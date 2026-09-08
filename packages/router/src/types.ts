@@ -30,6 +30,8 @@ export type Snapshot = {
 export type Candidate = {
   credential: CredentialView;
   target: Target;
+  /** In probe territory; see `Pair.probe`. Dispatch makes the claim. */
+  probe: boolean;
   score: number;
   /** Per-term contributions, surfaced in the request log for debugging. */
   reasons: Record<string, number>;
@@ -79,6 +81,14 @@ export type RankInput = {
    */
   load: ReadonlyMap<string, number>;
   /**
+   * What this process last observed per `healthKey`: when it last released a
+   * slot there, and its own latency average. Same lifetime and source as
+   * `load` — the gateway's `loadRegistry` — and kept off `Snapshot` for the
+   * same reason. Optional because a caller with no registry (dry runs, tests)
+   * has nothing to say; a missing key means never used here.
+   */
+  recent?: ReadonlyMap<string, RecentUse> | undefined;
+  /**
    * Which providers this installation has, for the `provider:missing` guard.
    *
    * Injected, defaulting to the real registry, so that a test can describe an
@@ -103,6 +113,14 @@ export type RankInput = {
    * Same convention `@omni/store`'s `TargetPricing` already uses.
    */
   providers?: ProviderDescriptors | undefined;
+};
+
+/** One process's record of a (credential, model) pair. See `RankInput.recent`. */
+export type RecentUse = {
+  /** When this process last finished a request there, on the caller's clock. */
+  lastReleasedAt: number;
+  /** This process's exponentially weighted time-to-first-token, or null unmeasured. */
+  ewmaTtftMs: number | null;
 };
 
 export type RankResult = {

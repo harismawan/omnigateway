@@ -41,8 +41,6 @@ export const PENALTY: Readonly<Record<ErrorCode, Penalty>> = {
   INTERNAL: "none",
 };
 
-/** Weight of the newest latency sample. Low enough to ride out one slow call. */
-const EWMA_ALPHA = 0.3;
 const DEFAULT_RATE_LIMIT_MS = 60_000;
 const QUOTA_PARK_MS = 3_600_000;
 const MAX_JITTER_MS = 2_000;
@@ -55,30 +53,55 @@ export function blankHealth(credentialId: string, model: string): CredentialHeal
     consecutiveFailures: 0,
     openedAt: null,
     rateLimitedUntil: null,
-    ewmaTtftMs: null,
-    lastUsedAt: null,
   };
 }
 
-export function recordSuccess(
-  current: CredentialHealth,
-  opts: { settings: Settings; now: number; ttftMs: number | null },
-): CredentialHealth {
-  const ewma =
-    opts.ttftMs === null
-      ? current.ewmaTtftMs
-      : current.ewmaTtftMs === null
-        ? opts.ttftMs
-        : current.ewmaTtftMs * (1 - EWMA_ALPHA) + opts.ttftMs * EWMA_ALPHA;
+/**
+ * The fields `recordSuccess` resets, and so the whole of what a success can
+ * change. Everything here is a value routing decides on; measurements live in
+ * the gateway's `loadRegistry`, so a success that would change none of these
+ * has nothing to write.
+ *
+ * `consecutiveFailures` is not optional. A sub-threshold hard failure writes a
+ * count with the breaker still closed, and the next success is what resets it;
+ * a predicate that skipped that success would turn the breaker from counting
+ * consecutive failures into counting cumulative ones.
+ *
+ * The Postgres `config_version` trigger watches a strict subset — the columns
+ * whose change forces every replica to rebuild rather than patch. The count is
+ * patched, so it is deliberately absent there and present here.
+ */
+export const SUCCESS_RESETS = [
+  "breakerState",
+  "consecutiveFailures",
+  "openedAt",
+  "rateLimitedUntil",
+] as const satisfies ReadonlyArray<keyof CredentialHealth>;
 
+/**
+ * Whether `recordSuccess` would change this row.
+ *
+ * No row reads as blank, which is what routing already assumes for it —
+ * `healthScore(undefined)` is 1 and the filters admit it — so a success there
+ * writes nothing and a healthy account ordinarily has no row at all. Rows
+ * come into being on a failure.
+ *
+ * Read off the snapshot before the attempt, never inside `updateHealth`'s
+ * `apply` — that runs inside the transaction this exists to skip.
+ */
+export function successWouldChange(current: CredentialHealth | undefined): boolean {
+  if (current === undefined) return false;
+  const blank = blankHealth(current.credentialId, current.model);
+  return SUCCESS_RESETS.some((field) => current[field] !== blank[field]);
+}
+
+export function recordSuccess(current: CredentialHealth): CredentialHealth {
   return {
     ...current,
     breakerState: "closed",
     consecutiveFailures: 0,
     openedAt: null,
     rateLimitedUntil: null,
-    ewmaTtftMs: ewma,
-    lastUsedAt: opts.now,
   };
 }
 
@@ -103,7 +126,7 @@ export function recordFailure(
         : (opts.retryAfterMs ?? DEFAULT_RATE_LIMIT_MS);
     // Jitter keeps a pool that rate-limited together from resuming together.
     const until = opts.now + base + Math.round((opts.jitter ?? 0) * MAX_JITTER_MS);
-    return { ...current, rateLimitedUntil: until, lastUsedAt: opts.now };
+    return { ...current, rateLimitedUntil: until };
   }
 
   const failures = current.consecutiveFailures + 1;
@@ -119,6 +142,5 @@ export function recordFailure(
     consecutiveFailures: failures,
     breakerState: open ? "open" : "closed",
     openedAt: open ? opts.now : current.openedAt,
-    lastUsedAt: opts.now,
   };
 }

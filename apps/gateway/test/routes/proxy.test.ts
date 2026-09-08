@@ -471,6 +471,16 @@ test("records a cancelled non-streaming request as 499, keeping what routing res
 test("gives a stream that broke on the gateway's own error a terminal status", async () => {
   const logger = captureLogger("info");
   const { call, store } = await harness(EVENTS, { logger });
+  // A success writes health only on a row it would change, so give it one:
+  // a sub-threshold count the success has to reset.
+  await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "closed",
+    consecutiveFailures: 1,
+    openedAt: null,
+    rateLimitedUntil: null,
+  }));
   // A health write is the one piece of dispatch that runs outside its own error
   // handling, so a store failure there escapes the generator as a throw instead
   // of an error event.
@@ -1013,6 +1023,7 @@ test("reports a stream that broke after dispatch recorded its outcome", async ()
     logger,
     loadRegistry: {
       counts: () => inner.counts(),
+      recent: () => inner.recent(),
       refresh: () => inner.refresh(),
       acquire: (credentialId, model) => {
         const release = inner.acquire(credentialId, model);

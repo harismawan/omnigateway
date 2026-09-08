@@ -487,6 +487,15 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   `OMNI_ROOT` not suppress it: both ambient.
 - Quota cooldowns, `1m` and `concurrency` process-local, reset on restart; `5h` and `1w` come
   from database, survive one.
+- **A success writes `credential_health` only when `successWouldChange` say so**, read off
+  snapshot before attempt, never inside `updateHealth`'s `apply`. `SUCCESS_RESETS` in
+  `router/src/breaker.ts` is one copy of what a success reset; `consecutiveFailures` stay in
+  it or breaker count cumulative failures, not consecutive. Postgres trigger `WHEN` is strict
+  subset — never add the count there. No row read as blank, so healthy account commonly has
+  none: nothing may assume a row exist. `lastUsedAt`/`ewmaTtftMs` live in `loadRegistry`,
+  reach ranking as `RankInput.recent`; display read `usage.lastUsedByCredential`. Pinned by
+  `apps/gateway/test/dispatch/dispatch.test.ts` (refusing store, cumulative test, ABAB) and
+  `packages/router/test/breaker.test.ts` (superset against migration SQL).
 - `usage.append` must run at most once per request ID; duplicate completion double-count
   `usage_daily` and `usage_rollup`. Pending rows hold placeholder metrics; inspect `state`, not
   `status`.
@@ -581,6 +590,16 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   `models.ts` from existence, same split `heldAuths` make.
   Both surfaces that remove account name models pinned to it **before** confirm; console
   treat unanswered `useModels()` or empty credential list as unknown, never as no pin.
+- **Breaker probe is one claim per `(credential, model)`, made in dispatch, gated in router.**
+  `filters.ts` mark `open`-past-cooldown **and `halfOpen`** as `Pair.probe`; dropping the
+  `halfOpen` arm restore the flood with "probing" lamp lit, because dispatch write `halfOpen`
+  on claim and every later request rank against it. Claim `coord.gauge.acquire("probe:…")`
+  sit inside attempt `try` beside `releaseSlot`, released in same `finally` after drain.
+  Skip on lost claim (`breaker:probing`) consume **no** attempt; all-skipped is
+  `NO_CANDIDATES`. `DispatchDeps.coord` required, never defaulted per request. Pinned by
+  probe block in `apps/gateway/test/dispatch/dispatch.test.ts` (sequential test is the one
+  that see the `halfOpen` arm) and `packages/router/test/imports.test.ts` (`@omni/coord`
+  denied). Design: `docs/superpowers/specs/2026-09-07-breaker-half-open-probe-design.md`.
 - `provider:missing` follow pin rule exactly: **once per target**, `kind: "target"`,
   `credentialId: ""`, **first** guard in target loop. Dispatch's `INTERNAL "no adapter for
   provider …"` stay throw: reaching it mean router admitted what it should have excluded;

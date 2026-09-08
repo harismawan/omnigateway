@@ -1,0 +1,25 @@
+-- DEPLOY HAZARD — read before upgrading an install that is still serving.
+--
+-- This migration drops two columns that every gateway before it writes on
+-- the success path (`UPSERT_HEALTH` names `ewma_ttft_ms` and `last_used_at`).
+-- SQLite is single-process, so the hazard is the rollback, not the rollout: an
+-- older gateway started against this database fails every successful request
+-- after the upstream call has completed and been billed — content frames out,
+-- then an aborted connection with no terminal frame. Rolling back the binary
+-- does not roll back the schema. The only way back is a snapshot taken before
+-- the upgrade. Deliberate: kept as a drop, not expand/contract, on the
+-- operator's decision — see the write-path spec.
+--
+-- `credential_health` keeps decisions, not measurements.
+--
+-- `ewma_ttft_ms` and `last_used_at` were written on every successful request,
+-- and a success that changes nothing else now writes nothing. Both live in the
+-- gateway's process-local `loadRegistry` instead: latency is a property of
+-- *this* process's path to the provider, and the round-robin tiebreak reads
+-- the value the process holds. The console's "last used" reads
+-- `request_logs` through `usage.lastUsedByCredential`, served by
+-- `idx_request_logs_cred`.
+--
+-- Neither column is indexed or constrained, so `DROP COLUMN` is permitted.
+ALTER TABLE credential_health DROP COLUMN ewma_ttft_ms;
+ALTER TABLE credential_health DROP COLUMN last_used_at;

@@ -53,6 +53,27 @@ forEachStore((backend) => {
     expect(typeof got?.inputTokens).toBe("number");
   });
 
+  test("lastUsedByCredential is the newest retained log, and NULL credentials answer for nobody", async () => {
+    const s = await backend.fresh();
+    expect(await s.usage.lastUsedByCredential("c1")).toBeNull();
+
+    // A row logged before routing resolved names no credential. It is the
+    // newest row in the table, and it must not be anyone's answer.
+    await s.usage.append(logRow({ id: "r0", at: T + 9_000, credentialId: null }));
+    expect(await s.usage.lastUsedByCredential("c1")).toBeNull();
+
+    await s.usage.append(logRow({ id: "r1", at: T, credentialId: "c1" }));
+    await s.usage.append(logRow({ id: "r2", at: T + 5_000, credentialId: "c1" }));
+    await s.usage.append(logRow({ id: "r3", at: T + 7_000, credentialId: "c2" }));
+    expect(await s.usage.lastUsedByCredential("c1")).toBe(T + 5_000);
+    expect(await s.usage.lastUsedByCredential("c2")).toBe(T + 7_000);
+
+    // Retention bounds the answer: pruned rows are gone, not remembered.
+    await s.usage.prune(T + 8_000);
+    expect(await s.usage.lastUsedByCredential("c1")).toBeNull();
+    expect(await s.usage.lastUsedByCredential("c2")).toBeNull();
+  });
+
   test("begin, route, then append updates one row in place and rolls it up once", async () => {
     const s = await backend.fresh();
     const pending = logRow({

@@ -222,28 +222,43 @@ export async function refreshCredential(
 
 /**
  * Everything the console draws per credential: breaker state, the newest quota
- * reading, and what that reading implies.
+ * reading, what that reading implies, and when each account last served.
  *
- * `burn` is derived rather than stored, over rows this call already loads, and
- * that is the whole budget for this route. The console refetches it every ten
- * seconds against the same synchronous connection that serves `/v1/messages`,
- * so nothing here may touch `request_logs`: the gateway-rate corroboration
- * lives on the history endpoint, where it is asked for once per expanded row.
+ * `burn` is derived rather than stored, over rows this call already loads. The
+ * console refetches this route every ten seconds against the same synchronous
+ * connection that serves `/v1/messages`, so its budget is indexed seeks: no
+ * `usage.aggregate` here, ever — a week-scale aggregate on that connection is
+ * head-of-line blocking on the hot path. The gateway-rate corroboration lives
+ * on the history endpoint, asked for once per expanded row.
+ *
+ * `lastUsed` is one seek per credential into `request_logs`; a health row is
+ * only written when routing has something to record, so a healthy account
+ * commonly has none and cannot carry the timestamp. Bounded by log retention:
+ * an account unused for longer than that reads as never used.
  */
-export async function credentialHealth(deps: {
-  store: Store;
-  now: () => number;
-}): Promise<{ health: CredentialHealth[]; quota: QuotaWindow[]; burn: BurnEstimate[] }> {
-  const [health, quota, settings] = await Promise.all([
+export async function credentialHealth(deps: { store: Store; now: () => number }): Promise<{
+  health: CredentialHealth[];
+  quota: QuotaWindow[];
+  burn: BurnEstimate[];
+  /** Newest `request_logs.at` per credential id; absent means none retained. */
+  lastUsed: Record<string, number>;
+}> {
+  const [health, quota, settings, credentials] = await Promise.all([
     deps.store.credentials.listHealth(),
     deps.store.credentials.listQuota(),
     deps.store.config.getSettings(),
+    deps.store.credentials.list(),
   ]);
+  const lastUsed: Record<string, number> = {};
+  for (const c of credentials) {
+    const at = await deps.store.usage.lastUsedByCredential(c.id);
+    if (at !== null) lastUsed[c.id] = at;
+  }
   const burn = burnEstimates(quota, {
     now: deps.now(),
     pollIntervalMs: settings.quotaPollIntervalMs,
   });
-  return { health, quota, burn };
+  return { health, quota, burn, lastUsed };
 }
 
 export type CredentialStatus = {

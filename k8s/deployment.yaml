@@ -10,7 +10,14 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       # One up before one down: the surviving replica keeps serving while the
-      # new one boots, migrates under the advisory lock, and turns ready.
+      # new one boots, migrates under the advisory lock, and turns ready —
+      # when the migration only adds. A migration that DROPS a column the old
+      # image writes breaks the surviving replica the moment the new one
+      # migrates, and it serves nothing but failures until it is replaced.
+      # The first release after v0.10.3 (migration 002_health_measurements)
+      # is one: scale to a single replica for that deploy, or accept the
+      # outage. Rollback across it is unsafe; recovery is a snapshot restore.
+      # See README "Upgrading" and the migration file's header.
       maxSurge: 1
       maxUnavailable: 0
   template:

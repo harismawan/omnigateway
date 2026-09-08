@@ -51,8 +51,6 @@ type HealthRow = {
   consecutive_failures: number;
   opened_at: string | null;
   rate_limited_until: string | null;
-  ewma_ttft_ms: number | null;
-  last_used_at: string | null;
 };
 
 function toHealth(r: HealthRow): CredentialHealth {
@@ -63,22 +61,18 @@ function toHealth(r: HealthRow): CredentialHealth {
     consecutiveFailures: r.consecutive_failures,
     openedAt: numOrNull(r.opened_at),
     rateLimitedUntil: numOrNull(r.rate_limited_until),
-    ewmaTtftMs: r.ewma_ttft_ms,
-    lastUsedAt: numOrNull(r.last_used_at),
   };
 }
 
 const UPSERT_HEALTH = `INSERT INTO credential_health
    (credential_id, model, breaker_state, consecutive_failures, opened_at,
-    rate_limited_until, ewma_ttft_ms, last_used_at)
- VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    rate_limited_until)
+ VALUES ($1,$2,$3,$4,$5,$6)
  ON CONFLICT (credential_id, model) DO UPDATE SET
    breaker_state = EXCLUDED.breaker_state,
    consecutive_failures = EXCLUDED.consecutive_failures,
    opened_at = EXCLUDED.opened_at,
-   rate_limited_until = EXCLUDED.rate_limited_until,
-   ewma_ttft_ms = EXCLUDED.ewma_ttft_ms,
-   last_used_at = EXCLUDED.last_used_at`;
+   rate_limited_until = EXCLUDED.rate_limited_until`;
 
 const healthValues = (r: CredentialHealth) => [
   r.credentialId,
@@ -87,8 +81,6 @@ const healthValues = (r: CredentialHealth) => [
   r.consecutiveFailures,
   r.openedAt,
   r.rateLimitedUntil,
-  r.ewmaTtftMs,
-  r.lastUsedAt,
 ];
 
 type SecretRow = Pick<Row, "access_token" | "refresh_token" | "api_key" | "id_token">;
@@ -302,13 +294,6 @@ export function createCredentialRepo(
     async listHealth() {
       const rows = await sql.unsafe<Rows<HealthRow>>("SELECT * FROM credential_health");
       return rows.map(toHealth);
-    },
-
-    async saveHealth(rows: CredentialHealth[]) {
-      await sql.begin(async (tx) => {
-        for (const r of rows) await tx.unsafe(UPSERT_HEALTH, healthValues(r));
-      });
-      emit({ type: "healthSaved", rows });
     },
 
     async updateHealth(credentialId, model, apply) {

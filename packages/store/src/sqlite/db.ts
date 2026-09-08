@@ -11,6 +11,7 @@ import keyLimits009 from "./migrations/009_key_limits.sql" with { type: "text" }
 import usageRollup010 from "./migrations/010_usage_rollup.sql" with { type: "text" };
 import pluginMigrations011 from "./migrations/011_plugin_migrations.sql" with { type: "text" };
 import nodes012 from "./migrations/012_nodes.sql" with { type: "text" };
+import healthMeasurements013 from "./migrations/013_health_measurements.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -40,7 +41,27 @@ const MIGRATIONS: ReadonlyArray<{
   // load. All migration 011 does is create the ledger that walk writes to.
   { id: 11, sql: pluginMigrations011 },
   { id: 12, sql: nodes012 },
+  { id: 13, sql: healthMeasurements013 },
 ];
+
+/**
+ * Splits a migration file into statements: comment lines dropped, split on a
+ * semicolon ending a line.
+ *
+ * ponytail: line-end split, not a SQL parser. Enough for every file in
+ * `migrations/` — none holds a `BEGIN … END` trigger body or a quoted
+ * semicolon — and a migration that needs either moves this to a real
+ * tokenizer. Plugin SQL is arbitrary and is not run through this.
+ */
+function statements(sql: string): string[] {
+  return sql
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("--"))
+    .join("\n")
+    .split(/;[ \t]*(?:\n|$)/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
 
 /**
  * Opens the database, sets the connection pragmas, and applies any migrations
@@ -112,7 +133,13 @@ export function openDb(path: string, dayOffsetMinutes = hostDayOffsetMinutes()):
   for (const m of MIGRATIONS) {
     if (done.has(m.id)) continue;
     db.transaction(() => {
-      db.run(m.sql);
+      // One `run` per statement, never one for the file. `bun:sqlite`'s `run`
+      // on a multi-statement string surfaces a *prepare* error but swallows a
+      // *step* error — dropping an indexed column, a constraint violation — and
+      // carries on to the next statement, so the transaction committed with the
+      // migration recorded and the schema half-applied. Verified on Bun 1.4.0;
+      // `packages/store/test/migrations.test.ts` holds the reduced case.
+      for (const statement of statements(m.sql)) db.run(statement);
       m.after?.(db, dayOffsetMinutes);
       db.run("INSERT INTO migrations (id, applied_at) VALUES (?, ?)", [m.id, Date.now()]);
     })();

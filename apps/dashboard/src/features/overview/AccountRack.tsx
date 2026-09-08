@@ -7,7 +7,7 @@ import type {
   QuotaWindow,
   UsageBucket,
 } from "../../api/types.ts";
-import { formatCount, formatMs, formatRelative } from "../../lib/format.ts";
+import { formatCount, formatRelative } from "../../lib/format.ts";
 import {
   burnOf,
   credentialStatus,
@@ -93,6 +93,8 @@ export type AccountRackProps = {
   burn: readonly BurnEstimate[];
   /** Usage grouped by credential; the key is the credential id. */
   usage: readonly UsageBucket[];
+  /** Newest request per credential id; absent means none retained. */
+  lastUsed: Readonly<Record<string, number>>;
   /** Poll interval, so a reading can be called stale on the same rule everywhere. */
   quotaPollIntervalMs: number;
   now: number;
@@ -109,6 +111,7 @@ export function AccountRack({
   quota,
   burn,
   usage,
+  lastUsed,
   quotaPollIntervalMs,
   now,
 }: AccountRackProps) {
@@ -181,7 +184,6 @@ export function AccountRack({
                 <Th>Provider</Th>
                 <Th $align="right">Tier</Th>
                 <Th>Quota</Th>
-                <Th $align="right">TTFT</Th>
                 <Th $align="right">Requests</Th>
                 <Th $align="right">Last used</Th>
               </tr>
@@ -233,13 +235,10 @@ export function AccountRack({
                     )}
                   </Td>
                   <Td $align="right" $mono>
-                    {formatMs(status.ttftMs)}
-                  </Td>
-                  <Td $align="right" $mono>
                     {used === undefined ? "—" : formatCount(used.requests)}
                   </Td>
                   <Td $align="right" $mono>
-                    {formatRelative(status.lastUsedAt, now)}
+                    {formatRelative(lastUsed[credential.id] ?? null, now)}
                   </Td>
                 </Tr>
               ))}

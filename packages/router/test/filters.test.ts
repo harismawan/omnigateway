@@ -400,6 +400,55 @@ test("admits an open breaker whose cooldown has elapsed as a half-open probe", (
     load: new Map(),
   });
   expect(pairs).toHaveLength(1);
+  expect(pairs[0]?.probe).toBe(true);
+});
+
+// `halfOpen` is probe territory too. Dispatch writes it when it takes the
+// claim, so a request ranking after that write reads this state; admitting it
+// as ordinary let every such request go upstream unclaimed — the flood, with
+// the "probing" lamp lit. Computed from the snapshot and the clock alone:
+// `eligible` is synchronous and makes no claim.
+test("a halfOpen breaker is admitted as probe territory", () => {
+  const { pairs, excluded } = eligible({
+    request: req,
+    model: model(),
+    snapshot: snapshot({
+      credentials: [credential({ id: "a" })],
+      health: [
+        health({
+          credentialId: "a",
+          breakerState: "halfOpen",
+          openedAt: NOW,
+          consecutiveFailures: 3,
+        }),
+      ],
+    }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  });
+  expect(excluded).toEqual([]);
+  expect(pairs).toHaveLength(1);
+  expect(pairs[0]?.probe).toBe(true);
+});
+
+test("a closed breaker and a missing row are not probe territory", () => {
+  const build = (withRow: boolean) =>
+    eligible({
+      request: req,
+      model: model(),
+      snapshot: snapshot({
+        credentials: [credential({ id: "a" })],
+        health: withRow
+          ? [health({ credentialId: "a", breakerState: "closed", consecutiveFailures: 2 })]
+          : [],
+      }),
+      now: NOW,
+      rand: 0,
+      load: new Map(),
+    });
+  expect(build(true).pairs[0]?.probe).toBe(false);
+  expect(build(false).pairs[0]?.probe).toBe(false);
 });
 
 test("cooldown grows exponentially with consecutive failures", () => {

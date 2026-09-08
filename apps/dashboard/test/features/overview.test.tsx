@@ -224,6 +224,31 @@ describe("OverviewBoard", () => {
     expect(pendingRow?.textContent).not.toContain("0ms");
   });
 
+  // The common case now: a healthy account has no health row, because the
+  // gateway writes one only when routing records something. Last use rides
+  // the route's own `lastUsed`, keyed by credential id, not the health row.
+  test("an account with no health row renders as healthy with its last use", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/credentials/health": () => ({
+        health: [],
+        quota: [],
+        burn: [],
+        lastUsed: { "cred-1": now - 120_000 },
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    const table = (await screen.findByText("claude-main")).closest("table");
+    if (table === null) throw new Error("the account rack was not rendered");
+    expect(within(table).getByRole("img", { name: "healthy" })).toBeTruthy();
+    expect(within(table).getByText("2m ago")).toBeTruthy();
+    expect(
+      await screen.findByText("All 1 accounts are answering. Nothing needs attention."),
+    ).toBeTruthy();
+  });
+
   test("an unconfigured gateway is called out rather than shown as healthy", async () => {
     stubOverview({
       "GET /api/credentials": () => ({ credentials: [] }),
@@ -295,7 +320,7 @@ describe("OverviewBoard", () => {
       within(table)
         .getAllByRole("columnheader")
         .map((cell) => cell.textContent),
-    ).toEqual(["Account", "Provider", "Tier", "Quota", "TTFT", "Requests", "Last used"]);
+    ).toEqual(["Account", "Provider", "Tier", "Quota", "Requests", "Last used"]);
     expect(within(table).queryByRole("button", { name: /quota history/i })).toBeNull();
     expect(container.querySelector(".recharts-responsive-container")).toBeNull();
   });

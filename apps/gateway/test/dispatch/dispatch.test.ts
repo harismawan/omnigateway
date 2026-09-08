@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { memoryCoord } from "@omni/coord";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import {
   anthropicAdapter,
@@ -8,8 +9,8 @@ import {
   type ProviderCodec,
 } from "@omni/providers";
 import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
-import { buildSnapshot, healthKey } from "@omni/router";
-import type { CredentialSecrets, Store } from "@omni/store";
+import { blankHealth, buildSnapshot, healthKey, recordSuccess } from "@omni/router";
+import type { CredentialHealth, CredentialSecrets, Store } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { captureLogger, entryOf } from "@omni/testkit";
 import { dispatch } from "../../src/dispatch/index.ts";
@@ -179,6 +180,7 @@ function deps(store: Store, adapter: ProviderAdapter) {
     now: () => 1_000_000,
     rand: () => 0,
     loadRegistry: createLoadRegistry(),
+    coord: memoryCoord(),
     refresh: async () => ({
       accessToken: "refreshed",
       refreshToken: "r",
@@ -872,16 +874,619 @@ test("a rate limit landing after a hard failure does not resurrect its count", a
   store.close();
 });
 
-test("a success records latency and marks the credential used", async () => {
+/** A store whose health write is a sentinel throw: reaching it is the failure. */
+function refusingHealthWrites(store: Store): Store {
+  return {
+    ...store,
+    credentials: {
+      ...store.credentials,
+      updateHealth: () => Promise.reject(new Error("HEALTH_WRITE_SENTINEL")),
+    },
+  };
+}
+
+// The one dispatch-level test that kills every mutant reintroducing a
+// per-request write: the store refuses the write outright, so a success that
+// reaches it fails the request rather than merely counting. On Postgres that
+// write was an advisory lock and a fleet-wide snapshot rebuild per request.
+test("a success against a healthy credential with no failure count writes no health", async () => {
   const store = await seeded(1);
+  const adapter = stubAdapter(() => textStream("hi"));
+  const configured = { ...deps(store, adapter), store: refusingHealthWrites(store) };
+
+  for (let i = 0; i < 3; i++) {
+    const outcome = await dispatch(req, configured, new AbortController().signal, `req_${i}`);
+    const events = await drain(outcome.events);
+    expect(events.at(-1)).toMatchObject({ type: "end" });
+    expect(outcome.log().status).toBe(200);
+  }
+
+  expect(await store.credentials.listHealth()).toEqual([]);
+
+  // A row that already reads closed-and-zero is the other silent case.
+  await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: null,
+  }));
+  const outcome = await dispatch(req, configured, new AbortController().signal, "req_seeded");
+  await drain(outcome.events);
+  expect(outcome.log().status).toBe(200);
+  store.close();
+});
+
+// The cumulative-failure test. A predicate that skips the success on a row
+// carrying a sub-threshold count never resets it, and the breaker then opens
+// on the third failure *ever* rather than the third in a row. Every other test
+// here passes against that mutant.
+test("two sub-threshold failures, a success, then a failure leave the breaker closed", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ maxAttempts: 1, breakerThreshold: 3 });
+  const run = async (adapter: ProviderAdapter, id: string) =>
+    drain((await dispatch(req, deps(store, adapter), new AbortController().signal, id)).events);
+  const failing = () => stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
+
+  await run(failing(), "req_1");
+  await run(failing(), "req_2");
+  expect((await store.credentials.listHealth())[0]?.consecutiveFailures).toBe(2);
+
+  await run(
+    stubAdapter(() => textStream("hi")),
+    "req_3",
+  );
+  expect((await store.credentials.listHealth())[0]?.consecutiveFailures).toBe(0);
+
+  await run(failing(), "req_4");
+  const rows = await store.credentials.listHealth();
+  expect(rows[0]?.breakerState).toBe("closed");
+  expect(rows[0]?.consecutiveFailures).toBe(1);
+  store.close();
+});
+
+// Both arms, because `=== "open"` passes the first and fails the second: a
+// half-open probe's recovery is a decision every replica has to see.
+for (const breakerState of ["open", "halfOpen"] as const) {
+  test(`a success against a ${breakerState} breaker writes through`, async () => {
+    const store = await seeded(1);
+    await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+      credentialId: "c1",
+      model: "claude-opus-4",
+      breakerState,
+      // Zero, so the breaker state is the only term that can write: a count
+      // would write on its own and hide a predicate narrowed to `=== "open"`.
+      consecutiveFailures: 0,
+      // Long past any cooldown, so routing admits the probe.
+      openedAt: 0,
+      rateLimitedUntil: null,
+    }));
+    const adapter = stubAdapter(() => textStream("hi"));
+    const outcome = await dispatch(
+      req,
+      deps(store, adapter),
+      new AbortController().signal,
+      "req_test",
+    );
+    await drain(outcome.events);
+
+    expect(outcome.log().status).toBe(200);
+    const rows = await store.credentials.listHealth();
+    expect(rows[0]).toMatchObject({
+      breakerState: "closed",
+      consecutiveFailures: 0,
+      openedAt: null,
+    });
+    store.close();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The half-open probe. An open breaker past its cooldown, or a `halfOpen` row,
+// is probe territory; dispatch claims `probe:<healthKey>` on `coord.gauge`, and
+// exactly one request holds it for the length of its attempt. Design:
+// `docs/superpowers/specs/2026-09-07-breaker-half-open-probe-design.md`.
+
+/** A breaker row that routing admits as a probe: open, long past any cooldown. */
+async function openPastCooldown(
+  store: Store,
+  overrides: Partial<CredentialHealth> = {},
+): Promise<void> {
+  await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "open",
+    consecutiveFailures: 3,
+    openedAt: 0,
+    rateLimitedUntil: null,
+    ...overrides,
+  }));
+}
+
+const PROBE_KEY = `probe:${healthKey("c1", "claude-opus-4")}`;
+
+/**
+ * A stream held open until `open()` is called: after its first delta by
+ * default — past the commit point — or before it with `beforeCommit`, where
+ * nothing has reached the client yet. `reached` resolves when the stream is
+ * parked at the gate.
+ */
+function gatedStream(opts: { beforeCommit?: boolean } = {}): {
+  stream: () => AsyncGenerator<StreamEvent>;
+  open: () => void;
+  reached: Promise<void>;
+} {
+  let open = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  let arrived = (): void => {};
+  const reached = new Promise<void>((resolve) => {
+    arrived = resolve;
+  });
+  return {
+    open: () => open(),
+    reached,
+    async *stream() {
+      yield { type: "start", id: "m", model: "claude-opus-4" };
+      yield { type: "blockStart", index: 0, block: { type: "text" } };
+      if (opts.beforeCommit === true) {
+        arrived();
+        await gate;
+      }
+      yield { type: "blockDelta", index: 0, delta: { type: "text", text: "a" } };
+      if (opts.beforeCommit !== true) {
+        arrived();
+        await gate;
+      }
+      for (let i = 0; i < 20; i++) {
+        yield { type: "blockDelta", index: 0, delta: { type: "text", text: "b" } };
+      }
+      yield { type: "blockEnd", index: 0 };
+      yield {
+        type: "end",
+        stopReason: "endTurn",
+        usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      };
+    },
+  };
+}
+
+test("N concurrent requests past an elapsed cooldown produce exactly one upstream attempt", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store);
+  const adapter = stubAdapter(() => textStream("hi"));
+  const shared = { ...deps(store, adapter), coord: memoryCoord() };
+
+  // Every request ranks before any body runs, which is what "concurrent" means
+  // here; the claim is the only thing that can tell them apart.
+  const outcomes = await Promise.all(
+    Array.from({ length: 20 }, (_, i) =>
+      dispatch(req, shared, new AbortController().signal, `req_${i}`),
+    ),
+  );
+  await Promise.all(outcomes.map((o) => drain(o.events)));
+
+  expect(adapter.calls).toHaveLength(1);
+  const logs = outcomes.map((o) => o.log());
+  expect(logs.filter((l) => l.status === 200)).toHaveLength(1);
+  const skipped = logs.filter((l) => l.errorCode === "NO_CANDIDATES");
+  expect(skipped).toHaveLength(19);
+  for (const l of skipped) expect(l.degradations).toContain("excluded:c1:breaker:probing");
+  expect((await store.credentials.listHealth())[0]?.breakerState).toBe("closed");
+  expect(await shared.coord.gauge.read(PROBE_KEY)).toBe(0);
+  store.close();
+});
+
+// Sequential, not concurrent: the second request ranks *after* the `halfOpen`
+// write landed, so it is the `halfOpen` arm of the router's guard — not the
+// claim — that puts it in probe territory. The concurrent test above cannot
+// see that arm, because all of its requests rank against `open`. Gated before
+// the commit point, because that is where the probe closes the row.
+test("a request that ranks after the halfOpen write is still excluded as probing", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store);
+  const gate = gatedStream({ beforeCommit: true });
+  const adapter = stubAdapter(() => gate.stream());
+  const shared = { ...deps(store, adapter), coord: memoryCoord() };
+
+  const probe = await dispatch(req, shared, new AbortController().signal, "req_probe");
+  const firstPull = probe.events.next();
+  await gate.reached;
+  expect((await store.credentials.listHealth())[0]?.breakerState).toBe("halfOpen");
+
+  const second = await dispatch(req, shared, new AbortController().signal, "req_second");
+  const events = await drain(second.events);
+  expect(events[0]).toMatchObject({ type: "error", code: "NO_CANDIDATES" });
+  expect(second.log().degradations).toContain("excluded:c1:breaker:probing");
+  expect(adapter.calls).toHaveLength(1);
+
+  gate.open();
+  expect((await firstPull).value).toMatchObject({ type: "start" });
+  await drain(probe.events);
+  expect(probe.log().status).toBe(200);
+  expect((await store.credentials.listHealth())[0]?.breakerState).toBe("closed");
+  store.close();
+});
+
+test("a probe closes the breaker at the commit point, and siblings serve while it drains", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store);
+  const gate = gatedStream();
+  const adapter = stubAdapter((call) => (call === 1 ? gate.stream() : textStream("hi")));
+  // Health writes counted: `halfOpen` at the claim, `closed` at commit, and
+  // nothing at `end` — a third write there is a lock and a row per probe on
+  // Postgres for a value already on disk.
+  let healthWrites = 0;
+  const counted: Store = {
+    ...store,
+    credentials: {
+      ...store.credentials,
+      updateHealth: (...args) => {
+        healthWrites++;
+        return store.credentials.updateHealth(...args);
+      },
+    },
+  };
+  const shared = { ...deps(counted, adapter), coord: memoryCoord() };
+
+  const probe = await dispatch(req, shared, new AbortController().signal, "req_probe");
+  // Past the commit point: bytes have gone to the client, the stream has not ended.
+  for (let i = 0; i < 3; i++) await probe.events.next();
+  expect((await store.credentials.listHealth())[0]).toMatchObject({
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+  });
+
+  // A sole-credential pair: before this closed at commit, every caller here got
+  // `NO_CANDIDATES` until the probe's last byte.
+  const second = await dispatch(req, shared, new AbortController().signal, "req_second");
+  await drain(second.events);
+  expect(second.log().status).toBe(200);
+  expect(second.log().degradations).not.toContain("excluded:c1:breaker:probing");
+  expect(adapter.calls).toHaveLength(2);
+
+  gate.open();
+  await drain(probe.events);
+  expect(probe.log().status).toBe(200);
+  expect(healthWrites).toBe(2);
+  store.close();
+});
+
+// The accepted price of closing at commit: a failure after it lands on a closed
+// row and counts one, rather than re-opening as a failed probe would.
+test("a probe failing after commit leaves the breaker closed with one failure", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store);
+  const adapter = stubAdapter(async function* () {
+    yield { type: "start", id: "m", model: "claude-opus-4" };
+    yield { type: "blockStart", index: 0, block: { type: "text" } };
+    yield { type: "blockDelta", index: 0, delta: { type: "text", text: "a" } };
+    yield { type: "error", code: "UPSTREAM", message: "cut", retryable: false };
+  });
+  const shared = { ...deps(store, adapter), coord: memoryCoord() };
+
+  const outcome = await dispatch(req, shared, new AbortController().signal, "req_probe");
+  await drain(outcome.events);
+  expect(outcome.log().errorCode).toBe("UPSTREAM");
+  expect((await store.credentials.listHealth())[0]).toMatchObject({
+    breakerState: "closed",
+    consecutiveFailures: 1,
+  });
+  expect(await shared.coord.gauge.read(PROBE_KEY)).toBe(0);
+  store.close();
+});
+
+// `candidate.probe` is a rank-time fact. A request that ranked against
+// `halfOpen` but reached its claim after that probe closed the row must not
+// write `halfOpen` back: the row is newer than the snapshot.
+test("a probe candidate that claims after the row closed leaves it closed", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store, { breakerState: "halfOpen", consecutiveFailures: 1 });
+  const inner = memoryCoord();
+  // The other probe closes the row between this request's rank and its claim.
+  const coord = {
+    ...inner,
+    gauge: {
+      ...inner.gauge,
+      acquire: async (key: string, ttl: number) => {
+        await store.credentials.updateHealth("c1", "claude-opus-4", (current) =>
+          recordSuccess(current ?? blankHealth("c1", "claude-opus-4")),
+        );
+        return inner.gauge.acquire(key, ttl);
+      },
+    },
+  };
+  const gate = gatedStream({ beforeCommit: true });
+  const adapter = stubAdapter((call) => (call === 1 ? gate.stream() : textStream("hi")));
+  const shared = { ...deps(store, adapter), coord };
+
+  const first = await dispatch(req, shared, new AbortController().signal, "req_first");
+  const firstPull = first.events.next();
+  await gate.reached;
+  expect((await store.credentials.listHealth())[0]?.breakerState).toBe("closed");
+
+  // Ordinary territory: nobody is excluded behind it.
+  const second = await dispatch(req, shared, new AbortController().signal, "req_second");
+  await drain(second.events);
+  expect(second.log().status).toBe(200);
+  expect(adapter.calls).toHaveLength(2);
+
+  gate.open();
+  await firstPull;
+  await drain(first.events);
+  expect(first.log().status).toBe(200);
+  store.close();
+});
+
+test("an abandoned halfOpen row is re-probed by exactly one request", async () => {
+  const store = await seeded(1);
+  // A probe that never reported back — the client hung up before health was
+  // written — leaves `halfOpen` behind with the slot released.
+  await openPastCooldown(store, { breakerState: "halfOpen", consecutiveFailures: 1 });
+  const adapter = stubAdapter(() => textStream("hi"));
+  const shared = { ...deps(store, adapter), coord: memoryCoord() };
+
+  const outcomes = await Promise.all(
+    Array.from({ length: 5 }, (_, i) =>
+      dispatch(req, shared, new AbortController().signal, `req_${i}`),
+    ),
+  );
+  await Promise.all(outcomes.map((o) => drain(o.events)));
+
+  expect(adapter.calls).toHaveLength(1);
+  expect(outcomes.map((o) => o.log().status).filter((s) => s === 200)).toHaveLength(1);
+  expect((await store.credentials.listHealth())[0]?.breakerState).toBe("closed");
+  store.close();
+});
+
+/** The seeded pool under round robin, which keeps arrival order when nothing is in flight. */
+async function roundRobinFast(store: Store): Promise<void> {
+  await store.config.putModel({
+    id: "fast",
+    strategy: "roundRobin",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+}
+
+test("a skipped probe candidate does not consume an attempt", async () => {
+  const store = await seeded(3);
+  await roundRobinFast(store);
+  await store.config.putSettings({ maxAttempts: 2 });
+  // The probe ranks first; see `roundRobinFast`.
+  await openPastCooldown(store);
+  const coord = memoryCoord();
+  // Someone else holds the probe.
+  await coord.gauge.acquire(PROBE_KEY, 60_000);
+  const adapter = stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), coord },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  // B *and* C: with `maxAttempts: 2`, a skip that counted would leave C untried.
+  expect(adapter.calls).toEqual(["test-token-2", "test-token-3"]);
+  expect(outcome.log().attempts).toBe(2);
+  expect(outcome.log().errorCode).toBe("ALL_CANDIDATES_FAILED");
+  expect(outcome.log().degradations).toContain("excluded:c1:breaker:probing");
+  // The loser's own acquire was released at once: the gauge still reads one.
+  expect(await coord.gauge.read(PROBE_KEY)).toBe(1);
+  store.close();
+});
+
+test("a sole probe candidate losing the claim yields NO_CANDIDATES, not ALL_CANDIDATES_FAILED", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store);
+  const coord = memoryCoord();
+  await coord.gauge.acquire(PROBE_KEY, 60_000);
+  const adapter = stubAdapter(() => textStream("hi"));
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), coord },
+    new AbortController().signal,
+    "req_test",
+  );
+  const events = await drain(outcome.events);
+
+  expect(adapter.calls).toHaveLength(0);
+  expect(events[0]).toMatchObject({ type: "error", code: "NO_CANDIDATES" });
+  expect(outcome.log().errorCode).toBe("NO_CANDIDATES");
+  expect(outcome.log().status).toBe(503);
+  expect(outcome.log().attempts).toBe(0);
+  // Nothing ran, so nothing was written: the row is as routing found it.
+  expect((await store.credentials.listHealth())[0]?.breakerState).toBe("open");
+  store.close();
+});
+
+test("the probe slot is held through the stream drain, not freed at head-of-stream", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store);
+  const gate = gatedStream();
+  const adapter = stubAdapter((call) => (call === 1 ? gate.stream() : textStream("hi")));
+  const shared = { ...deps(store, adapter), coord: memoryCoord() };
+
+  const probe = await dispatch(req, shared, new AbortController().signal, "req_probe");
+  // Past the commit point: bytes have gone to the client. The row closed there,
+  // so a second request is ordinary and is served — but the slot is the
+  // probe's until its last byte, so a re-opened breaker mid-drain still finds
+  // it taken.
+  for (let i = 0; i < 3; i++) await probe.events.next();
+  expect(await shared.coord.gauge.read(PROBE_KEY)).toBe(1);
+
+  const second = await dispatch(req, shared, new AbortController().signal, "req_second");
+  await drain(second.events);
+  expect(second.log().status).toBe(200);
+  expect(await shared.coord.gauge.read(PROBE_KEY)).toBe(1);
+
+  gate.open();
+  await drain(probe.events);
+  expect(await shared.coord.gauge.read(PROBE_KEY)).toBe(0);
+  store.close();
+});
+
+test("the probe slot is released on failure and the failed probe re-opens the breaker", async () => {
+  const store = await seeded(2);
+  // Opened by an AUTH failure at a count of one, so a plain failure would be
+  // sub-threshold: only the `halfOpen` branch of `recordFailure` re-opens it.
+  await openPastCooldown(store, { consecutiveFailures: 1 });
+  const coord = memoryCoord();
+  // Round robin keeps arrival order with nothing in flight, so the probe is
+  // tried first; under `priority` its halved score would rank it last.
+  await roundRobinFast(store);
+  const adapter = stubAdapter((call) =>
+    call === 1 ? new GatewayError("UPSTREAM", "still down") : textStream("hi"),
+  );
+
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), coord },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  // The probe failed over to the healthy sibling and the slot went with it.
+  expect(adapter.calls).toEqual(["test-token-1", "test-token-2"]);
+  expect(outcome.log().status).toBe(200);
+  expect(await coord.gauge.read(PROBE_KEY)).toBe(0);
+  const row = (await store.credentials.listHealth()).find((h) => h.credentialId === "c1");
+  expect(row).toMatchObject({ breakerState: "open", consecutiveFailures: 2, openedAt: 1_000_000 });
+  store.close();
+});
+
+test("the probe slot is released when the client hangs up mid-probe", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store);
+  const gate = gatedStream();
+  const adapter = stubAdapter(() => gate.stream());
+  const shared = { ...deps(store, adapter), coord: memoryCoord() };
+
+  const probe = await dispatch(req, shared, new AbortController().signal, "req_probe");
+  await probe.events.next();
+  await probe.events.return(undefined);
+
+  expect(await shared.coord.gauge.read(PROBE_KEY)).toBe(0);
+  // Health never heard back, so the row stays `halfOpen` — and the next
+  // request re-claims it rather than reading it as ordinary.
+  expect((await store.credentials.listHealth())[0]?.breakerState).toBe("halfOpen");
+  const next = await dispatch(req, shared, new AbortController().signal, "req_next");
+  await next.events.next();
+  expect(adapter.calls).toHaveLength(2);
+  gate.open();
+  await drain(next.events);
+  expect((await store.credentials.listHealth())[0]?.breakerState).toBe("closed");
+  store.close();
+});
+
+// Weak, kept and not counted: any implementation that does anything per
+// process passes this. Two coordinators stand in for a coordinator fault.
+test("a coordinator fault degrades to one probe per replica", async () => {
+  const store = await seeded(1);
+  await openPastCooldown(store);
+  const adapter = stubAdapter(() => textStream("hi"));
+  const a = await dispatch(
+    req,
+    { ...deps(store, adapter), coord: memoryCoord() },
+    new AbortController().signal,
+    "req_a",
+  );
+  const b = await dispatch(
+    req,
+    { ...deps(store, adapter), coord: memoryCoord() },
+    new AbortController().signal,
+    "req_b",
+  );
+  await Promise.all([drain(a.events), drain(b.events)]);
+  expect(adapter.calls).toHaveLength(2);
+  store.close();
+});
+
+test("a stale rate limit is cleared by the next success", async () => {
+  const store = await seeded(1);
+  await store.credentials.updateHealth("c1", "claude-opus-4", () => ({
+    credentialId: "c1",
+    model: "claude-opus-4",
+    breakerState: "closed",
+    consecutiveFailures: 0,
+    openedAt: null,
+    rateLimitedUntil: 999_000,
+  }));
   const adapter = stubAdapter(() => textStream("hi"));
   await drain(
     (await dispatch(req, deps(store, adapter), new AbortController().signal, "req_test")).events,
   );
+  expect((await store.credentials.listHealth())[0]?.rateLimitedUntil).toBeNull();
+  store.close();
+});
 
-  const rows = await store.credentials.listHealth();
-  expect(rows[0]?.lastUsedAt).toBe(1_000_000);
-  expect(rows[0]?.ewmaTtftMs).not.toBeNull();
+test("failures still write", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ maxAttempts: 1 });
+  const adapter = stubAdapter(() => new GatewayError("UPSTREAM", "boom"));
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), store: refusingHealthWrites(store) },
+    new AbortController().signal,
+    "req_test",
+  );
+  // The refused write is what surfaces, which is the proof the failure path
+  // still reaches the store.
+  await expect(drain(outcome.events)).rejects.toThrow("HEALTH_WRITE_SENTINEL");
+  store.close();
+});
+
+// Round-robin's tiebreak reads the process's own release record, not a shared
+// health column. Nothing is in flight between these four sequential
+// requests, so the tiebreak *is* the strategy: exact ABAB, not a distribution.
+test("round robin rotates through the real release hook", async () => {
+  const store = await seeded(2);
+  await store.config.putModel({
+    id: "fast",
+    strategy: "roundRobin",
+    isAlias: false,
+    targets: [
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  let tick = 0;
+  const registry = createLoadRegistry(undefined, () => ++tick);
+  const adapter = stubAdapter(() => textStream("hi"));
+
+  for (let i = 0; i < 4; i++) {
+    const outcome = await dispatch(
+      req,
+      { ...deps(store, adapter), loadRegistry: registry },
+      new AbortController().signal,
+      `req_${i}`,
+    );
+    await drain(outcome.events);
+  }
+
+  expect(adapter.calls).toEqual(["test-token-1", "test-token-2", "test-token-1", "test-token-2"]);
   store.close();
 });
 

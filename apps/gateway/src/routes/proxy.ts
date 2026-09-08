@@ -1,4 +1,4 @@
-import type { Coord } from "@omni/coord";
+import { type Coord, memoryCoord } from "@omni/coord";
 import {
   collect,
   describeError,
@@ -64,9 +64,10 @@ import type { Telemetry } from "../telemetry/index.ts";
 import type { TraceRecord } from "../telemetry/spans.ts";
 import { modelListBody } from "./models.ts";
 
-export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry"> & {
+export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry" | "coord"> & {
   snapshots?: DispatchDeps["snapshots"];
   loadRegistry?: DispatchDeps["loadRegistry"];
+  /** Defaults to one in-memory coordinator for the process, shared by every consumer below. */
   coord?: Coord;
   requestId: () => string;
   rateLimiter?: ApiKeyRateLimiter;
@@ -834,22 +835,18 @@ async function handle(
 
 export function proxyRoutes(deps: ProxyDeps) {
   const logger = deps.logger ?? noopLogger;
+  const coord = deps.coord ?? memoryCoord();
   const rateLimiter =
-    deps.rateLimiter ??
-    new ApiKeyRateLimiter({
-      store: deps.store,
-      now: deps.now,
-      logger,
-      ...(deps.coord === undefined ? {} : { coord: deps.coord }),
-    });
+    deps.rateLimiter ?? new ApiKeyRateLimiter({ store: deps.store, now: deps.now, logger, coord });
   const dispatchDeps: ResolvedProxyDeps = {
     ...deps,
     logger,
+    coord,
     snapshots: deps.snapshots ?? createRoutingSnapshotCache(deps.store, logger),
     // One registry for the process. Built here rather than per request, because
     // a fresh registry per request would always read zero and rank as if the
     // gateway were idle.
-    loadRegistry: deps.loadRegistry ?? createLoadRegistry(deps.coord),
+    loadRegistry: deps.loadRegistry ?? createLoadRegistry(coord),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
   };
   return (

@@ -49,8 +49,6 @@ type HealthRow = {
   consecutive_failures: number;
   opened_at: number | null;
   rate_limited_until: number | null;
-  ewma_ttft_ms: number | null;
-  last_used_at: number | null;
 };
 
 function toHealth(r: HealthRow): CredentialHealth {
@@ -61,22 +59,18 @@ function toHealth(r: HealthRow): CredentialHealth {
     consecutiveFailures: r.consecutive_failures,
     openedAt: r.opened_at,
     rateLimitedUntil: r.rate_limited_until,
-    ewmaTtftMs: r.ewma_ttft_ms,
-    lastUsedAt: r.last_used_at,
   };
 }
 
 const UPSERT_HEALTH = `INSERT INTO credential_health
    (credential_id, model, breaker_state, consecutive_failures, opened_at,
-    rate_limited_until, ewma_ttft_ms, last_used_at)
- VALUES (?,?,?,?,?,?,?,?)
+    rate_limited_until)
+ VALUES (?,?,?,?,?,?)
  ON CONFLICT (credential_id, model) DO UPDATE SET
    breaker_state = excluded.breaker_state,
    consecutive_failures = excluded.consecutive_failures,
    opened_at = excluded.opened_at,
-   rate_limited_until = excluded.rate_limited_until,
-   ewma_ttft_ms = excluded.ewma_ttft_ms,
-   last_used_at = excluded.last_used_at`;
+   rate_limited_until = excluded.rate_limited_until`;
 
 export function createCredentialRepo(
   db: Database,
@@ -322,25 +316,6 @@ export function createCredentialRepo(
       return db.query<HealthRow, []>("SELECT * FROM credential_health").all().map(toHealth);
     },
 
-    async saveHealth(rows: CredentialHealth[]) {
-      const stmt = db.prepare(UPSERT_HEALTH);
-      db.transaction(() => {
-        for (const r of rows) {
-          stmt.run(
-            r.credentialId,
-            r.model,
-            r.breakerState,
-            r.consecutiveFailures,
-            r.openedAt,
-            r.rateLimitedUntil,
-            r.ewmaTtftMs,
-            r.lastUsedAt,
-          );
-        }
-      })();
-      emit({ type: "healthSaved", rows });
-    },
-
     async updateHealth(credentialId, model, apply) {
       const current = db.prepare<HealthRow, [string, string]>(
         "SELECT * FROM credential_health WHERE credential_id = ? AND model = ?",
@@ -361,8 +336,6 @@ export function createCredentialRepo(
           next.consecutiveFailures,
           next.openedAt,
           next.rateLimitedUntil,
-          next.ewmaTtftMs,
-          next.lastUsedAt,
         );
         return next;
       })();

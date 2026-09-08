@@ -56,8 +56,6 @@ export function health(patch: Partial<CredentialHealth> = {}): CredentialHealth 
     consecutiveFailures: 0,
     openedAt: null,
     rateLimitedUntil: null,
-    ewmaTtftMs: 210,
-    lastUsedAt: NOW - 30_000,
     ...patch,
   };
 }

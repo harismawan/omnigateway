@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
-import { credential, health, snapshot, target } from "@omni/testkit";
+import { credential, recent, snapshot, target } from "@omni/testkit";
 import { healthKey, rank } from "../src/index.ts";
 
 const NOW = 1_000_000;
@@ -34,15 +34,12 @@ test("scores latency by how much slower it is, not by rank order", () => {
         model: model(),
         snapshot: snapshot({
           credentials: [credential({ id: "quick" }), credential({ id: "slow" })],
-          health: [
-            health({ credentialId: "quick", ewmaTtftMs: 100 }),
-            health({ credentialId: "slow", ewmaTtftMs: slow }),
-          ],
           settings: only("latency"),
         }),
         now: NOW,
         rand: 0,
         load: new Map(),
+        recent: recent({ quick: { ewmaTtftMs: 100 }, slow: { ewmaTtftMs: slow } }),
       }).candidates,
     );
 
@@ -168,17 +165,14 @@ test("a zero first-token measurement is unknown, not instant", () => {
       model: model(),
       snapshot: snapshot({
         credentials: [credential({ id: "unmeasured" }), credential({ id: "slow" })],
-        health: [
-          // A sub-millisecond first token seeds the EWMA at zero. That means
-          // "no useful measurement", exactly as a null does.
-          health({ credentialId: "unmeasured", ewmaTtftMs: 0 }),
-          health({ credentialId: "slow", ewmaTtftMs: 400 }),
-        ],
         settings: only("latency"),
       }),
       now: NOW,
       rand: 0,
       load: new Map(),
+      // A sub-millisecond first token seeds the EWMA at zero. That means
+      // "no useful measurement", exactly as a null does.
+      recent: recent({ unmeasured: { ewmaTtftMs: 0 }, slow: { ewmaTtftMs: 400 } }),
     }).candidates,
   );
 

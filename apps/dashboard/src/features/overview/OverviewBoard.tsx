@@ -82,6 +82,7 @@ export function OverviewBoard() {
             quota={health.data?.quota ?? []}
             burn={health.data?.burn ?? []}
             usage={usage.data ?? []}
+            lastUsed={health.data?.lastUsed ?? {}}
             quotaPollIntervalMs={settings.data?.quotaPollIntervalMs ?? 300_000}
             now={now}
           />

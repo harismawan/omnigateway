@@ -183,7 +183,12 @@ kubectl apply -k k8s
 
 Releases deploy by GitOps: a `v*` tag publishes `ghcr.io/harismawan/omnigateway:<version>`
 and the workflow commits that version into `k8s/kustomization.yaml` on `main`, which Argo
-CD syncs. Rolling back is editing `newTag` by hand.
+CD syncs. Rolling back is editing `newTag` by hand — **except across the first release after
+v0.10.3**, whose migration drops columns every older image writes on the success path. For that
+deploy scale to one replica first (the rolling update's surviving replica is the one that breaks),
+and take a snapshot before it: rolling `newTag` back does not roll the schema back, and the old
+image fails every successful request against it. Details in the README's "Upgrading" note and the
+header of `packages/store/src/postgres/migrations/002_health_measurements.sql`.
 
 Plugins in a fleet are baked into the image so every replica holds the same
 set: `COPY plugins/ /data/plugins/` in a derived Dockerfile. The image is

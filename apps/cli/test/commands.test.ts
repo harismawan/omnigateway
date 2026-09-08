@@ -691,17 +691,21 @@ test("credentials health emits all rows in JSON mode", async () => {
   const root = await installation();
   const store = await openStore(root);
   await seedCredential(store, { id: "c1", label: "work" });
-  await store.credentials.saveHealth([
-    health({ credentialId: "c1", model: "model-1", consecutiveFailures: 1 }),
-  ]);
+  const row = health({ credentialId: "c1", model: "model-1", consecutiveFailures: 1 });
+  await store.credentials.updateHealth("c1", "model-1", () => row);
+  await store.usage.append(requestLog({ id: "r1", at: 1_234, credentialId: "c1" }));
   store.close();
 
   const result = await cli(["credentials", "health", "--json"], { root });
-  const body = JSON.parse(result.out) as { health: Array<{ credentialId: string }> };
+  const body = JSON.parse(result.out) as {
+    health: Array<{ credentialId: string }>;
+    lastUsed: Record<string, number>;
+  };
 
   expect(body.health).toEqual([
     expect.objectContaining({ credentialId: "c1", model: "model-1", consecutiveFailures: 1 }),
   ]);
+  expect(body.lastUsed).toEqual({ c1: 1_234 });
 });
 
 test("credentials set with nothing to change is a usage error", async () => {

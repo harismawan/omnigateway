@@ -12,7 +12,6 @@ import type {
   AccountQuota,
   AgentModelMapping,
   ApiKeySummary,
-  BurnEstimate,
   CatalogProvider,
   CatalogResponse,
   ClearBodiesResult,
@@ -25,7 +24,6 @@ import type {
   ConnectStart,
   ConsoleResponse,
   Credential,
-  CredentialHealth,
   CredentialHealthResponse,
   CredentialPatch,
   CredentialsResponse,
@@ -46,7 +44,6 @@ import type {
   ProviderId,
   QuotaHistoryQuery,
   QuotaHistoryResponse,
-  QuotaWindow,
   RequestBodyResponse,
   RequestLog,
   RestoreResult,
@@ -200,12 +197,8 @@ export function useCredentials(): UseQueryResult<Credential[]> {
   });
 }
 
-export type HealthSnapshot = {
-  health: CredentialHealth[];
-  quota: QuotaWindow[];
-  /** Derived server-side, so the boards and the CLI cannot disagree about it. */
-  burn: BurnEstimate[];
-};
+/** `burn` is derived server-side, so the boards and the CLI cannot disagree about it. */
+export type HealthSnapshot = CredentialHealthResponse;
 
 export function useCredentialHealth(cadence: Cadence = 10_000): UseQueryResult<HealthSnapshot> {
   return useQuery({

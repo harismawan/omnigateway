@@ -1,7 +1,16 @@
 import { expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { DEFAULT_SETTINGS } from "@omni/store";
 import { health } from "@omni/testkit";
-import { blankHealth, PENALTY, recordFailure, recordSuccess } from "../src/breaker.ts";
+import {
+  blankHealth,
+  PENALTY,
+  recordFailure,
+  recordSuccess,
+  SUCCESS_RESETS,
+  successWouldChange,
+} from "../src/breaker.ts";
 
 const NOW = 1_000_000;
 const opts = { settings: DEFAULT_SETTINGS, now: NOW, jitter: 0 };
@@ -15,40 +24,77 @@ test("blank health starts closed with no failures", () => {
     consecutiveFailures: 0,
     openedAt: null,
     rateLimitedUntil: null,
-    ewmaTtftMs: null,
-    lastUsedAt: null,
   });
 });
 
 test("success clears failures and closes the breaker", () => {
   const next = recordSuccess(
     health({ breakerState: "open", consecutiveFailures: 5, openedAt: NOW - 1000 }),
-    { ...opts, ttftMs: 400 },
   );
   expect(next.breakerState).toBe("closed");
   expect(next.consecutiveFailures).toBe(0);
   expect(next.openedAt).toBeNull();
-  expect(next.lastUsedAt).toBe(NOW);
 });
 
 test("success clears a stale rate-limit window", () => {
-  const next = recordSuccess(health({ rateLimitedUntil: NOW + 5000 }), { ...opts, ttftMs: 100 });
+  const next = recordSuccess(health({ rateLimitedUntil: NOW + 5000 }));
   expect(next.rateLimitedUntil).toBeNull();
 });
 
-test("first latency sample seeds the ewma directly", () => {
-  expect(recordSuccess(health(), { ...opts, ttftMs: 500 }).ewmaTtftMs).toBe(500);
+test("a success against a closed, zero-count row, or no row, would change nothing", () => {
+  expect(successWouldChange(undefined)).toBe(false);
+  expect(successWouldChange(health())).toBe(false);
+  // The sub-threshold count is the case a narrower predicate misses, and it
+  // is the one that turns consecutive failures into cumulative ones.
+  expect(successWouldChange(health({ consecutiveFailures: 1 }))).toBe(true);
+  expect(successWouldChange(health({ breakerState: "open" }))).toBe(true);
+  expect(successWouldChange(health({ breakerState: "halfOpen" }))).toBe(true);
+  expect(successWouldChange(health({ rateLimitedUntil: NOW + 1 }))).toBe(true);
+  expect(successWouldChange(health({ openedAt: NOW - 1 }))).toBe(true);
 });
 
-test("subsequent latency samples blend at alpha 0.3", () => {
-  const next = recordSuccess(health({ ewmaTtftMs: 1000 }), { ...opts, ttftMs: 500 });
-  expect(next.ewmaTtftMs).toBeCloseTo(850, 5);
+test("successWouldChange is exactly whether recordSuccess would change the row", () => {
+  const cases = [
+    health(),
+    health({ consecutiveFailures: 2 }),
+    health({ breakerState: "open", openedAt: NOW }),
+    health({ rateLimitedUntil: NOW + 10 }),
+  ];
+  for (const h of cases) {
+    const changed = JSON.stringify(recordSuccess(h)) !== JSON.stringify(h);
+    expect(successWouldChange(h)).toBe(changed);
+  }
 });
 
-test("a success with no measured ttft leaves the ewma untouched", () => {
-  expect(recordSuccess(health({ ewmaTtftMs: 700 }), { ...opts, ttftMs: null }).ewmaTtftMs).toBe(
-    700,
+// The predicate asks "would this write change anything"; the Postgres trigger
+// asks "must every replica rebuild". The second is a strict subset: the failure
+// count is patched into a held snapshot, so it belongs in the predicate and
+// not in the trigger. Equality here would force `consecutive_failures` into
+// the trigger and bring back a rebuild on every sub-threshold failure.
+// Read from whichever migration most recently defined the trigger, so a later
+// migration that replaces it is the one compared — a fixed `002` would keep
+// passing against a trigger no longer installed.
+const MIGRATIONS = join(import.meta.dir, "../../store/src/postgres/migrations");
+const healthTrigger = readdirSync(MIGRATIONS)
+  .sort()
+  .reverse()
+  .map((file) => readFileSync(join(MIGRATIONS, file), "utf8"))
+  .find((sql) => sql.includes("CREATE TRIGGER credential_health_config_version_upd"));
+
+test("the success predicate is a strict superset of the trigger's WHEN columns", () => {
+  expect(healthTrigger).toBeDefined();
+  const when = /WHEN \(([^)]*)\)/.exec(healthTrigger ?? "")?.[1] ?? "";
+  const triggerColumns = new Set(
+    [...when.matchAll(/OLD\.(\w+)\s+IS DISTINCT FROM NEW\.\1/g)].map((m) =>
+      (m[1] as string).replace(/_(\w)/g, (_, c: string) => c.toUpperCase()),
+    ),
   );
+  expect(triggerColumns.size).toBeGreaterThan(0);
+  const predicate = new Set<string>(SUCCESS_RESETS);
+  for (const column of triggerColumns) expect(predicate).toContain(column);
+  expect(predicate.size).toBeGreaterThan(triggerColumns.size);
+  expect(predicate).toContain("consecutiveFailures");
+  expect(triggerColumns).not.toContain("consecutiveFailures");
 });
 
 test("hard failures accumulate without opening below the threshold", () => {
@@ -116,7 +162,7 @@ test("quota exhaustion parks the credential for an hour", () => {
 });
 
 test("request-level errors change nothing", () => {
-  const before = health({ consecutiveFailures: 1, ewmaTtftMs: 300 });
+  const before = health({ consecutiveFailures: 1 });
   expect(recordFailure(before, { ...opts, code: "BAD_REQUEST" })).toEqual(before);
   expect(recordFailure(before, { ...opts, code: "CAPABILITY_MISMATCH" })).toEqual(before);
   expect(recordFailure(before, { ...opts, code: "CONTENT_FILTER" })).toEqual(before);

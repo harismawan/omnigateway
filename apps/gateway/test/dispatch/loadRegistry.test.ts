@@ -83,3 +83,33 @@ test("reports the fleet's load after refresh, without counting itself twice", as
   await b.refresh();
   expect(b.counts().get(KEY) ?? 0).toBe(0);
 });
+
+test("release records when the pair was last used here and folds in its latency", async () => {
+  let now = 100;
+  const registry = createLoadRegistry(memoryCoord(), () => now);
+  expect(registry.recent().get(KEY)).toBeUndefined();
+
+  registry.acquire("cred-1", "claude-opus-4")(500);
+  expect(registry.recent().get(KEY)).toEqual({ lastReleasedAt: 100, ewmaTtftMs: 500 });
+
+  // Alpha 0.3: 500 * 0.7 + 1000 * 0.3.
+  now = 200;
+  registry.acquire("cred-1", "claude-opus-4")(1000);
+  expect(registry.recent().get(KEY)?.lastReleasedAt).toBe(200);
+  expect(registry.recent().get(KEY)?.ewmaTtftMs).toBeCloseTo(650, 5);
+
+  // A request that never reached a first token still counts as a use, and
+  // leaves the average alone.
+  now = 300;
+  registry.acquire("cred-1", "claude-opus-4")(null);
+  expect(registry.recent().get(KEY)?.lastReleasedAt).toBe(300);
+  expect(registry.recent().get(KEY)?.ewmaTtftMs).toBeCloseTo(650, 5);
+
+  // A second release of one slot is not a second use.
+  now = 400;
+  const release = registry.acquire("cred-1", "claude-opus-4");
+  release(10);
+  release(10);
+  expect(registry.recent().get(KEY)?.lastReleasedAt).toBe(400);
+  expect(registry.recent().get(KEY)?.ewmaTtftMs).toBeCloseTo(650 * 0.7 + 10 * 0.3, 5);
+});

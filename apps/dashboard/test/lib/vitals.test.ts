@@ -173,8 +173,14 @@ describe("credentialStatus", () => {
     expect(status.note).toBe("disabled");
   });
 
-  test("an unused credential is idle", () => {
-    expect(credentialStatus([], NOW, true).state).toBe("idle");
+  // The gateway writes a health row only when routing has something to
+  // record, so no row is the ordinary state of a healthy account — not an
+  // unknown, and not idle.
+  test("a credential with no health row reads as healthy", () => {
+    const status = credentialStatus([], NOW, true);
+    expect(status.state).toBe("ok");
+    expect(status.note).toBe("");
+    expect(status.consecutiveFailures).toBe(0);
   });
 
   test("the worst row wins", () => {
@@ -203,15 +209,6 @@ describe("credentialStatus", () => {
     const status = credentialStatus([health({ breakerState: "halfOpen" })], NOW, true);
     expect(status.state).toBe("warn");
     expect(status.note).toBe("probing");
-  });
-
-  test("latency is the slowest model, not the first row", () => {
-    const status = credentialStatus(
-      [health({ ewmaTtftMs: 200 }), health({ model: "b", ewmaTtftMs: 900 })],
-      NOW,
-      true,
-    );
-    expect(status.ttftMs).toBe(900);
   });
 });
 
