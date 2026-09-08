@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { hostDayOffsetMinutes } from "@omni/store";
 import { DEFAULT_SETTINGS } from "@omni/store/types";
 import { loadConfig } from "../src/config.ts";
 import { settingsSchema } from "../src/schemas.ts";
@@ -89,9 +90,35 @@ test("reads a valid day offset and falls back to the host offset for invalid val
 
   for (const value of ["", "1.5", "nope", "1441", "-1441"]) {
     const fallback = loadConfig({ ...base, OMNI_DAY_OFFSET_MINUTES: value });
-    expect(fallback.dayOffsetMinutes).toBe(-new Date().getTimezoneOffset());
+    expect(fallback.dayOffsetMinutes).toBe(hostDayOffsetMinutes());
     expect(fallback.dayOffsetFallbackFrom).toBe(value);
   }
+});
+
+/**
+ * `bun test` pins the process to UTC unless `TZ` is set, so inside this file
+ * the host default is always 0 and the assertion above is 0-vs-0. A child
+ * process under a named zone is the one place the host path can be watched
+ * reading something else, and the zone named here — not the machine's — is
+ * what it reads.
+ */
+test("the host default follows the process zone, not UTC", () => {
+  const read = (tz: string): string => {
+    const child = Bun.spawnSync(
+      [
+        process.execPath,
+        "-e",
+        `import("${import.meta.dir}/../src/config.ts").then((m) =>
+           console.log(m.loadConfig({ OMNI_ENCRYPTION_KEY: "${base.OMNI_ENCRYPTION_KEY}" }).dayOffsetMinutes))`,
+      ],
+      { env: { ...process.env, TZ: tz } },
+    );
+    expect(child.exitCode).toBe(0);
+    return child.stdout.toString().trim();
+  };
+  expect(read("Asia/Jakarta")).toBe("420");
+  expect(read("America/New_York")).toMatch(/^-(240|300)$/);
+  expect(read("UTC")).toBe("0");
 });
 
 test("falls back to info for an invalid log level without refusing to boot", () => {

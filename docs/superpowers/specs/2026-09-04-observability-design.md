@@ -103,6 +103,7 @@ Labels are `provider`, `model`, `status`, `code`, `api_key_id`, `dimension`,
 | `omni_stream_queued` | gauge | — | `registry.stats()` |
 | `omni_stream_dropped_total` | counter | — | `registry.stats()` |
 | `omni_coord_fallback` | gauge | — | `coord.healthy()` |
+| `omni_coord_faults_total` | counter | — | `coord.faults()` |
 | `omni_metrics_series_folded_total` | counter | — | the cardinality cap |
 | `omni_otlp_spans_dropped_total` | counter | reason | the export queue |
 | `omni_build_info` | gauge | version | constant 1 |
@@ -129,7 +130,10 @@ where the fleet-wide value is sitting right there and looks better.
 reports — `"healthy" in coord && !coord.healthy()` — which is a boolean this process
 maintains after its own failures, not a call across the network. It is a statement
 about *this replica's* view of coordination, which is what an operator needs to see
-per instance.
+per instance. It is also only the *last* call: a coordinator that times out one
+call in a hundred reads `0` on nearly every scrape, so `omni_coord_faults_total`
+counts every fault since boot beside it — the rate on that counter is what says
+Redis is slow.
 
 Three counters are deliberately about the telemetry itself. A subsystem that can
 drop data and does not say so is worse than one that is absent.

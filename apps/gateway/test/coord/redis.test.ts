@@ -88,16 +88,103 @@ if (url === undefined) {
       // Redis would say two; memory has never seen this key.
       expect((await coord.window.claim("stalled", 60_000, 3)).before.used).toBe(0);
       expect(coord.healthy()).toBe(false);
+      expect(coord.faults()).toBe(1);
+      // Named as slowness, not absence: `healthy` reads true again on the next
+      // call, so the line and the count are what say Redis was late.
       expect(logger.records).toContainEqual(
         expect.objectContaining({
-          msg: "coordinator unreachable; serving from memory",
-          fields: expect.objectContaining({ coord: "redis", coordFallback: true }),
+          msg: "coordinator slow; serving from memory",
+          fields: expect.objectContaining({
+            coord: "redis",
+            coordFallback: true,
+            reason: "command timed out",
+          }),
         }),
       );
 
       await spinning;
+      await coord.window.claim("stalled", 60_000, 4);
+      expect(coord.healthy()).toBe(true);
+      expect(coord.faults()).toBe(1);
       blocker.close();
       coord.close();
+    });
+
+    /**
+     * The deadline does not cancel the command. For window, gauge and buckets
+     * a late-landing claim over-counts, which the limiter permits; for the
+     * mutex a late-landing `SET NX` is a lock taken under a token nobody
+     * holds, and `fn` never runs, so nothing releases it until the TTL
+     * lapses. Measured on the seed lock: a contender waited the whole
+     * `SEED_LOCK_MS` on the request path, five times the hang the deadline
+     * exists to bound.
+     */
+    test("a lock claim that outruns its deadline is released, not stranded", async () => {
+      const blocker = new RedisClient(url);
+      await blocker.send("FLUSHDB", []);
+      const slow = redisCoord({ url, faultLogIntervalMs: 0, commandTimeoutMs: 50 });
+      await slow.incr("warm");
+
+      const spinning = blocker.send("EVAL", ["for i=1,200000000 do end return 1", "0"]);
+      await Bun.sleep(50);
+      await expect(slow.mutex.withLock("seed", 5_000, 0, async () => 1)).rejects.toThrow(
+        "LOCK_UNAVAILABLE",
+      );
+      await spinning;
+
+      // A healthy contender, with a wait far below the lock's TTL: with the
+      // stranded token in place it polls the whole wait and gives up.
+      const contender = redisCoord({ url });
+      const started = performance.now();
+      expect(await contender.mutex.withLock("seed", 5_000, 500, async () => 1)).toBe(1);
+      expect(performance.now() - started).toBeLessThan(400);
+
+      blocker.close();
+      slow.close();
+      contender.close();
+    });
+
+    /**
+     * Recovery reseeds the fleet's long-window counters by dropping every
+     * bucket hash, which is shared by every replica. That repair is owed only
+     * when a debit went to memory and was lost there; a claim answered from
+     * memory but never debited leaves the shared picture whole. One slow
+     * command on one replica must not cost every replica a reseed, because
+     * slowness comes with load, which is when the store can least absorb one.
+     */
+    test("a timed-out claim without a lost debit does not drop the fleet's buckets", async () => {
+      const blocker = new RedisClient(url);
+      await blocker.send("FLUSHDB", []);
+      const a = redisCoord({ url, faultLogIntervalMs: 0, commandTimeoutMs: 50 });
+      const b = redisCoord({ url });
+      const delta = { requests: 1, tokens: 1, costUsd: 0 };
+      await a.buckets.seed("k", 1_000, 60_000, 10_000, [[9_000, delta]]);
+      expect((await b.buckets.sum("k", 1_000, 60_000, 10_000))?.requests).toBe(1);
+
+      let spinning = blocker.send("EVAL", ["for i=1,200000000 do end return 1", "0"]);
+      await Bun.sleep(50);
+      await a.window.claim("w", 60_000, 1);
+      expect(a.healthy()).toBe(false);
+      await spinning;
+      await a.window.claim("w", 60_000, 2);
+      expect(a.healthy()).toBe(true);
+      await Bun.sleep(50);
+      expect((await b.buckets.sum("k", 1_000, 60_000, 10_000))?.requests).toBe(1);
+
+      // A debit that did go to memory is lost there, so this time the reseed
+      // is owed: the shared hash goes and the next admission reads the store.
+      spinning = blocker.send("EVAL", ["for i=1,200000000 do end return 1", "0"]);
+      await Bun.sleep(50);
+      await a.buckets.add("k", 1_000, 60_000, 10_000, delta);
+      expect(a.healthy()).toBe(false);
+      await spinning;
+      await a.window.claim("w", 60_000, 3);
+      await Bun.sleep(50);
+      expect(await b.buckets.sum("k", 1_000, 60_000, 10_000)).toBeNull();
+
+      blocker.close();
+      a.close();
+      b.close();
     });
   });
 }

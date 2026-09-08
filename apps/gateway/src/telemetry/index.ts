@@ -39,6 +39,7 @@ export type Telemetry = {
     localInflight: ReadonlyMap<ProviderId, number>,
     streams: RegistryStats,
     coordFallback: boolean,
+    coordFaults: number,
   ): string;
   stop(): void;
 };
@@ -192,13 +193,14 @@ export function createTelemetry(opts: {
       if (opts.metricsEnabled)
         registry.add("omni_ratelimit_rejected_total", { dimension, window: window ?? "none" });
     },
-    scrape(localInflight, streams, coordFallback) {
+    scrape(localInflight, streams, coordFallback, coordFaults) {
       for (const [provider, value] of localInflight)
         registry.set("omni_inflight", { provider }, value);
       registry.set("omni_stream_connections", {}, streams.connections);
       registry.set("omni_stream_queued", {}, streams.queued);
       registry.set("omni_stream_dropped_total", {}, streams.dropped);
       registry.set("omni_coord_fallback", {}, coordFallback ? 1 : 0);
+      registry.set("omni_coord_faults_total", {}, coordFaults);
       return renderPrometheus(registry.snapshot());
     },
     stop() {

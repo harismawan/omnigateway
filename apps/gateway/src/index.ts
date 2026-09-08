@@ -321,7 +321,7 @@ async function main(): Promise<void> {
     coord,
     nodeId,
     mode: config.clusterMode ? "cluster" : "single",
-    ...(shared === null ? {} : { coordHealthy: shared.healthy }),
+    ...(shared === null ? {} : { coordHealthy: shared.healthy, coordFaults: shared.faults }),
     baseUrl: config.baseUrl,
     http,
     now,
