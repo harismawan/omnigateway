@@ -265,6 +265,23 @@ Several replicas behind a load balancer are **cluster mode** on Postgres and
 Redis. All of it, with the nginx block and the Kubernetes base, is in
 [docs/deploying.md](docs/deploying.md).
 
+### Upgrading past v0.10.3 — action required
+
+The first release after v0.10.3 drops two columns from `credential_health`
+that every earlier gateway writes on **every successful request**. The moment
+the new version migrates the database, every older gateway still running fails
+each request *after* the upstream call has completed and been billed: the
+client gets its content and then an aborted connection with no terminal frame.
+
+- **Cluster mode:** a rolling deploy does not protect you — the surviving old
+  replica is the one that breaks. Scale to **one replica** before deploying
+  this release, then scale back up, or accept that every old replica serves
+  only failures until it is replaced.
+- **Single process (SQLite):** the upgrade itself is safe; the rollback is not.
+- **Rollback is unsafe on both.** An older version cannot re-add the columns
+  and fails the same way against the new schema. Take a snapshot **before** the
+  deploy; restoring it is the only way back.
+
 ## Configuration
 
 Configuration is environment variables, read from the installation's `.env`:

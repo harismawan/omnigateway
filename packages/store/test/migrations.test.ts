@@ -12,6 +12,12 @@ import rtkMetrics005 from "../src/sqlite/migrations/005_rtk_metrics.sql" with { 
 import rtkUsage006 from "../src/sqlite/migrations/006_rtk_usage.sql" with { type: "text" };
 import quotaSamples007 from "../src/sqlite/migrations/007_quota_samples.sql" with { type: "text" };
 import bodyLogging008 from "../src/sqlite/migrations/008_body_logging.sql" with { type: "text" };
+import keyLimits009 from "../src/sqlite/migrations/009_key_limits.sql" with { type: "text" };
+import usageRollup010 from "../src/sqlite/migrations/010_usage_rollup.sql" with { type: "text" };
+import pluginMigrations011 from "../src/sqlite/migrations/011_plugin_migrations.sql" with {
+  type: "text",
+};
+import nodes012 from "../src/sqlite/migrations/012_nodes.sql" with { type: "text" };
 
 type TableRow = { name: string };
 
@@ -299,5 +305,45 @@ test("migration 3 adds the snapshot columns to a database created before it", ()
     .map((r) => r.name);
   expect(credentialColumns).toContain("disabled_reason");
   expect(credentialColumns).toContain("disabled_at");
+  db.close();
+});
+
+/**
+ * The runner's own failure mode, reduced. `bun:sqlite`'s `run` on a
+ * multi-statement string swallows a *step*-time error and carries on;
+ * dropping an indexed column is one, and 013 is the first migration with a
+ * schema precondition that can fail. A runner handing the file to one `run`
+ * records 013 as applied over a table that still has both columns.
+ */
+test("a failing statement aborts a multi-statement migration and leaves it unrecorded", () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  legacyDb(path);
+  const pre = new Database(path);
+  [keyLimits009, usageRollup010, pluginMigrations011, nodes012].forEach((text, index) => {
+    pre.run(text);
+    pre.run("INSERT INTO migrations (id, applied_at) VALUES (?, 0)", [index + 9]);
+  });
+  pre.run("CREATE INDEX hazard ON credential_health(ewma_ttft_ms)");
+  pre.close();
+
+  expect(() => openDb(path)).toThrow(/ewma_ttft_ms/);
+
+  const after = new Database(path);
+  const applied = after.query<{ id: number }, []>("SELECT id FROM migrations").all();
+  expect(applied.map((row) => row.id)).not.toContain(13);
+  const columns = after
+    .query<{ name: string }, []>("PRAGMA table_info(credential_health)")
+    .all()
+    .map((row) => row.name);
+  // Neither statement's effect survives: the second must not have run.
+  expect(columns).toContain("ewma_ttft_ms");
+  expect(columns).toContain("last_used_at");
+  after.run("DROP INDEX hazard");
+  after.close();
+
+  // Precondition repaired, the same runner applies it.
+  const db = openDb(path);
+  const ids = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
+  expect(ids.map((row) => row.id)).toContain(13);
   db.close();
 });

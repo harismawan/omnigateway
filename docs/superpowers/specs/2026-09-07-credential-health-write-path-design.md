@@ -212,8 +212,11 @@ CREATE TRIGGER credential_health_config_version_ins
 
 CREATE TRIGGER credential_health_config_version_del
   AFTER DELETE ON credential_health
-  FOR EACH ROW EXECUTE FUNCTION bump_config_version();
+  FOR EACH STATEMENT EXECUTE FUNCTION bump_config_version();
 ```
+
+The `DELETE` arm stays statement-level, as in `001`: it needs no `WHEN`, and row-level would bump
+once per model row when a credential is removed — M fleet-wide rebuilds where one is enough.
 
 **The `INSERT` arm must be `FOR EACH ROW`, and this is the trap that makes the whole fix moot if
 missed.** The write is an upsert (`postgres/credentials.ts:71-81`, `ON CONFLICT DO UPDATE`).
@@ -239,7 +242,33 @@ publish (`app.ts:276-281`, fire-and-forget, degrading to a per-process emitter o
 per `coord/redis.ts:196-207`) still costs one late rebuild rather than a replica routing into an
 open breaker. For a bare `consecutiveFailures` increment the counter no longer moves, so a
 dropped publish leaves that replica's count stale until something else invalidates. Acceptable —
-it shortens a backoff, and the breaker state itself is not at risk — but on the record.
+the breaker state itself is not at risk — but on the record, and the direction matters: it
+**lengthens** the backoff, never shortens it. A replica whose snapshot holds a lower count than
+the row judges its own successes silent (`successWouldChange` reads the snapshot), so nothing it
+does resets the row; only failures write, and the row's count can only climb until a replica with
+the true count succeeds through it.
+
+### The column drops are a deploy hazard, and stay
+
+`ewma_ttft_ms` and `last_used_at` are **dropped**, not left in place. Every gateway before this
+release names both in `UPSERT_HEALTH` on the success path, so once any replica has applied the
+migration, every older replica throws there: after the upstream call completed and was billed, and
+on `main` that write is not wrapped, so the error escapes `run()`, `sseResponse`'s `pull` calls
+`controller.error`, and the client receives every content frame followed by an aborted
+connection with no terminal frame. Both adversarial reviewers executed this.
+
+The `RollingUpdate` in `k8s/deployment.yaml` (`maxSurge: 1, maxUnavailable: 0`) makes it worse,
+not better: the "surviving" replica is exactly the one that breaks, for the whole window between
+the new pod's migration and the old pod's termination.
+
+**Decision:** the drops stay as drops. Expand/contract — leave the columns, drop them in a later
+release once no old image can be running — was proposed and refused by the operator, who would
+rather take one bounded, announced outage than carry dead columns for a release. Cost accepted:
+this release requires either scaling to a single replica for the deploy or accepting that window;
+rollback is unsafe on both backends (an old image cannot re-add the columns, and fails the same
+way against the new schema); the only recovery is a snapshot taken before the deploy. Written
+where an operator meets it: header of both migration files, README "Upgrading past v0.10.3",
+`docs/deploying.md`, and the `k8s/deployment.yaml` strategy comment.
 
 ## Decisions taken before design
 

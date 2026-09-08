@@ -224,6 +224,13 @@ forEachStore((backend) => {
           openedAt: 5,
         }));
         expect(await version()).toBe(afterInsert + 1);
+
+        // DELETE stays statement-level: removing a credential's M rows is one
+        // bump, not M rebuilds across the fleet.
+        await seedHealth(s, { ...blank, model: "m2", consecutiveFailures: 1 });
+        const beforeDelete = await version();
+        await admin.unsafe("DELETE FROM credential_health WHERE credential_id = 'c1'");
+        expect(await version()).toBe(beforeDelete + 1);
       } finally {
         await admin.close();
       }

@@ -41,6 +41,25 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string; after?: (db: Database
 ];
 
 /**
+ * Splits a migration file into statements: comment lines dropped, split on a
+ * semicolon ending a line.
+ *
+ * ponytail: line-end split, not a SQL parser. Enough for every file in
+ * `migrations/` — none holds a `BEGIN … END` trigger body or a quoted
+ * semicolon — and a migration that needs either moves this to a real
+ * tokenizer. Plugin SQL is arbitrary and is not run through this.
+ */
+function statements(sql: string): string[] {
+  return sql
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("--"))
+    .join("\n")
+    .split(/;[ \t]*(?:\n|$)/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
  * Opens the database, sets the connection pragmas, and applies any migrations
  * not yet recorded. Safe to call on an existing database.
  *
@@ -110,7 +129,13 @@ export function openDb(path: string): Database {
   for (const m of MIGRATIONS) {
     if (done.has(m.id)) continue;
     db.transaction(() => {
-      db.run(m.sql);
+      // One `run` per statement, never one for the file. `bun:sqlite`'s `run`
+      // on a multi-statement string surfaces a *prepare* error but swallows a
+      // *step* error — dropping an indexed column, a constraint violation — and
+      // carries on to the next statement, so the transaction committed with the
+      // migration recorded and the schema half-applied. Verified on Bun 1.4.0;
+      // `packages/store/test/migrations.test.ts` holds the reduced case.
+      for (const statement of statements(m.sql)) db.run(statement);
       m.after?.(db);
       db.run("INSERT INTO migrations (id, applied_at) VALUES (?, ?)", [m.id, Date.now()]);
     })();

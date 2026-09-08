@@ -492,6 +492,10 @@ export async function dispatch(
         const attemptStartedAt = deps.now();
         let attemptCode: ErrorCode | undefined;
         let releaseProbe: (() => Promise<void>) | undefined;
+        // Whether this attempt wrote `halfOpen` — the probe that every other
+        // caller is excluded behind. Set inside the transition, so it reads
+        // the row, not the snapshot.
+        let probing = false;
         try {
           // The probe claim, taken inside the `try` so the `finally` beside
           // `releaseSlot` frees it on every way out, including failover. The
@@ -515,7 +519,17 @@ export async function dispatch(
             }
             // A decision-field change, so it writes through and every replica
             // ranks the pair as `halfOpen` from here on.
-            await persistHealth(candidate, (current) => ({ ...current, breakerState: "halfOpen" }));
+            //
+            // Unless the row already closed. `candidate.probe` was decided
+            // against the rank-time snapshot, and a request that ranked during
+            // a probe but reached this line after that probe closed the row
+            // would re-open probe territory for its whole duration. The row is
+            // the newer fact: leave it, and run as an ordinary request.
+            await persistHealth(candidate, (current) => {
+              if (current.breakerState === "closed") return current;
+              probing = true;
+              return { ...current, breakerState: "halfOpen" };
+            });
           }
           const i = attempts++;
           if (deps.trace !== null && deps.trace !== undefined) {
@@ -559,6 +573,7 @@ export async function dispatch(
           log.ttftMs = null;
 
           let committed = false;
+          let closedAtCommit = false;
           let authRefreshRetried = false;
           let retrySecrets: CredentialSecrets | undefined;
           const attemptNow = deps.now();
@@ -665,6 +680,18 @@ export async function dispatch(
                   });
                   for (const buffered of pending) yield buffered;
                   pending.length = 0;
+                  // A probe closes the breaker here, not at `end`. The
+                  // upstream answered, which is what the probe asked; waiting
+                  // for the last byte kept a sole-credential pair returning
+                  // `NO_CANDIDATES` to every other caller for the length of
+                  // the stream — up to the request deadline. A failure after
+                  // this lands on a closed row as one counted failure, the
+                  // accepted price. Non-probe successes still write at `end`.
+                  if (probing) {
+                    await persistHealth(candidate, recordSuccess);
+                    probing = false;
+                    closedAtCommit = true;
+                  }
                 }
 
                 if (event.type === "end") {
@@ -777,7 +804,7 @@ export async function dispatch(
                 );
               }
 
-              if (successWrites) await persistHealth(candidate, recordSuccess);
+              if (successWrites && !closedAtCommit) await persistHealth(candidate, recordSuccess);
               log.status = 200;
               log.errorCode = null;
               log.durationMs = deps.now() - startedAt;

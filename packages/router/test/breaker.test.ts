@@ -1,9 +1,8 @@
 import { expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { DEFAULT_SETTINGS } from "@omni/store";
 import { health } from "@omni/testkit";
-import healthTrigger from "../../store/src/postgres/migrations/002_health_measurements.sql" with {
-  type: "text",
-};
 import {
   blankHealth,
   PENALTY,
@@ -72,8 +71,19 @@ test("successWouldChange is exactly whether recordSuccess would change the row",
 // count is patched into a held snapshot, so it belongs in the predicate and
 // not in the trigger. Equality here would force `consecutive_failures` into
 // the trigger and bring back a rebuild on every sub-threshold failure.
+// Read from whichever migration most recently defined the trigger, so a later
+// migration that replaces it is the one compared — a fixed `002` would keep
+// passing against a trigger no longer installed.
+const MIGRATIONS = join(import.meta.dir, "../../store/src/postgres/migrations");
+const healthTrigger = readdirSync(MIGRATIONS)
+  .sort()
+  .reverse()
+  .map((file) => readFileSync(join(MIGRATIONS, file), "utf8"))
+  .find((sql) => sql.includes("CREATE TRIGGER credential_health_config_version_upd"));
+
 test("the success predicate is a strict superset of the trigger's WHEN columns", () => {
-  const when = /WHEN \(([^)]*)\)/.exec(healthTrigger)?.[1] ?? "";
+  expect(healthTrigger).toBeDefined();
+  const when = /WHEN \(([^)]*)\)/.exec(healthTrigger ?? "")?.[1] ?? "";
   const triggerColumns = new Set(
     [...when.matchAll(/OLD\.(\w+)\s+IS DISTINCT FROM NEW\.\1/g)].map((m) =>
       (m[1] as string).replace(/_(\w)/g, (_, c: string) => c.toUpperCase()),

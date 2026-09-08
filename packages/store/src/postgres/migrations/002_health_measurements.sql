@@ -1,3 +1,21 @@
+-- DEPLOY HAZARD — read before applying to a fleet.
+--
+-- This migration drops two columns that every gateway before it writes on
+-- the success path (`UPSERT_HEALTH` names `ewma_ttft_ms` and `last_used_at`).
+-- The first new replica to boot applies it under the migration lock; from that
+-- moment every OLD replica still running throws on every successful request:
+-- the upstream call has completed and been billed, the client has received its
+-- content frames, and then the connection aborts with no terminal frame. The
+-- `RollingUpdate` in `k8s/deployment.yaml` does not protect against this — the
+-- "surviving" replica is the one that breaks.
+--
+-- Required: scale to ONE replica before deploying this release, or accept that
+-- every old replica fails every successful request until it is replaced.
+-- Rollback is unsafe: an old image cannot re-add the columns, and running it
+-- against this schema fails the same way. The only way back is a snapshot
+-- restore taken before the deploy. Deliberate: kept as a drop, not
+-- expand/contract, on the operator's decision — see the write-path spec.
+--
 -- `credential_health` keeps decisions, not measurements.
 --
 -- `ewma_ttft_ms` and `last_used_at` were written on every successful request,
@@ -32,6 +50,8 @@ CREATE TRIGGER credential_health_config_version_ins
   AFTER INSERT ON credential_health
   FOR EACH ROW EXECUTE FUNCTION bump_config_version();
 
+-- DELETE needs no WHEN, so it stays statement-level as in 001: a credential
+-- with M model rows bumps once, not M times.
 CREATE TRIGGER credential_health_config_version_del
   AFTER DELETE ON credential_health
-  FOR EACH ROW EXECUTE FUNCTION bump_config_version();
+  FOR EACH STATEMENT EXECUTE FUNCTION bump_config_version();

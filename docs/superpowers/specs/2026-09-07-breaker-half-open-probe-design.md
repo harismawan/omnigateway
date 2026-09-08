@@ -165,8 +165,16 @@ not worth extra machinery.
 ### The state transition
 
 - **Claim taken** → write `breakerState: "halfOpen"`. A decision-field change, so it writes
-  through and reaches other replicas.
-- **Probe succeeds** → `recordSuccess` closes the breaker.
+  through and reaches other replicas. Skipped when the row already reads `closed`: `probe` was
+  decided against the rank-time snapshot, and a request that claims after another probe closed
+  the row would otherwise re-open probe territory for its whole duration. It runs as ordinary.
+- **Probe succeeds** → `recordSuccess` closes the breaker **at the commit point**, the first
+  `blockDelta`, not at `end`. The upstream answered, which is what the probe asked. Closing at
+  `end` kept a sole-credential pair returning `NO_CANDIDATES` to every other caller for the
+  length of the probe's stream — up to the request deadline — where before this spec that
+  window was a flood of successes. A failure after commit lands on a closed row as one counted
+  failure; accepted. Non-probe successes still write at `end`, and the probe writes nothing
+  there.
 - **Probe fails** → `recordFailure`'s `current.breakerState === "halfOpen"` branch
   (`breaker.ts:114`) opens immediately without burning the threshold. Already written, already
   unit-tested at `packages/router/test/breaker.test.ts:67-74` — the test is not vacuous, the
@@ -252,6 +260,11 @@ the test.
   only a sequential test could. Mutation testing during implementation confirmed exactly that:
   reverting the arm left the concurrent test green and was killed by the sequential one. The
   concurrent test is the obvious one to write and would have shipped the bug alone.
+- **Pre-merge review, 2026-09-08, found the close-at-`end` regression.** With the row `halfOpen`
+  until the last byte, a sole-credential pair served nobody but the probe for the probe's whole
+  stream — a 503 window the old flood never had. Moved to the commit point. The same review
+  found the unconditional `halfOpen` write re-opening a row another probe had already closed,
+  because `candidate.probe` is a rank-time fact; the write now reads the row.
 - Line numbers in this spec predate the write-path implementation (`d7979e9`) and have drifted
   by roughly twenty lines in `dispatch/index.ts`. The structure they describe is intact; treat
   them as landmarks, not addresses.
