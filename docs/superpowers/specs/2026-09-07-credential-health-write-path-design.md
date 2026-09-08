@@ -16,14 +16,24 @@ round-trips holding one advisory lock keyed on `(credentialId, model)`.
 Three consequences, in increasing order of how badly they were understood.
 
 **A per-credential throughput ceiling.** Every replica's every request through one credential
-queues on one lock. Magnitude is unmeasured; the mechanism is not.
+queues on one lock. Measured against a live Postgres through a 2.3ms-RTT proxy, dispatch alone:
+p50 18.5ms before, 2.5ms after at concurrency 1 — a saving of 16.0ms, or **exactly 7.0 round
+trips**, which is what the mechanism predicts (five in `updateHealth`, one for the rebuild, one
+for the extra version read). Scales linearly in RTT: ~3ms same-AZ, 6-14ms cross-AZ, ~60ms
+cross-region. The ratio is not an end-to-end speedup — the harness measures `dispatch()` only,
+with no auth, body encryption, `request_logs` writes or upstream call — so the transferable
+figure is milliseconds saved per request, not the multiple.
 
 **A self-reinforcing failure herd.** When a credential starts failing, every in-flight request
 on every replica calls `recordFailure` for the same pair and they all queue. The breaker exists
 to shed that load, but the write that records it opening is the one stuck in the queue.
 
-**Every request invalidates every replica's routing snapshot.** Unverified against a live
-Postgres — read from the schema and the cache, and it must be measured before it is relied on.
+**Every request invalidates every replica's routing snapshot.** Measured, and worse than this
+paragraph first claimed: on a live Postgres at concurrency 1, **500 of 500 requests rebuilt the
+snapshot** — every one, even single-process, because the local `healthSaved` patch is undone by
+the read-behind version check seeing the trigger bump. At concurrency 16 in-flight sharing
+collapses it to roughly one rebuild per three requests. The counter moved **twice** per write,
+not once (see the trigger section). After this change: zero rebuilds, zero bumps.
 `postgres/migrations/001_init.sql:285-287` bumps a global counter on every `credential_health`
 write; `apps/gateway/src/dispatch/snapshotCache.ts:67-68` marks the snapshot stale on any
 change, and stale means `buildSnapshot` — five queries (`packages/router/src/snapshot.ts:12-18`).
