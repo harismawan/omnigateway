@@ -19,6 +19,7 @@ async function key(id: string, overrides: Partial<ApiKeyInput> = {}): Promise<Ap
     modelAllowlist: null,
     limits: {},
     bodyLoggingOptOut: false,
+    expiresAt: null,
     ...overrides,
   };
 }
@@ -71,6 +72,25 @@ forEachStore((backend) => {
     expect(await s.keys.get("k2")).toBeNull();
   });
 
+  test("expiry round-trips, defaults to never, and is replaced whole", async () => {
+    const s = await backend.fresh();
+    // A key minted without one never expires, which is what every key that
+    // existed before this column reads back as.
+    await s.keys.create(await key("k1"));
+    expect((await s.keys.get("k1"))?.expiresAt).toBeNull();
+
+    await s.keys.create(await key("k2", { expiresAt: 1_700_000_000_000 }));
+    expect((await s.keys.get("k2"))?.expiresAt).toBe(1_700_000_000_000);
+
+    await s.keys.setExpiry("k1", 1_800_000_000_000);
+    expect((await s.keys.get("k1"))?.expiresAt).toBe(1_800_000_000_000);
+    // Back to never, which is the only way an expiry is removed.
+    await s.keys.setExpiry("k1", null);
+    expect((await s.keys.get("k1"))?.expiresAt).toBeNull();
+    // The other key is untouched: the write names one row.
+    expect((await s.keys.get("k2"))?.expiresAt).toBe(1_700_000_000_000);
+  });
+
   test("setModelAllowlist keeps null and [] distinct", async () => {
     const s = await backend.fresh();
     await s.keys.create(await key("k1", { modelAllowlist: ["a", "b"] }));
@@ -96,10 +116,14 @@ forEachStore((backend) => {
       bodyLoggingOptOut: true,
       createdAt: 1_600_000_000_000,
       revokedAt: 1_600_000_100_000,
+      expiresAt: 1_600_000_200_000,
     });
     const row = await s.keys.get("k_imported");
     expect(row?.createdAt).toBe(1_600_000_000_000);
     expect(row?.revokedAt).toBe(1_600_000_100_000);
+    // A restore that dropped this would hand back a key that outlives the
+    // expiry its operator set, which is the one direction that fails open.
+    expect(row?.expiresAt).toBe(1_600_000_200_000);
     expect(row?.limits).toEqual({ concurrency: 2 });
     expect(row?.bodyLoggingOptOut).toBe(true);
     await expect(
@@ -113,6 +137,7 @@ forEachStore((backend) => {
         bodyLoggingOptOut: false,
         createdAt: 1,
         revokedAt: null,
+        expiresAt: null,
       }),
     ).rejects.toThrow("unreadable limits");
   });

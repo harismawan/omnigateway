@@ -8,7 +8,13 @@ import {
 } from "@omni/ratelimit/catalog";
 import type { ApiKey, Store, UsageSums } from "@omni/store";
 import { generateApiKey, hashApiKey } from "@omni/store";
-import { keyCreateSchema, keyLimitsSchema, keyModelsSchema, parseOrThrow } from "./schemas.ts";
+import {
+  keyCreateSchema,
+  keyExpirySchema,
+  keyLimitsSchema,
+  keyModelsSchema,
+  parseOrThrow,
+} from "./schemas.ts";
 
 /**
  * One configured ceiling and what the stored history says has gone against it.
@@ -131,6 +137,10 @@ async function toSummary(store: Store, key: ApiKey, now: number): Promise<ApiKey
     bodyLoggingOptOut: key.bodyLoggingOptOut,
     createdAt: key.createdAt,
     revokedAt: key.revokedAt,
+    // Carried on every listing, including for a key already past it. Refuse at
+    // auth, degrade at list: an expired key that vanished from the board would
+    // be a key that stopped working with nowhere to see why.
+    expiresAt: key.expiresAt,
   };
 }
 
@@ -190,6 +200,9 @@ export async function createKey(store: Store, input: unknown): Promise<CreatedKe
     // its payloads are never retained must not become capturable later by an
     // edit the client cannot see, and there is no patch route to make one.
     bodyLoggingOptOut: body.bodyLoggingOptOut,
+    // Null unless asked for, which is what every key minted before this field
+    // existed carries and what the great majority should keep carrying.
+    expiresAt: body.expiresAt,
   });
 
   return { id: created.id, label: created.label, prefix: created.prefix, key: raw };
@@ -243,6 +256,36 @@ export async function setKeyModels(
 
   await store.keys.setModelAllowlist(id, body.modelAllowlist);
   return toSummary(store, { ...key, modelAllowlist: body.modelAllowlist }, now);
+}
+
+/**
+ * Replaces one key's expiry and reports the key as it now stands.
+ *
+ * The third field editable after minting, written whole like the other two: an
+ * instant, or `null` for never. An unknown id is refused before the write for
+ * the same reason the other two refuse one — an UPDATE that matches no row must
+ * not report success.
+ *
+ * An instant already behind `now` is accepted, not refused, and that is the
+ * point rather than an oversight: it is how "expire this key now" is spelled,
+ * and unlike `revoke` it can be undone. Nothing here may grow a `> now` guard.
+ *
+ * `now` is taken for the summary — `limitUsage` is measured against it — not to
+ * judge the value being written.
+ */
+export async function setKeyExpiry(
+  store: Store,
+  id: string,
+  input: unknown,
+  now: number = Date.now(),
+): Promise<ApiKeySummary> {
+  const body = parseOrThrow(keyExpirySchema, input);
+
+  const key = await store.keys.get(id);
+  if (key === null) throw new GatewayError("BAD_REQUEST", "no such api key");
+
+  await store.keys.setExpiry(id, body.expiresAt);
+  return toSummary(store, { ...key, expiresAt: body.expiresAt }, now);
 }
 
 export async function revokeKey(store: Store, id: string): Promise<void> {

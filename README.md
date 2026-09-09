@@ -174,6 +174,22 @@ pair is unlimited. Windows slide, `tokens` and `spend` are debited on
 completion, and limits are editable afterwards with `omni keys limits`; the
 semantics are in [docs/operations.md](docs/operations.md#key-limits).
 
+A key can also carry an expiry, which is optional and off by default — a key
+with none works until it is revoked, and no upgrade ever attaches one:
+
+```bash
+omni keys create --label contractor --expires 2027-01-01
+omni keys expiry <id> --at 2027-06-01T12:00:00Z   # move it
+omni keys expiry <id> --never                     # take it away
+```
+
+Past the instant, every request the key makes is refused with the same answer a
+revoked or unknown key gets — deliberately indistinguishable. Unlike
+`omni keys revoke` this is reversible: a date already behind the clock is
+accepted and means "stop it now", and `--never` brings the key back. Expired
+keys stay listed, with their own state in `omni keys list` and on the console's
+keys board, so a client that stopped working can be found rather than guessed at.
+
 Now use it:
 
 ```bash

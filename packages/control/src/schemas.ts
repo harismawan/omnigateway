@@ -202,12 +202,26 @@ export const keyCreateSchema = z
      * installation's policy rather than opting itself out of one it has not met.
      */
     bodyLoggingOptOut: z.boolean().default(false),
+    /**
+     * When the key stops being accepted, as an absolute epoch-ms instant.
+     * `null` — the default — is never.
+     *
+     * Defaulted here where `keyExpirySchema` refuses an absent field, and the
+     * asymmetry is the same one `modelAllowlist` has: a mint that says nothing
+     * about expiry means the key that already exists in every operator's head,
+     * while an edit that says nothing has forgotten to say something.
+     *
+     * `positive()`, so `0` is refused. Epoch zero is 1970 and would expire the
+     * key at the instant it was minted, which is nobody's intent and reads
+     * identically to a caller that meant to send `null`.
+     */
+    expiresAt: z.number().int().positive().nullable().default(null),
   })
   .strict();
 
 /**
- * One of the two parts of a key that may be edited after it is minted — the
- * matrix here, the model allowlist in `keyModelsSchema` below.
+ * One of the three parts of a key that may be edited after it is minted — the
+ * matrix here, the model allowlist and the expiry in the two schemas below.
  *
  * Sent whole rather than as a patch: `limits` is one JSON document, `{}` is a
  * meaningful value, and a partial body would have to distinguish "leave this
@@ -222,7 +236,7 @@ export const keyCreateSchema = z
 export const keyLimitsSchema = z.object({ limits: limitConfigSchema }).strict();
 
 /**
- * The other part of a key that may be edited after it is minted.
+ * The second part of a key that may be edited after it is minted.
  *
  * Sent whole rather than as a patch, for the same reason the matrix is:
  * `null` (every model) and `[]` (none) are both meaningful values, so a
@@ -238,6 +252,27 @@ export const keyModelsSchema = z
     /** Null means every configured model; an empty array denies all of them. */
     modelAllowlist: z.array(z.string().min(1)).nullable(),
   })
+  .strict();
+
+/**
+ * The third part of a key that may be edited after it is minted.
+ *
+ * Deliberately not defaulted, exactly as `keyModelsSchema` is not: `null`
+ * (never expires) and an absent field are different facts, and an edit that
+ * forgot the field must fail loudly rather than have one of them chosen for it.
+ * A body of `{}` withdrawing an operator's expiry is the failure this refuses.
+ *
+ * **No `> now` guard, and none may be added.** An instant already behind the
+ * clock is a legitimate value meaning "expire this key now" — the one
+ * fast-acting stop that, unlike `revoke`, can be undone by moving the instant
+ * forward again. Refusing the past would take that operation away and leave
+ * only the irreversible one.
+ *
+ * `positive()` bars `0` for the same reason it does at creation: epoch zero is
+ * a value nobody means, and it reads identically to a caller that meant `null`.
+ */
+export const keyExpirySchema = z
+  .object({ expiresAt: z.number().int().positive().nullable() })
   .strict();
 
 /**

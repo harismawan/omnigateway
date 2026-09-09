@@ -1,0 +1,26 @@
+-- An optional expiry on a gateway API key: an absolute epoch-ms instant after
+-- which the key is refused, spelled exactly as `credentials.expires_at` is.
+--
+-- Nullable rather than `NOT NULL DEFAULT`, which is the opposite of the choice
+-- migration 9 made for `limits`, and for the opposite reason. There, every
+-- possible value is a policy and `{}` is the one that means "no ceiling", so a
+-- default gives "unlimited" a single spelling. Here the column is a deadline,
+-- and no number means "no deadline" — every finite default is a date on which
+-- somebody's client stops working. NULL is the only value that says nothing was
+-- decided, so it is the column's own default and every reader maps it to
+-- "never expires".
+--
+-- No backfill, deliberately, and this is the whole substance of the migration.
+-- Every key on every existing installation was minted on the promise that it
+-- works until revoked; an upgrade that attaches an expiry to those rows breaks
+-- clients on a date the operator never chose, and the failure surfaces days
+-- later as an authentication error with nothing in it that names this change.
+-- Adding the column and stopping is what keeps that promise, so the absence of
+-- an `UPDATE` here is load-bearing rather than an omission —
+-- `packages/store/test/migrations.test.ts` pins it.
+--
+-- No index. The column is read only after a row has already been found by
+-- `hash` or by `id`, both of which are unique, so there is no scan for an index
+-- to help; and nothing sweeps expired keys, because an expired key stays listed
+-- exactly as a revoked one does so its usage history keeps its attribution.
+ALTER TABLE api_keys ADD COLUMN expires_at INTEGER;

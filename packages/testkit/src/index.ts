@@ -226,6 +226,8 @@ export async function seedApiKey(
     modelAllowlist: null,
     limits: {},
     bodyLoggingOptOut: false,
+    /** Never expires, which is what a key says when nobody sets a deadline. */
+    expiresAt: null,
     ...overrides,
   });
   return { raw, key };

@@ -31,6 +31,7 @@ import type {
   DryRunNeed,
   DryRunResult,
   KeyCreateInput,
+  KeyExpiryInput,
   KeyLimitsInput,
   KeyModelsInput,
   KeysResponse,
@@ -833,10 +834,11 @@ export function useCreateKey(): UseMutationResult<MintedKey, Error, KeyCreateInp
 /**
  * Replaces one key's limits.
  *
- * One of two fields editable after minting — the allowlist via
- * `useSetKeyModels` is the other. `bodyLoggingOptOut` has no mutation like
- * this on purpose: it is a promise to whoever holds the key, while a limit is
- * the operator's own ceiling on their own installation.
+ * One of three fields editable after minting — the allowlist via
+ * `useSetKeyModels` and the expiry via `useSetKeyExpiry` are the others.
+ * `bodyLoggingOptOut` has no mutation like this on purpose: it is a promise to
+ * whoever holds the key, while a limit is the operator's own ceiling on their
+ * own installation.
  */
 export function useSetKeyLimits(): UseMutationResult<
   ApiKeySummary,
@@ -866,6 +868,29 @@ export function useSetKeyModels(): UseMutationResult<
   return useMutation({
     mutationFn: ({ id, modelAllowlist }) =>
       put<ApiKeySummary>(`/api/keys/${id}/models`, { modelAllowlist }),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
+  });
+}
+
+/**
+ * Replaces one key's expiry.
+ *
+ * The third field editable after minting, and the only edit that can be undone:
+ * an instant already in the past means "expire it now" and is accepted, and
+ * `null` brings the key back — which `useRevokeKey` deliberately cannot.
+ *
+ * `expiresAt` is sent whether it is a number or `null`, never omitted: an
+ * absent field is a `BAD_REQUEST` at the route, because saying nothing and
+ * saying "never" are different instructions.
+ */
+export function useSetKeyExpiry(): UseMutationResult<
+  ApiKeySummary,
+  Error,
+  { id: string } & KeyExpiryInput
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, expiresAt }) => put<ApiKeySummary>(`/api/keys/${id}/expiry`, { expiresAt }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
   });
 }

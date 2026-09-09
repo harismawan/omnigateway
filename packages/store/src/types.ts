@@ -602,7 +602,47 @@ export type ApiKey = {
   bodyLoggingOptOut: boolean;
   createdAt: number;
   revokedAt: number | null;
+  /**
+   * When this key stops being accepted, or `null` when it never does.
+   *
+   * An absolute epoch-ms instant, the same spelling `Credential.expiresAt`
+   * uses, so a reader that knows one knows the other. `null` is "never", and it
+   * is what every key minted before this field existed reads back as — there is
+   * no backfill and there must never be one.
+   *
+   * Different from `revokedAt` in both direction and finality. `revokedAt`
+   * records that something *happened*, is in the past by construction, and
+   * cannot be undone; this names an instant that may be ahead or behind, and it
+   * can be moved or cleared. A key can carry both, which is why
+   * `keyUsable` asks about them together rather than at whichever site
+   * happens to be looking.
+   */
+  expiresAt: number | null;
 };
+
+/**
+ * Whether this key may still be used at this instant.
+ *
+ * The single copy of a two-clause question that used to be one clause asked in
+ * three places — the gateway's auth chokepoint, `loginClient`, and the
+ * `keyStillValid` that runs on every client-session verify. Expiry made it two
+ * clauses, and three sites free to gain the second one separately is three
+ * sites free to gain it at different times: the shape where a key is refused at
+ * `/v1` while its dashboard session keeps serving the same key's usage.
+ *
+ * The boundary is exclusive. `expiresAt` is when the key stops being accepted,
+ * so the instant it names is already outside — `>=` would leave one
+ * millisecond in which an expired key still serves, which is a millisecond no
+ * test written against a real clock would ever observe.
+ *
+ * Says nothing about `limits`. An unreadable limit matrix is also a reason to
+ * refuse a key, but it is a different reason with a different answer — the
+ * installation is misconfigured rather than the credential being over — and
+ * folding it in here would collapse the two into one message at the one
+ * boundary that must keep them apart.
+ */
+export const keyUsable = (key: ApiKey, now: number): boolean =>
+  key.revokedAt === null && (key.expiresAt === null || key.expiresAt > now);
 
 /**
  * `pending` is a request still in flight. Its `status`, `attempts`, tokens and
@@ -952,8 +992,9 @@ export interface KeyRepo {
   /**
    * Replaces one key's limit matrix, whole.
    *
-   * One of two fields editable after minting — the allowlist via
-   * `setModelAllowlist` is the other — and deliberately so:
+   * One of three fields editable after minting — the allowlist via
+   * `setModelAllowlist` and the expiry via `setExpiry` are the others — and
+   * deliberately so:
    * `bodyLoggingOptOut` is a promise to whoever holds the key, while a limit is
    * the operator's own ceiling on their own installation. A weekly spend cap
    * that cannot be adjusted without minting a new key and redeploying every
@@ -976,6 +1017,16 @@ export interface KeyRepo {
    * a request, which fails closed per request rather than failing open once.
    */
   setModelAllowlist(id: string, modelAllowlist: string[] | null): Promise<void>;
+  /**
+   * Replaces one key's expiry, whole. `null` is "never expires".
+   *
+   * The third field editable after minting, and the one whose edit is
+   * reversible in both directions: an instant already in the past is a
+   * legitimate value meaning "expire it now", and moving it forward or clearing
+   * it brings the key back. `revoke` is the one-way door, and this is
+   * deliberately not one.
+   */
+  setExpiry(id: string, expiresAt: number | null): Promise<void>;
   revoke(id: string): Promise<void>;
 }
 

@@ -345,6 +345,17 @@ export type KeyLimitsInput = { limits: LimitConfig };
  */
 export type KeyModelsInput = { modelAllowlist: string[] | null };
 
+/**
+ * When the key stops being accepted, as an absolute epoch-ms instant. `null` is
+ * never.
+ *
+ * Required rather than optional, for the same reason `modelAllowlist` is above:
+ * `null` and an absent field are opposite instructions on an edit, and only one
+ * of them may withdraw an operator's expiry. An instant already in the past is
+ * a legitimate value — "expire it now" — and reversible, unlike revocation.
+ */
+export type KeyExpiryInput = { expiresAt: number | null };
+
 export type KeyCreateInput = {
   label: string;
   /** Null means every configured model; an empty array means none. */
@@ -358,6 +369,12 @@ export type KeyCreateInput = {
   limits: LimitConfig;
   /** Settable only here: there is no route that turns capture back on for a key. */
   bodyLoggingOptOut: boolean;
+  /**
+   * When the key stops being accepted, or `null` for never — which is what a
+   * mint that says nothing about expiry means, and what every key issued before
+   * this field existed carries.
+   */
+  expiresAt: number | null;
 };
 
 /**

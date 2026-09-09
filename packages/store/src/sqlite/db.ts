@@ -12,6 +12,7 @@ import usageRollup010 from "./migrations/010_usage_rollup.sql" with { type: "tex
 import pluginMigrations011 from "./migrations/011_plugin_migrations.sql" with { type: "text" };
 import nodes012 from "./migrations/012_nodes.sql" with { type: "text" };
 import healthMeasurements013 from "./migrations/013_health_measurements.sql" with { type: "text" };
+import keyExpiry014 from "./migrations/014_key_expiry.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -42,6 +43,9 @@ const MIGRATIONS: ReadonlyArray<{
   { id: 11, sql: pluginMigrations011 },
   { id: 12, sql: nodes012 },
   { id: 13, sql: healthMeasurements013 },
+  // No `after`. There is nothing to backfill, and that is the migration's whole
+  // point: a key minted before the column existed never expires.
+  { id: 14, sql: keyExpiry014 },
 ];
 
 /**

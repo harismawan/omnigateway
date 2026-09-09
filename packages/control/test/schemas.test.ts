@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
 import { DEFAULT_SETTINGS } from "@omni/store";
 import { isProviderId } from "../src/connect.ts";
-import { keyCreateSchema, modelSchema, providerIdSchema, settingsSchema } from "../src/schemas.ts";
+import {
+  keyCreateSchema,
+  keyExpirySchema,
+  modelSchema,
+  providerIdSchema,
+  settingsSchema,
+} from "../src/schemas.ts";
 
 const target = (provider: string): Record<string, unknown> => ({
   provider,
@@ -161,6 +167,30 @@ test("a key opts out of body capture only when it asks to", () => {
   expect(keyCreateSchema.parse({}).bodyLoggingOptOut).toBe(false);
   expect(keyCreateSchema.parse({ bodyLoggingOptOut: true }).bodyLoggingOptOut).toBe(true);
   expect(() => keyCreateSchema.parse({ bodyLoggingOptOut: "yes" })).toThrow();
+});
+
+/**
+ * Minting defaults to never, editing must say which.
+ *
+ * The same split `keyModelsSchema` makes and for the same reason: `null` and an
+ * absent field are opposite facts on the edit path — one clears the expiry, the
+ * other forgot to mention it — so the edit schema has no `.default()` and a
+ * body without the field is a `BAD_REQUEST` rather than a silent "never".
+ */
+test("expiry defaults to never at creation and is required on an edit", () => {
+  expect(keyCreateSchema.parse({}).expiresAt).toBeNull();
+  expect(keyCreateSchema.parse({ expiresAt: 1_800_000_000_000 }).expiresAt).toBe(1_800_000_000_000);
+  expect(keyCreateSchema.parse({ expiresAt: null }).expiresAt).toBeNull();
+  expect(() => keyCreateSchema.parse({ expiresAt: "tomorrow" })).toThrow();
+  expect(() => keyCreateSchema.parse({ expiresAt: 1.5 })).toThrow();
+
+  expect(keyExpirySchema.parse({ expiresAt: null }).expiresAt).toBeNull();
+  expect(keyExpirySchema.parse({ expiresAt: 1_800_000_000_000 }).expiresAt).toBe(1_800_000_000_000);
+  // Absent is not "never".
+  expect(() => keyExpirySchema.parse({})).toThrow();
+  expect(() => keyExpirySchema.parse({ expiresAt: 0 })).toThrow();
+  expect(() => keyExpirySchema.parse({ expiresAt: -1 })).toThrow();
+  expect(() => keyExpirySchema.parse({ expiresAt: 1, extra: true })).toThrow();
 });
 test("settings accept the four ponytail modes and reject anything else", () => {
   for (const mode of ["off", "lite", "full", "ultra"] as const) {

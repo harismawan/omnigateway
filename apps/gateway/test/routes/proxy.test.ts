@@ -1403,6 +1403,54 @@ test("accepts x-api-key on proxy and models routes", async () => {
   expect(models.status).toBe(200);
 });
 
+/**
+ * An expired key is refused at `/v1` exactly as a revoked one is, on both
+ * header forms.
+ *
+ * The harness clock is fixed at 1_000_000, which is what makes the boundary
+ * statable: a key whose `expiresAt` **is** that instant is already outside, and
+ * one a millisecond later is not. The message is compared against the revoked
+ * case rather than a literal, because the property being defended is that a
+ * caller cannot tell the two apart.
+ */
+test("an expired key is refused on both header forms, exactly as a revoked one is", async () => {
+  const { app, store } = await harness();
+  const expired = await seedApiKey(store, { label: "lapsed", expiresAt: 1_000_000 });
+  const alive = await seedApiKey(store, { label: "ticking", expiresAt: 1_000_001 });
+  const revoked = await seedApiKey(store, { label: "pulled" });
+  await store.keys.revoke(revoked.key.id);
+
+  const body = JSON.stringify({
+    model: "fast",
+    max_tokens: 100,
+    messages: [{ role: "user", content: "hi" }],
+  });
+  const send = (headers: Record<string, string>) =>
+    app.handle(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body,
+      }),
+    );
+  const messageOf = async (response: Response): Promise<string> => {
+    const payload = (await response.json()) as { error: { message: string } };
+    return payload.error.message;
+  };
+
+  const bearer = await send({ authorization: `Bearer ${expired.raw}` });
+  const header = await send({ "x-api-key": expired.raw });
+  const pulled = await send({ authorization: `Bearer ${revoked.raw}` });
+  expect(bearer.status).toBe(401);
+  expect(header.status).toBe(401);
+  expect(await messageOf(bearer)).toBe(await messageOf(pulled));
+  expect(await messageOf(header)).toBe("invalid API key");
+
+  // One millisecond the other side of the same clock still serves, so it is the
+  // expiry doing this and not the seeding.
+  expect((await send({ authorization: `Bearer ${alive.raw}` })).status).toBe(200);
+});
+
 test("rejects conflicting API key headers on proxy and models routes", async () => {
   const logger = captureLogger();
   const { app, raw } = await harness(EVENTS, { logger });
@@ -1477,7 +1525,7 @@ test("enforces exact model allowlists before dispatch", async () => {
   expect(denied.status).toBe(401);
   expect(sends).toBe(0);
 
-  const key = await authenticateApiKey(store, raw);
+  const key = await authenticateApiKey(store, raw, Date.now());
   await store.keys.revoke(key.id);
   const allowedKey = await seedApiKey(store, { modelAllowlist: ["fast"] });
   const allowed = await app.handle(

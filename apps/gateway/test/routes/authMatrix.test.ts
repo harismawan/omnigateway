@@ -202,6 +202,7 @@ const ROUTES: ReadonlyArray<{
   { method: "PUT", path: "/api/settings", allow: ["admin"], body: {} },
   { method: "PUT", path: "/api/keys/nope/limits", allow: ["admin"], body: {} },
   { method: "PUT", path: "/api/keys/nope/models", allow: ["admin"], body: {} },
+  { method: "PUT", path: "/api/keys/nope/expiry", allow: ["admin"], body: {} },
   { method: "POST", path: "/api/models/x/dry-run", allow: ["admin"] },
   // Found by the completeness check below on its first run, along with
   // `DELETE /api/models/:id` and the ws route — three rows a hand-written table

@@ -65,6 +65,7 @@ function key(id: string): ApiKeyInput {
     modelAllowlist: null,
     limits: {},
     bodyLoggingOptOut: false,
+    expiresAt: null,
   };
 }
 

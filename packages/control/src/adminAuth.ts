@@ -1,6 +1,6 @@
 import { hash, verify } from "@node-rs/argon2";
 import { type Coord, memoryCoord } from "@omni/coord";
-import { hashApiKey, type Store } from "@omni/store";
+import { hashApiKey, keyUsable, type Store } from "@omni/store";
 import type { Principal } from "./principal.ts";
 
 export const ADMIN_COOKIE = "omni_admin";
@@ -53,8 +53,9 @@ export type AdminAuth = {
    * A session for the holder of a raw gateway API key.
    *
    * The raw key is hashed and looked up by the same path `/v1/*` uses, and only
-   * the resulting id is kept. A revoked key is refused here and, more
-   * importantly, on every later `verify`.
+   * the resulting id is kept. A key that is revoked or past its expiry — one
+   * `keyUsable` question, asked here and at `/v1` from the same copy — is
+   * refused here and, more importantly, on every later `verify`.
    */
   loginClient(rawKey: string): Promise<string | null>;
 
@@ -160,7 +161,10 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
    * Read on every verify, not only at login. A session that checked once would
    * outlive a revocation by up to the session TTL, which is a revocation that
    * did not revoke — the operator pulls a key precisely because they want it to
-   * stop working now.
+   * stop working now. `keyUsable` makes the same true of an expiry with no
+   * extra code here: a session held open across the instant its key expires
+   * fails its next verify and is deleted, so the dashboard cannot keep serving
+   * a key `/v1` has already stopped accepting.
    *
    * `keys.get` rather than scanning `keys.list()`: this runs on every request a
    * client dashboard makes, and `list` reads and JSON-parses every key in the
@@ -169,7 +173,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
    */
   const keyStillValid = async (apiKeyId: string): Promise<boolean> => {
     const key = await store.keys.get(apiKeyId);
-    return key !== null && key.revokedAt === null;
+    return key !== null && keyUsable(key, opts.now());
   };
 
   /**
@@ -261,7 +265,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
       // Same lookup `/v1/*` performs, so a key that cannot serve a request
       // cannot open a dashboard either.
       const key = await store.keys.findByHash(await hashApiKey(rawKey));
-      if (key === null || key.revokedAt !== null) return null;
+      if (key === null || !keyUsable(key, opts.now())) return null;
       // Only the id is kept. The raw key never enters the session map, so a heap
       // dump of a running gateway yields no usable credential.
       return issue({ kind: "client", apiKeyId: key.id });

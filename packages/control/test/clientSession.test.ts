@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { memoryCoord } from "@omni/coord";
 import { memoryStore, seedApiKey } from "@omni/testkit";
 import { createAdminAuth } from "../src/adminAuth.ts";
 
@@ -67,6 +68,45 @@ test("revoking a key ends its live session on the next request, without a restar
   await store.keys.revoke(key.id);
 
   // No clock movement, no re-login, no restart: the very next verify refuses.
+  expect(await auth.verify(token)).toBeNull();
+});
+
+test("a key already past its expiry opens nothing", async () => {
+  const store = await memoryStore();
+  const auth = createAdminAuth(store, opts);
+  const { raw } = await seedApiKey(store, { expiresAt: clock });
+
+  // The boundary is exclusive, so the instant named is already outside.
+  expect(await auth.loginClient(raw)).toBeNull();
+});
+
+/**
+ * Expiry ends a live session for the same reason revocation does, and through
+ * the same code: `keyStillValid` asks `keyUsable`, so this needed no branch of
+ * its own. The session is *deleted* rather than merely refused — restoring the
+ * key afterwards does not resurrect the cookie.
+ */
+test("a session outliving its key's expiry fails the next verify and is deleted", async () => {
+  const store = await memoryStore();
+  const coord = memoryCoord({ now: () => clock });
+  const auth = createAdminAuth(store, { ...opts, coord });
+  const { raw, key } = await seedApiKey(store, { expiresAt: clock + 10_000 });
+
+  const token = (await auth.loginClient(raw)) as string;
+  expect(await auth.verify(token)).toEqual({ kind: "client", apiKeyId: key.id });
+
+  const sessionKey = `sess:client:${new Bun.CryptoHasher("sha256").update(token).digest("hex")}`;
+  expect(await coord.kv.get(sessionKey)).not.toBeNull();
+
+  // Past the key's expiry but well inside the session TTL, so the TTL cannot be
+  // what refuses this.
+  clock += 10_000;
+  expect(await auth.verify(token)).toBeNull();
+  expect(await coord.kv.get(sessionKey)).toBeNull();
+
+  // Deleted, not merely refused: withdrawing the expiry does not bring the
+  // session back.
+  await store.keys.setExpiry(key.id, null);
   expect(await auth.verify(token)).toBeNull();
 });
 

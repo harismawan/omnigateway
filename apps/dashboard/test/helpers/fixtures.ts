@@ -176,6 +176,8 @@ export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
     bodyLoggingOptOut: false,
     createdAt: NOW - 86_400_000,
     revokedAt: null,
+    /** Never, which is what a key says when nobody set a deadline on it. */
+    expiresAt: null,
     ...patch,
   };
 }

@@ -80,8 +80,38 @@ describe("KeysBoard", () => {
           modelAllowlist: null,
           limits: { requests: { "1m": 60 }, spend: { "1w": 25.5 } },
           bodyLoggingOptOut: false,
+          // Blank means never, which is what a key that says nothing about
+          // expiry has always meant.
+          expiresAt: null,
         }),
       );
+    });
+  });
+
+  /**
+   * A native `datetime-local`, so what is typed is local wall time and what is
+   * sent is the epoch instant it names.
+   *
+   * The round trip is the assertion: reading the parsed value back through the
+   * same `Date` the input speaks proves the conversion did not silently land an
+   * offset out, which is the failure a UTC-formatted control would ship.
+   */
+  test("an expiry typed at creation is sent as the instant it names", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({ "POST /api/keys": () => minted });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    const dialog = await screen.findByRole("dialog");
+
+    await user.type(within(dialog).getByLabelText("Label"), "dated");
+    await user.type(within(dialog).getByLabelText("Expires"), "2030-06-01T12:00");
+    await user.click(within(dialog).getByRole("button", { name: "Create key" }));
+
+    await waitFor(() => {
+      const post = stub.calls.find((call) => call.init?.method === "POST");
+      const body = JSON.parse(String(post?.init?.body)) as { expiresAt: number };
+      expect(body.expiresAt).toBe(new Date("2030-06-01T12:00").getTime());
     });
   });
 
@@ -486,6 +516,102 @@ describe("KeysBoard", () => {
     await waitFor(() => {
       const put = stub.calls.find((call) => call.init?.method === "PUT");
       expect(put?.init?.body).toBe(JSON.stringify({ modelAllowlist: null }));
+    });
+  });
+
+  /**
+   * An expired key keeps its row.
+   *
+   * A key that stopped working and then vanished from the board is the bug this
+   * feature would otherwise ship: the operator sees a client failing and finds
+   * nothing on the screen that says why. It stays listed, with a state of its
+   * own — neither "active", which would be a lie, nor "revoked", which is a
+   * different and irreversible thing — and only the headline count narrows.
+   */
+  test("an expired key stays listed with its own state and date, and is not counted active", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey(),
+          apiKey({ id: "key-2", label: "lapsed", expiresAt: 1_000_000_000_000 }),
+          apiKey({ id: "key-3", label: "dated", expiresAt: Date.now() + 86_400_000 }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const lapsed = (await screen.findByText("lapsed")).closest("tr");
+    if (lapsed === null) throw new Error("the expired key lost its row");
+    expect(within(lapsed).getByText("expired")).toBeTruthy();
+    expect(within(lapsed).queryByText("active")).toBeNull();
+
+    // Still ahead of the clock, so it is active and says when it will not be.
+    const dated = screen.getByText("dated").closest("tr");
+    if (dated === null) throw new Error("the dated key has no row");
+    expect(within(dated).getByText("active")).toBeTruthy();
+    expect(within(dated).getByText(/^expires /)).toBeTruthy();
+
+    expect(screen.getByText("2 active keys of 3 ever issued.")).toBeTruthy();
+  });
+
+  /**
+   * The way back from an expiry, which revocation deliberately does not have.
+   *
+   * Reachable on an already-expired key, and `null` is sent rather than the
+   * field being omitted — an absent field is a `BAD_REQUEST`, because saying
+   * nothing and saying "never" are different instructions.
+   */
+  test("an expiry is editable after creation and clearable back to never", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey({ expiresAt: 1_000_000_000_000 })] }),
+      "PUT /api/keys/key-1/expiry": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit expiry for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+
+    // The stored instant is what the field starts from, in local time.
+    const field = within(dialog).getByLabelText("Expires") as HTMLInputElement;
+    expect(field.value).toBe(
+      new Date(1_000_000_000_000 - new Date(1_000_000_000_000).getTimezoneOffset() * 60_000)
+        .toISOString()
+        .slice(0, 16),
+    );
+    expect(within(dialog).getByRole("status").textContent).toContain("expired");
+
+    await user.clear(field);
+    await user.click(within(dialog).getByRole("button", { name: "Save expiry" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.url).toBe("/api/keys/key-1/expiry");
+      expect(put?.init?.body).toBe(JSON.stringify({ expiresAt: null }));
+    });
+  });
+
+  test("a new expiry is sent as the instant the field names", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+      "PUT /api/keys/key-1/expiry": () => apiKey({ expiresAt: 1 }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit expiry for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    // Nothing set, so nothing to say about a lapse.
+    expect(within(dialog).queryByRole("status")).toBeNull();
+
+    await user.type(within(dialog).getByLabelText("Expires"), "2031-03-04T05:06");
+    await user.click(within(dialog).getByRole("button", { name: "Save expiry" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(
+        JSON.stringify({ expiresAt: new Date("2031-03-04T05:06").getTime() }),
+      );
     });
   });
 
