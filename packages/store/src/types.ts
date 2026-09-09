@@ -653,6 +653,34 @@ export const keyUsable = (
 ): boolean => key.revokedAt === null && (key.expiresAt === null || key.expiresAt > now);
 
 /**
+ * Whether this credential's expiry puts it beyond use at this instant.
+ *
+ * The companion to `keyUsable` for the other kind of credential, and single-copy
+ * for the same reason. `authType` is load-bearing: only an OAuth credential's
+ * `expiresAt` describes a token that stops working. An API key's is operator
+ * bookkeeping, and the router has never refused one for it.
+ *
+ * `omni credentials list` restated the comparison without that clause, under a
+ * docstring promising "what the router would do with this credential right
+ * now". An API key carrying a past `expiresAt` therefore printed `expired`
+ * while the router kept routing to it — the listing disagreeing with the thing
+ * it claims to describe, which is worse than no listing.
+ *
+ * Refreshability is deliberately separate. A refreshable OAuth credential past
+ * expiry is usable, because dispatch refreshes before the call; a surface that
+ * wants to *say* "expired (refreshable)" still needs to know it was past expiry,
+ * so that stays the caller's to phrase and this stays one question.
+ */
+export const credentialExpired = (
+  credential: { authType: AuthType; expiresAt: number | null; hasRefreshToken: boolean },
+  now: number,
+): boolean =>
+  credential.authType === "oauth" &&
+  credential.expiresAt !== null &&
+  credential.expiresAt <= now &&
+  !credential.hasRefreshToken;
+
+/**
  * `pending` is a request still in flight. Its `status`, `attempts`, tokens and
  * cost are placeholder zeros, never measurements: read `state` to tell the two
  * apart, never `status`.

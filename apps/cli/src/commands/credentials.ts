@@ -14,24 +14,37 @@ import {
 } from "@omni/control";
 import { nodeHttpClient } from "@omni/providers";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
+import { type AuthType, credentialExpired } from "@omni/store/types";
 import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, formatTime, note, paint, table } from "../output.ts";
 import { connectRegistryFor, pluginProviders } from "./plugins.ts";
 
-/** One word for what the router would do with this credential right now. */
-function condition(credential: {
-  enabled: boolean;
-  disabledReason: string | null;
-  expiresAt: number | null;
-  hasRefreshToken: boolean;
-}): { ok: boolean; text: string } {
+/**
+ * One word for what the router would do with this credential right now.
+ *
+ * Which means asking the router's own question: `credentialExpired`. This
+ * restated it without the `authType === "oauth"` clause, so an API key with a
+ * past `expiresAt` printed `expired` under a promise to report what the router
+ * does — while the router routed to it.
+ */
+function condition(
+  credential: {
+    enabled: boolean;
+    disabledReason: string | null;
+    authType: AuthType;
+    expiresAt: number | null;
+    hasRefreshToken: boolean;
+  },
+  now: number,
+): { ok: boolean; text: string } {
   if (!credential.enabled) return { ok: false, text: credential.disabledReason ?? "disabled" };
-  if (credential.expiresAt !== null && credential.expiresAt <= Date.now()) {
-    return credential.hasRefreshToken
-      ? { ok: true, text: "expired (refreshable)" }
-      : { ok: false, text: "expired" };
+  if (credentialExpired(credential, now)) return { ok: false, text: "expired" };
+  // Past expiry but rescuable: dispatch refreshes before the call, so the router
+  // keeps it. Only an OAuth credential can be here.
+  if (credential.expiresAt !== null && credential.expiresAt <= now && credential.hasRefreshToken) {
+    return { ok: true, text: "expired (refreshable)" };
   }
   return { ok: true, text: "enabled" };
 }
@@ -56,7 +69,7 @@ export const credentialsList: Command = {
           { header: "EXPIRES" },
         ],
         credentials.map((c) => {
-          const status = condition(c);
+          const status = condition(c, ctx.now());
           return [
             c.id,
             provider(ctx, c.provider),
@@ -86,7 +99,7 @@ export const credentialsShow: Command = {
   async run(args, { ctx, writer }) {
     const id = requirePositional(args, 0, "credential id");
     const credential = await findCredential(ctx, id);
-    const status = condition(credential);
+    const status = condition(credential, ctx.now());
 
     const data = {
       id: credential.id,
