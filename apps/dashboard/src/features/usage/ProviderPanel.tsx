@@ -55,6 +55,14 @@ export type ProviderPanelProps = {
   by: TimeBy;
   since: number;
   until: number;
+  /**
+   * The gateway's day boundary, or null for the browser's own zone.
+   *
+   * The tick axis and the bucket keys have to be cut in the same frame: the
+   * server keys `usage_daily` at this offset, so an axis cut anywhere else
+   * matches none of them and the series renders flat zero over real traffic.
+   */
+  dayOffsetMinutes: number | null;
   metric: Metric;
 };
 
@@ -62,7 +70,14 @@ export type ProviderPanelProps = {
  * Where the traffic actually went. Hue is doing its one categorical job here —
  * a provider keeps its colour whether or not the others appear in the window.
  */
-export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPanelProps) {
+export function ProviderPanel({
+  buckets,
+  by,
+  since,
+  until,
+  metric,
+  dayOffsetMinutes,
+}: ProviderPanelProps) {
   // Loaded before this screen mounts, by the gate in `routes/_app.tsx`.
   const catalog = useProviderCatalog().data ?? [];
   const totals = bySplit(buckets, metric);
@@ -80,7 +95,7 @@ export function ProviderPanel({ buckets, by, since, until, metric }: ProviderPan
     .map((name) => ({ name, totals: totals.get(name) }))
     .filter((entry): entry is { name: string; totals: Totals } => entry.totals !== undefined);
   const names = ranked.map((entry) => entry.name);
-  const ticks = timeTicks(since, until, by);
+  const ticks = timeTicks(since, until, by, dayOffsetMinutes);
   const rows = splitSeries(buckets, ticks, by, metric);
   const grand = [...totals.values()].reduce((sum, entry) => sum + entry.requests, 0);
 

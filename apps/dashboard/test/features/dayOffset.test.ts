@@ -8,11 +8,14 @@
  * differ, which is every containerised deployment: the pod runs UTC and the
  * ConfigMap names an offset.
  *
- * These assert the arithmetic against fixed instants, which is the half that can
- * be checked without a timezone-dependent runner. `startOfDay(at, null)` is left
- * to the browser and deliberately not asserted here: its answer depends on the
- * zone the suite happens to run in, and pinning it would make this file pass or
- * fail on the machine rather than on the code.
+ * The null arm — "the gateway did not say, use the browser's zone" — is asserted
+ * too, under a pinned `TZ`. An earlier draft of this file declined to, on the
+ * grounds that its answer depends on the runner's zone. That reasoning was
+ * wrong, and expensively so: `bun test` forces `TZ=UTC`, where
+ * `setHours(0,0,0,0)` *is* UTC midnight and `getDay()` *is* `getUTCDay()`, so
+ * the fallback and the offset path are indistinguishable by construction and
+ * three mutations to the null arm survived the whole suite. The zone is
+ * pinnable; not pinning it is what made the arm untestable.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -52,6 +55,60 @@ describe("startOfDay with a gateway offset", () => {
   });
 });
 
+describe("the browser-zone fallback, when the gateway did not say", () => {
+  /**
+   * Runs `fn` with `TZ` pinned, so the arm is asserted rather than assumed.
+   *
+   * Restores by deleting rather than assigning `undefined`: under
+   * `exactOptionalPropertyTypes` those are different, and an env var literally
+   * set to the string "undefined" is the kind of leak that reads as a zone.
+   */
+  const inZone = (tz: string, fn: () => void): void => {
+    const prev = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      fn();
+    } finally {
+      // Back to UTC when nothing was set, never deleted. `bun test` establishes
+      // `TZ=UTC` for the whole run without necessarily putting it in `env`, so
+      // deleting leaves the process on the *host's* zone — and every other file
+      // sharing this process that formats a local time then fails. Three
+      // `KeysBoard` expiry tests did exactly that.
+      process.env.TZ = prev ?? "UTC";
+    }
+  };
+
+  test("cuts the day at the browser's own midnight", () => {
+    // UTC+7: 04:30Z is 11:30 local on the 9th, whose local midnight is 17:00Z
+    // on the 8th. Under the runner's default UTC this would be 00:00Z on the
+    // 9th, so the two frames disagree here and the assertion has teeth.
+    inZone("Asia/Jakarta", () => {
+      expect(startOfDay(AT, null)).toBe(Date.UTC(2026, 8, 8, 17));
+    });
+  });
+
+  test("reads the weekday in the browser's zone", () => {
+    inZone("Asia/Jakarta", () => {
+      // 17:00Z Saturday is already Sunday in Jakarta.
+      expect(dayOfWeek(Date.UTC(2026, 8, 12, 17), null)).toBe(0);
+    });
+  });
+
+  test("steps through the calendar, so a DST transition stays one day", () => {
+    // New York springs forward 2026-03-08: that local day is 23 hours long, so
+    // adding DAY_MS would land at 01:00 on the 9th and every later tick would
+    // carry the error. This arm exists for exactly this instant.
+    inZone("America/New_York", () => {
+      const beforeDst = startOfDay(Date.UTC(2026, 2, 7, 17), null);
+      const next = addDays(beforeDst, 1, null);
+      expect(next - beforeDst).toBe(DAY_MS);
+      const acrossDst = addDays(next, 1, null);
+      expect(acrossDst - next).toBe(23 * 60 * 60 * 1000);
+      expect(new Date(acrossDst).getHours()).toBe(0);
+    });
+  });
+});
+
 describe("weekday and stepping in the same frame", () => {
   test("reads the weekday at the offset, not at UTC", () => {
     // 17:00Z on Saturday is already Sunday in Jakarta, and a grid that asked UTC
@@ -69,6 +126,60 @@ describe("weekday and stepping in the same frame", () => {
 
   test("normalises before stepping, so a mid-day instant lands on a boundary", () => {
     expect(addDays(AT, 0, 420)).toBe(startOfDay(AT, 420));
+  });
+});
+
+describe("the tick axis and the server's bucket keys", () => {
+  /**
+   * The two have to be cut in the same frame or nothing joins.
+   *
+   * `timeTicks` gained its offset parameter and no panel passed it, so the axis
+   * stayed on browser midnight while `since` and the server's `usage_daily`
+   * keys moved to the gateway's. Every daily series then rendered flat zero
+   * over real traffic, and the activity grid — which had been rewired — drew
+   * the same days as busy. Measured before the fix: 91 ticks, 91 buckets, 0
+   * joined.
+   *
+   * This asserts the join rather than the argument, so it survives the panels
+   * being refactored and fails again if any of them drops the offset.
+   */
+  test("join, for the offset the gateway reports", () => {
+    const offset = 420;
+    const since = startOfDay(AT, offset);
+    const until = since + 6 * DAY_MS;
+
+    // What the server would key these days as: `usage_daily.day` is its own
+    // `startOfDay` at the configured offset.
+    const serverKeys = new Set<number>();
+    for (let at = since; at <= until; at += DAY_MS) serverKeys.add(startOfDay(at, offset));
+
+    const ticks = timeTicks(since, until, "day", offset);
+    expect(ticks).toHaveLength(7);
+    expect(ticks.filter((at) => serverKeys.has(at))).toHaveLength(7);
+  });
+
+  test("do not join when the axis is left on the browser's zone", () => {
+    // The bug, stated as a fact rather than a caveat: passing no offset is not
+    // a harmless default here, it is a different frame. Asserted under a fixed
+    // TZ so the runner's own zone cannot make the two agree by accident.
+    const prev = process.env.TZ;
+    process.env.TZ = "Asia/Jakarta";
+    try {
+      const offset = 0;
+      const since = startOfDay(AT, offset);
+      const until = since + 6 * DAY_MS;
+      const serverKeys = new Set([...Array(7).keys()].map((i) => since + i * DAY_MS));
+
+      const browserCut = timeTicks(since, until, "day", null);
+      expect(browserCut.filter((at) => serverKeys.has(at))).toHaveLength(0);
+    } finally {
+      // Back to UTC when nothing was set, never deleted. `bun test` establishes
+      // `TZ=UTC` for the whole run without necessarily putting it in `env`, so
+      // deleting leaves the process on the *host's* zone — and every other file
+      // sharing this process that formats a local time then fails. Three
+      // `KeysBoard` expiry tests did exactly that.
+      process.env.TZ = prev ?? "UTC";
+    }
   });
 });
 

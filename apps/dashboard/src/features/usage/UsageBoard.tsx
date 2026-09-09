@@ -168,6 +168,7 @@ export function UsageBoard() {
         until={until}
         by={range.by}
         rangeLabel={range.label}
+        dayOffsetMinutes={dayOffset}
       />
 
       <Section
@@ -177,7 +178,13 @@ export function UsageBoard() {
         isEmpty={buckets.length === 0}
         empty={empty}
       >
-        <TrafficPanel buckets={buckets} by={range.by} since={since} until={until} />
+        <TrafficPanel
+          buckets={buckets}
+          by={range.by}
+          since={since}
+          until={until}
+          dayOffsetMinutes={dayOffset}
+        />
       </Section>
 
       <Controls>
@@ -211,6 +218,7 @@ export function UsageBoard() {
           by={range.by}
           since={since}
           until={until}
+          dayOffsetMinutes={dayOffset}
           metric={metric}
           providers={modelProviders}
         />
@@ -233,6 +241,7 @@ export function UsageBoard() {
               by={range.by}
               since={since}
               until={until}
+              dayOffsetMinutes={dayOffset}
               metric={metric}
             />
           </Section>
@@ -250,7 +259,13 @@ export function UsageBoard() {
             isEmpty={buckets.length === 0}
             empty={empty}
           >
-            <TokenMixPanel buckets={buckets} by={range.by} since={since} until={until} />
+            <TokenMixPanel
+              buckets={buckets}
+              by={range.by}
+              since={since}
+              until={until}
+              dayOffsetMinutes={dayOffset}
+            />
           </Section>
 
           <Section
@@ -309,6 +324,7 @@ export function UsageBoard() {
           by={range.by}
           since={since}
           until={until}
+          dayOffsetMinutes={dayOffset}
           metric={metric}
           names={keyNames}
         />

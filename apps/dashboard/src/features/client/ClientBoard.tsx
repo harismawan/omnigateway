@@ -386,6 +386,7 @@ export function ClientBoard() {
         until={until}
         by={range.by}
         rangeLabel={range.label}
+        dayOffsetMinutes={dayOffset}
       />
 
       <Section
