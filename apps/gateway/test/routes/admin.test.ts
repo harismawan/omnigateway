@@ -6,7 +6,13 @@ import type { CatalogProvider as ServerCatalogProvider } from "@omni/control";
 import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
 import { GatewayError } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
-import { type BodyArtifact, createStore, deriveKey, type Store } from "@omni/store";
+import {
+  type BodyArtifact,
+  createStore,
+  deriveKey,
+  hostDayOffsetMinutes,
+  type Store,
+} from "@omni/store";
 import {
   captureLogger,
   entryOf,
@@ -58,6 +64,8 @@ type HarnessOptions = {
   store?: Store;
   /** Whether `OMNI_BODY_LOGGING_ALLOWED` was set at boot. */
   bodyLoggingAllowed?: boolean;
+  /** The fixed day offset the rows are cut on, when the test cares. */
+  dayOffsetMinutes?: number;
   /** For the merged (`node=all`) console read, which needs more than one process. */
   consoleFleet?: AdminDeps["consoleFleet"];
   /** For the routes whose only visible effect is a line on stdout. */
@@ -70,6 +78,7 @@ async function harness({
   now = NOW,
   store: provided,
   bodyLoggingAllowed,
+  dayOffsetMinutes,
   consoleFleet,
   logger,
 }: HarnessOptions = {}) {
@@ -104,6 +113,7 @@ async function harness({
     ...(consoleDeps === undefined ? {} : { console: consoleDeps }),
     ...(consoleFleet === undefined ? {} : { consoleFleet }),
     ...(bodyLoggingAllowed === undefined ? {} : { bodyLoggingAllowed }),
+    ...(dayOffsetMinutes === undefined ? {} : { dayOffsetMinutes }),
     ...(logger === undefined ? {} : { logger }),
   });
 
@@ -664,6 +674,36 @@ test("settings round-trip and reject an unknown weight", async () => {
     (await call("PUT", "/api/settings", { ...next, weights: { ...next.weights, bogus: 1 } }))
       .status,
   ).toBe(400);
+});
+
+/**
+ * The console draws its daily charts on this, so `/api/settings` reporting the
+ * wrong one shifts every day boundary on the operator's screen away from the
+ * rows underneath it.
+ *
+ * The client half of this pair was pinned from the start and the operator half
+ * was not, which is how two mutants lived: `app.ts` ceasing to thread the value
+ * at all, and the route's absent-value fallback returning something arbitrary.
+ * Both are silent — the field is present and plausible either way.
+ */
+test("settings report the day offset the rows are cut on", async () => {
+  // Not the host's offset, so this cannot pass by coincidence on a UTC runner.
+  const { call } = await harness({ dayOffsetMinutes: 420 });
+  const body = (await (await call("GET", "/api/settings")).json()) as {
+    dayOffsetMinutes: number;
+  };
+  expect(body.dayOffsetMinutes).toBe(420);
+});
+
+test("settings fall back to the host offset, never to UTC", async () => {
+  // `?? 0` here would claim UTC while `createStore` — given the same absence —
+  // cuts its rows at the host's offset. Two defaults for one number, and the
+  // console believes the route.
+  const { call } = await harness();
+  const body = (await (await call("GET", "/api/settings")).json()) as {
+    dayOffsetMinutes: number;
+  };
+  expect(body.dayOffsetMinutes).toBe(hostDayOffsetMinutes());
 });
 
 test("usage aggregates by the requested dimension", async () => {

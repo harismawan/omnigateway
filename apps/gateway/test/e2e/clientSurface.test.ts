@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Store } from "@omni/store";
+import { hostDayOffsetMinutes, type Store } from "@omni/store";
 import {
   memoryStore,
   seedApiKey,
@@ -26,7 +26,7 @@ const NOW = 1_000_000;
  * Here the id is written by `beginLog` on the real proxy path and read back
  * through the real route, so nothing in the chain is asserted against itself.
  */
-async function harness(): Promise<{
+async function harness(opts: { omitDayOffset?: boolean } = {}): Promise<{
   store: Store;
   upstream: StubUpstream;
   serve: (rawKey: string) => Promise<Response>;
@@ -64,8 +64,9 @@ async function harness(): Promise<{
     http: upstream.http,
     requestId: () => `req_${++n}`,
     // Not the host's offset, so a test that reads it back cannot pass by
-    // coincidence on a machine that happens to sit at UTC.
-    dayOffsetMinutes: 420,
+    // coincidence on a machine that happens to sit at UTC. Overridable so the
+    // absent case — which must fall back to the host, not to UTC — is reachable.
+    ...(opts.omitDayOffset === true ? {} : { dayOffsetMinutes: 420 }),
   });
 
   const serve = (rawKey: string) =>
@@ -180,6 +181,48 @@ test("a key holder sees the request it served, end to end", async () => {
   // zone draws days that do not line up with the rows they are drawn from, and
   // the client surface has no settings route to read it from instead.
   expect(summary.dayOffsetMinutes).toBe(420);
+  store.close();
+});
+
+test("both surfaces report the same day offset through the real app", async () => {
+  /**
+   * `admin.test.ts` mounts `adminRoutes()` directly, so it pins the route and
+   * not the wiring — `app.ts` ceasing to thread the value into `adminRoutes`
+   * survived it. This goes through `createApp`, which is the only place the two
+   * halves are assembled, and asserts they agree: a console reading one number
+   * and a client board reading another is the same misalignment inside one
+   * install.
+   */
+  const { store, api, login, loginAdmin } = await harness();
+  const adminCookie = await loginAdmin();
+  const mine = await seedApiKey(store, { label: "mine" });
+  const clientCookie = await login(mine.raw);
+
+  const settings = (await (await api("/api/settings", adminCookie)).json()) as {
+    dayOffsetMinutes: number;
+  };
+  const summary = (await (await api("/api/client/summary", clientCookie)).json()) as {
+    dayOffsetMinutes: number;
+  };
+
+  expect(settings.dayOffsetMinutes).toBe(420);
+  expect(summary.dayOffsetMinutes).toBe(settings.dayOffsetMinutes);
+  store.close();
+});
+
+test("the summary falls back to the host offset, never to UTC", async () => {
+  // The absent case, which the 420 harness above cannot see. `?? 0` here would
+  // report UTC while `createStore`, given the same absence, cuts its rows at the
+  // host's offset — two defaults for one number, with the console believing the
+  // route. Pinned on both surfaces; the operator's half is in `admin.test.ts`.
+  const { store, api, login } = await harness({ omitDayOffset: true });
+  const mine = await seedApiKey(store, { label: "mine" });
+  const cookie = await login(mine.raw);
+
+  const summary = (await (await api("/api/client/summary", cookie)).json()) as {
+    dayOffsetMinutes: number;
+  };
+  expect(summary.dayOffsetMinutes).toBe(hostDayOffsetMinutes());
   store.close();
 });
 
