@@ -86,6 +86,8 @@ export type AppDeps = {
    * flips mid-incident, and this is the half that says they may.
    */
   bodyLoggingAllowed?: boolean;
+  /** Minutes east of UTC the daily usage buckets are cut on. See `adminRoutes`. */
+  dayOffsetMinutes?: number;
   logger?: Logger;
   /** Where this process's stdout was captured, when anything captured it. */
   console?: { source: ConsoleSource; deps: ConsoleDeps };
@@ -317,7 +319,7 @@ export function createApp(deps: AppDeps) {
       now,
       onDetach: (id, topics) => channelsRef?.closed(id, topics),
     });
-  const ring = deps.ring ?? createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
+  const ring = deps.ring ?? createRing();
   const broadcaster = deps.broadcaster ?? createBroadcaster({ registry, ring, coord, nodeId, now });
   // After the broadcaster, because a channel's `broadcast` leaves through it.
   const channels =
@@ -433,6 +435,9 @@ export function createApp(deps: AppDeps) {
           admin,
           baseUrl: deps.baseUrl,
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+          ...(deps.dayOffsetMinutes === undefined
+            ? {}
+            : { dayOffsetMinutes: deps.dayOffsetMinutes }),
           now,
           sessionTtlMs: ADMIN_SESSION_TTL_MS,
           logger,
@@ -450,6 +455,9 @@ export function createApp(deps: AppDeps) {
           store: deps.store,
           admin,
           sessionTtlMs: ADMIN_SESSION_TTL_MS,
+          ...(deps.dayOffsetMinutes === undefined
+            ? {}
+            : { dayOffsetMinutes: deps.dayOffsetMinutes }),
           now,
           logger,
         }),

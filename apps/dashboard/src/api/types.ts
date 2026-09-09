@@ -336,6 +336,17 @@ export type LimitReading = {
 
 export type KeysResponse = { keys: ApiKeySummary[] };
 
+/**
+ * `/api/client/summary` — the caller's own key, plus how this install cuts days.
+ *
+ * `dayOffsetMinutes` is not a property of the key; it rides here because the
+ * client surface has no settings route and the board's daily charts need the
+ * same boundary the rows were written on. Optional for the reason the field on
+ * `SettingsResponse` is: a gateway older than it does not send one, and zero is
+ * a real offset rather than a stand-in for absent.
+ */
+export type ClientSummaryResponse = ApiKeySummary & { dayOffsetMinutes?: number };
+
 /** The whole matrix, sent whole. `{}` leaves the key unlimited. */
 export type KeyLimitsInput = { limits: LimitConfig };
 
@@ -385,7 +396,19 @@ export type KeyCreateInput = {
  * can say that flipping `bodyLoggingEnabled` on this installation would do
  * nothing. A switch that silently does nothing is worse than one that is absent.
  */
-export type SettingsResponse = { settings: Settings; bodyLoggingAllowed: boolean };
+export type SettingsResponse = {
+  settings: Settings;
+  bodyLoggingAllowed: boolean;
+  /**
+   * Minutes east of UTC the gateway cuts its daily usage buckets on.
+   *
+   * Optional because a gateway older than this field does not send it, and the
+   * console then has nothing better than the browser's own zone. Zero is a real
+   * value — UTC — so absence and zero are different facts and must not be
+   * collapsed with `||`.
+   */
+  dayOffsetMinutes?: number;
+};
 
 /**
  * One request's captured bodies.

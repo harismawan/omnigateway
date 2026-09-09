@@ -3,6 +3,7 @@ import { Fragment, useMemo, useState } from "react";
 import styled from "styled-components";
 import {
   LOG_CADENCE_MS,
+  useClientDayOffsetMinutes,
   useClientLogs,
   useClientQuota,
   useClientQuotaHistory,
@@ -231,14 +232,17 @@ export function ClientBoard() {
   const [openAccount, setOpenAccount] = useState<string | null>(null);
 
   const range = rangeOf(rangeId);
+  // The gateway's day boundary, off the summary rather than `/api/settings`:
+  // that route is `requireReader` and a key holder is neither.
+  const dayOffset = useClientDayOffsetMinutes().data ?? null;
   // Pinned per range so the query key does not change on every tick: to the
   // minute for raw windows, to the day for rollup ones.
   const since = useMemo(
     () =>
       range.grain === "daily"
-        ? startOfDay(Date.now() - range.ms)
+        ? startOfDay(Date.now() - range.ms, dayOffset)
         : Math.floor((Date.now() - range.ms) / 60_000) * 60_000,
-    [range],
+    [range, dayOffset],
   );
   const until = useMemo(() => since + range.ms, [since, range]);
 

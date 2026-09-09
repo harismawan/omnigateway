@@ -272,7 +272,7 @@ async function main(): Promise<void> {
     now,
     onDetach: (id, topics) => pluginChannelsRef?.closed(id, topics),
   });
-  const streamRing = createRing({ frames: 500, bytes: 2 * 1024 * 1024 });
+  const streamRing = createRing();
   const broadcaster = createBroadcaster({
     registry: streamRegistry,
     ring: streamRing,
@@ -336,6 +336,7 @@ async function main(): Promise<void> {
     telemetry,
     ...(config.metricsToken === null ? {} : { metricsToken: config.metricsToken }),
     bodyLoggingAllowed: config.bodyLoggingAllowed,
+    dayOffsetMinutes: config.dayOffsetMinutes,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
     pluginUi: loadedPlugins.plugins,
     // Only when something could receive one. `finishLog` builds the payload

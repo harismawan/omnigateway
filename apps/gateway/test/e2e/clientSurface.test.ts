@@ -63,6 +63,9 @@ async function harness(): Promise<{
     rand: () => 0.5,
     http: upstream.http,
     requestId: () => `req_${++n}`,
+    // Not the host's offset, so a test that reads it back cannot pass by
+    // coincidence on a machine that happens to sit at UTC.
+    dayOffsetMinutes: 420,
   });
 
   const serve = (rawKey: string) =>
@@ -169,9 +172,14 @@ test("a key holder sees the request it served, end to end", async () => {
   const summary = (await (await api("/api/client/summary", cookie)).json()) as {
     id: string;
     label: string;
+    dayOffsetMinutes: number;
   };
   expect(summary.id).toBe(mine.key.id);
   expect(summary.label).toBe("mine");
+  // The board's daily charts bucket on this. Without it a key holder in another
+  // zone draws days that do not line up with the rows they are drawn from, and
+  // the client surface has no settings route to read it from instead.
+  expect(summary.dayOffsetMinutes).toBe(420);
   store.close();
 });
 

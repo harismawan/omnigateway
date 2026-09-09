@@ -1,5 +1,11 @@
 import { useMemo, useState } from "react";
-import { useCredentials, useKeys, useModels, useUsage } from "../../api/queries.ts";
+import {
+  useCredentials,
+  useDayOffsetMinutes,
+  useKeys,
+  useModels,
+  useUsage,
+} from "../../api/queries.ts";
 import type { ProviderId, UsageDimension } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount, formatUsd } from "../../lib/format.ts";
@@ -54,15 +60,24 @@ export function UsageBoard() {
 
   // Pinned per range so the query key does not change on every tick: to the
   // minute for raw windows, to the day for rollup ones.
+  // The gateway's own day boundary, not the browser's: the daily rows were cut
+  // on it, so asking for a span that starts anywhere else asks for part of two
+  // of them. Null until the settings load, which is the browser's zone and what
+  // this did unconditionally before.
+  const dayOffset = useDayOffsetMinutes().data ?? null;
+
   const since = useMemo(
     () =>
       range.grain === "daily"
-        ? startOfDay(Date.now() - range.ms)
+        ? startOfDay(Date.now() - range.ms, dayOffset)
         : Math.floor((Date.now() - range.ms) / 60_000) * 60_000,
-    [range],
+    [range, dayOffset],
   );
   const until = useMemo(() => since + range.ms, [since, range]);
-  const activitySince = useMemo(() => startOfDay(Date.now() - ACTIVITY_DAYS * DAY_MS), []);
+  const activitySince = useMemo(
+    () => startOfDay(Date.now() - ACTIVITY_DAYS * DAY_MS, dayOffset),
+    [dayOffset],
+  );
 
   const common = { since, grain: range.grain } as const;
   const series = useUsage({ ...common, groupBy: range.by }, cadence(60_000, "res:usage"));
@@ -224,7 +239,7 @@ export function UsageBoard() {
 
           {/* The year sits among the breakdowns rather than above them: it is one
               more way to read the same traffic, not a header for the page. */}
-          <ActivityGrid days={activity.data ?? []} now={Date.now()} />
+          <ActivityGrid days={activity.data ?? []} now={Date.now()} dayOffsetMinutes={dayOffset} />
         </Stack>
 
         <Stack $gap={4}>

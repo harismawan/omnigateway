@@ -65,6 +65,18 @@ export type AdminDeps = {
    * settable here — that is the whole point of the second key.
    */
   bodyLoggingAllowed?: boolean;
+  /**
+   * The fixed offset the daily usage buckets are cut on, in minutes east of UTC.
+   *
+   * Rides on `/api/settings` for the same reason `bodyLoggingAllowed` does: it
+   * is startup configuration the console cannot function correctly without, and
+   * not a thing this route may set. The console drew day boundaries at the
+   * *browser's* midnight while `usage_daily` rows were cut at this offset, so a
+   * viewer in any other zone read a chart whose days did not line up with the
+   * rows underneath it — invisible on a single-node install, where this defaults
+   * to the host's own offset and the operator is usually on that host.
+   */
+  dayOffsetMinutes?: number;
   logger?: Logger;
   /**
    * Where this process's stdout was captured, and how to read it.
@@ -454,6 +466,10 @@ export function adminRoutes(deps: AdminDeps) {
         return {
           settings: await getSettings(deps.store),
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+          // Zero is a real offset (UTC), so it cannot double as "unset"; the
+          // console falls back to its own zone only when the field is absent,
+          // which is an older gateway rather than a configured one.
+          dayOffsetMinutes: deps.dayOffsetMinutes ?? 0,
           // Whether, not what. The hash never leaves the store and there is no
           // route that reads it back.
           viewerConfigured: await deps.admin.isViewerConfigured(),
