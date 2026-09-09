@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { releaseVersion, runtimeDependencies } from "../build-npm.ts";
+import { RUNTIME_DEPENDENCIES, releaseVersion, runtimeDependencies } from "../build-npm.ts";
 
 test("a release tag becomes the published version", () => {
   expect(releaseVersion("v1.2.3")).toBe("1.2.3");
@@ -31,6 +31,17 @@ test("the published argon2 range is the gateway's own", () => {
   expect(runtimeDependencies(gateway)["@node-rs/argon2"]).toBe(
     gateway.dependencies?.["@node-rs/argon2"],
   );
+});
+
+test("the range that actually ships is the derived one", () => {
+  // `runtimeDependencies` being correct is not the same as the manifest using
+  // it: the bug this replaced was a stale literal in exactly that position, and
+  // reintroducing it verbatim left every test here green because they all
+  // called the helper rather than reading what the build writes.
+  const gateway = JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "..", "apps", "gateway", "package.json"), "utf8"),
+  ) as { dependencies?: Record<string, string> };
+  expect(RUNTIME_DEPENDENCIES).toEqual(runtimeDependencies(gateway));
 });
 
 test("an external that is not a gateway dependency stops the build", () => {

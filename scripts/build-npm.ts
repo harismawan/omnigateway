@@ -52,7 +52,7 @@ export function runtimeDependencies(
   );
 }
 
-const RUNTIME_DEPENDENCIES: Readonly<Record<string, string>> = runtimeDependencies(
+export const RUNTIME_DEPENDENCIES: Readonly<Record<string, string>> = runtimeDependencies(
   JSON.parse(readFileSync(join(root, "apps", "gateway", "package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   },

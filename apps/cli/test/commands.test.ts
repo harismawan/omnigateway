@@ -1736,3 +1736,50 @@ test("every settings key is reachable from settings set", async () => {
     expect({ key, code: result.code, err: result.err }).toMatchObject({ key, code: 0 });
   }
 });
+
+/**
+ * The listing has to say what the router would do, because that is what it
+ * promises to say.
+ *
+ * It restated the router's expiry check without the `authType === "oauth"`
+ * clause, so an API key carrying a past `expiresAt` printed `expired` while the
+ * router kept routing to it. Both halves are asserted: the API key that must
+ * read `enabled`, and the OAuth credential that must still read `expired`, so a
+ * fix that simply stopped checking expiry at all would fail here too.
+ */
+test("credentials list reports expiry the way the router judges it", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  const past = Date.now() - 60_000;
+
+  // An API key's expiresAt is operator bookkeeping; the router never refuses
+  // one for it.
+  await seedCredential(store, {
+    id: "cred-key",
+    authType: "apiKey",
+    expiresAt: past,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "sk-ant-whatever",
+  });
+  // An OAuth credential past expiry with nothing to refresh with is refused.
+  await seedCredential(store, {
+    id: "cred-oauth",
+    authType: "oauth",
+    expiresAt: past,
+    refreshToken: null,
+  });
+  store.close();
+
+  // The table, not `--json`: the state is a rendering of `condition()` and the
+  // JSON projection carries the raw row, so only this output can disagree with
+  // the router.
+  const listed = await cli(["credentials", "list"], { root });
+  expect(listed.code).toBe(0);
+  const rowOf = (id: string): string =>
+    listed.out.split("\n").find((line) => line.includes(id)) ?? "";
+
+  expect(rowOf("cred-key")).toContain("enabled");
+  expect(rowOf("cred-key")).not.toContain("expired");
+  expect(rowOf("cred-oauth")).toContain("expired");
+});
