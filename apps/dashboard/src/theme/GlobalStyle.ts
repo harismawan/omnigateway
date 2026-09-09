@@ -178,6 +178,11 @@ export const GlobalStyle = createGlobalStyle`
     color: inherit;
   }
 
+  svg {
+    display: block;
+    flex-shrink: 0;
+  }
+
   a {
     color: inherit;
     text-decoration: none;

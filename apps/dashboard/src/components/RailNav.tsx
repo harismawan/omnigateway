@@ -80,6 +80,7 @@ const Rail = styled.nav`
 const face = css`
   display: flex;
   align-items: center;
+  line-height: 1;
   gap: ${({ theme }) => theme.space(2)};
   padding: 7px ${({ theme }) => theme.space(2)};
   border-radius: ${({ theme }) => theme.radius.control};

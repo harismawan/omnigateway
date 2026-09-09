@@ -16,6 +16,7 @@ const tones: Record<ChipTone, { fg: string; bg: string }> = {
 export const Chip = styled.span<{ $tone?: ChipTone }>`
   display: inline-flex;
   align-items: center;
+  line-height: 1;
   gap: 4px;
   height: 18px;
   padding: 0 6px;
