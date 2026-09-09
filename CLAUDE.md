@@ -78,12 +78,17 @@ them; branch passed every command here, still failed `verify`. Set here = what
 
 ## Architectural boundaries
 
-**Single-copy rules.** Five helpers in `@omni/store/types` and `@omni/control` are only copy of
+**Single-copy rules.** Six helpers in `@omni/store/types` and `@omni/control` are only copy of
 their question; each exist because several sites once asked separately and disagreed. Never
 re-derive locally, however small local question look: `keyUsable` ("may this key be used
 now" — revoked **and** expired, one question; `authenticateApiKey`, `loginClient`,
 `keyStillValid` all route through it; boundary exclusive, `expiresAt === now` expired),
-`servesTarget` / `resolvePin` ("can
+`credentialExpired` ("is this account past use" — `authType === "oauth"` clause is the
+rule, not a detail: an API key's `expiresAt` is operator bookkeeping and router never
+refuse for it; `filters.ts` and `omni credentials list` route through it, second one
+having restated comparison without that clause under docstring promising what router
+would do, so listing said `expired` while router routed; refreshability stay caller's to
+phrase, since dispatch refresh before call), `servesTarget` / `resolvePin` ("can
 this account serve this target" — provider, custom `endpointId`, pin are one question; router,
 `putModel`, `resolveModelLimits`, `omni doctor`, console picker all route through it;
 `ServingCredential` carry `providerData` so it see custom endpoints), `scopeOf` (principal to
@@ -343,7 +348,12 @@ can reach, which decide whether rest good idea.
   default**: no row, `passwordMatches(null, …)` refuse everything, `viewerConfigured` false.
   `PUT /api/settings/viewer-password` set/replace it; `{"password": null}` withdraw it and
   **delete** row; absent field is `BAD_REQUEST`. Setting or clearing drop **viewer**
-  sessions only.
+  sessions only. `MIN_PASSWORD_LENGTH` (12) is `@omni/control`'s, mirrored in console's
+  `features/settings/policy.ts` — plain `.ts`, not the panel, because pinning test live in
+  `apps/gateway` whose tsconfig set no `--jsx`. Pinned by
+  `apps/gateway/test/routes/passwordPolicyMirror.test.ts`; both drift directions silent
+  (raise server alone and form accept what gateway refuse; lower it and form refuse what
+  would pass, which read as rule working).
 
 ## Client contracts
 
@@ -363,6 +373,16 @@ Client surface:
 `quota`, `quota/history`. Scope come from verified session, never query parameter — two
 arrive as separate arguments because separate provenance. Client session re-read key
 row on **every** verify, refuse revoked one.
+
+**`summary` carry `dayOffsetMinutes`, only install-level fact on this surface.** Additive
+top-level field beside key's own facts, not folded into `ApiKeySummary` (shared with admin
+list) and not wrapped (wrapper would break holders reading old shape). Here because client's
+daily charts bucket exactly as operator's do and offset live on `/api/settings`, which is
+`requireReader` — key holder is neither. Safe to expose: boundary not measurement, say nothing
+about other keys, and every timestamp on those charts already cut on it. Absent ≠ zero
+anywhere: zero is UTC. Pinned by `clientSurface.test.ts`, whose harness pass 420 so
+assertion cannot pass by coincidence on UTC machine. Second install fact **need same
+argument made again** — this one is not precedent for "client may see config".
 
 Provider quota reach client as **named accounts**: `accountQuota` return one row per
 credential+window carrying operator's `label`, deliberately. `usedRatio` and
