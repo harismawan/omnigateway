@@ -4,7 +4,19 @@ import { hashApiKey, keyUsable, type Store } from "@omni/store";
 import type { Principal } from "./principal.ts";
 
 export const ADMIN_COOKIE = "omni_admin";
-const MIN_PASSWORD_LENGTH = 12;
+
+/**
+ * The shortest password this gateway accepts, for either principal.
+ *
+ * Exported because the console restates it to validate before the round trip —
+ * it cannot import `@omni/control` under boundary rule 12 — and a restatement
+ * nothing pins is a restatement that drifts. Raising it here without the console
+ * would leave the form accepting what the server refuses; lowering it here
+ * without the console would leave the form refusing what the server accepts, and
+ * only one of those is visible to whoever is typing.
+ * `apps/gateway/test/routes/passwordPolicyMirror.test.ts` holds them together.
+ */
+export const MIN_PASSWORD_LENGTH = 12;
 
 /**
  * The gateway's session authority.

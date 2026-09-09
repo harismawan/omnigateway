@@ -7,12 +7,7 @@ import { Field, Input } from "../../ui/Field.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Divider, Legend, Row, Stack } from "../../ui/primitives.ts";
 import { describeError } from "../../ui/States.tsx";
-
-/**
- * The gateway's own rule, restated so the form can say it before the round
- * trip. The server checks it too — this is a courtesy, never the guard.
- */
-const MIN_PASSWORD_LENGTH = 12;
+import { MIN_PASSWORD_LENGTH } from "./policy.ts";
 
 const Blurb = styled.p`
   font-size: 12px;

@@ -10,6 +10,7 @@ export {
   type AdminAuth,
   type AdminAuthOptions,
   createAdminAuth,
+  MIN_PASSWORD_LENGTH,
 } from "./adminAuth.ts";
 export { type RequestBodyRead, readRequestBody } from "./bodies.ts";
 export {
