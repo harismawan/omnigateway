@@ -65,6 +65,7 @@ export const Button = styled.button<{ $variant?: ButtonVariant; $size?: ButtonSi
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  line-height: 1;
   gap: ${({ theme }) => theme.space(1.5)};
   border: 1px solid transparent;
   border-radius: ${({ theme }) => theme.radius.control};

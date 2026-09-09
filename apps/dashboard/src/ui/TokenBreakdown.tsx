@@ -27,6 +27,7 @@ const Breakdown = styled.span`
 const Part = styled.span`
   display: inline-flex;
   align-items: center;
+  line-height: 1;
   gap: 2px;
 
   svg {
