@@ -1,7 +1,41 @@
 import { expect, test } from "bun:test";
-import { createRing } from "../../src/stream/ring.ts";
+import { createRing, DEFAULT_RING_LIMITS } from "../../src/stream/ring.ts";
 
 const limits = { frames: 4, bytes: 1_000 };
+
+/**
+ * The default, which is the only limits production ever uses.
+ *
+ * Every test below passes its own, so before this the shipped numbers were
+ * exercised by nothing: a mutation to `DEFAULT_RING_LIMITS` survived the whole
+ * suite. That is the same shape as the duplicate it replaced — the copy that
+ * would catch a change being the copy nothing runs — so the consolidation is
+ * only finished with this here.
+ *
+ * Asserted as behaviour rather than by reading the numbers back: what matters
+ * is that the default bounds the ring at all, and roughly where.
+ */
+test("the default limits bound the ring where production expects", () => {
+  expect(DEFAULT_RING_LIMITS.frames).toBe(500);
+  expect(DEFAULT_RING_LIMITS.bytes).toBe(2 * 1024 * 1024);
+
+  const ring = createRing();
+  for (let i = 0; i < DEFAULT_RING_LIMITS.frames + 50; i++) ring.push("stream:console", `f${i}`);
+
+  // Evicted down to the cap, and the head still names the newest frame — a ring
+  // that dropped the wrong end would keep the count and lose the sequence.
+  expect(ring.head("stream:console")).toBe(DEFAULT_RING_LIMITS.frames + 50);
+
+  // A subscriber older than the retained window is told `gap`, not handed a
+  // short replay it would treat as complete.
+  expect(ring.since("stream:console", 0).kind).toBe("gap");
+
+  // And one exactly at the oldest retained frame gets the whole window, which
+  // is what says the cap evicted 50 rather than some other number.
+  const replay = ring.since("stream:console", 50);
+  expect(replay.kind).toBe("frames");
+  if (replay.kind === "frames") expect(replay.frames).toHaveLength(DEFAULT_RING_LIMITS.frames);
+});
 
 test("push assigns a monotonic sequence per topic", () => {
   const ring = createRing(limits);
