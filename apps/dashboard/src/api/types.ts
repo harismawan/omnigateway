@@ -282,7 +282,17 @@ export type QuotaHistoryQuery = {
 };
 
 /** The estimate itself rides the health endpoint and is not repeated here. */
-export type QuotaHistoryResponse = { samples: QuotaSample[]; gatewayRates: GatewayRate[] };
+export type QuotaHistoryResponse = {
+  samples: QuotaSample[];
+  gatewayRates: GatewayRate[];
+  /**
+   * The span held more readings than the page, so the oldest were cut.
+   *
+   * Reported rather than absorbed: a chart silently shortened to a fraction of
+   * the axis it is drawn against reads as a quiet period that did not happen.
+   */
+  truncated: boolean;
+};
 
 export type CredentialPatch = {
   label?: string;

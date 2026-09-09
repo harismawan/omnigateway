@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { QuotaSample, Store } from "@omni/store";
 import { memoryStore, quota, requestLog, seedCredential } from "@omni/testkit";
-import { quotaHistory } from "../../src/quota/history.ts";
+import { MAX_SAMPLES, quotaHistory } from "../../src/quota/history.ts";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -267,4 +267,67 @@ test("in-flight requests are left out of the gateway rate", async () => {
   const { gatewayRates } = await quotaHistory({ store, now: () => NOW }, { credentialId: "c1" });
 
   expect(gatewayRates[0]?.gatewayRatePerHour).toBe(0);
+});
+
+/**
+ * The console's read is capped, and reports when the cap bit.
+ *
+ * This surface was the *uncapped* one: `quotaHistory` asked for every retained
+ * sample of every account while the client's identical call was bounded, so the
+ * route reachable by every key holder was the safe one and `requireReader`'s —
+ * parameterless, over the whole retention window, on a synchronous `bun:sqlite`
+ * read — was not. Both halves are asserted here because both can be lost
+ * silently: dropping the `limit` restores the unbounded scan, and dropping the
+ * paging leaves a chart shortened with no notice, which reads as a quiet period
+ * that never happened.
+ */
+test("the console's read asks for one row past the cap", async () => {
+  const store = await seeded();
+  const seen: Array<{ limit?: number | undefined }> = [];
+  const watched = {
+    ...store,
+    credentials: {
+      ...store.credentials,
+      listQuotaSamples: async (q: Parameters<typeof store.credentials.listQuotaSamples>[0]) => {
+        seen.push(q);
+        return store.credentials.listQuotaSamples(q);
+      },
+    },
+  } as Store;
+
+  const result = await quotaHistory({ store: watched, now: () => NOW }, {});
+
+  expect(seen).toHaveLength(1);
+  // The value, not its type: `typeof … === "number"` would pass for a cap of
+  // three. One past the cap, because that row is what tells a full page from a
+  // cut one.
+  expect(seen[0]?.limit).toBe(MAX_SAMPLES + 1);
+  expect(result.truncated).toBe(false);
+  store.close();
+});
+
+test("an overflowing page is cut to the cap and reported", async () => {
+  const store = await seeded();
+  const overflowing = {
+    ...store,
+    credentials: {
+      ...store.credentials,
+      listQuotaSamples: async (q: Parameters<typeof store.credentials.listQuotaSamples>[0]) =>
+        Array.from({ length: Math.min(MAX_SAMPLES + 1, q.limit ?? MAX_SAMPLES + 1) }, () => ({
+          credentialId: "c1",
+          windowType: "fiveHour" as const,
+          observedAt: NOW,
+          used: 10,
+          limit: 100,
+          resetsAt: NOW + HOUR,
+          windowMs: null,
+        })),
+    },
+  } as Store;
+
+  const result = await quotaHistory({ store: overflowing, now: () => NOW }, {});
+
+  expect(result.samples).toHaveLength(MAX_SAMPLES);
+  expect(result.truncated).toBe(true);
+  store.close();
 });
