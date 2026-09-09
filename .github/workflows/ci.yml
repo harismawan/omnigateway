@@ -2,9 +2,13 @@ name: ci
 
 on:
   pull_request:
+    paths-ignore:
+      - "k8s/**"
   push:
     branches:
       - main
+    paths-ignore:
+      - "k8s/**"
 
 permissions:
   contents: read
