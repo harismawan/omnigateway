@@ -1451,6 +1451,51 @@ test("an expired key is refused on both header forms, exactly as a revoked one i
   expect((await send({ authorization: `Bearer ${alive.raw}` })).status).toBe(200);
 });
 
+/**
+ * The same refusal on the other two authenticated `/v1` routes.
+ *
+ * `authenticateApiKey` takes `now` rather than reading a clock, and each of the
+ * three routes threads it from its own call site — so "the check is in the
+ * chokepoint" does not by itself mean all three ask it about the right instant.
+ * Replacing the threaded `now` with `Date.now()` at either site below survived
+ * the whole suite: no test had ever sent an expired key to a listing or a
+ * count. The boundary instant is what makes that mutant die, because the
+ * harness clock is fixed at 1_000_000 while the real one is not.
+ */
+test("an expired key is refused on /v1/models and count_tokens too, indistinguishably", async () => {
+  const { app, store } = await harness();
+  const expired = await seedApiKey(store, { label: "lapsed", expiresAt: 1_000_000 });
+  const alive = await seedApiKey(store, { label: "ticking", expiresAt: 1_000_001 });
+  const revoked = await seedApiKey(store, { label: "pulled" });
+  await store.keys.revoke(revoked.key.id);
+
+  const messageOf = async (response: Response): Promise<string> => {
+    const payload = (await response.json()) as { error: { message: string } };
+    return payload.error.message;
+  };
+  const listing = (raw: string) =>
+    app.handle(new Request("http://localhost/v1/models", { headers: { "x-api-key": raw } }));
+  const count = (raw: string) =>
+    app.handle(
+      new Request("http://localhost/v1/messages/count_tokens", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": raw },
+        body: JSON.stringify({ model: "fast", messages: [{ role: "user", content: "hi" }] }),
+      }),
+    );
+
+  for (const send of [listing, count]) {
+    const lapsed = await send(expired.raw);
+    const pulled = await send(revoked.raw);
+    expect(lapsed.status).toBe(401);
+    expect(pulled.status).toBe(401);
+    // Compared against the revoked case rather than a literal: what is being
+    // defended is that a caller cannot tell the two apart.
+    expect(await messageOf(lapsed)).toBe(await messageOf(pulled));
+    expect((await send(alive.raw)).status).toBe(200);
+  }
+});
+
 test("rejects conflicting API key headers on proxy and models routes", async () => {
   const logger = captureLogger();
   const { app, raw } = await harness(EVENTS, { logger });

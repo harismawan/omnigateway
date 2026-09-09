@@ -181,6 +181,19 @@ export const modelSchema = z.object({
   targets: z.array(targetSchema).min(1, "a virtual model needs at least one target"),
 });
 
+/**
+ * The largest epoch-ms instant a `Date` can hold — ±8.64e15, ECMA-262's range,
+ * not a policy number and not a year anyone picked.
+ *
+ * `int()` is `Number.isSafeInteger`, whose ceiling is 9.007e15, so without this
+ * there is a band of values a caller can store that every formatter then throws
+ * on: `new Date(9e15).toISOString()` is a `RangeError`, and `Number.isFinite`
+ * — which is what both formatters guard with — says nothing about it. That
+ * lands as `omni keys list` failing outright and the console's edit-expiry
+ * dialog throwing during render, from a value the route accepted.
+ */
+const MAX_INSTANT = 8_640_000_000_000_000;
+
 export const keyCreateSchema = z
   .object({
     label: z.string().min(1).default("api key"),
@@ -214,8 +227,10 @@ export const keyCreateSchema = z
      * `positive()`, so `0` is refused. Epoch zero is 1970 and would expire the
      * key at the instant it was minted, which is nobody's intent and reads
      * identically to a caller that meant to send `null`.
+     *
+     * Bounded by `MAX_INSTANT` for the reason given there.
      */
-    expiresAt: z.number().int().positive().nullable().default(null),
+    expiresAt: z.number().int().positive().max(MAX_INSTANT).nullable().default(null),
   })
   .strict();
 
@@ -272,7 +287,7 @@ export const keyModelsSchema = z
  * a value nobody means, and it reads identically to a caller that meant `null`.
  */
 export const keyExpirySchema = z
-  .object({ expiresAt: z.number().int().positive().nullable() })
+  .object({ expiresAt: z.number().int().positive().max(MAX_INSTANT).nullable() })
   .strict();
 
 /**

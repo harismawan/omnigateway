@@ -640,9 +640,17 @@ export type ApiKey = {
  * installation is misconfigured rather than the credential being over — and
  * folding it in here would collapse the two into one message at the one
  * boundary that must keep them apart.
+ *
+ * Takes the two fields rather than an `ApiKey`, so that the surfaces which hold
+ * a summary — the console's row, which is an `ApiKey` without its `hash`, and
+ * the CLI's listing — ask this copy instead of restating the comparison to fit
+ * their own shape. Both of them did, and the restatement is exactly how the
+ * three sites above came to be three.
  */
-export const keyUsable = (key: ApiKey, now: number): boolean =>
-  key.revokedAt === null && (key.expiresAt === null || key.expiresAt > now);
+export const keyUsable = (
+  key: { revokedAt: number | null; expiresAt: number | null },
+  now: number,
+): boolean => key.revokedAt === null && (key.expiresAt === null || key.expiresAt > now);
 
 /**
  * `pending` is a request still in flight. Its `status`, `attempts`, tokens and

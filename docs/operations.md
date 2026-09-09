@@ -63,7 +63,10 @@ omni keys expiry <id> --never                     # take it away
 Past the instant, every `/v1` request the key makes is refused with the same
 answer a revoked or unknown key gets — the three are deliberately
 indistinguishable, so a caller cannot probe which keys exist. A client-dashboard
-session held open across the expiry fails its next request and is ended.
+session held open across the expiry fails its next request and is ended. A
+request or stream already in flight at the instant runs to completion, exactly
+as it does through a revocation: the key is checked when the request arrives,
+never again while it is being served.
 
 Unlike `omni keys revoke`, this is reversible in both directions. A date already
 behind the clock is accepted rather than refused, and it means "stop this key

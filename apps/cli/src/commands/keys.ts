@@ -7,7 +7,9 @@ import {
   setKeyLimits,
   setKeyModels,
 } from "@omni/control";
-import type { LimitConfig } from "@omni/store";
+// The gateway's own "may this key be used now", so the listing's label and the
+// answer at `/v1` cannot drift apart.
+import { keyUsable, type LimitConfig } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -233,16 +235,20 @@ function parseWhen(flag: string, raw: string): number {
   return at;
 }
 
-/** Three states, not two: an expired key is neither active nor revoked. */
-function keyState(
+/**
+ * Three states, not two: an expired key is neither active nor revoked.
+ *
+ * The third answer comes from `revokedAt`, not from a second comparison —
+ * `keyUsable` is asked for the boundary, so the listing cannot call a key active
+ * that `/v1` has already stopped accepting. Exported for the boundary test
+ * alone; nothing outside this file calls it.
+ */
+export function keyState(
   key: { revokedAt: number | null; expiresAt: number | null },
   now: number,
 ): string {
   if (key.revokedAt !== null) return "revoked";
-  // Exclusive at the instant named, matching `keyUsable` — the listing must not
-  // call a key active that `/v1` has already stopped accepting.
-  if (key.expiresAt !== null && key.expiresAt <= now) return "expired";
-  return "active";
+  return keyUsable(key, now) ? "active" : "expired";
 }
 
 export const keysList: Command = {

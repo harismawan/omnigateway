@@ -92,9 +92,12 @@ describe("KeysBoard", () => {
    * A native `datetime-local`, so what is typed is local wall time and what is
    * sent is the epoch instant it names.
    *
-   * The round trip is the assertion: reading the parsed value back through the
-   * same `Date` the input speaks proves the conversion did not silently land an
-   * offset out, which is the failure a UTC-formatted control would ship.
+   * The claim here is the wiring — that the typed field reaches the body at all
+   * — and the expectation is written out rather than recomputed through the
+   * conversion under test. Whether the conversion lands the offset the right way
+   * round is `features/keys/expiry.test.ts`, which runs it under fixed non-zero
+   * zones; it cannot be asked here, because `bun test` pins this process to UTC
+   * and every sign of a zero offset is the same number.
    */
   test("an expiry typed at creation is sent as the instant it names", async () => {
     const user = userEvent.setup();
@@ -111,7 +114,7 @@ describe("KeysBoard", () => {
     await waitFor(() => {
       const post = stub.calls.find((call) => call.init?.method === "POST");
       const body = JSON.parse(String(post?.init?.body)) as { expiresAt: number };
-      expect(body.expiresAt).toBe(new Date("2030-06-01T12:00").getTime());
+      expect(body.expiresAt).toBe(Date.UTC(2030, 5, 1, 12, 0));
     });
   });
 
@@ -572,13 +575,11 @@ describe("KeysBoard", () => {
     await user.click(await screen.findByRole("button", { name: "Edit expiry for laptop" }));
     const dialog = await screen.findByRole("dialog");
 
-    // The stored instant is what the field starts from, in local time.
+    // The stored instant is what the field starts from. Written out, for the
+    // reason given on the creation test above: under this runner's UTC the
+    // offset is zero, so recomputing it here would agree with any sign.
     const field = within(dialog).getByLabelText("Expires") as HTMLInputElement;
-    expect(field.value).toBe(
-      new Date(1_000_000_000_000 - new Date(1_000_000_000_000).getTimezoneOffset() * 60_000)
-        .toISOString()
-        .slice(0, 16),
-    );
+    expect(field.value).toBe("2001-09-09T01:46");
     expect(within(dialog).getByRole("status").textContent).toContain("expired");
 
     await user.clear(field);
@@ -609,9 +610,7 @@ describe("KeysBoard", () => {
 
     await waitFor(() => {
       const put = stub.calls.find((call) => call.init?.method === "PUT");
-      expect(put?.init?.body).toBe(
-        JSON.stringify({ expiresAt: new Date("2031-03-04T05:06").getTime() }),
-      );
+      expect(put?.init?.body).toBe(JSON.stringify({ expiresAt: Date.UTC(2031, 2, 4, 5, 6) }));
     });
   });
 

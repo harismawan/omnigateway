@@ -1,3 +1,9 @@
+// The gateway's own answer to "may this key be used now", imported for the same
+// reason `draft.ts` imports `servesTarget`: a second copy of the boundary is
+// free to drift from the one `/v1` enforces, and a key refused at `/v1` while
+// the console calls it active is the failure this whole feature would otherwise
+// ship.
+import { keyUsable } from "@omni/store/types";
 import type { ApiKeySummary } from "../../api/types.ts";
 
 /**
@@ -5,23 +11,22 @@ import type { ApiKeySummary } from "../../api/types.ts";
  * draw.
  *
  * An expired key is refused at `/v1` while looking untouched everywhere else,
- * so it needs a state of its own: a key that stopped working while the console
- * calls it active is the failure this whole feature would otherwise ship.
+ * so it needs a state of its own.
  */
 export type KeyState = "active" | "expired" | "revoked";
 
 /**
- * Mirrors `keyUsable` in `@omni/store/types`, which the gateway answers with.
+ * The label, derived from `keyUsable` rather than beside it.
  *
- * Restated rather than imported only because it returns three answers where the
- * store's returns two — this is a *label*, not a second copy of the rule, and
- * the boundary is the same exclusive one: `expiresAt` is when the key stops
- * being accepted, so the instant it names is already outside.
+ * Three answers out of a function that returns two, with no second comparison:
+ * the third comes from `revokedAt`, which is read here anyway to tell the two
+ * ways of being unusable apart. Once that arm is taken, "not usable" can only
+ * mean expired, so the boundary — exclusive, `expiresAt === now` is already
+ * outside — is asked once, in the store.
  */
 export function keyState(key: ApiKeySummary, now: number): KeyState {
   if (key.revokedAt !== null) return "revoked";
-  if (key.expiresAt !== null && key.expiresAt <= now) return "expired";
-  return "active";
+  return keyUsable(key, now) ? "active" : "expired";
 }
 
 /**
@@ -34,7 +39,14 @@ export function keyState(key: ApiKeySummary, now: number): KeyState {
  */
 export function toLocalInput(at: number | null): string {
   if (at === null) return "";
-  return new Date(at - new Date(at).getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+  const local = new Date(at - new Date(at).getTimezoneOffset() * 60_000);
+  // Outside `Date`'s ±8.64e15 range, which `keyExpirySchema` refuses but a
+  // restored or hand-edited row can still carry. Blank, because a
+  // `datetime-local` has no spelling for an instant it cannot hold; the
+  // alternative is `toISOString` throwing a `RangeError` out of a `useState`
+  // initialiser and taking the dialog down with it.
+  if (Number.isNaN(local.getTime())) return "";
+  return local.toISOString().slice(0, 16);
 }
 
 /**

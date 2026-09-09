@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import type { LimitConfig } from "@omni/store";
+import { keyUsable, type LimitConfig } from "@omni/store";
 import { requestLog } from "@omni/testkit";
+import { keyState } from "../src/commands/keys.ts";
 import { cli, makeRoot, openStore } from "./helpers/harness.ts";
 
 type ListedKey = { id: string; label: string; limits: LimitConfig | null };
@@ -591,4 +592,51 @@ test("keys list distinguishes active, expired and revoked, and shows the date", 
   expect(line("pulled")).toContain("revoked");
   // The date, so the operator can tell "expires tomorrow" from "expired in 2001".
   expect(line("lapsed")).toContain("2001");
+});
+
+/**
+ * A stored expiry outside `Date`'s ±8.64e15 range.
+ *
+ * `keyExpirySchema` refuses it, so — like the unparseable limit matrix above —
+ * it can only arrive from a restore or a hand-edit. `Number.isFinite` says
+ * nothing about it, so `formatTime` used to hand `toISOString` a value it throws
+ * on, and one bad row took the whole table down rather than one cell.
+ */
+test("keys list survives an expiry no Date can hold, naming the cell instead", async () => {
+  const root = makeRoot();
+  const created = await cli(["keys", "create", "--label", "wild", "--json"], { root });
+  const { id } = JSON.parse(created.out) as { id: string };
+
+  const db = new Database(join(root, "omnigateway.db"));
+  db.run("UPDATE api_keys SET expires_at = ? WHERE id = ?", [9e15, id]);
+  db.close();
+
+  const listed = await cli(["keys", "list"], { root });
+  expect(listed.code).toBe(0);
+  expect(listed.out).toContain("wild");
+  expect(listed.out).toContain("out of range");
+});
+
+/**
+ * The listing's word at the instant itself, which the table above cannot reach.
+ *
+ * Every key in that test is years either side of the clock, so it would pass
+ * against a boundary a millisecond out — and a millisecond out is precisely the
+ * shape where `omni keys list` says "active" about a key `/v1` has stopped
+ * accepting. `keyState` reads the boundary out of `keyUsable` rather than
+ * restating it, so this asserts the two together rather than the label alone.
+ */
+test("the listed state follows keyUsable exactly, boundary included", () => {
+  const now = 1_000_000;
+
+  expect(keyUsable({ revokedAt: null, expiresAt: now }, now)).toBe(false);
+  expect(keyState({ revokedAt: null, expiresAt: now }, now)).toBe("expired");
+
+  expect(keyUsable({ revokedAt: null, expiresAt: now + 1 }, now)).toBe(true);
+  expect(keyState({ revokedAt: null, expiresAt: now + 1 }, now)).toBe("active");
+
+  expect(keyState({ revokedAt: null, expiresAt: null }, now)).toBe("active");
+  // Revoked wins over both, and is the answer `keyUsable` cannot give.
+  expect(keyState({ revokedAt: 1, expiresAt: now + 1 }, now)).toBe("revoked");
+  expect(keyState({ revokedAt: 1, expiresAt: now }, now)).toBe("revoked");
 });
