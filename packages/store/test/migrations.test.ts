@@ -18,32 +18,43 @@ import pluginMigrations011 from "../src/sqlite/migrations/011_plugin_migrations.
   type: "text",
 };
 import nodes012 from "../src/sqlite/migrations/012_nodes.sql" with { type: "text" };
+import healthMeasurements013 from "../src/sqlite/migrations/013_health_measurements.sql" with {
+  type: "text",
+};
 
 type TableRow = { name: string };
 
+/** Every migration file in order, so a legacy database can be built to any id. */
+const SQL_BY_ID = [
+  init001,
+  usageDaily002,
+  quotaSnapshot003,
+  requestState004,
+  rtkMetrics005,
+  rtkUsage006,
+  quotaSamples007,
+  bodyLogging008,
+  keyLimits009,
+  usageRollup010,
+  pluginMigrations011,
+  nodes012,
+  healthMeasurements013,
+];
+
 /**
- * A database as it stood before migration 9, so the backfill can be watched
- * running rather than inferred from a schema that has already moved.
+ * A database as it stood before a given migration, so a backfill — or the
+ * deliberate absence of one — can be watched running rather than inferred from
+ * a schema that has already moved.
  *
- * The `after` hooks on migrations 2 and 6 are skipped: both roll up
- * `request_logs`, and this database has none until the caller seeds it.
+ * The `after` hooks are skipped: they roll up `request_logs`, and this database
+ * has none until the caller seeds it.
  */
-function legacyDb(path: string): void {
+function legacyDb(path: string, before = 9): void {
   const db = new Database(path, { create: true });
-  const sql = [
-    init001,
-    usageDaily002,
-    quotaSnapshot003,
-    requestState004,
-    rtkMetrics005,
-    rtkUsage006,
-    quotaSamples007,
-    bodyLogging008,
-  ];
   db.run(
     "CREATE TABLE IF NOT EXISTS migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)",
   );
-  sql.forEach((text, index) => {
+  SQL_BY_ID.slice(0, before - 1).forEach((text, index) => {
     db.run(text);
     db.run("INSERT INTO migrations (id, applied_at) VALUES (?, 0)", [index + 1]);
   });
@@ -74,7 +85,7 @@ test("openDb applies migrations and records them", () => {
     expect(tables).toContain(t);
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
-  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
     .query<{ name: string }, []>("PRAGMA table_info(credential_health)")
@@ -101,6 +112,7 @@ test("openDb applies migrations and records them", () => {
     .map((row) => row.name);
   expect(keyColumns).toContain("body_logging_opt_out");
   expect(keyColumns).toContain("limits");
+  expect(keyColumns).toContain("expires_at");
   // Anything still reading it breaks at compile time, which is the intent.
   expect(keyColumns).not.toContain("rate_limit_per_min");
   db.close();
@@ -195,6 +207,41 @@ test("migration 9 leaves every upgraded key readable, whatever the old column he
   db.close();
 });
 
+/**
+ * The guarantee migration 14 makes by doing nothing: every key that already
+ * exists keeps working forever.
+ *
+ * There is no backfill, and that is the point — a default expiry applied to
+ * rows minted before the column existed would silently stop clients an operator
+ * never chose to stop. `null` is the column's own default and reads back as
+ * "never", so the absence of a data step is the behaviour, which means it has
+ * to be pinned rather than assumed: a later `NOT NULL DEFAULT <now + something>`
+ * would pass every other test in this file.
+ */
+test("migration 14 leaves every key that predates it with no expiry", async () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  legacyDb(path, 14);
+
+  const legacy = new Database(path);
+  legacy.run(
+    `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
+                           body_logging_opt_out, created_at, revoked_at)
+     VALUES ('before', 'b', 'sk-omni-aaaa', 'h1', NULL, '{}', 0, 0, NULL)`,
+  );
+  legacy.close();
+
+  const db = openDb(path);
+  const keyColumns = db
+    .query<{ name: string }, []>("PRAGMA table_info(api_keys)")
+    .all()
+    .map((row) => row.name);
+  expect(keyColumns).toContain("expires_at");
+
+  const key = await createKeyRepo(db).get("before");
+  expect(key?.expiresAt).toBeNull();
+  db.close();
+});
+
 test("migration 9 indexes request logs by key first, so a per-key window scan starts at the key", () => {
   const db = openDb(":memory:");
   // Composite order is the whole point: `(at DESC, api_key_id)` would not let a
@@ -241,7 +288,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(13);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(14);
   db.close();
 });
 

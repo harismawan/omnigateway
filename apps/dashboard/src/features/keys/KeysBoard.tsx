@@ -1,4 +1,11 @@
-import { ChevronDown, ChevronRight, ListChecks, Plus, SlidersHorizontal } from "lucide-react";
+import {
+  CalendarClock,
+  ChevronDown,
+  ChevronRight,
+  ListChecks,
+  Plus,
+  SlidersHorizontal,
+} from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
 import { useKeys, useRevokeKey } from "../../api/queries.ts";
@@ -12,8 +19,10 @@ import { Module } from "../../ui/Panel.tsx";
 import { Legend, Row, ScrollX, Truncate } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
+import { EditExpiryDialog } from "./EditExpiryDialog.tsx";
 import { EditLimitsDialog } from "./EditLimitsDialog.tsx";
 import { EditModelsDialog } from "./EditModelsDialog.tsx";
+import { keyState } from "./expiry.ts";
 import { LimitMatrix } from "./LimitMatrix.tsx";
 import { describeSlot, formatLimitValue, fractionOf, nearestExhaustion } from "./limits.ts";
 import { MintKeyDialog } from "./MintKeyDialog.tsx";
@@ -26,6 +35,13 @@ const Allow = styled(Row)`
 
 const Revoked = styled.span`
   color: ${({ theme }) => theme.color.inkFaint};
+`;
+
+/** The expiry date under the state chip, quiet enough to stay secondary. */
+const Expires = styled.span`
+  display: block;
+  font-size: 11px;
+  color: ${({ theme }) => theme.color.inkDim};
 `;
 
 /** The nearest-exhaustion line under the count, quiet enough to stay secondary. */
@@ -63,11 +79,17 @@ export function KeysBoard() {
   const [minting, setMinting] = useState(false);
   const [editing, setEditing] = useState<ApiKeySummary | null>(null);
   const [editingModels, setEditingModels] = useState<ApiKeySummary | null>(null);
+  const [editingExpiry, setEditingExpiry] = useState<ApiKeySummary | null>(null);
   const [opened, setOpened] = useState<string | null>(null);
   const [doomed, setDoomed] = useState<ApiKeySummary | null>(null);
 
+  const now = Date.now();
   const rows = keys.data ?? [];
-  const active = rows.filter((key) => key.revokedAt === null);
+  // Only the *count* narrows. Every key stays in `rows` and keeps its row,
+  // expired ones included: a key that stopped working and then disappeared from
+  // the board is the bug this feature would otherwise ship, and the row is
+  // where the operator goes to move the date or clear it.
+  const active = rows.filter((key) => keyState(key, now) === "active");
 
   const summary = keys.isLoading
     ? "Reading issued keys…"
@@ -125,6 +147,7 @@ export function KeysBoard() {
                 {rows.map((key) => {
                   const open = opened === key.id;
                   const nearest = nearestExhaustion(key.limitUsage);
+                  const status = keyState(key, now);
                   return (
                     <Fragment key={key.id}>
                       <Tr>
@@ -183,12 +206,26 @@ export function KeysBoard() {
                           {key.bodyLoggingOptOut ? <Chip>no bodies</Chip> : <Legend>—</Legend>}
                         </Td>
                         <Td>
-                          {key.revokedAt === null ? (
-                            <Chip $tone="ok">active</Chip>
-                          ) : (
-                            <Revoked title={formatDateTime(key.revokedAt)}>
+                          {/* Three chips, not two. An expired key is refused at
+                              `/v1` while looking untouched in every other
+                              column, so it says so here — and the date sits
+                              under whichever chip it applies to, because
+                              "expires tomorrow" and "expired in 2001" are
+                              different things to know. */}
+                          {status === "revoked" ? (
+                            <Revoked title={formatDateTime(key.revokedAt ?? 0)}>
                               <Chip>revoked</Chip>
                             </Revoked>
+                          ) : status === "expired" ? (
+                            <Chip $tone="down">expired</Chip>
+                          ) : (
+                            <Chip $tone="ok">active</Chip>
+                          )}
+                          {key.expiresAt === null ? null : (
+                            <Expires>
+                              {status === "expired" ? "expired" : "expires"}{" "}
+                              {formatDateTime(key.expiresAt)}
+                            </Expires>
                           )}
                         </Td>
                         <Td $align="right">
@@ -230,6 +267,20 @@ export function KeysBoard() {
                                   onClick={() => setEditing(key)}
                                 >
                                   <SlidersHorizontal />
+                                </IconButton>
+                                {/* Offered on an expired key too — the gate
+                                    above is on revocation, which is the one-way
+                                    door. Moving the date forward or clearing it
+                                    is the way back, so it must stay reachable. */}
+                                <IconButton
+                                  type="button"
+                                  $variant="ghost"
+                                  $size="sm"
+                                  aria-label={`Edit expiry for ${key.label}`}
+                                  title={`Edit expiry for ${key.label}`}
+                                  onClick={() => setEditingExpiry(key)}
+                                >
+                                  <CalendarClock />
                                 </IconButton>
                                 <Button
                                   type="button"
@@ -280,6 +331,15 @@ export function KeysBoard() {
         apiKey={editingModels}
         onOpenChange={(next) => {
           if (!next) setEditingModels(null);
+        }}
+      />
+
+      {/* Keyed by the row, same reason as the two dialogs above. */}
+      <EditExpiryDialog
+        key={editingExpiry?.id ?? "none"}
+        apiKey={editingExpiry}
+        onOpenChange={(next) => {
+          if (!next) setEditingExpiry(null);
         }}
       />
 

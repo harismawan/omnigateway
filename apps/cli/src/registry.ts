@@ -22,7 +22,14 @@ import {
   dbStats,
   dbVacuum,
 } from "./commands/db.ts";
-import { keysCreate, keysLimits, keysList, keysModels, keysRevoke } from "./commands/keys.ts";
+import {
+  keysCreate,
+  keysExpiry,
+  keysLimits,
+  keysList,
+  keysModels,
+  keysRevoke,
+} from "./commands/keys.ts";
 import {
   modelsCatalog,
   modelsDryRun,
@@ -95,6 +102,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "keys create": keysCreate,
   "keys limits": keysLimits,
   "keys models": keysModels,
+  "keys expiry": keysExpiry,
   "keys revoke": keysRevoke,
 
   "plugin list": pluginList,

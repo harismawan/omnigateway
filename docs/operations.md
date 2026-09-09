@@ -47,6 +47,33 @@ console's Keys screen shows and edits the same matrix.
 The headers a client sees for these limits are in
 [client-api.md](client-api.md#rate-limit-headers).
 
+## Key expiry
+
+A key can carry an expiry, and by default it carries none: a key with no expiry
+works until it is revoked, and upgrading never attaches one to a key that
+already exists. Set it at creation or afterwards, in either direction:
+
+```bash
+omni keys create --label contractor --expires 2027-01-01
+omni keys expiry <id>                             # show
+omni keys expiry <id> --at 2027-06-01T12:00:00Z   # move it
+omni keys expiry <id> --never                     # take it away
+```
+
+Past the instant, every `/v1` request the key makes is refused with the same
+answer a revoked or unknown key gets — the three are deliberately
+indistinguishable, so a caller cannot probe which keys exist. A client-dashboard
+session held open across the expiry fails its next request and is ended. A
+request or stream already in flight at the instant runs to completion, exactly
+as it does through a revocation: the key is checked when the request arrives,
+never again while it is being served.
+
+Unlike `omni keys revoke`, this is reversible in both directions. A date already
+behind the clock is accepted rather than refused, and it means "stop this key
+now"; `--never`, or a date further ahead, brings it back. Expired keys stay
+listed with a state of their own in `omni keys list` and on the console's Keys
+screen, so a client that stopped working can be found rather than guessed at.
+
 ## Metrics and traces
 
 Both observability surfaces are off until configured. Set `OMNI_METRICS_TOKEN` to register

@@ -78,9 +78,12 @@ them; branch passed every command here, still failed `verify`. Set here = what
 
 ## Architectural boundaries
 
-**Single-copy rules.** Four helpers in `@omni/store/types` and `@omni/control` are only copy of
+**Single-copy rules.** Five helpers in `@omni/store/types` and `@omni/control` are only copy of
 their question; each exist because several sites once asked separately and disagreed. Never
-re-derive locally, however small local question look: `servesTarget` / `resolvePin` ("can
+re-derive locally, however small local question look: `keyUsable` ("may this key be used
+now" — revoked **and** expired, one question; `authenticateApiKey`, `loginClient`,
+`keyStillValid` all route through it; boundary exclusive, `expiresAt === now` expired),
+`servesTarget` / `resolvePin` ("can
 this account serve this target" — provider, custom `endpointId`, pin are one question; router,
 `putModel`, `resolveModelLimits`, `omni doctor`, console picker all route through it;
 `ServingCredential` carry `providerData` so it see custom endpoints), `scopeOf` (principal to
@@ -548,10 +551,13 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Refuse at auth, degrade at list. Unparseable `limits` read back as `null`, distinct from `{}`;
   `authenticateApiKey` turn it into `INTERNAL` — not `AUTH`. `keys.list()` must never throw over
   such row. Nothing may collapse that `null` into `{}`.
-- Two fields editable after minting: `limits` (`setKeyLimits`, `PUT /api/keys/:id/limits`) and
-  `modelAllowlist` (`setKeyModels`, `PUT /api/keys/:id/models`). Both written whole, never patched —
-  `{}` is how last limit go away; allowlist `null` and `[]` opposite facts, so schema refuse
-  default. `bodyLoggingOptOut` deliberately not editable — promise to whoever hold key.
+- Three fields editable after minting: `limits` (`setKeyLimits`, `PUT /api/keys/:id/limits`),
+  `modelAllowlist` (`setKeyModels`, `PUT /api/keys/:id/models`) and `expiresAt`
+  (`setKeyExpiry`, `PUT /api/keys/:id/expiry`). All written whole, never patched —
+  `{}` is how last limit go away; allowlist `null` and `[]` opposite facts, and expiry `null`
+  ("never") and absent field likewise, so both schemas refuse default. Expiry take **past
+  instant** — "expire it now", reversible where `revoke` not; never add `> now` guard.
+  `bodyLoggingOptOut` deliberately not editable — promise to whoever hold key.
 - Windows *slide*. `1m` exact ring in `apps/gateway`; longer windows are `usage.sumSince` —
   which must filter `state = 'done'` — plus in-memory delta, cached 30s. Composition may over-count,
   must **never** under-count, so delta keep everything at or after read instant. Failed

@@ -3,10 +3,13 @@ import {
   type LimitReading,
   listKeys,
   revokeKey,
+  setKeyExpiry,
   setKeyLimits,
   setKeyModels,
 } from "@omni/control";
-import type { LimitConfig } from "@omni/store";
+// The gateway's own "may this key be used now", so the listing's label and the
+// answer at `/v1` cannot drift apart.
+import { keyUsable, type LimitConfig } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -212,11 +215,48 @@ function summarizeLimits(limits: LimitConfig): string {
   return parts.length === 0 ? "—" : parts.join(" ");
 }
 
+/**
+ * A date or datetime from the command line as an epoch-ms instant.
+ *
+ * `Date.parse`, so `2030-01-01` and `2030-01-01T12:00:00Z` both work and mean
+ * what the operator's own tooling would read them as. The `NaN` check is the
+ * whole reason this is a function: `Date.parse` returns `NaN` rather than
+ * throwing, and `NaN` written into the column is a key with an expiry no reader
+ * can compare against — refused at the flag instead, naming what was typed.
+ *
+ * A past instant is deliberately not refused. It is how "expire this key now"
+ * is spelled, and unlike `keys revoke` it can be undone with `--never`.
+ */
+function parseWhen(flag: string, raw: string): number {
+  const at = Date.parse(raw);
+  if (!Number.isFinite(at)) {
+    throw new UsageError(`${flag} must be a date, e.g. 2030-01-01, got "${raw}"`);
+  }
+  return at;
+}
+
+/**
+ * Three states, not two: an expired key is neither active nor revoked.
+ *
+ * The third answer comes from `revokedAt`, not from a second comparison —
+ * `keyUsable` is asked for the boundary, so the listing cannot call a key active
+ * that `/v1` has already stopped accepting. Exported for the boundary test
+ * alone; nothing outside this file calls it.
+ */
+export function keyState(
+  key: { revokedAt: number | null; expiresAt: number | null },
+  now: number,
+): string {
+  if (key.revokedAt !== null) return "revoked";
+  return keyUsable(key, now) ? "active" : "expired";
+}
+
 export const keysList: Command = {
   usage: "keys list",
   summary: "List gateway API keys",
   async run(_args, { ctx, writer }) {
     const keys = await listKeys(await ctx.store());
+    const now = Date.now();
 
     emit(ctx, writer, { keys }, () => {
       if (keys.length === 0) return "no api keys; create one with: omni keys create";
@@ -229,6 +269,7 @@ export const keysList: Command = {
           { header: "LIMITS" },
           { header: "BODY CAPTURE" },
           { header: "STATE" },
+          { header: "EXPIRES" },
           { header: "CREATED" },
         ],
         keys.map((key) => [
@@ -252,7 +293,14 @@ export const keysList: Command = {
           // "captured": it means this key defers to the installation's setting,
           // which is off unless someone turned it on.
           key.bodyLoggingOptOut ? "no bodies" : "—",
-          state(ctx, key.revokedAt === null, key.revokedAt === null ? "active" : "revoked"),
+          // Three states, because an expired key is refused at `/v1` while
+          // looking untouched here otherwise — a key that stopped working with
+          // nothing on the board saying why is the failure this column exists
+          // to prevent.
+          ((verdict) => state(ctx, verdict === "active", verdict))(keyState(key, now)),
+          // The date beside the state, so "expires tomorrow" and "expired in
+          // 2001" are not the same cell.
+          formatTime(key.expiresAt),
           formatTime(key.createdAt),
         ]),
       );
@@ -261,16 +309,19 @@ export const keysList: Command = {
 };
 
 export const keysCreate: Command = {
-  usage: "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--no-bodies]",
+  usage:
+    "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--expires <when>] [--no-bodies]",
   summary: "Mint a gateway API key, printed once",
   options: {
     label: { type: "string" },
     allow: { type: "string", multiple: true },
     limit: { type: "string", multiple: true },
+    expires: { type: "string" },
     "no-bodies": { type: "boolean" },
   },
   async run(args, { ctx, writer }) {
     const allow = listFlag(args.values, "allow");
+    const expires = stringFlag(args.values, "expires");
     const created = await createKey(await ctx.store(), {
       ...(stringFlag(args.values, "label") === undefined
         ? {}
@@ -287,6 +338,10 @@ export const keysCreate: Command = {
       // become capturable later by an edit the client cannot see. Reissue
       // instead — there is no flag that turns this off.
       bodyLoggingOptOut: boolFlag(args.values, "no-bodies"),
+      // Absent means never, which is what every key minted before this flag
+      // existed carries. Editable afterwards with `keys expiry`, unlike the
+      // opt-out above.
+      expiresAt: expires === undefined ? null : parseWhen("--expires", expires),
     });
 
     emit(ctx, writer, created, () => {
@@ -380,6 +435,57 @@ export const keysLimits: Command = {
         ],
         key.limitUsage.map(limitRow),
       )}\n${paint(ctx, "dim", "usage is counted from completed requests still inside each window")}`;
+    });
+  },
+};
+
+/**
+ * The third editable field, and the only edit that can be undone.
+ *
+ * Mirrors `keys models`: show when asked nothing, replace whole when given
+ * something, and one spelling per invocation because `--at` and `--never` name
+ * opposite facts. A date already behind the clock is accepted rather than
+ * refused — it is how "expire this key now" is spelled, and `--never` brings it
+ * back, which `keys revoke` deliberately cannot.
+ */
+export const keysExpiry: Command = {
+  usage: "keys expiry <id> [--at <when>] [--never]",
+  summary: "Show or replace one key's expiry",
+  options: {
+    at: { type: "string" },
+    never: { type: "boolean" },
+  },
+  async run(args, { ctx, writer }) {
+    const id = requirePositional(args, 0, "key id");
+    const at = stringFlag(args.values, "at");
+    const never = boolFlag(args.values, "never");
+
+    const store = await ctx.store();
+    const existing = (await listKeys(store)).find((entry) => entry.id === id);
+    if (existing === undefined) throw new CliError(`no api key "${id}"`);
+
+    let key = existing;
+    if (never || at !== undefined) {
+      if (never && at !== undefined) {
+        throw new UsageError("--at and --never cannot be combined");
+      }
+      // Parsed before the write, so an unparseable date names the flag rather
+      // than becoming a `NaN` no reader can compare against.
+      const next = never ? null : parseWhen("--at", at as string);
+      key = await setKeyExpiry(store, id, { expiresAt: next });
+    }
+
+    emit(ctx, writer, key, () => {
+      const head = fields([
+        ["id", key.id],
+        ["label", key.label],
+        ["prefix", `${key.prefix}…`],
+      ]);
+      if (key.expiresAt === null) return `${head}\nexpires: never`;
+      const verdict = keyState(key, Date.now());
+      return `${head}\nexpires: ${formatTime(key.expiresAt)}${
+        verdict === "expired" ? ` ${paint(ctx, "red", "(expired)")}` : ""
+      }`;
     });
   },
 };

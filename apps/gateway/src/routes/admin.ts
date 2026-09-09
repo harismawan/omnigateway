@@ -28,6 +28,7 @@ import {
   removeCredential,
   removeModel,
   revokeKey,
+  setKeyExpiry,
   setKeyLimits,
   setKeyModels,
   setupFiles,
@@ -378,8 +379,8 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       /**
-       * One of the two fields on a key that are editable after minting — this
-       * one and the allowlist below.
+       * One of the three fields on a key that are editable after minting — this
+       * one, the allowlist below, and the expiry after it.
        *
        * `bodyLoggingOptOut` has no route like this on purpose: it is a promise
        * to whoever holds the key. A limit is the operator's own ceiling on
@@ -395,7 +396,7 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       /**
-       * The other field on a key that is editable after minting.
+       * The second field on a key that is editable after minting.
        *
        * An allowlist that cannot be adjusted without minting a new key and
        * redeploying every client is an allowlist that gets set to unrestricted
@@ -405,6 +406,27 @@ export function adminRoutes(deps: AdminDeps) {
       .put("/api/keys/:id/models", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         const key = await setKeyModels(deps.store, params.id, await readJson(request));
+        changed("res:keys");
+        return key;
+      })
+
+      /**
+       * The third, and the only one whose edit is reversible in both
+       * directions.
+       *
+       * An instant already behind the clock is accepted rather than refused: it
+       * is how "expire this key now" is spelled, and unlike `DELETE` below it
+       * can be undone by moving the instant forward or sending `null`. Nothing
+       * here or in `keyExpirySchema` may grow a `> now` guard — that would
+       * leave only the one-way door.
+       *
+       * `null` and an absent field are different facts, so the body must name
+       * the field: an edit that forgot it is a `BAD_REQUEST` rather than a
+       * silent withdrawal of the operator's expiry.
+       */
+      .put("/api/keys/:id/expiry", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        const key = await setKeyExpiry(deps.store, params.id, await readJson(request));
         changed("res:keys");
         return key;
       })

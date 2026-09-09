@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { GatewayError } from "@omni/ir";
 import { createStore, deriveKey } from "@omni/store";
 import { memoryStore, requestLog, seedApiKey } from "@omni/testkit";
-import { listKeys, setKeyLimits, setKeyModels } from "../src/keys.ts";
+import { listKeys, setKeyExpiry, setKeyLimits, setKeyModels } from "../src/keys.ts";
 
 /**
  * Limits are editable after creation; `bodyLoggingOptOut` is not.
@@ -157,6 +157,52 @@ test("setting models on an unknown key id is refused rather than matching no row
   await expect(setKeyModels(store, "not-a-key", { modelAllowlist: null })).rejects.toThrow(
     "no such api key",
   );
+  store.close();
+});
+
+/**
+ * The third field editable after minting, and the only one whose edit is
+ * reversible in both directions.
+ *
+ * An instant already behind the clock is accepted rather than refused: it is
+ * how "expire this key now" is spelled, and unlike `revoke` it can be undone by
+ * moving the instant forward or clearing it. Nothing here may grow a `> now`
+ * guard — that would take away the one operation this is for.
+ */
+test("setting an expiry round-trips, accepts a past instant, and clears back to never", async () => {
+  const store = await memoryStore();
+  const now = 1_700_000_000_000;
+  const { key } = await seedApiKey(store);
+
+  const set = await setKeyExpiry(store, key.id, { expiresAt: now + 86_400_000 }, now);
+  expect(set.expiresAt).toBe(now + 86_400_000);
+  expect((await store.keys.get(key.id))?.expiresAt).toBe(now + 86_400_000);
+
+  // "Expire it now", which is the whole reason a past instant is not refused.
+  const past = await setKeyExpiry(store, key.id, { expiresAt: now - 1 }, now);
+  expect(past.expiresAt).toBe(now - 1);
+
+  const cleared = await setKeyExpiry(store, key.id, { expiresAt: null }, now);
+  expect(cleared.expiresAt).toBeNull();
+  expect((await store.keys.get(key.id))?.expiresAt).toBeNull();
+  store.close();
+});
+
+test("setting an expiry on an unknown key id is refused rather than matching no row", async () => {
+  const store = await memoryStore();
+  await seedApiKey(store);
+  await expect(setKeyExpiry(store, "not-a-key", { expiresAt: null })).rejects.toThrow(
+    "no such api key",
+  );
+  store.close();
+});
+
+/** An absent field is not "never": the two are different instructions. */
+test("an expiry edit that names no field is refused", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { expiresAt: 1_700_000_000_000 });
+  await expect(setKeyExpiry(store, key.id, {})).rejects.toThrow();
+  expect((await store.keys.get(key.id))?.expiresAt).toBe(1_700_000_000_000);
   store.close();
 });
 

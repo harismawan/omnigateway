@@ -38,6 +38,7 @@ type Row = {
   body_logging_opt_out: number;
   created_at: number;
   revoked_at: number | null;
+  expires_at: number | null;
 };
 
 /**
@@ -79,6 +80,9 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   bodyLoggingOptOut: r.body_logging_opt_out === 1,
   createdAt: r.created_at,
   revokedAt: r.revoked_at,
+  // Null is "never expires", which is what every row written before migration
+  // 14 holds and what a key minted without one holds today.
+  expiresAt: r.expires_at,
 });
 
 export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRepo {
@@ -107,8 +111,8 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       const now = Date.now();
       db.run(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
-                               body_logging_opt_out, created_at, revoked_at)
-         VALUES (?,?,?,?,?,?,?,?,NULL)`,
+                               body_logging_opt_out, created_at, revoked_at, expires_at)
+         VALUES (?,?,?,?,?,?,?,?,NULL,?)`,
         [
           input.id,
           input.label,
@@ -121,6 +125,7 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
           JSON.stringify(parseLimitConfig(input.limits)),
           input.bodyLoggingOptOut ? 1 : 0,
           now,
+          input.expiresAt,
         ],
       );
       return { ...input, createdAt: now, revokedAt: null };
@@ -130,8 +135,8 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       if (row.limits === null) throw new Error(`api key ${row.id} has unreadable limits`);
       db.run(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
-                               body_logging_opt_out, created_at, revoked_at)
-         VALUES (?,?,?,?,?,?,?,?,?)`,
+                               body_logging_opt_out, created_at, revoked_at, expires_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
         [
           row.id,
           row.label,
@@ -142,6 +147,9 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
           row.bodyLoggingOptOut ? 1 : 0,
           row.createdAt,
           row.revokedAt,
+          // Carried like the dates beside it. A restore that dropped this would
+          // hand back a key outliving the expiry its operator set.
+          row.expiresAt,
         ],
       );
     },
@@ -165,6 +173,14 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
         modelAllowlist === null ? null : JSON.stringify(modelAllowlist),
         id,
       ]);
+    },
+
+    async setExpiry(id: string, expiresAt: number | null) {
+      // No guard on the value, unlike `limits`. Any number round-trips through
+      // an INTEGER column, and one already in the past is a legitimate edit
+      // meaning "expire it now" — refusing it here would put a rule in the repo
+      // that the control schema deliberately does not have.
+      db.run("UPDATE api_keys SET expires_at = ? WHERE id = ?", [expiresAt, id]);
     },
 
     async revoke(id: string) {

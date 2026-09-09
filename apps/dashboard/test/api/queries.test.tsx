@@ -79,6 +79,7 @@ describe("mutations", () => {
       modelAllowlist: null,
       limits: {},
       bodyLoggingOptOut: false,
+      expiresAt: null,
     });
 
     await waitFor(() => expect(create.result.current.isSuccess).toBe(true));

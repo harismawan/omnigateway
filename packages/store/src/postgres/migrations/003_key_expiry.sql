@@ -1,0 +1,17 @@
+-- The Postgres half of the sqlite migration of the same name. `BIGINT`, like
+-- every other epoch-ms column in this schema, and read back through `numOrNull`.
+--
+-- Nullable rather than `NOT NULL DEFAULT`: the column is a deadline, and every
+-- finite default is a date on which somebody's client stops working. NULL is
+-- the only value that says nothing was decided, and every reader maps it to
+-- "never expires".
+--
+-- No backfill, deliberately. Every key on every existing installation was
+-- minted on the promise that it works until revoked, so adding the column and
+-- stopping is what keeps that promise. The absence of an `UPDATE` here is the
+-- substance of the migration, not an omission.
+--
+-- Safe to apply under a rolling deploy, unlike migration 2: this adds a
+-- nullable column and drops nothing, so a replica running the previous image
+-- keeps serving — `SELECT *` gains a field its mapper ignores.
+ALTER TABLE api_keys ADD COLUMN expires_at BIGINT;

@@ -488,7 +488,15 @@ async function handle(
   try {
     let key: Awaited<ReturnType<typeof authenticateApiKey>>;
     try {
-      key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers), deps.logger);
+      // `startedAt`, not a fresh `deps.now()`: this request's rate-limit
+      // windows, deadline and usage row are all stamped from it, and a key's
+      // expiry is judged on the same instant as everything else it gates.
+      key = await authenticateApiKey(
+        deps.store,
+        apiKeyHeader(request.headers),
+        startedAt,
+        deps.logger,
+      );
     } catch (error) {
       if (error instanceof GatewayError && error.code === "AUTH") {
         deps.logger.warn("authentication rejected", {
@@ -865,7 +873,12 @@ export function proxyRoutes(deps: ProxyDeps) {
       })
       .get("/v1/models", async ({ request }) => {
         try {
-          const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers), logger);
+          const key = await authenticateApiKey(
+            deps.store,
+            apiKeyHeader(request.headers),
+            deps.now(),
+            logger,
+          );
           // The routing snapshot, not the store: it already holds both halves of
           // the answer, it is invalidated on every routing change, and taking it
           // here means the listing and dispatch cannot disagree about which
@@ -899,7 +912,12 @@ export function proxyRoutes(deps: ProxyDeps) {
       // which is exactly when a client most needs the number.
       .post("/v1/messages/count_tokens", async ({ request }) => {
         try {
-          const key = await authenticateApiKey(deps.store, apiKeyHeader(request.headers), logger);
+          const key = await authenticateApiKey(
+            deps.store,
+            apiKeyHeader(request.headers),
+            deps.now(),
+            logger,
+          );
           // Minted even though this route writes no row. `consume` logs the
           // fail-open path when a long-window store read times out, and that
           // line is the only record this request leaves anywhere — without an

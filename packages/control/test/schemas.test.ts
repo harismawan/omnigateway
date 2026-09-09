@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
 import { DEFAULT_SETTINGS } from "@omni/store";
 import { isProviderId } from "../src/connect.ts";
-import { keyCreateSchema, modelSchema, providerIdSchema, settingsSchema } from "../src/schemas.ts";
+import {
+  keyCreateSchema,
+  keyExpirySchema,
+  modelSchema,
+  providerIdSchema,
+  settingsSchema,
+} from "../src/schemas.ts";
 
 const target = (provider: string): Record<string, unknown> => ({
   provider,
@@ -161,6 +167,55 @@ test("a key opts out of body capture only when it asks to", () => {
   expect(keyCreateSchema.parse({}).bodyLoggingOptOut).toBe(false);
   expect(keyCreateSchema.parse({ bodyLoggingOptOut: true }).bodyLoggingOptOut).toBe(true);
   expect(() => keyCreateSchema.parse({ bodyLoggingOptOut: "yes" })).toThrow();
+});
+
+/**
+ * Minting defaults to never, editing must say which.
+ *
+ * The same split `keyModelsSchema` makes and for the same reason: `null` and an
+ * absent field are opposite facts on the edit path — one clears the expiry, the
+ * other forgot to mention it — so the edit schema has no `.default()` and a
+ * body without the field is a `BAD_REQUEST` rather than a silent "never".
+ */
+test("expiry defaults to never at creation and is required on an edit", () => {
+  expect(keyCreateSchema.parse({}).expiresAt).toBeNull();
+  expect(keyCreateSchema.parse({ expiresAt: 1_800_000_000_000 }).expiresAt).toBe(1_800_000_000_000);
+  expect(keyCreateSchema.parse({ expiresAt: null }).expiresAt).toBeNull();
+  expect(() => keyCreateSchema.parse({ expiresAt: "tomorrow" })).toThrow();
+  expect(() => keyCreateSchema.parse({ expiresAt: 1.5 })).toThrow();
+
+  expect(keyExpirySchema.parse({ expiresAt: null }).expiresAt).toBeNull();
+  expect(keyExpirySchema.parse({ expiresAt: 1_800_000_000_000 }).expiresAt).toBe(1_800_000_000_000);
+  // Absent is not "never".
+  expect(() => keyExpirySchema.parse({})).toThrow();
+  expect(() => keyExpirySchema.parse({ expiresAt: 0 })).toThrow();
+  expect(() => keyExpirySchema.parse({ expiresAt: -1 })).toThrow();
+  expect(() => keyExpirySchema.parse({ expiresAt: 1, extra: true })).toThrow();
+});
+
+/**
+ * The band between a safe integer and an instant `Date` can hold.
+ *
+ * `int()` is `Number.isSafeInteger`, so it stops at 9.007e15, while the largest
+ * epoch-ms a `Date` represents is 8.64e15. Everything in between used to parse
+ * and store, and then `new Date(that).toISOString()` throws a `RangeError` —
+ * which is `omni keys list` failing outright and the console's edit-expiry
+ * dialog throwing during render, both from a value the route said yes to.
+ * Refused at the schema, which is the trust boundary, rather than papered over
+ * in each formatter.
+ */
+test("an expiry beyond Date's range is refused on both the mint and edit paths", () => {
+  const max = 8_640_000_000_000_000;
+  expect(keyExpirySchema.parse({ expiresAt: max }).expiresAt).toBe(max);
+  expect(keyCreateSchema.parse({ expiresAt: max }).expiresAt).toBe(max);
+  expect(() => keyExpirySchema.parse({ expiresAt: max + 1 })).toThrow();
+  expect(() => keyCreateSchema.parse({ expiresAt: max + 1 })).toThrow();
+
+  // The value the old bound let through, and the reason the bound exists: it is
+  // a safe integer, so `int()` alone was happy with it.
+  expect(Number.isSafeInteger(9e15)).toBe(true);
+  expect(() => keyExpirySchema.parse({ expiresAt: 9e15 })).toThrow();
+  expect(() => new Date(9e15).toISOString()).toThrow();
 });
 test("settings accept the four ponytail modes and reject anything else", () => {
   for (const mode of ["off", "lite", "full", "ultra"] as const) {

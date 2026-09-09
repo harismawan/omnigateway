@@ -14,6 +14,7 @@ type Row = {
   body_logging_opt_out: boolean;
   created_at: string;
   revoked_at: string | null;
+  expires_at: string | null;
 };
 
 /**
@@ -49,7 +50,11 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   limits: parseLimits(r.id, r.limits, logger),
   bodyLoggingOptOut: r.body_logging_opt_out,
   createdAt: num(r.created_at),
+  // `numOrNull` like every other nullable BIGINT here: the driver hands back a
+  // string rather than narrowing 64 bits into a double, and null stays null —
+  // which is "never expires".
   revokedAt: numOrNull(r.revoked_at),
+  expiresAt: numOrNull(r.expires_at),
 });
 
 export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
@@ -75,8 +80,8 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       const now = Date.now();
       await sql.unsafe(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
-                               body_logging_opt_out, created_at, revoked_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL)`,
+                               body_logging_opt_out, created_at, revoked_at, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9)`,
         [
           input.id,
           input.label,
@@ -89,6 +94,7 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           JSON.stringify(parseLimitConfig(input.limits)),
           input.bodyLoggingOptOut,
           now,
+          input.expiresAt,
         ],
       );
       return { ...input, createdAt: now, revokedAt: null };
@@ -98,8 +104,8 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       if (row.limits === null) throw new Error(`api key ${row.id} has unreadable limits`);
       await sql.unsafe(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
-                               body_logging_opt_out, created_at, revoked_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+                               body_logging_opt_out, created_at, revoked_at, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
           row.id,
           row.label,
@@ -110,6 +116,9 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           row.bodyLoggingOptOut,
           row.createdAt,
           row.revokedAt,
+          // Carried like the dates beside it. A restore that dropped this would
+          // hand back a key outliving the expiry its operator set.
+          row.expiresAt,
         ],
       );
     },
@@ -133,6 +142,14 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
         modelAllowlist === null ? null : JSON.stringify(modelAllowlist),
         id,
       ]);
+    },
+
+    async setExpiry(id: string, expiresAt: number | null) {
+      // No guard on the value, unlike `limits`. An instant already in the past
+      // is a legitimate edit meaning "expire it now", and refusing it here
+      // would put a rule in the repo that the control schema deliberately does
+      // not have.
+      await sql.unsafe("UPDATE api_keys SET expires_at = $1 WHERE id = $2", [expiresAt, id]);
     },
 
     async revoke(id: string) {

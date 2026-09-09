@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import type { LimitConfig } from "@omni/store";
+import { keyUsable, type LimitConfig } from "@omni/store";
 import { requestLog } from "@omni/testkit";
+import { keyState } from "../src/commands/keys.ts";
 import { cli, makeRoot, openStore } from "./helpers/harness.ts";
 
 type ListedKey = { id: string; label: string; limits: LimitConfig | null };
@@ -483,4 +484,159 @@ test("an ordinary --json edit carries no such flag", async () => {
   expect(body.limitsReplaced).toBeUndefined();
   // The pre-existing limit survives, which is what "not replaced" means.
   expect(body.limits?.requests).toEqual({ "1m": 100, "5h": 9 });
+});
+
+type ExpiryOutput = {
+  id: string;
+  label: string;
+  expiresAt: number | null;
+  revokedAt: number | null;
+};
+
+async function keysWithExpiry(root: string): Promise<ExpiryOutput[]> {
+  const listed = await cli(["keys", "list", "--json"], { root });
+  return (JSON.parse(listed.out) as { keys: ExpiryOutput[] }).keys;
+}
+
+/**
+ * Expiry is the third editable field, and the one whose input is a date rather
+ * than a number.
+ *
+ * `--expires` and `--at` both go through `Date.parse`, so an ISO date and a
+ * full ISO datetime are both accepted and mean the same instant a client would
+ * read them as. What is being pinned here is that the stored column holds that
+ * instant — a parse that produced `NaN` would write a column no reader can use.
+ */
+test("keys create --expires stores the parsed instant, and no flag means never", async () => {
+  const root = makeRoot();
+  expect(
+    (
+      await cli(["keys", "create", "--label", "dated", "--expires", "2030-01-01", "--json"], {
+        root,
+      })
+    ).code,
+  ).toBe(0);
+  expect((await cli(["keys", "create", "--label", "forever", "--json"], { root })).code).toBe(0);
+
+  const keys = await keysWithExpiry(root);
+  expect(keys.find((k) => k.label === "dated")?.expiresAt).toBe(Date.parse("2030-01-01"));
+  // No backfill, no default: a key minted without the flag never expires.
+  expect(keys.find((k) => k.label === "forever")?.expiresAt).toBeNull();
+});
+
+test("an unparseable date is a clear error rather than NaN in the column", async () => {
+  const root = makeRoot();
+  const bad = await cli(["keys", "create", "--label", "junk", "--expires", "next tuesday"], {
+    root,
+  });
+  expect(bad.code).not.toBe(0);
+  expect(bad.err).toContain("next tuesday");
+  // Nothing was minted on the way past the refusal.
+  expect(await keysWithExpiry(root)).toHaveLength(0);
+});
+
+test("keys expiry sets, clears, and refuses the two flags together", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "ci", "--json"], { root });
+  const id = await idOf(root, "ci");
+
+  const shown = await cli(["keys", "expiry", id], { root });
+  expect(shown.code).toBe(0);
+  expect(shown.out).toContain("never");
+
+  const set = await cli(["keys", "expiry", id, "--at", "2030-06-01T12:00:00Z", "--json"], { root });
+  expect(set.code).toBe(0);
+  expect((await keysWithExpiry(root)).find((k) => k.id === id)?.expiresAt).toBe(
+    Date.parse("2030-06-01T12:00:00Z"),
+  );
+
+  const cleared = await cli(["keys", "expiry", id, "--never", "--json"], { root });
+  expect(cleared.code).toBe(0);
+  expect((await keysWithExpiry(root)).find((k) => k.id === id)?.expiresAt).toBeNull();
+
+  // Opposite instructions, so one spelling per invocation — the same rule
+  // `keys models` applies to --allow/--all/--none.
+  const both = await cli(["keys", "expiry", id, "--at", "2030-01-01", "--never"], { root });
+  expect(both.code).not.toBe(0);
+  expect(both.err).toContain("--never");
+
+  const missing = await cli(["keys", "expiry", "not-a-key", "--never"], { root });
+  expect(missing.code).not.toBe(0);
+  expect(missing.err).toContain("not-a-key");
+});
+
+/**
+ * Three states, not two.
+ *
+ * An expired key is neither active nor revoked, and the list is where an
+ * operator finds out why a client stopped working — so it says "expired" in the
+ * same column that says "revoked", and shows the date beside it. Collapsing it
+ * into "active" is the failure this feature would otherwise ship: a key that
+ * refuses every request while the listing calls it healthy.
+ */
+test("keys list distinguishes active, expired and revoked, and shows the date", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "alive", "--json"], { root });
+  await cli(["keys", "create", "--label", "lapsed", "--expires", "2001-02-03", "--json"], { root });
+  await cli(["keys", "create", "--label", "pulled", "--json"], { root });
+  await cli(["keys", "revoke", await idOf(root, "pulled"), "--yes"], { root });
+
+  const listed = await cli(["keys", "list"], { root });
+  expect(listed.code).toBe(0);
+  const line = (label: string): string =>
+    listed.out.split("\n").find((row) => row.includes(label)) ?? "";
+
+  expect(line("alive")).toContain("active");
+  expect(line("lapsed")).toContain("expired");
+  expect(line("lapsed")).not.toContain("active");
+  expect(line("pulled")).toContain("revoked");
+  // The date, so the operator can tell "expires tomorrow" from "expired in 2001".
+  expect(line("lapsed")).toContain("2001");
+});
+
+/**
+ * A stored expiry outside `Date`'s ±8.64e15 range.
+ *
+ * `keyExpirySchema` refuses it, so — like the unparseable limit matrix above —
+ * it can only arrive from a restore or a hand-edit. `Number.isFinite` says
+ * nothing about it, so `formatTime` used to hand `toISOString` a value it throws
+ * on, and one bad row took the whole table down rather than one cell.
+ */
+test("keys list survives an expiry no Date can hold, naming the cell instead", async () => {
+  const root = makeRoot();
+  const created = await cli(["keys", "create", "--label", "wild", "--json"], { root });
+  const { id } = JSON.parse(created.out) as { id: string };
+
+  const db = new Database(join(root, "omnigateway.db"));
+  db.run("UPDATE api_keys SET expires_at = ? WHERE id = ?", [9e15, id]);
+  db.close();
+
+  const listed = await cli(["keys", "list"], { root });
+  expect(listed.code).toBe(0);
+  expect(listed.out).toContain("wild");
+  expect(listed.out).toContain("out of range");
+});
+
+/**
+ * The listing's word at the instant itself, which the table above cannot reach.
+ *
+ * Every key in that test is years either side of the clock, so it would pass
+ * against a boundary a millisecond out — and a millisecond out is precisely the
+ * shape where `omni keys list` says "active" about a key `/v1` has stopped
+ * accepting. `keyState` reads the boundary out of `keyUsable` rather than
+ * restating it, so this asserts the two together rather than the label alone.
+ */
+test("the listed state follows keyUsable exactly, boundary included", () => {
+  const now = 1_000_000;
+
+  expect(keyUsable({ revokedAt: null, expiresAt: now }, now)).toBe(false);
+  expect(keyState({ revokedAt: null, expiresAt: now }, now)).toBe("expired");
+
+  expect(keyUsable({ revokedAt: null, expiresAt: now + 1 }, now)).toBe(true);
+  expect(keyState({ revokedAt: null, expiresAt: now + 1 }, now)).toBe("active");
+
+  expect(keyState({ revokedAt: null, expiresAt: null }, now)).toBe("active");
+  // Revoked wins over both, and is the answer `keyUsable` cannot give.
+  expect(keyState({ revokedAt: 1, expiresAt: now + 1 }, now)).toBe("revoked");
+  expect(keyState({ revokedAt: 1, expiresAt: now }, now)).toBe("revoked");
 });

@@ -482,7 +482,7 @@ test("creating an api key returns the raw value exactly once", async () => {
 });
 
 /**
- * Limits are the one part of a key that is editable after minting.
+ * Limits are one of the three parts of a key that are editable after minting.
  *
  * `bodyLoggingOptOut` has no route like this on purpose: it is a promise to
  * whoever holds the key. A limit is the operator's own ceiling on their own
@@ -502,6 +502,62 @@ test("a key's limits are editable behind admin auth, and the matrix is replaced 
   expect(saved.status).toBe(200);
   const listed = await store.keys.list();
   expect(listed[0]?.limits).toEqual({ tokens: { "1w": 50_000_000 }, concurrency: 8 });
+});
+
+/**
+ * The third editable field, and the only edit that can be undone.
+ *
+ * A past instant is accepted — it is how "expire this key now" is spelled — and
+ * an absent field is refused, because `null` (never) and saying nothing are
+ * different instructions and only one of them may withdraw an operator's
+ * expiry.
+ */
+test("a key's expiry is editable behind admin auth, clearable, and settable into the past", async () => {
+  const { call, store } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {
+    id: string;
+  };
+  expect((await store.keys.list())[0]?.expiresAt).toBeNull();
+
+  const body = { expiresAt: 1_900_000_000_000 };
+  expect((await call("PUT", `/api/keys/${created.id}/expiry`, body, false)).status).toBe(401);
+
+  const saved = await call("PUT", `/api/keys/${created.id}/expiry`, body);
+  expect(saved.status).toBe(200);
+  expect(((await saved.json()) as { expiresAt: number | null }).expiresAt).toBe(1_900_000_000_000);
+  expect((await store.keys.list())[0]?.expiresAt).toBe(1_900_000_000_000);
+
+  // "Expire it now" — accepted, and reversible, which is what separates this
+  // from revocation.
+  expect((await call("PUT", `/api/keys/${created.id}/expiry`, { expiresAt: 1 })).status).toBe(200);
+  expect((await store.keys.list())[0]?.expiresAt).toBe(1);
+
+  expect((await call("PUT", `/api/keys/${created.id}/expiry`, { expiresAt: null })).status).toBe(
+    200,
+  );
+  expect((await store.keys.list())[0]?.expiresAt).toBeNull();
+});
+
+test("an expiry edit that names no field, or a nonsense one, is refused rather than stored", async () => {
+  const { call, store } = await harness();
+  const created = (await (
+    await call("POST", "/api/keys", { label: "cli", expiresAt: 1_900_000_000_000 })
+  ).json()) as { id: string };
+
+  for (const body of [
+    // Absent is not "never": only an explicit null may withdraw an expiry.
+    {},
+    { expiresAt: 0 },
+    { expiresAt: -1 },
+    { expiresAt: 1.5 },
+    { expiresAt: "tomorrow" },
+    { expiresAt: null, extra: true },
+  ]) {
+    const response = await call("PUT", `/api/keys/${created.id}/expiry`, body);
+    expect(response.status).toBe(400);
+  }
+
+  expect((await store.keys.list())[0]?.expiresAt).toBe(1_900_000_000_000);
 });
 
 test("a malformed limit matrix is refused rather than stored", async () => {
@@ -1535,6 +1591,13 @@ const MUTATIONS: ReadonlyArray<{
     method: "PUT",
     path: "/api/keys/:key/limits",
     body: { limits: { requests: { "1m": 60 } } },
+    topics: ["res:keys"],
+  },
+  {
+    route: "/api/keys/:id/expiry",
+    method: "PUT",
+    path: "/api/keys/:key/expiry",
+    body: { expiresAt: 1_900_000_000_000 },
     topics: ["res:keys"],
   },
   {

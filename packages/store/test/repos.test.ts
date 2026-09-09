@@ -167,6 +167,7 @@ test("api key body logging opt-out defaults off and round-trips", async () => {
     modelAllowlist: null,
     limits: {},
     bodyLoggingOptOut: false,
+    expiresAt: null,
   });
   await s.keys.create({
     id: "k2",
@@ -176,6 +177,7 @@ test("api key body logging opt-out defaults off and round-trips", async () => {
     modelAllowlist: null,
     limits: {},
     bodyLoggingOptOut: true,
+    expiresAt: null,
   });
 
   expect((await s.keys.findByHash(plain))?.bodyLoggingOptOut).toBe(false);
@@ -267,6 +269,7 @@ test("api keys are found by hash and never store the raw value", async () => {
     modelAllowlist: ["fast"],
     limits: { requests: { "1m": 60 } },
     bodyLoggingOptOut: false,
+    expiresAt: null,
   });
 
   const found = await s.keys.findByHash(hash);
@@ -287,6 +290,7 @@ test("revoked keys are still listed but marked revoked", async () => {
     modelAllowlist: null,
     limits: {},
     bodyLoggingOptOut: false,
+    expiresAt: null,
   });
   await s.keys.revoke("k1");
   const found = await s.keys.findByHash(hash);
@@ -397,6 +401,7 @@ test("api key limits round-trip the sparse matrix", async () => {
       concurrency: 8,
     },
     bodyLoggingOptOut: false,
+    expiresAt: null,
   });
 
   expect((await s.keys.findByHash(hash))?.limits).toEqual({
@@ -464,6 +469,7 @@ test("a limits shape the schema refuses is never written", async () => {
       // Reached past the control schema, e.g. by a direct store caller.
       limits: { requests: { "2m": 60 } } as unknown as LimitConfig,
       bodyLoggingOptOut: false,
+      expiresAt: null,
     }),
   ).rejects.toThrow();
   expect(await s.keys.list()).toHaveLength(0);
@@ -490,6 +496,7 @@ test("a limits shape the schema refuses is never written by an edit either", asy
     modelAllowlist: null,
     limits: { requests: { "1m": 60 } },
     bodyLoggingOptOut: false,
+    expiresAt: null,
   });
 
   await expect(
@@ -519,6 +526,7 @@ test("setModelAllowlist replaces the column whole and keeps null and [] distinct
     modelAllowlist: ["fast"],
     limits: {},
     bodyLoggingOptOut: false,
+    expiresAt: null,
   });
 
   await s.keys.setModelAllowlist("k1", ["fast", "smart"]);

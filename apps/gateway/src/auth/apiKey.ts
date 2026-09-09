@@ -1,5 +1,5 @@
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
-import { type ApiKey, hashApiKey, type LimitConfig, type Store } from "@omni/store";
+import { type ApiKey, hashApiKey, keyUsable, type LimitConfig, type Store } from "@omni/store";
 
 /**
  * A key that passed the chokepoint below.
@@ -14,21 +14,39 @@ export type AuthenticatedKey = ApiKey & { limits: LimitConfig };
  * Resolves an Authorization header to an API key record.
  *
  * Every failure raises the same message. Distinguishing "no such key" from
- * "key revoked" would let a caller probe which keys exist.
+ * "key revoked" — or from "key expired" — would let a caller probe which keys
+ * exist and which merely lapsed.
  *
  * The store is queried by hash, never by raw value, so a presented key that
  * does not exist leaves no trace of itself anywhere in the query path.
+ *
+ * `now` is a parameter rather than a `Date.now()` inside this function. Every
+ * request on the installation passes through here, so the one clock the whole
+ * request is judged against — deadlines, rate-limit windows, the usage row —
+ * has to be the one this reads too; a second reading taken here would put the
+ * chokepoint a few milliseconds out of step with everything it gates, and would
+ * make the expiry boundary untestable at the instant that matters.
  */
 export async function authenticateApiKey(
   store: Store,
   header: string | undefined | null,
+  now: number,
   logger: Logger = noopLogger,
 ): Promise<AuthenticatedKey> {
   const raw = extractToken(header);
   if (raw === null) throw new GatewayError("AUTH", "missing or malformed Authorization header");
 
   const key = await store.keys.findByHash(await hashApiKey(raw));
-  if (key === null || key.revokedAt !== null) {
+  // `keyUsable` rather than a local `revokedAt`/`expiresAt` pair: the same
+  // question is asked by `loginClient` and by the client session's every
+  // verify, and three sites free to answer it separately is how a key comes to
+  // be refused at `/v1` while its dashboard session keeps serving.
+  //
+  // Asked **before** the limits parse below, and the order is load-bearing. An
+  // expired key whose stored matrix is also unreadable must answer `AUTH`, not
+  // `INTERNAL`: the second says the installation is misconfigured and sends an
+  // operator hunting a key that is simply past its date.
+  if (key === null || !keyUsable(key, now)) {
     throw new GatewayError("AUTH", "invalid API key");
   }
 

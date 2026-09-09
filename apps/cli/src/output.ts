@@ -113,7 +113,13 @@ export function note(ctx: Context, writer: Writer, message: string): void {
 
 export function formatTime(at: number | null): string {
   if (at === null || !Number.isFinite(at)) return "—";
-  return new Date(at).toISOString().replace("T", " ").slice(0, 19);
+  const date = new Date(at);
+  // Finite but outside `Date`'s ±8.64e15 range, which the control schema refuses
+  // and a restored or hand-edited row can still carry. Named rather than
+  // rendered, because the alternative is `toISOString` throwing a bare
+  // `RangeError` out of `omni keys list` and taking the whole table with it.
+  if (Number.isNaN(date.getTime())) return "out of range";
+  return date.toISOString().replace("T", " ").slice(0, 19);
 }
 
 export function formatAge(from: number | null, now: number): string {

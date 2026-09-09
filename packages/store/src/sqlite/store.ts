@@ -158,6 +158,7 @@ export async function createStore(opts: {
       importRow: (row) => handle.keys.importRow(row),
       setLimits: (id, limits) => handle.keys.setLimits(id, limits),
       setModelAllowlist: (id, modelAllowlist) => handle.keys.setModelAllowlist(id, modelAllowlist),
+      setExpiry: (id, expiresAt) => handle.keys.setExpiry(id, expiresAt),
       revoke: (id) => handle.keys.revoke(id),
     },
 

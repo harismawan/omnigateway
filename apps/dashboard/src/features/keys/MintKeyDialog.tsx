@@ -10,6 +10,7 @@ import { Modal } from "../../ui/Modal.tsx";
 import { Legend, Mono, Row, Stack } from "../../ui/primitives.ts";
 import { describeError } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
+import { fromLocalInput } from "./expiry.ts";
 import { LimitFields } from "./LimitFields.tsx";
 import { draftFrom, draftToLimits, type LimitDraft } from "./limits.ts";
 import { ModelPicker } from "./ModelPicker.tsx";
@@ -60,6 +61,7 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
   const [allowed, setAllowed] = useState<string[]>([]);
   const [limits, setLimits] = useState<LimitDraft>(() => draftFrom({}));
   const [showLimits, setShowLimits] = useState(false);
+  const [expires, setExpires] = useState("");
   const [optOut, setOptOut] = useState(false);
   const [minted, setMinted] = useState<MintedKey | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -70,6 +72,7 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
     setAllowed([]);
     setLimits(draftFrom({}));
     setShowLimits(false);
+    setExpires("");
     setOptOut(false);
     setMinted(null);
     setProblem(null);
@@ -93,6 +96,11 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
       setProblem(matrix.problem);
       return;
     }
+    const expiry = fromLocalInput(expires);
+    if ("problem" in expiry) {
+      setProblem(expiry.problem);
+      return;
+    }
     setProblem(null);
     create.mutate(
       {
@@ -103,6 +111,10 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
         // dimension objects nobody asked for.
         limits: matrix.limits,
         bodyLoggingOptOut: optOut,
+        // Blank is never, which is what the great majority of keys should be
+        // and what every key issued before this field existed carries. Unlike
+        // the opt-out below, it is editable afterwards.
+        expiresAt: expiry.at,
       },
       {
         onSuccess: (key) => setMinted(key),
@@ -201,6 +213,25 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
             </Row>
             {showLimits ? <LimitFields draft={limits} onChange={setLimits} /> : null}
           </Stack>
+
+          {/* Optional, and blank means never — the behaviour every key had
+              before this field existed, and the one the great majority should
+              keep. A native `datetime-local` rather than a picker library: the
+              platform gives keyboard entry and the operator's own timezone for
+              free. Editable afterwards, unlike the opt-out below. */}
+          <Field
+            label="Expires"
+            hint="Optional. Your local time; blank means the key never expires."
+          >
+            {(props) => (
+              <Input
+                {...props}
+                type="datetime-local"
+                value={expires}
+                onChange={(event) => setExpires(event.target.value)}
+              />
+            )}
+          </Field>
 
           {/* Settable only here. A client handed a key on the promise that its
               payloads are never retained must not have that reversed later by
