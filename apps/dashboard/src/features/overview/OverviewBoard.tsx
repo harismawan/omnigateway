@@ -1,6 +1,8 @@
+import { useMemo } from "react";
 import {
   useCredentialHealth,
   useCredentials,
+  useKeys,
   useLogs,
   useModels,
   useSettings,
@@ -31,7 +33,14 @@ export function OverviewBoard() {
   const health = useCredentialHealth(cadence(10_000, "res:credentials"));
   const models = useModels();
   const logs = useLogs(500, cadence(10_000, "res:logs"));
+  const keys = useKeys();
   const settings = useSettings();
+
+  const keyNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const key of keys.data ?? []) names.set(key.id, key.label);
+    return names;
+  }, [keys.data]);
 
   const now = Date.now();
   const since = Math.floor((now - WINDOW_MS) / 60_000) * 60_000;
@@ -89,7 +98,7 @@ export function OverviewBoard() {
 
           <Grid $min="340px" $gap={4}>
             <ModelTraffic models={models.data ?? []} logs={logs.data ?? []} />
-            <ActivityTail logs={logs.data ?? []} />
+            <ActivityTail logs={logs.data ?? []} keyNames={keyNames} />
           </Grid>
         </Stack>
       )}

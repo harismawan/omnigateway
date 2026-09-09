@@ -3,7 +3,16 @@ import { screen, within } from "@testing-library/react";
 import type { Credential } from "../../src/api/types.ts";
 import { OverviewBoard } from "../../src/features/overview/OverviewBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { burn, credential, health, log, model, quota, usageBucket } from "../helpers/fixtures.ts";
+import {
+  apiKey,
+  burn,
+  credential,
+  health,
+  log,
+  model,
+  quota,
+  usageBucket,
+} from "../helpers/fixtures.ts";
 import { renderWithRouter } from "../helpers/render.tsx";
 
 /** Logs are placed relative to the real clock, since the board reads Date.now(). */
@@ -34,6 +43,7 @@ function stubOverview(overrides: Parameters<typeof createFetchStub>[0] = {}) {
     "GET /api/models": () => ({ models: [model()] }),
     "GET /api/logs": () => ({ logs: recentLogs() }),
     "GET /api/usage": () => ({ rows: [usageBucket()] }),
+    "GET /api/keys": () => ({ keys: [apiKey()] }),
     ...overrides,
   });
 }
@@ -222,6 +232,26 @@ describe("OverviewBoard", () => {
     const pendingRow = processing.closest("li");
     expect(pendingRow?.textContent).not.toContain("$0.00");
     expect(pendingRow?.textContent).not.toContain("0ms");
+  });
+
+  // A key deleted since the request was logged keeps its row, so the id is the
+  // fallback — the same rule the logs table follows.
+  test("names the api key on each activity row, falling back to its id", async () => {
+    const now = Date.now();
+    stubOverview({
+      "GET /api/logs": () => ({
+        logs: [
+          log({ id: "named", at: now - 30_000, apiKeyId: "key-1" }),
+          log({ id: "gone", at: now - 60_000, apiKeyId: "key-deleted-9" }),
+        ],
+      }),
+    });
+    renderWithRouter(<OverviewBoard />);
+
+    await screen.findByText("Activity");
+    const activity = screen.getByText("Activity").closest("section");
+    expect(within(activity as HTMLElement).getByText("laptop")).toBeTruthy();
+    expect(within(activity as HTMLElement).getByText("key-dele…")).toBeTruthy();
   });
 
   // The common case now: a healthy account has no health row, because the
