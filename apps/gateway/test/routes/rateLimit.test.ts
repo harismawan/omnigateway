@@ -404,8 +404,15 @@ function trackTimers(): {
      * assertion pass: a genuinely leaked keepalive lives for `KEEPALIVE_MS`
      * (10s), so it is still counted when this gives up and the assertion still
      * fails.
+     *
+     * The bound must stay under `KEEPALIVE_MS` for that to hold, and far enough
+     * over the real cleanup for the give-up not to be a verdict of its own. It
+     * was 2s, and the whole-suite run is where that is too tight: observed
+     * failing once at 2031ms — the deadline, not a leak — while passing 21/21
+     * in isolation and under sibling load. A bound that reports a leak because
+     * the machine was busy is a bound that teaches people to rerun the suite.
      */
-    async settle(timeoutMs = 2_000): Promise<void> {
+    async settle(timeoutMs = 5_000): Promise<void> {
       const deadline = Date.now() + timeoutMs;
       while (live.size > 0 && Date.now() < deadline) {
         await new Promise((resolve) => realSetTimeout(resolve, 1));
