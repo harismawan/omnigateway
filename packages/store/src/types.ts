@@ -666,19 +666,26 @@ export const keyUsable = (
  * while the router kept routing to it — the listing disagreeing with the thing
  * it claims to describe, which is worse than no listing.
  *
- * Refreshability is deliberately separate. A refreshable OAuth credential past
- * expiry is usable, because dispatch refreshes before the call; a surface that
- * wants to *say* "expired (refreshable)" still needs to know it was past expiry,
- * so that stays the caller's to phrase and this stays one question.
+ * Refreshability is folded in, not separate: dispatch refreshes before the
+ * call, so a refreshable credential past expiry is still usable and this
+ * answers "beyond use", not "past expiry".
+ *
+ * Which is why `credentialPastExpiry` is exported beside it. A surface that
+ * wants to say "expired (refreshable)" needs the other half, and the first one
+ * that did wrote the comparison out by hand — inside the very function this
+ * helper exists to keep from restating it.
  */
+export const credentialPastExpiry = (
+  credential: { authType: AuthType; expiresAt: number | null },
+  now: number,
+): boolean =>
+  credential.authType === "oauth" && credential.expiresAt !== null && credential.expiresAt <= now;
+
+/** Past expiry and beyond rescue. See `credentialPastExpiry` for the other half. */
 export const credentialExpired = (
   credential: { authType: AuthType; expiresAt: number | null; hasRefreshToken: boolean },
   now: number,
-): boolean =>
-  credential.authType === "oauth" &&
-  credential.expiresAt !== null &&
-  credential.expiresAt <= now &&
-  !credential.hasRefreshToken;
+): boolean => credentialPastExpiry(credential, now) && !credential.hasRefreshToken;
 
 /**
  * `pending` is a request still in flight. Its `status`, `attempts`, tokens and

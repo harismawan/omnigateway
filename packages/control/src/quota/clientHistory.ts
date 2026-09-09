@@ -61,8 +61,6 @@ export type AccountQuotaHistoryResult = {
  */
 const MAX_SPAN_MS = 16 * 24 * 60 * 60 * 1_000;
 
-/** And at most this many rows out of that span — see `MAX_SAMPLES` in `history.ts`. */
-
 /**
  * The retained readings behind the client screen's quota charts.
  *

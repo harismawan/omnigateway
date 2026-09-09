@@ -14,7 +14,7 @@ import {
 } from "@omni/control";
 import { nodeHttpClient } from "@omni/providers";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
-import { type AuthType, credentialExpired } from "@omni/store/types";
+import { type AuthType, credentialExpired, credentialPastExpiry } from "@omni/store/types";
 import { boolFlag, numberFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -42,10 +42,10 @@ function condition(
   if (!credential.enabled) return { ok: false, text: credential.disabledReason ?? "disabled" };
   if (credentialExpired(credential, now)) return { ok: false, text: "expired" };
   // Past expiry but rescuable: dispatch refreshes before the call, so the router
-  // keeps it. Only an OAuth credential can be here.
-  if (credential.expiresAt !== null && credential.expiresAt <= now && credential.hasRefreshToken) {
-    return { ok: true, text: "expired (refreshable)" };
-  }
+  // keeps it. Asked of the store's own helper rather than restated here — the
+  // hand-written version of this line is what put the listing and the router in
+  // disagreement in the first place.
+  if (credentialPastExpiry(credential, now)) return { ok: true, text: "expired (refreshable)" };
   return { ok: true, text: "enabled" };
 }
 

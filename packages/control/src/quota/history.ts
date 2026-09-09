@@ -64,6 +64,12 @@ export const SAMPLE_QUERY_LIMIT = MAX_SAMPLES + 1;
 /**
  * Trims an over-full page and says so.
  *
+ * Which row goes is decided by the store, not here: `listQuotaSamples` applies
+ * its own `ORDER BY observed_at DESC LIMIT`, so the oldest readings in the span
+ * were already cut before this sees them, and the row this drops is whatever
+ * the store's own re-sort left last. One row of `MAX_SAMPLES + 1`, and only
+ * ever on a page that is already reported as truncated.
+ *
  * Asking for the cap made `length >= MAX_SAMPLES` true for a complete history of
  * exactly that size, and every chart then claimed readings were missing when
  * none were — hence the extra row rather than a comparison against the cap.

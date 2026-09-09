@@ -83,12 +83,14 @@ their question; each exist because several sites once asked separately and disag
 re-derive locally, however small local question look: `keyUsable` ("may this key be used
 now" — revoked **and** expired, one question; `authenticateApiKey`, `loginClient`,
 `keyStillValid` all route through it; boundary exclusive, `expiresAt === now` expired),
-`credentialExpired` ("is this account past use" — `authType === "oauth"` clause is the
-rule, not a detail: an API key's `expiresAt` is operator bookkeeping and router never
+`credentialExpired` / `credentialPastExpiry` ("is this account past use" —
+`authType === "oauth"` clause is the rule, not a detail: an API key's `expiresAt` is operator bookkeeping and router never
 refuse for it; `filters.ts` and `omni credentials list` route through it, second one
 having restated comparison without that clause under docstring promising what router
 would do, so listing said `expired` while router routed; refreshability stay caller's to
-phrase, since dispatch refresh before call), `servesTarget` / `resolvePin` ("can
+phrase through `credentialPastExpiry`, second export existing because first
+caller wrote that comparison by hand inside function helper exist to stop),
+`servesTarget` / `resolvePin` ("can
 this account serve this target" — provider, custom `endpointId`, pin are one question; router,
 `putModel`, `resolveModelLimits`, `omni doctor`, console picker all route through it;
 `ServingCredential` carry `providerData` so it see custom endpoints), `scopeOf` (principal to
@@ -391,7 +393,12 @@ defended** — `usedRatio` exact quotient recoverable by continued fractions;
 `exhaustsAt` give second way. Rounding tried, not work; never reintroduce and claim
 size withheld. `stale` and `rolledOver` stay separate booleans — folding blank chart for
 poll interval after every rollover. `/api/client/quota/history` carry **no gateway rate** (that
-aggregate cover every key). `clientSurface.test.ts` hold both halves: no credential identity on
+aggregate cover every key). Both history reads **capped** at `MAX_SAMPLES`
+(50_000) in `quota/history.ts`, asked as `cap + 1` so full page tell from cut
+one, and `truncated` reported rather than absorbed — console's was uncapped
+while client's was not, so `requireReader` route ran unbounded synchronous
+`bun:sqlite` scan over whole retention window. Surface drawing one series
+narrow it to that series: cap cover every account at once. `clientSurface.test.ts` hold both halves: no credential identity on
 `logs`/`usage`/`summary`; quota routes name accounts, omit `used`/`limit`/`ratePerHour`.
 
 Every `/v1/*` request accept Bearer or `x-api-key`; reject conflicts. `null` model allowlist mean
