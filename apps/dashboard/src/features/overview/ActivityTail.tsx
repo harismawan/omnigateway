@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import styled from "styled-components";
 import type { RequestLog } from "../../api/types.ts";
-import { formatClock, formatMs, formatUsd } from "../../lib/format.ts";
+import { formatClock, formatMs, formatUsd, shortId } from "../../lib/format.ts";
 import { isPending, lampLabel, lampState } from "../../lib/vitals.ts";
 import { providerColor } from "../../theme/tokens.ts";
 import { Button } from "../../ui/Button.tsx";
@@ -34,12 +34,26 @@ const Model = styled(Truncate)`
   max-width: 30ch;
 `;
 
+const KeyName = styled(Truncate)`
+  font-family: ${({ theme }) => theme.font.mono};
+  font-size: 11px;
+  color: ${({ theme }) => theme.color.inkFaint};
+  max-width: 16ch;
+`;
+
 const Fault = styled(Mono)`
   color: ${({ theme }) => theme.color.down};
   font-size: 11px;
 `;
 
-export function ActivityTail({ logs }: { logs: readonly RequestLog[] }) {
+export function ActivityTail({
+  logs,
+  keyNames,
+}: {
+  logs: readonly RequestLog[];
+  /** Key id to operator label. A revoked key keeps its rows, so the id is the fallback. */
+  keyNames: ReadonlyMap<string, string>;
+}) {
   const recent = logs.slice(0, 12);
 
   return (
@@ -69,6 +83,11 @@ export function ActivityTail({ logs }: { logs: readonly RequestLog[] }) {
                 <Mono $dim style={{ color: providerColor(log.resolvedProvider) }}>
                   {log.resolvedProvider}
                 </Mono>
+              )}
+              {log.apiKeyId === null ? null : (
+                <KeyName title={log.apiKeyId}>
+                  {keyNames.get(log.apiKeyId) ?? shortId(log.apiKeyId)}
+                </KeyName>
               )}
               <Spacer />
               {isPending(log) ? (
