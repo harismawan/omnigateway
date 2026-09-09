@@ -6,7 +6,8 @@ import type { Context } from "../context.ts";
 import { emit, note, paint, type Tone } from "../output.ts";
 import { consoleSource } from "../service.ts";
 
-const FOLLOW_INTERVAL_MS = 2_000;
+/** How often `--follow` asks again. Shared with `omni logs --follow`. */
+export const FOLLOW_INTERVAL_MS = 2_000;
 
 /**
  * How a level reads in a terminal.

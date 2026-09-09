@@ -29,7 +29,58 @@ export type GatewayRate = {
 export type QuotaHistoryResult = {
   samples: QuotaSample[];
   gatewayRates: GatewayRate[];
+  /** The span held more readings than the page; the oldest were cut. */
+  truncated: boolean;
 };
+
+/**
+ * At most this many rows out of a span.
+ *
+ * A runaway guard, not a working limit, and the distinction is the whole of this
+ * constant's history: it was 8_000 on the reasoning that "a window's line is a
+ * few hundred points", which is wrong by an order of magnitude. A weekly window
+ * charted with its predecessor spans fourteen days, and at the default
+ * five-minute poll that is ~4_000 readings per credential-window — so a single
+ * account with two windows already exceeded 8_000 and had its chart silently
+ * shortened to a fraction of the axis it was drawn against.
+ *
+ * Fifty thousand is past what any install these surfaces are built for produces,
+ * while still bounding a `bun:sqlite` read that is synchronous — an uncapped one
+ * blocks the whole event loop, the reason the unbounded `SELECT SUM` behind
+ * `usage_rollup` was removed. Hitting it is a real condition rather than a
+ * routine one, so it is reported rather than absorbed — see `truncated`.
+ *
+ * Lives here beside `retainedSpan` for the same reason that does: both surfaces
+ * that read samples go through it. The console's read was uncapped while the
+ * client's was not, so the route reachable by every key holder was the bounded
+ * one, and the operator's — every account over the whole retention window, and
+ * `requireReader` rather than `requireAdmin` — was not.
+ */
+export const MAX_SAMPLES = 50_000;
+
+/** One more than the cap, so a page that is *exactly* full can be told from a cut one. */
+export const SAMPLE_QUERY_LIMIT = MAX_SAMPLES + 1;
+
+/**
+ * Trims an over-full page and says so.
+ *
+ * Which row goes is decided by the store, not here: `listQuotaSamples` applies
+ * its own `ORDER BY observed_at DESC LIMIT`, so the oldest readings in the span
+ * were already cut before this sees them, and the row this drops is whatever
+ * the store's own re-sort left last. One row of `MAX_SAMPLES + 1`, and only
+ * ever on a page that is already reported as truncated.
+ *
+ * Asking for the cap made `length >= MAX_SAMPLES` true for a complete history of
+ * exactly that size, and every chart then claimed readings were missing when
+ * none were — hence the extra row rather than a comparison against the cap.
+ */
+export function pageSamples(samples: QuotaSample[]): {
+  page: QuotaSample[];
+  truncated: boolean;
+} {
+  const truncated = samples.length > MAX_SAMPLES;
+  return { page: truncated ? samples.slice(0, MAX_SAMPLES) : samples, truncated };
+}
 
 /**
  * The span a retained-reading request actually covers.
@@ -155,6 +206,7 @@ export async function quotaHistory(
     deps.store.credentials.listQuotaSamples({
       since,
       until,
+      limit: SAMPLE_QUERY_LIMIT,
       ...(credentialId === undefined ? {} : { credentialId }),
     }),
     deps.store.credentials.listQuota(),
@@ -163,5 +215,6 @@ export async function quotaHistory(
   const scoped =
     credentialId === undefined ? quota : quota.filter((w) => w.credentialId === credentialId);
 
-  return { samples, gatewayRates: await gatewayRatesFor(deps.store, scoped) };
+  const { page, truncated } = pageSamples(samples);
+  return { samples: page, truncated, gatewayRates: await gatewayRatesFor(deps.store, scoped) };
 }

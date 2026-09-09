@@ -1,6 +1,11 @@
 import type { ChatRequest, ContentBlock, ProviderCapabilities, ProviderId } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
-import { type CredentialView, servesTarget, type Target } from "@omni/store/types";
+import {
+  type CredentialView,
+  credentialExpired,
+  servesTarget,
+  type Target,
+} from "@omni/store/types";
 import { healthKey } from "./snapshot.ts";
 import type { Excluded, RankInput } from "./types.ts";
 
@@ -238,12 +243,7 @@ export function eligible(input: RankInput): { pairs: Pair[]; excluded: Excluded[
 
       // An OAuth credential past expiry is usable only if it can be refreshed;
       // dispatch performs the refresh before the call.
-      if (
-        credential.authType === "oauth" &&
-        credential.expiresAt !== null &&
-        credential.expiresAt <= now &&
-        !credential.hasRefreshToken
-      ) {
+      if (credentialExpired(credential, now)) {
         drop("expired");
         continue;
       }

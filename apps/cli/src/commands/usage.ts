@@ -3,6 +3,7 @@ import { boolFlag, numberFlag, stringFlag, UsageError } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { emit, formatTime, formatUsd, paint, table } from "../output.ts";
 import { serviceLogs } from "../service.ts";
+import { FOLLOW_INTERVAL_MS } from "./console.ts";
 
 /** Accepts an epoch millisecond value or anything `Date` understands. */
 function instant(raw: string | undefined, fallback: number): number {
@@ -122,7 +123,7 @@ export const logs: Command = {
     // reader that tails the table sees exactly what the console sees.
     let seen = first[0]?.at ?? 0;
     for (;;) {
-      await Bun.sleep(2_000);
+      await Bun.sleep(FOLLOW_INTERVAL_MS);
       const next = (await recentLogs(store, limit)).filter((row) => row.at > seen);
       if (next.length === 0) continue;
       seen = next[0]?.at ?? seen;

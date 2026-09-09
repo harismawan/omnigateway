@@ -653,6 +653,41 @@ export const keyUsable = (
 ): boolean => key.revokedAt === null && (key.expiresAt === null || key.expiresAt > now);
 
 /**
+ * Whether this credential's expiry puts it beyond use at this instant.
+ *
+ * The companion to `keyUsable` for the other kind of credential, and single-copy
+ * for the same reason. `authType` is load-bearing: only an OAuth credential's
+ * `expiresAt` describes a token that stops working. An API key's is operator
+ * bookkeeping, and the router has never refused one for it.
+ *
+ * `omni credentials list` restated the comparison without that clause, under a
+ * docstring promising "what the router would do with this credential right
+ * now". An API key carrying a past `expiresAt` therefore printed `expired`
+ * while the router kept routing to it — the listing disagreeing with the thing
+ * it claims to describe, which is worse than no listing.
+ *
+ * Refreshability is folded in, not separate: dispatch refreshes before the
+ * call, so a refreshable credential past expiry is still usable and this
+ * answers "beyond use", not "past expiry".
+ *
+ * Which is why `credentialPastExpiry` is exported beside it. A surface that
+ * wants to say "expired (refreshable)" needs the other half, and the first one
+ * that did wrote the comparison out by hand — inside the very function this
+ * helper exists to keep from restating it.
+ */
+export const credentialPastExpiry = (
+  credential: { authType: AuthType; expiresAt: number | null },
+  now: number,
+): boolean =>
+  credential.authType === "oauth" && credential.expiresAt !== null && credential.expiresAt <= now;
+
+/** Past expiry and beyond rescue. See `credentialPastExpiry` for the other half. */
+export const credentialExpired = (
+  credential: { authType: AuthType; expiresAt: number | null; hasRefreshToken: boolean },
+  now: number,
+): boolean => credentialPastExpiry(credential, now) && !credential.hasRefreshToken;
+
+/**
  * `pending` is a request still in flight. Its `status`, `attempts`, tokens and
  * cost are placeholder zeros, never measurements: read `state` to tell the two
  * apart, never `status`.

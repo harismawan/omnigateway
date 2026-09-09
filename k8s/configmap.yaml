@@ -30,3 +30,32 @@ data:
   # (`bodyLoggingEnabled`), and in cluster mode bodies are bytea rows in
   # Postgres that grow with prompt volume — watch retention.
   OMNI_BODY_LOGGING_ALLOWED: "true"
+
+  # Telemetry. Off unless set. OMNI_METRICS_TOKEN is a secret and lives in the
+  # Secret, not here; without it the /metrics route is not registered, so the
+  # scrape annotations in deployment.yaml stay commented out. Uncomment the
+  # OTLP endpoint to export spans; with it unset, tracing allocates nothing.
+  # OMNI_METRICS_MAX_SERIES: "5000"
+  # OMNI_OTLP_ENDPOINT: "http://otel-collector.observability:4318"
+  # OMNI_OTLP_HEADERS: "x-tenant=acme"
+  # OMNI_TRACE_SAMPLE: "1.0"
+
+  # Console build served by the gateway. Unset means the one baked into the
+  # image, which is what you want unless a volume carries a different build.
+  # OMNI_STATIC_DIR: "/data/console"
+
+  # Pods log to stdout and the Console screen reads whatever captured it. Set
+  # this only when something in the pod redirects stdout to a file; it names an
+  # existing capture and does not create one.
+  # OMNI_LOG_FILE: ""
+
+  # Client identity: how the gateway names itself to each provider. Every value
+  # has a default compiled in, so these exist to move a stale CLI version pin
+  # without a release. Full list and semantics in .env.example.
+  # OMNI_ANTHROPIC_CLI_VERSION: ""
+  # OMNI_OPENAI_CLI_VERSION: ""
+  # OMNI_KIMI_CLI_VERSION: ""
+  # OMNI_GROK_CLI_VERSION: ""
+  # OMNI_KILO_CLI_VERSION: ""
+  # OMNI_MUSE_CLI_VERSION: ""
+  # OMNI_ANTIGRAVITY_IDE_VERSION: ""

@@ -19,6 +19,14 @@ export type SummaryDeckProps = {
   buckets: readonly UsageBucket[];
   since: number;
   until: number;
+  /**
+   * The gateway's day boundary, or null for the browser's own zone.
+   *
+   * The tick axis and the bucket keys have to be cut in the same frame: the
+   * server keys `usage_daily` at this offset, so an axis cut anywhere else
+   * matches none of them and the series renders flat zero over real traffic.
+   */
+  dayOffsetMinutes: number | null;
   by: TimeBy;
   /** How the window is named in the units line, e.g. "24 hours". */
   rangeLabel: string;
@@ -32,7 +40,14 @@ export type SummaryDeckProps = {
  * copy would be a second set of definitions for "prompt input" and "tokens"
  * that nobody would notice diverging.
  */
-export function SummaryDeck({ buckets, since, until, by, rangeLabel }: SummaryDeckProps) {
+export function SummaryDeck({
+  buckets,
+  since,
+  until,
+  by,
+  rangeLabel,
+  dayOffsetMinutes,
+}: SummaryDeckProps) {
   const totals = totalsOf(buckets);
   const promptInput = totals.inputTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
   const meanOutput = totals.requests === 0 ? 0 : totals.outputTokens / totals.requests;
@@ -41,7 +56,7 @@ export function SummaryDeck({ buckets, since, until, by, rangeLabel }: SummaryDe
   const meanCost = totals.requests === 0 ? 0 : totals.costUsd / totals.requests;
 
   // The traces share the window's ticks with whatever charts sit below them.
-  const ticks = timeTicks(since, until, by);
+  const ticks = timeTicks(since, until, by, dayOffsetMinutes);
   const byTick = new Map(buckets.map((bucket) => [keyToTime(bucket.key, by), bucket]));
   const trace = (of: (at: number) => number): number[] => ticks.map(of);
   const errorTone = (rate: number): "ok" | "warn" | "down" =>

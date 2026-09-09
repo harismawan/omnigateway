@@ -43,6 +43,7 @@ export function QuotaHistory({
   const history = useQuotaHistory({ credentialId, since }, starts.length > 0);
   const samples = history.data?.samples ?? [];
   const gatewayRates = history.data?.gatewayRates ?? [];
+  const truncated = history.data?.truncated === true;
 
   return (
     <Stack $gap={4}>
@@ -58,6 +59,7 @@ export function QuotaHistory({
               sample.observedAt >= (panel.since ?? 0),
           )}
           gatewayRate={gatewayRates.find((rate) => rate.windowType === panel.window.windowType)}
+          truncated={truncated}
           pollIntervalMs={pollIntervalMs}
           now={now}
         />
@@ -73,6 +75,8 @@ type AccountWindowProps = {
   samples: readonly Parameters<typeof readingOf>[0][];
   /** Absent until the history request lands, and null when it has no span. */
   gatewayRate: GatewayRate | undefined;
+  /** Whether the read hit its row cap. Narrowed per window below. */
+  truncated: boolean;
   pollIntervalMs: number;
   now: number;
 };
@@ -91,6 +95,7 @@ function AccountWindow({
   since,
   samples,
   gatewayRate,
+  truncated,
   pollIntervalMs,
   now,
 }: AccountWindowProps) {
@@ -116,6 +121,14 @@ function AccountWindow({
       samples={samples.map(readingOf)}
       since={since}
       now={now}
+      // Asked of *this* window, not of the read. The cap covers every window of
+      // the account at once, so it can be reached by rows this panel is not
+      // drawing — and a note saying the earliest readings are missing, printed
+      // over a chart that is complete, is the same lie as printing nothing over
+      // one that is not. Same narrowing the client board makes.
+      truncated={
+        truncated && since !== null && samples.length > 0 && (samples[0]?.observedAt ?? 0) > since
+      }
       ratePerHourRatio={rateRatioOf(window, estimate)}
       exhaustsAt={estimate?.exhaustsAt ?? null}
       survives={estimate?.survives ?? null}

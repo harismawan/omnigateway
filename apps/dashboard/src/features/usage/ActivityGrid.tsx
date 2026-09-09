@@ -6,10 +6,12 @@ import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Row, ScrollX, Stack } from "../../ui/primitives.ts";
 import { Controls, Segment } from "../../ui/Segment.tsx";
 import {
+  addDays,
   addTotals,
   allTokens,
   asBucket,
   dayLabel,
+  dayOfWeek,
   METRICS,
   type MetricId,
   metricOf,
@@ -124,9 +126,17 @@ function levelOf(value: number, [q1, q2, q3]: readonly [number, number, number])
 }
 
 export type ActivityGridProps = {
-  /** Daily rollup buckets keyed by local midnight. */
+  /** Daily rollup buckets, keyed at the day starts the gateway cut them on. */
   days: readonly UsageBucket[];
   now: number;
+  /**
+   * The gateway's day offset, or null to fall back to the browser's zone.
+   *
+   * Both the bucketing and the week columns read it, and they have to read the
+   * same one: a square's position and the day it counts are the same question
+   * asked twice.
+   */
+  dayOffsetMinutes?: number | null;
 };
 
 /**
@@ -134,7 +144,7 @@ export type ActivityGridProps = {
  * grid answers "when was this gateway busy" at a glance; the panels below it
  * answer "on what".
  */
-export function ActivityGrid({ days, now }: ActivityGridProps) {
+export function ActivityGrid({ days, now, dayOffsetMinutes = null }: ActivityGridProps) {
   const [metricId, setMetricId] = useState<MetricId>("tokens");
   const [hovered, setHovered] = useState<Day | null>(null);
   const metric = metricOf(metricId);
@@ -144,7 +154,7 @@ export function ActivityGrid({ days, now }: ActivityGridProps) {
     for (const bucket of days) {
       const at = Number(bucket.key);
       if (!Number.isFinite(at)) continue;
-      byDay.set(startOfDay(at), {
+      byDay.set(startOfDay(at, dayOffsetMinutes), {
         requests: bucket.requests,
         errors: bucket.errors,
         costUsd: bucket.costUsd,
@@ -159,19 +169,23 @@ export function ActivityGrid({ days, now }: ActivityGridProps) {
     }
 
     // Columns end on the Saturday of the current week, so today sits in the
-    // last column wherever in the week it falls.
-    const cursor = new Date(startOfDay(now));
-    cursor.setDate(cursor.getDate() + (6 - cursor.getDay()) - (WEEKS * 7 - 1));
-    const today = startOfDay(now);
+    // last column wherever in the week it falls. Both the weekday and the step
+    // are asked in the same frame the buckets above were keyed in.
+    const today = startOfDay(now, dayOffsetMinutes);
+    let at = addDays(
+      today,
+      6 - dayOfWeek(today, dayOffsetMinutes) - (WEEKS * 7 - 1),
+      dayOffsetMinutes,
+    );
 
     return Array.from({ length: WEEKS }, () =>
       Array.from({ length: 7 }, (): Day => {
-        const at = cursor.getTime();
-        cursor.setDate(cursor.getDate() + 1);
-        return { at, totals: byDay.get(at) ?? ZERO_TOTALS, future: at > today };
+        const cell = at;
+        at = addDays(at, 1, dayOffsetMinutes);
+        return { at: cell, totals: byDay.get(cell) ?? ZERO_TOTALS, future: cell > today };
       }),
     );
-  }, [days, now]);
+  }, [days, now, dayOffsetMinutes]);
 
   const cells = grid.flat();
   const thresholds = thresholdsOf(cells.map((day) => metric.of({ key: "", ...day.totals })));

@@ -90,6 +90,7 @@ export function metricOf(id: MetricId): Metric {
 }
 
 const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
 
 /** Bucket keys are hour indices at the raw grain and local midnights at the daily one. */
 export function keyToTime(key: string, by: TimeBy): number {
@@ -98,14 +99,55 @@ export function keyToTime(key: string, by: TimeBy): number {
   return by === "hour" ? value * HOUR_MS : value;
 }
 
-export function timeToKey(at: number, by: TimeBy): string {
-  return by === "hour" ? String(Math.floor(at / HOUR_MS)) : String(startOfDay(at));
+/**
+ * The instant the gateway's day containing `at` began.
+ *
+ * `offsetMinutes` is the gateway's `OMNI_DAY_OFFSET_MINUTES`, which is what
+ * `usage_daily` rows are actually cut on. Null means the gateway did not say —
+ * it is older than the field, or the settings have not loaded — and then this
+ * falls back to the browser's own midnight, which is what every caller did
+ * unconditionally before. That fallback is right on a single-node install, where
+ * the offset defaults to the host's own zone, and wrong wherever the pod and the
+ * viewer disagree.
+ *
+ * A fixed offset does not follow DST, deliberately: it is the same fixed offset
+ * the server buckets on, so a chart drawn from it lines up with the rows even
+ * across a transition, which is the whole point of the server using one.
+ */
+export function startOfDay(at: number, offsetMinutes: number | null = null): number {
+  if (offsetMinutes === null) {
+    const day = new Date(at);
+    day.setHours(0, 0, 0, 0);
+    return day.getTime();
+  }
+  const shift = offsetMinutes * 60_000;
+  return Math.floor((at + shift) / DAY_MS) * DAY_MS - shift;
 }
 
-export function startOfDay(at: number): number {
-  const day = new Date(at);
-  day.setHours(0, 0, 0, 0);
-  return day.getTime();
+/**
+ * The day `n` days after the one containing `at`, in the gateway's frame.
+ *
+ * With an offset the days are fixed-width, so this is arithmetic. Without one it
+ * has to go through the calendar: local days are 23 or 25 hours long across a
+ * DST transition, and adding `DAY_MS` would drift an hour and eventually land
+ * twice on one date or skip another.
+ */
+export function addDays(at: number, n: number, offsetMinutes: number | null = null): number {
+  if (offsetMinutes !== null) return startOfDay(at, offsetMinutes) + n * DAY_MS;
+  const cursor = new Date(startOfDay(at));
+  cursor.setDate(cursor.getDate() + n);
+  return cursor.getTime();
+}
+
+/**
+ * Which weekday `at` falls on, 0 = Sunday, in the frame the days are cut in.
+ *
+ * A grid whose columns are weeks has to ask this in the same frame it buckets
+ * in, or the column a day lands in disagrees with the day it was counted as.
+ */
+export function dayOfWeek(at: number, offsetMinutes: number | null = null): number {
+  if (offsetMinutes === null) return new Date(at).getDay();
+  return new Date(at + offsetMinutes * 60_000).getUTCDay();
 }
 
 /**
@@ -113,11 +155,24 @@ export function startOfDay(at: number): number {
  * zero traffic rather than closed up, or a quiet weekend reads as a busy one.
  * Days are stepped through the calendar so a DST change stays one tick.
  */
-export function timeTicks(since: number, until: number, by: TimeBy): number[] {
+export function timeTicks(
+  since: number,
+  until: number,
+  by: TimeBy,
+  offsetMinutes: number | null = null,
+): number[] {
   const ticks: number[] = [];
   if (by === "hour") {
     const first = Math.floor(since / HOUR_MS) * HOUR_MS;
     for (let at = first; at <= until; at += HOUR_MS) ticks.push(at);
+    return ticks;
+  }
+  // With a known offset the days are fixed-width by construction, so stepping by
+  // DAY_MS lands on the same boundaries `startOfDay` produces. Without one, the
+  // calendar step stays: local days are not fixed-width across a DST change, and
+  // adding DAY_MS there would drift an hour and eventually double or skip a tick.
+  if (offsetMinutes !== null) {
+    for (let at = startOfDay(since, offsetMinutes); at <= until; at += DAY_MS) ticks.push(at);
     return ticks;
   }
   const cursor = new Date(startOfDay(since));

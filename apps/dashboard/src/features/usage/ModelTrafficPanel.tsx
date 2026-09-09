@@ -48,6 +48,14 @@ export type ModelTrafficPanelProps = {
   by: TimeBy;
   since: number;
   until: number;
+  /**
+   * The gateway's day boundary, or null for the browser's own zone.
+   *
+   * The tick axis and the bucket keys have to be cut in the same frame: the
+   * server keys `usage_daily` at this offset, so an axis cut anywhere else
+   * matches none of them and the series renders flat zero over real traffic.
+   */
+  dayOffsetMinutes: number | null;
   metric: Metric;
   /** Upstream model to the provider a configured target sends it to. */
   providers: ReadonlyMap<string, ProviderId>;
@@ -93,6 +101,7 @@ export function ModelTrafficPanel({
   by,
   since,
   until,
+  dayOffsetMinutes,
   metric,
   providers,
 }: ModelTrafficPanelProps) {
@@ -143,7 +152,7 @@ export function ModelTrafficPanel({
     const id = `${keyToTime(bucket.key, by)} ${drawn.has(model) ? model : OTHER}`;
     cells.set(id, (cells.get(id) ?? 0) + metric.of(bucket));
   }
-  const rows = timeTicks(since, until, by).map((at) => {
+  const rows = timeTicks(since, until, by, dayOffsetMinutes).map((at) => {
     const row: Record<string, number> = { at };
     for (const band of bands) row[band.name] = cells.get(`${at} ${band.name}`) ?? 0;
     return row;

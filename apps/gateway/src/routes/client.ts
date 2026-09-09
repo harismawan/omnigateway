@@ -11,7 +11,7 @@ import {
   toClientLog,
 } from "@omni/control";
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
-import type { Store } from "@omni/store";
+import { hostDayOffsetMinutes, type Store } from "@omni/store";
 import { Elysia } from "elysia";
 import {
   apiErrorHandler,
@@ -25,6 +25,17 @@ export type ClientDeps = {
   store: Store;
   admin: AdminAuth;
   sessionTtlMs: number;
+  /**
+   * Minutes east of UTC the daily usage buckets are cut on.
+   *
+   * The client's charts bucket by day exactly as the operator's do, so they need
+   * the same boundary — without it a key holder in another zone reads days that
+   * do not line up with the rows behind them. It is the one piece of install
+   * configuration this surface carries, and it is safe to: it is a boundary, not
+   * a measurement, it says nothing about any other key, and it is already public
+   * in the sense that matters — every timestamp on these charts is cut on it.
+   */
+  dayOffsetMinutes?: number;
   now?: () => number;
   logger?: Logger;
 };
@@ -82,10 +93,20 @@ export function clientRoutes(deps: ClientDeps) {
         return { ok: true };
       })
 
-      /** The caller's own key: label, prefix, allowlist, limits, consumption. */
+      /**
+       * The caller's own key: label, prefix, allowlist, limits, consumption.
+       *
+       * `dayOffsetMinutes` rides alongside rather than inside: it describes the
+       * installation, not this key, and the fields around it are all facts about
+       * the key. Additive, so a holder reading the old shape is unaffected.
+       */
       .get("/api/client/summary", async ({ request }) => {
         const apiKeyId = await requireClient(request, deps.admin);
-        return readOwnKey(deps.store, apiKeyId, now());
+        return {
+          ...(await readOwnKey(deps.store, apiKeyId, now())),
+          // Zero is UTC and a real answer, so it cannot stand in for "unset".
+          dayOffsetMinutes: deps.dayOffsetMinutes ?? hostDayOffsetMinutes(),
+        };
       })
 
       .get("/api/client/usage", async ({ request, query }) => {

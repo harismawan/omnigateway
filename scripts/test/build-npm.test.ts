@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { releaseVersion } from "../build-npm.ts";
+import { RUNTIME_DEPENDENCIES, releaseVersion, runtimeDependencies } from "../build-npm.ts";
 
 test("a release tag becomes the published version", () => {
   expect(releaseVersion("v1.2.3")).toBe("1.2.3");
@@ -20,6 +20,35 @@ test("a tag that is not a version stops the build", () => {
   for (const bad of ["", "latest", "v1.2", "v1.2.3.4", "release-1.2.3"]) {
     expect(() => releaseVersion(bad)).toThrow(/semver/);
   }
+});
+
+test("the published argon2 range is the gateway's own", () => {
+  // The drift this replaced was invisible: both numbers were valid semver and
+  // the published one was simply older, so only an install could show it.
+  const gateway = JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "..", "apps", "gateway", "package.json"), "utf8"),
+  ) as { dependencies?: Record<string, string> };
+  expect(runtimeDependencies(gateway)["@node-rs/argon2"]).toBe(
+    gateway.dependencies?.["@node-rs/argon2"],
+  );
+});
+
+test("the range that actually ships is the derived one", () => {
+  // `runtimeDependencies` being correct is not the same as the manifest using
+  // it: the bug this replaced was a stale literal in exactly that position, and
+  // reintroducing it verbatim left every test here green because they all
+  // called the helper rather than reading what the build writes.
+  const gateway = JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "..", "apps", "gateway", "package.json"), "utf8"),
+  ) as { dependencies?: Record<string, string> };
+  expect(RUNTIME_DEPENDENCIES).toEqual(runtimeDependencies(gateway));
+});
+
+test("an external that is not a gateway dependency stops the build", () => {
+  // Publishing it with no version lets npm resolve `latest` on a native module.
+  expect(() => runtimeDependencies({ dependencies: {} }, ["@node-rs/argon2"])).toThrow(
+    /not a gateway dependency/,
+  );
 });
 
 const dirs: string[] = [];

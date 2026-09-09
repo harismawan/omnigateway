@@ -47,7 +47,14 @@ function bucket(split: string, requests: number): UsageBucket {
 }
 
 /** The window the panels below chart, one hour wide and ending now. */
-const WINDOW = { by: "hour", since: NOW - HOUR_MS, until: NOW } as const;
+// `dayOffsetMinutes` is null because this window is hour-grain: the offset only
+// decides where a *day* is cut, and these panels are asked about colour order.
+const WINDOW = {
+  by: "hour",
+  since: NOW - HOUR_MS,
+  until: NOW,
+  dayOffsetMinutes: null,
+} as const;
 
 describe("the catalog arrives in display order", () => {
   test("the loaded catalog is sorted by order, whatever the wire said", async () => {

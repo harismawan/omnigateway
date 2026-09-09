@@ -76,3 +76,41 @@ test("does not mutate the input request", () => {
   validateRequest(input);
   expect(input.messages).toHaveLength(2);
 });
+
+/**
+ * The id generator is a parameter so this package can be deterministic.
+ *
+ * `packages/ir` is required to be side-effect-free, and a bare
+ * `crypto.randomUUID()` made the one function that rewrites a request answer
+ * differently for identical input. The seam existed for a while with no caller
+ * and no test, which is the same as not having it: nothing demonstrated that
+ * passing a generator changed anything.
+ */
+test("an injected generator makes identical requests validate identically", () => {
+  const counter = () => {
+    let n = 0;
+    return () => `tu_fixed_${++n}`;
+  };
+
+  const withEmptyIds = () =>
+    base([
+      {
+        role: "assistant",
+        content: [
+          { type: "toolUse", id: "", name: "Read", input: {} },
+          { type: "toolUse", id: "", name: "Write", input: {} },
+        ],
+      },
+    ]);
+
+  const first = validateRequest(withEmptyIds(), counter());
+  const second = validateRequest(withEmptyIds(), counter());
+
+  expect(first).toEqual(second);
+  // And the ids are the generator's, not the default's — a run that ignored the
+  // parameter would still satisfy the equality above only by accident.
+  const ids = first.messages[0]?.content.flatMap((block) =>
+    block.type === "toolUse" ? [block.id] : [],
+  );
+  expect(ids).toEqual(["tu_fixed_1", "tu_fixed_2"]);
+});

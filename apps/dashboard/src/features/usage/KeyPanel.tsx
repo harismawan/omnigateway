@@ -21,6 +21,14 @@ export type KeyPanelProps = {
   by: TimeBy;
   since: number;
   until: number;
+  /**
+   * The gateway's day boundary, or null for the browser's own zone.
+   *
+   * The tick axis and the bucket keys have to be cut in the same frame: the
+   * server keys `usage_daily` at this offset, so an axis cut anywhere else
+   * matches none of them and the series renders flat zero over real traffic.
+   */
+  dayOffsetMinutes: number | null;
   metric: Metric;
   /** Key id to operator-visible label; a revoked key still has rows. */
   names: ReadonlyMap<string, string>;
@@ -31,8 +39,16 @@ export type KeyPanelProps = {
  * split query feeds both the totals and the traces, so the traces cannot
  * disagree with the numbers beside them.
  */
-export function KeyPanel({ buckets, by, since, until, metric, names }: KeyPanelProps) {
-  const ticks = timeTicks(since, until, by);
+export function KeyPanel({
+  buckets,
+  by,
+  since,
+  until,
+  metric,
+  names,
+  dayOffsetMinutes,
+}: KeyPanelProps) {
+  const ticks = timeTicks(since, until, by, dayOffsetMinutes);
   const totals = new Map<string, Totals>();
   const traces = new Map<string, Map<number, number>>();
 

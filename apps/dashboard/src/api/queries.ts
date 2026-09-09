@@ -20,6 +20,7 @@ import type {
   ClientQuotaHistoryResponse,
   ClientQuotaResponse,
   ClientRequestLog,
+  ClientSummaryResponse,
   ConnectPollResult,
   ConnectStart,
   ConsoleResponse,
@@ -291,6 +292,24 @@ export function useBodyLoggingActive(): UseQueryResult<boolean> {
 /** Whether the environment permits capture at all, regardless of the setting. */
 export function useBodyLoggingAllowed(): UseQueryResult<boolean> {
   return useQuery({ ...settingsQuery, select: (response) => response.bodyLoggingAllowed });
+}
+
+/**
+ * The offset the gateway cuts days on, for charts that bucket by day.
+ *
+ * Null until the settings load, and on a gateway too old to report it. Both mean
+ * "use the browser's zone", which is what every daily chart did unconditionally
+ * before this existed: correct on a single-node install, where the offset
+ * defaults to the host's own and the operator is usually on that host, and wrong
+ * anywhere the two differ — a pod on UTC serving a console in another zone would
+ * draw day boundaries that do not line up with the `usage_daily` rows it is
+ * drawing.
+ */
+export function useDayOffsetMinutes(): UseQueryResult<number | null> {
+  return useQuery({
+    ...settingsQuery,
+    select: (response) => response.dayOffsetMinutes ?? null,
+  });
 }
 
 /**
@@ -666,10 +685,28 @@ export function useClientLogout(): UseMutationResult<{ ok: true }, Error, void> 
  * took a key id would put the scope in the caller's hands, which is the shape
  * this whole surface exists to avoid.
  */
-export function useClientSummary(): UseQueryResult<ApiKeySummary> {
+const clientSummaryQuery = {
+  queryKey: queryKeys.clientSummary,
+  queryFn: ({ signal }: { signal: AbortSignal }) =>
+    get<ClientSummaryResponse>("/api/client/summary", signal),
+};
+
+export function useClientSummary(): UseQueryResult<ClientSummaryResponse> {
+  return useQuery(clientSummaryQuery);
+}
+
+/**
+ * The gateway's day offset, for the client board's daily charts.
+ *
+ * The operator's board reads this off `/api/settings`, which is `requireReader`
+ * and therefore closed to a key holder; this surface carries it on the summary
+ * instead. Null until it loads, and on a gateway too old to send it, which means
+ * "use the browser's zone" — the same fallback and the same caveat.
+ */
+export function useClientDayOffsetMinutes(): UseQueryResult<number | null> {
   return useQuery({
-    queryKey: queryKeys.clientSummary,
-    queryFn: ({ signal }) => get<ApiKeySummary>("/api/client/summary", signal),
+    ...clientSummaryQuery,
+    select: (response) => response.dayOffsetMinutes ?? null,
   });
 }
 

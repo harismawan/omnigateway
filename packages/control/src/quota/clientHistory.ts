@@ -1,7 +1,7 @@
 import type { ProviderId } from "@omni/ir";
 import type { Store, WindowType } from "@omni/store";
 import { usedRatioOf } from "./headroom.ts";
-import { retainedSpan } from "./history.ts";
+import { pageSamples, retainedSpan, SAMPLE_QUERY_LIMIT } from "./history.ts";
 
 /**
  * One retained reading of one account's quota window, as a fraction.
@@ -62,24 +62,6 @@ export type AccountQuotaHistoryResult = {
 const MAX_SPAN_MS = 16 * 24 * 60 * 60 * 1_000;
 
 /**
- * And at most this many rows out of that span.
- *
- * A runaway guard, not a working limit, and the distinction is the whole of
- * this constant's history: it was 8_000 on the reasoning that "a window's line
- * is a few hundred points", which is wrong by an order of magnitude. A weekly
- * window charted with its predecessor spans fourteen days, and at the default
- * five-minute poll that is ~4_000 readings per credential-window — so a single
- * account with two windows already exceeded 8_000 and had its chart silently
- * shortened to a fraction of the axis it was drawn against.
- *
- * Fifty thousand is past what any install this surface is built for produces in
- * sixteen days, while still bounding a `bun:sqlite` read that is synchronous and
- * reachable by every key holder. Hitting it is a real condition rather than a
- * routine one, so it is reported rather than absorbed — see `truncated`.
- */
-const MAX_SAMPLES = 50_000;
-
-/**
  * The retained readings behind the client screen's quota charts.
  *
  * One series per account and window, which is what lets a key holder see which
@@ -105,21 +87,15 @@ export async function accountQuotaHistory(
   const { since, until } = await retainedSpan(deps, input, MAX_SPAN_MS);
 
   const [samples, credentials] = await Promise.all([
-    // One more than the cap, so a page that is *exactly* full can be told from
-    // one that was cut. Asking for the cap made `length >= MAX_SAMPLES` true
-    // for a complete history of exactly that size, and every chart on the page
-    // then claimed readings were missing when none were.
-    deps.store.credentials.listQuotaSamples({ since, until, limit: MAX_SAMPLES + 1 }),
+    deps.store.credentials.listQuotaSamples({ since, until, limit: SAMPLE_QUERY_LIMIT }),
     deps.store.credentials.list(),
   ]);
 
   const byId = new Map(credentials.map((credential) => [credential.id, credential]));
 
-  // The page overflowed, so the oldest readings in the span were cut. Decided
-  // before the extra row is dropped, and reported per series below rather than
-  // for the request as a whole.
-  const truncated = samples.length > MAX_SAMPLES;
-  const page = truncated ? samples.slice(0, MAX_SAMPLES) : samples;
+  // The page overflowed, so the oldest readings in the span were cut. Reported
+  // per series below rather than for the request as a whole.
+  const { page, truncated } = pageSamples(samples);
 
   const out: AccountQuotaSample[] = [];
   for (const sample of page) {
