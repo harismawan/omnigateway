@@ -71,7 +71,18 @@ function sizeOf(payload: unknown): number {
   }
 }
 
-export function createRing(limits: RingLimits): Ring {
+/**
+ * What both construction sites use, so there is one of them.
+ *
+ * These limits were written out twice — once in `index.ts`, once as `app.ts`'s
+ * `deps.ring` fallback. Production passes the first in, so the second was
+ * reached only by tests: the two could diverge and the suite would still be
+ * green while the gateway ran different limits. The copy that would have caught
+ * a change was the one nothing exercised.
+ */
+export const DEFAULT_RING_LIMITS: RingLimits = { frames: 500, bytes: 2 * 1024 * 1024 };
+
+export function createRing(limits: RingLimits = DEFAULT_RING_LIMITS): Ring {
   const topics = new Map<string, TopicState>();
 
   const stateFor = (topic: string): TopicState => {
