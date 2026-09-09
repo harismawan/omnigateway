@@ -16,6 +16,7 @@
  *   also why the published package needs Bun rather than Node: the store, the
  *   spawner, and the file APIs are all Bun's.
  */
+import { readFileSync } from "node:fs";
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -25,9 +26,37 @@ const outDir = join(root, "dist", "npm");
 /** Native modules cannot be bundled; they stay dependencies of the published package. */
 const EXTERNAL = ["@node-rs/argon2"];
 
-const RUNTIME_DEPENDENCIES: Readonly<Record<string, string>> = {
-  "@node-rs/argon2": "2.0.2",
-};
+/**
+ * The versions the gateway itself depends on, not a second list of them.
+ *
+ * This was a literal, and it drifted: the published package pinned argon2
+ * `2.0.2` for a workspace that had moved to `2.2.0`, so every npm install got a
+ * password hasher no test in this repository had ever run. Nothing failed,
+ * because the copy that would have caught it was the wrong one. Reading the
+ * gateway's manifest deletes the second copy rather than correcting it.
+ */
+export function runtimeDependencies(
+  manifest: { dependencies?: Record<string, string> },
+  external: readonly string[] = EXTERNAL,
+): Record<string, string> {
+  return Object.fromEntries(
+    external.map((name) => {
+      const range = manifest.dependencies?.[name];
+      // A native module that is external but absent from the manifest would be
+      // published with no version at all, which npm resolves to `latest`.
+      if (range === undefined) {
+        throw new Error(`${name} is bundled as external but is not a gateway dependency`);
+      }
+      return [name, range];
+    }),
+  );
+}
+
+const RUNTIME_DEPENDENCIES: Readonly<Record<string, string>> = runtimeDependencies(
+  JSON.parse(readFileSync(join(root, "apps", "gateway", "package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+  },
+);
 
 /**
  * Reads the release version from the tag that triggered the build.
