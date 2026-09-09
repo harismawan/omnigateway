@@ -34,7 +34,7 @@ import {
   setupFiles,
 } from "@omni/control";
 import { describeError, GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
-import type { Store } from "@omni/store";
+import { hostDayOffsetMinutes, type Store } from "@omni/store";
 import { Elysia } from "elysia";
 import type { Invalidator } from "../stream/broadcaster.ts";
 import type { ConsoleFleet } from "../stream/consoleFleet.ts";
@@ -469,7 +469,7 @@ export function adminRoutes(deps: AdminDeps) {
           // Zero is a real offset (UTC), so it cannot double as "unset"; the
           // console falls back to its own zone only when the field is absent,
           // which is an older gateway rather than a configured one.
-          dayOffsetMinutes: deps.dayOffsetMinutes ?? 0,
+          dayOffsetMinutes: deps.dayOffsetMinutes ?? hostDayOffsetMinutes(),
           // Whether, not what. The hash never leaves the store and there is no
           // route that reads it back.
           viewerConfigured: await deps.admin.isViewerConfigured(),

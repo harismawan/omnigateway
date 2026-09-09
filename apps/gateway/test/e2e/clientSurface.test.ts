@@ -215,15 +215,26 @@ test("the summary falls back to the host offset, never to UTC", async () => {
   // report UTC while `createStore`, given the same absence, cuts its rows at the
   // host's offset — two defaults for one number, with the console believing the
   // route. Pinned on both surfaces; the operator's half is in `admin.test.ts`.
-  const { store, api, login } = await harness({ omitDayOffset: true });
-  const mine = await seedApiKey(store, { label: "mine" });
-  const cookie = await login(mine.raw);
+  // In a zone that is not UTC: under the runner's default `hostDayOffsetMinutes()`
+  // is 0, so `?? 0` and the host default are the same value and this assertion
+  // cannot tell which one the route used.
+  const prev = process.env.TZ;
+  process.env.TZ = "Asia/Jakarta";
+  try {
+    const host = hostDayOffsetMinutes();
+    expect(host).not.toBe(0);
+    const { store, api, login } = await harness({ omitDayOffset: true });
+    const mine = await seedApiKey(store, { label: "mine" });
+    const cookie = await login(mine.raw);
 
-  const summary = (await (await api("/api/client/summary", cookie)).json()) as {
-    dayOffsetMinutes: number;
-  };
-  expect(summary.dayOffsetMinutes).toBe(hostDayOffsetMinutes());
-  store.close();
+    const summary = (await (await api("/api/client/summary", cookie)).json()) as {
+      dayOffsetMinutes: number;
+    };
+    expect(summary.dayOffsetMinutes).toBe(host);
+    store.close();
+  } finally {
+    process.env.TZ = prev ?? "UTC";
+  }
 });
 
 test("two keys on one gateway never see each other's traffic", async () => {

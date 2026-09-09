@@ -11,7 +11,7 @@ import {
   toClientLog,
 } from "@omni/control";
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
-import type { Store } from "@omni/store";
+import { hostDayOffsetMinutes, type Store } from "@omni/store";
 import { Elysia } from "elysia";
 import {
   apiErrorHandler,
@@ -105,7 +105,7 @@ export function clientRoutes(deps: ClientDeps) {
         return {
           ...(await readOwnKey(deps.store, apiKeyId, now())),
           // Zero is UTC and a real answer, so it cannot stand in for "unset".
-          dayOffsetMinutes: deps.dayOffsetMinutes ?? 0,
+          dayOffsetMinutes: deps.dayOffsetMinutes ?? hostDayOffsetMinutes(),
         };
       })
 

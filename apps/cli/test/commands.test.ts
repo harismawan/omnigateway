@@ -1769,6 +1769,13 @@ test("credentials list reports expiry the way the router judges it", async () =>
     expiresAt: past,
     refreshToken: null,
   });
+  // Past expiry but rescuable: the router keeps it, so the listing must too.
+  await seedCredential(store, {
+    id: "cred-refreshable",
+    authType: "oauth",
+    expiresAt: past,
+    refreshToken: "test-refresh-live",
+  });
   store.close();
 
   // The table, not `--json`: the state is a rendering of `condition()` and the
@@ -1782,4 +1789,8 @@ test("credentials list reports expiry the way the router judges it", async () =>
   expect(rowOf("cred-key")).toContain("enabled");
   expect(rowOf("cred-key")).not.toContain("expired");
   expect(rowOf("cred-oauth")).toContain("expired");
+  // The third arm, which the first version of this test left uncovered: past
+  // expiry but refreshable is usable, because dispatch refreshes before the
+  // call. Dropping this branch entirely left the suite green.
+  expect(rowOf("cred-refreshable")).toContain("expired (refreshable)");
 });

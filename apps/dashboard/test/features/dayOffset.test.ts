@@ -87,6 +87,16 @@ describe("the browser-zone fallback, when the gateway did not say", () => {
     });
   });
 
+  test("reads the weekday at the offset, not at the browser's zone", () => {
+    // The offset arm, asserted where the two can differ. Under the runner's
+    // default UTC, `getUTCDay()` and `getDay()` return the same number for
+    // every input, so swapping one for the other survived the whole suite.
+    inZone("Asia/Jakarta", () => {
+      // 17:00Z Saturday: still Saturday at UTC, already Sunday in Jakarta.
+      expect(dayOfWeek(Date.UTC(2026, 8, 12, 17), 0)).toBe(6);
+    });
+  });
+
   test("reads the weekday in the browser's zone", () => {
     inZone("Asia/Jakarta", () => {
       // 17:00Z Saturday is already Sunday in Jakarta.

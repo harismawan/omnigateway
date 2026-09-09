@@ -306,6 +306,35 @@ test("the console's read asks for one row past the cap", async () => {
   store.close();
 });
 
+test("a page of exactly the cap is the whole history, not a cut one", async () => {
+  // The reason the read asks for `cap + 1`. Comparing `length >= cap` against a
+  // read of `cap` makes a complete history of exactly that size indistinguishable
+  // from a truncated one, and every chart then claims missing readings.
+  const store = await seeded();
+  const exact = {
+    ...store,
+    credentials: {
+      ...store.credentials,
+      listQuotaSamples: async () =>
+        Array.from({ length: MAX_SAMPLES }, () => ({
+          credentialId: "c1",
+          windowType: "fiveHour" as const,
+          observedAt: NOW,
+          used: 10,
+          limit: 100,
+          resetsAt: NOW + HOUR,
+          windowMs: null,
+        })),
+    },
+  } as Store;
+
+  const result = await quotaHistory({ store: exact, now: () => NOW }, {});
+
+  expect(result.samples).toHaveLength(MAX_SAMPLES);
+  expect(result.truncated).toBe(false);
+  store.close();
+});
+
 test("an overflowing page is cut to the cap and reported", async () => {
   const store = await seeded();
   const overflowing = {

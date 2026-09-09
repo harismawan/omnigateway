@@ -695,15 +695,38 @@ test("settings report the day offset the rows are cut on", async () => {
   expect(body.dayOffsetMinutes).toBe(420);
 });
 
+/**
+ * Runs `fn` with `TZ` pinned, restoring UTC rather than deleting the key.
+ *
+ * Needed because `bun test` pins `TZ=UTC`, where `hostDayOffsetMinutes()` is 0
+ * and therefore indistinguishable from the `?? 0` this asserts against. The
+ * first version of this test passed against both implementations.
+ */
+function inZone(tz: string, fn: () => void | Promise<void>): Promise<void> {
+  const prev = process.env.TZ;
+  process.env.TZ = tz;
+  return (async () => fn())().finally(() => {
+    process.env.TZ = prev ?? "UTC";
+  });
+}
+
 test("settings fall back to the host offset, never to UTC", async () => {
   // `?? 0` here would claim UTC while `createStore` — given the same absence —
   // cuts its rows at the host's offset. Two defaults for one number, and the
   // console believes the route.
-  const { call } = await harness();
-  const body = (await (await call("GET", "/api/settings")).json()) as {
-    dayOffsetMinutes: number;
-  };
-  expect(body.dayOffsetMinutes).toBe(hostDayOffsetMinutes());
+  //
+  // Asserted in a zone that is not UTC, because that is the only place the two
+  // implementations differ: under the runner's default both return 0 and this
+  // test cannot see which one it is calling.
+  await inZone("Asia/Jakarta", async () => {
+    const host = hostDayOffsetMinutes();
+    expect(host).not.toBe(0);
+    const { call } = await harness();
+    const body = (await (await call("GET", "/api/settings")).json()) as {
+      dayOffsetMinutes: number;
+    };
+    expect(body.dayOffsetMinutes).toBe(host);
+  });
 });
 
 test("usage aggregates by the requested dimension", async () => {

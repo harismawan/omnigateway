@@ -1,6 +1,6 @@
 import { type Refresher, SCHEDULER_REFRESH_LEAD_MS } from "@omni/control";
 import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
-import type { CredentialView, Store } from "@omni/store";
+import { type CredentialView, credentialExpired, type Store } from "@omni/store";
 import { type LeaseDeps, underLease } from "../lease.ts";
 import type { Invalidator } from "../stream/broadcaster.ts";
 
@@ -58,7 +58,11 @@ export async function sweep(deps: SchedulerDeps): Promise<number> {
     // only be revived by reconnecting, and leaving it enabled costs one failed
     // attempt on every request that picks it.
     if (!credential.hasRefreshToken) {
-      if (credential.expiresAt !== null && credential.expiresAt <= deps.now()) {
+      // The store's own question rather than a third spelling of it. `due()` has
+      // already established `oauth` and a non-null expiry, so this reads the
+      // same as the comparison it replaces — but it reads it from the one place
+      // that decides what "beyond use" means, which is the point.
+      if (credentialExpired(credential, deps.now())) {
         await deps.store.credentials.update(credential.id, {
           enabled: false,
           disabledReason: "expiredNoRefresh",
