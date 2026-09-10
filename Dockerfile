@@ -68,8 +68,7 @@ COPY --from=build /app/apps/gateway apps/gateway
 # Dropping just one frees ~0.1MB and reads like the removal did nothing.
 #
 # `--omit` cannot reach tsc: `=peer` also drops @sinclair/typebox, which elysia
-# requires at runtime, and `=optional` drops @node-rs/argon2's native binding,
-# so every password hash throws.
+# requires at runtime.
 RUN find packages apps -maxdepth 2 -name node_modules -type d -exec rm -rf {} + \
  && bun install --frozen-lockfile --production --filter=@omni/gateway \
  && rm -rf node_modules/.bun/typescript@* node_modules/.bun/@typescript+* \

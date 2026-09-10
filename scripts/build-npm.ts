@@ -8,13 +8,9 @@
  * into one installable thing — the CLI and the server each become a single
  * file with their `@omni/*` imports inlined.
  *
- * Two things deliberately stay out of the bundle:
- *
- * - `@node-rs/argon2` is a native module, so it stays a real dependency and is
- *   installed by npm at the user's platform.
- * - Bun's own built-ins (`bun:sqlite`) are provided by the runtime. That is
- *   also why the published package needs Bun rather than Node: the store, the
- *   spawner, and the file APIs are all Bun's.
+ * Bun's own built-ins (`bun:sqlite`, `Bun.password`) are provided by the runtime.
+ * That is why the published package needs Bun rather than Node: the store, the
+ * hasher, the spawner, and the file APIs are all Bun's.
  */
 import { readFileSync } from "node:fs";
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -23,8 +19,8 @@ import { join } from "node:path";
 const root = join(import.meta.dir, "..");
 const outDir = join(root, "dist", "npm");
 
-/** Native modules cannot be bundled; they stay dependencies of the published package. */
-const EXTERNAL = ["@node-rs/argon2"];
+// All dependencies are bundled or provided by the Bun runtime (bun:sqlite, Bun.password, etc.)
+const EXTERNAL: string[] = [];
 
 /**
  * The versions the gateway itself depends on, not a second list of them.

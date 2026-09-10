@@ -93,7 +93,7 @@ reader. Two readers of the same environment drift, and the failure mode is a CLI
 that writes to a different database than the server reads.
 
 Dependencies: `@omni/ir`, `@omni/store`, `@omni/providers`, `@omni/router`,
-`zod`, `@node-rs/argon2`.
+`zod` (hashing uses `Bun.password`).
 
 ### apps/gateway (changed)
 
