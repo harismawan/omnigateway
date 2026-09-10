@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { RUNTIME_DEPENDENCIES, releaseVersion, runtimeDependencies } from "../build-npm.ts";
 
 test("a release tag becomes the published version", () => {
@@ -22,31 +22,20 @@ test("a tag that is not a version stops the build", () => {
   }
 });
 
-test("the published argon2 range is the gateway's own", () => {
-  // The drift this replaced was invisible: both numbers were valid semver and
-  // the published one was simply older, so only an install could show it.
+test("the published package has no external runtime dependencies", () => {
   const gateway = JSON.parse(
     readFileSync(join(import.meta.dir, "..", "..", "apps", "gateway", "package.json"), "utf8"),
   ) as { dependencies?: Record<string, string> };
-  expect(runtimeDependencies(gateway)["@node-rs/argon2"]).toBe(
-    gateway.dependencies?.["@node-rs/argon2"],
-  );
+  expect(runtimeDependencies(gateway)).toEqual({});
 });
 
-test("the range that actually ships is the derived one", () => {
-  // `runtimeDependencies` being correct is not the same as the manifest using
-  // it: the bug this replaced was a stale literal in exactly that position, and
-  // reintroducing it verbatim left every test here green because they all
-  // called the helper rather than reading what the build writes.
-  const gateway = JSON.parse(
-    readFileSync(join(import.meta.dir, "..", "..", "apps", "gateway", "package.json"), "utf8"),
-  ) as { dependencies?: Record<string, string> };
-  expect(RUNTIME_DEPENDENCIES).toEqual(runtimeDependencies(gateway));
+test("the range that actually ships is empty", () => {
+  expect(RUNTIME_DEPENDENCIES).toEqual({});
 });
 
 test("an external that is not a gateway dependency stops the build", () => {
   // Publishing it with no version lets npm resolve `latest` on a native module.
-  expect(() => runtimeDependencies({ dependencies: {} }, ["@node-rs/argon2"])).toThrow(
+  expect(() => runtimeDependencies({ dependencies: {} }, ["some-external-pkg"])).toThrow(
     /not a gateway dependency/,
   );
 });
@@ -82,30 +71,9 @@ function bundleCli(outfile: string, version: string): Bun.SyncSubprocess {
 }
 
 /**
- * Gives the artifact the one dependency a published install carries.
- *
- * `@node-rs/argon2` is deliberately external to the bundle — a native module
- * cannot be inlined — and it is declared in the published package's
- * `dependencies`, so a real install always has it in `node_modules` beside
- * `bin/omni.js`. The first version of this fixture ran the artifact from a
- * bare directory and called that "the shape a published install has", which it
- * is not — and the test passed anyway, because Bun's runtime auto-install
- * quietly resolved the module from this machine's cache. On CI it could not,
- * the import failed to stderr, and both version tests read an empty stdout.
- *
- * The symlink makes the fixture honest; the `--no-install` on every artifact
- * spawn makes the auto-install accident impossible in both environments, so
- * the test means the same thing here and on the runner.
- *
- * Resolved through the workspace consumer and realpath'd into Bun's store, so
- * the linked scope directory carries the platform binding beside the loader.
+ * The bundled artifact runs with zero external runtime dependencies.
+ * The `--no-install` on every artifact spawn ensures no runtime auto-install occurs.
  */
-function linkRuntimeDeps(dir: string): void {
-  const entry = Bun.resolveSync("@node-rs/argon2", join(root, "apps", "gateway"));
-  const scope = dirname(realpathSync(dirname(entry)));
-  mkdirSync(join(dir, "node_modules"));
-  symlinkSync(scope, join(dir, "node_modules", "@node-rs"));
-}
 
 /**
  * The version reaching the artifact, not the version reaching the manifest.
@@ -126,7 +94,6 @@ function linkRuntimeDeps(dir: string): void {
 test("the bundled CLI reports the version it was built with", () => {
   const dir = mkdtempSync(join(tmpdir(), "omni-cli-version-"));
   dirs.push(dir);
-  linkRuntimeDeps(dir);
   const outfile = join(dir, "omni.js");
 
   const build = bundleCli(outfile, "9.9.9-test");
@@ -145,7 +112,6 @@ test("a second version produces a second answer", () => {
   // echoed an argument, satisfies the test above exactly as well.
   const dir = mkdtempSync(join(tmpdir(), "omni-cli-version-"));
   dirs.push(dir);
-  linkRuntimeDeps(dir);
   const outfile = join(dir, "omni.js");
 
   expect(bundleCli(outfile, "1.2.3").exitCode).toBe(0);
@@ -172,7 +138,6 @@ test("a second version produces a second answer", () => {
 test("the bundled CLI names that same version in doctor --json", () => {
   const dir = mkdtempSync(join(tmpdir(), "omni-cli-doctor-"));
   dirs.push(dir);
-  linkRuntimeDeps(dir);
   const outfile = join(dir, "omni.js");
 
   const build = bundleCli(outfile, "9.9.9-test");

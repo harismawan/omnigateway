@@ -1,4 +1,3 @@
-import { hash, verify } from "@node-rs/argon2";
 import { type Coord, memoryCoord } from "@omni/coord";
 import { hashApiKey, keyUsable, type Store } from "@omni/store";
 import type { Principal } from "./principal.ts";
@@ -104,9 +103,9 @@ export type AdminAuthOptions = {
  *
  * This is the one secret in the system a human chooses, so it is the one place
  * where a slow hash buys anything. Parameters are the OWASP baseline: 19 MiB of
- * memory, 2 passes, 1 lane.
+ * memory, 2 passes.
  */
-const ARGON2 = { memoryCost: 19_456, timeCost: 2, parallelism: 1 } as const;
+const ARGON2 = { algorithm: "argon2id", memoryCost: 19_456, timeCost: 2 } as const;
 
 type Session = { expiresAt: number; principal: Principal };
 
@@ -161,7 +160,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
   const passwordMatches = async (stored: string | null, password: string): Promise<boolean> => {
     if (stored === null) return false;
     try {
-      return await verify(stored, password);
+      return await Bun.password.verify(password, stored);
     } catch {
       return false;
     }
@@ -200,7 +199,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
     if (password.length < MIN_PASSWORD_LENGTH) {
       throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
-    await store.config.setAdminPasswordHash(await hash(password, ARGON2));
+    await store.config.setAdminPasswordHash(await Bun.password.hash(password, ARGON2));
     // A password change is also a "log everyone out" event — every kind of
     // session, because the operator changing their own password is the one
     // action that should not leave someone else's window open.
@@ -218,7 +217,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
       if (password.length < MIN_PASSWORD_LENGTH) {
         throw new Error(`admin password must be at least ${MIN_PASSWORD_LENGTH} characters`);
       }
-      return store.config.setAdminPasswordHashIfAbsent(await hash(password, ARGON2));
+      return store.config.setAdminPasswordHashIfAbsent(await Bun.password.hash(password, ARGON2));
     },
 
     async changePassword(current, next) {
@@ -260,7 +259,7 @@ export function createAdminAuth(store: Store, opts: AdminAuthOptions): AdminAuth
         throw new Error(`viewer password must be at least ${MIN_PASSWORD_LENGTH} characters`);
       }
       await store.config.setViewerPasswordHash(
-        password === null ? null : await hash(password, ARGON2),
+        password === null ? null : await Bun.password.hash(password, ARGON2),
       );
       // Viewer sessions only. Changing who else may look does not log the
       // operator out of their own console.
