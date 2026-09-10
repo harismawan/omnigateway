@@ -189,6 +189,14 @@ test("sessions issued by one process verify on another, and end on both", async 
   expect(await a.verify(token)).toBeNull();
 });
 
+test("newly hashed passwords use the OWASP argon2id parameters", async () => {
+  const store = await memoryStore();
+  const auth = createAdminAuth(store, opts);
+  await auth.setPassword("hunter2hunter2");
+  const stored = await store.config.getAdminPasswordHash();
+  expect(stored).toMatch(/^\$argon2id\$v=19\$m=19456,t=2,p=1\$/);
+});
+
 test("verifies existing legacy hashes from @node-rs/argon2", async () => {
   const store = await memoryStore();
   const auth = createAdminAuth(store, opts);
