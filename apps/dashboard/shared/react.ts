@@ -32,6 +32,8 @@ export const {
   PureComponent,
   StrictMode,
   Suspense,
+  ViewTransition,
+  addTransitionType,
   cache,
   cacheSignal,
   captureOwnerStack,

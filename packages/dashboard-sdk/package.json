@@ -1,6 +1,6 @@
 {
   "name": "@omnigateway/dashboard-sdk",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -15,7 +15,7 @@
     "styled-components": ">=6"
   },
   "devDependencies": {
-    "@types/react": "^19.2.0"
+    "@types/react": "^19.3.0"
   },
   "description": "Build a UI panel for an OmniGateway plugin against the admin console's React",
   "keywords": [

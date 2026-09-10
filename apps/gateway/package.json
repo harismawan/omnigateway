@@ -19,7 +19,7 @@
     "@omni/rtk": "workspace:*",
     "@omni/store": "workspace:*",
     "elysia": "1.4.30",
-    "zod": "4.5.4"
+    "zod": "4.6.1"
   },
   "devDependencies": {
     "@omni/testkit": "workspace:*"
