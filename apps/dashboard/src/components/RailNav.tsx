@@ -97,6 +97,7 @@ const face = css`
     width: 15px;
     height: 15px;
     flex: none;
+    transform: translateY(-1px);
   }
 `;
 

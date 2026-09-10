@@ -30,7 +30,7 @@ const Bar = styled.header`
 
 const Mark = styled.div`
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 7px;
   font-stretch: 74%;
   font-weight: 700;

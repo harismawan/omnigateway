@@ -88,6 +88,7 @@ export const Button = styled.button<{ $variant?: ButtonVariant; $size?: ButtonSi
   svg {
     width: 14px;
     height: 14px;
+    transform: translateY(-0.5px);
   }
 `;
 
@@ -95,4 +96,8 @@ export const Button = styled.button<{ $variant?: ButtonVariant; $size?: ButtonSi
 export const IconButton = styled(Button)`
   padding: 0;
   width: ${({ $size }) => ($size === "sm" ? "24px" : "30px")};
+
+  svg {
+    transform: none;
+  }
 `;

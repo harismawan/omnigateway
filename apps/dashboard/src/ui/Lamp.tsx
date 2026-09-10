@@ -38,6 +38,7 @@ const Glyph = styled.span<{ $state: LampState }>`
   font-size: 12px;
   line-height: 1;
   flex: none;
+  transform: translateY(-1.5px);
   ${({ $state }) => tone[$state]}
 `;
 

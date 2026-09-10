@@ -28,6 +28,10 @@ export const Chip = styled.span<{ $tone?: ChipTone }>`
   font-size: 10.5px;
   letter-spacing: 0.02em;
   white-space: nowrap;
+
+  svg {
+    transform: translateY(-0.5px);
+  }
 `;
 
 const Tag = styled.span<{ $provider: ProviderId }>`
