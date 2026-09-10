@@ -1,6 +1,6 @@
 {
   "name": "@omnigateway/plugin-api",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
@@ -10,7 +10,7 @@
     "./events": "./src/events.ts"
   },
   "dependencies": {
-    "zod": "4.5.4"
+    "zod": "4.6.1"
   },
   "description": "Manifest schema, capability context and event types for OmniGateway plugins",
   "keywords": [
