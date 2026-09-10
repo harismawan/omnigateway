@@ -34,7 +34,6 @@ const Part = styled.span`
     width: 12px;
     height: 12px;
     stroke-width: 1.75;
-    transform: translateY(-1px);
   }
 `;
 

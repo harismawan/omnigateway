@@ -186,6 +186,10 @@ describe("OverviewBoard", () => {
     // keeps them inside the card is being allowed onto a second line.
     expect(getComputedStyle(valueRow).flexWrap).toBe("wrap");
     expect(getComputedStyle(breakdown).flexWrap).toBe("wrap");
+    // Flex alignment centers the icons; an optical offset would pull them above the numbers.
+    const icon = breakdown.querySelector("svg");
+    if (icon === null) throw new Error("breakdown has no icon");
+    expect(getComputedStyle(icon).transform).toBe("");
     // A count still never splits away from the arrow that names it.
     expect(getComputedStyle(breakdown).whiteSpace).toBe("nowrap");
   });
