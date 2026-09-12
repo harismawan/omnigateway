@@ -14,6 +14,7 @@ import nodes012 from "./migrations/012_nodes.sql" with { type: "text" };
 import healthMeasurements013 from "./migrations/013_health_measurements.sql" with { type: "text" };
 import keyExpiry014 from "./migrations/014_key_expiry.sql" with { type: "text" };
 import logKeyset015 from "./migrations/015_log_keyset.sql" with { type: "text" };
+import logFilterIndexes016 from "./migrations/016_log_filter_indexes.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -50,6 +51,9 @@ const MIGRATIONS: ReadonlyArray<{
   // Index-only: three shorter indexes replaced by their keyset-ordered forms.
   // No `after`, because there is no data to move.
   { id: 15, sql: logKeyset015 },
+  // Index-only again, and the measurement 15 said should buy the next one: an
+  // unindexed exact filter scanned the whole table whenever it matched nothing.
+  { id: 16, sql: logFilterIndexes016 },
 ];
 
 /**

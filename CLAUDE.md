@@ -728,6 +728,12 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   parameter to repo method mean editing that arrow; `packages/store/test/swap.test.ts` read
   forwarder source, assert no arrow drop argument.
 - `vacuum()` must checkpoint, or page count fall while file keep every page.
+- **Nothing under `packages/store/src` may run `ANALYZE`.** `model` filter is one OR clause
+  (`requested_model = ? OR resolved_model = ?`); planner reach it as MULTI-INDEX OR only while
+  `sqlite_stat1` absent, and with stats it cost union's sort against ordered scan and pick
+  scan — full table per miss, silently, on exact case migration 016 exist for. Plan test run on
+  empty database so it cannot see that; source-reading test in `migrations.test.ts` is guard.
+  Re-measure that plan before adding it.
 - Restore compare admin password hash across swap, invalidate sessions only when differ.
   **Nothing may sit between swap and that comparison.** `swapIn` rebuild `usage_rollup` last
   and guarded, for that reason; cost documented in `README.md`.

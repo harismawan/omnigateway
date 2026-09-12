@@ -1,0 +1,52 @@
+-- Indexes for the exact filters on `request_logs`, which `015_log_keyset.sql`
+-- deliberately left out pending a measurement. This is that measurement, taken
+-- on a 75,610-row install.
+--
+-- Every unindexed exact filter cost a full table scan whenever it matched
+-- nothing or matched rarely, which is the common case while a name is being
+-- typed and the whole case when an operator asks about traffic that turns out
+-- not to exist. `bun:sqlite` is synchronous, so that scan is the event loop:
+-- 15ms in which no proxied request moves, growing linearly with retention.
+--
+--   filter                   before    after
+--   resolved_model (miss)    15.7ms    0.1ms
+--   error_code (miss)        15.0ms    0.0ms
+--   resolved_provider miss   14.2ms    0.0ms
+--   model, either column     17.2ms    0.0ms   (697ms on a cold cache)
+--
+-- The `model` filter is why this stopped being optional. It is the one clause
+-- that is an OR — `requested_model = ? OR resolved_model = ?` — and an OR over
+-- two unindexed columns cannot stop early at all: the page limit bounds what is
+-- returned, not what is compared. With both indexes present the planner reaches
+-- it as a MULTI-INDEX OR, unioning two seeks.
+--
+-- That plan sorts its union, so it is a small loss on a value most rows carry:
+-- 3.9ms against the ordered scan's 0.6ms at 41,937 matching rows. Taken
+-- deliberately, because the loss is bounded by the page and the win is a scan
+-- that is not, and because the miss is the case an operator produces by typing.
+--
+-- Trap: **`ANALYZE` reverses this.** With `sqlite_stat1` present the planner
+-- costs the union's sort against the ordered scan and picks the scan — 17ms
+-- again, silently, on exactly the case these indexes exist for. Measured: the
+-- plan is a MULTI-INDEX OR at 5,000 rows and an ordered scan at the same 5,000
+-- rows once `ANALYZE` has run.
+--
+-- `migrations.test.ts` asserts the plan, but on an empty database, so it cannot
+-- see that reversal: the damage is to a plan, on data the suite does not have.
+-- What guards it is a second test asserting nothing under `src/` runs `ANALYZE`
+-- at all. Whoever needs to run it re-measures the `model` filter first.
+--
+-- `state` gets nothing: `idx_request_logs_pending` already covers the only
+-- selective half, and `state = 'done'` is every row, so the keyset index fills
+-- a page immediately. Still nothing per-column for `failed`, whose predicate is
+-- `state = 'done' AND status >= 400` and which reads at 1.0ms off the keyset
+-- index, because failures cluster near the head an operator is looking at.
+--
+-- Each index leads with the filtered column and continues with the keyset pair,
+-- so one seek answers the filter and the walk from it is already in page order.
+-- Measured cost of the four: 2.6us to 4.7us per inserted row, which is noise
+-- beside a request that spends seconds upstream.
+CREATE INDEX idx_request_logs_resolved_model ON request_logs (resolved_model, at DESC, id DESC);
+CREATE INDEX idx_request_logs_requested_model ON request_logs (requested_model, at DESC, id DESC);
+CREATE INDEX idx_request_logs_error_code ON request_logs (error_code, at DESC, id DESC);
+CREATE INDEX idx_request_logs_provider ON request_logs (resolved_provider, at DESC, id DESC);
