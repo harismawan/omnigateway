@@ -1,30 +1,41 @@
--- Re-shapes migration 005's indexes for a substring match. The SQLite copy,
--- `017_log_text_search.sql`, carries the measurement and the reasoning: a leading
--- wildcard cannot seek a B-tree, so the three per-column indexes answer none of
--- the queries they were built for and are dropped rather than left costing a
--- write per row.
+-- Drops migration 005's per-column indexes, which the substring match made
+-- unseekable. The SQLite copy, `017_log_text_search.sql`, carries the reasoning:
+-- a leading wildcard has no prefix to range over, so these three answer none of
+-- the queries they were built for and only cost a write per row.
 --
--- **The replacement is honestly weaker here than it is there.** SQLite will test
--- the match against entries of the index it is already walking, which is what
--- buys the 2.6x measured on that side. Postgres applies a leading-wildcard
--- `ILIKE` as a filter on the heap tuple, so trailing index columns do not save
--- the fetch for a `SELECT *` the way they do in SQLite — the shape is kept so the
--- two backends carry one schema and one contract, not because the numbers
--- transfer.
+-- **This backend does not get SQLite's replacement, because measurement says it
+-- would not use it.** There, the text columns move into the keyset index so the
+-- scan tests the match against entries it is already walking; here the planner
+-- does not walk that index at all. It reads a leading-wildcard `ILIKE` as
+-- unindexable, so both misses plan as a parallel sequential scan with a sort on
+-- top — `idx_request_logs_at` is never opened, and nothing put in it can be. An
+-- earlier draft of this file widened it anyway, "so the two backends carry one
+-- schema". Measured at 500,000 rows of a 284MB table:
 --
--- What does work on this backend, when a substring miss over a large log stops
--- being acceptable, is `pg_trgm` with a GIN index. It is left out because it is
--- an extension an operator must have installed, and because SQLite's answer to
--- the same problem is a different mechanism entirely (FTS5 trigram), so adopting
--- either means the two backends stop sharing one predicate. A time bound is the
--- cheap lever on both, and it is the one already wired into every surface.
+--   idx_request_logs_at        model miss   error miss   head read   index size
+--   (at, id)                      86.43ms      16.42ms      0.02ms         15MB
+--   (at, id, + 3 columns)         86.68ms      16.43ms      0.02ms         58MB
 --
--- `resolved_provider` keeps its own index and its `=`: it arrives from a dropdown
--- of ids the gateway supplied, so it is never half-typed.
+-- 3.9x the index, a wider row to maintain on every insert, and 0.25ms of noise.
+-- One schema is not worth that; one *predicate* is what the backends actually
+-- share, and `logPage.ts` holds it. The shapes are allowed to differ where the
+-- planners do.
+--
+-- The scan is also cheaper here than the same scan is on SQLite, and not by
+-- accident: `bun:sqlite` is synchronous, so 78ms of scanning is 78ms in which no
+-- proxied request moves, while Postgres runs it in another process across three
+-- workers. The index shape mattered more there for that reason too.
+--
+-- What would work on this backend, when a substring miss over a large log stops
+-- being acceptable, is `pg_trgm` with a GIN index. Left out because it is an
+-- extension an operator must have installed, and SQLite's answer to the same
+-- problem is a different mechanism entirely (FTS5 trigram), so adopting either
+-- means the two backends stop sharing one predicate. A time bound is the cheap
+-- lever on both, and it is the one already wired into every surface.
+--
+-- `resolved_provider` keeps 005's index and its `=`, and here it earns it plainly:
+-- a provider with no traffic answers in 0.01ms off an index scan rather than the
+-- seq scan it would otherwise cost.
 DROP INDEX IF EXISTS idx_request_logs_resolved_model;
 DROP INDEX IF EXISTS idx_request_logs_requested_model;
 DROP INDEX IF EXISTS idx_request_logs_error_code;
-
-DROP INDEX IF EXISTS idx_request_logs_at;
-CREATE INDEX idx_request_logs_at
-  ON request_logs (at DESC, id DESC, requested_model, resolved_model, error_code);
