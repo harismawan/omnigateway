@@ -858,6 +858,92 @@ test("logs are returned newest first, capped, and normalize fractional limits", 
   expect(blank.logs).toHaveLength(3);
 });
 
+test("logs page on an opaque cursor, and a bad one is refused rather than restarted", async () => {
+  const { call, store } = await harness();
+  for (let i = 0; i < 5; i += 1) {
+    await store.usage.append(requestLog({ id: `r${i}`, at: NOW + i }));
+  }
+
+  const first = (await (await call("GET", "/api/logs?limit=2")).json()) as {
+    logs: Array<{ id: string }>;
+    nextCursor: string | null;
+  };
+  expect(first.logs.map((row) => row.id)).toEqual(["r4", "r3"]);
+  expect(first.nextCursor).toBeTruthy();
+
+  const second = (await (
+    await call("GET", `/api/logs?limit=2&cursor=${encodeURIComponent(first.nextCursor ?? "")}`)
+  ).json()) as { logs: Array<{ id: string }>; nextCursor: string | null };
+  expect(second.logs.map((row) => row.id)).toEqual(["r2", "r1"]);
+
+  // A cursor that cannot be read is a 400. Falling back to the newest page
+  // would hand an operator paging through an incident the head again, which
+  // reads as having reached the end of the history.
+  expect((await call("GET", "/api/logs?cursor=not-a-cursor")).status).toBe(400);
+});
+
+test("every log filter is applied by the gateway, and an unknown one is refused", async () => {
+  const { call, store } = await harness();
+  await store.usage.append(
+    requestLog({ id: "old", at: NOW, apiKeyId: "k-wanted", errorCode: "UPSTREAM", status: 502 }),
+  );
+  for (let i = 0; i < 10; i += 1) {
+    await store.usage.append(requestLog({ id: `noise${i}`, at: NOW + 100 + i, apiKeyId: "k-x" }));
+  }
+
+  // The matching row is the oldest of eleven and the page holds two, so only a
+  // filter the store applied before the limit can find it.
+  const scoped = (await (await call("GET", "/api/logs?limit=2&apiKeyId=k-wanted")).json()) as {
+    logs: Array<{ id: string }>;
+  };
+  expect(scoped.logs.map((row) => row.id)).toEqual(["old"]);
+
+  const failed = (await (await call("GET", "/api/logs?limit=2&failed=true")).json()) as {
+    logs: Array<{ id: string }>;
+  };
+  expect(failed.logs.map((row) => row.id)).toEqual(["old"]);
+
+  const coded = (await (await call("GET", "/api/logs?limit=2&errorCode=UPSTREAM")).json()) as {
+    logs: Array<{ id: string }>;
+  };
+  expect(coded.logs.map((row) => row.id)).toEqual(["old"]);
+
+  // A filter that is merely ignored produces a page an operator reads as "no
+  // matches" when the truth is "that filter never ran".
+  expect((await call("GET", "/api/logs?resolvedMdoel=fast")).status).toBe(400);
+  expect((await call("GET", "/api/logs?since=2&until=1")).status).toBe(400);
+});
+
+test("the export streams a download with a server-chosen name and no store", async () => {
+  const { call, store } = await harness();
+  await store.usage.append(requestLog({ id: "r1", at: NOW, requestedModel: "=danger" }));
+
+  const csv = await call("GET", `/api/logs/export?since=0&until=${NOW + 1}`);
+  expect(csv.status).toBe(200);
+  expect(csv.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+  expect(csv.headers.get("cache-control")).toBe("no-store");
+  // No caller-supplied text reaches the header: the name is built from the
+  // format and the clock.
+  expect(csv.headers.get("content-disposition")).toMatch(
+    /^attachment; filename="omnigateway-logs-[\dTZ-]+\.csv"$/,
+  );
+  const text = await csv.text();
+  expect(text.split("\r\n")[0]?.startsWith("id,state,at,")).toBe(true);
+  // Neutralised on the way out, because a spreadsheet runs what it reads.
+  expect(text).toContain("'=danger");
+
+  const jsonl = await call("GET", `/api/logs/export?since=0&until=${NOW + 1}&format=jsonl`);
+  expect(jsonl.headers.get("content-type")).toBe("application/x-ndjson");
+  const lines = (await jsonl.text()).split("\n").filter((line) => line.length > 0);
+  expect(lines).toHaveLength(1);
+  // Lossless: the same text the CSV had to guard survives verbatim here.
+  expect(JSON.parse(lines[0] ?? "null")).toMatchObject({ requestedModel: "=danger" });
+
+  // The interval is what bounds a read with no page size, so it is required.
+  expect((await call("GET", "/api/logs/export")).status).toBe(400);
+  expect((await call("GET", `/api/logs/export?since=0&until=${NOW}&format=xlsx`)).status).toBe(400);
+});
+
 /* ------------------------------------------------------- captured bodies -- */
 
 const BODY_AT = Date.UTC(2026, 7, 17, 12, 0, 0);

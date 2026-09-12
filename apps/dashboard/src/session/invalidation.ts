@@ -1,5 +1,5 @@
 import type { InvalidateQueryFilters, QueryClient } from "@tanstack/react-query";
-import { queryKeys } from "../api/queries.ts";
+import { isHeadPage, queryKeys } from "../api/queries.ts";
 
 /** The one `stream:*` topic this console holds. Named because three files spell it. */
 export const CONSOLE_TOPIC = "stream:console";
@@ -54,10 +54,27 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
       (query.queryKey[0] === "client" &&
         (query.queryKey[1] === "usage" || query.queryKey[1] === "summary")),
   },
+  /**
+   * ## Why the paginated boards are matched by state, not only by prefix
+   *
+   * `["logPages", …]` and `["client", "logPages", …]` are infinite queries, and
+   * invalidating one refetches **every page it has loaded** — so on a busy
+   * gateway an operator who had scrolled back ten pages would have all ten
+   * re-read once a second, to repaint rows that are nowhere near the head.
+   *
+   * The topic means "the log changed", and what changed is its head. So these
+   * two are invalidated only while they *are* their head: one page loaded, or
+   * none yet. Once older pages are open the board is reading a window that has
+   * already scrolled past the newest row, and it stays as the operator left it
+   * until they clear the filters or reload.
+   */
   "res:logs": {
     predicate: (query) =>
       (query.queryKey[0] === "logs" && query.queryKey[1] !== "body") ||
-      (query.queryKey[0] === "client" && query.queryKey[1] === "logs"),
+      (query.queryKey[0] === "client" && query.queryKey[1] === "logs") ||
+      ((query.queryKey[0] === "logPages" ||
+        (query.queryKey[0] === "client" && query.queryKey[1] === "logPages")) &&
+        isHeadPage(query.state.data)),
   },
   // `["credentials"]` covers `["credentials", "health"]`, which is the one that
   // actually moves: the health poller writes it every ten seconds today.

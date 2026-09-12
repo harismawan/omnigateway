@@ -2,15 +2,24 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import styled from "styled-components";
 import {
+  isHeadPage,
   LOG_CADENCE_MS,
+  queryKeys,
   useClientDayOffsetMinutes,
-  useClientLogs,
+  useClientLogPages,
   useClientQuota,
   useClientQuotaHistory,
   useClientSummary,
   useClientUsage,
+  useTrimToHead,
 } from "../../api/queries.ts";
-import type { AccountQuota, LimitReading, RequestRow } from "../../api/types.ts";
+import {
+  type AccountQuota,
+  type LimitReading,
+  type LogFilters,
+  NO_LOG_FILTERS,
+  type RequestRow,
+} from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount, formatPercent, formatRelative, formatUsd } from "../../lib/format.ts";
 import {
@@ -23,7 +32,7 @@ import {
 } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
 import { Button, IconButton } from "../../ui/Button.tsx";
-import { Input, Select } from "../../ui/Field.tsx";
+import { Select } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Module } from "../../ui/Panel.tsx";
@@ -32,21 +41,21 @@ import { Section } from "../../ui/Section.tsx";
 import { Controls, Segment } from "../../ui/Segment.tsx";
 import { Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
-import { filterLogs, RequestDetail, RequestTable, useCurrentTime } from "../logs/RequestTable.tsx";
+import { LogFilterBar } from "../logs/LogFilterBar.tsx";
+import { RequestDetail, RequestTable, useCurrentTime } from "../logs/RequestTable.tsx";
 import { chartSpanOf, WindowChart } from "../quota/WindowChart.tsx";
 import { SummaryDeck } from "../usage/SummaryDeck.tsx";
 import { RANGES, type RangeId, rangeOf, startOfDay } from "../usage/shared.ts";
 
 /**
- * How many rows to fetch, shortest first.
+ * How many rows a page holds, shortest first.
  *
  * Twenty by default and never fewer: a client screen is read to answer "what
- * did my last few requests do", and the longer tails are here for the rare walk
- * back through a bad afternoon rather than for the arrival case.
+ * did my last few requests do", and the longer pages are here for the rare walk
+ * back through a bad afternoon rather than for the arrival case — which is also
+ * what "Load older" is for, so the default staying small costs nothing.
  */
 const LIMITS = [20, 50, 100, 250] as const;
-
-type Filter = "all" | "failed";
 
 /** The window a limit is counted over, spelled for a reader rather than a schema. */
 const LIMIT_WINDOW_LABEL: Readonly<Record<string, string>> = {
@@ -225,8 +234,7 @@ function AccountRow({
 export function ClientBoard() {
   const { cadence, live: liveUpdates } = useLive();
   const [rangeId, setRangeId] = useState<RangeId>("24h");
-  const [filter, setFilter] = useState<Filter>("all");
-  const [term, setTerm] = useState("");
+  const [filters, setFilters] = useState<LogFilters>(NO_LOG_FILTERS);
   const [limit, setLimit] = useState<number>(LIMITS[0]);
   const [open, setOpen] = useState<RequestRow | null>(null);
   const [openAccount, setOpenAccount] = useState<string | null>(null);
@@ -250,7 +258,12 @@ export function ClientBoard() {
   const common = { since, grain: range.grain } as const;
   const series = useClientUsage({ ...common, groupBy: range.by }, cadence(60_000, "res:usage"));
   const byModel = useClientUsage({ ...common, groupBy: "model" }, cadence(60_000, "res:usage"));
-  const logs = useClientLogs(limit, cadence(LOG_CADENCE_MS, "res:logs"));
+  const logs = useClientLogPages(filters, limit, cadence(LOG_CADENCE_MS, "res:logs"));
+  // Loading scrollback stops the poll and the push, so the panel says so and
+  // offers the way back rather than leaving a frozen head to be read as a key
+  // that has served nothing since.
+  const paused = !isHeadPage(logs.data);
+  const backToHead = useTrimToHead(queryKeys.clientLogPages(filters, limit));
   // Polled, with no topic. A client holds `res:usage` and `res:logs` and nothing
   // else, so naming `res:quota` here would switch polling off in favour of a
   // push that never arrives, and the panel would sit frozen with no error.
@@ -305,10 +318,12 @@ export function ClientBoard() {
     openAccount !== null && spans.length > 0,
   );
 
-  const hasPending = (logs.data ?? []).some(isPending);
-  const now = useCurrentTime(liveUpdates && hasPending);
-  const rows = filterLogs(logs.data ?? [], filter, term);
-  const failed = (logs.data ?? []).filter(isError).length;
+  const rows = useMemo(
+    () => (logs.data?.pages ?? []).flatMap((page) => page.logs),
+    [logs.data?.pages],
+  );
+  const now = useCurrentTime(liveUpdates && rows.some(isPending));
+  const failed = rows.filter(isError).length;
 
   const buckets = series.data ?? [];
   const requests = buckets.reduce((sum, bucket) => sum + bucket.requests, 0);
@@ -612,31 +627,18 @@ export function ClientBoard() {
         meta={`${rows.length} shown`}
         actions={
           <Controls>
-            <Input
-              value={term}
-              placeholder="Filter by model or error"
-              aria-label="Filter requests"
-              style={{ width: 200 }}
-              onChange={(event) => setTerm(event.target.value)}
-            />
-            <Select
-              value={filter}
-              aria-label="Show which requests"
-              style={{ width: "auto" }}
-              onChange={(event) => setFilter(event.target.value as Filter)}
-            >
-              <option value="all">All requests</option>
-              <option value="failed">Failed only</option>
-            </Select>
+            {/* No `operator`: the account and key controls are absent here,
+                and `/api/client/logs` refuses both parameters regardless. */}
+            <LogFilterBar filters={filters} onChange={setFilters} />
             <Select
               value={limit}
-              aria-label="How many requests to fetch"
+              aria-label="How many requests per page"
               style={{ width: "auto" }}
               onChange={(event) => setLimit(Number(event.target.value))}
             >
               {LIMITS.map((value) => (
                 <option key={value} value={value}>
-                  last {value}
+                  {value} per page
                 </option>
               ))}
             </Select>
@@ -652,15 +654,35 @@ export function ClientBoard() {
         empty={{
           legend: "No requests",
           message:
-            (logs.data ?? []).length === 0
+            Object.keys(filters).length === 0
               ? "Nothing served through this key yet."
-              : "No request in this window matches the filter. Clear it to see everything.",
+              : "No request served through this key matches these filters.",
         }}
         isEmpty={rows.length === 0}
         footer={
-          <Muted>
-            {formatCount(failed)} of the last {formatCount((logs.data ?? []).length)} failed.
-          </Muted>
+          <Row $gap={2} $wrap>
+            <Muted>
+              {formatCount(failed)} of the {formatCount(rows.length)} loaded failed.
+            </Muted>
+            {logs.hasNextPage ? (
+              <Button
+                type="button"
+                $size="sm"
+                disabled={logs.isFetchingNextPage}
+                onClick={() => void logs.fetchNextPage()}
+              >
+                {logs.isFetchingNextPage ? "Loading…" : "Load older"}
+              </Button>
+            ) : null}
+            {paused ? (
+              <>
+                <Muted>Live updates are paused while older pages are loaded.</Muted>
+                <Button type="button" $size="sm" onClick={backToHead}>
+                  Back to live
+                </Button>
+              </>
+            ) : null}
+          </Row>
         }
       >
         <ScrollX>

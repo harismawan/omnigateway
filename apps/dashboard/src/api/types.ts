@@ -503,10 +503,49 @@ export type UsageQuery = {
 
 export type UsageResponse = { rows: UsageBucket[] };
 
-export type LogsResponse = { logs: RequestLog[] };
+export type LogsResponse = { logs: RequestLog[]; nextCursor?: string | null };
 
 /** The client's own tail, which is a narrower row than the operator's. */
-export type ClientLogsResponse = { logs: ClientRequestLog[] };
+export type ClientLogsResponse = { logs: ClientRequestLog[]; nextCursor?: string | null };
+
+/**
+ * The filters the log routes accept, and which of them match loosely.
+ *
+ * Two kinds, and the split is by where the value came from. Anything the gateway
+ * handed the console — an id, a provider, a state — is compared with `=`, because
+ * it was picked from a list and a looser comparison could only widen it. Anything
+ * a person typed is matched as a case-insensitive substring, applied by the
+ * gateway *before* the page limit.
+ *
+ * That last clause is the whole difference from the box this replaced. The old
+ * one matched substrings too, but over a *fetched tail* in the browser, so it
+ * answered "among the newest N rows" while reading as "in the log". Substring was
+ * never the problem; filtering a page instead of the table was.
+ *
+ * `credentialId` and `apiKeyId` are operator-only; the client surface accepts
+ * neither, so its controls do not offer them.
+ */
+export type LogFilters = {
+  since?: number;
+  until?: number;
+  state?: "pending" | "done";
+  /** Only ever `"true"`. "Not failed" and "succeeded" differ on pending rows. */
+  failed?: "true";
+  provider?: string;
+  /** Substring of the name the client asked for. */
+  requestedModel?: string;
+  /** Substring of the name the gateway routed to. */
+  resolvedModel?: string;
+  /** Substring of *either* model name, which is what a bare word in the box means. */
+  model?: string;
+  credentialId?: string;
+  apiKeyId?: string;
+  /** Substring of the error code. */
+  errorCode?: string;
+};
+
+/** An empty filter set, so "cleared" is one value rather than eight. */
+export const NO_LOG_FILTERS: LogFilters = {};
 
 /**
  * One line of the gateway's own output.

@@ -12,10 +12,14 @@ import {
   createKey,
   credentialHealth,
   dryRun,
+  EXPORT_CONTENT_TYPE,
+  exportFilename,
+  exportLogs,
   getSettings,
   listCredentials,
   listKeys,
   listModels,
+  pageLogs,
   parseOrThrow,
   patchCredential,
   providerCatalog,
@@ -27,7 +31,6 @@ import {
   quotaRefreshSchema,
   readConsole,
   readRequestBody,
-  recentLogs,
   removeCredential,
   removeModel,
   revokeKey,
@@ -50,6 +53,9 @@ import {
   requireReader,
   sessionCookie,
 } from "./http.ts";
+
+/** One encoder for the export stream; `TextEncoder` is stateless and reusable. */
+const EXPORT_ENCODER = new TextEncoder();
 
 export type AdminDeps = {
   store: Store;
@@ -616,9 +622,70 @@ export function adminRoutes(deps: AdminDeps) {
         };
       })
 
+      /**
+       * One page of request metadata, newest first.
+       *
+       * Every filter is applied by the store before the page limit, so "failed
+       * requests" means failures in the retained log rather than failures among
+       * the newest N rows — which is what it meant when the console filtered a
+       * fetched tail in the browser.
+       *
+       * Additively shaped: `logs` is what it always was and `nextCursor` rides
+       * beside it, so a consumer reading only `logs` is unaffected.
+       */
       .get("/api/logs", async ({ request, query }) => {
         await requireReader(request, deps.admin);
-        return { logs: await recentLogs(deps.store, query.limit) };
+        return pageLogs(deps.store, query);
+      })
+
+      /**
+       * The same rows, streamed as a file.
+       *
+       * `requireReader`, not `requireAdmin`, and that is deliberate: a viewer
+       * can already retrieve every one of these rows and every one of these
+       * fields through `/api/logs`, so export changes the transfer shape rather
+       * than the authority. The snapshot download next door stays admin-only
+       * because it carries encrypted credentials and key hashes — a difference
+       * in what is inside, not in how it is fetched.
+       *
+       * Metadata only. Nothing here touches the body repository, and there is
+       * no filter or format that would reach it.
+       *
+       * The generator is consumed by the stream rather than collected: an
+       * unbounded interval on a busy gateway is more rows than this process
+       * should hold. A client that disconnects cancels the stream, the loop
+       * stops pulling pages, and nothing is written in-band to say so — both
+       * formats would parse an error row as data.
+       */
+      .get("/api/logs/export", async ({ request, query }) => {
+        await requireReader(request, deps.admin);
+        const format = query.format === "jsonl" ? "jsonl" : "csv";
+        const rows = exportLogs(deps.store, query);
+        // The first chunk is pulled before the response is built, so a bad
+        // filter or an unreadable cursor is still a normal gateway error with a
+        // status rather than a 200 that dies two bytes in.
+        const head = await rows.next();
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            if (head.done !== true) controller.enqueue(EXPORT_ENCODER.encode(head.value));
+          },
+          async pull(controller) {
+            const next = await rows.next();
+            if (next.done === true) controller.close();
+            else controller.enqueue(EXPORT_ENCODER.encode(next.value));
+          },
+          // Stops the paging. Without it the generator is suspended forever at
+          // its yield and the store keeps no work queued, but the walk is also
+          // never told the reader is gone.
+          cancel: (reason: unknown) => void rows.return(reason),
+        });
+        return new Response(body, {
+          headers: {
+            "content-type": EXPORT_CONTENT_TYPE[format],
+            "content-disposition": `attachment; filename="${exportFilename(format, deps.now())}"`,
+            "cache-control": "no-store",
+          },
+        });
       })
 
       /**

@@ -396,3 +396,365 @@ forEachStore((backend) => {
     expect(row?.status).toBe(499);
   });
 });
+
+const T2 = 1_700_000_000_000;
+
+/**
+ * The paging contract, asserted against both backends because "proven on one"
+ * is the whole reason this file exists. Every case here is a way a keyset read
+ * silently loses or repeats a row rather than failing.
+ */
+forEachStore((backend) => {
+  /** Nine rows across three timestamps, so every page boundary lands on a tie. */
+  const seeded = async () => {
+    const s = await backend.fresh();
+    for (const at of [1, 2, 3]) {
+      for (const id of ["a", "b", "c"]) {
+        await s.usage.append(logRow({ id: `${at}${id}`, at: T2 + at }));
+      }
+    }
+    return s;
+  };
+
+  const walk = async (
+    s: Awaited<ReturnType<typeof seeded>>,
+    limit: number,
+    query: Partial<Parameters<typeof s.usage.page>[0]> = {},
+  ): Promise<string[]> => {
+    const seen: string[] = [];
+    let cursor: { at: number; id: string } | null = null;
+    for (let guard = 0; guard < 50; guard += 1) {
+      const page: Awaited<ReturnType<typeof s.usage.page>> = await s.usage.page({
+        ...query,
+        limit,
+        cursor,
+      });
+      expect(page.logs.length).toBeLessThanOrEqual(limit);
+      seen.push(...page.logs.map((row) => row.id));
+      if (page.next === null) return seen;
+      cursor = page.next;
+    }
+    throw new Error("paging did not terminate");
+  };
+
+  test("page walks newest first, breaking ties on id, with no omission or repeat", async () => {
+    const s = await seeded();
+    const every = await walk(s, 9);
+    // Descending `at`, and within a timestamp descending `id`. The tie-break
+    // has to be total: two rows written in the same millisecond are ordered
+    // only by id, and a sort that leaves them equal makes the cursor ambiguous.
+    expect(every).toEqual(["3c", "3b", "3a", "2c", "2b", "2a", "1c", "1b", "1a"]);
+
+    // The same sequence however it is cut, including page sizes whose
+    // boundaries fall inside a group of equal timestamps.
+    for (const limit of [1, 2, 3, 4, 8]) {
+      expect(await walk(s, limit)).toEqual(every);
+      expect(new Set(await walk(s, limit)).size).toBe(9);
+    }
+  });
+
+  test("a full final page reports no cursor, so paging stops without an empty read", async () => {
+    const s = await seeded();
+    // `limit + 1` is what makes this answerable: with exactly `limit` rows
+    // left, a repo that cut the cursor from the last row it returned would
+    // hand back a cursor whose only page is empty, and every caller would make
+    // one more round trip to learn nothing.
+    const first = await s.usage.page({ limit: 9, cursor: null });
+    expect(first.logs).toHaveLength(9);
+    expect(first.next).toBeNull();
+
+    const short = await s.usage.page({ limit: 8, cursor: null });
+    expect(short.next).toEqual({ at: T2 + 1, id: "1b" });
+  });
+
+  test("the cursor is exclusive, and a row written above it does not disturb the walk", async () => {
+    const s = await seeded();
+    const first = await s.usage.page({ limit: 4, cursor: null });
+    expect(first.next).not.toBeNull();
+    if (first.next === null) throw new Error("expected a cursor");
+
+    // Arrivals while an operator is reading. A keyset walk is anchored to the
+    // rows themselves, so the new head neither shifts the window (as an offset
+    // would) nor appears twice.
+    await s.usage.append(logRow({ id: "9z", at: T2 + 9 }));
+    const second = await s.usage.page({ limit: 9, cursor: first.next });
+    expect(second.logs.map((row) => row.id)).toEqual(["2b", "2a", "1c", "1b", "1a"]);
+
+    // And the boundary row itself is never returned twice.
+    expect(second.logs.map((row) => row.id)).not.toContain(first.logs.at(-1)?.id);
+  });
+
+  test("filters and scope are applied before the limit, not to the page after it", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "old-match", at: T2 + 1, apiKeyId: "k-wanted" }));
+    for (let i = 0; i < 20; i += 1) {
+      await s.usage.append(logRow({ id: `noise-${i}`, at: T2 + 100 + i, apiKeyId: "k-other" }));
+    }
+
+    // The only matching row is the oldest of twenty-one. A repo that took the
+    // newest N and then filtered would return nothing here and report the log
+    // as having no rows for that key — the failure this whole change exists to
+    // stop, and one that reads as an empty result rather than as an error.
+    const page = await s.usage.page({ limit: 5, cursor: null, apiKeyId: "k-wanted" });
+    expect(page.logs.map((row) => row.id)).toEqual(["old-match"]);
+    expect(page.next).toBeNull();
+  });
+
+  test("requested and resolved model are separate questions", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(
+      logRow({ id: "aliased", at: T2, requestedModel: "fast", resolvedModel: "claude-opus-4" }),
+    );
+
+    // An alias and what it resolved to are different facts about one row, and
+    // a repo that read one column for both would answer yes to both of these.
+    expect(
+      (await s.usage.page({ limit: 5, cursor: null, requestedModel: "fast" })).logs,
+    ).toHaveLength(1);
+    expect(
+      (await s.usage.page({ limit: 5, cursor: null, resolvedModel: "fast" })).logs,
+    ).toHaveLength(0);
+    expect(
+      (await s.usage.page({ limit: 5, cursor: null, requestedModel: "claude-opus-4" })).logs,
+    ).toHaveLength(0);
+  });
+
+  /**
+   * One fixture per exact filter, the two rows differing in that column alone.
+   *
+   * Deleting any single clause from `logPageClauses` has to fail here. A fixture
+   * that varies several columns at once does not have that property: with one
+   * row per provider *and* one row per model, a dropped provider clause still
+   * returns exactly one row, and the suite stays green over a filter that never
+   * ran. Which is the failure this whole surface exists to remove, so the test
+   * for it cannot be the vague kind.
+   */
+  test("each exact filter reads its own column and nothing else", async () => {
+    const cases = [
+      { query: { apiKeyId: "hit" }, hit: { apiKeyId: "hit" }, miss: { apiKeyId: "miss" } },
+      {
+        query: { credentialId: "hit" },
+        hit: { credentialId: "hit" },
+        miss: { credentialId: "miss" },
+      },
+      {
+        query: { provider: "anthropic" },
+        hit: { resolvedProvider: "anthropic" as const },
+        miss: { resolvedProvider: "openai" as const },
+      },
+      {
+        query: { requestedModel: "hit" },
+        hit: { requestedModel: "hit" },
+        miss: { requestedModel: "miss" },
+      },
+      {
+        query: { resolvedModel: "hit" },
+        hit: { resolvedModel: "hit" },
+        miss: { resolvedModel: "miss" },
+      },
+      { query: { errorCode: "HIT" }, hit: { errorCode: "HIT" }, miss: { errorCode: "MISS" } },
+    ];
+
+    for (const { query, hit, miss } of cases) {
+      const s = await backend.fresh();
+      await s.usage.append(logRow({ id: "hit", at: T2, ...hit }));
+      await s.usage.append(logRow({ id: "miss", at: T2 + 1, ...miss }));
+
+      const page = await s.usage.page({ limit: 5, cursor: null, ...query });
+      // Named in the message because a bare length assertion inside a loop
+      // reports the wrong filter as the failing one.
+      expect(
+        page.logs.map((row) => row.id),
+        `filtering by ${Object.keys(query)[0]}`,
+      ).toEqual(["hit"]);
+    }
+  });
+
+  /**
+   * The one filter that reads two columns, and the reason it has to.
+   *
+   * `requested_model` and `resolved_model` hold different vocabularies — an
+   * alias is only ever asked for, and the concrete name it routes to is only
+   * ever resolved to — so an operator naming a model cannot know which side
+   * their spelling is on. Each column alone is pinned above; this pins that
+   * either one answers, and that a row matching neither still does not.
+   */
+  /**
+   * The typed filters match substrings; the picked ones do not.
+   *
+   * An exact match on a model name answered "no such traffic" for every spelling
+   * but one, and the one is the long form an operator does not have in front of
+   * them. So `opus` has to find `claude-opus-5`.
+   *
+   * The four that stay exact are not an oversight and the `api_key_id` case is
+   * the reason to test it here rather than trust the comment: `scopeKey` writes a
+   * client's own key into this query, so a substring match would let the scope
+   * `mine` read the rows of a key called `mine-2`. That is a scope escape, and it
+   * would not show up in any test that only ever uses one key.
+   */
+  test("typed filters match substrings, picked ones stay exact", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(
+      logRow({
+        id: "long",
+        at: T2,
+        requestedModel: "opus",
+        resolvedModel: "claude-opus-5",
+        errorCode: "ALL_CANDIDATES_FAILED",
+        apiKeyId: "mine",
+        credentialId: "cred",
+        resolvedProvider: "anthropic",
+      }),
+    );
+    await s.usage.append(
+      logRow({
+        id: "other",
+        at: T2 + 1,
+        requestedModel: "haiku",
+        resolvedModel: "claude-haiku-4-5",
+        errorCode: "UPSTREAM",
+        apiKeyId: "mine-2",
+        credentialId: "cred-2",
+        resolvedProvider: "openai",
+      }),
+    );
+
+    const ids = async (query: Record<string, unknown>): Promise<string[]> =>
+      (await s.usage.page({ limit: 5, cursor: null, ...query })).logs.map((row) => row.id);
+
+    // A fragment of the long name finds it, from either end and from the middle.
+    expect(await ids({ resolvedModel: "opus" })).toEqual(["long"]);
+    expect(await ids({ resolvedModel: "claude" })).toEqual(["other", "long"]);
+    expect(await ids({ requestedModel: "pu" })).toEqual(["long"]);
+    expect(await ids({ errorCode: "CANDIDATES" })).toEqual(["long"]);
+    // Case-insensitively, which is the half the two backends disagree on by
+    // default: SQLite's `LIKE` folds ASCII and Postgres' does not, so this is
+    // what holds `ILIKE` in place on that side.
+    expect(await ids({ resolvedModel: "OPUS" })).toEqual(["long"]);
+    expect(await ids({ errorCode: "upstream" })).toEqual(["other"]);
+
+    // And the ids do not, or a scope would leak into a longer one.
+    expect(await ids({ apiKeyId: "mine" })).toEqual(["long"]);
+    expect(await ids({ credentialId: "cred" })).toEqual(["long"]);
+  });
+
+  /**
+   * `_` and `%` are LIKE's wildcards and they occur in real values, so a filter
+   * carrying one has to mean the character.
+   *
+   * `ALL_CANDIDATES_FAILED` is every error code's shape. Unescaped, a filter for
+   * `ALL_CANDIDATES` also matched `ALLXCANDIDATESXFAILED` — measured, not
+   * theorised — which is a filter quietly answering a question nobody asked.
+   */
+  test("an underscore or percent in a filter means that character", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "real", at: T2, errorCode: "ALL_CANDIDATES_FAILED" }));
+    await s.usage.append(logRow({ id: "decoy", at: T2 + 1, errorCode: "ALLXCANDIDATESXFAILED" }));
+    await s.usage.append(logRow({ id: "pct", at: T2 + 2, requestedModel: "cut-50%-model" }));
+    await s.usage.append(logRow({ id: "plain", at: T2 + 3, requestedModel: "cut-50-model" }));
+    await s.usage.append(logRow({ id: "slash", at: T2 + 4, requestedModel: "back\\slash-model" }));
+
+    const page = await s.usage.page({ limit: 5, cursor: null, errorCode: "ALL_CANDIDATES" });
+    expect(page.logs.map((row) => row.id)).toEqual(["real"]);
+
+    const pct = await s.usage.page({ limit: 5, cursor: null, requestedModel: "50%-" });
+    expect(pct.logs.map((row) => row.id)).toEqual(["pct"]);
+
+    // The backslash is escaped *first*, and this is the assertion that holds it
+    // there. A row carrying one has to be findable by typing one — and the
+    // decoys are what make the case sharp rather than vacuous: escape every
+    // wildcard but leave the backslash alone, and `\` renders as the pattern
+    // `%\%`, in which `\%` is an escaped percent. The filter then stops matching
+    // `slash` and starts matching `pct` instead, which is the wrong answer
+    // rather than merely an empty one.
+    const slash = await s.usage.page({ limit: 5, cursor: null, requestedModel: "\\" });
+    expect(slash.logs.map((row) => row.id)).toEqual(["slash"]);
+  });
+
+  test("model matches either name, and nothing that carries neither", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(
+      logRow({ id: "asked", at: T2, requestedModel: "opus", resolvedModel: "claude-opus-5" }),
+    );
+    await s.usage.append(
+      logRow({ id: "served", at: T2 + 1, requestedModel: "sonnet", resolvedModel: "opus" }),
+    );
+    await s.usage.append(
+      logRow({ id: "neither", at: T2 + 2, requestedModel: "haiku", resolvedModel: "claude-haiku" }),
+    );
+
+    const page = await s.usage.page({ limit: 5, cursor: null, model: "opus" });
+    expect(page.logs.map((row) => row.id).sort()).toEqual(["asked", "served"]);
+
+    // And it narrows with the rest rather than widening past them: a filter
+    // spanning two columns that stopped being `AND`ed would read as more
+    // traffic than the other filters admit.
+    const narrowed = await s.usage.page({
+      limit: 5,
+      cursor: null,
+      model: "opus",
+      requestedModel: "sonnet",
+    });
+    expect(narrowed.logs.map((row) => row.id)).toEqual(["served"]);
+  });
+
+  test("filters intersect rather than accumulate", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "both", at: T2, apiKeyId: "k1", credentialId: "c1" }));
+    await s.usage.append(logRow({ id: "one", at: T2 + 1, apiKeyId: "k1", credentialId: "c2" }));
+
+    const page = await s.usage.page({
+      limit: 5,
+      cursor: null,
+      apiKeyId: "k1",
+      credentialId: "c1",
+    });
+    expect(page.logs.map((row) => row.id)).toEqual(["both"]);
+  });
+
+  test("since and until are inclusive on both ends", async () => {
+    const s = await seeded();
+    const window = await s.usage.page({
+      limit: 9,
+      cursor: null,
+      since: T2 + 1,
+      until: T2 + 3,
+    });
+    expect(window.logs).toHaveLength(9);
+
+    // A half-open bound would drop the three rows sitting exactly on it, and
+    // an operator exporting two adjacent windows by their stated boundaries
+    // would lose a millisecond of traffic at every seam.
+    const inner = await s.usage.page({ limit: 9, cursor: null, since: T2 + 2, until: T2 + 2 });
+    expect(inner.logs.map((row) => row.id)).toEqual(["2c", "2b", "2a"]);
+  });
+
+  test("failed means completed with an error status, never still running", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "ok", at: T2, status: 200 }));
+    await s.usage.append(logRow({ id: "bad", at: T2 + 1, status: 502, errorCode: "UPSTREAM" }));
+    await s.usage.begin(logRow({ id: "live", at: T2 + 2, state: "pending", status: 0 }));
+
+    const failed = await s.usage.page({ limit: 9, cursor: null, failed: true });
+    expect(failed.logs.map((row) => row.id)).toEqual(["bad"]);
+
+    // `state` asks the other question, and a pending row carries placeholder
+    // metrics rather than a status worth comparing.
+    const pending = await s.usage.page({ limit: 9, cursor: null, state: "pending" });
+    expect(pending.logs.map((row) => row.id)).toEqual(["live"]);
+    expect(await s.usage.page({ limit: 9, cursor: null, errorCode: "UPSTREAM" })).toMatchObject({
+      logs: [{ id: "bad" }],
+    });
+  });
+
+  test("a page row carries every column recent does", async () => {
+    const s = await backend.fresh();
+    const row = logRow({ id: "r1", at: T2, degradations: ["a:b"], errorCode: "UPSTREAM" });
+    await s.usage.append(row);
+    const [got] = (await s.usage.page({ limit: 1, cursor: null })).logs;
+    expect(got).toEqual(row);
+    // Numeric, not the BIGINT string Postgres returns: the cursor is cut from
+    // this value, and a stringified `at` compares lexically on the next read.
+    expect(typeof got?.at).toBe("number");
+  });
+});

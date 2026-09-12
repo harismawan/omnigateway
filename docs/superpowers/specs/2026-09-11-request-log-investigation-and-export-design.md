@@ -1,6 +1,6 @@
 # Request-log investigation and metadata export
 
-Status: designed, not built.
+Status: implemented on `feat/request-log-investigation`.
 
 `request_logs` already records the metadata needed to investigate routing, failures, latency,
 tokens and cost. The current product exposes only a newest-first tail: at most 500 rows, filtered

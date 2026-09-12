@@ -31,17 +31,23 @@ export function makeRoot(env: Record<string, string> = {}): string {
   return root;
 }
 
-export type Captured = { out: string[]; err: string[]; writer: Writer };
+export type Captured = { out: string[]; err: string[]; raw: string[]; writer: Writer };
 
 export function capture(): Captured {
   const out: string[] = [];
   const err: string[] = [];
+  // Kept apart from `out`, because the distinction is the point: `out` is lines
+  // and `raw` is bytes, and a test asserting an export's exact framing cannot
+  // do so through a channel that appends terminators of its own.
+  const raw: string[] = [];
   return {
     out,
     err,
+    raw,
     writer: {
       out: (line) => out.push(line),
       err: (line) => err.push(line),
+      raw: (chunk) => raw.push(chunk),
     },
   };
 }
@@ -128,7 +134,7 @@ export async function cli(
     env?: Record<string, string | undefined>;
     now?: () => number;
   },
-): Promise<{ code: number; out: string; err: string; lines: string[] }> {
+): Promise<{ code: number; out: string; err: string; raw: string; lines: string[] }> {
   const captured = capture();
   const options: RunOptions = {
     env: input.env ?? {},
@@ -147,6 +153,9 @@ export async function cli(
     code,
     out: captured.out.join("\n"),
     err: captured.err.join("\n"),
+    // Joined with nothing: export chunks carry their own terminators, and CSV's
+    // is a CRLF a line-joining channel would corrupt.
+    raw: captured.raw.join(""),
     lines: captured.out,
   };
 }

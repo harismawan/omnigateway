@@ -1,0 +1,33 @@
+-- An index for the provider filter on `request_logs`, which `015_log_keyset.sql`
+-- deliberately left out pending a measurement. This is that measurement.
+--
+-- Without it, filtering by a provider that has *no* traffic scans the whole
+-- table: there is nothing to seek, so proving the absence means reading every
+-- row. `bun:sqlite` is synchronous, so that scan is the event loop — time in
+-- which no proxied request moves. Measured at 500,000 rows:
+--
+--   resolved_provider =        without index    with index
+--   a provider with no rows          84.0ms         0.0ms
+--   a minority provider              0.19ms         0.10ms
+--   the dominant provider            0.09ms         0.08ms
+--
+-- Only the first row justifies the index, and it justifies it completely. It is
+-- also the case the console invites: the filter is a dropdown built from the
+-- provider catalog rather than from traffic, so every provider this gateway
+-- *could* route to is offered, including the ones an operator has no account
+-- for. Selecting one is a normal thing to do and it was the most expensive
+-- query on the surface.
+--
+-- Leading column then the keyset pair, so one seek answers the filter and the
+-- walk from it is already in page order.
+--
+-- `state` gets nothing: `idx_request_logs_pending` already covers the only
+-- selective half, and `state = 'done'` is every row, so the keyset index fills a
+-- page immediately. Nothing per-column for `failed` either, whose predicate is
+-- `state = 'done' AND status >= 400` and which reads at 1.0ms off the keyset
+-- index, because failures cluster near the head an operator is looking at.
+--
+-- The filters an operator *types* are not here, and not by omission: they match
+-- substrings, which no B-tree can seek. `017_log_text_search.sql` carries them,
+-- and carries them inside the keyset index rather than beside it.
+CREATE INDEX idx_request_logs_provider ON request_logs (resolved_provider, at DESC, id DESC);

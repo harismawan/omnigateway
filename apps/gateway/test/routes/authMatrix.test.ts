@@ -129,6 +129,16 @@ const ROUTES: ReadonlyArray<{
   { method: "GET", path: "/api/settings", allow: ["admin", "viewer"] },
   { method: "GET", path: "/api/usage", allow: ["admin", "viewer"] },
   { method: "GET", path: "/api/logs", allow: ["admin", "viewer"] },
+  // Export carries exactly the rows and fields `/api/logs` already serves a
+  // viewer, so restricting it to admin would restrict a transfer shape rather
+  // than an authority. `since` and `until` are required by the operation, and a
+  // row that is missing them fails on validation before it reaches the session
+  // check — which would test the wrong thing.
+  {
+    method: "GET",
+    path: "/api/logs/export?since=0&until=1&format=jsonl",
+    allow: ["admin", "viewer"],
+  },
 
   // Metadata is readable by a reader; the payload behind it is not. A viewer
   // may diagnose an installation without being handed every prompt in it.
@@ -277,7 +287,10 @@ test("every /api route is either in the table or named as unauthenticated", asyn
         const [method, path] = entry.split(" ");
         if (method !== route.method || path === undefined) return false;
         const rx = new RegExp(`^${path.replace(/:[^/]+/g, "[^/]+")}$`);
-        return rx.test(route.path);
+        // A row's path may carry a query string, because some routes validate
+        // their parameters before checking the session and would otherwise be
+        // tested on the wrong refusal. Elysia registers the path alone.
+        return rx.test(route.path.split("?")[0] ?? route.path);
       });
       return pattern ?? `UNMATCHED ${route.method} ${route.path}`;
     }),

@@ -108,8 +108,13 @@ test("the host default follows the process zone, not UTC", () => {
       [
         process.execPath,
         "-e",
+        // `process.stdout.write` rather than `console.log`: the latter
+        // pretty-prints, and a number comes back wrapped in ANSI colour when the
+        // environment this inherits carries `FORCE_COLOR`. The assertion then
+        // fails on a developer's terminal and passes in CI, which reads as the
+        // zone handling being broken rather than as the harness colouring a 420.
         `import("${import.meta.dir}/../src/config.ts").then((m) =>
-           console.log(m.loadConfig({ OMNI_ENCRYPTION_KEY: "${base.OMNI_ENCRYPTION_KEY}" }).dayOffsetMinutes))`,
+           process.stdout.write(String(m.loadConfig({ OMNI_ENCRYPTION_KEY: "${base.OMNI_ENCRYPTION_KEY}" }).dayOffsetMinutes)))`,
       ],
       { env: { ...process.env, TZ: tz } },
     );

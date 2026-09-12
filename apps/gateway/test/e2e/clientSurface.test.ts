@@ -265,6 +265,63 @@ test("two keys on one gateway never see each other's traffic", async () => {
 });
 
 /**
+ * The client pages its own history, and the two filters that name the
+ * operator's infrastructure are absent rather than refused-with-a-message.
+ *
+ * Both halves are the point. The key holder gets the same exact filters an
+ * operator does over the fields it can see, and `credentialId` / `apiKeyId` are
+ * not in the vocabulary at all — a client that could send `apiKeyId` would be
+ * one schema change away from reading another key's rows, and a client that
+ * could send `credentialId` could enumerate the operator's accounts by
+ * measuring which values return rows.
+ */
+test("a key holder pages its own rows and cannot filter by account or key", async () => {
+  const { store, upstream, serve, api, login } = await harness();
+  const mine = await seedApiKey(store, { label: "mine" });
+  for (let i = 0; i < 3; i += 1) {
+    upstream.queue(ANTHROPIC_STREAM);
+    expect((await serve(mine.raw)).status).toBe(200);
+  }
+
+  const cookie = await login(mine.raw);
+  const first = (await (await api("/api/client/logs?limit=2", cookie)).json()) as {
+    logs: { id: string }[];
+    nextCursor: string | null;
+  };
+  expect(first.logs).toHaveLength(2);
+  expect(first.nextCursor).toBeTruthy();
+
+  const second = (await (
+    await api(
+      `/api/client/logs?limit=2&cursor=${encodeURIComponent(first.nextCursor ?? "")}`,
+      cookie,
+    )
+  ).json()) as { logs: { id: string }[]; nextCursor: string | null };
+  expect(second.logs).toHaveLength(1);
+  expect(second.nextCursor).toBeNull();
+  // Three rows, each once: a cursor that restarted or overlapped would show up
+  // as a repeat here.
+  expect(new Set([...first.logs, ...second.logs].map((row) => row.id)).size).toBe(3);
+
+  // The filters it does have reach the gateway.
+  const filtered = (await (
+    await api("/api/client/logs?requestedModel=nothing-served", cookie)
+  ).json()) as { logs: unknown[] };
+  expect(filtered.logs).toEqual([]);
+
+  // And the two it does not have are dropped rather than honoured: the route
+  // never forwards them, so naming one selects nothing and narrows nothing.
+  const ignored = (await (
+    await api("/api/client/logs?credentialId=cred-OPERATOR-ACCOUNT&apiKeyId=whatever", cookie)
+  ).json()) as { logs: { id: string }[] };
+  expect(ignored.logs).toHaveLength(3);
+
+  // No export on this surface at all — absent, not refusing.
+  expect((await api("/api/client/logs/export?since=0&until=1", cookie)).status).toBe(404);
+  store.close();
+});
+
+/**
  * The columns, not just the rows.
  *
  * `credentialId` reached the client for one commit while every row-scoping

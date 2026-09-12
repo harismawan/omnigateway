@@ -153,6 +153,90 @@ bun apps/gateway/src/index.ts >> /var/log/omni.log 2>&1
 setup. Capture in a fleet is per process; see
 [deploying.md](deploying.md#log-capture-in-a-fleet).
 
+## Investigating requests
+
+`request_logs` holds one row per completed request — metadata only, never
+prompts. The console's Logs screen, `omni logs`, and `GET /api/logs` all read it
+through one query: every filter is matched by the gateway **before** the page
+size is applied, so "failed requests on this key last Tuesday" means that and
+not "whichever of the newest hundred rows happen to match".
+
+```bash
+omni logs --failed --key key_abc --since 2026-09-08 --until 2026-09-09
+omni logs --provider anthropic --model claude-opus-4 --error-code UPSTREAM
+omni logs --state pending                 # still in flight
+```
+
+`--model` matches a **substring** of either the requested or the resolved model,
+ignoring case. Both halves are there because no single column holds the spelling
+you have: an alias like `opus` only ever appears as a requested name, the
+`claude-opus-5` it routes to only ever as a resolved one, and you remember
+neither in full. So `--model opus` finds both, and so does `--model OPUS` or
+`--model pus`. Use `--requested-model` or `--resolved-model` when the question
+really is about one side, and `--error-code up` matches `UPSTREAM` the same way.
+
+```bash
+omni logs --model opus              # every request that asked for or got an opus
+omni logs --resolved-model haiku    # only what the gateway actually routed to
+omni logs --error-code CANDIDATES   # ALL_CANDIDATES_FAILED, without typing it
+```
+
+`--provider`, `--account` and `--key` stay **exact**: they name things by an id
+the gateway gave you, so matching loosely could only widen them. None of these
+filters reads a prompt.
+
+The console spells the same filters in one box: a bare word is `--model`, and
+`requested:`, `resolved:` or `error:` name one column each. So
+`opus error:UPSTREAM` is the console's spelling of
+`--model opus --error-code UPSTREAM`. Values cannot contain a space; a colon
+anywhere but the prefix is part of the value, so `llama3:8b` is a model name
+rather than a filter. The box waits 500ms after the last keystroke before
+asking, so a name costs one query rather than one per character.
+
+A filter matching **nothing** is the expensive case — proving nothing matches
+means reading the retained log, since a substring has no index to seek. Measured
+at 6ms over 75,000 rows, growing with retention. Setting `--since` collapses it,
+which is the cheapest thing you can do on a large log and the reason export
+requires both bounds.
+
+Pages are ordered newest first and walked by cursor, not by page number. Each
+page prints the cursor for the next one (`--json` carries it as `nextCursor`),
+and a cursor is opaque — pass it back unchanged:
+
+```bash
+omni logs -n 100 --failed --cursor eyJ2IjoxLCJhdCI6MTc2…
+```
+
+A cursor names a position in one specific ordering, so a rejected or expired one
+is an error rather than a silent restart at the newest row. Changing a filter
+starts a new walk.
+
+### Exporting
+
+`omni logs export` writes matching rows to stdout as CSV or JSONL. Both time
+bounds are required: an export has no page size bounding it, so the interval is
+what does.
+
+```bash
+omni logs export --since 2026-09-01 --until 2026-09-08 > september.csv
+omni logs export --since 2026-09-01 --until 2026-09-08 --format jsonl --failed
+```
+
+Admins and viewers can do the same from `GET /api/logs/export`, which streams
+the response rather than building it in memory. **Metadata only** — no prompts,
+no responses, no captured bodies, whatever the capture setting says. Key holders
+have no export at all on `/api/client/*`.
+
+The two formats differ deliberately. JSONL is lossless: one object per line, in
+a fixed key order, values verbatim. CSV is RFC 4180 and **neutralises formulas**
+— a cell starting `=`, `+`, `-` or `@` gets a leading apostrophe, because a
+request log carries client-supplied model names and upstream error text, and a
+spreadsheet runs what it reads. Use JSONL when you need the bytes exactly.
+
+Retention applies first: an export can only contain rows the gateway still has,
+so a window older than `logRetentionDays` comes back short with nothing to say
+so. Check retention before exporting a range you intend to keep.
+
 ## Recording bodies
 
 By default the gateway records no prompts and no responses. For incident

@@ -117,6 +117,21 @@ export {
   type Supervisor,
 } from "./lifecycle.ts";
 export {
+  csvCell,
+  decodeLogCursor,
+  EXPORT_CONTENT_TYPE,
+  encodeLogCursor,
+  exportFilename,
+  exportHeader,
+  exportLogs,
+  exportRow,
+  type LogExportFormat,
+  type LogExportInput,
+  type LogFilterInput,
+  type LogPage,
+  pageLogs,
+} from "./logs.ts";
+export {
   type ModelLimits,
   modelDisplayName,
   resolveModelLimits,

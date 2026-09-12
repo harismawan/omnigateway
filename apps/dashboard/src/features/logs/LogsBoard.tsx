@@ -1,41 +1,46 @@
 import { useMemo, useState } from "react";
 import styled from "styled-components";
 import {
+  isHeadPage,
   LOG_CADENCE_MS,
+  queryKeys,
   useBodyLoggingActive,
   useCredentials,
   useKeys,
-  useLogs,
+  useLogPages,
+  useTrimToHead,
 } from "../../api/queries.ts";
-import type { RequestRow } from "../../api/types.ts";
+import { type LogFilters, NO_LOG_FILTERS, type RequestRow } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount } from "../../lib/format.ts";
 import { isError, isPending } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Input, Select } from "../../ui/Field.tsx";
+import { Select } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Module } from "../../ui/Panel.tsx";
-import { Row, ScrollX } from "../../ui/primitives.ts";
+import { Muted, Row, ScrollX } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { BodyArtifact } from "./BodyArtifact.tsx";
-import { filterLogs, RequestDetail, RequestTable, useCurrentTime } from "./RequestTable.tsx";
+import { LogFilterBar } from "./LogFilterBar.tsx";
+import { RequestDetail, RequestTable, useCurrentTime } from "./RequestTable.tsx";
 
+/** Rows per request, not rows in total: "Load older" appends another page. */
 const LIMITS = [50, 100, 250, 500] as const;
-
-type Filter = "all" | "failed";
 
 const Controls = styled(Row)`
   gap: ${({ theme }) => theme.space(2)};
   flex-wrap: wrap;
 `;
 
-const Search = styled(Input)`
-  width: 220px;
-`;
-
 const Narrow = styled(Select)`
   width: auto;
+`;
+
+const More = styled(Row)`
+  justify-content: center;
+  gap: ${({ theme }) => theme.space(2)};
+  padding: ${({ theme }) => theme.space(3)};
 `;
 
 const RequestLogModule = styled(Module)`
@@ -60,16 +65,32 @@ const RequestLogScroller = styled(ScrollX)`
  * One row per request, most recent first.
  *
  * Fed by `res:logs` when the socket is up and by the two-second interval when it
- * is not — the same fetch either way, chosen per render by `cadence`.
+ * is not — the same fetch either way, chosen per render by `cadence`. Both stop
+ * once the operator has loaded a second page: the topic and the poll are about
+ * the head of the log, and a board reading older pages is not at the head.
+ *
+ * Every filter is a request parameter, matched exactly by the gateway before the
+ * page limit is applied — so "failed requests by this key last Tuesday" means
+ * that, and not "whichever of the newest hundred rows happen to match".
  */
 export function LogsBoard() {
   const { cadence, live: liveUpdates } = useLive();
   const [limit, setLimit] = useState<number>(100);
-  const [filter, setFilter] = useState<Filter>("all");
-  const [term, setTerm] = useState("");
+  const [filters, setFilters] = useState<LogFilters>(NO_LOG_FILTERS);
   const [open, setOpen] = useState<RequestRow | null>(null);
 
-  const logs = useLogs(limit, cadence(LOG_CADENCE_MS, "res:logs"));
+  // Changing any filter changes the query key, so pagination resets to the
+  // first page without this board holding a cursor of its own.
+  const logs = useLogPages(filters, limit, cadence(LOG_CADENCE_MS, "res:logs"));
+  const rows = useMemo(
+    () => (logs.data?.pages ?? []).flatMap((page) => page.logs),
+    [logs.data?.pages],
+  );
+  // Loading scrollback stops the poll and the push, so the board says so and
+  // offers the way back rather than leaving a frozen head to be read as a quiet
+  // gateway.
+  const paused = !isHeadPage(logs.data);
+  const backToHead = useTrimToHead(queryKeys.logPages(filters, limit));
   const credentials = useCredentials();
   const keys = useKeys();
   // Both keys, not just the setting: an installation whose environment never
@@ -77,8 +98,7 @@ export function LogsBoard() {
   // operator their prompts are being kept when they are not is the worse lie of
   // the two. Unknown — the settings read failed — is reported as not recording.
   const capturing = useBodyLoggingActive();
-  const hasPending = (logs.data ?? []).some(isPending);
-  const now = useCurrentTime(liveUpdates && hasPending);
+  const now = useCurrentTime(liveUpdates && rows.some(isPending));
 
   /**
    * The labels a row is annotated with.
@@ -95,10 +115,8 @@ export function LogsBoard() {
     [credentials.data, keys.data],
   );
 
-  const rows = filterLogs(logs.data ?? [], filter, term, names);
-
-  const failed = (logs.data ?? []).filter(isError).length;
-  const live = (logs.data ?? []).filter(isPending).length;
+  const failed = rows.filter(isError).length;
+  const live = rows.filter(isPending).length;
 
   return (
     <>
@@ -108,32 +126,19 @@ export function LogsBoard() {
         summary={
           logs.isLoading
             ? "Reading the request log…"
-            : `${formatCount(logs.data?.length ?? 0)} recent requests, ${formatCount(failed)} of them failed${live === 0 ? "" : `, ${formatCount(live)} still running`}. ${capturing.data === true ? "Body capture is on: open a request to read what it sent and received." : "Prompt and response bodies are not being recorded."}`
+            : `${formatCount(rows.length)} requests loaded, ${formatCount(failed)} of them failed${live === 0 ? "" : `, ${formatCount(live)} still running`}. ${capturing.data === true ? "Body capture is on: open a request to read what it sent and received." : "Prompt and response bodies are not being recorded."}`
         }
         actions={
           <Controls>
-            <Search
-              value={term}
-              placeholder="Filter by model, account, key, or error"
-              aria-label="Filter requests"
-              onChange={(event) => setTerm(event.target.value)}
-            />
-            <Narrow
-              value={filter}
-              aria-label="Show which requests"
-              onChange={(event) => setFilter(event.target.value as Filter)}
-            >
-              <option value="all">All requests</option>
-              <option value="failed">Failed only</option>
-            </Narrow>
+            <LogFilterBar filters={filters} onChange={setFilters} operator />
             <Narrow
               value={limit}
-              aria-label="How many requests to fetch"
+              aria-label="How many requests per page"
               onChange={(event) => setLimit(Number(event.target.value))}
             >
               {LIMITS.map((value) => (
                 <option key={value} value={value}>
-                  last {value}
+                  {value} per page
                 </option>
               ))}
             </Narrow>
@@ -152,14 +157,39 @@ export function LogsBoard() {
           <Empty
             legend="Nothing to show"
             message={
-              (logs.data?.length ?? 0) === 0
+              // With the gateway doing the matching, "no rows" no longer implies
+              // "no rows in the fetched window" — an unfiltered read that comes
+              // back empty means the log itself is empty, and that is a
+              // different thing to tell an operator than a filter that missed.
+              Object.keys(filters).length === 0
                 ? "No requests have reached the gateway yet."
-                : "No request in this window matches the filter. Clear it to see everything."
+                : "No request matches these filters. Clear them to see everything."
             }
           />
         ) : (
           <RequestLogScroller data-testid="request-log-scroller">
             <RequestTable rows={rows} now={now} names={names} onOpen={setOpen} />
+            {logs.hasNextPage || paused ? (
+              <More>
+                {logs.hasNextPage ? (
+                  <Button
+                    type="button"
+                    disabled={logs.isFetchingNextPage}
+                    onClick={() => void logs.fetchNextPage()}
+                  >
+                    {logs.isFetchingNextPage ? "Loading…" : "Load older"}
+                  </Button>
+                ) : null}
+                {paused ? (
+                  <>
+                    <Muted>Live updates are paused while older pages are loaded.</Muted>
+                    <Button type="button" onClick={backToHead}>
+                      Back to live
+                    </Button>
+                  </>
+                ) : null}
+              </More>
+            ) : null}
           </RequestLogScroller>
         )}
       </RequestLogModule>

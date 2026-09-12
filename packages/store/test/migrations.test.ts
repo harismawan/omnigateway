@@ -85,7 +85,9 @@ test("openDb applies migrations and records them", () => {
     expect(tables).toContain(t);
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
-  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  expect(applied.map((row) => row.id)).toEqual([
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+  ]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
     .query<{ name: string }, []>("PRAGMA table_info(credential_health)")
@@ -247,11 +249,15 @@ test("migration 9 indexes request logs by key first, so a per-key window scan st
   // Composite order is the whole point: `(at DESC, api_key_id)` would not let a
   // weekly sum for one key start at that key, and would scan every row in the
   // week for every key on the install.
+  //
+  // Migration 15 appended `id` to the same index rather than adding a second
+  // one, so the leading two columns — the only part this test is about — are
+  // unchanged, and there is no shorter prefix index left costing a write.
   const columns = db
     .query<{ seqno: number; name: string }, []>("PRAGMA index_info(idx_request_logs_key_at)")
     .all()
     .map((row) => row.name);
-  expect(columns).toEqual(["api_key_id", "at"]);
+  expect(columns).toEqual(["api_key_id", "at", "id"]);
 
   // Not an optimisation, so it has to be the plan the planner actually picks.
   const plan = db
@@ -263,6 +269,70 @@ test("migration 9 indexes request logs by key first, so a per-key window scan st
     .map((row) => row.detail)
     .join(" ");
   expect(plan).toContain("idx_request_logs_key_at");
+  db.close();
+});
+
+/**
+ * What migration 17 left behind, and why the shape is the whole point.
+ *
+ * A leading wildcard cannot seek a B-tree, so 16's per-column indexes answer none
+ * of the queries the typed filters now make and are gone — asserting they are
+ * *absent* is what keeps somebody from restoring three writes per row that buy
+ * nothing. The columns moved into the index the scan already walks, which is the
+ * only placement SQLite will use: given a separate covering index it prefers the
+ * narrower one that supplies the ordering and never reads the wider one.
+ *
+ * `resolved_provider` keeps its own index and its equality, because it arrives
+ * from a dropdown rather than a keyboard.
+ */
+test("migration 17 moves the typed columns into the keyset index a substring scan walks", () => {
+  const db = openDb(":memory:");
+
+  const columnsOf = (index: string): string[] =>
+    db
+      .query<{ name: string }, []>(`PRAGMA index_info(${index})`)
+      .all()
+      .map((row) => row.name);
+
+  expect(columnsOf("idx_request_logs_at")).toEqual([
+    "at",
+    "id",
+    "requested_model",
+    "resolved_model",
+    "error_code",
+  ]);
+  expect(columnsOf("idx_request_logs_provider")).toEqual(["resolved_provider", "at", "id"]);
+
+  const indexes = db
+    .query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='request_logs'",
+    )
+    .all()
+    .map((row) => row.name);
+  for (const gone of [
+    "idx_request_logs_resolved_model",
+    "idx_request_logs_requested_model",
+    "idx_request_logs_error_code",
+  ]) {
+    expect(indexes, `${gone} costs a write per row and can no longer be seeked`).not.toContain(
+      gone,
+    );
+  }
+
+  // The ordering still comes from this index, which is what makes carrying the
+  // text columns in it free for the unfiltered head read every board opens with.
+  const plan = db
+    .query<{ detail: string }, [string, string]>(
+      `EXPLAIN QUERY PLAN
+       SELECT * FROM request_logs
+       WHERE (requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')
+       ORDER BY at DESC, id DESC LIMIT 101`,
+    )
+    .all("%opus%", "%opus%")
+    .map((row) => row.detail)
+    .join(" ");
+  expect(plan).toContain("idx_request_logs_at");
+  expect(plan).not.toContain("TEMP B-TREE");
   db.close();
 });
 
@@ -288,7 +358,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(14);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(17);
   db.close();
 });
 

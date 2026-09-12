@@ -1,8 +1,9 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { DEFAULT_SETTINGS, openDb } from "@omni/store";
+import { DEFAULT_SETTINGS, openDb, type RequestLog } from "@omni/store";
 import { health, requestLog, seedCredential } from "@omni/testkit";
+import { FOLLOW_MAX_PAGES, isAfter, newerThan } from "../src/commands/usage.ts";
 import { serviceLogs } from "../src/service.ts";
 import { cli, fakeService, makeRoot, openStore, TEST_KEY } from "./helpers/harness.ts";
 
@@ -1366,7 +1367,7 @@ test("logs without --service reads the request log", async () => {
   const result = await cli(["logs", "--json"], { root, service });
 
   expect(result.code).toBe(0);
-  expect(JSON.parse(result.out)).toEqual({ logs: [] });
+  expect(JSON.parse(result.out)).toEqual({ logs: [], nextCursor: null });
 });
 
 /** Three completed requests, so a page size shows up as a row count. */
@@ -1399,6 +1400,72 @@ test("-n 0 still means zero, which the page size clamps to one row", async () =>
 
   expect(await loggedRows(root, ["-n", "0"])).toBe(1);
   expect(await loggedRows(root, ["-n", "2"])).toBe(2);
+});
+
+test("logs filters and pages through the store rather than the newest rows", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(requestLog({ id: "wanted", at: 1_000, errorCode: "UPSTREAM" }));
+  for (let i = 0; i < 5; i += 1) {
+    await store.usage.append(requestLog({ id: `noise${i}`, at: 2_000 + i }));
+  }
+  store.close();
+  const service = fakeService({ root });
+
+  // The matching row is the oldest of six and the page holds two, so it can
+  // only be here because the store filtered before it cut the page.
+  const filtered = await cli(["logs", "-n", "2", "--error-code", "UPSTREAM", "--json"], {
+    root,
+    service,
+  });
+  const matched = JSON.parse(filtered.out) as { logs: { id: string }[]; nextCursor: string | null };
+  expect(matched.logs.map((row) => row.id)).toEqual(["wanted"]);
+  expect(matched.nextCursor).toBeNull();
+
+  const first = JSON.parse((await cli(["logs", "-n", "2", "--json"], { root, service })).out) as {
+    logs: { id: string }[];
+    nextCursor: string | null;
+  };
+  expect(first.nextCursor).toBeTruthy();
+  const second = JSON.parse(
+    (
+      await cli(["logs", "-n", "2", "--cursor", first.nextCursor ?? "", "--json"], {
+        root,
+        service,
+      })
+    ).out,
+  ) as { logs: { id: string }[] };
+  // A script can page without constructing a cursor, and the two pages do not
+  // overlap.
+  expect(first.logs.map((row) => row.id)).toEqual(["noise4", "noise3"]);
+  expect(second.logs.map((row) => row.id)).toEqual(["noise2", "noise1"]);
+});
+
+test("logs export writes the bytes of the format, with no --json wrapper", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(requestLog({ id: "r1", at: 1_000, requestedModel: "=danger" }));
+  store.close();
+  const service = fakeService({ root });
+
+  const csv = await cli(["logs", "export", "--since", "0", "--until", "2000"], { root, service });
+  expect(csv.code).toBe(0);
+  const lines = csv.raw.split("\r\n").filter((line) => line.length > 0);
+  expect(lines[0]?.startsWith("id,state,at,")).toBe(true);
+  expect(lines[1]).toContain("'=danger");
+
+  const jsonl = await cli(
+    ["logs", "export", "--since", "0", "--until", "2000", "--format", "jsonl"],
+    { root, service },
+  );
+  const rows = jsonl.raw.split("\n").filter((line) => line.length > 0);
+  expect(rows).toHaveLength(1);
+  // JSONL is the lossless half of the pair: the text CSV had to guard is
+  // verbatim here.
+  expect(JSON.parse(rows[0] ?? "null")).toMatchObject({ id: "r1", requestedModel: "=danger" });
+
+  // The interval bounds a read that has no page size.
+  expect((await cli(["logs", "export"], { root, service })).code).not.toBe(0);
 });
 
 test("a non-numeric -n is still refused rather than defaulted", async () => {
@@ -1793,4 +1860,98 @@ test("credentials list reports expiry the way the router judges it", async () =>
   // expiry but refreshable is usable, because dispatch refreshes before the
   // call. Dropping this branch entirely left the suite green.
   expect(rowOf("cred-refreshable")).toContain("expired (refreshable)");
+});
+
+/**
+ * Follow mode's watermark is the whole `(at, id)` tuple, not the timestamp.
+ *
+ * Two rows written in the same millisecond are ordered only by their ids, so a
+ * follower comparing `at` alone drops every row after the first in such a group
+ * — silently, and more often the busier the gateway is, which is exactly when
+ * somebody is watching.
+ */
+test("follow mode keeps rows that share the newest timestamp", () => {
+  const seen = { at: 1_000, id: "b" };
+  const at = (id: string, when: number) => isAfter(requestLog({ id, at: when }), seen);
+
+  expect(at("c", 1_000)).toBe(true);
+  expect(at("a", 1_000)).toBe(false);
+  expect(at("b", 1_000)).toBe(false);
+  expect(at("a", 1_001)).toBe(true);
+  expect(at("z", 999)).toBe(false);
+});
+
+/**
+ * A burst larger than one page must not fall off the bottom of it.
+ *
+ * `pageLogs` answers with the newest `limit` rows. A follower that takes one
+ * page and moves its watermark to the newest row in it loses everything the
+ * page could not hold — permanently, and more of it the busier the gateway is.
+ */
+describe("follow mode drains every page back to its watermark", () => {
+  /** A log newest-first, served through the same keyset contract as the store. */
+  const paged = (rows: RequestLog[], limit: number) => {
+    const calls: Array<string | undefined> = [];
+    const read = async (cursor: string | undefined) => {
+      calls.push(cursor);
+      const from = cursor === undefined ? 0 : rows.findIndex((row) => row.id === cursor) + 1;
+      const slice = rows.slice(from, from + limit);
+      const last = slice[slice.length - 1];
+      const more = from + limit < rows.length;
+      return {
+        logs: slice,
+        nextCursor: more && last !== undefined ? last.id : null,
+      };
+    };
+    return { read, calls };
+  };
+
+  const burst = (count: number): RequestLog[] =>
+    Array.from({ length: count }, (_, i) =>
+      requestLog({ id: `n${String(count - 1 - i).padStart(2, "0")}`, at: 2_000 + count - 1 - i }),
+    );
+
+  test("a burst of 21 across a page of 20 loses none of them", async () => {
+    const rows = burst(21);
+    const { read } = paged(rows, 20);
+
+    const { rows: seen, skipped } = await newerThan(read, { at: 1_000, id: "old" });
+
+    // The oldest of the 21 is the one a single page drops.
+    expect(seen).toHaveLength(21);
+    expect(seen.map((row) => row.id)).toContain("n00");
+    expect(skipped).toBe(false);
+  });
+
+  test("it stops at the first page that reaches the watermark", async () => {
+    const rows = burst(21);
+    const { read, calls } = paged(rows, 20);
+    // The watermark sits inside the first page, so there is no gap to close and
+    // no second read to make.
+    await newerThan(read, { at: 2_000 + 5, id: "n05" });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a follower with no watermark takes one page rather than replaying the log", async () => {
+    const rows = burst(500);
+    const { read, calls } = paged(rows, 20);
+
+    const { rows: seen, skipped } = await newerThan(read, null);
+
+    expect(seen).toHaveLength(20);
+    expect(calls).toHaveLength(1);
+    expect(skipped).toBe(false);
+  });
+
+  test("a gap too large to drain is reported rather than absorbed", async () => {
+    const rows = burst(FOLLOW_MAX_PAGES * 20 + 50);
+    const { read } = paged(rows, 20);
+
+    const { rows: seen, skipped } = await newerThan(read, { at: 1_000, id: "old" });
+
+    // Silence here would read as "nothing else happened", which is the failure
+    // the draining exists to fix — so the shortfall is stated.
+    expect(skipped).toBe(true);
+    expect(seen).toHaveLength(FOLLOW_MAX_PAGES * 20);
+  });
 });

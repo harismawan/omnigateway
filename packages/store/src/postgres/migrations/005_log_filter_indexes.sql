@@ -1,0 +1,30 @@
+-- An index for the provider filter on `request_logs`. Filtering by a provider
+-- with no traffic has nothing to seek, so proving the absence reads every row,
+-- and the console offers exactly that query because its dropdown is built from
+-- the provider catalog rather than from traffic. Measured here at 500,000 rows,
+-- and separately in the SQLite copy `016_log_filter_indexes.sql`:
+--
+--   resolved_provider =        without index    with index
+--   a provider with no rows        17.17ms        0.01ms
+--   a minority provider             0.04ms        0.02ms
+--   the dominant provider           0.02ms        0.02ms
+--
+-- Only the first row justifies the index, and it justifies it on both backends:
+-- without it the planner falls back to a sequential scan with a sort on top,
+-- because there is no prefix to seek and every row has to be rejected before the
+-- absence is proven. The other two answer off `idx_request_logs_at` either way —
+-- a provider that has traffic fills a page near the head immediately.
+--
+-- Leading column then the keyset pair, so one seek answers the filter and the
+-- walk from it is already in page order.
+--
+-- **This is the only log-filter index on this backend, and the SQLite copy has
+-- one more.** There, `017_log_text_search.sql` moves `requested_model`,
+-- `resolved_model` and `error_code` into the keyset index so a substring scan
+-- tests the match against entries it is already walking. Do not mirror that
+-- here: this planner reads a leading-wildcard `ILIKE` as unindexable, so a
+-- substring miss plans as a parallel sequential scan with a sort on top and
+-- `idx_request_logs_at` is never opened. Measured at 500,000 rows, widening it
+-- cost 15MB to 58MB and a wider row per insert, and bought 0.25ms of 86ms. The
+-- backends share the predicate in `logPage.ts`, not the index shape.
+CREATE INDEX idx_request_logs_provider ON request_logs (resolved_provider, at DESC, id DESC);
