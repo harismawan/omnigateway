@@ -100,6 +100,42 @@ path. `OMNI_OTLP_HEADERS` supplies comma-separated `k=v` collector headers and
 header is ever added to a provider request. Export is bounded and fire-and-forget, with dropped
 spans reported by `omni_otlp_spans_dropped_total`.
 
+## Refreshing provider quota
+
+Provider quota is polled in the background on `quotaPollIntervalMs` (300s by default). To read it
+now — after reconnecting an account, or when a reading looks stale — use the Accounts page or:
+
+```bash
+omni quota refresh <credential-id>
+omni quota refresh --all
+```
+
+Exactly one target is required; an omitted argument is a usage error and never means every account.
+
+Admin-only, on both surfaces. A refresh reaches a provider, may rotate an OAuth token and may write
+a rate-limit cooldown, so a read-only viewer keeps every chart and does not get the control. Setting
+`quotaPollIntervalMs` to zero disables only the background timer — a manual refresh still runs,
+because an operator asked for it.
+
+Each account is reported separately, and a partial result is a success:
+
+| Outcome | Meaning |
+| --- | --- |
+| `refreshed` | the provider answered and the reading was written |
+| `coalesced` | another request in flight produced this reading |
+| `noData` | the provider ran and reported nothing usable |
+| `cooldown` | not called; a 429 cooldown from an earlier probe is still live |
+| `unsupported` | an API key, or a provider with no usage endpoint |
+| `disabled` | the account is disabled, so it was not probed |
+| `failed` | the refresh, probe or write failed |
+
+`omni quota refresh` exits nonzero when any account reports `failed` or `cooldown` — in both the
+reading on screen is exactly as old as it was. The other outcomes exit zero.
+
+A failure never disables a credential and never clears the previous reading. Missing quota data
+means unknown, never zero and never unlimited, so an account that could not be probed keeps its
+last reading with its normal stale marking.
+
 ## Logs
 
 Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth

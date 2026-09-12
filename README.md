@@ -249,6 +249,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
 | `omni usage` | spend and tokens, by provider, model, key, or day |
 | `omni quota` | provider quota per window: use, burn rate, and when it runs out |
+| `omni quota refresh <id> \| --all` | read provider quota now, without waiting for the next poll |
 | `omni connect <provider>` | authorize an account from the terminal |
 | `omni credentials …` | list, show, enable, disable, `set`, `rm`, refresh, `add-key`, health |
 | `omni models …` | list, show, put, `rm`, `dry-run`, `catalog` |

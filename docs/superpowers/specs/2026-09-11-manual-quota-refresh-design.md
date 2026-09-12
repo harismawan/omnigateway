@@ -1,6 +1,17 @@
 # Manual provider-quota refresh
 
-Status: designed, not built.
+Status: built.
+
+Two things the code decided differently, both because the repository already had an answer:
+
+- **`NOT_FOUND` does not exist.** `ErrorCode` in `@omni/ir` is a closed union of 16 members with two
+  exhaustive tables behind it, and every `@omni/control` operation already answers an unknown id
+  with `GatewayError("BAD_REQUEST", "no such credential")`. Adding a member to serve one route
+  would have been a wider change than the feature. The route answers 400.
+- **The route takes the built operation, not its dependencies.** `AdminDeps` had no `coord`, `http`,
+  `refresh` or `providers`, and widening it by four would have let the route build a *second*
+  `QuotaOps` — correct alone, wrong beside the poller, because the in-flight map is the whole point.
+  `AdminDeps.quota` carries the one instance the bootstrap also hands the poller.
 
 Provider quota is already polled in the background and rendered on the Accounts page. Operators
 cannot request a fresh reading after reconnecting an account, investigating stale telemetry or
