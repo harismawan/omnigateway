@@ -54,12 +54,13 @@ const stateIdOf = (filters: LogFilters): StateId =>
  * cannot express.
  *
  * A bare word is `model`, which matches *either* name — the requested one or the
- * resolved one. It has to be: the two columns hold different vocabularies, so
- * `opus` is only ever a requested name and the `claude-opus-5` it routes to is
- * only ever a resolved one, and an operator typing the name in front of them
- * cannot know which side they are on. Asking one column and getting nothing
- * reads as "no such traffic" rather than "wrong column". `requested:` and
- * `resolved:` stay for the question that really is about one side.
+ * resolved one — and matches it as a substring, case-insensitively. Both halves
+ * are there for the same reason: the two columns hold different vocabularies, and
+ * neither holds the spelling an operator has. `opus` is only ever a requested
+ * name, `claude-opus-5` only ever a resolved one, and `opus` is what somebody
+ * types. Every narrowing that answered nothing read as "no such traffic" rather
+ * than "wrong column, wrong spelling". `requested:` and `resolved:` stay for the
+ * question that really is about one side.
  */
 const TERMS = [
   { prefix: "model", field: "model" },
@@ -79,6 +80,8 @@ type TermFilters = Pick<LogFilters, (typeof TERM_FIELDS)[number]>;
  * Split on whitespace, so no value may contain a space — none of them can: a
  * model name or an error code with a space in it is not a thing this gateway
  * records, and quoting would be syntax to carry for a case that cannot arise.
+ * Each word is a substring the gateway matches, so a fragment is a whole filter
+ * and there is nothing to complete.
  *
  * A word whose prefix is not one of the four is a bare term, not a dropped one:
  * model names carry colons — Ollama's `llama3:8b`, and whatever a custom endpoint
@@ -258,18 +261,18 @@ export type LogFilterBarProps = {
 /**
  * The exact filters both log boards send to the gateway.
  *
- * Every control emits an id or an exact value, never a substring. The text
- * filters share one box, read by `parseTerms`: a bare word is the model under
+ * Every control either emits an id it was given or a fragment somebody typed. The
+ * typed ones share one box, read by `parseTerms`: a bare word is the model under
  * either of its names, and `requested:`, `resolved:` or `error:` name one column
  * each. One box because they are one question typed in one place, but still
  * separate parameters on the wire — the prefix decides which, so "requested
- * `opus` that resolved to `claude-opus-5`" stays askable, which one value
- * matched across every column could not express.
+ * `opus` that resolved to `claude-opus-5`" stays askable, which one value matched
+ * across every column could not express.
  *
- * This is not the box that used to be here. That one matched model, account
- * label, key label and error code by *substring*, over a *fetched tail* — so it
- * answered "among the newest N rows" while reading as "in the log". Every term
- * here is an exact value the gateway applies before the page limit.
+ * This is not the box that used to be here, and the difference is *where* the
+ * matching happens rather than how. That one filtered a *fetched tail* in the
+ * browser, so it answered "among the newest N rows" while reading as "in the
+ * log". These terms go to the gateway, which applies them before the page limit.
  *
  * Labels come from the credential and key lists, but the value sent is always
  * the stored id: rows outlive the keys and accounts that made them, so a
@@ -366,7 +369,7 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
 
       <Terms
         aria-label="Models and error codes"
-        placeholder="claude-opus-5  requested:opus  error:UPSTREAM"
+        placeholder="opus  requested:haiku  error:UPSTREAM"
         value={text}
         onChange={(event) => {
           const typed = event.target.value;

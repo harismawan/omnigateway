@@ -328,7 +328,7 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
     },
 
     async page(query) {
-      const { where, bindings } = logPageClauses(query, (n) => `$${n}`);
+      const { where, bindings } = logPageClauses(query, (n) => `$${n}`, "ILIKE");
       const rows = (
         await sql.unsafe<Rows<Row>>(
           `SELECT * FROM request_logs ${where}

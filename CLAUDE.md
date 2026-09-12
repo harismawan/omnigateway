@@ -728,12 +728,14 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   parameter to repo method mean editing that arrow; `packages/store/test/swap.test.ts` read
   forwarder source, assert no arrow drop argument.
 - `vacuum()` must checkpoint, or page count fall while file keep every page.
-- **Nothing under `packages/store/src` may run `ANALYZE`.** `model` filter is one OR clause
-  (`requested_model = ? OR resolved_model = ?`); planner reach it as MULTI-INDEX OR only while
-  `sqlite_stat1` absent, and with stats it cost union's sort against ordered scan and pick
-  scan — full table per miss, silently, on exact case migration 016 exist for. Plan test run on
-  empty database so it cannot see that; source-reading test in `migrations.test.ts` is guard.
-  Re-measure that plan before adding it.
+- **Log filters split by where value came from, and `apiKeyId` staying `=` is a scope rule.**
+  Four a person type — `model`, `requestedModel`, `resolvedModel`, `errorCode` — matched as
+  case-insensitive substring by `contains()` in `store/src/logPage.ts`; everything else `=`.
+  `scopeKey` write client's own key into that query, so substring on `api_key_id` let scope
+  `mine` read `mine-2`'s rows. `_` and `%` escaped with explicit `ESCAPE`, because every error
+  code is `ALL_CANDIDATES_FAILED` and unescaped filter matched `ALLXCANDIDATESXFAILED`. Case
+  folding is dialect argument (`LIKE` sqlite, `ILIKE` postgres) — defaults disagree, and suite
+  comparing `opus` to `opus` would never notice. All three pinned in `test/contract/usage.test.ts`.
 - Restore compare admin password hash across swap, invalidate sessions only when differ.
   **Nothing may sit between swap and that comparison.** `swapIn` rebuild `usage_rollup` last
   and guarded, for that reason; cost documented in `README.md`.

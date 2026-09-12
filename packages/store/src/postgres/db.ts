@@ -4,6 +4,7 @@ import healthMeasurements002 from "./migrations/002_health_measurements.sql" wit
 import keyExpiry003 from "./migrations/003_key_expiry.sql" with { type: "text" };
 import logKeyset004 from "./migrations/004_log_keyset.sql" with { type: "text" };
 import logFilterIndexes005 from "./migrations/005_log_filter_indexes.sql" with { type: "text" };
+import logTextSearch006 from "./migrations/006_log_text_search.sql" with { type: "text" };
 
 /**
  * Anything that can run a statement: the pool, a reserved connection, or the
@@ -40,6 +41,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string }> = [
   { id: 3, sql: keyExpiry003 },
   { id: 4, sql: logKeyset004 },
   { id: 5, sql: logFilterIndexes005 },
+  { id: 6, sql: logTextSearch006 },
 ];
 
 /**

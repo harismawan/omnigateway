@@ -86,7 +86,7 @@ test("openDb applies migrations and records them", () => {
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
   expect(applied.map((row) => row.id)).toEqual([
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
   ]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
@@ -273,83 +273,67 @@ test("migration 9 indexes request logs by key first, so a per-key window scan st
 });
 
 /**
- * Migration 16 is only worth having if the planner reaches for it, and the
- * `model` filter is the case that can silently stop being reached: it is an OR
- * over two columns, so the plan is a MULTI-INDEX OR whose union has to be
- * sorted, and the planner will abandon it for an ordered scan of the whole table
- * once `ANALYZE` gives it statistics to cost the sort with. Asserting the
- * indexes exist would keep passing through exactly that regression — which is
- * the one that matters, because an unindexed OR cannot stop at the page limit:
- * the limit bounds what is returned, not what is compared.
+ * What migration 17 left behind, and why the shape is the whole point.
+ *
+ * A leading wildcard cannot seek a B-tree, so 16's per-column indexes answer none
+ * of the queries the typed filters now make and are gone — asserting they are
+ * *absent* is what keeps somebody from restoring three writes per row that buy
+ * nothing. The columns moved into the index the scan already walks, which is the
+ * only placement SQLite will use: given a separate covering index it prefers the
+ * narrower one that supplies the ordering and never reads the wider one.
+ *
+ * `resolved_provider` keeps its own index and its equality, because it arrives
+ * from a dropdown rather than a keyboard.
  */
-test("migration 16 indexes every exact log filter, and the model OR uses both", () => {
+test("migration 17 moves the typed columns into the keyset index a substring scan walks", () => {
   const db = openDb(":memory:");
 
-  for (const [index, columns] of [
-    ["idx_request_logs_resolved_model", ["resolved_model", "at", "id"]],
-    ["idx_request_logs_requested_model", ["requested_model", "at", "id"]],
-    ["idx_request_logs_error_code", ["error_code", "at", "id"]],
-    ["idx_request_logs_provider", ["resolved_provider", "at", "id"]],
-  ] as const) {
-    const actual = db
+  const columnsOf = (index: string): string[] =>
+    db
       .query<{ name: string }, []>(`PRAGMA index_info(${index})`)
       .all()
       .map((row) => row.name);
-    // Filtered column first, then the keyset pair: one seek answers the filter
-    // and the walk from it is already in page order, so neither the filter nor
-    // the ordering needs a pass of its own.
-    expect(actual, index).toEqual([...columns]);
+
+  expect(columnsOf("idx_request_logs_at")).toEqual([
+    "at",
+    "id",
+    "requested_model",
+    "resolved_model",
+    "error_code",
+  ]);
+  expect(columnsOf("idx_request_logs_provider")).toEqual(["resolved_provider", "at", "id"]);
+
+  const indexes = db
+    .query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='request_logs'",
+    )
+    .all()
+    .map((row) => row.name);
+  for (const gone of [
+    "idx_request_logs_resolved_model",
+    "idx_request_logs_requested_model",
+    "idx_request_logs_error_code",
+  ]) {
+    expect(indexes, `${gone} costs a write per row and can no longer be seeked`).not.toContain(
+      gone,
+    );
   }
 
-  const planFor = (where: string, ...args: string[]): string =>
-    db
-      .query<{ detail: string }, string[]>(
-        `EXPLAIN QUERY PLAN
-         SELECT * FROM request_logs WHERE ${where} ORDER BY at DESC, id DESC LIMIT 101`,
-      )
-      .all(...args)
-      .map((row) => row.detail)
-      .join(" ");
-
-  const both = planFor("(requested_model = ? OR resolved_model = ?)", "opus", "opus");
-  expect(both).toContain("idx_request_logs_requested_model");
-  expect(both).toContain("idx_request_logs_resolved_model");
-
-  expect(planFor("resolved_model = ?", "opus")).toContain("idx_request_logs_resolved_model");
-  expect(planFor("error_code = ?", "UPSTREAM")).toContain("idx_request_logs_error_code");
-  expect(planFor("resolved_provider = ?", "anthropic")).toContain("idx_request_logs_provider");
+  // The ordering still comes from this index, which is what makes carrying the
+  // text columns in it free for the unfiltered head read every board opens with.
+  const plan = db
+    .query<{ detail: string }, [string, string]>(
+      `EXPLAIN QUERY PLAN
+       SELECT * FROM request_logs
+       WHERE (requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')
+       ORDER BY at DESC, id DESC LIMIT 101`,
+    )
+    .all("%opus%", "%opus%")
+    .map((row) => row.detail)
+    .join(" ");
+  expect(plan).toContain("idx_request_logs_at");
+  expect(plan).not.toContain("TEMP B-TREE");
   db.close();
-});
-
-/**
- * The one input that turns migration 16's `model` plan back into a full scan.
- *
- * `EXPLAIN QUERY PLAN` above runs on an empty database, where there are no
- * statistics and the planner takes the union. Give it `sqlite_stat1` and it costs
- * the union's sort against an ordered scan and picks the scan — so the plan test
- * would keep passing through the regression, and the only property that holds it
- * is that nothing runs `ANALYZE`. Asserted by reading the source because there is
- * no state to observe it in: the damage is done to a plan, on a database this
- * suite does not have.
- *
- * This is not an argument against ever running it. It is a requirement that
- * whoever does re-measures the `model` filter first, and reads this test's
- * failure as the reason to.
- */
-test("nothing in the store runs ANALYZE, which would cost the model OR out of its indexes", async () => {
-  const dir = new URL("../src/", import.meta.url).pathname;
-  const found: string[] = [];
-  for await (const path of new Bun.Glob("**/*.{ts,sql}").scan({ cwd: dir })) {
-    const text = await Bun.file(`${dir}${path}`).text();
-    // Comment lines are how the trap is documented, including in migration 16
-    // itself, so they are not the thing being looked for.
-    const code = text
-      .split("\n")
-      .filter((line) => !/^\s*(--|\/\/|\*)/.test(line))
-      .join("\n");
-    if (/\bANALYZE\b/i.test(code)) found.push(path);
-  }
-  expect(found).toEqual([]);
 });
 
 test("migration 8 gives request_bodies its time index and no cascade", () => {
@@ -374,7 +358,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(16);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(17);
   db.close();
 });
 

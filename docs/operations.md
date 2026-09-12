@@ -167,25 +167,37 @@ omni logs --provider anthropic --model claude-opus-4 --error-code UPSTREAM
 omni logs --state pending                 # still in flight
 ```
 
-`--model` matches a request whose **requested or resolved** model is the name
-given. It asks both because the two columns hold different vocabularies: an
-alias like `opus` only ever appears as a requested name, and the
-`claude-opus-5` it routes to only ever as a resolved one, so a flag bound to one
-side answers "no such traffic" for half the names you have. Use
-`--requested-model` or `--resolved-model` when the question really is about one
-side — which alias resolved here, or what this alias resolved to.
+`--model` matches a **substring** of either the requested or the resolved model,
+ignoring case. Both halves are there because no single column holds the spelling
+you have: an alias like `opus` only ever appears as a requested name, the
+`claude-opus-5` it routes to only ever as a resolved one, and you remember
+neither in full. So `--model opus` finds both, and so does `--model OPUS` or
+`--model pus`. Use `--requested-model` or `--resolved-model` when the question
+really is about one side, and `--error-code up` matches `UPSTREAM` the same way.
 
-Every one of these is an exact match, as are `--provider`, `--account`, `--key`
-and `--error-code`; there is no substring search, and none of them reads a
-prompt.
+```bash
+omni logs --model opus              # every request that asked for or got an opus
+omni logs --resolved-model haiku    # only what the gateway actually routed to
+omni logs --error-code CANDIDATES   # ALL_CANDIDATES_FAILED, without typing it
+```
+
+`--provider`, `--account` and `--key` stay **exact**: they name things by an id
+the gateway gave you, so matching loosely could only widen them. None of these
+filters reads a prompt.
 
 The console spells the same filters in one box: a bare word is `--model`, and
 `requested:`, `resolved:` or `error:` name one column each. So
 `opus error:UPSTREAM` is the console's spelling of
 `--model opus --error-code UPSTREAM`. Values cannot contain a space; a colon
 anywhere but the prefix is part of the value, so `llama3:8b` is a model name
-rather than a filter. The box waits a second after the last keystroke before it
-asks, since every prefix of an exact name matches nothing.
+rather than a filter. The box waits a second after the last keystroke before
+asking, so a name costs one query rather than one per character.
+
+A filter matching **nothing** is the expensive case — proving nothing matches
+means reading the retained log, since a substring has no index to seek. Measured
+at 6ms over 75,000 rows, growing with retention. Setting `--since` collapses it,
+which is the cheapest thing you can do on a large log and the reason export
+requires both bounds.
 
 Pages are ordered newest first and walked by cursor, not by page number. Each
 page prints the cursor for the next one (`--json` carries it as `nextCursor`),

@@ -509,14 +509,18 @@ export type LogsResponse = { logs: RequestLog[]; nextCursor?: string | null };
 export type ClientLogsResponse = { logs: ClientRequestLog[]; nextCursor?: string | null };
 
 /**
- * The exact filters the log routes accept.
+ * The filters the log routes accept, and which of them match loosely.
  *
- * Every value is an id or an exact string the gateway compares with `=`. There
- * is deliberately no free-text field: the board used to filter a fetched tail in
- * the browser by substring across model, account label, key label and error, and
- * an exact server query cannot preserve those semantics — it would silently
- * match a different set. Removing the box is the honest replacement for
- * pretending it still works.
+ * Two kinds, and the split is by where the value came from. Anything the gateway
+ * handed the console — an id, a provider, a state — is compared with `=`, because
+ * it was picked from a list and a looser comparison could only widen it. Anything
+ * a person typed is matched as a case-insensitive substring, applied by the
+ * gateway *before* the page limit.
+ *
+ * That last clause is the whole difference from the box this replaced. The old
+ * one matched substrings too, but over a *fetched tail* in the browser, so it
+ * answered "among the newest N rows" while reading as "in the log". Substring was
+ * never the problem; filtering a page instead of the table was.
  *
  * `credentialId` and `apiKeyId` are operator-only; the client surface accepts
  * neither, so its controls do not offer them.
@@ -528,12 +532,15 @@ export type LogFilters = {
   /** Only ever `"true"`. "Not failed" and "succeeded" differ on pending rows. */
   failed?: "true";
   provider?: string;
+  /** Substring of the name the client asked for. */
   requestedModel?: string;
+  /** Substring of the name the gateway routed to. */
   resolvedModel?: string;
-  /** Either name for the model: matches a row whose requested or resolved is this. */
+  /** Substring of *either* model name, which is what a bare word in the box means. */
   model?: string;
   credentialId?: string;
   apiKeyId?: string;
+  /** Substring of the error code. */
   errorCode?: string;
 };
 

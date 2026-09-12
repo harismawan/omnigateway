@@ -15,6 +15,7 @@ import healthMeasurements013 from "./migrations/013_health_measurements.sql" wit
 import keyExpiry014 from "./migrations/014_key_expiry.sql" with { type: "text" };
 import logKeyset015 from "./migrations/015_log_keyset.sql" with { type: "text" };
 import logFilterIndexes016 from "./migrations/016_log_filter_indexes.sql" with { type: "text" };
+import logTextSearch017 from "./migrations/017_log_text_search.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -54,6 +55,10 @@ const MIGRATIONS: ReadonlyArray<{
   // Index-only again, and the measurement 15 said should buy the next one: an
   // unindexed exact filter scanned the whole table whenever it matched nothing.
   { id: 16, sql: logFilterIndexes016 },
+  // Index-only, and partly a retraction of 16: the typed filters became substring
+  // matches, which no per-column index can seek, so those three move into the
+  // keyset index the scan already walks.
+  { id: 17, sql: logTextSearch017 },
 ];
 
 /**

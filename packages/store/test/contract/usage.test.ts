@@ -579,6 +579,92 @@ forEachStore((backend) => {
    * their spelling is on. Each column alone is pinned above; this pins that
    * either one answers, and that a row matching neither still does not.
    */
+  /**
+   * The typed filters match substrings; the picked ones do not.
+   *
+   * An exact match on a model name answered "no such traffic" for every spelling
+   * but one, and the one is the long form an operator does not have in front of
+   * them. So `opus` has to find `claude-opus-5`.
+   *
+   * The four that stay exact are not an oversight and the `api_key_id` case is
+   * the reason to test it here rather than trust the comment: `scopeKey` writes a
+   * client's own key into this query, so a substring match would let the scope
+   * `mine` read the rows of a key called `mine-2`. That is a scope escape, and it
+   * would not show up in any test that only ever uses one key.
+   */
+  test("typed filters match substrings, picked ones stay exact", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(
+      logRow({
+        id: "long",
+        at: T2,
+        requestedModel: "opus",
+        resolvedModel: "claude-opus-5",
+        errorCode: "ALL_CANDIDATES_FAILED",
+        apiKeyId: "mine",
+        credentialId: "cred",
+        resolvedProvider: "anthropic",
+      }),
+    );
+    await s.usage.append(
+      logRow({
+        id: "other",
+        at: T2 + 1,
+        requestedModel: "haiku",
+        resolvedModel: "claude-haiku-4-5",
+        errorCode: "UPSTREAM",
+        apiKeyId: "mine-2",
+        credentialId: "cred-2",
+        resolvedProvider: "openai",
+      }),
+    );
+
+    const ids = async (query: Record<string, unknown>): Promise<string[]> =>
+      (await s.usage.page({ limit: 5, cursor: null, ...query })).logs.map((row) => row.id);
+
+    // A fragment of the long name finds it, from either end and from the middle.
+    expect(await ids({ resolvedModel: "opus" })).toEqual(["long"]);
+    expect(await ids({ resolvedModel: "claude" })).toEqual(["other", "long"]);
+    expect(await ids({ requestedModel: "pu" })).toEqual(["long"]);
+    expect(await ids({ errorCode: "CANDIDATES" })).toEqual(["long"]);
+    // Case-insensitively, which is the half the two backends disagree on by
+    // default: SQLite's `LIKE` folds ASCII and Postgres' does not, so this is
+    // what holds `ILIKE` in place on that side.
+    expect(await ids({ resolvedModel: "OPUS" })).toEqual(["long"]);
+    expect(await ids({ errorCode: "upstream" })).toEqual(["other"]);
+
+    // And the ids do not, or a scope would leak into a longer one.
+    expect(await ids({ apiKeyId: "mine" })).toEqual(["long"]);
+    expect(await ids({ credentialId: "cred" })).toEqual(["long"]);
+  });
+
+  /**
+   * `_` and `%` are LIKE's wildcards and they occur in real values, so a filter
+   * carrying one has to mean the character.
+   *
+   * `ALL_CANDIDATES_FAILED` is every error code's shape. Unescaped, a filter for
+   * `ALL_CANDIDATES` also matched `ALLXCANDIDATESXFAILED` — measured, not
+   * theorised — which is a filter quietly answering a question nobody asked.
+   */
+  test("an underscore or percent in a filter means that character", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "real", at: T2, errorCode: "ALL_CANDIDATES_FAILED" }));
+    await s.usage.append(logRow({ id: "decoy", at: T2 + 1, errorCode: "ALLXCANDIDATESXFAILED" }));
+    await s.usage.append(logRow({ id: "pct", at: T2 + 2, requestedModel: "cut-50%-model" }));
+    await s.usage.append(logRow({ id: "plain", at: T2 + 3, requestedModel: "cut-50-model" }));
+
+    const page = await s.usage.page({ limit: 5, cursor: null, errorCode: "ALL_CANDIDATES" });
+    expect(page.logs.map((row) => row.id)).toEqual(["real"]);
+
+    const pct = await s.usage.page({ limit: 5, cursor: null, requestedModel: "50%-" });
+    expect(pct.logs.map((row) => row.id)).toEqual(["pct"]);
+
+    // A lone backslash is a character too, and escaping it is what stops a typed
+    // one from turning the next character into an escape.
+    const slash = await s.usage.page({ limit: 5, cursor: null, requestedModel: "\\" });
+    expect(slash.logs).toEqual([]);
+  });
+
   test("model matches either name, and nothing that carries neither", async () => {
     const s = await backend.fresh();
     await s.usage.append(

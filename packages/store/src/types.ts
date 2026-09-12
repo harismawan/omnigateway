@@ -1184,21 +1184,26 @@ export type RequestLogQuery = {
   apiKeyId?: string;
   credentialId?: string;
   provider?: ProviderId;
-  /** What the client asked for. A different fact from `resolvedModel`. */
+  /** Substring of what the client asked for. A different fact from `resolvedModel`. */
   requestedModel?: string;
-  /** What the gateway routed to. Null on a row that never resolved. */
+  /** Substring of what the gateway routed to. Never matches a row that did not resolve. */
   resolvedModel?: string;
   /**
-   * Either name for the model: matches a row whose requested *or* resolved
-   * model is this, exactly.
+   * Substring of *either* model name: matches a row whose requested or resolved
+   * model contains this.
    *
-   * The two columns hold different vocabularies — an alias like `opus` is only
-   * ever a requested name, and the `claude-opus-5` it routes to is only ever a
-   * resolved one — so an operator asking "this model" by the name they have in
-   * front of them cannot know which column it lives in, and picking wrong reads
-   * as "no such traffic" rather than "wrong column". The narrow filters stay
-   * for the question that is genuinely about one side: which alias resolved
-   * here, or what this alias resolved to.
+   * Both halves answer the same problem, which is that no single column holds
+   * the spelling an operator has. The two carry different vocabularies — an
+   * alias like `opus` is only ever requested, the `claude-opus-5` it routes to
+   * only ever resolved — and neither is what somebody recalls in full. Asked as
+   * an equality against one column, the answer was "no such traffic" for every
+   * spelling but one. The narrow filters stay for the question that is genuinely
+   * about one side: which alias resolved here, or what this alias resolved to.
+   *
+   * These four — this, both narrow ones, and `errorCode` — are the only loose
+   * comparisons in the query. Everything else is `=`, and `apiKeyId` especially:
+   * a scope is enforced by writing a key into it, so a substring there would let
+   * one key read another whose id contains it.
    */
   model?: string;
   errorCode?: string;
