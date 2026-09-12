@@ -5,6 +5,7 @@ import type { LogFilters } from "../../api/types.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Input, Select } from "../../ui/Field.tsx";
 import { Row } from "../../ui/primitives.ts";
+import { DateRangeField } from "./DateRangeField.tsx";
 
 const Bar = styled(Row)`
   gap: ${({ theme }) => theme.space(2)};
@@ -18,10 +19,6 @@ const Narrow = styled(Select)`
 const Terms = styled(Input)`
   flex: 1;
   min-width: 260px;
-`;
-
-const When = styled(Input)`
-  width: 200px;
 `;
 
 /**
@@ -152,23 +149,6 @@ const CLEAR_TERMS: FilterPatch = Object.fromEntries(TERM_FIELDS.map((field) => [
  * wait out.
  */
 export const TERM_DEBOUNCE_MS = 1000;
-
-/**
- * `datetime-local` renders in the browser's zone and yields a naive string, so
- * the two conversions are not symmetric: reading subtracts the offset the
- * browser applied, writing adds it back. Empty means the bound is absent, which
- * is a different fact from the epoch.
- */
-const toLocalInput = (at: number | undefined): string =>
-  at === undefined
-    ? ""
-    : new Date(at - new Date(at).getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-
-const fromLocalInput = (text: string): number | undefined => {
-  if (text === "") return undefined;
-  const parsed = Date.parse(text);
-  return Number.isNaN(parsed) ? undefined : parsed;
-};
 
 /**
  * The two controls that name operator infrastructure.
@@ -323,17 +303,25 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
 
   return (
     <Bar>
-      <When
-        type="datetime-local"
-        aria-label="From"
-        value={toLocalInput(filters.since)}
-        onChange={(event) => patch({ since: fromLocalInput(event.target.value) })}
+      <Terms
+        aria-label="Models and error codes"
+        placeholder="Search anything"
+        value={text}
+        onChange={(event) => {
+          const typed = event.target.value;
+          setText(typed);
+          cancel();
+          timer.current = setTimeout(() => {
+            timer.current = null;
+            patchRef.current({ ...CLEAR_TERMS, ...parseTerms(typed) });
+          }, TERM_DEBOUNCE_MS);
+        }}
       />
-      <When
-        type="datetime-local"
-        aria-label="To"
-        value={toLocalInput(filters.until)}
-        onChange={(event) => patch({ until: fromLocalInput(event.target.value) })}
+
+      <DateRangeField
+        since={filters.since}
+        until={filters.until}
+        onChange={(next) => patch(next)}
       />
 
       <Narrow
@@ -366,21 +354,6 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
           </option>
         ))}
       </Narrow>
-
-      <Terms
-        aria-label="Models and error codes"
-        placeholder="opus  requested:haiku  error:UPSTREAM"
-        value={text}
-        onChange={(event) => {
-          const typed = event.target.value;
-          setText(typed);
-          cancel();
-          timer.current = setTimeout(() => {
-            timer.current = null;
-            patchRef.current({ ...CLEAR_TERMS, ...parseTerms(typed) });
-          }, TERM_DEBOUNCE_MS);
-        }}
-      />
 
       {operator ? <OperatorFilters filters={filters} patch={patch} /> : null}
 
