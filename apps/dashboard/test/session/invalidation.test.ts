@@ -87,13 +87,30 @@ test("res:usage reaches a six-element usage key", () => {
   expect(stale(client, USAGE)).toBe(true);
 });
 
-test("res:quota reaches quota history", () => {
+test("res:quota reaches both the charts and the meters above them", () => {
   const client = seeded();
   expect(QUOTA[0]).toBe("quota-history");
 
   invalidateTopic(client, "res:quota");
 
   expect(stale(client, QUOTA)).toBe(true);
+  // The half this topic used to miss. One probe writes the newest reading and
+  // the history sample together, so a frame that refreshed the expanded chart
+  // and left the meter beside it on the previous number was showing two
+  // answers to one question — and under LIVE, which suppresses the poll, it
+  // kept showing them.
+  expect(stale(client, queryKeys.credentialHealth)).toBe(true);
+});
+
+test("res:quota leaves the credential list alone", () => {
+  const client = seeded();
+
+  invalidateTopic(client, "res:quota");
+
+  // A quota probe writes no credential row. Reaching health by its
+  // `["credentials"]` prefix would re-read every account on every pass, which
+  // is a cost with nothing behind it.
+  expect(stale(client, queryKeys.credentials)).toBe(false);
 });
 
 test("the single-key topics reach their own key and nothing else", () => {

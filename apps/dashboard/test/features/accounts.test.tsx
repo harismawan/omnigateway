@@ -30,8 +30,17 @@ const credentials = [
   credential({ id: "cred-2", provider: "openai", label: "codex-work", enabled: false, tier: 2 }),
 ];
 
+/** An admin session, because the board's mutating controls are gated on one. */
+const ADMIN = {
+  configured: true,
+  authenticated: true,
+  principal: { kind: "admin" },
+  viewerConfigured: false,
+};
+
 function stubAccounts(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
+    "GET /api/status": () => ADMIN,
     "GET /api/credentials": () => ({ credentials }),
     "GET /api/credentials/health": () => ({
       health: [health({ breakerState: "open", consecutiveFailures: 4 })],
@@ -1457,6 +1466,161 @@ describe("AccountsBoard quota pace", () => {
       expect(factValue("Projected")).toBe("unknown");
     } finally {
       restore();
+    }
+  });
+});
+
+describe("AccountsBoard quota refresh", () => {
+  test("an admin sees the refresh controls and a viewer sees neither", async () => {
+    stubAccounts();
+    const admin = renderWithProviders(<AccountsBoard />);
+    expect(await screen.findByRole("button", { name: "Refresh all quota" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Refresh quota for claude-main" })).toBeTruthy();
+    admin.unmount();
+
+    // Not inferred from a mutation coming back 401: a control that only reveals
+    // it does nothing once pressed should not have been drawn.
+    stubAccounts({
+      "GET /api/status": () => ({
+        configured: true,
+        authenticated: true,
+        principal: { kind: "viewer" },
+        viewerConfigured: true,
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    expect(await screen.findByText("Anthropic")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Refresh all quota" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Refresh quota for claude-main" })).toBeNull();
+  });
+
+  test("a row refresh sends that account's id and reports what came back", async () => {
+    const sent: unknown[] = [];
+    const stub = stubAccounts({
+      "POST /api/credentials/quota/refresh": ({ init }) => {
+        sent.push(JSON.parse(String(init?.body)));
+        return { outcomes: [{ kind: "refreshed", credentialId: "cred-1", windows: 2 }] };
+      },
+    });
+    void stub;
+    renderWithProviders(<AccountsBoard />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Refresh quota for claude-main" }),
+    );
+
+    expect(sent).toEqual([{ kind: "one", credentialId: "cred-1" }]);
+    const status = await screen.findByRole("status");
+    await waitFor(() => expect(status.textContent).toBe("Quota refreshed for claude-main."));
+  });
+
+  test("the bulk control says all, explicitly", async () => {
+    const sent: unknown[] = [];
+    stubAccounts({
+      "POST /api/credentials/quota/refresh": ({ init }) => {
+        sent.push(JSON.parse(String(init?.body)));
+        return {
+          outcomes: [
+            { kind: "refreshed", credentialId: "cred-1", windows: 2 },
+            { kind: "failed", credentialId: "cred-2", code: "UPSTREAM" },
+          ],
+        };
+      },
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Refresh all quota" }));
+
+    // Never an absent field standing in for everything.
+    expect(sent).toEqual([{ kind: "all" }]);
+    const status = await screen.findByRole("status");
+    await waitFor(() => expect(status.textContent).toBe("Refreshed 1 account; 1 failed."));
+  });
+
+  test("an outcome that changed nothing still says so, by name", async () => {
+    stubAccounts({
+      "POST /api/credentials/quota/refresh": () => ({
+        outcomes: [{ kind: "cooldown", credentialId: "cred-1" }],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Refresh quota for claude-main" }),
+    );
+
+    const status = await screen.findByRole("status");
+    await waitFor(() =>
+      expect(status.textContent).toBe("Quota refresh is cooling down for claude-main."),
+    );
+  });
+
+  test("a failed refresh leaves the reading that is already on screen", async () => {
+    stubAccounts({
+      "POST /api/credentials/quota/refresh": () => ({
+        status: 502,
+        body: { error: { code: "UPSTREAM", message: "provider unavailable" } },
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    // 950 of 1,000 before the refresh, and the same after: a refresh that did
+    // not land must never blank a meter or read it as zero.
+    expect(await screen.findByText("95%")).toBeTruthy();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Refresh quota for claude-main" }),
+    );
+
+    const status = await screen.findByRole("status");
+    await waitFor(() =>
+      expect(status.textContent).toBe("Quota refresh could not be started for claude-main."),
+    );
+    expect(screen.getByText("95%")).toBeTruthy();
+  });
+
+  test("a bulk refresh disables every refresh control while it runs", async () => {
+    stubAccounts({
+      "POST /api/credentials/quota/refresh": () => ({
+        outcomes: [{ kind: "refreshed", credentialId: "cred-1", windows: 2 }],
+      }),
+    });
+
+    // Held at the fetch layer rather than in the handler: the stub's handlers
+    // are synchronous, so an async one resolves instantly and the pending state
+    // never exists to be observed.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const base = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await base(input, init);
+      if (String(input).includes("quota/refresh")) await held;
+      return response;
+    }) as typeof fetch;
+
+    try {
+      renderWithProviders(<AccountsBoard />);
+      const all = await screen.findByRole("button", { name: "Refresh all quota" });
+      void userEvent.click(all);
+
+      // The bulk control names what it is doing, and no row can start a second
+      // request behind it.
+      const pending = await screen.findByRole("button", { name: "Refreshing quota…" });
+      expect(pending.hasAttribute("disabled")).toBe(true);
+      expect(
+        screen
+          .getByRole("button", { name: "Refresh quota for claude-main" })
+          .hasAttribute("disabled"),
+      ).toBe(true);
+
+      release?.();
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Refresh all quota" })).not.toBeNull(),
+      );
+    } finally {
+      globalThis.fetch = base;
     }
   });
 });

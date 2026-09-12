@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
 import {
@@ -6,12 +6,20 @@ import {
   useCredentialHealth,
   useCredentials,
   useDeleteCredential,
+  useIsAdmin,
   useModels,
   useProviderCatalog,
+  useRefreshQuota,
   useSettings,
   useUpdateCredential,
 } from "../../api/queries.ts";
-import type { Credential, ProviderId, VirtualModel } from "../../api/types.ts";
+import type {
+  Credential,
+  ProviderId,
+  QuotaRefreshOutcome,
+  QuotaRefreshRequest,
+  VirtualModel,
+} from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatPercent, formatRelative } from "../../lib/format.ts";
@@ -69,6 +77,20 @@ const Note = styled.span`
   display: block;
   padding-left: 9px;
   font-size: 11px;
+  color: ${({ theme }) => theme.color.inkDim};
+`;
+
+/**
+ * Where a refresh reports what it did.
+ *
+ * Always mounted, empty when there is nothing to say: a region that appears
+ * with its first message is one a screen reader may not be watching yet. Height
+ * is not reserved, so an empty one costs a line and nothing moves under it.
+ */
+const StatusNote = styled.p`
+  margin: 0 0 10px;
+  min-height: 16px;
+  font-size: 12px;
   color: ${({ theme }) => theme.color.inkDim};
 `;
 
@@ -150,9 +172,23 @@ export function AccountsBoard() {
   const models = useModels();
   const catalogQuery = useProviderCatalog();
   const remove = useDeleteCredential();
+  const refresh = useRefreshQuota();
+  const isAdmin = useIsAdmin();
   const { commit } = useCommit();
 
   const [connecting, setConnecting] = useState(false);
+  /**
+   * What the last refresh did, in the operator's words.
+   *
+   * Held rather than derived from the mutation, because the mutation forgets
+   * the account as soon as the next row is pressed and this is the only place
+   * an outcome that changed nothing — cooling down, no data, unsupported — is
+   * ever reported. Cleared when a new request starts.
+   */
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
+  /** Which single account is refreshing, so the other rows stay usable. */
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [refreshingAll, setRefreshingAll] = useState(false);
   const [doomed, setDoomed] = useState<Credential | null>(null);
   // Which rows have their history open. Local to the board: an expansion is a
   // glance at one account, not a preference worth outliving the visit.
@@ -164,8 +200,66 @@ export function AccountsBoard() {
       return next;
     });
 
-  const now = Date.now();
   const rows = credentials.data ?? [];
+  const labelFor = (id: string): string => rows.find((row) => row.id === id)?.label ?? id;
+
+  /** One operation's outcomes as one sentence. Host phrasing, never upstream text. */
+  const describeRefresh = (outcomes: QuotaRefreshOutcome[]): string => {
+    const only = outcomes[0];
+    if (outcomes.length === 1 && only !== undefined) {
+      const account = labelFor(only.credentialId);
+      return only.kind === "refreshed" || only.kind === "coalesced"
+        ? `Quota refreshed for ${account}.`
+        : only.kind === "noData"
+          ? `No quota data reported for ${account}.`
+          : only.kind === "cooldown"
+            ? `Quota refresh is cooling down for ${account}.`
+            : only.kind === "unsupported"
+              ? `${account} does not report quota.`
+              : only.kind === "disabled"
+                ? `${account} is disabled, so it was not probed.`
+                : `Quota refresh failed for ${account}.`;
+    }
+    const refreshed = outcomes.filter(
+      (o) => o.kind === "refreshed" || o.kind === "coalesced",
+    ).length;
+    const failed = outcomes.filter((o) => o.kind === "failed").length;
+    const cooling = outcomes.filter((o) => o.kind === "cooldown").length;
+    const skipped = outcomes.length - refreshed - failed - cooling;
+    return [
+      `Refreshed ${refreshed} ${refreshed === 1 ? "account" : "accounts"}`,
+      failed === 0 ? null : `${failed} failed`,
+      cooling === 0 ? null : `${cooling} cooling down`,
+      skipped === 0 ? null : `${skipped} skipped`,
+    ]
+      .filter((part) => part !== null)
+      .join("; ")
+      .concat(".");
+  };
+
+  const runRefresh = async (request: QuotaRefreshRequest): Promise<void> => {
+    setRefreshNote(null);
+    if (request.kind === "all") setRefreshingAll(true);
+    else setRefreshingId(request.credentialId);
+    try {
+      const result = await refresh.mutateAsync(request);
+      setRefreshNote(describeRefresh(result.outcomes));
+    } catch (error) {
+      // The request itself did not land. The meters keep whatever they were
+      // showing — a failed refresh never blanks a reading.
+      setRefreshNote(
+        request.kind === "all"
+          ? "Quota refresh could not be started."
+          : `Quota refresh could not be started for ${labelFor(request.credentialId)}.`,
+      );
+      void error;
+    } finally {
+      setRefreshingAll(false);
+      setRefreshingId(null);
+    }
+  };
+
+  const now = Date.now();
   // Loaded before this screen mounts, by the gate in `routes/_app.tsx`.
   const catalog = catalogQuery.data ?? [];
   // The catalog decides the order, the connected accounts decide the set. Built
@@ -196,12 +290,35 @@ export function AccountsBoard() {
         title="Provider accounts"
         summary={summary}
         actions={
-          <Button type="button" $variant="primary" onClick={() => setConnecting(true)}>
-            <Plus />
-            Connect an account
-          </Button>
+          <Row $gap={1}>
+            {isAdmin ? (
+              <Button
+                type="button"
+                $variant="ghost"
+                disabled={refreshingAll || refreshingId !== null}
+                onClick={() => void runRefresh({ kind: "all" })}
+              >
+                <RefreshCw />
+                {refreshingAll ? "Refreshing quota…" : "Refresh all quota"}
+              </Button>
+            ) : null}
+            <Button type="button" $variant="primary" onClick={() => setConnecting(true)}>
+              <Plus />
+              Connect an account
+            </Button>
+          </Row>
         }
       />
+
+      {/*
+        One region for the whole operation, near the controls that caused it.
+        `role="status"` rather than an alert: a refresh that reported nothing
+        useful is information, not an interruption, and a bulk result is one
+        announcement rather than one per account.
+      */}
+      <StatusNote role="status" aria-live="polite">
+        {refreshNote ?? ""}
+      </StatusNote>
 
       {credentials.isError ? (
         <Module legend="Accounts">
@@ -260,7 +377,7 @@ export function AccountsBoard() {
                         <Th $align="right" $width="130px">
                           Token expires
                         </Th>
-                        <Th $width="76px" />
+                        <Th $width="112px" />
                       </tr>
                     </thead>
                     <tbody>
@@ -412,6 +529,24 @@ export function AccountsBoard() {
                                       {open ? <ChevronDown /> : <ChevronRight />}
                                     </IconButton>
                                   )}
+                                  {isAdmin ? (
+                                    <IconButton
+                                      type="button"
+                                      $variant="ghost"
+                                      $size="sm"
+                                      disabled={refreshingAll || refreshingId !== null}
+                                      aria-label={`Refresh quota for ${credential.label}`}
+                                      title={`Refresh quota for ${credential.label}`}
+                                      onClick={() =>
+                                        void runRefresh({
+                                          kind: "one",
+                                          credentialId: credential.id,
+                                        })
+                                      }
+                                    >
+                                      <RefreshCw />
+                                    </IconButton>
+                                  ) : null}
                                   <IconButton
                                     type="button"
                                     $variant="ghost"
