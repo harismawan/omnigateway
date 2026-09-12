@@ -1,6 +1,7 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
+import { logPageClauses, splitPage } from "../logPage.ts";
 import {
   NODE_GRACE_MS,
   type RequestLog,
@@ -374,6 +375,22 @@ export function createUsageRepo(
         )
         .all(apiKeyId, limit)
         .map(toLog);
+    },
+
+    async page(query) {
+      const { where, bindings } = logPageClauses(query, () => "?");
+      const rows = db
+        .query<Row, SQLQueryBindings[]>(
+          `SELECT * FROM request_logs ${where} ORDER BY at DESC, id DESC LIMIT ?`,
+        )
+        // One more than the page, so a full final page is told from a full one
+        // with more behind it.
+        .all(...bindings, query.limit + 1)
+        // Mapped before the split, so the cursor is cut from the same normalized
+        // `at` the caller was handed rather than from a raw column — which in the
+        // Postgres repo is a BIGINT string.
+        .map(toLog);
+      return splitPage(rows, query.limit);
     },
 
     async lastUsedByCredential(credentialId) {

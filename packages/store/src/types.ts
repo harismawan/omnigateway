@@ -1144,6 +1144,67 @@ export type UsageBucket = {
  */
 export type UsageSums = { requests: number; tokens: number; costUsd: number };
 
+/**
+ * Where a log traversal resumed from: the `(at, id)` of the last row returned.
+ *
+ * Both halves are required. `at` alone cannot order two rows written in the same
+ * millisecond, so a cursor holding only a timestamp either skips the second row
+ * or serves it twice depending on which comparison it uses — the bug the CLI's
+ * follow mode had.
+ */
+export type RequestLogCursor = { at: number; id: string };
+
+/**
+ * One page of request logs: a scope, exact filters, a page size and where to
+ * resume.
+ *
+ * One object rather than a parameter list, and that is a safety property rather
+ * than ergonomics. The SQLite swap forwarder hand-writes one arrow per repo
+ * method, and an arrow of lower arity still satisfies the interface — that is
+ * how `recent`'s optional scope argument was once dropped and every key's rows
+ * served to every caller. A single required parameter cannot be dropped
+ * silently.
+ *
+ * Semantics the stores must agree on:
+ *
+ * - order is `(at DESC, id DESC)`, always, with no caller-chosen sort;
+ * - `cursor` is **exclusive**: the row it names is not returned again;
+ * - `since` and `until` are **inclusive** bounds on `at`;
+ * - every supplied filter is combined with `AND`;
+ * - the filters and the scope apply **before** `limit`, so a quiet key or a
+ *   rare error still fills a page rather than being paged out by traffic that
+ *   does not match;
+ * - `failed: true` is a completed row with an error status — the same question
+ *   the console's `isError` asks — and `failed: false` is not a filter at all,
+ *   because "not failed" and "succeeded" differ on pending rows.
+ */
+export type RequestLogQuery = {
+  limit: number;
+  cursor: RequestLogCursor | null;
+  apiKeyId?: string;
+  credentialId?: string;
+  provider?: ProviderId;
+  /** What the client asked for. A different fact from `resolvedModel`. */
+  requestedModel?: string;
+  /** What the gateway routed to. Null on a row that never resolved. */
+  resolvedModel?: string;
+  errorCode?: string;
+  state?: RequestState;
+  /** Completed rows with an error status. `false` is omitted, never inverted. */
+  failed?: boolean;
+  since?: number;
+  until?: number;
+};
+
+/**
+ * A page and where the next one starts, or null when this page is the last.
+ *
+ * `next` comes from asking the store for `limit + 1` rows: a full page that
+ * happens to exhaust the table reports no cursor, rather than advertising a
+ * page the caller would find empty.
+ */
+export type RequestLogPage = { logs: RequestLog[]; next: RequestLogCursor | null };
+
 /** What comparing the hourly rollup against the rows it summarizes found. */
 export type RollupAudit = {
   /** Buckets `request_logs` says should exist. Zero on an install with no traffic. */
@@ -1189,6 +1250,15 @@ export interface UsageRepo {
    * cannot see. Anonymous rows carry a NULL `api_key_id` and match no scope.
    */
   recent(limit: number, apiKeyId?: string): Promise<RequestLog[]>;
+  /**
+   * One filtered, ordered page of request logs, newest first.
+   *
+   * The investigation read: `recent` is its first page with no filters and no
+   * way to ask for the next one. See `RequestLogQuery` for the ordering, cursor
+   * and filter semantics both stores are pinned against in
+   * `test/contract/usage.test.ts`.
+   */
+  page(query: RequestLogQuery): Promise<RequestLogPage>;
   /**
    * The `at` of the newest row that ran against one credential, or null.
    *

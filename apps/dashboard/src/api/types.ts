@@ -503,10 +503,40 @@ export type UsageQuery = {
 
 export type UsageResponse = { rows: UsageBucket[] };
 
-export type LogsResponse = { logs: RequestLog[] };
+export type LogsResponse = { logs: RequestLog[]; nextCursor?: string | null };
 
 /** The client's own tail, which is a narrower row than the operator's. */
-export type ClientLogsResponse = { logs: ClientRequestLog[] };
+export type ClientLogsResponse = { logs: ClientRequestLog[]; nextCursor?: string | null };
+
+/**
+ * The exact filters the log routes accept.
+ *
+ * Every value is an id or an exact string the gateway compares with `=`. There
+ * is deliberately no free-text field: the board used to filter a fetched tail in
+ * the browser by substring across model, account label, key label and error, and
+ * an exact server query cannot preserve those semantics — it would silently
+ * match a different set. Removing the box is the honest replacement for
+ * pretending it still works.
+ *
+ * `credentialId` and `apiKeyId` are operator-only; the client surface accepts
+ * neither, so its controls do not offer them.
+ */
+export type LogFilters = {
+  since?: number;
+  until?: number;
+  state?: "pending" | "done";
+  /** Only ever `"true"`. "Not failed" and "succeeded" differ on pending rows. */
+  failed?: "true";
+  provider?: string;
+  requestedModel?: string;
+  resolvedModel?: string;
+  credentialId?: string;
+  apiKeyId?: string;
+  errorCode?: string;
+};
+
+/** An empty filter set, so "cleared" is one value rather than eight. */
+export const NO_LOG_FILTERS: LogFilters = {};
 
 /**
  * One line of the gateway's own output.

@@ -1366,7 +1366,7 @@ test("logs without --service reads the request log", async () => {
   const result = await cli(["logs", "--json"], { root, service });
 
   expect(result.code).toBe(0);
-  expect(JSON.parse(result.out)).toEqual({ logs: [] });
+  expect(JSON.parse(result.out)).toEqual({ logs: [], nextCursor: null });
 });
 
 /** Three completed requests, so a page size shows up as a row count. */

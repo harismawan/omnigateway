@@ -1,6 +1,7 @@
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
 import type { SQL } from "bun";
+import { logPageClauses, splitPage } from "../logPage.ts";
 import { HOUR_MS, hourOf, startOfDay } from "../sqlite/rollup.ts";
 import {
   NODE_GRACE_MS,
@@ -324,6 +325,23 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
               [apiKeyId, limit],
             );
       return rows.map(toLog);
+    },
+
+    async page(query) {
+      const { where, bindings } = logPageClauses(query, (n) => `$${n}`);
+      const rows = (
+        await sql.unsafe<Rows<Row>>(
+          `SELECT * FROM request_logs ${where}
+            ORDER BY at DESC, id DESC LIMIT $${bindings.length + 1}`,
+          // One more than the page, so a full final page is told from a full one
+          // with more behind it.
+          [...bindings, query.limit + 1],
+        )
+      )
+        // Mapped before the split, so the cursor is cut from the normalized `at`
+        // rather than from the BIGINT string the driver returns.
+        .map(toLog);
+      return splitPage(rows, query.limit);
     },
 
     async lastUsedByCredential(credentialId) {

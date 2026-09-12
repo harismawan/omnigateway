@@ -85,7 +85,7 @@ test("openDb applies migrations and records them", () => {
     expect(tables).toContain(t);
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
-  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+  expect(applied.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
     .query<{ name: string }, []>("PRAGMA table_info(credential_health)")
@@ -247,11 +247,15 @@ test("migration 9 indexes request logs by key first, so a per-key window scan st
   // Composite order is the whole point: `(at DESC, api_key_id)` would not let a
   // weekly sum for one key start at that key, and would scan every row in the
   // week for every key on the install.
+  //
+  // Migration 15 appended `id` to the same index rather than adding a second
+  // one, so the leading two columns — the only part this test is about — are
+  // unchanged, and there is no shorter prefix index left costing a write.
   const columns = db
     .query<{ seqno: number; name: string }, []>("PRAGMA index_info(idx_request_logs_key_at)")
     .all()
     .map((row) => row.name);
-  expect(columns).toEqual(["api_key_id", "at"]);
+  expect(columns).toEqual(["api_key_id", "at", "id"]);
 
   // Not an optimisation, so it has to be the plan the planner actually picks.
   const plan = db
@@ -288,7 +292,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(14);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(15);
   db.close();
 });
 

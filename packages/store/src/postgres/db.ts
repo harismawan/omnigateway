@@ -2,6 +2,7 @@ import { SQL } from "bun";
 import init001 from "./migrations/001_init.sql" with { type: "text" };
 import healthMeasurements002 from "./migrations/002_health_measurements.sql" with { type: "text" };
 import keyExpiry003 from "./migrations/003_key_expiry.sql" with { type: "text" };
+import logKeyset004 from "./migrations/004_log_keyset.sql" with { type: "text" };
 
 /**
  * Anything that can run a statement: the pool, a reserved connection, or the
@@ -36,6 +37,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string }> = [
   { id: 1, sql: init001 },
   { id: 2, sql: healthMeasurements002 },
   { id: 3, sql: keyExpiry003 },
+  { id: 4, sql: logKeyset004 },
 ];
 
 /**

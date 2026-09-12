@@ -10,7 +10,7 @@ import {
   formatUsd,
   shortId,
 } from "../../lib/format.ts";
-import { isError, isPending, lampLabel, lampState } from "../../lib/vitals.ts";
+import { isPending, lampLabel, lampState } from "../../lib/vitals.ts";
 import { Chip, ProviderTag } from "../../ui/Chip.tsx";
 import { Lamp } from "../../ui/Lamp.tsx";
 import { Legend, Mono, Row, Stack, Truncate } from "../../ui/primitives.ts";
@@ -51,44 +51,6 @@ export function useCurrentTime(active: boolean): number {
   }, [active]);
 
   return now;
-}
-
-/**
- * Whether a row matches the filter box.
- *
- * The account and key clauses are applied only where those labels are readable.
- * A client filtering on "anthropic" is filtering models and providers; there is
- * no account name for the term to match, and pretending otherwise would be a
- * search over fields it cannot see.
- */
-export function matchesTerm(log: RequestRow, needle: string, names?: RequestNames): boolean {
-  if (needle.length === 0) return true;
-  if (
-    log.requestedModel.toLowerCase().includes(needle) ||
-    (log.resolvedModel ?? "").toLowerCase().includes(needle) ||
-    (log.errorCode ?? "").toLowerCase().includes(needle)
-  ) {
-    return true;
-  }
-  if (names === undefined) return false;
-  // Both ids are optional on the row, not merely nullable: the client's
-  // projection omits them entirely. Absent and null match the same nothing.
-  const account = log.credentialId == null ? "" : (names.accounts.get(log.credentialId) ?? "");
-  const key = log.apiKeyId == null ? "" : (names.keys.get(log.apiKeyId) ?? log.apiKeyId);
-  return account.toLowerCase().includes(needle) || key.toLowerCase().includes(needle);
-}
-
-/** Rows in this window, filtered exactly as the table renders them. */
-export function filterLogs(
-  logs: readonly RequestRow[],
-  filter: "all" | "failed",
-  term: string,
-  names?: RequestNames,
-): RequestRow[] {
-  const needle = term.trim().toLowerCase();
-  return logs.filter(
-    (log) => (filter !== "failed" || isError(log)) && matchesTerm(log, needle, names),
-  );
 }
 
 function TokenCell({ log }: { log: RequestRow }) {

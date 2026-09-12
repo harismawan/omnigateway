@@ -420,25 +420,42 @@ describe("client board renders the console's own views", () => {
     expect(row.textContent).not.toContain("cred-1");
   });
 
-  test("the filter reads models and errors, and never an account it cannot resolve", async () => {
+  /**
+   * The client's filters are the operator's filters minus the two that name
+   * infrastructure this session cannot see.
+   *
+   * Both halves matter. The model and error controls are here because a key
+   * holder debugging their own traffic asks exactly those questions; the account
+   * and key controls are absent because `/api/client/logs` refuses both
+   * parameters, and a control the server will not honour is a control that
+   * reports a filtered view it did not apply.
+   */
+  test("the filters a client can send name models and errors, never accounts or keys", async () => {
     const user = userEvent.setup();
-    stub({
+    const fetches = stub({
       "GET /api/client/logs": () => ({
         logs: [
           log({ id: "req-ok", requestedModel: "fast" }),
           log({ id: "req-bad", requestedModel: "slow", status: 502, errorCode: "UPSTREAM" }),
         ],
+        nextCursor: null,
       }),
     });
     renderWithProviders(<ClientBoard />);
     await screen.findByText("laptop");
 
-    await user.type(screen.getByLabelText("Filter requests"), "slow");
+    expect(screen.queryByLabelText("Account")).toBeNull();
+    expect(screen.queryByLabelText("Gateway key")).toBeNull();
+
+    await user.type(screen.getByLabelText("Requested model"), "slow");
     await waitFor(() => {
-      expect(screen.queryByText("UPSTREAM")).toBeTruthy();
+      expect(
+        fetches.calls.some(
+          (call) =>
+            call.url.startsWith("/api/client/logs") && call.url.includes("requestedModel=slow"),
+        ),
+      ).toBe(true);
     });
-    const rows = screen.getAllByRole("row").filter((row) => row.textContent?.includes("ms"));
-    expect(rows).toHaveLength(1);
   });
 
   test("the deck reports every class the usage board does, from one scoped read", async () => {

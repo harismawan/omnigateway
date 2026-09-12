@@ -3,10 +3,9 @@ import {
   type AdminAuth,
   accountQuota,
   accountQuotaHistory,
-  logLimit,
+  pageLogs,
   queryUsage,
   readOwnKey,
-  recentLogs,
   scopeOf,
   toClientLog,
 } from "@omni/control";
@@ -126,18 +125,46 @@ export function clientRoutes(deps: ClientDeps) {
         );
       })
 
+      /**
+       * The caller's own requests, one page at a time.
+       *
+       * The same paginated operation the operator's `/api/logs` uses, with two
+       * differences that are both narrowings. The scope comes from the verified
+       * session, so it cannot be widened by anything in the URL. And the two
+       * operator-identity filters — `apiKeyId` and `credentialId` — are not
+       * forwarded at all: the first is not a question a client may ask (its own
+       * key is the scope, and any other is refused rather than silently
+       * ignored), and the second names an account this surface does not
+       * disclose per request.
+       *
+       * Forwarded field by field rather than by spreading `query`, so a filter
+       * added to the operator's route later is absent here until somebody
+       * decides it belongs — the same shape, and the same reason, as
+       * `toClientLog` enumerating its columns.
+       */
       .get("/api/client/logs", async ({ request, query }) => {
         const apiKeyId = await requireClient(request, deps.admin);
-        const rows = await recentLogs(
+        const page = await pageLogs(
           deps.store,
-          logLimit(query.limit),
+          {
+            limit: query.limit,
+            cursor: query.cursor,
+            since: query.since,
+            until: query.until,
+            state: query.state,
+            failed: query.failed,
+            provider: query.provider,
+            requestedModel: query.requestedModel,
+            resolvedModel: query.resolvedModel,
+            errorCode: query.errorCode,
+          },
           scopeOf({ kind: "client", apiKeyId }),
         );
         // Projected, never returned raw. `RequestLog` is the operator's row and
         // names the account that served the request — in `credentialId` and,
         // less obviously, inside the `excluded:<credentialId>:<reason>` strings
         // in `degradations`. Both are the operator's infrastructure.
-        return { logs: rows.map(toClientLog) };
+        return { logs: page.logs.map(toClientLog), nextCursor: page.nextCursor };
       })
 
       /**

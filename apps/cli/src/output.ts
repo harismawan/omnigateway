@@ -37,6 +37,14 @@ export type Tone = keyof Omit<typeof ANSI, "reset">;
 export type Writer = {
   out: (line: string) => void;
   err: (line: string) => void;
+  /**
+   * Bytes to stdout exactly as given, with no newline appended.
+   *
+   * For output that is a *file* rather than a line: an export's rows already
+   * carry their own terminators, and CSV's is CRLF, so a writer that appends
+   * `\n` per chunk produces a file no RFC 4180 reader agrees with.
+   */
+  raw: (chunk: string) => void;
 };
 
 export const consoleWriter: Writer = {
@@ -45,6 +53,9 @@ export const consoleWriter: Writer = {
   },
   err: (line) => {
     process.stderr.write(`${line}\n`);
+  },
+  raw: (chunk) => {
+    process.stdout.write(chunk);
   },
 };
 

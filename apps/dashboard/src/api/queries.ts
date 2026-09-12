@@ -1,8 +1,11 @@
 import type { Cadence } from "@omnigateway/dashboard-sdk";
 import {
+  type InfiniteData,
   queryOptions,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -37,6 +40,7 @@ import type {
   KeyModelsInput,
   KeysResponse,
   LifecycleCapability,
+  LogFilters,
   LogsResponse,
   MintedKey,
   ModelsResponse,
@@ -67,6 +71,48 @@ import type {
   VirtualModel,
 } from "./types.ts";
 
+/**
+ * Every log filter, in a fixed order, as one cache-key segment.
+ *
+ * Order is fixed here rather than taken from the object, because two filter
+ * sets that differ only in the order their keys were assigned are the same
+ * query and must share a cache entry — `Object.entries` would give them two,
+ * and the second would start its traversal from scratch while the first kept
+ * scrolling.
+ *
+ * The names are the wire parameter names, so this doubles as the list a request
+ * sends. `undefined` and `""` both mean absent; neither is a null-filter
+ * sentinel the gateway would read.
+ */
+const LOG_FILTER_FIELDS = [
+  "since",
+  "until",
+  "state",
+  "failed",
+  "provider",
+  "requestedModel",
+  "resolvedModel",
+  "credentialId",
+  "apiKeyId",
+  "errorCode",
+] as const satisfies ReadonlyArray<keyof LogFilters>;
+
+// JSON rather than a joined string, so no separator can appear inside a
+// value: a model name holding the delimiter would otherwise let two
+// different filter sets produce one key, and share a traversal.
+const logFilterKey = (filters: LogFilters): string =>
+  JSON.stringify(LOG_FILTER_FIELDS.map((field) => filters[field] ?? null));
+
+/** The same fields as query parameters, with the absent ones dropped. */
+const logFilterParams = (filters: LogFilters): Record<string, string | number | undefined> => {
+  const params: Record<string, string | number | undefined> = {};
+  for (const field of LOG_FILTER_FIELDS) {
+    const value = filters[field];
+    if (value !== undefined && value !== "") params[field] = value;
+  }
+  return params;
+};
+
 export const queryKeys = {
   status: ["status"] as const,
   credentials: ["credentials"] as const,
@@ -88,6 +134,18 @@ export const queryKeys = {
   quotaHistory: (query: QuotaHistoryQuery) =>
     ["quota-history", query.credentialId, query.since, query.until ?? null] as const,
   logs: (limit: number) => ["logs", limit] as const,
+  /**
+   * The Logs board's paginated read, under its own prefix.
+   *
+   * Not `["logs", …]`, because it is an infinite query and `res:logs` invalidates
+   * that prefix — and invalidating an infinite query refetches every page it has
+   * loaded, so a busy gateway would re-read an operator's whole scrollback once a
+   * second. The prefix is what lets the invalidation map hold one narrow rule for
+   * it instead. Every normalized filter is in the key, so changing one starts a
+   * fresh traversal rather than appending to the old one's pages.
+   */
+  logPages: (filters: LogFilters, limit: number) =>
+    ["logPages", limit, logFilterKey(filters)] as const,
   requestBody: (requestId: string) => ["logs", "body", requestId] as const,
   /**
    * The client surface's own keys, under prefixes the console never uses.
@@ -109,6 +167,8 @@ export const queryKeys = {
       query.until ?? null,
     ] as const,
   clientLogs: (limit: number) => ["client", "logs", limit] as const,
+  clientLogPages: (filters: LogFilters, limit: number) =>
+    ["client", "logPages", limit, logFilterKey(filters)] as const,
   clientQuota: ["client", "quota"] as const,
   clientQuotaHistory: (query: ClientQuotaHistoryQuery) =>
     ["client", "quota-history", query.since, query.until ?? null] as const,
@@ -389,6 +449,62 @@ export function useLogs(
     queryFn: async ({ signal }) =>
       (await get<LogsResponse>(withQuery("/api/logs", { limit }), signal)).logs,
     refetchInterval: cadence,
+  });
+}
+
+/** One page of a paginated log read, as both routes return it. */
+export type LogPage<T> = { logs: T[]; nextCursor: string | null };
+
+/**
+ * Whether an infinite log query is still showing only its first page.
+ *
+ * The condition `res:logs` refreshes on. A board sitting at the head wants live
+ * rows; one that has loaded older pages is reading a window that has already
+ * scrolled past the head, and refetching it on every push would re-read the
+ * whole scrollback to repaint rows the operator is not looking at.
+ *
+ * Undefined data counts as at-head: an unfetched query has no scrollback to
+ * disturb, and a first fetch is what a stale mark should produce.
+ */
+export function isHeadPage(data: unknown): boolean {
+  if (data === undefined) return true;
+  const pages = (data as InfiniteData<unknown> | undefined)?.pages;
+  return !Array.isArray(pages) || pages.length <= 1;
+}
+
+/**
+ * The Logs board's read: exact filters applied by the gateway, one page at a
+ * time, oldest page appended last.
+ *
+ * Separate from `useLogs` on purpose. Overview, the chassis bar and the client
+ * summary want a bounded tail and nothing else — turning them into infinite
+ * queries would make every one of them carry pagination state for a scrollback
+ * nobody scrolls.
+ *
+ * `cadence` is honoured only while the query is at its head, for the reason
+ * `isHeadPage` records.
+ */
+export function useLogPages(
+  filters: LogFilters,
+  limit = 100,
+  cadence: Cadence = LOG_CADENCE_MS,
+): UseInfiniteQueryResult<InfiniteData<LogPage<RequestLog>>> {
+  return useInfiniteQuery({
+    queryKey: queryKeys.logPages(filters, limit),
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam, signal }) => {
+      const page = await get<LogsResponse>(
+        withQuery("/api/logs", {
+          ...logFilterParams(filters),
+          limit,
+          ...(pageParam === null ? {} : { cursor: pageParam }),
+        }),
+        signal,
+      );
+      return { logs: page.logs, nextCursor: page.nextCursor ?? null };
+    },
+    getNextPageParam: (last) => last.nextCursor,
+    refetchInterval: (query) => (isHeadPage(query.state.data) ? cadence : false),
   });
 }
 
@@ -751,6 +867,39 @@ export function useClientLogs(
     queryFn: async ({ signal }) =>
       (await get<ClientLogsResponse>(withQuery("/api/client/logs", { limit }), signal)).logs,
     refetchInterval: cadence,
+  });
+}
+
+/**
+ * The same paginated read on the client surface, over that key's own rows.
+ *
+ * `credentialId` and `apiKeyId` are not sent — the route refuses them, since the
+ * first is the session's own scope and the second names an account this surface
+ * does not attribute per request. The board offering neither control is the
+ * first of the two gates; the route is the second.
+ */
+export function useClientLogPages(
+  filters: LogFilters,
+  limit = 100,
+  cadence: Cadence = LOG_CADENCE_MS,
+): UseInfiniteQueryResult<InfiniteData<LogPage<ClientRequestLog>>> {
+  return useInfiniteQuery({
+    queryKey: queryKeys.clientLogPages(filters, limit),
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam, signal }) => {
+      const { credentialId: _credentialId, apiKeyId: _apiKeyId, ...sendable } = filters;
+      const page = await get<ClientLogsResponse>(
+        withQuery("/api/client/logs", {
+          ...logFilterParams(sendable),
+          limit,
+          ...(pageParam === null ? {} : { cursor: pageParam }),
+        }),
+        signal,
+      );
+      return { logs: page.logs, nextCursor: page.nextCursor ?? null };
+    },
+    getNextPageParam: (last) => last.nextCursor,
+    refetchInterval: (query) => (isHeadPage(query.state.data) ? cadence : false),
   });
 }
 

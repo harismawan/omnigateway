@@ -57,7 +57,7 @@ import {
 import { settingsGet, settingsSet } from "./commands/settings.ts";
 import { setupClaude, setupOpencode } from "./commands/setup.ts";
 import { adminSetPassword, status } from "./commands/status.ts";
-import { logs, usage } from "./commands/usage.ts";
+import { logs, logsExport, usage } from "./commands/usage.ts";
 
 /**
  * Every command, keyed by the words that select it.
@@ -77,6 +77,8 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   usage,
   quota,
   connect,
+
+  "logs export": logsExport,
 
   "service install": serviceInstall,
   "service uninstall": serviceUninstall,

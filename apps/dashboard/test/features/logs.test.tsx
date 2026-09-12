@@ -34,7 +34,7 @@ const logs = [
 
 function stubLogs(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
-    "GET /api/logs": () => ({ logs }),
+    "GET /api/logs": () => ({ logs, nextCursor: null }),
     "GET /api/credentials": () => ({ credentials: [credential()] }),
     "GET /api/keys": () => ({ keys: [apiKey()] }),
     // The board states what this gateway does with prompts, and that answer is
@@ -53,7 +53,7 @@ describe("LogsBoard", () => {
 
     expect(
       await screen.findByText(
-        "2 recent requests, 1 of them failed. Prompt and response bodies are not being recorded.",
+        "2 requests loaded, 1 of them failed. Prompt and response bodies are not being recorded.",
       ),
     ).toBeTruthy();
   });
@@ -76,7 +76,7 @@ describe("LogsBoard", () => {
 
     expect(
       await screen.findByText(
-        "2 recent requests, 1 of them failed. Prompt and response bodies are not being recorded.",
+        "2 requests loaded, 1 of them failed. Prompt and response bodies are not being recorded.",
       ),
     ).toBeTruthy();
   });
@@ -92,7 +92,7 @@ describe("LogsBoard", () => {
 
     expect(
       await screen.findByText(
-        "2 recent requests, 1 of them failed. Body capture is on: open a request to read what it sent and received.",
+        "2 requests loaded, 1 of them failed. Body capture is on: open a request to read what it sent and received.",
       ),
     ).toBeTruthy();
   });
@@ -108,7 +108,11 @@ describe("LogsBoard", () => {
   test("resolves a credential id to the account's label", async () => {
     stubLogs();
     renderWithProviders(<LogsBoard />);
-    expect(await screen.findByText("claude-main")).toBeTruthy();
+    // Scoped to the table: the filter bar offers the same labels as options, so
+    // an unscoped query would pass on the control alone and prove nothing about
+    // the row.
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("claude-main")).toBeTruthy();
   });
 
   test("breaks a completed request's tokens into four compact categories", async () => {
@@ -144,29 +148,156 @@ describe("LogsBoard", () => {
     expect(screen.getByText("ALL_CANDIDATES_FAILED")).toBeTruthy();
   });
 
-  test("the failed filter hides successful requests", async () => {
+  /**
+   * Every filter is a request parameter, which is the whole point of the
+   * change: the gateway matches before it applies the limit, so the answer is
+   * "failed requests in the log" rather than "failed requests among the newest
+   * hundred rows the board happened to fetch".
+   *
+   * Asserted on the URL rather than on which rows are rendered — a board that
+   * fetched everything and hid rows locally would still show one row here, and
+   * would still be answering the wrong question.
+   */
+  test("the failed filter is sent to the gateway, not applied to the fetched rows", async () => {
     const user = userEvent.setup();
-    stubLogs();
+    const stub = stubLogs();
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("fast");
     await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
 
-    await waitFor(() => expect(screen.queryByText("fast")).toBeNull());
-    expect(screen.getByText("deep")).toBeTruthy();
-    expect(screen.getByText("1 shown")).toBeTruthy();
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url.includes("failed=true"))).toBe(true);
+    });
   });
 
-  test("the search box matches model, account, and error code", async () => {
+  test("the state filter never asks for a pending row that failed", async () => {
     const user = userEvent.setup();
-    stubLogs();
+    const stub = stubLogs();
     renderWithProviders(<LogsBoard />);
 
-    const search = await screen.findByLabelText("Filter requests");
-    await user.type(search, "ALL_CANDIDATES");
+    await screen.findByText("fast");
+    const control = screen.getByLabelText("Show which requests");
+    await user.selectOptions(control, "failed");
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url.includes("failed=true"))).toBe(true);
+    });
 
-    await waitFor(() => expect(screen.queryByText("fast")).toBeNull());
-    expect(screen.getByText("deep")).toBeTruthy();
+    // The four positions are exclusive. Switching away from "failed" has to
+    // clear it, or the gateway is asked for rows that are both still running
+    // and already failed — a set that is always empty.
+    await user.selectOptions(control, "pending");
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url.includes("state=pending"))).toBe(true);
+    });
+    const last = stub.calls.at(-1);
+    if (last === undefined) throw new Error("no request was made");
+    expect(last.url).not.toContain("failed=");
+  });
+
+  test("an exact model filter is sent as a parameter rather than matched locally", async () => {
+    const user = userEvent.setup();
+    const stub = stubLogs();
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    await user.type(screen.getByLabelText("Resolved model"), "claude-opus-4");
+
+    await waitFor(() => {
+      expect(
+        stub.calls.some((call) => call.url.includes("resolvedModel=claude-opus-4")),
+      ).toBe(true);
+    });
+  });
+
+  test("an operator can narrow to one gateway key by its label", async () => {
+    const user = userEvent.setup();
+    const stub = stubLogs();
+    renderWithProviders(<LogsBoard />);
+
+    // The control is labelled, but the value sent is the stored id: a row
+    // outlives the key that made it, so a renamed key must not change which
+    // rows an existing filter selects.
+    await user.selectOptions(await screen.findByLabelText("Gateway key"), "laptop");
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url.includes("apiKeyId=key-1"))).toBe(true);
+    });
+  });
+
+  test("clearing the filters returns to the unfiltered head", async () => {
+    const user = userEvent.setup();
+    const stub = stubLogs();
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url.includes("failed=true"))).toBe(true);
+    });
+
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => {
+      const last = stub.calls.at(-1);
+      if (last === undefined) throw new Error("no request was made");
+      expect(last.url).toBe("/api/logs?limit=100");
+    });
+  });
+
+  /**
+   * A page boundary is a cursor, never an offset.
+   *
+   * "Load older" has to carry the cursor the previous page returned, and the
+   * rows it brings back have to be appended rather than replacing what is on
+   * screen — an operator walking back through an afternoon is reading one list,
+   * not a sequence of windows.
+   */
+  test("load older pages on the cursor and appends the rows", async () => {
+    const user = userEvent.setup();
+    const stub = stubLogs({
+      "GET /api/logs": ({ url }) =>
+        url.includes("cursor=")
+          ? { logs: [logs[1]], nextCursor: null }
+          : { logs: [logs[0]], nextCursor: "cursor-2" },
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    expect(screen.queryByText("deep")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Load older" }));
+
+    expect(await screen.findByText("deep")).toBeTruthy();
+    // Still there: the second page was appended, not swapped in.
+    expect(screen.getByText("fast")).toBeTruthy();
+    expect(stub.calls.some((call) => call.url.includes("cursor=cursor-2"))).toBe(true);
+    // And a page that reported no successor offers nothing more to load.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Load older" })).toBeNull());
+  });
+
+  test("changing a filter starts again at the head rather than reusing a cursor", async () => {
+    const user = userEvent.setup();
+    const stub = stubLogs({
+      "GET /api/logs": ({ url }) =>
+        url.includes("cursor=")
+          ? { logs: [logs[1]], nextCursor: null }
+          : { logs: [logs[0]], nextCursor: "cursor-2" },
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    await user.click(screen.getByRole("button", { name: "Load older" }));
+    await screen.findByText("deep");
+
+    await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
+
+    await waitFor(() => {
+      const last = stub.calls.at(-1);
+      if (last === undefined) throw new Error("no request was made");
+      expect(last.url).toContain("failed=true");
+      // A cursor cut from the previous filter's ordering would silently skip
+      // rows: it names a position in a different sequence.
+      expect(last.url).not.toContain("cursor=");
+    });
   });
 
   test("resolves an api key id to the key's label", async () => {
@@ -174,7 +305,9 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     // Both rows were made by the same key, so the label appears once per row.
-    await waitFor(() => expect(screen.getAllByText("laptop")).toHaveLength(2));
+    // Scoped to the table, past the filter bar's option of the same name.
+    const table = await screen.findByRole("table");
+    await waitFor(() => expect(within(table).getAllByText("laptop")).toHaveLength(2));
   });
 
   test("falls back to the id for a key that has since been deleted", async () => {
@@ -199,30 +332,9 @@ describe("LogsBoard", () => {
     });
     renderWithProviders(<LogsBoard />);
 
-    await screen.findByText("claude-main");
-    expect(screen.queryByText("laptop")).toBeNull();
-  });
-
-  test("the search box matches a key label", async () => {
-    const user = userEvent.setup();
-    createFetchStub({
-      "GET /api/logs": () => ({
-        logs: [
-          log({ id: "req-laptop", requestedModel: "fast", apiKeyId: "key-1" }),
-          log({ id: "req-ci", requestedModel: "deep", apiKeyId: "key-2" }),
-        ],
-      }),
-      "GET /api/credentials": () => ({ credentials: [credential()] }),
-      "GET /api/keys": () => ({
-        keys: [apiKey(), apiKey({ id: "key-2", label: "ci-runner" })],
-      }),
-    });
-    renderWithProviders(<LogsBoard />);
-
-    await user.type(await screen.findByLabelText("Filter requests"), "ci-runner");
-
-    await waitFor(() => expect(screen.queryByText("fast")).toBeNull());
-    expect(screen.getByText("deep")).toBeTruthy();
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("claude-main")).toBeTruthy();
+    expect(within(table).queryByText("laptop")).toBeNull();
   });
 
   test("request detail shows RTK aggregate metrics without content", async () => {
@@ -296,26 +408,32 @@ describe("LogsBoard", () => {
     expect(within(dialog).queryByText("key-1")).toBeNull();
   });
 
+  /**
+   * Two empty results that mean different things.
+   *
+   * A filtered read coming back empty is a filter that missed; an unfiltered one
+   * is a gateway that has served nothing. Reporting the second as the first
+   * sends an operator hunting for a filter they never set.
+   */
   test("a filter that matches nothing says how to recover", async () => {
     const user = userEvent.setup();
-    stubLogs();
+    stubLogs({ "GET /api/logs": () => ({ logs: [], nextCursor: null }) });
     renderWithProviders(<LogsBoard />);
 
-    await user.type(await screen.findByLabelText("Filter requests"), "nothing-matches-this");
+    await screen.findByText("No requests have reached the gateway yet.");
+    await user.type(screen.getByLabelText("Error code"), "OVERLOADED");
     expect(
-      await screen.findByText(
-        "No request in this window matches the filter. Clear it to see everything.",
-      ),
+      await screen.findByText("No request matches these filters. Clear them to see everything."),
     ).toBeTruthy();
   });
 
-  test("changing the depth refetches with the new limit", async () => {
+  test("changing the page size refetches with the new limit", async () => {
     const user = userEvent.setup();
     const stub = stubLogs();
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("fast");
-    await user.selectOptions(screen.getByLabelText("How many requests to fetch"), "500");
+    await user.selectOptions(screen.getByLabelText("How many requests per page"), "500");
 
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url === "/api/logs?limit=500")).toBe(true);
@@ -361,9 +479,10 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     expect(await screen.findByLabelText("in flight")).toBeTruthy();
-    expect(screen.getByText("anthropic")).toBeTruthy();
-    expect(screen.getByText("claude-opus-4")).toBeTruthy();
-    expect(screen.getByText("claude-main")).toBeTruthy();
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("anthropic")).toBeTruthy();
+    expect(within(table).getByText("claude-opus-4")).toBeTruthy();
+    expect(within(table).getByText("claude-main")).toBeTruthy();
     const live = screen.getByText("live");
     const generatedClass = live.className.split(" ").at(-1);
     if (generatedClass === undefined) throw new Error("live chip has no generated class");
@@ -408,7 +527,7 @@ describe("LogsBoard", () => {
       request.state = "done";
       request.durationMs = 1_500;
       await act(async () => {
-        await view.client.refetchQueries({ queryKey: ["logs", 100] });
+        await view.client.refetchQueries({ queryKey: ["logPages"] });
       });
       await waitFor(() => expect(screen.queryByLabelText("in flight")).toBeNull());
       expect(screen.getByText("1.5s")).toBeTruthy();
@@ -434,26 +553,9 @@ describe("LogsBoard", () => {
 
     expect(
       await screen.findByText(
-        "3 recent requests, 1 of them failed, 1 still running. Prompt and response bodies are not being recorded.",
+        "3 requests loaded, 1 of them failed, 1 still running. Prompt and response bodies are not being recorded.",
       ),
     ).toBeTruthy();
-  });
-
-  test("the failed filter hides a request that has not finished", async () => {
-    const user = userEvent.setup();
-    createFetchStub({
-      "GET /api/logs": () => ({
-        logs: [...logs, log({ id: "req-live", state: "pending", requestedModel: "live-one" })],
-      }),
-      "GET /api/credentials": () => ({ credentials: [credential()] }),
-    });
-    renderWithProviders(<LogsBoard />);
-
-    await screen.findByText("live-one");
-    await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
-
-    await waitFor(() => expect(screen.queryByText("live-one")).toBeNull());
-    expect(screen.getByText("1 shown")).toBeTruthy();
   });
 
   /**

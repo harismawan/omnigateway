@@ -172,6 +172,10 @@ export async function createStore(opts: {
       // carries the scope that keeps one API key's logs away from another's, so
       // dropping it would serve every row and report no fault.
       recent: (limit, apiKeyId) => handle.usage.recent(limit, apiKeyId),
+      // One required object, for the reason the comment above records: the
+      // scope, the filters and the cursor travel together, so there is no
+      // optional argument here for an arrow to drop.
+      page: (query) => handle.usage.page(query),
       lastUsedByCredential: (credentialId) => handle.usage.lastUsedByCredential(credentialId),
       scan: (cursor, limit) => handle.usage.scan(cursor, limit),
       aggregate: (q) => handle.usage.aggregate(q),

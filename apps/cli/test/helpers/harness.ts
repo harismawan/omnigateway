@@ -31,17 +31,23 @@ export function makeRoot(env: Record<string, string> = {}): string {
   return root;
 }
 
-export type Captured = { out: string[]; err: string[]; writer: Writer };
+export type Captured = { out: string[]; err: string[]; raw: string[]; writer: Writer };
 
 export function capture(): Captured {
   const out: string[] = [];
   const err: string[] = [];
+  // Kept apart from `out`, because the distinction is the point: `out` is lines
+  // and `raw` is bytes, and a test asserting an export's exact framing cannot
+  // do so through a channel that appends terminators of its own.
+  const raw: string[] = [];
   return {
     out,
     err,
+    raw,
     writer: {
       out: (line) => out.push(line),
       err: (line) => err.push(line),
+      raw: (chunk) => raw.push(chunk),
     },
   };
 }
