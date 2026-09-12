@@ -17,4 +17,14 @@
 --
 -- Leading column then the keyset pair, so one seek answers the filter and the
 -- walk from it is already in page order.
+--
+-- **This is the only log-filter index on this backend, and the SQLite copy has
+-- one more.** There, `017_log_text_search.sql` moves `requested_model`,
+-- `resolved_model` and `error_code` into the keyset index so a substring scan
+-- tests the match against entries it is already walking. Do not mirror that
+-- here: this planner reads a leading-wildcard `ILIKE` as unindexable, so a
+-- substring miss plans as a parallel sequential scan with a sort on top and
+-- `idx_request_logs_at` is never opened. Measured at 500,000 rows, widening it
+-- cost 15MB to 58MB and a wider row per insert, and bought 0.25ms of 86ms. The
+-- backends share the predicate in `logPage.ts`, not the index shape.
 CREATE INDEX idx_request_logs_provider ON request_logs (resolved_provider, at DESC, id DESC);
