@@ -137,18 +137,22 @@ const CLEAR_TERMS: FilterPatch = Object.fromEntries(TERM_FIELDS.map((field) => [
 /**
  * How long the box waits before it asks.
  *
- * Every term is an exact match, so every *prefix* of one matches nothing: a
- * per-keystroke filter blanks the board on every character of a name until the
- * last, which reads as the filter being broken rather than as the filter being
- * halfway typed. It is also the expensive direction to be wrong in — a miss has
- * no index to seek, so it scans `request_logs` end to end, synchronously, once
- * per character.
+ * Cost, not correctness. A half-typed term is a *wider* filter now that the
+ * terms match substrings, so every prefix of a name answers with rows rather
+ * than blanking the board — that was the original reason for waiting and it
+ * stopped being true when the filters became `LIKE`. What remains is the price:
+ * a leading wildcard has no prefix to seek, so each keystroke scans
+ * `request_logs` end to end, and on SQLite that scan is the event loop.
+ *
+ * A second was too long to leave a board unresponsive for a filter that now
+ * shows partial matches as you type; 500ms still folds a typed word into one
+ * scan at any human rate.
  *
  * The other controls stay immediate. They emit values that exist by
  * construction, chosen rather than typed, so there is no half-finished state to
  * wait out.
  */
-export const TERM_DEBOUNCE_MS = 1000;
+export const TERM_DEBOUNCE_MS = 500;
 
 /**
  * The two controls that name operator infrastructure.
