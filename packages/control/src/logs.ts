@@ -31,16 +31,28 @@ const idSchema = z.string().min(1).max(MAX_ID_LENGTH);
 const textSchema = z.string().min(1).max(MAX_FILTER_LENGTH);
 
 /**
- * A wire instant, coerced and then checked rather than defaulted.
+ * A wire instant: epoch milliseconds, spelled as digits and nothing else.
  *
- * `optionalNumber(value, 0)` reads an unparseable bound as `0`, which is the
- * epoch, which is every row still retained. A mistyped `since` on an export
- * would therefore hand back the whole history under the range the operator
- * thought they had asked for. Rejecting is the only answer that cannot be
- * misread. `.int()` is zod's safe-integer check, so it also bounds the value the
- * way the cursor's `at` is bounded.
+ * Neither a fallback nor a coercion. `optionalNumber(value, 0)` read an
+ * unparseable bound as `0`, which is the epoch, which is every row still
+ * retained — a mistyped `since` on an export handed back the whole history under
+ * the range the operator thought they had asked for. `z.coerce.number()` is the
+ * same bug with more steps: `Number(" ")` is `0`, so a bound of one space
+ * arrives as the epoch, and `"0x10"`, `"1e3"`, `true` and `[7]` all become
+ * numbers nobody typed.
+ *
+ * So the string arm matches a decimal integer or fails, and `.int()` — zod's
+ * safe-integer check — bounds the result the way the cursor's `at` is bounded.
  */
-const instantSchema = z.coerce.number().int();
+const instantSchema = z
+  .union([
+    z.number(),
+    z
+      .string()
+      .regex(/^-?\d+$/, "must be epoch milliseconds")
+      .transform(Number),
+  ])
+  .pipe(z.number().int());
 
 /**
  * The filters a caller may send, in the loose shape a query string produces.

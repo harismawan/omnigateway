@@ -7,10 +7,17 @@
  */
 export type StubResponse = { status?: number; body?: unknown; text?: string };
 
+type StubResult = StubResponse | Record<string, unknown> | Array<unknown>;
+
+/**
+ * A handler may return a promise, which is how a test holds a response open —
+ * "this page is still in flight" is a state some behaviour only has while it
+ * lasts, and there is no way to observe it with a table that answers instantly.
+ */
 export type StubHandler = (input: {
   url: string;
   init: RequestInit | undefined;
-}) => StubResponse | Record<string, unknown> | Array<unknown>;
+}) => StubResult | Promise<StubResult>;
 
 export type FetchStub = {
   calls: Array<{ url: string; init: RequestInit | undefined }>;
@@ -45,7 +52,7 @@ export function createFetchStub(routes: Record<string, StubHandler>): FetchStub 
       );
     }
 
-    const result = handler({ url, init });
+    const result = await handler({ url, init });
     if (isStubResponse(result)) {
       const status = result.status ?? 200;
       if (status === 204) return new Response(null, { status });

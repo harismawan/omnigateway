@@ -307,6 +307,51 @@ describe("LogsBoard", () => {
     expect(screen.queryByText(/Live updates are paused/)).toBeNull();
   });
 
+  /**
+   * The way back wins against a page still arriving.
+   *
+   * `setQueryData` alone does not: an in-flight `fetchNextPage` resolves against
+   * the page list it captured when it started, so it writes the trimmed pages
+   * back alongside the one it fetched and the board sits paused with the button
+   * already clicked. The fetch is cancelled first, which is what makes the
+   * reversal unconditional rather than only true while idle.
+   */
+  test("back to live wins over a page that is still arriving", async () => {
+    const user = userEvent.setup();
+    // A holder rather than a bare `let`: assigned inside a callback, a `let`
+    // narrows to `never` and the call below stops compiling.
+    const held: { release: (() => void) | null } = { release: null };
+    stubLogs({
+      "GET /api/logs": async ({ url }) => {
+        if (url.includes("cursor=page-3")) {
+          // Held open, so the trim lands while this page is on the wire. A board
+          // is only paused once it has two pages, so the race needs a third.
+          await new Promise<void>((resolve) => {
+            held.release = resolve;
+          });
+          return { logs: [], nextCursor: null };
+        }
+        if (url.includes("cursor=page-2")) return { logs: [logs[1]], nextCursor: "page-3" };
+        return { logs: [logs[0]], nextCursor: "page-2" };
+      },
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    await user.click(screen.getByRole("button", { name: "Load older" }));
+    await screen.findByText("deep");
+    await user.click(screen.getByRole("button", { name: "Load older" }));
+    await waitFor(() => expect(held.release).not.toBeNull());
+
+    await user.click(screen.getByRole("button", { name: "Back to live" }));
+    held.release?.();
+
+    // The page that landed after the trim does not put the scrollback back.
+    await waitFor(() => expect(screen.queryByText("deep")).toBeNull());
+    expect(screen.queryByText(/Live updates are paused/)).toBeNull();
+    expect(screen.getByText("fast")).toBeTruthy();
+  });
+
   test("changing a filter starts again at the head rather than reusing a cursor", async () => {
     const user = userEvent.setup();
     const stub = stubLogs({

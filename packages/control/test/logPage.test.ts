@@ -121,7 +121,23 @@ test("an inverted interval is refused rather than returning nothing", async () =
 test("an unparseable time bound is refused rather than read as the epoch", async () => {
   const { store } = await seeded();
   const spy = spying(store);
-  for (const bound of ["tomorrow", "NaN", "Infinity", "1.5", "9007199254740993"]) {
+  const bad = [
+    "tomorrow",
+    "NaN",
+    "Infinity",
+    "1.5",
+    "9007199254740993",
+    // Every one of these is `Number()`-coercible, which is why a coercing schema
+    // is no better than the fallback it replaced: a bound of one space arrives
+    // as 0, and 0 is the epoch.
+    " ",
+    "\t",
+    "0x10",
+    "1e3",
+    "  42  ",
+    "+1",
+  ];
+  for (const bound of bad) {
     await expect(pageLogs(spy.store, { since: bound })).rejects.toMatchObject({
       code: "BAD_REQUEST",
     });
@@ -133,14 +149,21 @@ test("an unparseable time bound is refused rather than read as the epoch", async
   // have run over the whole retention window on the way to the error.
   expect(spy.queries).toHaveLength(0);
 
-  const exported = async (): Promise<string[]> => {
+  // The export is where this matters most: the interval is the only thing
+  // bounding it, so a bound read as 0 is a download of the whole retention
+  // window. A single space passes a `!== ""` required-bound check, which is why
+  // that check is not what refuses it.
+  const exported = async (since: string): Promise<string[]> => {
     const out: string[] = [];
-    for await (const chunk of exportLogs(spy.store, { since: "tomorrow", until: String(NOW) })) {
+    for await (const chunk of exportLogs(spy.store, { since, until: String(NOW) })) {
       out.push(chunk);
     }
     return out;
   };
-  await expect(exported()).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  for (const since of ["tomorrow", " "]) {
+    await expect(exported(since)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  }
+  expect(spy.queries).toHaveLength(0);
 });
 
 test("the limit is clamped rather than trusted", async () => {
@@ -300,6 +323,37 @@ test("an export is scoped like a page, and a scope reading nothing writes only a
     none.push(chunk);
   }
   expect(none.join("").split("\r\n").filter(Boolean)).toHaveLength(1);
+});
+
+/**
+ * A walk longer than one batch, drained to the end.
+ *
+ * The cancellation test below stops at the first batch on purpose, and the
+ * streaming test above fits in one page — so between them, an export that ended
+ * after 500 rows, skipped the first row of the second batch or served a boundary
+ * row twice would pass both. This is the case that reads every page.
+ */
+test("an export walks past its batch size without dropping or repeating a row", async () => {
+  const store = await memoryStore();
+  const ids: string[] = [];
+  for (let i = 0; i < 501; i += 1) {
+    // Descending `at`, so seeding order is the order they come back in.
+    await store.usage.append(requestLog({ id: `r${i}`, at: NOW - i }));
+    ids.push(`r${i}`);
+  }
+  const spy = spying(store);
+
+  const lines: string[] = [];
+  for await (const chunk of exportLogs(spy.store, { since: 0, until: NOW, format: "jsonl" })) {
+    if (chunk.length > 0) lines.push(chunk);
+  }
+
+  expect(lines).toHaveLength(501);
+  expect(lines.map((line) => JSON.parse(line).id)).toEqual(ids);
+  // Two reads for 501 rows at a batch of 500, and the second is what carries the
+  // cursor: one read would mean a truncated export, three a re-read.
+  expect(spy.queries).toHaveLength(2);
+  expect(spy.queries[1]?.cursor).toMatchObject({ id: "r499" });
 });
 
 /**

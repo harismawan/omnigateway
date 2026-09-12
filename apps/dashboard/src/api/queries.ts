@@ -484,11 +484,17 @@ export function isHeadPage(data: unknown): boolean {
 export function useTrimToHead(queryKey: readonly unknown[]): () => void {
   const client = useQueryClient();
   return () => {
-    client.setQueryData<InfiniteData<LogPage<unknown>>>(queryKey, (data) =>
-      data === undefined
-        ? data
-        : { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) },
-    );
+    // Cancelled first, because an in-flight `fetchNextPage` resolves against the
+    // page list it captured when it started: it would write every trimmed page
+    // back alongside the one it fetched, and the board would silently stay
+    // paused with the button already clicked.
+    void client.cancelQueries({ queryKey }).then(() => {
+      client.setQueryData<InfiniteData<LogPage<unknown>>>(queryKey, (data) =>
+        data === undefined
+          ? data
+          : { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) },
+      );
+    });
   };
 }
 
