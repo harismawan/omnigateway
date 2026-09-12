@@ -1,6 +1,7 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { TERM_DEBOUNCE_MS } from "../../src/features/logs/LogFilterBar.tsx";
 import { LogsBoard } from "../../src/features/logs/LogsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import {
@@ -210,6 +211,13 @@ describe("LogsBoard", () => {
       );
     });
 
+    // One read for the name, not one per character. Every term is an exact
+    // match, so each prefix of a model name is a filter that matches nothing —
+    // and matches nothing the expensive way, since a miss has no index to seek
+    // and scans the table. Thirteen of those also blank the board thirteen
+    // times, which is what a filter that does not work looks like.
+    expect(stub.calls.filter((call) => call.url.includes("resolvedModel="))).toHaveLength(1);
+
     // Emptying the box has to remove the parameter, not leave the last value
     // that parsed: the box writes every term key on every keystroke, so a filter
     // that survived its own text would be one no control could reach.
@@ -257,6 +265,12 @@ describe("LogsBoard", () => {
     // The box holds its own text, so clearing the filters has to reach it too —
     // a term left on screen after "Clear filters" reads as a filter still set.
     expect((box as HTMLInputElement).value).toBe("");
+
+    // Clearing has to cancel the keystroke still waiting out its debounce.
+    // Otherwise the term lands after the button that removed it, and the board
+    // filters itself again with nothing on screen saying why.
+    await new Promise((resolve) => setTimeout(resolve, TERM_DEBOUNCE_MS * 3));
+    expect(stub.calls.some((call) => call.url.includes("requestedModel="))).toBe(false);
   });
 
   /**

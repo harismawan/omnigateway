@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import styled from "styled-components";
 import { useCredentials, useKeys, useProviderCatalog } from "../../api/queries.ts";
 import type { LogFilters } from "../../api/types.ts";
@@ -116,6 +116,22 @@ export function formatTerms(filters: LogFilters): string {
 
 const sameTerms = (a: TermFilters, b: TermFilters): boolean =>
   TERM_FIELDS.every((field) => a[field] === b[field]);
+
+/**
+ * How long the box waits before it asks.
+ *
+ * Every term is an exact match, so every *prefix* of one matches nothing: a
+ * per-keystroke filter blanks the board on every character of a name until the
+ * last, which reads as the filter being broken rather than as the filter being
+ * halfway typed. It is also the expensive direction to be wrong in — a miss has
+ * no index to seek, so it scans `request_logs` end to end, synchronously, once
+ * per character.
+ *
+ * The other controls stay immediate. They emit values that exist by
+ * construction, chosen rather than typed, so there is no half-finished state to
+ * wait out.
+ */
+export const TERM_DEBOUNCE_MS = 300;
 
 /**
  * `datetime-local` renders in the browser's zone and yields a naive string, so
@@ -253,12 +269,37 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
   // only when the incoming filters stop matching the text — "Clear filters" and
   // nothing else, in practice, since no other control touches these three.
   const [text, setText] = useState(() => formatTerms(filters));
+
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The pending patch runs after the render that armed it, so it must not close
+  // over that render's `filters`: another control may have changed them while
+  // the operator was still typing, and a stale merge would revert it.
+  const patchRef = useRef(patch);
+  patchRef.current = patch;
+
+  const cancel = (): void => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+  };
+  // Unmount only — the board is one screen away from every other one, and a
+  // timer that outlives it patches filters nothing is reading. Spelled out
+  // rather than reusing `cancel`, which is a new function every render: as a
+  // dependency it would re-run this on each one, and the cleanup it ran on the
+  // way would clear the timer the previous render had just armed.
+  useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
+
   const fromFilters = formatTerms(filters);
-  // The second condition is what bounds this: after the assignment `text` is
+  // Skipped while a keystroke is pending, because the disagreement is then the
+  // point: the text is ahead of the filters by design and rewriting it from
+  // them would delete what is being typed.
+  //
+  // The last condition is what bounds the rest: after the assignment `text` is
   // `fromFilters`, so the next render cannot set it again whatever the parse of
   // it says. Comparing only the parse would spin on any value the two functions
   // are not exact inverses for.
-  if (!sameTerms(parseTerms(text), filters) && text !== fromFilters) setText(fromFilters);
+  if (timer.current === null && !sameTerms(parseTerms(text), filters) && text !== fromFilters) {
+    setText(fromFilters);
+  }
 
   return (
     <Bar>
@@ -311,21 +352,35 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
         placeholder="claude-opus-4  requested:fast  error:UPSTREAM"
         value={text}
         onChange={(event) => {
-          setText(event.target.value);
-          // Every term key is cleared first, so deleting a word removes its
-          // filter rather than leaving the last one that was parsed.
-          patch({
-            resolvedModel: undefined,
-            requestedModel: undefined,
-            errorCode: undefined,
-            ...parseTerms(event.target.value),
-          });
+          const typed = event.target.value;
+          setText(typed);
+          cancel();
+          timer.current = setTimeout(() => {
+            timer.current = null;
+            // Every term key is cleared first, so deleting a word removes its
+            // filter rather than leaving the last one that was parsed.
+            patchRef.current({
+              resolvedModel: undefined,
+              requestedModel: undefined,
+              errorCode: undefined,
+              ...parseTerms(typed),
+            });
+          }, TERM_DEBOUNCE_MS);
         }}
       />
 
       {operator ? <OperatorFilters filters={filters} patch={patch} /> : null}
 
-      <Button type="button" onClick={() => onChange({})}>
+      <Button
+        type="button"
+        onClick={() => {
+          // Both explicitly, rather than leaving the resync to notice: a pending
+          // keystroke would otherwise land 300ms later and put the term back.
+          cancel();
+          setText("");
+          onChange({});
+        }}
+      >
         Clear filters
       </Button>
     </Bar>
