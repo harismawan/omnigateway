@@ -87,11 +87,16 @@ const Note = styled.span`
  * with its first message is one a screen reader may not be watching yet. Height
  * is not reserved, so an empty one costs a line and nothing moves under it.
  */
-const StatusNote = styled.p`
+const StatusNote = styled.div`
   margin: 0 0 10px;
   min-height: 16px;
   font-size: 12px;
   color: ${({ theme }) => theme.color.inkDim};
+`;
+
+/** The announced half: one sentence, whatever the result held. */
+const StatusLine = styled.p`
+  margin: 0;
 `;
 
 /** The accounts behind a bulk summary, so a count can be acted on. */
@@ -202,7 +207,14 @@ export function AccountsBoard() {
    */
   const [refreshDetail, setRefreshDetail] = useState<readonly string[]>([]);
   /** Which single account is refreshing, so the other rows stay usable. */
-  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  /**
+   * Which accounts are refreshing right now.
+   *
+   * A set, not one id: rows run independently, so a scalar let the second row
+   * pressed overwrite the first — re-enabling a button whose request was still
+   * in flight, and clearing every pending state as soon as either finished.
+   */
+  const [refreshing, setRefreshing] = useState<ReadonlySet<string>>(new Set());
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [doomed, setDoomed] = useState<Credential | null>(null);
   // Which rows have their history open. Local to the board: an expansion is a
@@ -271,7 +283,12 @@ export function AccountsBoard() {
     setRefreshNote(null);
     setRefreshDetail([]);
     if (request.kind === "all") setRefreshingAll(true);
-    else setRefreshingId(request.credentialId);
+    else
+      setRefreshing((current) => {
+        const next = new Set(current);
+        next.add(request.credentialId);
+        return next;
+      });
     try {
       const result = await refresh.mutateAsync(request);
       setRefreshNote(describeRefresh(result.outcomes));
@@ -288,7 +305,14 @@ export function AccountsBoard() {
       void error;
     } finally {
       setRefreshingAll(false);
-      setRefreshingId(null);
+      // Only this request's account: another row may still be in flight.
+      if (request.kind === "one") {
+        setRefreshing((current) => {
+          const next = new Set(current);
+          next.delete(request.credentialId);
+          return next;
+        });
+      }
     }
   };
 
@@ -328,7 +352,7 @@ export function AccountsBoard() {
               <Button
                 type="button"
                 $variant="ghost"
-                disabled={refreshingAll || refreshingId !== null}
+                disabled={refreshingAll || refreshing.size > 0}
                 onClick={() => void runRefresh({ kind: "all" })}
               >
                 <RefreshCw />
@@ -349,8 +373,16 @@ export function AccountsBoard() {
         useful is information, not an interruption, and a bulk result is one
         announcement rather than one per account.
       */}
-      <StatusNote role="status" aria-live="polite">
-        {refreshNote ?? ""}
+      <StatusNote>
+        {/*
+          The summary alone is announced. The detail list is visible and sits
+          outside the live region on purpose: a bulk refresh over a page of
+          failing accounts would otherwise read every one of them aloud in a
+          single update, which is how a status region stops being useful.
+        */}
+        <StatusLine role="status" aria-live="polite">
+          {refreshNote ?? ""}
+        </StatusLine>
         {refreshDetail.length === 0 ? null : (
           <RefreshDetail>
             {refreshDetail.map((line) => (
@@ -574,9 +606,9 @@ export function AccountsBoard() {
                                       type="button"
                                       $variant="ghost"
                                       $size="sm"
-                                      disabled={refreshingAll || refreshingId === credential.id}
+                                      disabled={refreshingAll || refreshing.has(credential.id)}
                                       aria-label={
-                                        refreshingId === credential.id
+                                        refreshing.has(credential.id)
                                           ? `Refreshing quota for ${credential.label}`
                                           : `Refresh quota for ${credential.label}`
                                       }

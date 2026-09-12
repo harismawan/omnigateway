@@ -553,12 +553,15 @@ test("a 429 whose cooldown cannot be written is still reported as rate limited",
   // the outcome it was recording.
   const store = await memoryStore();
   await seedCredential(store, { id: "c1" });
+  const logger = captureLogger();
 
+  let attempted = 0;
   const unwritable: Coord = {
     ...memoryCoord({ now: () => NOW }),
     kv: {
       get: async () => null,
       set: async () => {
+        attempted += 1;
         throw new GatewayError("OVERLOADED", "the coordinator is unreachable");
       },
       del: async () => {},
@@ -566,8 +569,8 @@ test("a 429 whose cooldown cannot be written is still reported as rate limited",
     },
   };
 
-  const ops = quotaOps(
-    deps(
+  const ops = quotaOps({
+    ...deps(
       store,
       async () => {
         throw new GatewayError("RATE_LIMIT", "rate limited");
@@ -575,13 +578,20 @@ test("a 429 whose cooldown cannot be written is still reported as rate limited",
       () => NOW,
       unwritable,
     ),
-  );
+    logger,
+  });
 
   expect(await refreshOne(ops, "c1")).toEqual({
     kind: "failed",
     credentialId: "c1",
     code: "RATE_LIMIT",
   });
+  // The write was attempted and its failure reported. Without these the test
+  // passes just as well with the cooldown write deleted outright.
+  expect(attempted).toBe(1);
+  expect(
+    logger.records.filter((r) => r.msg === "quota probe coordination unavailable"),
+  ).toHaveLength(1);
 });
 
 test("a repudiated refresh token disables the account, and the refresh says failed", async () => {

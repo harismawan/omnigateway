@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { BurnEstimate, QuotaSample, QuotaWindow, Target } from "../../src/api/types.ts";
 import { AccountsBoard } from "../../src/features/accounts/AccountsBoard.tsx";
@@ -1626,49 +1626,6 @@ describe("AccountsBoard quota refresh", () => {
     }
   });
 
-  test("one row refreshing leaves the other rows usable", async () => {
-    let release: (() => void) | undefined;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    stubAccounts({
-      "POST /api/credentials/quota/refresh": () => ({
-        outcomes: [{ kind: "refreshed", credentialId: "cred-1", windows: 2 }],
-      }),
-    });
-    const base = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const response = await base(input, init);
-      if (String(input).includes("quota/refresh")) await held;
-      return response;
-    }) as typeof fetch;
-
-    try {
-      renderWithProviders(<AccountsBoard />);
-      await userEvent.click(
-        await screen.findByRole("button", { name: "Refresh quota for claude-main" }),
-      );
-
-      // The pressed row says what it is doing and cannot be pressed twice.
-      const busy = await screen.findByRole("button", { name: "Refreshing quota for claude-main" });
-      expect(busy.hasAttribute("disabled")).toBe(true);
-
-      // The unrelated account is a different provider probed over a different
-      // connection; blocking it would make one slow provider freeze the page.
-      const other = screen.getByRole("button", { name: "Refresh quota for codex-work" });
-      expect(other.hasAttribute("disabled")).toBe(false);
-
-      release?.();
-      await waitFor(() =>
-        expect(
-          screen.queryByRole("button", { name: "Refreshing quota for claude-main" }),
-        ).toBeNull(),
-      );
-    } finally {
-      globalThis.fetch = base;
-    }
-  });
-
   test("a bulk partial failure names the accounts behind the count", async () => {
     stubAccounts({
       "POST /api/credentials/quota/refresh": () => ({
@@ -1685,9 +1642,115 @@ describe("AccountsBoard quota refresh", () => {
     // "1 failed" across a page of accounts is not something an operator can act
     // on; the account that needs looking at has to be named.
     const status = await screen.findByRole("status");
-    await waitFor(() => expect(status.textContent).toContain("codex-work: failed"));
-    expect(status.textContent).toContain("Refreshed 1 account; 1 failed.");
+    await waitFor(() => expect(status.textContent).toContain("Refreshed 1 account; 1 failed."));
+    // Named on screen, below the announced sentence.
+    expect(await screen.findByText("codex-work: failed")).toBeTruthy();
     // The upstream error code is not operator-facing text and stays out.
-    expect(status.textContent).not.toContain("UPSTREAM");
+    expect(document.body.textContent).not.toContain("UPSTREAM");
+  });
+
+  test("two rows refresh independently, each clearing only its own pending state", async () => {
+    // The shape a scalar `refreshingId` could not hold: the second row pressed
+    // overwrote the first, re-enabling a button whose request was still in
+    // flight, and the first response to land cleared both.
+    const gates = new Map<string, () => void>();
+    const held = (id: string) =>
+      new Promise<void>((resolve) => {
+        gates.set(id, resolve);
+      });
+    const waits = new Map([
+      ["cred-1", held("cred-1")],
+      ["cred-2", held("cred-2")],
+    ]);
+
+    stubAccounts({
+      "POST /api/credentials/quota/refresh": ({ init }) => {
+        const body = JSON.parse(String(init?.body)) as { credentialId?: string };
+        return {
+          outcomes: [{ kind: "refreshed", credentialId: body.credentialId, windows: 2 }],
+        };
+      },
+    });
+    const base = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await base(input, init);
+      if (String(input).includes("quota/refresh")) {
+        const body = JSON.parse(String(init?.body)) as { credentialId?: string };
+        await waits.get(String(body.credentialId));
+      }
+      return response;
+    }) as typeof fetch;
+
+    try {
+      renderWithProviders(<AccountsBoard />);
+      // `fireEvent`, not `userEvent`: both responses are held on purpose, and
+      // `userEvent` keeps shared pointer state that cannot carry two overlapping
+      // interactions — the second click is swallowed and the row never enters
+      // its pending state.
+      fireEvent.click(await screen.findByRole("button", { name: "Refresh quota for claude-main" }));
+      expect(
+        (
+          await screen.findByRole("button", { name: "Refreshing quota for claude-main" })
+        ).hasAttribute("disabled"),
+      ).toBe(true);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Refresh quota for codex-work" }));
+      expect(
+        (
+          await screen.findByRole("button", { name: "Refreshing quota for codex-work" })
+        ).hasAttribute("disabled"),
+      ).toBe(true);
+
+      // Both in flight: pressing the second row did not bring the first one
+      // back, which is exactly what a scalar pending id got wrong.
+      expect(screen.getByRole("button", { name: "Refreshing quota for claude-main" })).toBeTruthy();
+
+      // The first to land releases only its own row.
+      gates.get("cred-1")?.();
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "Refreshing quota for claude-main" }),
+        ).toBeNull(),
+      );
+      expect(
+        screen
+          .getByRole("button", { name: "Refreshing quota for codex-work" })
+          .hasAttribute("disabled"),
+      ).toBe(true);
+
+      gates.get("cred-2")?.();
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "Refreshing quota for codex-work" }),
+        ).toBeNull(),
+      );
+    } finally {
+      globalThis.fetch = base;
+      for (const release of gates.values()) release();
+    }
+  }, 20_000);
+
+  test("the bulk detail list is visible without being announced", async () => {
+    stubAccounts({
+      "POST /api/credentials/quota/refresh": () => ({
+        outcomes: [
+          { kind: "failed", credentialId: "cred-1", code: "UPSTREAM" },
+          { kind: "cooldown", credentialId: "cred-2" },
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Refresh all quota" }));
+
+    // The live region carries one sentence. Reading a page of failing accounts
+    // aloud in a single update is how a status region stops being useful.
+    const status = await screen.findByRole("status");
+    await waitFor(() => expect(status.textContent).toContain("Refreshed 0 accounts"));
+    expect(status.textContent).not.toContain("claude-main: failed");
+
+    // The detail is on screen regardless, because a count cannot be acted on.
+    expect(await screen.findByText("claude-main: failed")).toBeTruthy();
+    expect(screen.getByText("codex-work: cooling down")).toBeTruthy();
   });
 });
