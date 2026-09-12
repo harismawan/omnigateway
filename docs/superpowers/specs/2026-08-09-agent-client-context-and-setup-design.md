@@ -150,17 +150,16 @@ constraint of the feature: allowlists are enforced against the real id, and a ke
 the mirror into a bypass. The listing is filtered by the same rule, so a mirror appears
 only when its real pool does.
 
-Off by default, behind `OMNI_EXPOSE_CLAUDE_CODE_ALIASES` (`1`/`true`/`yes`/`on`), read once at
-boot like the rest of the gateway's startup configuration. An installation whose clients are
-not Claude Code should not have its catalog doubled; OmniRoute reached the same default
-independently.
+**Unconditional.** It was off by default behind `OMNI_EXPOSE_CLAUDE_CODE_ALIASES` for one
+release — the reasoning being that an installation whose clients are not Claude Code should
+not have its catalog doubled — then removed entirely, gate and all. A gate meant two rules
+that had to agree: ingress stripped the prefix only when the flag was on, so an operator who
+turned it off after configuring a client got `NO_CANDIDATES` on ids their settings file still
+named. The doubled catalog costs a listing entry; the disagreement cost a working install.
 
-*As built:* the gate is that environment variable rather than a stored setting. A stored
-one would have meant a `Settings` field, a control schema change, a console form that types
-its limits as numbers, and a CLI `settings set` that parses only numbers — four edits to
-express a boot-time toggle. `claude/` is also reserved at the point a model is named:
-`modelSchema` refuses a pool id in that namespace, because such a pool would be shadowed by
-its own mirror rule and become unaddressable.
+`claude/` is reserved at the point a model is named: `modelSchema` refuses a pool id in that
+namespace, because ingress now unwinds the prefix on every request, so such a pool would be
+unaddressable.
 
 ## 3. `[1m]` and the 1M beta (Claude Code)
 
