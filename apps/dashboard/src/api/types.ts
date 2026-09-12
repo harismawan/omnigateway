@@ -530,6 +530,8 @@ export type LogFilters = {
   provider?: string;
   requestedModel?: string;
   resolvedModel?: string;
+  /** Either name for the model: matches a row whose requested or resolved is this. */
+  model?: string;
   credentialId?: string;
   apiKeyId?: string;
   errorCode?: string;

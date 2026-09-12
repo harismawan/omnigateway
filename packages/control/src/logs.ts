@@ -72,6 +72,7 @@ const logFilterSchema = z
     provider: providerIdSchema.optional(),
     requestedModel: textSchema.optional(),
     resolvedModel: textSchema.optional(),
+    model: textSchema.optional(),
     credentialId: idSchema.optional(),
     apiKeyId: idSchema.optional(),
     errorCode: textSchema.optional(),
@@ -88,6 +89,8 @@ export type LogFilterInput = {
   provider?: string | undefined;
   requestedModel?: string | undefined;
   resolvedModel?: string | undefined;
+  /** Either name for the model. See `RequestLogQuery.model`. */
+  model?: string | undefined;
   credentialId?: string | undefined;
   apiKeyId?: string | undefined;
   errorCode?: string | undefined;
@@ -181,6 +184,7 @@ function toQuery(input: LogFilterInput, scope: Scope): RequestLogQuery {
     ...(filters.provider === undefined ? {} : { provider: filters.provider }),
     ...(filters.requestedModel === undefined ? {} : { requestedModel: filters.requestedModel }),
     ...(filters.resolvedModel === undefined ? {} : { resolvedModel: filters.resolvedModel }),
+    ...(filters.model === undefined ? {} : { model: filters.model }),
     ...(filters.errorCode === undefined ? {} : { errorCode: filters.errorCode }),
     ...(filters.state === undefined ? {} : { state: filters.state }),
     // `false` is dropped, never passed through. "Not failed" and "succeeded"

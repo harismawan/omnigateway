@@ -205,28 +205,38 @@ describe("LogsBoard", () => {
     const box = screen.getByLabelText("Models and error codes");
     await user.type(box, "claude-opus-4");
 
-    await waitFor(() => {
-      expect(stub.calls.some((call) => call.url.includes("resolvedModel=claude-opus-4"))).toBe(
-        true,
-      );
-    });
+    // `model=`, not `resolvedModel=`: a bare term asks both model columns,
+    // because the name an operator has in front of them may be the one the
+    // client asked for or the one the gateway routed to.
+    await waitFor(
+      () => {
+        expect(stub.calls.some((call) => call.url.includes("model=claude-opus-4"))).toBe(true);
+      },
+      // Derived from the debounce rather than guessed: `waitFor`'s own default
+      // is the same 1000ms, so a wait left implicit races the delay it is
+      // waiting out and fails on whichever timer the runner reaches first.
+      { timeout: TERM_DEBOUNCE_MS * 3 },
+    );
 
     // One read for the name, not one per character. Every term is an exact
     // match, so each prefix of a model name is a filter that matches nothing —
     // and matches nothing the expensive way, since a miss has no index to seek
     // and scans the table. Thirteen of those also blank the board thirteen
     // times, which is what a filter that does not work looks like.
-    expect(stub.calls.filter((call) => call.url.includes("resolvedModel="))).toHaveLength(1);
+    expect(stub.calls.filter((call) => call.url.includes("model="))).toHaveLength(1);
 
     // Emptying the box has to remove the parameter, not leave the last value
     // that parsed: the box writes every term key on every keystroke, so a filter
     // that survived its own text would be one no control could reach.
     await user.clear(box);
-    await waitFor(() => {
-      const last = stub.calls.at(-1);
-      if (last === undefined) throw new Error("no request was made");
-      expect(last.url).toBe("/api/logs?limit=100");
-    });
+    await waitFor(
+      () => {
+        const last = stub.calls.at(-1);
+        if (last === undefined) throw new Error("no request was made");
+        expect(last.url).toBe("/api/logs?limit=100");
+      },
+      { timeout: TERM_DEBOUNCE_MS * 3 },
+    );
   });
 
   test("an operator can narrow to one gateway key by its label", async () => {
@@ -531,7 +541,13 @@ describe("LogsBoard", () => {
     await screen.findByText("No requests have reached the gateway yet.");
     await user.type(screen.getByLabelText("Models and error codes"), "error:OVERLOADED");
     expect(
-      await screen.findByText("No request matches these filters. Clear them to see everything."),
+      await screen.findByText(
+        "No request matches these filters. Clear them to see everything.",
+        undefined,
+        // The box debounces, and `findByText`'s own default budget is that same
+        // delay, so an implicit wait races the delay it is waiting out.
+        { timeout: TERM_DEBOUNCE_MS * 3 },
+      ),
     ).toBeTruthy();
   });
 

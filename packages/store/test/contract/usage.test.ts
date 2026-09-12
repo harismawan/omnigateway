@@ -570,6 +570,42 @@ forEachStore((backend) => {
     }
   });
 
+  /**
+   * The one filter that reads two columns, and the reason it has to.
+   *
+   * `requested_model` and `resolved_model` hold different vocabularies — an
+   * alias is only ever asked for, and the concrete name it routes to is only
+   * ever resolved to — so an operator naming a model cannot know which side
+   * their spelling is on. Each column alone is pinned above; this pins that
+   * either one answers, and that a row matching neither still does not.
+   */
+  test("model matches either name, and nothing that carries neither", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(
+      logRow({ id: "asked", at: T2, requestedModel: "opus", resolvedModel: "claude-opus-5" }),
+    );
+    await s.usage.append(
+      logRow({ id: "served", at: T2 + 1, requestedModel: "sonnet", resolvedModel: "opus" }),
+    );
+    await s.usage.append(
+      logRow({ id: "neither", at: T2 + 2, requestedModel: "haiku", resolvedModel: "claude-haiku" }),
+    );
+
+    const page = await s.usage.page({ limit: 5, cursor: null, model: "opus" });
+    expect(page.logs.map((row) => row.id).sort()).toEqual(["asked", "served"]);
+
+    // And it narrows with the rest rather than widening past them: a filter
+    // spanning two columns that stopped being `AND`ed would read as more
+    // traffic than the other filters admit.
+    const narrowed = await s.usage.page({
+      limit: 5,
+      cursor: null,
+      model: "opus",
+      requestedModel: "sonnet",
+    });
+    expect(narrowed.logs.map((row) => row.id)).toEqual(["served"]);
+  });
+
   test("filters intersect rather than accumulate", async () => {
     const s = await backend.fresh();
     await s.usage.append(logRow({ id: "both", at: T2, apiKeyId: "k1", credentialId: "c1" }));

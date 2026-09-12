@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ClientBoard } from "../../src/features/client/ClientBoard.tsx";
+import { TERM_DEBOUNCE_MS } from "../../src/features/logs/LogFilterBar.tsx";
 import { measureCharts } from "../helpers/chart.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import {
@@ -448,14 +449,18 @@ describe("client board renders the console's own views", () => {
     expect(screen.queryByLabelText("Gateway key")).toBeNull();
 
     await user.type(screen.getByLabelText("Models and error codes"), "requested:slow");
-    await waitFor(() => {
-      expect(
-        fetches.calls.some(
-          (call) =>
-            call.url.startsWith("/api/client/logs") && call.url.includes("requestedModel=slow"),
-        ),
-      ).toBe(true);
-    });
+    await waitFor(
+      () => {
+        expect(
+          fetches.calls.some(
+            (call) =>
+              call.url.startsWith("/api/client/logs") && call.url.includes("requestedModel=slow"),
+          ),
+        ).toBe(true);
+      },
+      // The box debounces, and `waitFor`'s default budget is that same delay.
+      { timeout: TERM_DEBOUNCE_MS * 3 },
+    );
   });
 
   test("the deck reports every class the usage board does, from one scoped read", async () => {

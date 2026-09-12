@@ -81,6 +81,7 @@ const LOG_FILTER_OPTIONS = {
   provider: { type: "string" },
   model: { type: "string" },
   "requested-model": { type: "string" },
+  "resolved-model": { type: "string" },
   account: { type: "string" },
   key: { type: "string" },
   "error-code": { type: "string" },
@@ -102,11 +103,15 @@ function logFilters(values: Parsed["values"]): LogFilterInput {
     state: stringFlag(values, "state"),
     ...(boolFlag(values, "failed") ? { failed: "true" } : {}),
     provider: stringFlag(values, "provider"),
-    // `--model` is the resolved one, because that is the question an operator
-    // asking "what did this model cost me" means. The requested name is the
-    // longer flag, since asking it is the rarer half of the pair.
-    resolvedModel: stringFlag(values, "model"),
+    // `--model` asks both columns, because the two hold different vocabularies:
+    // an alias like `opus` only ever appears as a requested name, and the
+    // `claude-opus-5` it routes to only ever as a resolved one. Bound to one
+    // side, the flag answered "no such traffic" for half the names an operator
+    // has. The two long flags are for the question that really is about one
+    // side, which is the rarer one.
+    model: stringFlag(values, "model"),
     requestedModel: stringFlag(values, "requested-model"),
+    resolvedModel: stringFlag(values, "resolved-model"),
     credentialId: stringFlag(values, "account"),
     apiKeyId: stringFlag(values, "key"),
     errorCode: stringFlag(values, "error-code"),

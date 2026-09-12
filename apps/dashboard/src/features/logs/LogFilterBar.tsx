@@ -46,31 +46,38 @@ const stateIdOf = (filters: LogFilters): StateId =>
   filters.failed === "true" ? "failed" : (filters.state ?? "all");
 
 /**
- * The three text filters, and the word that names each in the combined box.
+ * The text filters, and the word that names each in the combined box.
  *
- * A prefix rather than one box searched across all three: "requested `fast`,
+ * A prefix rather than one box searched across all of them: "requested `fast`,
  * resolved `claude-opus-4`" is two facts about one row and an operator has to be
  * able to ask for both at once, which a single value matched against any column
- * cannot express. `resolved` is an alias for `model` because the bare form
- * already means resolved, so the explicit spelling should too.
+ * cannot express.
+ *
+ * A bare word is `model`, which matches *either* name — the requested one or the
+ * resolved one. It has to be: the two columns hold different vocabularies, so
+ * `opus` is only ever a requested name and the `claude-opus-5` it routes to is
+ * only ever a resolved one, and an operator typing the name in front of them
+ * cannot know which side they are on. Asking one column and getting nothing
+ * reads as "no such traffic" rather than "wrong column". `requested:` and
+ * `resolved:` stay for the question that really is about one side.
  */
 const TERMS = [
-  { prefix: "model", field: "resolvedModel" },
+  { prefix: "model", field: "model" },
   { prefix: "resolved", field: "resolvedModel" },
   { prefix: "requested", field: "requestedModel" },
   { prefix: "error", field: "errorCode" },
 ] as const satisfies ReadonlyArray<{ prefix: string; field: keyof LogFilters }>;
 
 /** What the box writes, and the only keys it may clear. */
-const TERM_FIELDS = ["resolvedModel", "requestedModel", "errorCode"] as const;
+const TERM_FIELDS = ["model", "resolvedModel", "requestedModel", "errorCode"] as const;
 
 type TermFilters = Pick<LogFilters, (typeof TERM_FIELDS)[number]>;
 
 /**
  * Reads the combined box into exact filters.
  *
- * Split on whitespace, so no value may contain a space — none of the three can:
- * a model name or an error code with a space in it is not a thing this gateway
+ * Split on whitespace, so no value may contain a space — none of them can: a
+ * model name or an error code with a space in it is not a thing this gateway
  * records, and quoting would be syntax to carry for a case that cannot arise.
  *
  * A word whose prefix is not one of the four is a bare term, not a dropped one:
@@ -89,7 +96,7 @@ export function parseTerms(text: string): TermFilters {
         ? undefined
         : TERMS.find((entry) => entry.prefix === word.slice(0, at).toLowerCase());
     if (term === undefined) {
-      out.resolvedModel = word;
+      out.model = word;
       continue;
     }
     // `model:` with nothing after it is a filter being typed, not an empty one.
@@ -103,12 +110,13 @@ export function parseTerms(text: string): TermFilters {
  * Writes exact filters back as box text.
  *
  * Only for filters that arrived from somewhere other than typing — "Clear
- * filters", or a board restoring state. A resolved model is written bare so the
- * common case round-trips as the operator typed it.
+ * filters", or a board restoring state. The either-column term is written bare
+ * so the common case round-trips as the operator typed it.
  */
 export function formatTerms(filters: LogFilters): string {
   const parts: string[] = [];
-  if (filters.resolvedModel !== undefined) parts.push(filters.resolvedModel);
+  if (filters.model !== undefined) parts.push(filters.model);
+  if (filters.resolvedModel !== undefined) parts.push(`resolved:${filters.resolvedModel}`);
   if (filters.requestedModel !== undefined) parts.push(`requested:${filters.requestedModel}`);
   if (filters.errorCode !== undefined) parts.push(`error:${filters.errorCode}`);
   return parts.join(" ");
@@ -116,6 +124,15 @@ export function formatTerms(filters: LogFilters): string {
 
 const sameTerms = (a: TermFilters, b: TermFilters): boolean =>
   TERM_FIELDS.every((field) => a[field] === b[field]);
+
+/**
+ * Every term key cleared, which each keystroke writes before what it parsed.
+ *
+ * Derived from `TERM_FIELDS` rather than listed again: a term added there and
+ * forgotten here would be a filter deleting its word does not remove, so it
+ * would outlive the text that set it with no control left pointing at it.
+ */
+const CLEAR_TERMS: FilterPatch = Object.fromEntries(TERM_FIELDS.map((field) => [field, undefined]));
 
 /**
  * How long the box waits before it asks.
@@ -131,7 +148,7 @@ const sameTerms = (a: TermFilters, b: TermFilters): boolean =>
  * construction, chosen rather than typed, so there is no half-finished state to
  * wait out.
  */
-export const TERM_DEBOUNCE_MS = 300;
+export const TERM_DEBOUNCE_MS = 1000;
 
 /**
  * `datetime-local` renders in the browser's zone and yields a naive string, so
@@ -241,13 +258,13 @@ export type LogFilterBarProps = {
 /**
  * The exact filters both log boards send to the gateway.
  *
- * Every control emits an id or an exact value, never a substring. The three text
- * filters share one box, read by `parseTerms`: a bare word is the resolved model,
- * and `requested:` or `error:` name the other two. One box because they are one
- * question typed in one place, but still three parameters on the wire — the
- * prefix decides which, so "requested `fast` that resolved to `claude-opus-4`"
- * stays askable, which a single value matched against any of the three columns
- * could not express.
+ * Every control emits an id or an exact value, never a substring. The text
+ * filters share one box, read by `parseTerms`: a bare word is the model under
+ * either of its names, and `requested:`, `resolved:` or `error:` name one column
+ * each. One box because they are one question typed in one place, but still
+ * separate parameters on the wire — the prefix decides which, so "requested
+ * `opus` that resolved to `claude-opus-5`" stays askable, which one value
+ * matched across every column could not express.
  *
  * This is not the box that used to be here. That one matched model, account
  * label, key label and error code by *substring*, over a *fetched tail* — so it
@@ -267,7 +284,7 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
   // incomplete `model:` parses to nothing, and rewriting the field from the
   // parsed filters on every keystroke would delete what is being typed. Resynced
   // only when the incoming filters stop matching the text — "Clear filters" and
-  // nothing else, in practice, since no other control touches these three.
+  // nothing else, in practice, since no other control touches these keys.
   const [text, setText] = useState(() => formatTerms(filters));
 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -349,7 +366,7 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
 
       <Terms
         aria-label="Models and error codes"
-        placeholder="claude-opus-4  requested:fast  error:UPSTREAM"
+        placeholder="claude-opus-5  requested:opus  error:UPSTREAM"
         value={text}
         onChange={(event) => {
           const typed = event.target.value;
@@ -357,14 +374,7 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
           cancel();
           timer.current = setTimeout(() => {
             timer.current = null;
-            // Every term key is cleared first, so deleting a word removes its
-            // filter rather than leaving the last one that was parsed.
-            patchRef.current({
-              resolvedModel: undefined,
-              requestedModel: undefined,
-              errorCode: undefined,
-              ...parseTerms(typed),
-            });
+            patchRef.current({ ...CLEAR_TERMS, ...parseTerms(typed) });
           }, TERM_DEBOUNCE_MS);
         }}
       />

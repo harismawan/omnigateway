@@ -167,18 +167,25 @@ omni logs --provider anthropic --model claude-opus-4 --error-code UPSTREAM
 omni logs --state pending                 # still in flight
 ```
 
-`--model` is the model that actually served the request; `--requested-model` is
-the name the client asked for. Both are exact matches, as are `--provider`,
-`--account`, `--key` and `--error-code`; there is no substring search, and none
-of these reads a prompt.
+`--model` matches a request whose **requested or resolved** model is the name
+given. It asks both because the two columns hold different vocabularies: an
+alias like `opus` only ever appears as a requested name, and the
+`claude-opus-5` it routes to only ever as a resolved one, so a flag bound to one
+side answers "no such traffic" for half the names you have. Use
+`--requested-model` or `--resolved-model` when the question really is about one
+side — which alias resolved here, or what this alias resolved to.
 
-The console spells those same three in one box: a bare word is the model that
-served the request, and `requested:` or `error:` name the other two
-(`model:` and `resolved:` say the first one explicitly, for symmetry). So
-`opus requested:fast error:UPSTREAM` is the console's spelling of
-`--model opus --requested-model fast --error-code UPSTREAM`. Values cannot
-contain a space; a colon anywhere but the prefix is part of the value, so
-`llama3:8b` is a model name rather than a filter.
+Every one of these is an exact match, as are `--provider`, `--account`, `--key`
+and `--error-code`; there is no substring search, and none of them reads a
+prompt.
+
+The console spells the same filters in one box: a bare word is `--model`, and
+`requested:`, `resolved:` or `error:` name one column each. So
+`opus error:UPSTREAM` is the console's spelling of
+`--model opus --error-code UPSTREAM`. Values cannot contain a space; a colon
+anywhere but the prefix is part of the value, so `llama3:8b` is a model name
+rather than a filter. The box waits a second after the last keystroke before it
+asks, since every prefix of an exact name matches nothing.
 
 Pages are ordered newest first and walked by cursor, not by page number. Each
 page prints the cursor for the next one (`--json` carries it as `nextCursor`),

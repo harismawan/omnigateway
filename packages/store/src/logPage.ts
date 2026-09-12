@@ -50,6 +50,16 @@ export function logPageClauses(
   eq("resolved_provider", query.provider);
   eq("requested_model", query.requestedModel);
   eq("resolved_model", query.resolvedModel);
+
+  // The one clause that is not an `=`, and still exact on both sides: an
+  // operator naming a model cannot know which of the two columns their spelling
+  // lives in, so this asks both. `AND`ed with the rest like every other filter,
+  // so combining it with a narrow one stays a narrowing.
+  if (query.model !== undefined) {
+    clauses.push(
+      `(requested_model = ${bind(query.model)} OR resolved_model = ${bind(query.model)})`,
+    );
+  }
   eq("error_code", query.errorCode);
   eq("state", query.state);
 

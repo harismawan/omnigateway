@@ -180,6 +180,51 @@ test("the limit is clamped rather than trusted", async () => {
   }
 });
 
+/**
+ * Every filter the wire accepts has to reach the store.
+ *
+ * `toQuery` copies them across one key at a time, and a key it forgets is a
+ * filter the schema accepts, the URL carries, and nothing ever applies — a page
+ * of unfiltered rows the operator reads as the answer to the question they
+ * asked. `.strict()` cannot catch it: the parameter *is* known, it is just
+ * dropped on the way through. Asserted as a set rather than one key at a time so
+ * a filter added to the schema and not to `toQuery` fails here.
+ */
+test("every accepted filter reaches the store query", async () => {
+  const { store } = await seeded();
+  const spy = spying(store);
+
+  await pageLogs(spy.store, {
+    state: "done",
+    failed: "true",
+    provider: "anthropic",
+    requestedModel: "opus",
+    resolvedModel: "claude-opus-5",
+    model: "sonnet",
+    credentialId: "cred-1",
+    apiKeyId: "key-1",
+    errorCode: "UPSTREAM",
+    since: "1",
+    until: "2",
+  });
+
+  expect(spy.queries.at(-1)).toEqual({
+    limit: 100,
+    cursor: null,
+    state: "done",
+    failed: true,
+    provider: "anthropic",
+    requestedModel: "opus",
+    resolvedModel: "claude-opus-5",
+    model: "sonnet",
+    credentialId: "cred-1",
+    apiKeyId: "key-1",
+    errorCode: "UPSTREAM",
+    since: 1,
+    until: 2,
+  });
+});
+
 test("a client reads only its own rows, and a key filter cannot widen that", async () => {
   const { store, mine, theirs } = await seeded();
   const spy = spying(store);

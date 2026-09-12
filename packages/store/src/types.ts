@@ -1188,6 +1188,19 @@ export type RequestLogQuery = {
   requestedModel?: string;
   /** What the gateway routed to. Null on a row that never resolved. */
   resolvedModel?: string;
+  /**
+   * Either name for the model: matches a row whose requested *or* resolved
+   * model is this, exactly.
+   *
+   * The two columns hold different vocabularies — an alias like `opus` is only
+   * ever a requested name, and the `claude-opus-5` it routes to is only ever a
+   * resolved one — so an operator asking "this model" by the name they have in
+   * front of them cannot know which column it lives in, and picking wrong reads
+   * as "no such traffic" rather than "wrong column". The narrow filters stay
+   * for the question that is genuinely about one side: which alias resolved
+   * here, or what this alias resolved to.
+   */
+  model?: string;
   errorCode?: string;
   state?: RequestState;
   /** Completed rows with an error status. `false` is omitted, never inverted. */

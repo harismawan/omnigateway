@@ -92,6 +92,7 @@ const LOG_FILTER_FIELDS = [
   "provider",
   "requestedModel",
   "resolvedModel",
+  "model",
   "credentialId",
   "apiKeyId",
   "errorCode",
