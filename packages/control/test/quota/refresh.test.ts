@@ -583,3 +583,65 @@ test("a 429 whose cooldown cannot be written is still reported as rate limited",
     code: "RATE_LIMIT",
   });
 });
+
+test("a repudiated refresh token disables the account, and the refresh says failed", async () => {
+  /**
+   * The one path where a refresh does change an account's eligibility, pinned
+   * because it reads as a contradiction and is not one.
+   *
+   * A probe whose token is inside the expiry lead refreshes first, through the
+   * process-wide refresher. `AUTH` there is not the probe failing — it is the
+   * provider repudiating the refresh token, which means the account cannot
+   * serve a real request either, and `createRefresher` disables it so every
+   * later request stops burning an attempt on it. The quota rule that a failed
+   * probe never disables still holds: every other failure below leaves the
+   * account enabled, and this one was never the probe's verdict.
+   *
+   * Unconstrained before review, because the harness refresher throws rather
+   * than modelling a repudiation.
+   */
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1", expiresAt: NOW - 1 });
+
+  const ops = quotaOps({
+    ...deps(store, async () => report),
+    refresh: async (credential) => {
+      await store.credentials.update(credential.id, {
+        enabled: false,
+        disabledReason: "tokenRejected",
+        disabledAt: NOW,
+      });
+      throw new GatewayError("AUTH", "refresh token rejected");
+    },
+  });
+
+  expect(await refreshOne(ops, "c1")).toEqual({
+    kind: "failed",
+    credentialId: "c1",
+    code: "AUTH",
+  });
+  expect((await store.credentials.get("c1"))?.enabled).toBe(false);
+
+  // And the reading it could not replace is still standing.
+  expect(await store.credentials.listQuota()).toHaveLength(0);
+});
+
+test("every other failure leaves the account enabled", async () => {
+  // The contrast that makes the test above a rule rather than an exception.
+  const store = await memoryStore();
+  for (const [id, error] of [
+    ["c1", new GatewayError("UPSTREAM", "500")],
+    ["c2", new GatewayError("NETWORK", "connect refused")],
+    ["c3", new GatewayError("TIMEOUT", "timed out")],
+    ["c4", new GatewayError("AUTH", "usage endpoint rejected the access token")],
+  ] as const) {
+    await seedCredential(store, { id });
+    const ops = quotaOps(
+      deps(store, async () => {
+        throw error;
+      }),
+    );
+    expect((await refreshOne(ops, id)).kind).toBe("failed");
+    expect((await store.credentials.get(id))?.enabled).toBe(true);
+  }
+});

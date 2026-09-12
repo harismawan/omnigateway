@@ -13,6 +13,25 @@ Two things the code decided differently, both because the repository already had
   `QuotaOps` — correct alone, wrong beside the poller, because the in-flight map is the whole point.
   `AdminDeps.quota` carries the one instance the bootstrap also hands the poller.
 
+Three things review found, all fixed except where noted:
+
+- **`coord.kv` does not fail open.** The Redis implementation answers an outage by throwing
+  `OVERLOADED`, so "coordination failure falls back to local" had to be implemented for the cooldown
+  lookup and the 429 cooldown write as well as for the mutex. Under `kind: "all"` one blip otherwise
+  collapsed a page of outcomes into a single rejected request. An unread cooldown is *unknown*, not
+  "cooling down".
+- **One exception to "no outcome disables a credential", and it is deliberate.** A probe whose token
+  is inside the expiry lead refreshes first, and `createRefresher` disables an account whose refresh
+  token the provider *repudiates* (`AUTH` from the refresh, not from the usage call). That is not
+  the probe's verdict: the account cannot serve a real request either, and leaving it enabled burns
+  an attempt on every later one. The refresh reports `failed`; every other failure — upstream,
+  network, timeout, and `AUTH` from the usage endpoint itself — leaves the account enabled. Both
+  halves are pinned in `packages/control/test/quota/refresh.test.ts`.
+- **Cross-replica coalescing compares wall clocks, and is left that way.** `observedAt >= startedAt`
+  is this design's rule. Under clock skew a waiter either repeats a probe or returns `coalesced` a
+  little early; both degrade to an extra call or a slightly stale read, never to wrong data, and the
+  alternative is a distributed clock this feature does not justify.
+
 Provider quota is already polled in the background and rendered on the Accounts page. Operators
 cannot request a fresh reading after reconnecting an account, investigating stale telemetry or
 validating a deployment; they must wait for the next scheduled pass. This design exposes the
