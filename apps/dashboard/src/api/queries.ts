@@ -46,6 +46,8 @@ import type {
   ProviderId,
   QuotaHistoryQuery,
   QuotaHistoryResponse,
+  QuotaRefreshRequest,
+  QuotaRefreshResult,
   RequestBodyResponse,
   RequestLog,
   RestoreResult,
@@ -813,6 +815,42 @@ export function useUpdateCredential(): UseMutationResult<
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.credentials });
       void client.invalidateQueries({ queryKey: queryKeys.credentialHealth });
+    },
+  });
+}
+
+/**
+ * Whether this session may cause a change, rather than only read one.
+ *
+ * Read from the verified principal the gateway already reports, never inferred
+ * from a mutation coming back 401: a control that only reveals it does nothing
+ * once pressed is a control that should not have been drawn. Undefined while
+ * `/api/status` is in flight, which reads as "not yet", so a control appears
+ * once rather than appearing and being taken away.
+ */
+export function useIsAdmin(): boolean {
+  return useStatus().data?.principal?.kind === "admin";
+}
+
+/**
+ * Reads provider quota now, for one account or for all of them.
+ *
+ * Invalidates both halves the probe writes — the meters in `credentialHealth`
+ * and every open history chart — because a refresh whose numbers only land on
+ * the next ten-second poll is one the operator presses twice.
+ */
+export function useRefreshQuota(): UseMutationResult<
+  QuotaRefreshResult,
+  Error,
+  QuotaRefreshRequest
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (request: QuotaRefreshRequest) =>
+      post<QuotaRefreshResult>("/api/credentials/quota/refresh", request),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.credentialHealth });
+      void client.invalidateQueries({ queryKey: ["quota-history"] });
     },
   });
 }

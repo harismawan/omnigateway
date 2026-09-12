@@ -65,8 +65,27 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
   "res:keys": { queryKey: queryKeys.keys },
   "res:settings": { queryKey: queryKeys.settings },
   "res:models": { queryKey: queryKeys.models },
-  // `["quota-history", credentialId, since, until]` — prefix again.
-  "res:quota": { queryKey: ["quota-history"] },
+  /**
+   * Both things a quota write moves: the charts and the meters above them.
+   *
+   * `["quota-history", credentialId, since, until]` is the obvious half. The
+   * other is `["credentials", "health"]`, which carries the latest reading and
+   * the burn estimate drawn from it — written by exactly the same probe. With
+   * history alone, a pass that wrote a new reading refreshed every expanded
+   * chart and left the meter beside it showing the previous one, until the
+   * ten-second poll caught up; under LIVE, which suppresses that poll, it
+   * stayed wrong.
+   *
+   * A predicate rather than `queryKey: ["credentials"]`, which would also
+   * invalidate the credential list — a quota probe writes no credential row,
+   * and re-reading the whole account list on every pass is a cost with nothing
+   * behind it.
+   */
+  "res:quota": {
+    predicate: (query) =>
+      query.queryKey[0] === "quota-history" ||
+      (query.queryKey[0] === "credentials" && query.queryKey[1] === "health"),
+  },
   /**
    * The one `stream:*` topic the console holds, and the one entry here that is
    * *not* what happens on an ordinary frame.

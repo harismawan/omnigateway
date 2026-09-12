@@ -294,6 +294,34 @@ export type QuotaHistoryResponse = {
   truncated: boolean;
 };
 
+/**
+ * Which accounts a manual quota refresh is for.
+ *
+ * Mirrored from `@omni/control` rather than imported, like every other wire
+ * type here. Discriminated on purpose: a caller that drops a field must fail
+ * closed rather than ask every connected provider.
+ */
+export type QuotaRefreshRequest = { kind: "one"; credentialId: string } | { kind: "all" };
+
+/**
+ * Why one account did or did not produce a fresh reading.
+ *
+ * `coalesced` is a success — another overlapping request produced the reading
+ * this one is answered with. `cooldown` is not: the provider was never called,
+ * so the meter on screen is exactly as old as it was. `code` is the gateway's
+ * closed error vocabulary, never upstream text.
+ */
+export type QuotaRefreshOutcome =
+  | { kind: "refreshed"; credentialId: string; windows: number }
+  | { kind: "noData"; credentialId: string }
+  | { kind: "cooldown"; credentialId: string }
+  | { kind: "unsupported"; credentialId: string }
+  | { kind: "disabled"; credentialId: string }
+  | { kind: "failed"; credentialId: string; code: string }
+  | { kind: "coalesced"; credentialId: string; windows: number };
+
+export type QuotaRefreshResult = { outcomes: QuotaRefreshOutcome[] };
+
 export type CredentialPatch = {
   label?: string;
   enabled?: boolean;

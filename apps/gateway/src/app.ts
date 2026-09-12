@@ -10,6 +10,7 @@ import {
   type LifecycleDeps,
   nodeDatabaseFs,
   OAUTH_PROVIDERS,
+  type QuotaOps,
   type Refresher,
   readConsole,
 } from "@omni/control";
@@ -78,6 +79,12 @@ export type AppDeps = {
    * internally consistent and jointly wrong.
    */
   refresh?: Refresher;
+  /**
+   * Shared with the quota poller by the bootstrap, for the same reason
+   * `refresh` is: one in-flight map per process, or an operator's refresh and
+   * the sweep ask the same provider twice.
+   */
+  quota?: QuotaOps;
   /** Absolute directory containing the built dashboard bundle. */
   staticDir?: string;
   /**
@@ -444,6 +451,7 @@ export function createApp(deps: AppDeps) {
           broadcaster,
           nodeId,
           consoleFleet,
+          ...(deps.quota === undefined ? {} : { quota: deps.quota }),
           ...(deps.console === undefined ? {} : { console: deps.console }),
         }),
       )

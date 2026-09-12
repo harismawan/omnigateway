@@ -209,6 +209,14 @@ const ROUTES: ReadonlyArray<{
   // had simply never listed.
   { method: "POST", path: "/api/credentials", allow: ["admin"], body: {} },
   { method: "DELETE", path: "/api/models/x", allow: ["admin"] },
+  // A refresh reaches a provider, may rotate a token and may write a cooldown,
+  // so a reader who may see every quota chart still may not press it.
+  {
+    method: "POST",
+    path: "/api/credentials/quota/refresh",
+    allow: ["admin"],
+    body: { kind: "all" },
+  },
 ];
 
 /**

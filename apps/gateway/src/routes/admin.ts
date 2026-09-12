@@ -16,12 +16,15 @@ import {
   listCredentials,
   listKeys,
   listModels,
+  parseOrThrow,
   patchCredential,
   providerCatalog,
   putModel,
   putSettings,
+  type QuotaOps,
   queryUsage,
   quotaHistory,
+  quotaRefreshSchema,
   readConsole,
   readRequestBody,
   recentLogs,
@@ -94,6 +97,19 @@ export type AdminDeps = {
   consoleFleet?: ConsoleFleet;
   /** This process's name, so `/api/nodes` can say which entry is the one answering. */
   nodeId: string;
+  /**
+   * The one quota operation this process holds, shared with the scheduled poller.
+   *
+   * Passed as the built instance rather than as the four dependencies it needs,
+   * because the sharing is the point: its in-flight map is what makes an
+   * operator's refresh and a sweep already probing the same account one
+   * provider call. A second instance built here would be correct on its own and
+   * wrong beside the poller.
+   *
+   * Optional so the many tests that mount this surface without a coordinator
+   * keep working; the route refuses rather than building its own.
+   */
+  quota?: QuotaOps;
   /**
    * Tells every open console that one of these routes changed a resource.
    *
@@ -283,6 +299,35 @@ export function adminRoutes(deps: AdminDeps) {
           until: query.until,
           credentialId: query.credentialId,
         });
+      })
+
+      /**
+       * Reads provider quota now, for one account or for every stored one.
+       *
+       * Admin-only: a refresh causes provider HTTP, may rotate an OAuth token
+       * and may write a cooldown, none of which a read-only session may do —
+       * viewers keep the charts and lose the button.
+       *
+       * Partial failure is data. One account's provider being down is not this
+       * request failing, so the outcomes come back whole and the console
+       * explains each row; only a malformed body or a store that cannot list
+       * accounts is an error.
+       */
+      .post("/api/credentials/quota/refresh", async ({ request }) => {
+        await requireAdmin(request, deps.admin);
+        const quota = deps.quota;
+        if (quota === undefined) {
+          throw new GatewayError("INTERNAL", "quota refresh is not available on this process");
+        }
+        const result = await quota.refresh(
+          parseOrThrow(quotaRefreshSchema, await readJson(request)),
+        );
+        // Once, after every write, and only when one happened: the other
+        // outcomes leave `quota_windows` exactly as the console already has it.
+        if (result.outcomes.some((o) => o.kind === "refreshed" || o.kind === "coalesced")) {
+          changed("res:quota");
+        }
+        return result;
       })
 
       .patch("/api/credentials/:id", async ({ request, params }) => {

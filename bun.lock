@@ -19,6 +19,7 @@
       },
       "dependencies": {
         "@omni/control": "workspace:*",
+        "@omni/coord": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/store": "workspace:*",

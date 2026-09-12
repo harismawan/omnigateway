@@ -45,7 +45,7 @@ import {
   pluginUpdate,
   pluginVerify,
 } from "./commands/plugins.ts";
-import { quota } from "./commands/quota.ts";
+import { quota, quotaRefresh } from "./commands/quota.ts";
 import {
   doctor,
   restart,
@@ -90,6 +90,8 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "credentials refresh": credentialsRefresh,
   "credentials add-key": credentialsAddKey,
   "credentials health": credentialsHealth,
+
+  "quota refresh": quotaRefresh,
 
   "models list": modelsList,
   "models show": modelsShow,

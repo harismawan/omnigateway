@@ -1,13 +1,24 @@
 import {
   type BurnEstimate,
   burnEstimates,
+  createRefresher,
   credentialStatus,
   getSettings,
+  listCredentials,
+  OAUTH_PROVIDERS,
+  type QuotaRefreshOutcome,
   quotaHistory,
+  quotaOps,
 } from "@omni/control";
+import { memoryCoord } from "@omni/coord";
+import { nodeHttpClient } from "@omni/providers";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type QuotaWindow, quotaVerdict, type Store, type WindowType } from "@omni/store";
+import { UsageError } from "../args.ts";
 import { type Command, provider } from "../command.ts";
-import { emit, formatSpan, paint, table } from "../output.ts";
+import { CliError } from "../context.ts";
+import { emit, formatSpan, note, paint, table } from "../output.ts";
+import { connectRegistryFor } from "./plugins.ts";
 
 /** Shortest window first, so a row reads soonest-to-latest. */
 const WINDOW_ORDER: Record<WindowType, number> = {
@@ -181,5 +192,109 @@ export const quota: Command = {
         rows,
       );
     });
+  },
+};
+
+/** How each outcome reads on a terminal, and whether it means the refresh ran. */
+const OUTCOME_NOTE: Record<QuotaRefreshOutcome["kind"], string> = {
+  refreshed: "refreshed",
+  coalesced: "refreshed by a concurrent probe",
+  noData: "provider reported nothing",
+  cooldown: "cooling down after a rate limit",
+  unsupported: "no usage endpoint",
+  disabled: "disabled",
+  failed: "failed",
+};
+
+/**
+ * Outcomes that mean the operator did not get what they asked for.
+ *
+ * `cooldown` counts: the provider was not called, so the reading on screen is
+ * as old as it was. `noData`, `unsupported` and `disabled` do not — the refresh
+ * ran, or could never have run, and the account is reported either way.
+ */
+export function unmet(outcome: QuotaRefreshOutcome): boolean {
+  return outcome.kind === "failed" || outcome.kind === "cooldown";
+}
+
+export const quotaRefresh: Command = {
+  usage: "quota refresh <id> | --all",
+  summary: "Read provider quota now, for one account or for every account",
+  options: { all: { type: "boolean" } },
+  async run(args, { ctx, writer }) {
+    const all = args.values.all === true;
+    const id = args.positionals[0];
+    // Never "an id, or everything when it is missing": bulk provider traffic is
+    // something an operator asks for, not something a forgotten argument does.
+    if (all === (id !== undefined)) {
+      throw new UsageError("give an account id or --all, not both");
+    }
+
+    const store = await ctx.store();
+    const credentials = await listCredentials(store);
+    // Not checked for existence here: `refresh` refuses an id nothing matches,
+    // and a second copy of that rule is one that can disagree with it. This
+    // narrows which provider modules have to be loaded, nothing more.
+    const wanted = id === undefined ? credentials : credentials.filter((c) => c.id === id);
+
+    // The same short-circuit `credentials refresh` makes, for the same reason:
+    // loading every provider-declaring plugin runs third-party top-level code,
+    // and it is only needed when one of the accounts in scope came from one.
+    const providers = wanted.every((c) => Object.hasOwn(PROVIDER_DESCRIPTORS, c.provider))
+      ? OAUTH_PROVIDERS
+      : (await connectRegistryFor(ctx.root.root)).providers;
+    const http = nodeHttpClient();
+    const ops = quotaOps({
+      store,
+      // One process, one pass: nothing else is probing these accounts, so the
+      // in-memory coordinator is the whole truth about who holds what.
+      coord: memoryCoord({ now: ctx.now }),
+      providers,
+      http,
+      refresh: createRefresher({ store, providers, http, now: ctx.now }),
+      now: ctx.now,
+    });
+
+    note(ctx, writer, id === undefined ? "refreshing every account…" : `refreshing ${id}…`);
+    const result = await ops.refresh(
+      id === undefined ? { kind: "all" } : { kind: "one", credentialId: id },
+    );
+
+    const labels = new Map(credentials.map((c) => [c.id, c.label]));
+    emit(ctx, writer, result, () => {
+      const rows = result.outcomes.map((outcome) => [
+        `${labels.get(outcome.credentialId) ?? outcome.credentialId}`,
+        OUTCOME_NOTE[outcome.kind],
+        outcome.kind === "refreshed" || outcome.kind === "coalesced"
+          ? `${outcome.windows} window${outcome.windows === 1 ? "" : "s"}`
+          : outcome.kind === "failed"
+            ? outcome.code
+            : dash,
+      ]);
+      const refreshed = result.outcomes.filter(
+        (o) => o.kind === "refreshed" || o.kind === "coalesced",
+      ).length;
+      const failed = result.outcomes.filter((o) => o.kind === "failed").length;
+      const skipped = result.outcomes.length - refreshed - failed;
+      return [
+        table(
+          [{ header: "ACCOUNT" }, { header: "OUTCOME" }, { header: "DETAIL", align: "right" }],
+          rows,
+        ),
+        "",
+        `refreshed ${refreshed}; failed ${failed}; skipped ${skipped}`,
+      ].join("\n");
+    });
+
+    // After the report, never instead of it: the operator wants to see which
+    // account did what even when the command is about to exit nonzero.
+    const bad = result.outcomes.filter(unmet);
+    if (bad.length > 0) {
+      throw new CliError(
+        bad.length === result.outcomes.length
+          ? "quota refresh did not run"
+          : `quota refresh did not run for ${bad.length} of ${result.outcomes.length} accounts`,
+      );
+    }
   },
 };

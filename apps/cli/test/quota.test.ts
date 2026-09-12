@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { BurnEstimate } from "@omni/control";
 import type { QuotaSample, QuotaWindow } from "@omni/store";
 import { seedCredential } from "@omni/testkit";
+import { unmet } from "../src/commands/quota.ts";
 import { cli, fakeService, makeRoot, openStore } from "./helpers/harness.ts";
 
 /** Every test runs against one fixed instant, so every estimate is arithmetic. */
@@ -236,4 +237,109 @@ test("quota --json carries the retained samples beside the derived estimate", as
   expect(burn?.ratePerHour).toBe(31);
   expect(burn?.survives).toBe(false);
   expect(burn?.stale).toBe(false);
+});
+
+test("quota refresh needs exactly one target", async () => {
+  const root = await installation();
+
+  // Neither. An omitted target must not mean every account.
+  const neither = await cli(["quota", "refresh"], { root });
+  expect(neither.code).toBe(2);
+  expect(neither.err).toContain("give an account id or --all");
+
+  // Both, which says two different things at once.
+  const both = await cli(["quota", "refresh", "cred-1", "--all"], { root });
+  expect(both.code).toBe(2);
+});
+
+test("quota refresh names an account it cannot find", async () => {
+  const root = await installation();
+  await account(root, "cred-1", "claude-main");
+
+  const missing = await cli(["quota", "refresh", "nope"], { root });
+  expect(missing.code).toBe(1);
+  expect(missing.err).toContain("no such credential");
+});
+
+test("quota refresh reports an account it could never probe, and succeeds", async () => {
+  // An API key has no usage endpoint to ask, which is a fact about the account
+  // rather than a failure of the command: nothing to retry, nothing to fix.
+  const root = await installation();
+  const store = await openStore(root);
+  await seedCredential(store, {
+    id: "key-1",
+    label: "openai-key",
+    provider: "openai",
+    authType: "apiKey",
+    refreshToken: null,
+  });
+  store.close();
+
+  const result = await cli(["quota", "refresh", "key-1"], { root });
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("openai-key");
+  expect(result.out).toContain("no usage endpoint");
+  expect(result.out).toContain("refreshed 0; failed 0; skipped 1");
+});
+
+test("quota refresh --all answers for every account it was shown", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await seedCredential(store, {
+    id: "key-1",
+    label: "openai-key",
+    provider: "openai",
+    authType: "apiKey",
+    refreshToken: null,
+  });
+  await seedCredential(store, {
+    id: "off-1",
+    label: "claude-spare",
+    provider: "anthropic",
+    enabled: false,
+  });
+  store.close();
+
+  const result = await cli(["quota", "refresh", "--all"], { root });
+  expect(result.code).toBe(0);
+  // A disabled account is explained rather than omitted, so the operator is not
+  // left wondering why a row they can see did not move.
+  expect(result.out).toContain("claude-spare");
+  expect(result.out).toContain("disabled");
+  expect(result.out).toContain("refreshed 0; failed 0; skipped 2");
+});
+
+test("quota refresh --json carries the durable ids, not the labels", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await seedCredential(store, {
+    id: "key-1",
+    label: "openai-key",
+    provider: "openai",
+    authType: "apiKey",
+    refreshToken: null,
+  });
+  store.close();
+
+  const result = await cli(["quota", "refresh", "key-1", "--json"], { root });
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.out)).toEqual({
+    outcomes: [{ kind: "unsupported", credentialId: "key-1" }],
+  });
+});
+
+test("only an outcome that left the reading stale exits nonzero", async () => {
+  // The whole exit-status rule in one place. `cooldown` counts because the
+  // provider was never called: the operator asked for a fresh reading and the
+  // one on screen is exactly as old as it was. `noData`, `unsupported` and
+  // `disabled` do not — the refresh ran, or could never run, and either way
+  // nothing is pending.
+  expect(unmet({ kind: "failed", credentialId: "c1", code: "UPSTREAM" })).toBe(true);
+  expect(unmet({ kind: "cooldown", credentialId: "c1" })).toBe(true);
+
+  expect(unmet({ kind: "refreshed", credentialId: "c1", windows: 2 })).toBe(false);
+  expect(unmet({ kind: "coalesced", credentialId: "c1", windows: 2 })).toBe(false);
+  expect(unmet({ kind: "noData", credentialId: "c1" })).toBe(false);
+  expect(unmet({ kind: "unsupported", credentialId: "c1" })).toBe(false);
+  expect(unmet({ kind: "disabled", credentialId: "c1" })).toBe(false);
 });

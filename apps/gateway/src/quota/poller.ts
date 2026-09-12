@@ -1,4 +1,4 @@
-import { type PollerDeps, poll } from "@omni/control";
+import { type PollerDeps, type QuotaOps, quotaOps } from "@omni/control";
 import { describeError, noopLogger } from "@omni/ir";
 import { type LeaseDeps, underLease } from "../lease.ts";
 import type { Invalidator } from "../stream/broadcaster.ts";
@@ -10,7 +10,19 @@ import type { Invalidator } from "../stream/broadcaster.ts";
  * and must not learn that a socket exists — so the broadcaster is added here
  * rather than there, and `poll` never sees it.
  */
-export type QuotaPollerDeps = PollerDeps & { broadcaster?: Invalidator; lease?: LeaseDeps };
+export type QuotaPollerDeps = PollerDeps & {
+  broadcaster?: Invalidator;
+  lease?: LeaseDeps;
+  /**
+   * The process's quota operation, when something else already holds it.
+   *
+   * The bootstrap passes the same instance it gave the admin routes, so a
+   * sweep and an operator's refresh of one account share the in-flight probe
+   * instead of asking the provider twice. Absent, the loop builds its own and
+   * behaves exactly as it did before manual refresh existed.
+   */
+  quota?: QuotaOps;
+};
 
 /**
  * Starts the poll loop at the interval in settings.
@@ -27,11 +39,13 @@ export async function startQuotaPoller(deps: QuotaPollerDeps): Promise<() => voi
   const { quotaPollIntervalMs } = await deps.store.config.getSettings();
   if (quotaPollIntervalMs <= 0) return () => {};
 
+  const quota = deps.quota ?? quotaOps(deps);
+
   let running = false;
   const pass = (): void => {
     if (running) return;
     running = true;
-    void underLease(deps.lease, "quota-poll", 2 * quotaPollIntervalMs, () => poll(deps).then())
+    void underLease(deps.lease, "quota-poll", 2 * quotaPollIntervalMs, () => quota.poll().then())
       .catch((error: unknown) => {
         logger.error("quota poll failed", {
           reason: describeError(error, "unknown"),

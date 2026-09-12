@@ -7,6 +7,7 @@ import {
   createRefresher,
   loadConfig,
   OAUTH_PROVIDERS,
+  quotaOps,
   resolveConsoleSource,
   tailFile,
 } from "@omni/control";
@@ -199,6 +200,10 @@ async function main(): Promise<void> {
   const coord = shared ?? memoryCoord({ now });
   const lease = { coord, nodeId };
   const refresh = createRefresher({ store, providers: OAUTH_PROVIDERS, http, now, logger, coord });
+  // One per process, for the reason the refresher is: the routes and the sweep
+  // must share the in-flight map, or an operator pressing refresh while a pass
+  // is mid-probe asks the provider a second time for the same account.
+  const quota = quotaOps({ store, coord, providers: OAUTH_PROVIDERS, http, refresh, now, logger });
   const staticDir = dashboardDir();
   logger.info(
     existsSync(staticDir) ? "dashboard directory resolved" : "dashboard directory absent",
@@ -326,6 +331,7 @@ async function main(): Promise<void> {
     http,
     now,
     refresh,
+    quota,
     staticDir,
     logger,
     console,
@@ -385,6 +391,7 @@ async function main(): Promise<void> {
     providers: OAUTH_PROVIDERS,
     http,
     refresh,
+    quota,
     now,
     logger,
     broadcaster,
