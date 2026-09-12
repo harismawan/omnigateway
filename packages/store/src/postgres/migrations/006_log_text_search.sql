@@ -33,9 +33,16 @@
 -- means the two backends stop sharing one predicate. A time bound is the cheap
 -- lever on both, and it is the one already wired into every surface.
 --
--- `resolved_provider` keeps 005's index and its `=`, and here it earns it plainly:
--- a provider with no traffic answers in 0.01ms off an index scan rather than the
--- seq scan it would otherwise cost.
+-- `resolved_provider` keeps 005's index and its `=`, and that one does carry over:
+-- an equality can seek, so a provider with no traffic answers in 0.01ms here
+-- against 17.17ms without the index. 005 carries those numbers.
+--
+-- Nothing is created here. On every install this migration is three no-ops: the
+-- indexes it drops were only ever built by an unreleased draft of 005, and 005
+-- no longer builds them. It stays because a database that ran that draft would
+-- otherwise carry three unseekable indexes and a write per row against them
+-- forever — the ledger is keyed on migration id, so repairing 005 in place would
+-- never re-run for a database that already applied it.
 DROP INDEX IF EXISTS idx_request_logs_resolved_model;
 DROP INDEX IF EXISTS idx_request_logs_requested_model;
 DROP INDEX IF EXISTS idx_request_logs_error_code;
