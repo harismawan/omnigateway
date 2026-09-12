@@ -20,10 +20,30 @@
 -- returned, not what is compared. With both indexes present the planner reaches
 -- it as a MULTI-INDEX OR, unioning two seeks.
 --
--- That plan sorts its union, so it is a small loss on a value most rows carry:
--- 3.9ms against the ordered scan's 0.6ms at 41,937 matching rows. Taken
--- deliberately, because the loss is bounded by the page and the win is a scan
--- that is not, and because the miss is the case an operator produces by typing.
+-- **That plan is a real trade, not a free win, and neither side is bounded by
+-- the page.** The union arrives in two orders, neither of them `at DESC`, so it
+-- is sorted in a temp B-tree — which means the limit stops being an early exit
+-- for this plan too: which 101 rows are newest is unknown until everything
+-- matching has been collected. So the ordered scan pays for how *rare* a value
+-- is and the union pays for how *common* it is, and both grow with the table:
+--
+--   rows        ordered scan, miss   MULTI-INDEX OR, 55% of rows match
+--   75,000      10.6ms                3.1ms
+--   300,000     44.7ms               12.5ms
+--   1,000,000  148.9ms               41.0ms
+--
+-- Chosen anyway, for two reasons. The union's worst case is some 3.6x smaller at
+-- the same size. And it is the worst case an operator *asked for* — a full page
+-- of the model that is most of their traffic — where the scan's worst case is
+-- the one they produce by accident: a typo, a half-typed name, or asking whether
+-- a model appears at all. A time bound rescues the scan as well (149ms to 1.8ms
+-- over the newest 1%), but nothing requires one, and the union needs no help.
+--
+-- If a large log with one dominant model makes the common case hurt, the levers
+-- are a time bound or `resolved:`/`requested:`, which plan as one seek with no
+-- union to sort. Past that, the upgrade is a covering index on
+-- `(at DESC, id DESC)` including both model columns, letting the ordered scan
+-- test them without fetching rows.
 --
 -- Trap: **`ANALYZE` reverses this.** With `sqlite_stat1` present the planner
 -- costs the union's sort against the ordered scan and picks the scan — 17ms
