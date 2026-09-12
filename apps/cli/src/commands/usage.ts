@@ -207,8 +207,13 @@ export const logs: Command = {
 
 const cursorOf = (row: RequestLog): RequestLogCursor => ({ at: row.at, id: row.id });
 
-/** Strictly newer than the watermark, in the store's own `(at, id)` order. */
-const isAfter = (row: RequestLog, seen: RequestLogCursor): boolean =>
+/**
+ * Strictly newer than the watermark, in the store's own `(at, id)` order.
+ *
+ * Exported for its test rather than for a caller: the follow loop it sits in
+ * has no exit, so the predicate is the only part of it a test can hold still.
+ */
+export const isAfter = (row: RequestLog, seen: RequestLogCursor): boolean =>
   row.at > seen.at || (row.at === seen.at && row.id > seen.id);
 
 export const logsExport: Command = {

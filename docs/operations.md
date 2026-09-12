@@ -153,6 +153,63 @@ bun apps/gateway/src/index.ts >> /var/log/omni.log 2>&1
 setup. Capture in a fleet is per process; see
 [deploying.md](deploying.md#log-capture-in-a-fleet).
 
+## Investigating requests
+
+`request_logs` holds one row per completed request — metadata only, never
+prompts. The console's Logs screen, `omni logs`, and `GET /api/logs` all read it
+through one query: every filter is matched by the gateway **before** the page
+size is applied, so "failed requests on this key last Tuesday" means that and
+not "whichever of the newest hundred rows happen to match".
+
+```bash
+omni logs --failed --key key_abc --since 2026-09-08 --until 2026-09-09
+omni logs --provider anthropic --model claude-opus-4 --error-code UPSTREAM
+omni logs --state pending                 # still in flight
+```
+
+`--model` is the model that actually served the request; `--requested-model` is
+the name the client asked for. Both are exact matches, as are `--provider`,
+`--account`, `--key` and `--error-code`; there is no substring search, and none
+of these reads a prompt.
+
+Pages are ordered newest first and walked by cursor, not by page number. Each
+page prints the cursor for the next one (`--json` carries it as `nextCursor`),
+and a cursor is opaque — pass it back unchanged:
+
+```bash
+omni logs -n 100 --failed --cursor eyJ2IjoxLCJhdCI6MTc2…
+```
+
+A cursor names a position in one specific ordering, so a rejected or expired one
+is an error rather than a silent restart at the newest row. Changing a filter
+starts a new walk.
+
+### Exporting
+
+`omni logs export` writes matching rows to stdout as CSV or JSONL. Both time
+bounds are required: an export has no page size bounding it, so the interval is
+what does.
+
+```bash
+omni logs export --since 2026-09-01 --until 2026-09-08 > september.csv
+omni logs export --since 2026-09-01 --until 2026-09-08 --format jsonl --failed
+```
+
+Admins and viewers can do the same from `GET /api/logs/export`, which streams
+the response rather than building it in memory. **Metadata only** — no prompts,
+no responses, no captured bodies, whatever the capture setting says. Key holders
+have no export at all on `/api/client/*`.
+
+The two formats differ deliberately. JSONL is lossless: one object per line, in
+a fixed key order, values verbatim. CSV is RFC 4180 and **neutralises formulas**
+— a cell starting `=`, `+`, `-` or `@` gets a leading apostrophe, because a
+request log carries client-supplied model names and upstream error text, and a
+spreadsheet runs what it reads. Use JSONL when you need the bytes exactly.
+
+Retention applies first: an export can only contain rows the gateway still has,
+so a window older than `logRetentionDays` comes back short with nothing to say
+so. Check retention before exporting a range you intend to keep.
+
 ## Recording bodies
 
 By default the gateway records no prompts and no responses. For incident

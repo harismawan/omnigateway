@@ -264,7 +264,8 @@ it", which cover `custom` without saying so.
     Trap: `scopeOf` mapped `machine` to `{kind:"key", apiKeyId:""}` meaning "matches nothing", but
     **`usage_daily.api_key_id` is `NOT NULL DEFAULT ''`**, so that scope read every untagged row at
     `daily` grain while `request_logs.api_key_id` (NULL) hid it at `raw`. `Scope` now carry
-    `none` arm; `readsNothing` gate both readers **before** `scopeKey` — which collapse `all` and
+    `none` arm; `readsNothing` gate **every** scoped reader — `recentLogs`, `usageDaily`, `pageLogs`,
+    `exportLogs` — **before** `scopeKey`, which collapse `all` and
     `none` to same `undefined`. Client surface own no body route: **absent, not refusing**.
     Design:
     [client dashboard surface](docs/superpowers/specs/2026-08-27-client-dashboard-surface-design.md).

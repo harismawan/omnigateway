@@ -244,7 +244,8 @@ Use `--db <path>` to point one command somewhere else.
 | `omni status` | the gateway, its accounts, and their quota, on one screen |
 | `omni start` / `stop` / `restart` | run the gateway; `--foreground` attaches it to your terminal |
 | `omni doctor` | which installation it resolved, and whether it can act on it |
-| `omni logs` | recent requests as the gateway recorded them |
+| `omni logs` | recent requests as the gateway recorded them; filter and page with `--failed`, `--key`, `--since`, `--cursor` |
+| `omni logs export` | matching request metadata as CSV or JSONL on stdout; `--since` and `--until` required |
 | `omni bodies <request-id>` | captured bodies for one request; withheld unless you pass `--full` |
 | `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
 | `omni usage` | spend and tokens, by provider, model, key, or day |

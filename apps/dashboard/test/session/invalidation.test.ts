@@ -67,6 +67,46 @@ test("res:logs leaves a captured request body alone", () => {
   expect(stale(client, queryKeys.logs(100))).toBe(true);
 });
 
+/**
+ * The paginated boards are refreshed only while they are at their head.
+ *
+ * Invalidating an infinite query refetches **every page it has loaded**, so on
+ * a busy gateway an operator who had scrolled back ten pages would have all ten
+ * re-read once a second to repaint rows nowhere near the head. The topic means
+ * "the log changed", and what changed is its head.
+ */
+test("res:logs refreshes a paginated board at its head and leaves its scrollback alone", () => {
+  const client = seeded();
+  const head = queryKeys.logPages({}, 100);
+  const scrolled = queryKeys.logPages({ failed: "true" }, 100);
+  const clientScrolled = queryKeys.clientLogPages({}, 100);
+
+  client.setQueryData(head, { pages: [{ logs: [], nextCursor: "c1" }], pageParams: [null] });
+  client.setQueryData(scrolled, {
+    pages: [
+      { logs: [], nextCursor: "c1" },
+      { logs: [], nextCursor: null },
+    ],
+    pageParams: [null, "c1"],
+  });
+  client.setQueryData(clientScrolled, {
+    pages: [
+      { logs: [], nextCursor: "c1" },
+      { logs: [], nextCursor: null },
+    ],
+    pageParams: [null, "c1"],
+  });
+
+  invalidateTopic(client, "res:logs");
+
+  expect(stale(client, head)).toBe(true);
+  expect(stale(client, scrolled)).toBe(false);
+  expect(stale(client, clientScrolled)).toBe(false);
+  // And the bounded tails the other boards read stay on the topic regardless:
+  // they have no scrollback to disturb.
+  expect(stale(client, queryKeys.logs(200))).toBe(true);
+});
+
 test("res:credentials reaches credential health, which is the part that moves", () => {
   const client = seeded();
 

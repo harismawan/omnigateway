@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_SETTINGS, openDb } from "@omni/store";
 import { health, requestLog, seedCredential } from "@omni/testkit";
+import { isAfter } from "../src/commands/usage.ts";
 import { serviceLogs } from "../src/service.ts";
 import { cli, fakeService, makeRoot, openStore, TEST_KEY } from "./helpers/harness.ts";
 
@@ -1401,6 +1402,72 @@ test("-n 0 still means zero, which the page size clamps to one row", async () =>
   expect(await loggedRows(root, ["-n", "2"])).toBe(2);
 });
 
+test("logs filters and pages through the store rather than the newest rows", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(requestLog({ id: "wanted", at: 1_000, errorCode: "UPSTREAM" }));
+  for (let i = 0; i < 5; i += 1) {
+    await store.usage.append(requestLog({ id: `noise${i}`, at: 2_000 + i }));
+  }
+  store.close();
+  const service = fakeService({ root });
+
+  // The matching row is the oldest of six and the page holds two, so it can
+  // only be here because the store filtered before it cut the page.
+  const filtered = await cli(["logs", "-n", "2", "--error-code", "UPSTREAM", "--json"], {
+    root,
+    service,
+  });
+  const matched = JSON.parse(filtered.out) as { logs: { id: string }[]; nextCursor: string | null };
+  expect(matched.logs.map((row) => row.id)).toEqual(["wanted"]);
+  expect(matched.nextCursor).toBeNull();
+
+  const first = JSON.parse((await cli(["logs", "-n", "2", "--json"], { root, service })).out) as {
+    logs: { id: string }[];
+    nextCursor: string | null;
+  };
+  expect(first.nextCursor).toBeTruthy();
+  const second = JSON.parse(
+    (
+      await cli(["logs", "-n", "2", "--cursor", first.nextCursor ?? "", "--json"], {
+        root,
+        service,
+      })
+    ).out,
+  ) as { logs: { id: string }[] };
+  // A script can page without constructing a cursor, and the two pages do not
+  // overlap.
+  expect(first.logs.map((row) => row.id)).toEqual(["noise4", "noise3"]);
+  expect(second.logs.map((row) => row.id)).toEqual(["noise2", "noise1"]);
+});
+
+test("logs export writes the bytes of the format, with no --json wrapper", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(requestLog({ id: "r1", at: 1_000, requestedModel: "=danger" }));
+  store.close();
+  const service = fakeService({ root });
+
+  const csv = await cli(["logs", "export", "--since", "0", "--until", "2000"], { root, service });
+  expect(csv.code).toBe(0);
+  const lines = csv.raw.split("\r\n").filter((line) => line.length > 0);
+  expect(lines[0]?.startsWith("id,state,at,")).toBe(true);
+  expect(lines[1]).toContain("'=danger");
+
+  const jsonl = await cli(
+    ["logs", "export", "--since", "0", "--until", "2000", "--format", "jsonl"],
+    { root, service },
+  );
+  const rows = jsonl.raw.split("\n").filter((line) => line.length > 0);
+  expect(rows).toHaveLength(1);
+  // JSONL is the lossless half of the pair: the text CSV had to guard is
+  // verbatim here.
+  expect(JSON.parse(rows[0] ?? "null")).toMatchObject({ id: "r1", requestedModel: "=danger" });
+
+  // The interval bounds a read that has no page size.
+  expect((await cli(["logs", "export"], { root, service })).code).not.toBe(0);
+});
+
 test("a non-numeric -n is still refused rather than defaulted", async () => {
   const root = await installation();
   const result = await cli(["logs", "-n", "soon", "--json"], {
@@ -1793,4 +1860,23 @@ test("credentials list reports expiry the way the router judges it", async () =>
   // expiry but refreshable is usable, because dispatch refreshes before the
   // call. Dropping this branch entirely left the suite green.
   expect(rowOf("cred-refreshable")).toContain("expired (refreshable)");
+});
+
+/**
+ * Follow mode's watermark is the whole `(at, id)` tuple, not the timestamp.
+ *
+ * Two rows written in the same millisecond are ordered only by their ids, so a
+ * follower comparing `at` alone drops every row after the first in such a group
+ * — silently, and more often the busier the gateway is, which is exactly when
+ * somebody is watching.
+ */
+test("follow mode keeps rows that share the newest timestamp", () => {
+  const seen = { at: 1_000, id: "b" };
+  const at = (id: string, when: number) => isAfter(requestLog({ id, at: when }), seen);
+
+  expect(at("c", 1_000)).toBe(true);
+  expect(at("a", 1_000)).toBe(false);
+  expect(at("b", 1_000)).toBe(false);
+  expect(at("a", 1_001)).toBe(true);
+  expect(at("z", 999)).toBe(false);
 });

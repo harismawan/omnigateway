@@ -204,9 +204,9 @@ describe("LogsBoard", () => {
     await user.type(screen.getByLabelText("Resolved model"), "claude-opus-4");
 
     await waitFor(() => {
-      expect(
-        stub.calls.some((call) => call.url.includes("resolvedModel=claude-opus-4")),
-      ).toBe(true);
+      expect(stub.calls.some((call) => call.url.includes("resolvedModel=claude-opus-4"))).toBe(
+        true,
+      );
     });
   });
 

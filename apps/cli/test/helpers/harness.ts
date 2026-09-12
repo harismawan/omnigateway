@@ -134,7 +134,7 @@ export async function cli(
     env?: Record<string, string | undefined>;
     now?: () => number;
   },
-): Promise<{ code: number; out: string; err: string; lines: string[] }> {
+): Promise<{ code: number; out: string; err: string; raw: string; lines: string[] }> {
   const captured = capture();
   const options: RunOptions = {
     env: input.env ?? {},
@@ -153,6 +153,9 @@ export async function cli(
     code,
     out: captured.out.join("\n"),
     err: captured.err.join("\n"),
+    // Joined with nothing: export chunks carry their own terminators, and CSV's
+    // is a CRLF a line-joining channel would corrupt.
+    raw: captured.raw.join(""),
     lines: captured.out,
   };
 }

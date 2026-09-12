@@ -316,7 +316,11 @@ export async function* exportLogs(
   input: LogExportInput,
   scope: Scope = ALL,
 ): AsyncGenerator<string> {
-  const format = parseOrThrow(formatSchema, input.format ?? "csv");
+  // Split off before anything else: `format` names the encoding, not a filter,
+  // and the filter schema is strict — passing the whole input through would
+  // make every export that named a format a `BAD_REQUEST`.
+  const { format: requested, ...filters } = input;
+  const format = parseOrThrow(formatSchema, requested ?? "csv");
   if (input.since === undefined || input.since === "") {
     throw new GatewayError("BAD_REQUEST", "since: required for export");
   }
@@ -328,7 +332,7 @@ export async function* exportLogs(
   // page, so there is no second definition of what a filter means or of who may
   // read what. `limit` is this function's own: the caller's page size describes
   // a screenful and has nothing to do with how the walk is batched.
-  const base = toQuery({ ...input, limit: EXPORT_BATCH, cursor: undefined }, scope);
+  const base = toQuery({ ...filters, limit: EXPORT_BATCH, cursor: undefined }, scope);
 
   yield exportHeader(format);
   if (readsNothing(scope)) return;
