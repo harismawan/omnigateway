@@ -652,6 +652,7 @@ forEachStore((backend) => {
     await s.usage.append(logRow({ id: "decoy", at: T2 + 1, errorCode: "ALLXCANDIDATESXFAILED" }));
     await s.usage.append(logRow({ id: "pct", at: T2 + 2, requestedModel: "cut-50%-model" }));
     await s.usage.append(logRow({ id: "plain", at: T2 + 3, requestedModel: "cut-50-model" }));
+    await s.usage.append(logRow({ id: "slash", at: T2 + 4, requestedModel: "back\\slash-model" }));
 
     const page = await s.usage.page({ limit: 5, cursor: null, errorCode: "ALL_CANDIDATES" });
     expect(page.logs.map((row) => row.id)).toEqual(["real"]);
@@ -659,10 +660,15 @@ forEachStore((backend) => {
     const pct = await s.usage.page({ limit: 5, cursor: null, requestedModel: "50%-" });
     expect(pct.logs.map((row) => row.id)).toEqual(["pct"]);
 
-    // A lone backslash is a character too, and escaping it is what stops a typed
-    // one from turning the next character into an escape.
+    // The backslash is escaped *first*, and this is the assertion that holds it
+    // there. A row carrying one has to be findable by typing one — and the
+    // decoys are what make the case sharp rather than vacuous: escape every
+    // wildcard but leave the backslash alone, and `\` renders as the pattern
+    // `%\%`, in which `\%` is an escaped percent. The filter then stops matching
+    // `slash` and starts matching `pct` instead, which is the wrong answer
+    // rather than merely an empty one.
     const slash = await s.usage.page({ limit: 5, cursor: null, requestedModel: "\\" });
-    expect(slash.logs).toEqual([]);
+    expect(slash.logs.map((row) => row.id)).toEqual(["slash"]);
   });
 
   test("model matches either name, and nothing that carries neither", async () => {

@@ -190,7 +190,7 @@ The console spells the same filters in one box: a bare word is `--model`, and
 `opus error:UPSTREAM` is the console's spelling of
 `--model opus --error-code UPSTREAM`. Values cannot contain a space; a colon
 anywhere but the prefix is part of the value, so `llama3:8b` is a model name
-rather than a filter. The box waits a second after the last keystroke before
+rather than a filter. The box waits 500ms after the last keystroke before
 asking, so a name costs one query rather than one per character.
 
 A filter matching **nothing** is the expensive case — proving nothing matches

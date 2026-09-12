@@ -199,18 +199,75 @@ export const logs: Command = {
     let seen: RequestLogCursor | null = first[0] === undefined ? null : cursorOf(first[0]);
     for (;;) {
       await Bun.sleep(FOLLOW_INTERVAL_MS);
-      const poll = await pageLogs(store, { ...filters, limit });
       const mark = seen;
-      const next = mark === null ? poll.logs : poll.logs.filter((row) => isAfter(row, mark));
-      if (next.length === 0) continue;
-      const newest = next[0];
+      const { rows, skipped } = await newerThan(
+        (cursor) => pageLogs(store, { ...filters, limit, cursor }),
+        mark,
+      );
+      if (rows.length === 0) continue;
+      const newest = rows[0];
       if (newest !== undefined) seen = cursorOf(newest);
-      writer.out(render(next.reverse()));
+      if (skipped) {
+        writer.out(
+          paint(
+            ctx,
+            "dim",
+            `more than ${FOLLOW_MAX_PAGES * limit} requests arrived since the last poll; older ones are not shown`,
+          ),
+        );
+      }
+      writer.out(render(rows.reverse()));
     }
   },
 };
 
 const cursorOf = (row: RequestLog): RequestLogCursor => ({ at: row.at, id: row.id });
+
+/**
+ * How far back a single poll will page before it gives up and says so.
+ *
+ * A follower that slept through an incident must not write a retention window
+ * into somebody's terminal in one go.
+ */
+export const FOLLOW_MAX_PAGES = 10;
+
+/**
+ * Every row newer than the watermark, newest first, paging back until a page
+ * reaches it.
+ *
+ * **One page is not enough, and the shortfall is silent.** `pageLogs` answers
+ * with the newest `limit` rows, so a burst larger than the page pushes its own
+ * oldest rows off the bottom; taking that page and advancing the watermark to
+ * the newest row in it loses the rest permanently. It loses more of them the
+ * busier the gateway is, which is exactly when somebody is following.
+ *
+ * Bounded by `FOLLOW_MAX_PAGES`, and hitting the bound is **reported rather
+ * than absorbed** — rows were skipped, and a follower that says nothing about
+ * it is the failure this function exists to fix.
+ *
+ * A null watermark means nothing has been shown yet, so there is no gap to
+ * close: one page is the whole answer, and draining would replay the log.
+ */
+export async function newerThan(
+  read: (cursor: string | undefined) => Promise<{ logs: RequestLog[]; nextCursor: string | null }>,
+  mark: RequestLogCursor | null,
+): Promise<{ rows: RequestLog[]; skipped: boolean }> {
+  const rows: RequestLog[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < FOLLOW_MAX_PAGES; page++) {
+    const got = await read(cursor);
+    if (mark === null) return { rows: got.logs, skipped: false };
+    const fresh = got.logs.filter((row) => isAfter(row, mark));
+    rows.push(...fresh);
+    // A page holding anything at or before the watermark has closed the gap, as
+    // has a page with nothing after it. Either way everything newer is in hand.
+    if (fresh.length < got.logs.length || got.nextCursor === null) {
+      return { rows, skipped: false };
+    }
+    cursor = got.nextCursor;
+  }
+  return { rows, skipped: true };
+}
 
 /**
  * Strictly newer than the watermark, in the store's own `(at, id)` order.
