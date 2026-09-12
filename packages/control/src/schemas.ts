@@ -363,6 +363,33 @@ export const credentialPatchSchema = z
   })
   .strict();
 
+/**
+ * Which accounts a manual quota refresh is asked for.
+ *
+ * Discriminated rather than "an id, or every account when it is missing": a
+ * caller that drops the field by accident must fail closed, not call every
+ * connected provider. `all` carries no fields for the same reason — there is
+ * nothing to mistype into it.
+ *
+ * `credentialId` is bounded on exactly the terms the pin field is, and for the
+ * same reason: an id that matches nothing is still logged, and this route is
+ * where operator text reaches `LogFields.credentialId`.
+ */
+export const quotaRefreshSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("one"),
+      credentialId: z
+        .string()
+        .trim()
+        .min(1)
+        .max(64)
+        .regex(/^[A-Za-z0-9_-]+$/, "credentialId must be an account id"),
+    })
+    .strict(),
+  z.object({ kind: z.literal("all") }).strict(),
+]);
+
 /** Mirrors `UsageDimension` exactly; the store whitelists the column. */
 export const dimensionSchema = z.enum([
   "credential",

@@ -228,6 +228,7 @@ export {
   modelSchema,
   parseOrThrow,
   providerIdSchema,
+  quotaRefreshSchema,
   requireDimension,
   retentionSchema,
   settingsSchema,

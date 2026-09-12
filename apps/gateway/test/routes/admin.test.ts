@@ -3,7 +3,12 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CatalogProvider as ServerCatalogProvider } from "@omni/control";
-import { ADMIN_COOKIE, createAdminAuth } from "@omni/control";
+import {
+  ADMIN_COOKIE,
+  createAdminAuth,
+  type QuotaRefreshRequest,
+  type QuotaRefreshResult,
+} from "@omni/control";
 import { GatewayError } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import {
@@ -70,6 +75,8 @@ type HarnessOptions = {
   consoleFleet?: AdminDeps["consoleFleet"];
   /** For the routes whose only visible effect is a line on stdout. */
   logger?: AdminDeps["logger"];
+  /** The process's quota operation, for the one route that drives it. */
+  quota?: AdminDeps["quota"];
 };
 
 async function harness({
@@ -81,6 +88,7 @@ async function harness({
   dayOffsetMinutes,
   consoleFleet,
   logger,
+  quota,
 }: HarnessOptions = {}) {
   const store = provided ?? (await memoryStore());
   const admin = createAdminAuth(store, { now: () => now, sessionTtlMs: SESSION_TTL_MS });
@@ -115,6 +123,13 @@ async function harness({
     ...(bodyLoggingAllowed === undefined ? {} : { bodyLoggingAllowed }),
     ...(dayOffsetMinutes === undefined ? {} : { dayOffsetMinutes }),
     ...(logger === undefined ? {} : { logger }),
+    // Always present, unlike the other options: the route refuses without it,
+    // and a table row that only ever saw that refusal would pin nothing about
+    // what a refresh announces.
+    quota: quota ?? {
+      poll: async () => 0,
+      refresh: async () => ({ outcomes: [{ kind: "refreshed", credentialId: "c1", windows: 2 }] }),
+    },
   });
 
   const call = (
@@ -1696,6 +1711,15 @@ const MUTATIONS: ReadonlyArray<{
     body: { current: "hunter2hunter2", password: "a-longer-new-password" },
     topics: [],
   },
+  // Reads a provider and writes what it said, so the meters and every open
+  // history chart are both stale until the console is told.
+  {
+    route: "/api/credentials/quota/refresh",
+    method: "POST",
+    path: "/api/credentials/quota/refresh",
+    body: { kind: "all" },
+    topics: ["res:quota"],
+  },
   // A POST that writes nothing: it ranks the targets a model already has.
   {
     route: "/api/models/:id/dry-run",
@@ -2090,4 +2114,127 @@ test("a catalog with nothing to repair says nothing", async () => {
   await call("GET", "/api/catalog");
 
   expect(logger.records.filter((line) => line.msg === "provider catalog repaired")).toEqual([]);
+});
+
+/** A quota operation that records what it was asked and answers with `outcomes`. */
+function stubQuota(
+  outcomes: QuotaRefreshResult["outcomes"],
+  seen: QuotaRefreshRequest[],
+): AdminDeps["quota"] {
+  return {
+    poll: async () => 0,
+    refresh: async (request) => {
+      seen.push(request);
+      return { outcomes };
+    },
+  };
+}
+
+test("a one-account refresh reaches the shared operation with that id", async () => {
+  const seen: QuotaRefreshRequest[] = [];
+  const { call, topics } = await harness({
+    quota: stubQuota([{ kind: "refreshed", credentialId: "c1", windows: 2 }], seen),
+  });
+
+  const response = await call("POST", "/api/credentials/quota/refresh", {
+    kind: "one",
+    credentialId: "c1",
+  });
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    outcomes: [{ kind: "refreshed", credentialId: "c1", windows: 2 }],
+  });
+  expect(seen).toEqual([{ kind: "one", credentialId: "c1" }]);
+  expect(topics).toEqual(["res:quota"]);
+});
+
+test("a bulk refresh has to say so, and says it once", async () => {
+  const seen: QuotaRefreshRequest[] = [];
+  const { call, topics } = await harness({
+    quota: stubQuota(
+      [
+        { kind: "refreshed", credentialId: "c1", windows: 2 },
+        { kind: "failed", credentialId: "c2", code: "UPSTREAM" },
+        { kind: "refreshed", credentialId: "c3", windows: 1 },
+      ],
+      seen,
+    ),
+  });
+
+  const response = await call("POST", "/api/credentials/quota/refresh", { kind: "all" });
+
+  // Partial failure is data: the operator is told which account did not answer,
+  // and the request itself succeeded.
+  expect(response.status).toBe(200);
+  expect(seen).toEqual([{ kind: "all" }]);
+  // One frame for the whole operation, not one per account.
+  expect(topics).toEqual(["res:quota"]);
+});
+
+test("an operation that changed nothing announces nothing", async () => {
+  const seen: QuotaRefreshRequest[] = [];
+  const { call, topics } = await harness({
+    quota: stubQuota(
+      [
+        { kind: "noData", credentialId: "c1" },
+        { kind: "cooldown", credentialId: "c2" },
+        { kind: "unsupported", credentialId: "c3" },
+        { kind: "disabled", credentialId: "c4" },
+        { kind: "failed", credentialId: "c5", code: "NETWORK" },
+      ],
+      seen,
+    ),
+  });
+
+  expect((await call("POST", "/api/credentials/quota/refresh", { kind: "all" })).status).toBe(200);
+  // `quota_windows` is exactly as the console already has it, so a refetch
+  // would read back what it is already showing.
+  expect(topics).toEqual([]);
+});
+
+test("a coalesced reading is a change, because another caller wrote it", async () => {
+  const seen: QuotaRefreshRequest[] = [];
+  const { call, topics } = await harness({
+    quota: stubQuota([{ kind: "coalesced", credentialId: "c1", windows: 2 }], seen),
+  });
+
+  await call("POST", "/api/credentials/quota/refresh", { kind: "one", credentialId: "c1" });
+  expect(topics).toEqual(["res:quota"]);
+});
+
+test("a malformed target is refused before the operation is asked anything", async () => {
+  const seen: QuotaRefreshRequest[] = [];
+  const { call, topics } = await harness({ quota: stubQuota([], seen) });
+
+  // A dropped discriminant must not read as "every account".
+  expect(
+    (await call("POST", "/api/credentials/quota/refresh", { credentialId: "c1" })).status,
+  ).toBe(400);
+  expect((await call("POST", "/api/credentials/quota/refresh", {})).status).toBe(400);
+  expect((await call("POST", "/api/credentials/quota/refresh", { kind: "every" })).status).toBe(
+    400,
+  );
+  expect((await call("POST", "/api/credentials/quota/refresh", { kind: "one" })).status).toBe(400);
+  expect(
+    (await call("POST", "/api/credentials/quota/refresh", { kind: "one", credentialId: "" }))
+      .status,
+  ).toBe(400);
+  // An id carrying anything but an account id never reaches `LogFields`.
+  expect(
+    (
+      await call("POST", "/api/credentials/quota/refresh", {
+        kind: "one",
+        credentialId: "../../etc/passwd",
+      })
+    ).status,
+  ).toBe(400);
+  // `all` takes no fields, so there is nothing to mistype into it.
+  expect(
+    (await call("POST", "/api/credentials/quota/refresh", { kind: "all", credentialId: "c1" }))
+      .status,
+  ).toBe(400);
+
+  expect(seen).toEqual([]);
+  expect(topics).toEqual([]);
 });
