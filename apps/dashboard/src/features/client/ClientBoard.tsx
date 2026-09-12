@@ -2,13 +2,16 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import styled from "styled-components";
 import {
+  isHeadPage,
   LOG_CADENCE_MS,
+  queryKeys,
   useClientDayOffsetMinutes,
   useClientLogPages,
   useClientQuota,
   useClientQuotaHistory,
   useClientSummary,
   useClientUsage,
+  useTrimToHead,
 } from "../../api/queries.ts";
 import {
   type AccountQuota,
@@ -256,6 +259,11 @@ export function ClientBoard() {
   const series = useClientUsage({ ...common, groupBy: range.by }, cadence(60_000, "res:usage"));
   const byModel = useClientUsage({ ...common, groupBy: "model" }, cadence(60_000, "res:usage"));
   const logs = useClientLogPages(filters, limit, cadence(LOG_CADENCE_MS, "res:logs"));
+  // Loading scrollback stops the poll and the push, so the panel says so and
+  // offers the way back rather than leaving a frozen head to be read as a key
+  // that has served nothing since.
+  const paused = !isHeadPage(logs.data);
+  const backToHead = useTrimToHead(queryKeys.clientLogPages(filters, limit));
   // Polled, with no topic. A client holds `res:usage` and `res:logs` and nothing
   // else, so naming `res:quota` here would switch polling off in favour of a
   // push that never arrives, and the panel would sit frozen with no error.
@@ -665,6 +673,14 @@ export function ClientBoard() {
               >
                 {logs.isFetchingNextPage ? "Loading…" : "Load older"}
               </Button>
+            ) : null}
+            {paused ? (
+              <>
+                <Muted>Live updates are paused while older pages are loaded.</Muted>
+                <Button type="button" $size="sm" onClick={backToHead}>
+                  Back to live
+                </Button>
+              </>
             ) : null}
           </Row>
         }

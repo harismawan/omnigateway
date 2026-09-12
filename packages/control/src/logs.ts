@@ -2,7 +2,7 @@ import { GatewayError } from "@omni/ir";
 import type { RequestLog, RequestLogCursor, RequestLogQuery, Store } from "@omni/store";
 import { z } from "zod";
 import { ALL, readsNothing, type Scope, scopeKey } from "./principal.ts";
-import { optionalNumber, parseOrThrow, providerIdSchema } from "./schemas.ts";
+import { parseOrThrow, providerIdSchema } from "./schemas.ts";
 import { logLimit } from "./usage.ts";
 
 /**
@@ -31,6 +31,18 @@ const idSchema = z.string().min(1).max(MAX_ID_LENGTH);
 const textSchema = z.string().min(1).max(MAX_FILTER_LENGTH);
 
 /**
+ * A wire instant, coerced and then checked rather than defaulted.
+ *
+ * `optionalNumber(value, 0)` reads an unparseable bound as `0`, which is the
+ * epoch, which is every row still retained. A mistyped `since` on an export
+ * would therefore hand back the whole history under the range the operator
+ * thought they had asked for. Rejecting is the only answer that cannot be
+ * misread. `.int()` is zod's safe-integer check, so it also bounds the value the
+ * way the cursor's `at` is bounded.
+ */
+const instantSchema = z.coerce.number().int();
+
+/**
  * The filters a caller may send, in the loose shape a query string produces.
  *
  * `.strict()` matters more here than on most of these schemas: a misspelled
@@ -41,8 +53,8 @@ const logFilterSchema = z
   .object({
     cursor: z.string().max(512).optional(),
     limit: z.union([z.string(), z.number()]).optional(),
-    since: z.union([z.string(), z.number()]).optional(),
-    until: z.union([z.string(), z.number()]).optional(),
+    since: instantSchema.optional(),
+    until: instantSchema.optional(),
     state: z.enum(["pending", "done"]).optional(),
     failed: z.enum(["true", "false"]).optional(),
     provider: providerIdSchema.optional(),
@@ -119,7 +131,14 @@ export function decodeLogCursor(raw: string): RequestLogCursor {
   const { at, id } = record;
   if (typeof at !== "number" || !Number.isSafeInteger(at)) return reject();
   if (typeof id !== "string" || id.length === 0 || id.length > MAX_ID_LENGTH) return reject();
-  return { at, id };
+  const cursor = { at, id };
+  // Re-encoding and comparing is what makes the value opaque rather than merely
+  // undocumented: `Buffer.from(raw, "base64url")` ignores trailing junk, so a
+  // cursor with characters appended decodes cleanly without this. One comparison
+  // covers that, non-canonical padding and reordered keys at once — a caller may
+  // only send back a string this gateway minted.
+  if (encodeLogCursor(cursor) !== raw) return reject();
+  return cursor;
 }
 
 /**
@@ -135,8 +154,7 @@ export function decodeLogCursor(raw: string): RequestLogCursor {
 function toQuery(input: LogFilterInput, scope: Scope): RequestLogQuery {
   const filters = parseOrThrow(logFilterSchema, present(input));
 
-  const since = filters.since === undefined ? undefined : optionalNumber(filters.since, 0);
-  const until = filters.until === undefined ? undefined : optionalNumber(filters.until, 0);
+  const { since, until } = filters;
   if (since !== undefined && until !== undefined && since > until) {
     throw new GatewayError("BAD_REQUEST", "since: must not be after until");
   }
@@ -334,14 +352,20 @@ export async function* exportLogs(
   // a screenful and has nothing to do with how the walk is batched.
   const base = toQuery({ ...filters, limit: EXPORT_BATCH, cursor: undefined }, scope);
 
-  yield exportHeader(format);
-  if (readsNothing(scope)) return;
+  if (readsNothing(scope)) {
+    yield exportHeader(format);
+    return;
+  }
 
-  let cursor = base.cursor;
+  // The first page is read *before* the header is yielded, so an unreadable
+  // store fails while the route is still building a status rather than two bytes
+  // into a 200. A header-only CSV downloads as a complete file reading "nothing
+  // matched", which is the same lie as a filter that never ran.
+  let page = await store.usage.page(base);
+  yield exportHeader(format);
   for (;;) {
-    const page = await store.usage.page({ ...base, cursor });
     for (const log of page.logs) yield exportRow(format, log);
     if (page.next === null) return;
-    cursor = page.next;
+    page = await store.usage.page({ ...base, cursor: page.next });
   }
 }

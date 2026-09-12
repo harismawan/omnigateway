@@ -274,6 +274,39 @@ describe("LogsBoard", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Load older" })).toBeNull());
   });
 
+  /**
+   * The pause is stated, and it is reversible.
+   *
+   * Loading scrollback switches off both the poll and `res:logs`, deliberately —
+   * refreshing an infinite query re-reads every loaded page. But a head that
+   * silently stopped updating reads exactly like a gateway serving nothing, so
+   * the board says which of the two it is and offers the way back.
+   */
+  test("loading older pages says live updates are paused, and offers the way back", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/logs": ({ url }) =>
+        url.includes("cursor=")
+          ? { logs: [logs[1]], nextCursor: null }
+          : { logs: [logs[0]], nextCursor: "cursor-2" },
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    expect(screen.queryByText(/Live updates are paused/)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Load older" }));
+    await screen.findByText("deep");
+    expect(screen.getByText(/Live updates are paused/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Back to live" }));
+
+    // Back to one page: the scrollback is dropped, so the head is live again.
+    await waitFor(() => expect(screen.queryByText("deep")).toBeNull());
+    expect(screen.getByText("fast")).toBeTruthy();
+    expect(screen.queryByText(/Live updates are paused/)).toBeNull();
+  });
+
   test("changing a filter starts again at the head rather than reusing a cursor", async () => {
     const user = userEvent.setup();
     const stub = stubLogs({

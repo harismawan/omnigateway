@@ -473,6 +473,26 @@ export function isHeadPage(data: unknown): boolean {
 }
 
 /**
+ * Drops every loaded page but the head.
+ *
+ * The way back to live. `isHeadPage` gates both the poll and the push, so a
+ * board that has loaded scrollback stops refreshing — deliberately, but a pause
+ * with no exit would leave the operator reading a frozen head and taking it for
+ * a quiet gateway. Trimming the cache rather than refetching keeps the rows on
+ * screen until the next poll replaces them.
+ */
+export function useTrimToHead(queryKey: readonly unknown[]): () => void {
+  const client = useQueryClient();
+  return () => {
+    client.setQueryData<InfiniteData<LogPage<unknown>>>(queryKey, (data) =>
+      data === undefined
+        ? data
+        : { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) },
+    );
+  };
+}
+
+/**
  * The Logs board's read: exact filters applied by the gateway, one page at a
  * time, oldest page appended last.
  *

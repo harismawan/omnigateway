@@ -519,6 +519,57 @@ forEachStore((backend) => {
     ).toHaveLength(0);
   });
 
+  /**
+   * One fixture per exact filter, the two rows differing in that column alone.
+   *
+   * Deleting any single clause from `logPageClauses` has to fail here. A fixture
+   * that varies several columns at once does not have that property: with one
+   * row per provider *and* one row per model, a dropped provider clause still
+   * returns exactly one row, and the suite stays green over a filter that never
+   * ran. Which is the failure this whole surface exists to remove, so the test
+   * for it cannot be the vague kind.
+   */
+  test("each exact filter reads its own column and nothing else", async () => {
+    const cases = [
+      { query: { apiKeyId: "hit" }, hit: { apiKeyId: "hit" }, miss: { apiKeyId: "miss" } },
+      {
+        query: { credentialId: "hit" },
+        hit: { credentialId: "hit" },
+        miss: { credentialId: "miss" },
+      },
+      {
+        query: { provider: "anthropic" },
+        hit: { resolvedProvider: "anthropic" as const },
+        miss: { resolvedProvider: "openai" as const },
+      },
+      {
+        query: { requestedModel: "hit" },
+        hit: { requestedModel: "hit" },
+        miss: { requestedModel: "miss" },
+      },
+      {
+        query: { resolvedModel: "hit" },
+        hit: { resolvedModel: "hit" },
+        miss: { resolvedModel: "miss" },
+      },
+      { query: { errorCode: "HIT" }, hit: { errorCode: "HIT" }, miss: { errorCode: "MISS" } },
+    ];
+
+    for (const { query, hit, miss } of cases) {
+      const s = await backend.fresh();
+      await s.usage.append(logRow({ id: "hit", at: T2, ...hit }));
+      await s.usage.append(logRow({ id: "miss", at: T2 + 1, ...miss }));
+
+      const page = await s.usage.page({ limit: 5, cursor: null, ...query });
+      // Named in the message because a bare length assertion inside a loop
+      // reports the wrong filter as the failing one.
+      expect(
+        page.logs.map((row) => row.id),
+        `filtering by ${Object.keys(query)[0]}`,
+      ).toEqual(["hit"]);
+    }
+  });
+
   test("filters intersect rather than accumulate", async () => {
     const s = await backend.fresh();
     await s.usage.append(logRow({ id: "both", at: T2, apiKeyId: "k1", credentialId: "c1" }));

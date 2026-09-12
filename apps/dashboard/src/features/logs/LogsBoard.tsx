@@ -1,11 +1,14 @@
 import { useMemo, useState } from "react";
 import styled from "styled-components";
 import {
+  isHeadPage,
   LOG_CADENCE_MS,
+  queryKeys,
   useBodyLoggingActive,
   useCredentials,
   useKeys,
   useLogPages,
+  useTrimToHead,
 } from "../../api/queries.ts";
 import { type LogFilters, NO_LOG_FILTERS, type RequestRow } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
@@ -16,7 +19,7 @@ import { Button } from "../../ui/Button.tsx";
 import { Select } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Module } from "../../ui/Panel.tsx";
-import { Row, ScrollX } from "../../ui/primitives.ts";
+import { Muted, Row, ScrollX } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { BodyArtifact } from "./BodyArtifact.tsx";
 import { LogFilterBar } from "./LogFilterBar.tsx";
@@ -36,6 +39,7 @@ const Narrow = styled(Select)`
 
 const More = styled(Row)`
   justify-content: center;
+  gap: ${({ theme }) => theme.space(2)};
   padding: ${({ theme }) => theme.space(3)};
 `;
 
@@ -82,6 +86,11 @@ export function LogsBoard() {
     () => (logs.data?.pages ?? []).flatMap((page) => page.logs),
     [logs.data?.pages],
   );
+  // Loading scrollback stops the poll and the push, so the board says so and
+  // offers the way back rather than leaving a frozen head to be read as a quiet
+  // gateway.
+  const paused = !isHeadPage(logs.data);
+  const backToHead = useTrimToHead(queryKeys.logPages(filters, limit));
   const credentials = useCredentials();
   const keys = useKeys();
   // Both keys, not just the setting: an installation whose environment never
@@ -160,15 +169,25 @@ export function LogsBoard() {
         ) : (
           <RequestLogScroller data-testid="request-log-scroller">
             <RequestTable rows={rows} now={now} names={names} onOpen={setOpen} />
-            {logs.hasNextPage ? (
+            {logs.hasNextPage || paused ? (
               <More>
-                <Button
-                  type="button"
-                  disabled={logs.isFetchingNextPage}
-                  onClick={() => void logs.fetchNextPage()}
-                >
-                  {logs.isFetchingNextPage ? "Loading…" : "Load older"}
-                </Button>
+                {logs.hasNextPage ? (
+                  <Button
+                    type="button"
+                    disabled={logs.isFetchingNextPage}
+                    onClick={() => void logs.fetchNextPage()}
+                  >
+                    {logs.isFetchingNextPage ? "Loading…" : "Load older"}
+                  </Button>
+                ) : null}
+                {paused ? (
+                  <>
+                    <Muted>Live updates are paused while older pages are loaded.</Muted>
+                    <Button type="button" onClick={backToHead}>
+                      Back to live
+                    </Button>
+                  </>
+                ) : null}
               </More>
             ) : null}
           </RequestLogScroller>

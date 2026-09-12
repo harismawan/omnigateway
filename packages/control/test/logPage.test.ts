@@ -70,6 +70,12 @@ test("a malformed cursor is refused rather than treated as the first page", asyn
     Buffer.from('{"v":1,"at":"1","id":"a"}').toString("base64url"),
     Buffer.from('{"v":1,"at":1,"id":""}').toString("base64url"),
     Buffer.from(`{"v":1,"at":1,"id":"${"x".repeat(129)}"}`).toString("base64url"),
+    // Trailing junk on an otherwise valid cursor. `Buffer.from(raw,
+    // "base64url")` ignores it, so without the canonical re-encode check this
+    // decodes cleanly and the wire form stops being the only accepted spelling.
+    `${encodeLogCursor({ at: NOW, id: "m1" })}!!!`,
+    // Same fields, different key order: still not a string this gateway minted.
+    Buffer.from('{"at":1,"id":"a","v":1}').toString("base64url"),
   ];
   for (const cursor of bad) {
     const attempt = pageLogs(store, { cursor });
@@ -101,6 +107,40 @@ test("an inverted interval is refused rather than returning nothing", async () =
   await expect(pageLogs(store, { since: NOW, until: NOW - 1 })).rejects.toMatchObject({
     code: "BAD_REQUEST",
   });
+});
+
+/**
+ * A bound that does not parse is refused, never defaulted.
+ *
+ * Read as `0` — which is what a fallback gives — the bound is the epoch, so the
+ * interval silently widens to every row still retained. On an export, whose
+ * range is the only thing bounding it at all, that turns one mistyped character
+ * into a download of the whole history under the range the operator believed
+ * they had asked for.
+ */
+test("an unparseable time bound is refused rather than read as the epoch", async () => {
+  const { store } = await seeded();
+  const spy = spying(store);
+  for (const bound of ["tomorrow", "NaN", "Infinity", "1.5", "9007199254740993"]) {
+    await expect(pageLogs(spy.store, { since: bound })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+    });
+    await expect(pageLogs(spy.store, { until: bound })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+    });
+  }
+  // Refused before the read, not after it: a query that reached the store would
+  // have run over the whole retention window on the way to the error.
+  expect(spy.queries).toHaveLength(0);
+
+  const exported = async (): Promise<string[]> => {
+    const out: string[] = [];
+    for await (const chunk of exportLogs(spy.store, { since: "tomorrow", until: String(NOW) })) {
+      out.push(chunk);
+    }
+    return out;
+  };
+  await expect(exported()).rejects.toMatchObject({ code: "BAD_REQUEST" });
 });
 
 test("the limit is clamped rather than trusted", async () => {
@@ -260,6 +300,28 @@ test("an export is scoped like a page, and a scope reading nothing writes only a
     none.push(chunk);
   }
   expect(none.join("").split("\r\n").filter(Boolean)).toHaveLength(1);
+});
+
+/**
+ * The first page is read before the header is yielded.
+ *
+ * The route pulls one chunk before it builds a response, so which of the two
+ * comes first decides whether an unreadable store is a status or a `200` that
+ * downloads as a header-only file. A CSV holding nothing but its header opens as
+ * a complete export reading "no request matched", which is indistinguishable
+ * from a successful empty range.
+ */
+test("an unreadable store fails before the header rather than halfway through", async () => {
+  const store = await memoryStore();
+  const failing: Store = {
+    ...store,
+    usage: {
+      ...store.usage,
+      page: (): Promise<RequestLogPage> => Promise.reject(new Error("database is closed")),
+    },
+  };
+  const rows = exportLogs(failing, { since: 0, until: NOW });
+  await expect(rows.next()).rejects.toThrow("database is closed");
 });
 
 /**
