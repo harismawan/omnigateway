@@ -212,6 +212,11 @@ export {
   type PollerDeps,
   poll,
   probe,
+  type QuotaOps,
+  type QuotaRefreshOutcome,
+  type QuotaRefreshRequest,
+  type QuotaRefreshResult,
+  quotaOps,
   RATE_LIMIT_COOLDOWN_MS,
 } from "./quota/poll.ts";
 export {
