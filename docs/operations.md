@@ -172,6 +172,14 @@ the name the client asked for. Both are exact matches, as are `--provider`,
 `--account`, `--key` and `--error-code`; there is no substring search, and none
 of these reads a prompt.
 
+The console spells those same three in one box: a bare word is the model that
+served the request, and `requested:` or `error:` name the other two
+(`model:` and `resolved:` say the first one explicitly, for symmetry). So
+`opus requested:fast error:UPSTREAM` is the console's spelling of
+`--model opus --requested-model fast --error-code UPSTREAM`. Values cannot
+contain a space; a colon anywhere but the prefix is part of the value, so
+`llama3:8b` is a model name rather than a filter.
+
 Pages are ordered newest first and walked by cursor, not by page number. Each
 page prints the cursor for the next one (`--json` carries it as `nextCursor`),
 and a cursor is opaque — pass it back unchanged:

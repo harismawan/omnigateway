@@ -201,12 +201,23 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("fast");
-    await user.type(screen.getByLabelText("Resolved model"), "claude-opus-4");
+    const box = screen.getByLabelText("Models and error codes");
+    await user.type(box, "claude-opus-4");
 
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url.includes("resolvedModel=claude-opus-4"))).toBe(
         true,
       );
+    });
+
+    // Emptying the box has to remove the parameter, not leave the last value
+    // that parsed: the box writes every term key on every keystroke, so a filter
+    // that survived its own text would be one no control could reach.
+    await user.clear(box);
+    await waitFor(() => {
+      const last = stub.calls.at(-1);
+      if (last === undefined) throw new Error("no request was made");
+      expect(last.url).toBe("/api/logs?limit=100");
     });
   });
 
@@ -231,6 +242,8 @@ describe("LogsBoard", () => {
 
     await screen.findByText("fast");
     await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
+    const box = screen.getByLabelText("Models and error codes");
+    await user.type(box, "requested:fast");
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url.includes("failed=true"))).toBe(true);
     });
@@ -241,6 +254,9 @@ describe("LogsBoard", () => {
       if (last === undefined) throw new Error("no request was made");
       expect(last.url).toBe("/api/logs?limit=100");
     });
+    // The box holds its own text, so clearing the filters has to reach it too —
+    // a term left on screen after "Clear filters" reads as a filter still set.
+    expect((box as HTMLInputElement).value).toBe("");
   });
 
   /**
@@ -499,7 +515,7 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("No requests have reached the gateway yet.");
-    await user.type(screen.getByLabelText("Error code"), "OVERLOADED");
+    await user.type(screen.getByLabelText("Models and error codes"), "error:OVERLOADED");
     expect(
       await screen.findByText("No request matches these filters. Clear them to see everything."),
     ).toBeTruthy();

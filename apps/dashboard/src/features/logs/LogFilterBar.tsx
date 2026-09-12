@@ -1,3 +1,4 @@
+import { useState } from "react";
 import styled from "styled-components";
 import { useCredentials, useKeys, useProviderCatalog } from "../../api/queries.ts";
 import type { LogFilters } from "../../api/types.ts";
@@ -14,8 +15,9 @@ const Narrow = styled(Select)`
   width: auto;
 `;
 
-const Exact = styled(Input)`
-  width: 170px;
+const Terms = styled(Input)`
+  flex: 1;
+  min-width: 260px;
 `;
 
 const When = styled(Input)`
@@ -42,6 +44,78 @@ type StateId = (typeof STATES)[number]["id"];
 
 const stateIdOf = (filters: LogFilters): StateId =>
   filters.failed === "true" ? "failed" : (filters.state ?? "all");
+
+/**
+ * The three text filters, and the word that names each in the combined box.
+ *
+ * A prefix rather than one box searched across all three: "requested `fast`,
+ * resolved `claude-opus-4`" is two facts about one row and an operator has to be
+ * able to ask for both at once, which a single value matched against any column
+ * cannot express. `resolved` is an alias for `model` because the bare form
+ * already means resolved, so the explicit spelling should too.
+ */
+const TERMS = [
+  { prefix: "model", field: "resolvedModel" },
+  { prefix: "resolved", field: "resolvedModel" },
+  { prefix: "requested", field: "requestedModel" },
+  { prefix: "error", field: "errorCode" },
+] as const satisfies ReadonlyArray<{ prefix: string; field: keyof LogFilters }>;
+
+/** What the box writes, and the only keys it may clear. */
+const TERM_FIELDS = ["resolvedModel", "requestedModel", "errorCode"] as const;
+
+type TermFilters = Pick<LogFilters, (typeof TERM_FIELDS)[number]>;
+
+/**
+ * Reads the combined box into exact filters.
+ *
+ * Split on whitespace, so no value may contain a space — none of the three can:
+ * a model name or an error code with a space in it is not a thing this gateway
+ * records, and quoting would be syntax to carry for a case that cannot arise.
+ *
+ * A word whose prefix is not one of the four is a bare term, not a dropped one:
+ * model names carry colons — Ollama's `llama3:8b`, and whatever a custom endpoint
+ * is asked for — so a colon cannot be read as "this names a field" on its own.
+ * Dropping those would also make the text and the filters disagree permanently,
+ * since the box is resynced from the filters it produced.
+ */
+export function parseTerms(text: string): TermFilters {
+  const out: TermFilters = {};
+  for (const word of text.trim().split(/\s+/)) {
+    if (word === "") continue;
+    const at = word.indexOf(":");
+    const term =
+      at === -1
+        ? undefined
+        : TERMS.find((entry) => entry.prefix === word.slice(0, at).toLowerCase());
+    if (term === undefined) {
+      out.resolvedModel = word;
+      continue;
+    }
+    // `model:` with nothing after it is a filter being typed, not an empty one.
+    const value = word.slice(at + 1);
+    if (value !== "") out[term.field] = value;
+  }
+  return out;
+}
+
+/**
+ * Writes exact filters back as box text.
+ *
+ * Only for filters that arrived from somewhere other than typing — "Clear
+ * filters", or a board restoring state. A resolved model is written bare so the
+ * common case round-trips as the operator typed it.
+ */
+export function formatTerms(filters: LogFilters): string {
+  const parts: string[] = [];
+  if (filters.resolvedModel !== undefined) parts.push(filters.resolvedModel);
+  if (filters.requestedModel !== undefined) parts.push(`requested:${filters.requestedModel}`);
+  if (filters.errorCode !== undefined) parts.push(`error:${filters.errorCode}`);
+  return parts.join(" ");
+}
+
+const sameTerms = (a: TermFilters, b: TermFilters): boolean =>
+  TERM_FIELDS.every((field) => a[field] === b[field]);
 
 /**
  * `datetime-local` renders in the browser's zone and yields a naive string, so
@@ -151,13 +225,18 @@ export type LogFilterBarProps = {
 /**
  * The exact filters both log boards send to the gateway.
  *
- * Every control emits an id or an exact value, never a substring. The board
- * previously carried a free-text box that matched model, account label, key
- * label and error code by substring over a *fetched tail* — a question no
- * server-side `=` can answer, and one that silently meant "among the newest N
- * rows" rather than "in the log". It is gone rather than reimplemented, because
- * a search box that quietly matches a different set than it used to is worse
- * than one that is not there.
+ * Every control emits an id or an exact value, never a substring. The three text
+ * filters share one box, read by `parseTerms`: a bare word is the resolved model,
+ * and `requested:` or `error:` name the other two. One box because they are one
+ * question typed in one place, but still three parameters on the wire — the
+ * prefix decides which, so "requested `fast` that resolved to `claude-opus-4`"
+ * stays askable, which a single value matched against any of the three columns
+ * could not express.
+ *
+ * This is not the box that used to be here. That one matched model, account
+ * label, key label and error code by *substring*, over a *fetched tail* — so it
+ * answered "among the newest N rows" while reading as "in the log". Every term
+ * here is an exact value the gateway applies before the page limit.
  *
  * Labels come from the credential and key lists, but the value sent is always
  * the stored id: rows outlive the keys and accounts that made them, so a
@@ -167,6 +246,19 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
   const catalog = useProviderCatalog();
 
   const patch = (next: FilterPatch): void => onChange(applyPatch(filters, next));
+
+  // The box holds its own text, because the filters cannot reconstruct it: an
+  // incomplete `model:` parses to nothing, and rewriting the field from the
+  // parsed filters on every keystroke would delete what is being typed. Resynced
+  // only when the incoming filters stop matching the text — "Clear filters" and
+  // nothing else, in practice, since no other control touches these three.
+  const [text, setText] = useState(() => formatTerms(filters));
+  const fromFilters = formatTerms(filters);
+  // The second condition is what bounds this: after the assignment `text` is
+  // `fromFilters`, so the next render cannot set it again whatever the parse of
+  // it says. Comparing only the parse would spin on any value the two functions
+  // are not exact inverses for.
+  if (!sameTerms(parseTerms(text), filters) && text !== fromFilters) setText(fromFilters);
 
   return (
     <Bar>
@@ -214,27 +306,24 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
         ))}
       </Narrow>
 
-      <Exact
-        aria-label="Requested model"
-        placeholder="Requested model"
-        value={filters.requestedModel ?? ""}
-        onChange={(event) => patch({ requestedModel: event.target.value || undefined })}
-      />
-      <Exact
-        aria-label="Resolved model"
-        placeholder="Resolved model"
-        value={filters.resolvedModel ?? ""}
-        onChange={(event) => patch({ resolvedModel: event.target.value || undefined })}
+      <Terms
+        aria-label="Models and error codes"
+        placeholder="claude-opus-4  requested:fast  error:UPSTREAM"
+        value={text}
+        onChange={(event) => {
+          setText(event.target.value);
+          // Every term key is cleared first, so deleting a word removes its
+          // filter rather than leaving the last one that was parsed.
+          patch({
+            resolvedModel: undefined,
+            requestedModel: undefined,
+            errorCode: undefined,
+            ...parseTerms(event.target.value),
+          });
+        }}
       />
 
       {operator ? <OperatorFilters filters={filters} patch={patch} /> : null}
-
-      <Exact
-        aria-label="Error code"
-        placeholder="Error code"
-        value={filters.errorCode ?? ""}
-        onChange={(event) => patch({ errorCode: event.target.value || undefined })}
-      />
 
       <Button type="button" onClick={() => onChange({})}>
         Clear filters

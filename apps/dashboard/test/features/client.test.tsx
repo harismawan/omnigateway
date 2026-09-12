@@ -447,7 +447,7 @@ describe("client board renders the console's own views", () => {
     expect(screen.queryByLabelText("Account")).toBeNull();
     expect(screen.queryByLabelText("Gateway key")).toBeNull();
 
-    await user.type(screen.getByLabelText("Requested model"), "slow");
+    await user.type(screen.getByLabelText("Models and error codes"), "requested:slow");
     await waitFor(() => {
       expect(
         fetches.calls.some(
