@@ -70,33 +70,19 @@ omni doctor --root <install>
 bun run build:npm v1.2.3
 ```
 
-Push `v*` tag run `.github/workflows/release.yml`; tag = sole version source. Before claim done: run
-focused changed-behavior tests, full `bun test`, dashboard suite, `bun run typecheck`, `bun run lint`,
-`bun run check:claims`, `bun run check:dead`. Last two once missing from this line while CI ran
-them; branch passed every command here, still failed `verify`. Set here = what
-`.github/workflows/ci.yml` run; that file gain step, this line gain one.
+Push `v*` tag run `.github/workflows/release.yml`; tag = sole version source. Before claim done, run
+focused changed-behavior tests and every check in `.github/workflows/ci.yml`.
 
 ## Architectural boundaries
 
-**Single-copy rules.** Six helpers in `@omni/store/types` and `@omni/control` are only copy of
-their question; each exist because several sites once asked separately and disagreed. Never
-re-derive locally, however small local question look: `keyUsable` ("may this key be used
-now" — revoked **and** expired, one question; `authenticateApiKey`, `loginClient`,
-`keyStillValid` all route through it; boundary exclusive, `expiresAt === now` expired),
-`credentialExpired` / `credentialPastExpiry` ("is this account past use" —
-`authType === "oauth"` clause is the rule, not a detail: an API key's `expiresAt` is operator bookkeeping and router never
-refuse for it; `filters.ts` and `omni credentials list` route through it, second one
-having restated comparison without that clause under docstring promising what router
-would do, so listing said `expired` while router routed; refreshability stay caller's to
-phrase through `credentialPastExpiry`, second export existing because first
-caller wrote that comparison by hand inside function helper exist to stop),
-`servesTarget` / `resolvePin` ("can
-this account serve this target" — provider, custom `endpointId`, pin are one question; router,
-`putModel`, `resolveModelLimits`, `omni doctor`, console picker all route through it;
-`ServingCredential` carry `providerData` so it see custom endpoints), `scopeOf` (principal to
-read filter), `quotaRolledOver` ("has this window already ended"). `servesTarget` consult no
-descriptor, name no provider: rule = "target naming endpoint served only by account at
-it", which cover `custom` without saying so.
+**Single-copy rules.** Never re-derive these helpers locally:
+- `keyUsable`: revoked or expired keys are unusable; `expiresAt === now` is expired.
+- `credentialExpired` / `credentialPastExpiry`: only OAuth expiry prevents routing; refreshability
+  stays caller phrasing.
+- `servesTarget` / `resolvePin`: provider, endpoint, and pin are one question;
+  `ServingCredential.providerData` carries endpoint data. `servesTarget` names no provider.
+- `scopeOf`: principal to read filter.
+- `quotaRolledOver`: whether a quota window ended.
 
 1. `packages/ir` stay provider-independent + side-effect-free. Inject clocks + logger sinks; never
    import `process`, `console`, or transport.
@@ -126,21 +112,16 @@ it", which cover `custom` without saying so.
     only.
 11. CLI administer local installs through `@omni/control`, never `/api/*`. Inject every side effect
     so tests never start processes or write outside temp dirs.
-12. Dashboard call `/api/*` only — including one WebSocket, `/api/stream`. One exception:
-    `/health`, polled to watch gateway leave and return across restart when no session exist to
-    probe. May import `@omni/store/types`, `@omni/ir`, `@omnigateway/dashboard-sdk`, but **not**
-    `@omni/providers` — no subpath, not even leaf: provider loaded from `<root>/plugins/`
-    exist only at runtime, so console importing providers can route to plugin provider while
-    showing it nowhere. Mirror wire shape in `api/types.ts` like `PluginCatalogEntry`; never import
-    it back. `ProviderId` come from `@omni/ir`, but provider list, order, label, colour, models all
-    come from `GET /api/catalog`; `theme/tokens.ts` hold no provider list. Shell gate in
-    `routes/_app.tsx` resolve catalog in `beforeLoad` **after** session check, before any screen
-    mount, so `--p-<id>` exist at first paint. Gate all-or-nothing, so its `errorComponent`
-    render error **with retry** — never spinner, never blank — and must not swallow `redirect`
-    expired session throw. Pinned by `apps/dashboard/test/routes/appGate.test.tsx`.
-    SDK permitted: it hold one copy of plugin API-prefix rule, LIVE switch, `usePluginChannel`
-    (ergonomics, not boundary). SDK in `SHARED_IMPORTS` — bundled per plugin it duplicate
-    `LiveContext` and panel pause forever silently. Internals + pins:
+12. Dashboard call `/api/*` only, including `/api/stream`; `/health` alone stays plain polling.
+    It may import `@omni/store/types`, `@omni/ir`, `@omnigateway/dashboard-sdk`, never
+    `@omni/providers` — no subpath or leaf, including type-only imports (plugins exist only at
+    runtime). Pin: `apps/dashboard/test/imports.test.ts`. Mirror wire shapes in `api/types.ts`; never
+    import them back. `ProviderId` comes from `@omni/ir`; provider list/order/label/colour/models
+    come from `GET /api/catalog`, never `theme/tokens.ts`. In `routes/_app.tsx`, resolve catalog in
+    `beforeLoad` after session check and before mount; `errorComponent` must show error + retry and
+    preserve expired-session `redirect`. Pin: `apps/dashboard/test/routes/appGate.test.tsx`.
+    Keep SDK in `SHARED_IMPORTS` so plugins share `LiveContext`; SDK owns the plugin API-prefix
+    rule, LIVE switch, and `usePluginChannel`. See
     `docs/writing-a-plugin.md#how-the-sdk-is-wired-for-anyone-changing-it`.
 13. `packages/rtk` stay pure like `ir` and `router`: no I/O, clocks, randomness. Rewrite tool-result
     content only, preserve errors + non-tool-result blocks. `@omni/rtk/catalog` leaf holding
@@ -168,34 +149,21 @@ it", which cover `custom` without saying so.
     rings + gauges — live in `apps/gateway`. `@omnigateway/plugin-api/events` **mirrors** unions
     and `WINDOW_MS`, not import (published vs not); mirror pinned by
     `apps/gateway/test/plugins/limitVocabulary.test.ts`, only place that may import both.
-16. Plugins load from `<root>/plugins/` at boot, receive capability-scoped `PluginContext`: never
-    `Store`, `HttpClient`, `AdminAuth`, `process.env`. **Guardrail, not sandbox** — plugin
-    share gateway's process, can import past all of it. What it buy: accidental overreach
-    impossible, intent auditable from manifest. Say so plainly wherever it come up.
-    **One real exception: plugin supplying provider receive decrypted credential for its
-    own provider.** `codec.buildRequest` get `{accessToken, apiKey, providerData}` from
-    `credential.openForInference()`; its `oauth` flow reach same class by second door:
-    `refresh` receive decrypted refresh token, `usage` access token through
-    `UsageSecrets`. Bounded three ways: router only produce candidates for that codec's own
-    provider id; refresher only hand credential to own provider's flow; neither codec
-    nor flow hold client or store; every URL either name checked against
-    manifest's `origins`.
-    `packages/plugin-api` stay pure like `ir`; loader, context, event bus, channel registry live in
-    `apps/gateway`. Every load failure skipped and reported, never fatal: proxy path depend on no
-    plugin. `channels` capability give plugin `open(name)`, nothing else — never socket,
-    upgrade request, header or `Principal`. Channel facade offer `send` (one connection,
-    this process) and optional `broadcast` (topic, every process, over `coord.pubsub`, **never
-    coalesced** — plugin payload name which thing changed, so folding by topic drop all but
-    last — but **capped** per channel, `BROADCAST_BURST`, drop counted + reported, since one
-    broadcast cost publish plus fan-out on every replica; per channel is **not** per key, so
-    size against how many thing a plugin push about at once — first number was 50, ordinary
-    install reach it. Unencodable payload counted apart from over-budget: different diagnosis,
-    different line). Envelope encoded in `try` at
-    `broadcaster.channel`: payload is plugin-authored `unknown`, and a throw from plugin's own
-    timer kill process. Member optional in type because it land in 0.4.0 with no generation
-    bump, so compiler force `?.` — host always supply it. Topic `plugin:<id>:<name>` with `<id>` from
-    validated manifest, same rule `{{name}}` follow for tables. Registry answer what **exist**;
-    `authorised` in `routes/stream.ts` decide who may hold it. Outbound frame reuse socket
+16. Plugins load from `<root>/plugins/` at boot with capability-scoped `PluginContext`, never
+    `Store`, `HttpClient`, `AdminAuth`, or `process.env`. This is a guardrail, not a sandbox; say so.
+    Provider plugins alone receive their own decrypted credential: `codec.buildRequest` gets
+    `{accessToken, apiKey, providerData}` via `credential.openForInference()`; OAuth `refresh` gets
+    the refresh token and `usage` gets the access token via `UsageSecrets`. Router/refresher enforce
+    matching provider, codec/flow hold neither client nor store, and URLs must match manifest
+    `origins`. OAuth `requests.ts` holds pure builders replacing `postJson`/`getJson`; nothing may
+    bypass the adapter. `packages/plugin-api` stays pure; loader/context/event bus/channel registry live in
+    `apps/gateway`. Load failures are reported and skipped, never fatal.
+    `channels.open(name)` exposes no socket, upgrade request, header, or `Principal`. `send` is local;
+    optional `broadcast` uses `coord.pubsub`, is never coalesced, and is capped per channel by
+    `BROADCAST_BURST`; count/report over-budget and unencodable payloads separately. Encode the
+    plugin-authored `unknown` envelope inside `try` at `broadcaster.channel`; call optional member
+    with `?.` though host always supplies it. Topic/table names use validated manifest id/name.
+    Registry reports existence; `routes/stream.ts` `authorised` decides access. Reuse the socket
     registry's bounded per-connection queue.
 17. **No provider-specific code in core module** — aim, not achieved state, measured per package.
     `ratelimit`, `rtk`, `ponytail` clean. `ir`: only `LogFields.surface` (`"anthropic" | "openai"`),
@@ -205,38 +173,19 @@ it", which cover `custom` without saying so.
     `custom` in one rule surviving its target union (custom target carry `endpointId`,
     nothing else may); `credentials.ts` plus `models.ts` ask `=== "custom"` about endpoint
     metadata. That is all.
-    **OAuth out of core.** `OAUTH_PROVIDERS` is empty null-prototype registry
-    `registerOAuthProvider` fill; seven vendor modules at `providers/src/<id>/oauth.ts`;
-    `builtinOAuthFlows()` in `@omni/providers` is one list. Do not re-add literal.
-    `seedBuiltinOAuth()` fill it from **`installPluginProviders`** on gateway (called
-    unconditionally at boot, reachable from harness — `main()` called by no test) and from
-    `apps/cli/src/run.ts` on CLI. Registry **threaded**: `registerOAuthProvider`,
-    `seedBuiltinOAuth`, `installPluginProviders` all take one, default global, because
-    guard reading module-global state passed on other test file's seed. Thread through **all**
-    of call graph or none. Idempotence = `WeakMap` of which id installed into which registry
-    (`WeakSet` of registries made deleted built-in unrecoverable); repair restore membership,
-    not position. Seeding late safe because every consumer read registry at call time and
-    `loadPlugins` register no flow; loader that ever register one move seed ahead of it.
-    `installPluginProviders` must stay **unconditional** — `if (providers.length > 0)` kill OAuth
-    on every plugin-less install; `oauthSeed.test.ts` catch it by asserting call sit at
-    two-space indent in `main()`. Seed **order is operator-facing order** — anthropic, openai,
-    kimi, kilo, grok, antigravity, muse — because `oauthProviderIds` derive from `Object.keys`;
-    `apps/cli/test/connect.test.ts` match by equality,
-    `apps/gateway/test/plugins/install.test.ts` pin as literal. Never pin against
-    `builtinOAuthFlows()`. Registry empty until seeded, so any test reading it **seed first**.
-    Contract in `providers/src/oauthFlow.ts` with `oauthRequests.ts` and `oauthUsage.ts`;
-    `@omni/providers` carry `@omni/store` **type-only** (`import type` from `@omni/store/types`),
-    enforced by `packages/providers/test/oauthStoreEdge.test.ts` — not `leafSubpaths.test.ts`.
-    Host keep mechanism — `pluginFlow.ts` (`oauthAdapter`), `pending.ts`, `refresh.ts`,
-    `pkce.ts`, `lead.ts`, `types.ts` — because adapter hold transport, origin check, yield cap,
-    return-shape validation, stamp `gatewayAuthored`. Each flow step is `async function*`
-    yielding described requests; host perform every one; yield **capped** per step; `fail`,
-    `keepPolling`, `pkce`, `randomState` supplied by host. `AuthRequest.timeoutMs` optional, clamped
-    to host ceiling (built-ins use 30s token / 15s usage). `PluginOAuthFlow` discriminated
-    union with `oauthAdapter` overloaded on `kind`. `requests.ts` hold pure builders that replaced
-    `postJson`/`getJson` — deleted so nothing bypass adapter. Provider OAuth tests stay in
-    `control/test/oauth/`, reading five via `test/oauth/builtins.ts` off seeded registry.
-    History: decoupling spec.
+    **OAuth out of core.** `OAUTH_PROVIDERS` is an empty null-prototype registry populated by
+    provider modules through `registerOAuthProvider`; never restore a core provider literal.
+    `seedBuiltinOAuth()` runs unconditionally through `installPluginProviders` at gateway boot and
+    from `apps/cli/src/run.ts`. Thread the registry through the whole call graph; tests reading it
+    seed first. Idempotence tracks provider membership per registry with `WeakMap`; repair missing
+    membership. Seed order is operator-facing: anthropic, openai, kimi, kilo, grok, antigravity,
+    muse; pin this literal, never `builtinOAuthFlows()`. Seeding after plugin loading is safe only
+    while the loader registers no flow; if it does, move seeding first. `@omni/providers` imports
+    `@omni/store/types` type-only. OAuth flow steps are capped async generators; optional
+    `AuthRequest.timeoutMs` is clamped to host ceilings (30s token, 15s usage). Host owns transport,
+    origin checks, return validation, PKCE, polling, randomness, and `gatewayAuthored`. Contract:
+    `providers/src/oauthFlow.ts`; design: decoupling
+    spec; pins: `oauthSeed.test.ts`, `connect.test.ts`, `install.test.ts`, `oauthStoreEdge.test.ts`.
     New provider knowledge in core go through three outcomes, in order: **descriptor data**; **make
     value carry own provenance** so branch delete; **named extension point** from
     closed set. `providerNative` is worked example: tagging block with producing
@@ -254,20 +203,14 @@ it", which cover `custom` without saying so.
     `SettingsBoard.tsx`. Design:
     [core/provider decoupling](docs/superpowers/specs/2026-08-27-core-provider-decoupling-design.md),
     [descriptor registry](docs/superpowers/specs/2026-08-26-provider-descriptor-registry-design.md).
-18. **`Principal` and `Scope` in `@omni/control` are only copy of "who is asking" and "what may
-    they read".** Four principals — `admin`, `viewer`, `client`, `machine` — share **one cookie**,
-    so `AdminAuth.verify` return principal, never boolean. `stream/registry.ts` re-export
-    union. Guards **opt-in per route**, never applied to group: `requireAdmin`,
-    `requireReader` (admin|viewer), `requireClient`. GET nobody remember to widen stay admin-only,
-    harmless way to be wrong. Mutations, snapshot download, `/api/connect/*` and `/api/plugins`
-    stay `requireAdmin`.
-    Trap: `scopeOf` mapped `machine` to `{kind:"key", apiKeyId:""}` meaning "matches nothing", but
-    **`usage_daily.api_key_id` is `NOT NULL DEFAULT ''`**, so that scope read every untagged row at
-    `daily` grain while `request_logs.api_key_id` (NULL) hid it at `raw`. `Scope` now carry
-    `none` arm; `readsNothing` gate **every** scoped reader — `recentLogs`, `usageDaily`, `pageLogs`,
-    `exportLogs` — **before** `scopeKey`, which collapse `all` and
-    `none` to same `undefined`. Client surface own no body route: **absent, not refusing**.
-    Design:
+18. `Principal` and `Scope` in `@omni/control` are the only copies of caller identity/read scope.
+    `admin`, `viewer`, `client`, and `machine` share one cookie; `AdminAuth.verify` returns principal,
+    never boolean; `stream/registry.ts` re-exports the union. Guards are per-route, never grouped:
+    `requireAdmin`, `requireReader` (admin|viewer), `requireClient`; mutations, snapshot download,
+    `/api/connect/*`, and `/api/plugins` stay admin-only. `Scope.none` must pass `readsNothing` before
+    `scopeKey` in every scoped reader (`recentLogs`, `usageDaily`, `pageLogs`, `exportLogs`) because
+    `scopeKey` maps both `all` and `none` to `undefined` and `usage_daily.api_key_id` defaults to `''`.
+    Client body route is absent, not refusing. Design:
     [client dashboard surface](docs/superpowers/specs/2026-08-27-client-dashboard-surface-design.md).
 
 ## Adding a provider
@@ -324,39 +267,27 @@ can reach, which decide whether rest good idea.
 
 - Never log prompt/response bodies, OAuth tokens, API keys, passwords, encryption keys, or arbitrary
   headers/metadata.
-- `LogFields` is closed allowlist + redaction boundary. Treat new free-text fields as security
-  changes; never add index signature. `fields?: LogFields` did **not** enforce it — excess property
-  checking apply only to fresh literal, so `{ plugin, ...(cond ? {} : { detail }) }` and passing
-  wider object both compiled. `Logger` methods now take `<T extends LogFields>(msg, fields?:
-  OnlyLogFields<T>)`, pinned by `packages/ir/test/logFields.test.ts` with `@ts-expect-error`.
-- **`GatewayError.gatewayAuthored` is second half of that boundary, opt-in on purpose.**
-  `reasonField` withhold failure's message from stdout unless debug on, because `httpError`
-  fill one from up to 500 characters of upstream body. Inferring from `provider !== undefined`
-  broke moment codec errors named provider: plugin codec throwing on every request
-  logged `code=UPSTREAM` with no reason. Flag default **false**; set only for message built
-  from literals and values this repository own — never one carrying upstream body, never one
-  authored outside this repository (`rebound` not set it, `codecFailure` do). Must survive
-  re-wraps: `classify` and dispatch's `rewrap` both rebuild error.
+- `LogFields` is a closed allowlist/redaction boundary: new free-text fields are security changes;
+  never add an index signature. Logger methods use `<T extends LogFields>(..., fields?:
+  OnlyLogFields<T>)`; pin: `packages/ir/test/logFields.test.ts` with `@ts-expect-error`.
+- `GatewayError.gatewayAuthored` is opt-in and defaults false. `reasonField` withholds a message
+  only when the error names a provider, unless debug is on or this flag is true. Set it only for repository-authored messages
+  containing no upstream/external text; `rebound` does not set it, `codecFailure` does. Preserve it
+  through `classify` and dispatch `rewrap`.
 - Return raw gateway API keys once; store only hashes.
 - Encrypt provider credentials with required `OMNI_ENCRYPTION_KEY`; never add default secrets or
   commit `.env` files/databases.
 - Client errors omit provider tokens, credential IDs, internal stacks.
 - Preserve admin sessions on every `/api/*` route except documented setup/status/login flows and
   two password routes, which end sessions **by design**.
-- **Two passwords, neither with default.** Admin password set at `/api/setup`, replaced at
-  `PUT /api/settings/password` — require **current** one, because unattended cookie that
-  rewrite own credential turn "left tab open" into "locked out". Success clear **every**
-  session, caller's included; console send operator to `/login?reason=password-changed`. Wrong
-  current password answer exactly like failed login. Viewer password **optional, absent by
-  default**: no row, `passwordMatches(null, …)` refuse everything, `viewerConfigured` false.
-  `PUT /api/settings/viewer-password` set/replace it; `{"password": null}` withdraw it and
-  **delete** row; absent field is `BAD_REQUEST`. Setting or clearing drop **viewer**
-  sessions only. `MIN_PASSWORD_LENGTH` (12) is `@omni/control`'s, mirrored in console's
-  `features/settings/policy.ts` — plain `.ts`, not the panel, because pinning test live in
-  `apps/gateway` whose tsconfig set no `--jsx`. Pinned by
-  `apps/gateway/test/routes/passwordPolicyMirror.test.ts`; both drift directions silent
-  (raise server alone and form accept what gateway refuse; lower it and form refuse what
-  would pass, which read as rule working).
+- Two passwords, neither default. Admin: set at `/api/setup`; `PUT /api/settings/password` requires
+  current password, answers wrong current exactly like failed login, clears all sessions including
+  caller, then console redirects to `/login?reason=password-changed`. Viewer password is optional:
+  no row means `passwordMatches(null, …)` rejects and `viewerConfigured` is false.
+  `PUT /api/settings/viewer-password` sets/replaces; `{"password": null}` deletes it; absent field is
+  `BAD_REQUEST`; either change clears viewer sessions only. `MIN_PASSWORD_LENGTH` is 12 in
+  `@omni/control`, mirrored in plain `features/settings/policy.ts`; pin:
+  `apps/gateway/test/routes/passwordPolicyMirror.test.ts`.
 
 ## Client contracts
 
@@ -377,30 +308,17 @@ Client surface:
 arrive as separate arguments because separate provenance. Client session re-read key
 row on **every** verify, refuse revoked one.
 
-**`summary` carry `dayOffsetMinutes`, only install-level fact on this surface.** Additive
-top-level field beside key's own facts, not folded into `ApiKeySummary` (shared with admin
-list) and not wrapped (wrapper would break holders reading old shape). Here because client's
-daily charts bucket exactly as operator's do and offset live on `/api/settings`, which is
-`requireReader` — key holder is neither. Safe to expose: boundary not measurement, say nothing
-about other keys, and every timestamp on those charts already cut on it. Absent ≠ zero
-anywhere: zero is UTC. Pinned by `clientSurface.test.ts`, whose harness pass 420 so
-assertion cannot pass by coincidence on UTC machine. Second install fact **need same
-argument made again** — this one is not precedent for "client may see config".
+`summary` carries `dayOffsetMinutes` as an additive top-level field, not inside shared
+`ApiKeySummary` and not wrapped. Absent differs from zero (UTC). It is the only install-level fact;
+justify any additional one independently. Pin: `clientSurface.test.ts` uses nonzero 420.
 
-Provider quota reach client as **named accounts**: `accountQuota` return one row per
-credential+window carrying operator's `label`, deliberately. `usedRatio` and
-`ratePerHourRatio` fractions in `0..1`. **Ceiling behind them derivable; accepted, not
-defended** — `usedRatio` exact quotient recoverable by continued fractions;
-`exhaustsAt` give second way. Rounding tried, not work; never reintroduce and claim
-size withheld. `stale` and `rolledOver` stay separate booleans — folding blank chart for
-poll interval after every rollover. `/api/client/quota/history` carry **no gateway rate** (that
-aggregate cover every key). Both history reads **capped** at `MAX_SAMPLES`
-(50_000) in `quota/history.ts`, asked as `cap + 1` so full page tell from cut
-one, and `truncated` reported rather than absorbed — console's was uncapped
-while client's was not, so `requireReader` route ran unbounded synchronous
-`bun:sqlite` scan over whole retention window. Surface drawing one series
-narrow it to that series: cap cover every account at once. `clientSurface.test.ts` hold both halves: no credential identity on
-`logs`/`usage`/`summary`; quota routes name accounts, omit `used`/`limit`/`ratePerHour`.
+Client provider quota exposes named accounts: `accountQuota` returns credential+window rows with
+operator label; `usedRatio`/`ratePerHourRatio` are `0..1`, with derivable ceilings accepted.
+Keep `stale` and `rolledOver` separate. `/api/client/quota/history` exposes no aggregate gateway
+rate. Both history reads cap at `MAX_SAMPLES` (50_000) in `quota/history.ts`, query `cap + 1`, and
+report `truncated`; a single-series surface narrows before applying the all-account cap.
+`clientSurface.test.ts` pins no credential identity on `logs`/`usage`/`summary`; quota may name
+accounts but omits `used`/`limit`/`ratePerHour`.
 
 Every `/v1/*` request accept Bearer or `x-api-key`; reject conflicts. `null` model allowlist mean
 unrestricted; empty array deny all models.
@@ -426,15 +344,11 @@ Translation invariants:
   turn 2. Degradation spelled `excluded:capability:providerNative`; old rows carry
   `excluded:capability:anthropicTools`, stay readable — degradations forensic text never
   parsed. Redaction of `credentialId` there read `Excluded.kind`, never string.
-- **Breakpoint on request's final mid-conversation system turn must leave that turn**, moved
-  by `systemCacheControl` + retarget in `toWire` onto last cacheable block *before* it
-  (`lastCacheableHistoryBlock(body.messages.slice(0, -1))`). Such turn is directive client
-  re-emit every request, so it sit at different position next request; prefix ending inside
-  it never prefix again. Measured: marked on trailing turn read **0** every request;
-  moved one block back, read 13,896. Hoisting to request-level `cache_control` behave identically
-  (dead). Mixed system turn (block array) get own copy of marker **stripped**. Recorded
-  `anthropic:system-turn-cache-control-retargeted`; skipped when target already carry client's
-  own marker. Numbers and $70.53 day: auto-cache spec History.
+- **Breakpoint on request's final mid-conversation system turn must leave that turn.**
+  `systemCacheControl` + `toWire` retarget it to
+  `lastCacheableHistoryBlock(body.messages.slice(0, -1))`; strip the mixed turn's copy, skip when
+  the target already has the client's marker, and record
+  `anthropic:system-turn-cache-control-retargeted`. History: auto-cache spec.
 - `pauseTurn` own stop reason; never fold into `endTurn` or `toolUse`.
 - Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in
   `anthropic/decode.ts` — never at egress. Anthropic fingerprint some name sets, refuse them
@@ -444,35 +358,22 @@ Translation invariants:
   attempts. Exempt names (already PascalCase, or `mcp__*`) reach wire unrenamed and **claim their
   spelling**.
 - Unknown Anthropic block types + SSE events fail visibly, not skipped.
-- Preserve cache-control breakpoint block, TTL, order when target can express them. Record
-  degradations for requested features provider cannot express. **Two exceptions, only two:**
-  - `autoCacheEnabled` (default **on**) let Anthropic adapter add breakpoints to request carrying
-    **none**. Fire only when `estimateCachedInputTokens` is 0 *and* no `cache_control` in vendor
-    bag. Up to **three** markers, one rule: walk tiers in render order — last tool, last system
-    block, last cache-eligible block of wire history — place marker when that prefix beat
-    **last placed marker's** prefix by ≥1024 (running comparison start at 0). Last *placed*, not
-    previous tier. Gating each marker on own prefix was wrong: prefixes monotone, so gate 1
-    implied all three. Same rule cover `OAUTH_IDENTITY` (~15 tokens) — **never add check naming
-    that string**. Marker 3 walk `body.messages` **backwards, never `req.messages`** (flatMap drop
-    turns of unsignable reasoning, so indices differ); skip string content and block types outside
-    text/image/tool_use/tool_result/document. Write to wire body only, never IR — IR shared across
-    attempts — pinned by deep-frozen fixture in `packages/providers/test/anthropic.test.ts`.
-    Recorded `anthropic:cache-breakpoint-added` (marker 1 or 2),
-    `anthropic:history-cache-breakpoint-added` (marker 3). Design:
-    `docs/superpowers/specs/2026-08-23-anthropic-auto-cache-full-prefix-design.md`.
-  - `ponytailMode` (default **off**) let dispatch append vendored ruleset to `system` and
-    **move** breakpoint client put on own last system block onto appended block:
-    marker meant "cache through end of system", still do — count, TTL unchanged, no marker
-    invented. Edit marker's *position* alone, on IR in dispatch, so
-    `estimateCachedInputTokens` stay non-zero and autoCache still decline; moving marker must
-    never become way to switch autoCache on. Injection **return new request**, pinned by
-    deep-frozen fixture in `packages/ponytail/test/inject.test.ts`. Dedupe on `PONYTAIL_MARKER`.
-    `count_tokens` apply same function by hand. Recorded on `request_logs.degradations` as
+- Preserve cache-control block, TTL, and order; record unsupported-feature degradations. Only two
+  exceptions:
+  - `autoCacheEnabled` defaults on and adds markers only when both
+    `estimateCachedInputTokens === 0` and the vendor bag has no `cache_control`. Walk last tool,
+    last system block, then last eligible wire-history block; place at most three markers where
+    prefix growth from the **last placed** marker is ≥1024, starting at 0. Walk `body.messages`
+    backwards, never `req.messages`; eligible blocks are text/image/tool_use/tool_result/document.
+    Mutate wire only, never shared IR. Record `anthropic:cache-breakpoint-added` and
+    `anthropic:history-cache-breakpoint-added`. Pin: deep-frozen
+    `packages/providers/test/anthropic.test.ts`; design: [auto-cache](docs/superpowers/specs/2026-08-23-anthropic-auto-cache-full-prefix-design.md).
+  - `ponytailMode` defaults off. Injection returns a new request, dedupes on `PONYTAIL_MARKER`, and
+    moves only the client's final-system marker onto the appended ruleset, preserving count/TTL and
+    never enabling auto-cache. `count_tokens` applies the same function. Degradation constants:
     `ponytail:<level>`, `ponytail:already-present`, `ponytail:cache-marker-moved`,
-    `ponytail:cache-marker-not-last` — constants only. Last one is shape move cannot help
-    (client marker on non-final system block; ruleset billed fresh, ~1,240 tokens). Text vendored
-    from upstream tag **v4.9.0**, blob `a3e4d94b…` — pin blob. Design:
-    `docs/superpowers/specs/2026-08-29-ponytail-prompt-injection-design.md`.
+    `ponytail:cache-marker-not-last`. Vendor text stays pinned to v4.9.0 blob `a3e4d94b…`. Pin:
+    deep-frozen `packages/ponytail/test/inject.test.ts`; design: [ponytail](docs/superpowers/specs/2026-08-29-ponytail-prompt-injection-design.md).
 - `Usage.inputTokens` is uncached input. Cache reads and 5m/1h writes disjoint classes priced
   once. Use `promptTokens()` when client surface need total prompt tokens.
 - Adapters stream upstream. OpenAI chat usage need `stream_options.include_usage`; Responses API
@@ -481,23 +382,15 @@ Translation invariants:
 - Normalize `[1m]` before key allowlist checks. `claude/` **not** reserved, not rewritten.
 - Gateway not validate request-shape support per model; unsupported combos surface as upstream
   errors.
-- **`ChatRequest.conversationId` is client's own name for its conversation; Codex
-  backend partition prompt cache by it** — measured 0 of 5 cache reads without session id,
-  14 of 15 with one. Arrive as Anthropic **`metadata.user_id`**: opaque free text (Claude Code send
-  96-char JSON string whose nested `session_id` make it conversation-scoped); ingress **not**
-  parse it. Only **conversation**-scoped ids may be used — OpenAI's `user` name human, read
-  nowhere. `readConversationHeader` in `ingress/schemas.ts` hold header list, checked
-  **after** body field, case-insensitive: `x-session-id`, `x-session-affinity` (opencode),
-  `x-deepseek-harness-session-id` (dsh), `session-id` (Codex). Derived fallback (hash of
-  instructions plus opening item) rotate several times per conversation; do **not** hash tool list
-  or first message; gateway-generated id collapse into same fallback. `openai/wire.ts`
-  resolve one key — client `prompt_cache_key`, then client `session_id`, then `conversationId`,
-  then hash — **before** vendor `Object.assign`; `openai/codec.ts` put **same**
-  string in `session_id` header (OAuth leg alone; `api.openai.com` take body field).
-  `"session_id"` sit in `openaiProfile.order`. Both non-client cases hashed, two reasons:
-  derived case hash by construction; `conversationId` hashed for **privacy** — arrive
-  beside `device_id` and `account_uuid`. `store: false` **required** (Codex 400 otherwise). When
-  checking what client send, print key set, not one member. History: responses-ingress spec.
+- `ChatRequest.conversationId` is the client's opaque, conversation-scoped name; Anthropic
+  `metadata.user_id` supplies it without parsing. Never use OpenAI `user`. `readConversationHeader`
+  in `ingress/schemas.ts` checks after the body field, case-insensitively:
+  `x-session-id`, `x-session-affinity`, `x-deepseek-harness-session-id`, `session-id`. Fallback hashes
+  instructions + opening item, not tool list/first message; gateway-generated ids use the fallback.
+  In `openai/wire.ts`, resolve client `prompt_cache_key` → client `session_id` → hashed
+  `conversationId` → fallback before vendor `Object.assign`. `openai/codec.ts` sends the same value
+  in OAuth `session_id` header; API-key leg uses body. Keep `session_id` in `openaiProfile.order` and
+  `store: false` for Codex. Inspect client key sets, not one member. History: responses-ingress spec.
 - OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /
   `experimental_attachments` as well as `content`. Payload's own container header beat any
   declared type; remote URL never fetched. `images` is Ollama's images-only field, so
@@ -518,37 +411,29 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   `OMNI_ROOT` not suppress it: both ambient.
 - Quota cooldowns, `1m` and `concurrency` process-local, reset on restart; `5h` and `1w` come
   from database, survive one.
-- **A success writes `credential_health` only when `successWouldChange` say so**, read off
-  snapshot before attempt, never inside `updateHealth`'s `apply`. `SUCCESS_RESETS` in
-  `router/src/breaker.ts` is one copy of what a success reset; `consecutiveFailures` stay in
-  it or breaker count cumulative failures, not consecutive. Postgres trigger `WHEN` is strict
-  subset — never add the count there. No row read as blank, so healthy account commonly has
-  none: nothing may assume a row exist. `lastUsedAt`/`ewmaTtftMs` live in `loadRegistry`,
-  reach ranking as `RankInput.recent`; display read `usage.lastUsedByCredential`. Pinned by
-  `apps/gateway/test/dispatch/dispatch.test.ts` (refusing store, cumulative test, ABAB) and
-  `packages/router/test/breaker.test.ts` (superset against migration SQL).
+- A success writes `credential_health` only when pre-attempt snapshot
+  `successWouldChange`; never decide inside `updateHealth.apply`. `SUCCESS_RESETS` in
+  `router/src/breaker.ts` is the single reset set and includes `consecutiveFailures`; Postgres
+  trigger `WHEN` is a strict subset. Missing health row means blank/healthy. Recent ranking uses
+  `loadRegistry`'s `lastUsedAt`/`ewmaTtftMs`; display uses `usage.lastUsedByCredential`. Pins:
+  `apps/gateway/test/dispatch/dispatch.test.ts`, `packages/router/test/breaker.test.ts`.
 - `usage.append` must run at most once per request ID; duplicate completion double-count
   `usage_daily` and `usage_rollup`. Pending rows hold placeholder metrics; inspect `state`, not
   `status`.
 - `startOfDay` in `packages/store/src/sqlite/rollup.ts` takes the configured fixed offset; thread it
   through both store factories, pinned by `packages/store/test/contract/usage.test.ts`.
-- `usage_rollup` derived, never authoritative: `request_logs` source of truth; `rebuildRollup`
-  reproduce every bucket. Written in `append`'s transaction, pruned with rows it summarizes, rebuilt
-  after restore, compared by `omni doctor`. Replaced unbounded `SELECT SUM` — `bun:sqlite`
-  synchronous, so that scan blocked whole event loop. Same reason timeout around store read
-  cannot fire; do not add one back.
+- `usage_rollup` is derived from authoritative `request_logs`; `rebuildRollup` reproduces every
+  bucket. Write it in `append`'s transaction, prune with source rows, rebuild after restore, compare
+  in `omni doctor`. Never restore unbounded synchronous `SELECT SUM`; a timeout around a
+  synchronous `bun:sqlite` read cannot fire.
 - `quota_windows` store provider observations, not gateway counts. Missing data mean unknown, not
   unlimited. Probe failure must never disable credential.
-- `quotaRolledOver` (single-copy rule above): between rollover and next probe — up to
-  `quotaPollIntervalMs`, 300_000 default — newest reading count window that no longer exist;
-  every staleness check report it current. Null `resetsAt` **not** rolled over. Rollover suppress
-  **inference**, never measurement: `burnFor` drop `ratePerHour`, `exhaustsAt`, `survives`
-  but **keep `windowStartsAt`** — suppressing it too make `spanStartOf` null, blank chart of
-  real readings for poll interval. Surfaces phrasing both verdicts say **staleness first**.
-- Projection line **truncate at ceiling**, never overshoot: `ratePerHour` is whole-window
-  average, enormous in minutes after rollover. `projectedPace` move endpoint to instant
-  line reach 100% — same instant `exhaustsAt` name. `usedPercent` capped at 100. Fact read "100% of
-  limit before it resets", not "160% by reset".
+- `quotaRolledOver`: null `resetsAt` is not rolled over; stale rollover data may persist up to
+  `quotaPollIntervalMs` (default 300_000). Rollover suppresses inference only:
+  `burnFor` drops `ratePerHour`, `exhaustsAt`, `survives` but keeps measured `windowStartsAt`.
+  Surfaces phrase staleness before rollover.
+- Projection truncates at the ceiling: `projectedPace` ends when it reaches 100%, the same instant
+  as `exhaustsAt`; cap `usedPercent` at 100.
 - RTK filter ids persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is storage contract.
   `isRtkFilterId` drop unknown ids on read. Add ids freely; rename or remove only with migration.
 - `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are JSON keys of `api_keys.limits` —
@@ -556,24 +441,16 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   migration; update mirror in `@omnigateway/plugin-api/events` in same change.
 - Rate limiting explained in `ARCHITECTURE.md#rate-limiting`; invariants below each already broken
   once.
-- **Nothing plugin imports may reach core package.** `@omnigateway/plugin-api` and
-  `@omnigateway/dashboard-sdk` published; every `@omni/*` not, so one import put unresolvable
-  `workspace:*` into stranger's tree — and typecheck green here.
-  `packages/plugin-api/test/bundleWeight.test.ts` build each entry point, assert zod appear only
-  under root; first test assert zod *is* present there, because "absent" also what broken
-  harness report.
-- **Range one published package put on other never resolved in this repository.**
-  `dashboard-sdk` carried `@omnigateway/plugin-api: ^0.1.0` past that package's move to `0.2.0`, so
-  every `bun add` of SDK resolved generation 1 against gateway refusing `api: 1`. Repairing
-  range fix nobody: release step skip package whose **version** not moved. `publishable.test.ts`
-  walk pairs, watch `package.json` beside `src`.
-- **`SAFE_PROVIDER_ID` in `apps/dashboard/src/theme/tokens.ts` mirror `PROVIDER_ID_PATTERN`;
-  `providerColor` is where stored string become CSS.** styled-components not escape
-  interpolations; `credential.provider`, `target.provider`, `log.resolvedProvider` never pass
-  `/api/catalog`; `sqlite/config.ts` parse `virtual_models.targets` with bare `JSON.parse`. Check
-  live in `providerColor`, not four call sites. Pinned by
-  `apps/gateway/test/routes/providerIdMirror.test.ts`. Reference carry
-  `var(--p-<id>, var(--ink-faint))`.
+- Nothing plugin imports may reach unpublished `@omni/*`; published `plugin-api` and
+  `dashboard-sdk` must remain independently installable. `bundleWeight.test.ts` builds every entry
+  and requires zod only in the root entry, including a positive root assertion.
+- Published-package dependency ranges and versions move together. `publishable.test.ts` watches
+  pair `package.json` files beside `src`; a range-only repair is not releasable.
+- `SAFE_PROVIDER_ID` in dashboard `theme/tokens.ts` mirrors `PROVIDER_ID_PATTERN`.
+  `providerColor` validates every stored provider before CSS interpolation and returns
+  `var(--p-<id>, var(--ink-faint))`; do not move guards to call sites. `sqlite/config.ts` reads
+  `virtual_models.targets` with bare `JSON.parse`, so restored data bypasses write schemas. Pin:
+  `apps/gateway/test/routes/providerIdMirror.test.ts`.
 - `admit`/`consume` claim ring stamp and gauge **synchronously**, before any `await`, roll back
   on refusal — ceiling of 3 once admitted 10 parallel requests.
 - Refuse at auth, degrade at list. Unparseable `limits` read back as `null`, distinct from `{}`;
@@ -599,41 +476,25 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   restart.
 - `ApiKeySummary.limitUsage` count committed rows only: floor on what limiter see.
   `concurrency.used` is `null`, not `0`.
-- `Target.credentialId` pin one account to one target — **filter state, not strategy**. No
-  `"pinned"` strategy exist, none should be added. Pin **hard**: disabled, breakered,
-  rate-limited or quota-spent pinned account fail request, never spill.
-  `pin:missing` emitted **once per target**, only when no account resolve; accounts pin exclude
-  skipped silently. `pinSeen` declared **per target, inside target loop**, set **before**
-  any `drop()`. All three guards are `continue`, so order cannot change membership — order
-  decide only whether `pin:missing` fire; mutation that widen membership is making earlier
-  guard conditional on pin.
-  Nothing validate pin at write time (removing account must not make unrelated edit
-  unsavable); `omni doctor` carry that weight, must resolve through `resolvePin`. Control schema
-  refuse `""`, bound it to 64 chars of `[A-Za-z0-9_-]` **on both arms of union**, because
-  `pin:missing` carry it into `LogFields.credentialId` untruncated; dashboard **omit** field
-  rather than send empty. `sqlite/config.ts` read targets back unvalidated, so restored database
-  bypass schema. Format not pinned to `crypto.randomUUID()`.
-  Console draft clear pin on provider **and** endpoint change (`retargetDraft`,
-  `reEndpointDraft`), never on model change — **draft behaviour only**; `PUT /api/models/:id` and
-  `omni models put -f` save pin under changed provider; `doctor` report it.
-  `resolveModelLimits` describe pinned target by own account's auth; unresolvable pin fall
-  back to provider-wide narrowing, **never** catalog figures (`setup.ts` persist that number into
-  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`). `unreachable` in `putModel` check pinned account's auth
-  alone, **deliberately not grandfatherable** — `pairOf` stay keyed on provider+model, so
-  clearing dangling pin never refused. `modelLimits` resolve pin from **enabled** credentials,
-  `models.ts` from existence, same split `heldAuths` make.
-  Both surfaces that remove account name models pinned to it **before** confirm; console
-  treat unanswered `useModels()` or empty credential list as unknown, never as no pin.
-- **Breaker probe is one claim per `(credential, model)`, made in dispatch, gated in router.**
-  `filters.ts` mark `open`-past-cooldown **and `halfOpen`** as `Pair.probe`; dropping the
-  `halfOpen` arm restore the flood with "probing" lamp lit, because dispatch write `halfOpen`
-  on claim and every later request rank against it. Claim `coord.gauge.acquire("probe:…")`
-  sit inside attempt `try` beside `releaseSlot`, released in same `finally` after drain.
-  Skip on lost claim (`breaker:probing`) consume **no** attempt; all-skipped is
-  `NO_CANDIDATES`. `DispatchDeps.coord` required, never defaulted per request. Pinned by
-  probe block in `apps/gateway/test/dispatch/dispatch.test.ts` (sequential test is the one
-  that see the `halfOpen` arm) and `packages/router/test/imports.test.ts` (`@omni/coord`
-  denied). Design: `docs/superpowers/specs/2026-09-07-breaker-half-open-probe-design.md`.
+- `Target.credentialId` is a hard filter, never a routing strategy: no `"pinned"` strategy and no
+  spill from disabled, breakered, rate-limited, or quota-spent account. `pin:missing` emits once per
+  target only when no account resolves; declare `pinSeen` inside each target loop and set it before
+  drops. Nothing validates pin existence at write time—account removal must not make unrelated edits
+  unsavable; `omni doctor` uses `resolvePin`. Schema on both
+  target arms rejects empty and limits `[A-Za-z0-9_-]` to 64 chars; dashboard omits an empty pin.
+  Console draft clears pin on provider/endpoint change, not model change; API/CLI preserve it.
+  Pinned model limits use its account auth; unresolved pin falls back to provider-wide narrowing,
+  never catalog figures. `putModel.unreachable` checks pinned auth without grandfathering; `pairOf`
+  stays keyed on provider+model so clearing a dangling pin is never refused. `modelLimits` uses
+  enabled credentials while `models.ts` uses existence. Account-removal surfaces
+  name pinned models before confirmation; unanswered/empty console data means unknown.
+- Breaker probe is one dispatch claim per `(credential, model)`, gated in router. `filters.ts` marks
+  both open-past-cooldown and `halfOpen` as `Pair.probe`. Acquire `coord.gauge` inside attempt `try`
+  beside `releaseSlot`; release after drain in the same `finally`. Lost claim
+  (`breaker:probing`) consumes no attempt; all skipped means `NO_CANDIDATES`. `DispatchDeps.coord`
+  is required; router must not import `@omni/coord`. Pins:
+  `apps/gateway/test/dispatch/dispatch.test.ts`, `packages/router/test/imports.test.ts`; design:
+  `docs/superpowers/specs/2026-09-07-breaker-half-open-probe-design.md`.
 - `provider:missing` follow pin rule exactly: **once per target**, `kind: "target"`,
   `credentialId: ""`, **first** guard in target loop. Dispatch's `INTERNAL "no adapter for
   provider …"` stay throw: reaching it mean router admitted what it should have excluded;
@@ -648,46 +509,24 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - `ProviderModelChoice.auth` enforced at write time in `putModel`, never at routing. Catalog export
   fact (`catalogModelAuths`), control own rule. Provider with no credential unknown,
   unlisted model unknown, disabled credentials count, stored target under that id exempt.
-- **`ProviderId` is validated string, not union of six.** Five tables key on it —
-  `PROVIDER_DESCRIPTORS`, `ADAPTERS`, `PROFILES`, `BODY_ORDER`, `PROVIDER_MODEL_CATALOG` — each
-  hand-written literal; only `PROVIDERS` derived. Delete built-in's line and **typecheck
-  pass**. What catch it: lint (unused import) and
-  `packages/providers/test/descriptor.test.ts` (key-set equality against literal `IDS`) — never
-  compiler; if guarantee need be stronger, derive table. Lookups keyed on
-  **stored** id partial; `noUncheckedIndexedAccess` make each compile error at point
-  of use; do not cast away. `PROVIDER_ID_PATTERN` in `packages/providers` is source;
-  `packages/control/src/catalog.ts` read it. Four other copies validate **plugin** id
-  (`packages/plugin-api/src/manifest.ts`, `apps/gateway/src/plugins/routes.ts`,
-  `packages/control/src/plugins.ts`, `packages/store/src/sqlite/plugins.ts`), pinned by behaviour
-  in `apps/gateway/test/plugins/pluginIdGrammar.test.ts` — failure mean mirror stale, never
-  that pattern should widen.
-- **Every provider-keyed table drop its prototype.** Provider id arrive from client's `model`
-  name and from unvalidated `virtual_models.targets`; on ordinary literal
-  `table["constructor"]` read "installed" then throw. `PROVIDER_ID_PATTERN` accept `constructor`;
-  `noUncheckedIndexedAccess` cannot see it. Do not add `Object.hasOwn` at readers instead — partial
-  protection reading as total worse than none. **Do not enumerate tables here**:
-  `packages/control/test/providerTables.test.ts` **discover** them by walking exported surface
-  of both packages, assert walk found something. Spreading null-prototype object give
-  ordinary one — use `Object.assign(Object.create(null), …)` — and `.hasOwnProperty()` as method
-  throw; use `Object.hasOwn`. Guard live at **read site**, `dispatch/index.ts`, not
-  `app.ts`: `DispatchDeps` and `ProxyDeps` public injection points. Console cannot import
-  `@omni/providers`, so `heldAuths` restate rule with `Object.create(null)` and own test.
-- **Registry threaded into some of call graph, not all, is this repository's most repeated
-  bug, and sweep that keep failing.** Sentinel-registry test (Testing section) is guard;
-  history in decoupling spec.
-- **Module-scope `Object.keys`/`Object.entries` over `PROVIDER_DESCRIPTORS` is build-time
-  snapshot**; `loadPlugins()` run long after import. Six sites wrong this way
-  (`providerCatalog`, `providerIdSchema`, `isProviderId`, `PREFIX_PROVIDER`, `CALLBACKS` — deleted
-  — and `OAUTH_PROVIDER_IDS`, now `oauthProviderIds()`). Assume **seventh** exist until you
-  grep for pattern, not names. `PROVIDER_IDS` still exist, still snapshot — feed
-  CLI usage messages and tests, never gate.
-- **`AggregateError` has no message of own.** Node report failed multi-address connect that
-  way, so `error.message` render `reason=` empty; `request_logs` hold no message column.
-  `describeError` in `@omni/ir` is one way to fill that field; `classify` recurse into `errors`
-  for same reason, else retryable transport failure fell through to `INTERNAL`.
-- `CONNECT_ATTEMPT_TIMEOUT_MS` must stay above one TCP retransmit: node's Happy Eyeballs budget
-  under Linux's one-second initial RTO, so dropped SYN abandoned at ~500ms. Measured: 3
-  failures in 99 connects at default, 0 in 212 once raised.
+- `ProviderId` is a validated string, not a built-in union. Provider-keyed lookups are partial;
+  keep `noUncheckedIndexedAccess` checks and never cast them away. `PROVIDER_ID_PATTERN` in providers
+  is source; control reads it. Plugin-id grammar mirrors in manifest/routes/control/store and is
+  pinned by `pluginIdGrammar.test.ts`. Built-in table completeness is pinned by lint plus
+  `descriptor.test.ts`, not typecheck.
+- Every provider-keyed table is null-prototype; use `Object.assign(Object.create(null), …)`, never
+  spread. Use `Object.hasOwn` (not method `.hasOwnProperty()`) only for injected tables, never instead
+  of null prototypes. `providerTables.test.ts` discovers tables rather than enumerating them. Guard
+  injected adapters at `dispatch/index.ts`, not `app.ts`; `DispatchDeps`/`ProxyDeps` are public.
+  Dashboard `heldAuths`
+  separately uses a null-prototype table.
+- Thread registries through the entire call graph; the sentinel-registry test is the guard.
+  Module-scope `Object.keys/entries(PROVIDER_DESCRIPTORS)` is a pre-plugin snapshot: grep for the
+  pattern whenever changing registries. `PROVIDER_IDS` may serve CLI text/tests, never gates.
+- `AggregateError` may have no message: use `describeError`; `classify` recurses into `errors` so
+  multi-address transport failures remain retryable.
+- Keep `CONNECT_ATTEMPT_TIMEOUT_MS` above one Linux TCP retransmit (>1s); do not use Node's shorter
+  Happy Eyeballs default.
 - Streaming responses need downstream `: keepalive` comments because provider heartbeats decoded
   away. Keep server idle timeout above request deadline.
 - Socket registry close every connection **before** `app.stop()`; its `stopLoops` position is
@@ -722,20 +561,13 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Quiesce latch gate `/v1/*` only; `/api/*` and `/health` stay live through swap.
 - `store.close()` idempotent, `reopen()` tolerate closed handle, so restore = close → swap →
   reopen. Repo methods forward per call: bind one to local and it die at next swap.
-- **Swap forwarder in `sqlite/store.ts` hand-write one arrow per repo method; arrow of
-  lower arity still satisfy interface** — dropped optional parameter silently become
-  `undefined` (`usage.recent` shipped that way; scoped read returned every key's rows). Adding
-  parameter to repo method mean editing that arrow; `packages/store/test/swap.test.ts` read
-  forwarder source, assert no arrow drop argument.
+- Swap forwarder in `sqlite/store.ts` hand-writes one arrow per repo method; TypeScript permits
+  lower arity, so every added parameter must be forwarded. Pin: `packages/store/test/swap.test.ts`.
 - `vacuum()` must checkpoint, or page count fall while file keep every page.
-- **Log filters split by where value came from, and `apiKeyId` staying `=` is a scope rule.**
-  Four a person type — `model`, `requestedModel`, `resolvedModel`, `errorCode` — matched as
-  case-insensitive substring by `contains()` in `store/src/logPage.ts`; everything else `=`.
-  `scopeKey` write client's own key into that query, so substring on `api_key_id` let scope
-  `mine` read `mine-2`'s rows. `_` and `%` escaped with explicit `ESCAPE`, because every error
-  code is `ALL_CANDIDATES_FAILED` and unescaped filter matched `ALLXCANDIDATESXFAILED`. Case
-  folding is dialect argument (`LIKE` sqlite, `ILIKE` postgres) — defaults disagree, and suite
-  comparing `opus` to `opus` would never notice. All three pinned in `test/contract/usage.test.ts`.
+- In `store/src/logPage.ts`, person-entered `model`, `requestedModel`, `resolvedModel`, `errorCode`
+  use case-insensitive escaped substring search; all other fields, especially scoped `apiKeyId`, use
+  `=`. Dialect supplies `LIKE`/`ILIKE`; escape `_` and `%` explicitly. Pin:
+  `test/contract/usage.test.ts`.
 - Restore compare admin password hash across swap, invalidate sessions only when differ.
   **Nothing may sit between swap and that comparison.** `swapIn` rebuild `usage_rollup` last
   and guarded, for that reason; cost documented in `README.md`.
@@ -755,19 +587,11 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 
 ## graphify
 
-Project can carry knowledge graph at `graphify-out/` with god nodes, community structure,
-cross-file relationships. `graphify-out/` gitignored, so fresh clone has none: if
-`graphify-out/graph.json` absent, run `/graphify .` to build, or skip graph and read source
-directly. Every rule below conditional on that file existing.
+When gitignored `graphify-out/graph.json` exists, query it first for codebase questions; use
+`path`/`explain` for focused relationships and the wiki/report only for broad navigation. If absent,
+run `/graphify .` or read source directly. After code edits run `graphify update .`.
 
-Rules:
-- Codebase questions: first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships, `graphify explain "<concept>"` for focused concepts. Return scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain not surface enough context.
-- After modifying code, run `graphify update .` to keep graph current (AST-only, no API cost).
-- AST extraction not follow barrel re-exports: import of `GatewayError` from `@omni/ir` target
-  `packages_ir_src_index_gatewayerror`, but symbol defined in `errors.ts`, so edge dangle, drop
-  at build. That silently zero inbound degree of types whole architecture turn on —
-  `GatewayError`, `ChatRequest`, `Store`, `ProviderId`, `StreamEvent`, `Logger`, `HttpClient` — so
-  god-node rankings under-weight `packages/ir` and `packages/store` until endpoints remapped to
-  defining module. Every `graphify update .` bring it back.
+Known graphify limitation: AST barrel re-exports dangle at `index` instead of defining modules,
+under-ranking core IR/store types. Every `graphify update .` reintroduces it for `GatewayError`,
+`ChatRequest`, `Store`, `ProviderId`, `StreamEvent`, `Logger`, and `HttpClient`; do not trust their
+inbound-degree rankings.
