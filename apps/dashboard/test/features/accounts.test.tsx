@@ -1535,7 +1535,9 @@ describe("AccountsBoard quota refresh", () => {
     // Never an absent field standing in for everything.
     expect(sent).toEqual([{ kind: "all" }]);
     const status = await screen.findByRole("status");
-    await waitFor(() => expect(status.textContent).toBe("Refreshed 1 account; 1 failed."));
+    // `toContain`, not equality: the per-account detail list rides in the same
+    // region under the summary sentence.
+    await waitFor(() => expect(status.textContent).toContain("Refreshed 1 account; 1 failed."));
   });
 
   test("an outcome that changed nothing still says so, by name", async () => {
@@ -1622,5 +1624,70 @@ describe("AccountsBoard quota refresh", () => {
     } finally {
       globalThis.fetch = base;
     }
+  });
+
+  test("one row refreshing leaves the other rows usable", async () => {
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    stubAccounts({
+      "POST /api/credentials/quota/refresh": () => ({
+        outcomes: [{ kind: "refreshed", credentialId: "cred-1", windows: 2 }],
+      }),
+    });
+    const base = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await base(input, init);
+      if (String(input).includes("quota/refresh")) await held;
+      return response;
+    }) as typeof fetch;
+
+    try {
+      renderWithProviders(<AccountsBoard />);
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Refresh quota for claude-main" }),
+      );
+
+      // The pressed row says what it is doing and cannot be pressed twice.
+      const busy = await screen.findByRole("button", { name: "Refreshing quota for claude-main" });
+      expect(busy.hasAttribute("disabled")).toBe(true);
+
+      // The unrelated account is a different provider probed over a different
+      // connection; blocking it would make one slow provider freeze the page.
+      const other = screen.getByRole("button", { name: "Refresh quota for codex-work" });
+      expect(other.hasAttribute("disabled")).toBe(false);
+
+      release?.();
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "Refreshing quota for claude-main" }),
+        ).toBeNull(),
+      );
+    } finally {
+      globalThis.fetch = base;
+    }
+  });
+
+  test("a bulk partial failure names the accounts behind the count", async () => {
+    stubAccounts({
+      "POST /api/credentials/quota/refresh": () => ({
+        outcomes: [
+          { kind: "refreshed", credentialId: "cred-1", windows: 2 },
+          { kind: "failed", credentialId: "cred-2", code: "UPSTREAM" },
+        ],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Refresh all quota" }));
+
+    // "1 failed" across a page of accounts is not something an operator can act
+    // on; the account that needs looking at has to be named.
+    const status = await screen.findByRole("status");
+    await waitFor(() => expect(status.textContent).toContain("codex-work: failed"));
+    expect(status.textContent).toContain("Refreshed 1 account; 1 failed.");
+    // The upstream error code is not operator-facing text and stays out.
+    expect(status.textContent).not.toContain("UPSTREAM");
   });
 });

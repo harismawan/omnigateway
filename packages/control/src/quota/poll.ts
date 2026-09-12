@@ -207,6 +207,29 @@ export function quotaOps(deps: PollerDeps): QuotaOps {
    */
   const inFlight = new Map<string, Promise<Attempt>>();
 
+  /**
+   * Runs one coordinator call, answering `fallback` if the coordinator is down.
+   *
+   * `kv` does not fail open on its own — the Redis implementation answers an
+   * outage by throwing `OVERLOADED` — and an unreachable coordinator must cost
+   * a duplicate provider call, never the refresh itself. Without this a Redis
+   * blip turned a bulk refresh into one rejected request instead of a page of
+   * outcomes, because `Promise.all` propagates the first rejection.
+   */
+  async function coordinated<T>(credential: CredentialView, fallback: T, fn: () => Promise<T>) {
+    try {
+      return await fn();
+    } catch (error) {
+      logger.warn("quota probe coordination unavailable", {
+        provider: credential.provider,
+        credentialId: credential.id,
+        coordFallback: true,
+        reason: describeError(error, "unknown"),
+      });
+      return fallback;
+    }
+  }
+
   /** Reports a probe failure without letting the upstream text past the boundary. */
   function reportFailure(credential: CredentialView, error: unknown): ErrorCode {
     const rateLimited = error instanceof GatewayError && error.code === "RATE_LIMIT";
@@ -231,7 +254,11 @@ export function quotaOps(deps: PollerDeps): QuotaOps {
       return { outcome: { kind: "refreshed", credentialId, windows: rows.length }, wrote: true };
     } catch (error) {
       if (error instanceof GatewayError && error.code === "RATE_LIMIT") {
-        await deps.coord.kv.set(COOLDOWN_PREFIX + credentialId, "1", RATE_LIMIT_COOLDOWN_MS);
+        // A cooldown that cannot be recorded costs a repeated call at the next
+        // pass; letting it escape would lose the 429 outcome entirely.
+        await coordinated(credential, undefined, () =>
+          deps.coord.kv.set(COOLDOWN_PREFIX + credentialId, "1", RATE_LIMIT_COOLDOWN_MS),
+        );
       }
       return {
         outcome: { kind: "failed", credentialId, code: reportFailure(credential, error) },
@@ -325,7 +352,13 @@ export function quotaOps(deps: PollerDeps): QuotaOps {
 
     const startedAt = deps.now();
     const started = (async (): Promise<Attempt> => {
-      if ((await deps.coord.kv.get(COOLDOWN_PREFIX + credentialId)) !== null) {
+      // Null on an unreachable coordinator: unknown is not "cooling down", and
+      // refusing to probe because the cooldown could not be read would make a
+      // coordinator outage look like every account being rate limited.
+      const cooling = await coordinated(credential, null, () =>
+        deps.coord.kv.get(COOLDOWN_PREFIX + credentialId),
+      );
+      if (cooling !== null) {
         return { outcome: { kind: "cooldown", credentialId }, wrote: false };
       }
       return runGuarded(credential, startedAt);

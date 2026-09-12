@@ -94,6 +94,13 @@ const StatusNote = styled.p`
   color: ${({ theme }) => theme.color.inkDim};
 `;
 
+/** The accounts behind a bulk summary, so a count can be acted on. */
+const RefreshDetail = styled.ul`
+  margin: 4px 0 0;
+  padding-left: 16px;
+  list-style: disc;
+`;
+
 const QuotaCell = styled.div`
   display: grid;
   /* Bar, figure, legend. The figure has a column of its own so the legends stay
@@ -186,6 +193,14 @@ export function AccountsBoard() {
    * ever reported. Cleared when a new request starts.
    */
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
+  /**
+   * The accounts a bulk refresh could not read, by name.
+   *
+   * Kept beside the summary because a count cannot be acted on: "1 failed"
+   * across eight accounts tells an operator something is wrong and not which
+   * account to go and look at.
+   */
+  const [refreshDetail, setRefreshDetail] = useState<readonly string[]>([]);
   /** Which single account is refreshing, so the other rows stay usable. */
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
@@ -237,13 +252,31 @@ export function AccountsBoard() {
       .concat(".");
   };
 
+  /** The accounts a refresh did not read, each with the reason, for the detail list. */
+  const unreadOf = (outcomes: QuotaRefreshOutcome[]): string[] =>
+    outcomes
+      .filter((o) => o.kind === "failed" || o.kind === "cooldown" || o.kind === "noData")
+      .map(
+        (o) =>
+          `${labelFor(o.credentialId)}: ${
+            o.kind === "failed"
+              ? "failed"
+              : o.kind === "cooldown"
+                ? "cooling down"
+                : "no data reported"
+          }`,
+      );
+
   const runRefresh = async (request: QuotaRefreshRequest): Promise<void> => {
     setRefreshNote(null);
+    setRefreshDetail([]);
     if (request.kind === "all") setRefreshingAll(true);
     else setRefreshingId(request.credentialId);
     try {
       const result = await refresh.mutateAsync(request);
       setRefreshNote(describeRefresh(result.outcomes));
+      // Only for a bulk result: a single-account message already names it.
+      setRefreshDetail(result.outcomes.length > 1 ? unreadOf(result.outcomes) : []);
     } catch (error) {
       // The request itself did not land. The meters keep whatever they were
       // showing — a failed refresh never blanks a reading.
@@ -318,6 +351,13 @@ export function AccountsBoard() {
       */}
       <StatusNote role="status" aria-live="polite">
         {refreshNote ?? ""}
+        {refreshDetail.length === 0 ? null : (
+          <RefreshDetail>
+            {refreshDetail.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </RefreshDetail>
+        )}
       </StatusNote>
 
       {credentials.isError ? (
@@ -534,8 +574,12 @@ export function AccountsBoard() {
                                       type="button"
                                       $variant="ghost"
                                       $size="sm"
-                                      disabled={refreshingAll || refreshingId !== null}
-                                      aria-label={`Refresh quota for ${credential.label}`}
+                                      disabled={refreshingAll || refreshingId === credential.id}
+                                      aria-label={
+                                        refreshingId === credential.id
+                                          ? `Refreshing quota for ${credential.label}`
+                                          : `Refresh quota for ${credential.label}`
+                                      }
                                       title={`Refresh quota for ${credential.label}`}
                                       onClick={() =>
                                         void runRefresh({

@@ -507,3 +507,79 @@ test("an unavailable coordinator costs a duplicate call, never the refresh", asy
   expect(fallback).toHaveLength(1);
   expect(fallback[0]?.fields?.coordFallback).toBe(true);
 });
+
+test("an unreachable coordinator costs a duplicate call, not the refresh", async () => {
+  // The Redis coordinator answers an outage by throwing, and `kv` has no
+  // fail-open of its own. Before this, one blip turned a bulk refresh into a
+  // single rejected request instead of a page of outcomes.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1" });
+  await seedCredential(store, { id: "c2" });
+  const logger = captureLogger();
+
+  const down: Coord = {
+    ...memoryCoord({ now: () => NOW }),
+    kv: {
+      get: async () => {
+        throw new GatewayError("OVERLOADED", "the coordinator is unreachable");
+      },
+      set: async () => {
+        throw new GatewayError("OVERLOADED", "the coordinator is unreachable");
+      },
+      del: async () => {},
+      delPrefix: async () => {},
+    },
+  };
+
+  const ops = quotaOps({
+    ...deps(
+      store,
+      async () => report,
+      () => NOW,
+      down,
+    ),
+    logger,
+  });
+  const { outcomes } = await ops.refresh({ kind: "all" });
+
+  expect(outcomes.map((o) => o.kind)).toEqual(["refreshed", "refreshed"]);
+  expect(
+    logger.records.filter((r) => r.msg === "quota probe coordination unavailable"),
+  ).not.toHaveLength(0);
+});
+
+test("a 429 whose cooldown cannot be written is still reported as rate limited", async () => {
+  // The cooldown write lives in the failure path. Letting it throw would lose
+  // the outcome it was recording.
+  const store = await memoryStore();
+  await seedCredential(store, { id: "c1" });
+
+  const unwritable: Coord = {
+    ...memoryCoord({ now: () => NOW }),
+    kv: {
+      get: async () => null,
+      set: async () => {
+        throw new GatewayError("OVERLOADED", "the coordinator is unreachable");
+      },
+      del: async () => {},
+      delPrefix: async () => {},
+    },
+  };
+
+  const ops = quotaOps(
+    deps(
+      store,
+      async () => {
+        throw new GatewayError("RATE_LIMIT", "rate limited");
+      },
+      () => NOW,
+      unwritable,
+    ),
+  );
+
+  expect(await refreshOne(ops, "c1")).toEqual({
+    kind: "failed",
+    credentialId: "c1",
+    code: "RATE_LIMIT",
+  });
+});
