@@ -95,11 +95,12 @@ test("stats reports page geometry and the applied schema version", async () => {
     expect(Number.isInteger(Math.log2(stats.pageSize))).toBe(true);
     expect(stats.pageCount).toBeGreaterThan(0);
     // Small but not zero, and reported rather than rounded away: migration 17
-    // drops the per-column indexes 16 created, so even a database that has never
-    // held a row boots with the pages those indexes used on its freelist. The
-    // bound is what the assertion is for — this is a figure `vacuum` hands back
-    // to the filesystem, so a fresh install carrying pages by the hundred would
-    // mean a migration leaking them, not a migration tidying up after itself.
+    // replaces the keyset index with a wider one, so even a database that has
+    // never held a row boots with the pages the narrow version used on its
+    // freelist. The bound is what the assertion is for — this is a figure
+    // `vacuum` hands back to the filesystem, so a fresh install carrying pages by
+    // the hundred would mean a migration leaking them rather than one replacing
+    // an index.
     expect(stats.freelistCount).toBeLessThan(16);
     // The highest migration id applied, which only ever grows.
     expect(stats.schemaVersion).toBeGreaterThanOrEqual(8);

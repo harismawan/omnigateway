@@ -52,12 +52,11 @@ const MIGRATIONS: ReadonlyArray<{
   // Index-only: three shorter indexes replaced by their keyset-ordered forms.
   // No `after`, because there is no data to move.
   { id: 15, sql: logKeyset015 },
-  // Index-only again, and the measurement 15 said should buy the next one: an
-  // unindexed exact filter scanned the whole table whenever it matched nothing.
+  // Index-only, and the measurement 15 said should buy the next index: filtering
+  // by a provider with no traffic had nothing to seek, so it scanned the table.
   { id: 16, sql: logFilterIndexes016 },
-  // Index-only, and partly a retraction of 16: the typed filters became substring
-  // matches, which no per-column index can seek, so those three move into the
-  // keyset index the scan already walks.
+  // Index-only. The typed filters match substrings, which no per-column index can
+  // seek, so those columns move into the keyset index the scan already walks.
   { id: 17, sql: logTextSearch017 },
 ];
 
