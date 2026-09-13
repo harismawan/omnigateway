@@ -463,6 +463,7 @@ export function createApp(deps: AppDeps) {
           store: deps.store,
           admin,
           sessionTtlMs: ADMIN_SESSION_TTL_MS,
+          baseUrl: deps.baseUrl,
           ...(deps.dayOffsetMinutes === undefined
             ? {}
             : { dayOffsetMinutes: deps.dayOffsetMinutes }),

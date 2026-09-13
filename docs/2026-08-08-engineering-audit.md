@@ -154,7 +154,18 @@ Implementation requirements:
 3. Complete a threshold-one failure before an older success; expect breaker to remain open.
 4. If multi-process SQLite behavior matters later, repeat against two stores connected to one file.
 
-### 3. Admin session cookie loses `Secure` behind TLS termination ⛔️ Deffered
+### 3. Admin session cookie loses `Secure` behind TLS termination ✅ Done
+
+**Completed:** 2026-09-13 — `sessionCookie` in `apps/gateway/src/routes/http.ts` now sets `Secure`
+when the configured public origin is https, when `X-Forwarded-Proto`'s client-facing hop is https, or
+when the request URL itself is. Pin: `apps/gateway/test/routes/sessionCookieSecure.test.ts`.
+
+The recommendation below advised against trusting `X-Forwarded-Proto` without trusted-proxy
+configuration. That guard was dropped deliberately, and the reasoning is in the function's comment:
+no value of the header widens anyone's access. Forging it to `https` only adds `Secure` to the
+forger's own cookie, which stops that cookie reaching an HTTP origin; forging it to `http` yields the
+flagless cookie that is already the default. `OMNI_BASE_URL` remains the trustworthy source and is
+checked first — the header covers only the install that left the origin at its derived default.
 
 **Severity:** Medium  
 **Confidence:** 9/10

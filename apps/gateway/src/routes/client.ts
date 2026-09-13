@@ -24,6 +24,8 @@ export type ClientDeps = {
   store: Store;
   admin: AdminAuth;
   sessionTtlMs: number;
+  /** The configured public origin, which decides the session cookie's `Secure`. */
+  baseUrl: string;
   /**
    * Minutes east of UTC the daily usage buckets are cut on.
    *
@@ -79,6 +81,7 @@ export function clientRoutes(deps: ClientDeps) {
         logger.info("client login succeeded");
         set.headers["set-cookie"] = sessionCookie(
           request,
+          deps.baseUrl,
           token,
           Math.floor(deps.sessionTtlMs / 1_000),
         );
@@ -88,7 +91,7 @@ export function clientRoutes(deps: ClientDeps) {
       .post("/api/client/logout", async ({ request, set }) => {
         const token = readCookie(request, ADMIN_COOKIE);
         if (token !== null) await deps.admin.logout(token);
-        set.headers["set-cookie"] = sessionCookie(request, "", 0);
+        set.headers["set-cookie"] = sessionCookie(request, deps.baseUrl, "", 0);
         return { ok: true };
       })
 

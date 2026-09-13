@@ -222,6 +222,7 @@ export function adminRoutes(deps: AdminDeps) {
         logger.info("admin setup completed");
         set.headers["set-cookie"] = sessionCookie(
           request,
+          deps.baseUrl,
           token,
           Math.floor(deps.sessionTtlMs / 1_000),
         );
@@ -250,6 +251,7 @@ export function adminRoutes(deps: AdminDeps) {
 
         set.headers["set-cookie"] = sessionCookie(
           request,
+          deps.baseUrl,
           token,
           Math.floor(deps.sessionTtlMs / 1_000),
         );
@@ -259,7 +261,7 @@ export function adminRoutes(deps: AdminDeps) {
       .post("/api/logout", async ({ request, set }) => {
         const token = readCookie(request, ADMIN_COOKIE);
         if (token !== null) await deps.admin.logout(token);
-        set.headers["set-cookie"] = sessionCookie(request, "", 0);
+        set.headers["set-cookie"] = sessionCookie(request, deps.baseUrl, "", 0);
         return { ok: true };
       })
 
