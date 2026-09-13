@@ -12,8 +12,53 @@ export function readCookie(request: Request, name: string): string | null {
   return null;
 }
 
-export function sessionCookie(request: Request, token: string, maxAge: number): string {
-  const secure = new URL(request.url).protocol === "https:" ? ["Secure"] : [];
+/**
+ * The scheme a proxy says the browser used, or null where none claimed one.
+ *
+ * `X-Forwarded-Proto` is a list when requests cross more than one hop, and the
+ * client-facing hop is the first entry — the only one that describes the leg
+ * the cookie has to survive.
+ */
+function forwardedProto(request: Request): string | null {
+  const header = request.headers.get("x-forwarded-proto");
+  if (header === null) return null;
+  return header.split(",")[0]?.trim().toLowerCase() ?? null;
+}
+
+/**
+ * The session cookie, and why `Secure` is not read off `request.url`.
+ *
+ * TLS usually terminates at the reverse proxy this gateway documents, so the
+ * backend request arrives over plain HTTP and its URL says `http:` for a login
+ * that was HTTPS end to end. Deriving the flag from that URL drops `Secure`
+ * from a live admin session, and `HttpOnly` and `SameSite` buy no transport
+ * confidentiality — an on-path attacker replays it on the next plain request to
+ * the same host.
+ *
+ * Two sources, either sufficient. `baseUrl` is the configured public origin and
+ * is the trustworthy one; `X-Forwarded-Proto` covers the deployment where it
+ * was left at its derived default but a proxy does terminate TLS. The header is
+ * unvalidated and deliberately so: forging it to `https` only adds `Secure` to
+ * the forger's own cookie, which stops that cookie reaching an HTTP origin —
+ * self-harm, not escalation — and forging it to `http` yields the flagless
+ * cookie that is already the default. There is no value of this header that
+ * widens anyone's access, so a trusted-proxy allowlist would guard nothing.
+ */
+export function sessionCookie(
+  request: Request,
+  baseUrl: string,
+  token: string,
+  maxAge: number,
+): string {
+  // Parsed rather than prefix-matched. URL schemes are case-insensitive, so
+  // `HTTPS://gateway.example.com` is a valid public origin that a
+  // `startsWith("https:")` test reads as plain HTTP — which drops `Secure` for
+  // exactly the operator who configured TLS, the defect this function exists to
+  // fix. A malformed origin is not https.
+  const configured = URL.canParse(baseUrl) ? new URL(baseUrl).protocol === "https:" : false;
+  const https =
+    configured || forwardedProto(request) === "https" || new URL(request.url).protocol === "https:";
+  const secure = https ? ["Secure"] : [];
   return [
     `${ADMIN_COOKIE}=${token}`,
     "Path=/",
