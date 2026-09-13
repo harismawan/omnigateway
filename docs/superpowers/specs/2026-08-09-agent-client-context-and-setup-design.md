@@ -185,6 +185,9 @@ positively reports something smaller — a model the catalog does not list is an
 own id, about which nothing is known, and guessing "no" there would break a custom 1M target
 that works today.
 
+*Since:* the beta is inert. It no longer raises any ceiling on any model in the catalog, so
+the forwarding rule above still runs but can no longer change an outcome. See `## History`.
+
 ## 4. `POST /v1/messages/count_tokens`
 
 The route does not exist, so the client gets a 404. CLIProxyAPI serves it
@@ -396,3 +399,45 @@ it is not a Codex-to-OpenAI passthrough, it is a third dialect over the same cor
   rather than taste.
 - Whether section 6 ships as its own spec and plan. It is roughly the size of sections 1–5
   combined, and nothing else here depends on it — only `omni setup codex` does.
+
+## History
+
+### The 1M beta went inert (measured 2026-09-13)
+
+An operator asked for a per-target 1M flag: one virtual model whose targets do not all
+agree about the 1M window. The design was drafted — tri-state `context1m?: boolean` on
+`TargetBase`, folded into a per-attempt copy of the request in `dispatch/attempt.ts` — and
+then abandoned, because the thing it switched had stopped switching anything.
+
+Three legs, all against the gateway, all deliberately over the ceiling so every one is
+refused with a 400 and none is billed. The stated maximum in the refusal is the
+measurement:
+
+| model | `anthropic-beta` | response |
+|---|---|---|
+| `claude-sonnet-4-5-20250929` | absent | `prompt is too long: 1251325 tokens > 200000 maximum` |
+| `claude-sonnet-4-5-20250929` | `context-1m-2025-08-07` | `prompt is too long: 1251325 tokens > 200000 maximum` |
+| `claude-sonnet-5` | absent | `prompt is too long: 2126804 tokens > 1000000 maximum` |
+
+The third leg is the control, and it is what makes the first two mean anything: without it,
+two identical `200000` answers are equally consistent with "the beta does nothing" and "the
+error message is a constant". It also independently confirms the claim in section 3 that 1M
+is a model property rather than an opt-in — Sonnet 5 reports the larger ceiling having been
+sent no beta at all.
+
+So `context-1m-2025-08-07` raises no ceiling on any model in `ANTHROPIC_MODELS`: the four
+1M entries have it by default, and Haiku 4.5 is 200k and already has the beta stripped by
+`anthropic/codec.ts`. Sonnet 4.5, the model the beta was introduced for, is no longer in the
+catalog at all. A flag over it would have had three states that produce identical bytes.
+
+What the operator actually wanted is `Target.contextWindow`, which predates the question.
+Its doc comment now says so, since "how do I mix 1M and non-1M targets" is the form the
+question arrives in and the field name does not answer it.
+
+Two things were left alone on purpose. `normalizeClientModel` still folds `[1m]` into the
+beta, and the encoder still forwards it, because the one case still live is an operator's
+own model id — `catalogLimits` knows nothing about it, so the beta is not stripped, and
+removing the fold would change that path silently. And the record at section 3 was correct
+when written: Claude Code 2.1.226 was measured sending the header. Current Claude Code
+documents only the strip. The comment on `ONE_M_SUFFIX` had asserted the header behaviour
+as present tense and now dates it.

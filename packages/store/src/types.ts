@@ -379,6 +379,19 @@ type TargetBase = {
    * and because a model outside the catalog has no default to fall back to.
    * Nothing enforces them: they are advertised on `GET /v1/models` so a client
    * sizes its own context, and an over-long request still fails upstream.
+   *
+   * This is also the only per-target context knob, and the answer to "how do I
+   * mix 1M and non-1M targets in one pool". There is deliberately no per-target
+   * 1M flag: 1M is a property of the model, not a request option. Measured
+   * 2026-09-13, `claude-sonnet-5` refuses an over-long prompt with
+   * `> 1000000 maximum` with no beta header sent, and
+   * `claude-sonnet-4-5-20250929` refuses with `> 200000 maximum` whether or not
+   * `context-1m-2025-08-07` is sent. A flag would have had three states that
+   * produced identical bytes.
+   *
+   * Because `GET /v1/models` reports the *smallest* window in a pool, a pool
+   * mixing windows advertises the small one — which is the honest number for a
+   * client that may land on any of them, not a rounding error to correct.
    */
   contextWindow?: number | undefined;
   maxOutputTokens?: number | undefined;
