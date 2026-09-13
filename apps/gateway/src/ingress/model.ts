@@ -21,9 +21,33 @@ import { CONTEXT_1M_BETA } from "@omni/ir";
 /**
  * The 1M-context marker an operator types after a model name.
  *
- * Claude Code strips it before sending and turns it into a header, so this only
- * fires for a client that passes the string through verbatim. Accepting it here
- * means one rule covers both.
+ * Claude Code strips it before sending, so this only fires for a client that
+ * passes the string through verbatim. Accepting it here means one rule covers
+ * both.
+ *
+ * Why an operator types it at all is a client-side matter the gateway never
+ * sees: for a pool id Claude Code's built-in table does not know, it assumes a
+ * 200k window and auto-compacts there, and the suffix is what lifts that.
+ * Measured at 2.1.270 — `--model fable` warns and assumes 200k, `--model
+ * 'fable[1m]'` does not warn, and `model=fable` reaches the wire either way.
+ * That effect is entirely in the client; nothing below produces it.
+ *
+ * What it folds into is now inert, and the fold is kept anyway. At Claude Code
+ * 2.1.226 the suffix also became a `context-1m-2025-08-07` header, which is why
+ * this function produces one; current Claude Code documents only the strip, and
+ * the beta no longer moves any ceiling. Measured 2026-09-13 against
+ * `claude-sonnet-4-5-20250929`: an over-long prompt is refused with
+ * `1251325 tokens > 200000 maximum` whether or not the header is sent, while
+ * `claude-sonnet-5` reports `> 1000000 maximum` with no header at all. So 1M is
+ * a property of the model, and the beta buys nothing on any model in the
+ * catalog.
+ *
+ * Kept because removing it would silently change behaviour for the one case
+ * still live — an operator's own model id, which `catalogLimits` knows nothing
+ * about and the Anthropic encoder therefore does not strip the beta from — and
+ * because a caller that sends the header directly is unaffected by anything
+ * here. Delete both this and `CONTEXT_1M_BETA` only once no such target can
+ * exist.
  */
 const ONE_M_SUFFIX = "[1m]";
 

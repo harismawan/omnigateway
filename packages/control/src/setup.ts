@@ -119,6 +119,14 @@ export function claudeSettings(
       : {};
 
   for (const key of Object.values(CLAUDE_MAPPING_KEYS)) delete env[key];
+  // Removed and deliberately not rewritten. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is
+  // process-global while this file maps up to five pools, so no single value is
+  // right for all of them, and a stale one from an earlier run is worse than
+  // absent. Claude Code therefore assumes 200k for every pool id it does not
+  // recognise; the per-invocation remedy is a `[1m]` suffix on the model name,
+  // which the console says and which never reaches this gateway. Restoring a
+  // write here means one file per pool first — see section 5 of the agent-client
+  // spec, whose profile-per-model shape exists for exactly this reason.
   delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
   env.ANTHROPIC_BASE_URL = input.baseUrl;
   env.ANTHROPIC_AUTH_TOKEN = input.apiKey ?? KEY_PLACEHOLDER;
