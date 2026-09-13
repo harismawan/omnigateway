@@ -45,6 +45,38 @@ each time so no cached state carried over.
    `{"claude-opus-5": "gpt-5.6-sol"}` with `--model opus` sent `model=gpt-5.6-sol` and
    silenced the unknown-model warning. `{"sonnet": "..."}` did nothing.
 
+### Claude Code 2.1.270
+
+Re-measured because measurement 5 above described the suffix by what it *sends*, which is
+the half that stopped mattering once the beta went inert. Same method: stub server logging
+the `model` field, fresh `CLAUDE_CONFIG_DIR` per run.
+
+10. **`[1m]` is what lifts the 200k fallback, and that is now its only effect.** For a pool
+    id the built-in table does not know, `--model fable` printed the unknown-model warning
+    and assumed 200k; `--model 'fable[1m]'` printed no warning, and `model=fable` still
+    reached the wire. So the suffix is a *client-side window assumption* an operator types,
+    and measurement 5's other half — the `anthropic-beta` header — no longer raises any
+    ceiling (see `## History`). It is also per-invocation, which is what the process-global
+    `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is not.
+11. Measurements 2 and 4 still hold, 44 releases on. `--model claude-mypool` reported 200k
+    with the variable unset, set to `444444`, and set to an invalid value — three identical
+    answers. `--model mypool-anthropic` warned with it unset and was silent with it set,
+    which is the control that makes those three mean anything. The client says so itself:
+    the warning offers `CLAUDE_CODE_MAX_CONTEXT_TOKENS` as a remedy only on the
+    non-`claude-` id, and omits that clause on the prefixed one.
+12. Two escape hatches exist now that did not at 2.1.226, both named in the warning text:
+    `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` restores the older
+    wait-for-the-API behaviour, and `behavesAs` on a `modelPicker` row maps an unknown id
+    onto a model this version knows. `behavesAs` is the only one that gives a `claude-`
+    prefixed pool id a real window.
+13. The alias an operator types is not the id that arrives.
+    `ANTHROPIC_DEFAULT_{OPUS,SONNET,FABLE,HAIKU}_MODEL` rewrite it first, so `--model opus`
+    against an installation setting `ANTHROPIC_DEFAULT_OPUS_MODEL=opus-pr` sent
+    `model=opus-pr`. Unset, `fable` is the client's *own* alias and resolved to
+    `claude-fable-5-1` with a correct 1M window — pointing the variable at a pool id trades
+    that known window for the 200k assumption, which is the cost these overrides carry and
+    what items 10-12 are the remedies for.
+
 ### opencode 1.17.20
 
 7. Works against this gateway today, unchanged. Given a provider entry using
@@ -188,6 +220,12 @@ that works today.
 *Since:* the beta is inert. It no longer raises any ceiling on any model in the catalog, so
 the forwarding rule above still runs but can no longer change an outcome. See `## History`.
 
+The suffix outlived it. `[1m]` was two things — a header and a client-side window
+assumption — and only the header died. Typing it is still how an operator stops Claude Code
+assuming 200k for a pool id its built-in table does not know (measurement 10), which is the
+reason the suffix keeps arriving and therefore why ingress keeps accepting it. The gateway's
+side of the bargain is unchanged and now inert; the client's side is the whole point.
+
 ## 4. `POST /v1/messages/count_tokens`
 
 The route does not exist, so the client gets a 404. CLIProxyAPI serves it
@@ -255,6 +293,11 @@ Rules, each from a measurement above:
 - `ANTHROPIC_MODEL` names the mirror id when aliases are on, the real id otherwise.
 - One profile per model, because the variable is process-global. That is the entire reason
   profiles exist rather than one settings file.
+- An operator who does not want a profile per model can append `[1m]` to the model name
+  instead: measurement 10 shows it lifts the same 200k fallback, per invocation, and the
+  suffix is stripped before the wire so the pool id still arrives intact. It says only
+  "1M", so it is the answer for a 1M pool and not for the `272000` in the example above —
+  which is why the generated profile writes the variable rather than the suffix.
 
 ### `omni setup opencode`
 
@@ -441,3 +484,28 @@ removing the fold would change that path silently. And the record at section 3 w
 when written: Claude Code 2.1.226 was measured sending the header. Current Claude Code
 documents only the strip. The comment on `ONE_M_SUFFIX` had asserted the header behaviour
 as present tense and now dates it.
+
+### What `[1m]` is for, now that the beta does nothing (measured 2026-09-13)
+
+Immediately after the above, the same operator asked whether their pools default to 200k.
+They do — every pool id named by `ANTHROPIC_DEFAULT_*_MODEL` on that installation drew the
+unknown-model warning. Measurements 10-13 are that session; the operator-facing conclusion
+is measurement 10, and it rescues the suffix from the finding just above it.
+
+The order of these two entries matters to anyone reading them. The beta going inert reads
+like it should also retire `[1m]`, and it does not: the suffix was always two mechanisms
+sharing one spelling, and the surviving one is the one operators actually type it for. An
+edit that deletes the fold "because the beta is dead" would be reasoning from this file's
+previous entry and still be wrong.
+
+Three things were confirmed rather than discovered, and are recorded because a confirmation
+that goes unwritten gets re-litigated: measurement 4 survives to 2.1.270 (item 11), so the
+`claude/` mirror prefix chosen in section 2 is still load-bearing rather than a workaround
+for a fixed bug; and the `/v1/models` window is still unread (the stub advertised
+`max_input_tokens: 272000` to no effect), so section 1's claim holds.
+
+One correction to a claim made during that session and never committed: the `[1m]` fold at
+`normalizeClientModel` is *not* on the path Claude Code exercises. The wire log shows
+`model=fable` for `--model 'fable[1m]'` — the client still strips it. The fold's live case
+remains what section 3's last paragraph says it is, a caller passing the raw string
+through.

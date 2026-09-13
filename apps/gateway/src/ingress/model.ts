@@ -25,6 +25,13 @@ import { CONTEXT_1M_BETA } from "@omni/ir";
  * passes the string through verbatim. Accepting it here means one rule covers
  * both.
  *
+ * Why an operator types it at all is a client-side matter the gateway never
+ * sees: for a pool id Claude Code's built-in table does not know, it assumes a
+ * 200k window and auto-compacts there, and the suffix is what lifts that.
+ * Measured at 2.1.270 — `--model fable` warns and assumes 200k, `--model
+ * 'fable[1m]'` does not warn, and `model=fable` reaches the wire either way.
+ * That effect is entirely in the client; nothing below produces it.
+ *
  * What it folds into is now inert, and the fold is kept anyway. At Claude Code
  * 2.1.226 the suffix also became a `context-1m-2025-08-07` header, which is why
  * this function produces one; current Claude Code documents only the strip, and
