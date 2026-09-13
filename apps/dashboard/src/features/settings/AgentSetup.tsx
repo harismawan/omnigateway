@@ -99,6 +99,16 @@ export function AgentSetup() {
           <Mono>omni setup {client}</Mono> to write these files directly.
         </Note>
 
+        {client === "claude" ? (
+          <Note>
+            Claude Code cannot read a window from this gateway, so it assumes 200k for a pool id it
+            does not recognise and auto-compacts there. For a pool whose models hold 1M, append{" "}
+            <Mono>[1m]</Mono> to the model name — <Mono>--model 'pool[1m]'</Mono> — which lifts it
+            per invocation. The suffix is stripped before the request is sent, so the pool id
+            arrives unchanged.
+          </Note>
+        ) : null}
+
         {(models.data?.length ?? 0) > 0 ? (
           <MappingGrid>
             {MAPPING_FIELDS.map((field) => (

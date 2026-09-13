@@ -106,6 +106,26 @@ describe("AgentSetup", () => {
     });
   });
 
+  // The generated file cannot carry a window: `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+  // is process-global and one file maps several pools, so the `[1m]` suffix is
+  // the only per-pool remedy and the console is where an operator learns it.
+  // opencode names a window in its own config and must not be told this.
+  test("tells Claude Code operators how to lift the 200k assumption, and only them", async () => {
+    const user = userEvent.setup();
+    stub();
+    renderWithProviders(<AgentSetup />);
+
+    await waitFor(() => {
+      expect(screen.getByText("[1m]")).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole("button", { name: "opencode" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("[1m]")).toBeNull();
+    });
+  });
+
   test("keeps separate mappings and sends opencode selections", async () => {
     const user = userEvent.setup();
     const fetch = stub();
