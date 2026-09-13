@@ -77,6 +77,42 @@ the `model` field, fresh `CLAUDE_CONFIG_DIR` per run.
     that known window for the 200k assumption, which is the cost these overrides carry and
     what items 10-12 are the remedies for.
 
+14. **`[1m]` beats `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, and does it by suppressing the check
+    rather than raising the ceiling.** With the variable at `272000` and a ~440k-token
+    prompt: variable alone refused locally with `Prompt is too long` and nothing but the
+    session-title call reached the wire; suffix alone sent it; *both* behaved exactly like
+    the suffix alone. The variable-alone leg is the control that makes this a measurement —
+    it refuses on its own, so it was live and the suffix overrode it.
+
+    "Suppresses" is the accurate verb. Under `[1m]` a ~1.56M-token prompt went upstream
+    whole and uncompacted, well past the 1,000,000 the name implies. So the suffix is not a
+    larger ceiling, it is the absence of one, and the consequence is an upstream 400 instead
+    of a local refusal when a pool cannot really hold what was sent. Unbilled, but a round
+    trip, and the error names the provider rather than the client.
+
+    Corollary worth stating because it inverts an intuition: the variable cannot be used to
+    *lower* a window deliberately — to force earlier compaction or bound spend — since any
+    invocation typing the suffix silently escapes it.
+
+    Not established: the variable's exact effective threshold. Legs across `1100000`,
+    `1500000` and `2000000` were non-monotonic, and the obvious explanation — the default
+    80% `CLAUDE_CODE_AUTO_COMPACT_WINDOW` — was tested and disproven, since setting it to
+    `100` changed no outcome. The likeliest cause is that the probe's bytes/4 token estimate
+    diverges from the client's real tokenizer near a boundary. Item 14's own legs ran at a
+    1.6x margin clear of any boundary and are unaffected, but no precise threshold for this
+    variable should be quoted from this session.
+15. **The two compose per model class, so one settings file can cap globally and exempt
+    individual slots.** With `ANTHROPIC_DEFAULT_FABLE_MODEL=fable[1m]`,
+    `ANTHROPIC_DEFAULT_OPUS_MODEL=opus-pool` and `CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000`,
+    the same ~440k prompt was sent under `--model fable` and refused under `--model opus`.
+    Two further facts came out of that leg: the suffix is honoured *inside* an
+    `ANTHROPIC_DEFAULT_*_MODEL` value, not only on `--model`, and it is still stripped from
+    there — `model=fable` reached the wire. This is what makes `claudeSettings`' one-file
+    shape workable despite the variable being process-global: the exemption is per slot.
+
+    Untested: whether the suffix follows a mid-session `/model` switch. Every leg above was
+    a separate `-p` invocation.
+
 ### opencode 1.17.20
 
 7. Works against this gateway today, unchanged. Given a provider entry using
