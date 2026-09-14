@@ -489,13 +489,14 @@ describe("ModelsBoard", () => {
   });
 
   test("an id containing a slash is encoded, not split into path segments", async () => {
-    // `claude/…` is what Claude Code's model picker shows, so it is an ordinary
-    // pool name; a bare `/` in the URL hits `/api/models/claude/opus` — 404.
+    // Nothing stops an operator naming a pool `anthropic/opus`; a bare `/` in the
+    // URL hits `/api/models/anthropic/opus` — 404. (`claude/` would be refused by
+    // `modelSchema`, so it cannot stand in for this case.)
     const user = userEvent.setup();
     const stub = createFetchStub({
-      "GET /api/models": () => ({ models: [model({ id: "claude/opus" })] }),
+      "GET /api/models": () => ({ models: [model({ id: "anthropic/opus" })] }),
       "GET /api/settings": () => ({ settings }),
-      "PUT /api/models/claude%2Fopus": () => ({ ok: true }),
+      "PUT /api/models/anthropic%2Fopus": () => ({ ok: true }),
     });
     renderWithProviders(<ModelsBoard />);
 
@@ -504,7 +505,7 @@ describe("ModelsBoard", () => {
 
     await waitFor(() => {
       const put = stub.calls.find((call) => call.init?.method === "PUT");
-      expect(put?.url).toBe("/api/models/claude%2Fopus");
+      expect(put?.url).toBe("/api/models/anthropic%2Fopus");
     });
     expect(await screen.findByText("Saved.")).toBeTruthy();
   });

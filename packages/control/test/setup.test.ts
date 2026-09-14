@@ -23,26 +23,39 @@ test("Claude setup writes one settings file with explicit class mappings", () =>
   const config = JSON.parse(file.contents) as { env: Record<string, string> };
 
   expect(file.path).toBe("settings.json");
+  // Every slot names the mirror, because that is the id Claude Code's picker
+  // shows; ingress unwinds it back to the pool before the key allowlist reads it.
   expect(config.env).toMatchObject({
-    ANTHROPIC_MODEL: "default",
-    ANTHROPIC_DEFAULT_FABLE_MODEL: "fable",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: "opus",
-    ANTHROPIC_DEFAULT_SONNET_MODEL: "sonnet",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku",
+    ANTHROPIC_MODEL: "claude/default",
+    ANTHROPIC_DEFAULT_FABLE_MODEL: "claude/fable",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "claude/opus",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "claude/sonnet",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude/haiku",
   });
   expect(config.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
 });
 
-test("Claude setup omits optional mappings and writes the pool's own id", () => {
+test("Claude setup omits optional mappings and names the discovery mirror", () => {
   const file = claudeSettings(described("model"), input, {
     defaultModel: "model",
   });
   const config = JSON.parse(file.contents) as { env: Record<string, string> };
 
-  // Never a `claude/`-prefixed mirror: the generated config names the pool the
-  // operator created, which is the only id `/v1/models` advertises.
-  expect(config.env.ANTHROPIC_MODEL).toBe("model");
+  // The mirrored id, because it is the one the picker shows and the one
+  // `/v1/models` advertises beside the pool's own name.
+  expect(config.env.ANTHROPIC_MODEL).toBe("claude/model");
   expect(config.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined();
+});
+
+test("Claude setup names a claude-prefixed pool directly, never a mirror of it", () => {
+  const file = claudeSettings(described("claude-fast"), input, {
+    defaultModel: "claude-fast",
+  });
+  const config = JSON.parse(file.contents) as { env: Record<string, string> };
+
+  // `/v1/models` skips the mirror for an id the picker already accepts, so a
+  // generated `claude/claude-fast` would name a model the listing never carries.
+  expect(config.env.ANTHROPIC_MODEL).toBe("claude-fast");
 });
 
 test("Claude setup rejects an empty default mapping", () => {
