@@ -155,11 +155,17 @@ const CLEAR_TERMS: FilterPatch = Object.fromEntries(TERM_FIELDS.map((field) => [
 export const TERM_DEBOUNCE_MS = 500;
 
 /**
- * The two controls that name operator infrastructure.
+ * The three controls whose options come from an admin-only route.
  *
  * Its own component so the `operator` gate is a mount, not a branch inside a
- * render: the credential and key queries live here, and a client session — which
- * may reach neither route — never runs them.
+ * render: the credential, key and catalog queries live here, and a client
+ * session — which may reach none of the three routes — never runs them.
+ *
+ * The provider control joined the two that name operator infrastructure for the
+ * second reason rather than the first. Its options are not sensitive, but they
+ * come from `/api/catalog`, which is `requireReader`; called above the gate it
+ * put a guaranteed 401 on every client screen. A hook cannot be conditional, so
+ * the only place the gate can hold is a component that is not mounted.
  */
 function OperatorFilters({
   filters,
@@ -170,8 +176,21 @@ function OperatorFilters({
 }) {
   const credentials = useCredentials();
   const keys = useKeys();
+  const catalog = useProviderCatalog();
   return (
     <>
+      <Narrow
+        aria-label="Provider"
+        value={filters.provider ?? ""}
+        onChange={(event) => patch({ provider: event.target.value || undefined })}
+      >
+        <option value="">Any provider</option>
+        {(catalog.data ?? []).map((provider) => (
+          <option key={provider.id} value={provider.id}>
+            {provider.label}
+          </option>
+        ))}
+      </Narrow>
       <Narrow
         aria-label="Account"
         value={filters.credentialId ?? ""}
@@ -232,12 +251,15 @@ export type LogFilterBarProps = {
   filters: LogFilters;
   onChange: (next: LogFilters) => void;
   /**
-   * Whether to offer the two controls that name operator infrastructure.
+   * Whether to offer the controls whose options come from an admin-only route.
    *
-   * The client surface passes `false`, and that is the console half of a rule
-   * the route enforces independently: `/api/client/logs` accepts neither
-   * parameter. Two gates, because a control that is merely hidden is a control
-   * somebody re-enables while believing the server still refuses it.
+   * The client surface passes `false`. For the account and key controls that is
+   * the console half of a rule the route enforces independently:
+   * `/api/client/logs` accepts neither parameter. Two gates, because a control
+   * that is merely hidden is a control somebody re-enables while believing the
+   * server still refuses it. The provider control is here for the other reason
+   * — `/api/catalog` is `requireReader` — and `/api/client/logs` does forward
+   * `provider`, so widening that route is all it would take to offer it back.
    */
   operator?: boolean;
 };
@@ -263,8 +285,6 @@ export type LogFilterBarProps = {
  * renamed or deleted label must not change which rows an old filter selects.
  */
 export function LogFilterBar({ filters, onChange, operator = false }: LogFilterBarProps) {
-  const catalog = useProviderCatalog();
-
   const patch = (next: FilterPatch): void => onChange(applyPatch(filters, next));
 
   // The box holds its own text, because the filters cannot reconstruct it: an
@@ -342,19 +362,6 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
         {STATES.map((entry) => (
           <option key={entry.id} value={entry.id}>
             {entry.label}
-          </option>
-        ))}
-      </Narrow>
-
-      <Narrow
-        aria-label="Provider"
-        value={filters.provider ?? ""}
-        onChange={(event) => patch({ provider: event.target.value || undefined })}
-      >
-        <option value="">Any provider</option>
-        {(catalog.data ?? []).map((provider) => (
-          <option key={provider.id} value={provider.id}>
-            {provider.label}
           </option>
         ))}
       </Narrow>
