@@ -120,6 +120,10 @@ focused changed-behavior tests and every check in `.github/workflows/ci.yml`.
     come from `GET /api/catalog`, never `theme/tokens.ts`. In `routes/_app.tsx`, resolve catalog in
     `beforeLoad` after session check and before mount; `errorComponent` must show error + retry and
     preserve expired-session `redirect`. Pin: `apps/dashboard/test/routes/appGate.test.tsx`.
+    `/client` is `_app`'s **sibling**, so nothing resolves the catalog for it: a component shared
+    with a console board must not call `useProviderCatalog` above its `operator` gate, and its test
+    must pass `makeQueryClient({catalog: false})` — the harness seed otherwise hides the 401.
+    Pin: `apps/dashboard/test/features/client.test.tsx`.
     Keep SDK in `SHARED_IMPORTS` so plugins share `LiveContext`; SDK owns the plugin API-prefix
     rule, LIVE switch, and `usePluginChannel`. See
     `docs/writing-a-plugin.md#how-the-sdk-is-wired-for-anyone-changing-it`.

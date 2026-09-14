@@ -28,14 +28,23 @@ import { catalogFixture } from "./fixtures.ts";
  * `gcTime` is `Infinity` for this key alone. The suite collects unobserved
  * queries immediately, which would drop the seed in the gap between here and
  * the first component that reads it.
+ *
+ * **`catalog: false` is for the client branch, and it is not an optimisation.**
+ * `/client` is a sibling of `/_app`, not a child, so nothing resolves the
+ * catalog before it mounts and the premise above is simply false there. Seeded
+ * anyway, a client board that reached for `/api/catalog` — a `requireReader`
+ * route it gets a 401 from — read it out of the cache and every assertion about
+ * which routes that board touches passed without touching the wire. That is how
+ * the operator-only provider filter shipped on the client screen.
  */
-export function makeQueryClient(): QueryClient {
+export function makeQueryClient(options: { catalog?: boolean } = {}): QueryClient {
   const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
       mutations: { retry: false },
     },
   });
+  if (options.catalog === false) return client;
   client.setQueryDefaults(queryKeys.catalog, { gcTime: Number.POSITIVE_INFINITY });
   client.setQueryData(queryKeys.catalog, catalogFixture());
   return client;

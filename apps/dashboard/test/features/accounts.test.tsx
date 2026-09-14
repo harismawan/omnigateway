@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { BurnEstimate, QuotaSample, QuotaWindow, Target } from "../../src/api/types.ts";
 import { AccountsBoard } from "../../src/features/accounts/AccountsBoard.tsx";
@@ -1663,23 +1663,22 @@ describe("AccountsBoard quota refresh", () => {
       ["cred-2", held("cred-2")],
     ]);
 
+    // Held inside the stub's own handler rather than by wrapping
+    // `globalThis.fetch`. A wrapper has to be put back, and the only place to
+    // do that is a `finally` the runner never reaches when a test times out —
+    // so the first failure here left the next test running against a fetch
+    // bound to *this* test's route table, and reported its own symptom instead.
+    // `createFetchStub` already documents a promise-returning handler as how a
+    // test holds a response open, and the next `stubAccounts` replaces it.
     stubAccounts({
-      "POST /api/credentials/quota/refresh": ({ init }) => {
+      "POST /api/credentials/quota/refresh": async ({ init }) => {
         const body = JSON.parse(String(init?.body)) as { credentialId?: string };
+        await waits.get(String(body.credentialId));
         return {
           outcomes: [{ kind: "refreshed", credentialId: body.credentialId, windows: 2 }],
         };
       },
     });
-    const base = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const response = await base(input, init);
-      if (String(input).includes("quota/refresh")) {
-        const body = JSON.parse(String(init?.body)) as { credentialId?: string };
-        await waits.get(String(body.credentialId));
-      }
-      return response;
-    }) as typeof fetch;
 
     try {
       renderWithProviders(<AccountsBoard />);
@@ -1706,7 +1705,18 @@ describe("AccountsBoard quota refresh", () => {
       expect(screen.getByRole("button", { name: "Refreshing quota for claude-main" })).toBeTruthy();
 
       // The first to land releases only its own row.
-      gates.get("cred-1")?.();
+      //
+      // Released inside `act`, which is worth a sentence because it is not
+      // style. Resolving the held response outside one leaves React's update
+      // for `waitFor` to discover by polling, and that path does not service
+      // timers while it spins: a `setInterval(20)` fired **once** in 2.4
+      // seconds, and each release cost ~2.2s locally against a 20s budget the
+      // whole test then spent 19.4s of on CI. Inside `act` React flushes the
+      // update before the call returns, so the same release costs ~8ms. The
+      // assertions below are unchanged — this is only how they are waited for.
+      await act(async () => {
+        gates.get("cred-1")?.();
+      });
       await waitFor(() =>
         expect(
           screen.queryByRole("button", { name: "Refreshing quota for claude-main" }),
@@ -1718,17 +1728,22 @@ describe("AccountsBoard quota refresh", () => {
           .hasAttribute("disabled"),
       ).toBe(true);
 
-      gates.get("cred-2")?.();
+      await act(async () => {
+        gates.get("cred-2")?.();
+      });
       await waitFor(() =>
         expect(
           screen.queryByRole("button", { name: "Refreshing quota for codex-work" }),
         ).toBeNull(),
       );
     } finally {
-      globalThis.fetch = base;
       for (const release of gates.values()) release();
     }
-  }, 20_000);
+    // No raised timeout. It carried one of 20s for as long as the releases
+    // above were unwrapped, and the default bound is the guard: if flushing
+    // ever goes back to being discovered by polling, this fails in seconds
+    // rather than passing at 19.4s and taking the next test down with it.
+  });
 
   test("the bulk detail list is visible without being announced", async () => {
     stubAccounts({

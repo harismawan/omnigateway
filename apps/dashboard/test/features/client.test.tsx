@@ -14,7 +14,7 @@ import {
   NOW,
   usageBucket,
 } from "../helpers/fixtures.ts";
-import { renderWithProviders } from "../helpers/render.tsx";
+import { makeQueryClient, renderWithProviders } from "../helpers/render.tsx";
 
 function stub(over: Record<string, () => unknown> = {}) {
   return createFetchStub({
@@ -27,18 +27,55 @@ function stub(over: Record<string, () => unknown> = {}) {
 }
 
 describe("client board", () => {
+  /**
+   * The catalog is deliberately **not** seeded here.
+   *
+   * `/client` is a sibling of `/_app`, so nothing resolves `/api/catalog` before
+   * this board mounts — and the harness default, which seeds it because the
+   * console shell does, made this test answer for a screen that does not exist.
+   * `/api/catalog` is `requireReader`, so every fetch of it from here is a 401;
+   * with the seed in place the filter bar read one out of the cache and the
+   * assertion below passed while the live console showed "admin session
+   * required".
+   */
   test("reads only the client surface, never the operator's routes", async () => {
     const fetches = stub();
-    renderWithProviders(<ClientBoard />);
+    renderWithProviders(<ClientBoard />, { client: makeQueryClient({ catalog: false }) });
     await screen.findByText("laptop");
 
     const paths = fetches.calls.map((call) => call.url.split("?")[0]);
     // The console's own routes would 401 for this session; a board that asked
     // for one would render an error the user cannot act on.
-    for (const forbidden of ["/api/usage", "/api/logs", "/api/keys", "/api/credentials"]) {
+    for (const forbidden of [
+      "/api/usage",
+      "/api/logs",
+      "/api/keys",
+      "/api/credentials",
+      "/api/catalog",
+    ]) {
       expect(paths).not.toContain(forbidden);
     }
     expect(paths.every((path) => path?.startsWith("/api/client/"))).toBe(true);
+  });
+
+  /**
+   * The control the catalog was fetched for, named so its absence is deliberate.
+   *
+   * Asserted separately from the route list because the two can come apart in
+   * both directions: a provider `<select>` rendered from a stale cache asks for
+   * nothing, and a catalog fetch with no control to show for it is a 401 for a
+   * filter nobody can see.
+   */
+  test("offers no provider filter, whose options only an operator may read", async () => {
+    stub();
+    renderWithProviders(<ClientBoard />, { client: makeQueryClient({ catalog: false }) });
+    await screen.findByText("laptop");
+
+    expect(screen.queryByLabelText("Provider")).toBeNull();
+    // The two that were already gated, so a regression that drops the whole
+    // `operator` gate rather than one control fails here too.
+    expect(screen.queryByLabelText("Account")).toBeNull();
+    expect(screen.queryByLabelText("Gateway key")).toBeNull();
   });
 
   test("shows the key's own label, prefix and allowlist", async () => {
