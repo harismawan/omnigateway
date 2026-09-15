@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import styled from "styled-components";
 import {
   isHeadPage,
@@ -27,6 +27,15 @@ import { RequestDetail, RequestTable, useCurrentTime } from "./RequestTable.tsx"
 
 /** Rows per request, not rows in total: "Load older" appends another page. */
 const LIMITS = [50, 100, 250, 500] as const;
+
+/**
+ * How close to the bottom counts as "at the bottom".
+ *
+ * A lookahead rather than an exact hit: the next page is asked for while the
+ * last rows are still being read, so the list grows before the scroll stops.
+ * Same measurement the console's follow-latest check uses.
+ */
+const NEAR_BOTTOM_PX = 160;
 
 const Controls = styled(Row)`
   gap: ${({ theme }) => theme.space(2)};
@@ -78,6 +87,7 @@ export function LogsBoard() {
   const [limit, setLimit] = useState<number>(100);
   const [filters, setFilters] = useState<LogFilters>(NO_LOG_FILTERS);
   const [open, setOpen] = useState<RequestRow | null>(null);
+  const loadingMore = useRef(false);
 
   // Changing any filter changes the query key, so pagination resets to the
   // first page without this board holding a cursor of its own.
@@ -90,7 +100,17 @@ export function LogsBoard() {
   // offers the way back rather than leaving a frozen head to be read as a quiet
   // gateway.
   const paused = !isHeadPage(logs.data);
-  const backToHead = useTrimToHead(queryKeys.logPages(filters, limit));
+  const trimToHead = useTrimToHead(queryKeys.logPages(filters, limit));
+  const scroller = useRef<HTMLDivElement | null>(null);
+  // The scroll is the point, not a flourish: the pause is entered by reading to
+  // the bottom, so leaving the operator there after the scrollback is dropped
+  // puts them at the end of a hundred rows with the newest request off screen.
+  // Immediate rather than after the trim resolves — the rows above are already
+  // rendered, and the position is where they are looking, not what is loaded.
+  const backToHead = () => {
+    scroller.current?.scrollTo({ top: 0 });
+    trimToHead();
+  };
   const credentials = useCredentials();
   const keys = useKeys();
   // Both keys, not just the setting: an installation whose environment never
@@ -142,6 +162,14 @@ export function LogsBoard() {
                 </option>
               ))}
             </Narrow>
+            {/* Beside the filters rather than at the foot of the scroller: the
+                pause is entered by scrolling to the bottom, so the way out of
+                it must not be somewhere the operator has to scroll back to. */}
+            {paused ? (
+              <Button type="button" onClick={backToHead}>
+                Back to live
+              </Button>
+            ) : null}
           </Controls>
         }
       />
@@ -167,26 +195,30 @@ export function LogsBoard() {
             }
           />
         ) : (
-          <RequestLogScroller data-testid="request-log-scroller">
+          <RequestLogScroller
+            ref={scroller}
+            data-testid="request-log-scroller"
+            onScroll={(event) => {
+              const view = event.currentTarget;
+              if (view.scrollHeight - view.scrollTop - view.clientHeight > NEAR_BOTTOM_PX) return;
+              if (!logs.hasNextPage) return;
+              // A ref, not `isFetchingNextPage`: one gesture emits a burst of
+              // scroll events and every one of them is at the bottom, while the
+              // query flag only rises on the render after the first call — so a
+              // flick would spend several cursors before the guard existed.
+              if (loadingMore.current) return;
+              loadingMore.current = true;
+              void logs.fetchNextPage().finally(() => {
+                loadingMore.current = false;
+              });
+            }}
+          >
             <RequestTable rows={rows} now={now} names={names} onOpen={setOpen} />
-            {logs.hasNextPage || paused ? (
+            {logs.isFetchingNextPage || paused ? (
               <More>
-                {logs.hasNextPage ? (
-                  <Button
-                    type="button"
-                    disabled={logs.isFetchingNextPage}
-                    onClick={() => void logs.fetchNextPage()}
-                  >
-                    {logs.isFetchingNextPage ? "Loading…" : "Load older"}
-                  </Button>
-                ) : null}
+                {logs.isFetchingNextPage ? <Muted>Loading older requests…</Muted> : null}
                 {paused ? (
-                  <>
-                    <Muted>Live updates are paused while older pages are loaded.</Muted>
-                    <Button type="button" onClick={backToHead}>
-                      Back to live
-                    </Button>
-                  </>
+                  <Muted>Live updates are paused while older pages are loaded.</Muted>
                 ) : null}
               </More>
             ) : null}
