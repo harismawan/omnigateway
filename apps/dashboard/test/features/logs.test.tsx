@@ -1,5 +1,5 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TERM_DEBOUNCE_MS } from "../../src/features/logs/LogFilterBar.tsx";
 import { LogsBoard } from "../../src/features/logs/LogsBoard.tsx";
@@ -286,13 +286,12 @@ describe("LogsBoard", () => {
   /**
    * A page boundary is a cursor, never an offset.
    *
-   * "Load older" has to carry the cursor the previous page returned, and the
-   * rows it brings back have to be appended rather than replacing what is on
+   * Reaching the bottom has to carry the cursor the previous page returned, and
+   * the rows it brings back have to be appended rather than replacing what is on
    * screen — an operator walking back through an afternoon is reading one list,
    * not a sequence of windows.
    */
   test("load older pages on the cursor and appends the rows", async () => {
-    const user = userEvent.setup();
     const stub = stubLogs({
       "GET /api/logs": ({ url }) =>
         url.includes("cursor=")
@@ -304,14 +303,39 @@ describe("LogsBoard", () => {
     await screen.findByText("fast");
     expect(screen.queryByText("deep")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Load older" }));
+    fireEvent.scroll(screen.getByTestId("request-log-scroller"));
 
     expect(await screen.findByText("deep")).toBeTruthy();
     // Still there: the second page was appended, not swapped in.
     expect(screen.getByText("fast")).toBeTruthy();
     expect(stub.calls.some((call) => call.url.includes("cursor=cursor-2"))).toBe(true);
-    // And a page that reported no successor offers nothing more to load.
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Load older" })).toBeNull());
+  });
+
+  /**
+   * The bottom is the only way to ask, so a page that reported no successor
+   * must leave the scroll asking for nothing. There is no button to hide: a
+   * list too short to scroll is a log with nothing older in it.
+   */
+  test("a page with no successor stops asking, however far it is scrolled", async () => {
+    const stub = stubLogs({
+      "GET /api/logs": ({ url }) =>
+        url.includes("cursor=")
+          ? { logs: [logs[1]], nextCursor: null }
+          : { logs: [logs[0]], nextCursor: "cursor-2" },
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    const scroller = screen.getByTestId("request-log-scroller");
+    fireEvent.scroll(scroller);
+    await screen.findByText("deep");
+
+    const before = stub.calls.length;
+    fireEvent.scroll(scroller);
+    fireEvent.scroll(scroller);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stub.calls.length).toBe(before);
+    expect(screen.queryByRole("button", { name: "Load older" })).toBeNull();
   });
 
   /**
@@ -321,6 +345,12 @@ describe("LogsBoard", () => {
    * refreshing an infinite query re-reads every loaded page. But a head that
    * silently stopped updating reads exactly like a gateway serving nothing, so
    * the board says which of the two it is and offers the way back.
+   *
+   * The way back sits with the filters, not under the rows: the pause is
+   * entered by scrolling to the bottom, so an exit at the foot of the scroller
+   * would be the one control the operator has scrolled away from. It also
+   * returns the view to the top, since the rows that are now live are the ones
+   * the operator scrolled away from.
    */
   test("loading older pages says live updates are paused, and offers the way back", async () => {
     const user = userEvent.setup();
@@ -335,16 +365,101 @@ describe("LogsBoard", () => {
     await screen.findByText("fast");
     expect(screen.queryByText(/Live updates are paused/)).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Load older" }));
+    const scroller = screen.getByTestId("request-log-scroller");
+    fireEvent.scroll(scroller);
     await screen.findByText("deep");
     expect(screen.getByText(/Live updates are paused/)).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: "Back to live" }));
+    // happy-dom does not lay out, so `scrollTo` is the observable call rather
+    // than a resulting offset. Recorded rather than stubbed away: the assertion
+    // is that the board asks for the top, which is all it can control.
+    const scrolled: Array<number | undefined> = [];
+    scroller.scrollTo = (options?: number | ScrollToOptions) => {
+      scrolled.push(typeof options === "object" ? options.top : options);
+    };
+
+    const back = screen.getByRole("button", { name: "Back to live" });
+    expect(back.closest("[data-testid='request-log-scroller']")).toBeNull();
+    await user.click(back);
+    expect(scrolled).toEqual([0]);
 
     // Back to one page: the scrollback is dropped, so the head is live again.
     await waitFor(() => expect(screen.queryByText("deep")).toBeNull());
     expect(screen.getByText("fast")).toBeTruthy();
     expect(screen.queryByText(/Live updates are paused/)).toBeNull();
+  });
+
+  /**
+   * The near-bottom arithmetic, with the numbers supplied.
+   *
+   * happy-dom does not lay out, so `scrollHeight`, `scrollTop` and
+   * `clientHeight` are all zero and every other scroll test here reads as "at
+   * the bottom" whatever the threshold says — `NEAR_BOTTOM_PX = 0` passes all of
+   * them. Defining the three metrics is what makes the comparison mean
+   * something: a scroller with further to go must not ask for a page, and the
+   * lookahead must fire before the exact bottom rather than at it.
+   */
+  test("the near-bottom check measures the distance rather than firing on any scroll", async () => {
+    const stub = stubLogs({
+      "GET /api/logs": ({ url }) =>
+        url.includes("cursor=")
+          ? { logs: [logs[1]], nextCursor: null }
+          : { logs: [logs[0]], nextCursor: "cursor-2" },
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    const scroller = screen.getByTestId("request-log-scroller");
+    const place = (scrollTop: number): void => {
+      for (const [name, value] of [
+        ["scrollHeight", 1_000],
+        ["clientHeight", 400],
+        ["scrollTop", scrollTop],
+      ] as const) {
+        Object.defineProperty(scroller, name, { configurable: true, value });
+      }
+    };
+
+    // 500px of rows still below the fold: nothing to ask for yet.
+    place(100);
+    fireEvent.scroll(scroller);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stub.calls.some((call) => call.url.includes("cursor="))).toBe(false);
+
+    // 100px left — inside the lookahead, but not at the bottom. The page is
+    // asked for while the last rows are still being read, which is the point of
+    // a threshold rather than an equality.
+    place(500);
+    fireEvent.scroll(scroller);
+    expect(await screen.findByText("deep")).toBeTruthy();
+    expect(stub.calls.some((call) => call.url.includes("cursor=cursor-2"))).toBe(true);
+  });
+
+  /**
+   * One page per gesture, not one per scroll event.
+   *
+   * A scroll emits many events and every one of them is at the bottom, so the
+   * in-flight fetch is what has to hold them off — otherwise a single flick
+   * spends every cursor the log has.
+   */
+  test("a burst of scroll events asks for one page, not one each", async () => {
+    const stub = stubLogs({
+      "GET /api/logs": async ({ url }) => {
+        if (!url.includes("cursor=")) return { logs: [logs[0]], nextCursor: "cursor-2" };
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { logs: [logs[1]], nextCursor: "cursor-3" };
+      },
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await screen.findByText("fast");
+    const scroller = screen.getByTestId("request-log-scroller");
+    fireEvent.scroll(scroller);
+    fireEvent.scroll(scroller);
+    fireEvent.scroll(scroller);
+
+    await screen.findByText("deep");
+    expect(stub.calls.filter((call) => call.url.includes("cursor=cursor-2"))).toHaveLength(1);
   });
 
   /**
@@ -378,9 +493,10 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("fast");
-    await user.click(screen.getByRole("button", { name: "Load older" }));
+    const scroller = screen.getByTestId("request-log-scroller");
+    fireEvent.scroll(scroller);
     await screen.findByText("deep");
-    await user.click(screen.getByRole("button", { name: "Load older" }));
+    fireEvent.scroll(scroller);
     await waitFor(() => expect(held.release).not.toBeNull());
 
     await user.click(screen.getByRole("button", { name: "Back to live" }));
@@ -403,7 +519,7 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("fast");
-    await user.click(screen.getByRole("button", { name: "Load older" }));
+    fireEvent.scroll(screen.getByTestId("request-log-scroller"));
     await screen.findByText("deep");
 
     await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
