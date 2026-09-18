@@ -332,7 +332,10 @@ changed without a restart: the six routing weights, `maxAttempts`,
 `ponytailMode` (`off` | `lite` | `full` | `ultra`),
 and the two body-capture switches. Edit them with `omni settings set` or in the
 console. `quotaPollIntervalMs` is the one exception: the poller reads it once at
-boot, so a change to it takes a restart. Snapshot retention —
+boot, so a change to it takes a restart. `requestDeadlineMs` defaults to `0`,
+which imposes no deadline at all; what that means for whatever sits in front of
+the gateway is
+[Behind a reverse proxy](docs/deploying.md#behind-a-reverse-proxy). Snapshot retention —
 `snapshotKeepLatest` and `snapshotMaxAgeDays` — is stored alongside them but
 deliberately edited on the Database screen instead; see
 [Snapshots and restore](docs/operations.md#snapshots-and-restore) for why.

@@ -75,8 +75,33 @@ location / {
 
 The gateway sends downstream `: keepalive` comments on streaming responses
 because provider heartbeats are decoded away, so an idle stream still looks
-alive to whatever sits in between. Keep any idle timeout in the proxy above
-your longest expected request.
+alive to whatever sits in between. The cadence is ten seconds, or four on
+`/v1/responses`, because Codex's HTTP client abandons a connection that has
+carried no bytes for about five.
+
+`requestDeadlineMs` defaults to `0`, so there is no longest expected request to
+size a timeout against: an inference request ends when the provider finishes or
+the client disconnects. The three inference routes clear Bun's own per-request
+socket ceiling to match, so nothing inside the gateway will cut a long reply
+short — which makes the proxy in front of it the only remaining limit.
+
+For **streaming** that is already handled: the keepalive comments mean the
+connection is never idle, so an ordinary `proxy_read_timeout` never fires. A
+**non-streaming** request is the case to watch. It writes nothing at all until
+its JSON body is ready, and no heartbeat can change that without altering the
+response shape, so a buffered reply that takes longer than the proxy's read
+timeout is cut off by the proxy no matter what the gateway does. If you serve
+unlimited non-streaming traffic, raise or disable that read timeout — 300s in
+the nginx block above is sized for the console's socket, not for a twenty-minute
+completion. Cloudflare's own 100-second origin limit cannot be raised on the
+lower plans at all; streaming stays under it on the keepalives, buffered
+requests do not.
+
+Setting `requestDeadlineMs` to a positive value opts back into a finite budget.
+The concurrency ceiling and the load accounting need no accompanying change —
+they renew their claims while a request is alive, so both stay correct at any
+request length. The proxy read timeout above is the one thing that does: a
+deadline longer than it still loses buffered responses to the proxy.
 
 ## Running more than one gateway
 

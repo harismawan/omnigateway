@@ -153,9 +153,13 @@ claimed the fault "fails in the direction that keeps serving" — for this leg i
 fails in the direction that keeps the credential out, and `PROBE_TTL_MS` is the bound on how
 long.
 
-`PROBE_TTL_MS` must exceed the request deadline (`requestDeadlineMs`, 120s default,
-`packages/store/src/types.ts:1431`) so a live probe is never displaced, and should not greatly
-exceed it, because it is also how long a fault strands the pair. **180s.**
+`PROBE_TTL_MS` was sized to exceed the request deadline so a live probe is never displaced, and
+not to greatly exceed it, because it is also how long a fault strands the pair. **180s.** Since
+`requestDeadlineMs` defaults to `0`, the first half no longer holds: a request can outrun the TTL
+and lose its slot to a second probe. That is accepted rather than fixed. The concurrency and load
+slots renew themselves for exactly this reason; this one deliberately does not, because renewal
+would let one very long probe hold a recovering pair out of rotation for its whole life — worse
+than the bounded double-probe described next.
 
 One more, minor: `gauge.release` pops the oldest slot (`packages/coord/src/index.ts:238-244`).
 If a probe's slot expires by TTL and a second probe acquires, the first probe's late release

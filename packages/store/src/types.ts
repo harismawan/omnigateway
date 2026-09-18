@@ -1632,7 +1632,13 @@ export type Store = {
 export const DEFAULT_SETTINGS: Settings = {
   weights: { tier: 10, health: 3, quota: 2, load: 2, cost: 1, latency: 1 },
   maxAttempts: 3,
-  requestDeadlineMs: 120_000,
+  // Unlimited by default: the gateway synthesises no TIMEOUT, and a request
+  // ends when the provider finishes or the client hangs up. The three
+  // inference routes clear Bun's per-request idle ceiling
+  // (`server.timeout(request, 0)` in `routes/proxy.ts`), so nothing below this
+  // holds a finite budget for them. An operator who wants one sets a positive
+  // value; two fixed TTLs then stop being bounded by it, see `GAUGE_TTL_MS`.
+  requestDeadlineMs: 0,
   breakerThreshold: 3,
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,

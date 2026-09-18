@@ -13,6 +13,10 @@ Allow operator-selected unlimited inference duration without Bun's 255-second id
 
 Default remains `120_000`. Dashboard labels `0` as disabling request deadline. Existing saved positive values retain current behavior.
 
+> **Superseded.** The default is now `0`. Nothing else in this design changed; see `## History` in
+> the deployment docs and `docs/deploying.md#behind-a-reverse-proxy` for what an unlimited default
+> means for the proxy in front of the gateway.
+
 ## Runtime behavior
 
 Dispatch creates deadline state only for positive settings. Unlimited requests still use client `AbortSignal`; client disconnect aborts active provider request and releases stream resources. Finite requests retain timeout classification and cleanup.
