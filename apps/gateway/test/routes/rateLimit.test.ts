@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { memoryCoord } from "@omni/coord";
 import type { StreamEvent } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
@@ -130,6 +131,253 @@ test("frees the concurrency slot when a stream drains", async () => {
 
   await response.text();
   expect(await rateLimiter.inFlight(keyId)).toBe(0);
+  store.close();
+});
+
+/**
+ * The ceiling holds for a request that outlives the slot's TTL.
+ *
+ * `GAUGE_TTL_MS` expires a live holder as readily as a dead one, and
+ * `requestDeadlineMs` is `0` by default, so nothing keeps a request under it.
+ * `admit` therefore names the slot and renews it on a timer. This drives that
+ * timer directly rather than waiting five real minutes: the renewal is what
+ * must keep `inFlight` at one and keep the second request refused.
+ *
+ * Asserted through `admit` rather than the gauge because the defect was in
+ * what the limiter *does* with the gauge — an unnamed slot cannot be renewed
+ * at all, so this fails outright on the previous code.
+ */
+test("a request outliving the slot ttl keeps its concurrency slot", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { limits: { concurrency: 1 } });
+  let clock = NOW;
+  const now = () => clock;
+  const limiter = new ApiKeyRateLimiter({
+    store,
+    now,
+    logger: captureLogger(),
+    // The coord must share this clock. Its default is `Date.now()`, which
+    // ignores the steps below entirely and makes the whole test vacuous — the
+    // slot never reaches its expiry and every assertion passes for the wrong
+    // reason.
+    coord: memoryCoord({ now }),
+  });
+  const limits: LimitConfig = { concurrency: 1 };
+
+  const admission = await limiter.admit(key.id, limits, "req-long");
+  expect(await limiter.inFlight(key.id)).toBe(1);
+
+  // The renewal fires every `RENEW_INTERVAL_MS` — a third of the TTL — so it
+  // always lands on a slot that is still live. Stepping past the expiry first
+  // would test the opposite rule: `renew` must NOT resurrect a lapsed slot,
+  // and would report a no-op as a broken ceiling.
+  const RENEW_INTERVAL = 100_000;
+  const TTL = 300_000;
+  // Twelve intervals is twenty minutes, four TTLs deep: without renewal the
+  // slot would have lapsed three times over.
+  for (let i = 0; i < 12; i++) {
+    clock += RENEW_INTERVAL;
+    // Exactly what the interval callback inside `admit` does.
+    await admission.renew();
+    expect(await limiter.inFlight(key.id)).toBe(1);
+  }
+  expect(clock - NOW).toBeGreaterThan(TTL * 3);
+
+  // A rival is still refused, which is the promise `concurrency` makes.
+  await expect(limiter.admit(key.id, limits, "req-rival")).rejects.toThrow();
+  expect(await limiter.inFlight(key.id)).toBe(1);
+
+  // And the long request's own release still frees exactly its slot.
+  admission.release();
+  expect(await limiter.inFlight(key.id)).toBe(0);
+
+  // Renewal after release is inert: the slot is gone and must not come back as
+  // a holder nothing will ever release.
+  await admission.renew();
+  expect(await limiter.inFlight(key.id)).toBe(0);
+  store.close();
+});
+
+/**
+ * The renewal above is driven by hand, so this asserts the wiring separately:
+ * that `admit` starts a timer, that the release stops it, and that it is
+ * unrefed so it can never be the thing holding the process open.
+ *
+ * Without this the pair of tests would pass on code that renews correctly when
+ * asked and never asks.
+ */
+test("admit runs an unrefed renewal timer, and the release clears it", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { limits: { concurrency: 1 } });
+  const started: Array<{ ms: number; unrefed: boolean; fire: () => void }> = [];
+  let cleared = 0;
+
+  const realSet = globalThis.setInterval;
+  const realClear = globalThis.clearInterval;
+  globalThis.setInterval = ((fn: () => void, ms?: number) => {
+    const timer = realSet(fn, ms);
+    const entry = { ms: ms ?? 0, unrefed: false, fire: fn };
+    started.push(entry);
+    // `unref` is what the production call reaches for; record that it was.
+    const withUnref = timer as unknown as { unref?: () => unknown };
+    const priorUnref = withUnref.unref?.bind(timer);
+    withUnref.unref = () => {
+      entry.unrefed = true;
+      return priorUnref?.() ?? timer;
+    };
+    return timer;
+  }) as typeof globalThis.setInterval;
+  globalThis.clearInterval = ((timer: Parameters<typeof realClear>[0]) => {
+    cleared += 1;
+    return realClear(timer);
+  }) as typeof globalThis.clearInterval;
+
+  try {
+    let clock = NOW;
+    const now = () => clock;
+    const limiter = new ApiKeyRateLimiter({
+      store,
+      now,
+      logger: captureLogger(),
+      coord: memoryCoord({ now }),
+    });
+    const admission = await limiter.admit(key.id, { concurrency: 1 }, "req-1");
+    expect(started).toHaveLength(1);
+    expect(started[0]?.ms).toBe(100_000);
+    expect(started[0]?.unrefed).toBe(true);
+    expect(cleared).toBe(0);
+
+    // Fire the captured callback rather than trusting that it renews: this is
+    // the difference between "a timer exists" and "the timer does the work".
+    // Stepped by the renewal interval, so the callback always lands on a live
+    // slot — stepping past the TTL first would test the opposite rule (renew
+    // must not revive a lapsed slot) and read a correct no-op as a failure.
+    for (let i = 0; i < 5; i++) {
+      clock += 100_000;
+      started[0]?.fire();
+      await Promise.resolve();
+    }
+    // Past the TTL in total, so an un-renewed slot would be long gone.
+    expect(clock - NOW).toBeGreaterThan(300_000);
+    expect(await limiter.inFlight(key.id)).toBe(1);
+
+    admission.release();
+    expect(cleared).toBe(1);
+    // Idempotent: a second release clears nothing further.
+    admission.release();
+    expect(cleared).toBe(1);
+
+    // A key with no concurrency ceiling starts no timer at all.
+    await (await limiter.admit(key.id, { requests: { "1m": 5 } }, "req-2")).release();
+    expect(started).toHaveLength(1);
+  } finally {
+    globalThis.setInterval = realSet;
+    globalThis.clearInterval = realClear;
+    store.close();
+  }
+});
+
+/**
+ * Renewal is bounded, so a slot whose release never runs still heals.
+ *
+ * The TTL is the only thing that reclaims a leaked slot — a streaming
+ * `Response` nobody reads is the reachable case — so a timer that renewed
+ * forever would turn a five-minute leak into a permanent one and lock the key's
+ * ceiling for the life of the process. Past `MAX_RENEWED_MS` the timer stops
+ * renewing and clears itself, and the slot lapses on its own.
+ */
+test("renewal stops at the cap, so an abandoned slot lapses instead of leaking forever", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { limits: { concurrency: 1 } });
+  const fired: Array<() => void> = [];
+  let cleared = 0;
+
+  const realSet = globalThis.setInterval;
+  const realClear = globalThis.clearInterval;
+  globalThis.setInterval = ((fn: () => void) => {
+    fired.push(fn);
+    return realSet(() => {}, 1 << 30);
+  }) as typeof globalThis.setInterval;
+  globalThis.clearInterval = ((timer: Parameters<typeof realClear>[0]) => {
+    cleared += 1;
+    return realClear(timer);
+  }) as typeof globalThis.clearInterval;
+
+  try {
+    let clock = NOW;
+    const now = () => clock;
+    const limiter = new ApiKeyRateLimiter({
+      store,
+      now,
+      logger: captureLogger(),
+      coord: memoryCoord({ now }),
+    });
+    // Admitted and then abandoned: nothing ever calls `release`.
+    await limiter.admit(key.id, { concurrency: 1 }, "abandoned");
+    expect(await limiter.inFlight(key.id)).toBe(1);
+
+    const DAY = 86_400_000;
+    // Renewed on its real interval all the way to the cap, so the slot is
+    // continuously live rather than lapsing between steps.
+    while (clock + 100_000 < NOW + DAY) {
+      clock += 100_000;
+      fired[0]?.();
+      await Promise.resolve();
+    }
+    expect(await limiter.inFlight(key.id)).toBe(1);
+    expect(cleared).toBe(0);
+
+    // At the cap it stops renewing and clears itself.
+    clock = NOW + DAY;
+    fired[0]?.();
+    await Promise.resolve();
+    expect(cleared).toBe(1);
+
+    // One TTL later, with nothing renewing it, the slot is gone and the
+    // ceiling admits again — the pre-renewal behaviour, restored.
+    clock = NOW + DAY + 300_001;
+    expect(await limiter.inFlight(key.id)).toBe(0);
+  } finally {
+    globalThis.setInterval = realSet;
+    globalThis.clearInterval = realClear;
+    store.close();
+  }
+});
+
+/**
+ * The slot's name is the limiter's, never the caller's `requestId`.
+ *
+ * A named slot is idempotent on purpose, so if the name came from the caller,
+ * two requests handed one id would share a single slot and the ceiling would
+ * admit past itself — a limit that under-counts, which is worse than no limit
+ * because the operator believes they set one. The burst tests in
+ * `test/auth/rateLimit.test.ts` caught exactly this by passing one id eight
+ * times; this states the rule where the name is chosen.
+ */
+test("one requestId reused across admissions still holds one slot each", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { limits: { concurrency: 3 } });
+  const limiter = new ApiKeyRateLimiter({ store, now: () => NOW, logger: captureLogger() });
+  const limits: LimitConfig = { concurrency: 3 };
+
+  // Same id every time, which is what a buggy caller or a retry looks like.
+  const first = await limiter.admit(key.id, limits, "same-id");
+  const second = await limiter.admit(key.id, limits, "same-id");
+  expect(await limiter.inFlight(key.id)).toBe(2);
+
+  const third = await limiter.admit(key.id, limits, "same-id");
+  expect(await limiter.inFlight(key.id)).toBe(3);
+  // The ceiling still bites at three.
+  await expect(limiter.admit(key.id, limits, "same-id")).rejects.toThrow();
+
+  // Each release frees exactly one, so the count walks down rather than
+  // collapsing to zero on the first.
+  first.release();
+  expect(await limiter.inFlight(key.id)).toBe(2);
+  second.release();
+  expect(await limiter.inFlight(key.id)).toBe(1);
+  third.release();
+  expect(await limiter.inFlight(key.id)).toBe(0);
   store.close();
 });
 

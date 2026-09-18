@@ -86,11 +86,16 @@ export type DispatchDeps = {
 /**
  * How long a probe claim outlives a holder that never released it.
  *
- * Above the request deadline (120s default) so a live probe is never
- * displaced, and not far above it, because it is also how long a coordinator
- * fault between acquire and release keeps the whole fleet from probing that
- * pair — the release then reaches the memory fallback and the shared slot
- * lives out its TTL.
+ * Deliberately **not** renewed, unlike the concurrency and load slots. A
+ * request outliving this loses its probe claim and a second request may probe
+ * the same pair — bounded, and the cost is one extra request against a
+ * credential that is recovering anyway, not a wrong routing decision. Renewal
+ * would instead let one very long probe hold a recovering pair out of rotation
+ * for its whole life, which is the worse failure.
+ *
+ * It is also how long a coordinator fault between acquire and release keeps
+ * the whole fleet from probing that pair — the release then reaches the memory
+ * fallback and the shared slot lives out its TTL.
  */
 export const PROBE_TTL_MS = 180_000;
 

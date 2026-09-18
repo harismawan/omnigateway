@@ -210,8 +210,9 @@ test("a burst under a generous ceiling leaves the gauge at the true count", asyn
  * Refused on `concurrency` while `requests` still has room, which is the only
  * arrangement where both halves of the rollback are visible: the gauge must read
  * two rather than eight, and the ring must hold the two admissions rather than
- * all eight attempts. A leaked claim is worse than the race it closed — no
- * window expires a gauge, so six stranded slots lock the key out for good.
+ * all eight attempts. A leaked claim is worse than the race it closed — a slot
+ * lapses only after renewal stops, so six stranded slots lock the key out for
+ * `MAX_RENEWED_MS`.
  */
 test("a refused request rolls back both the gauge and the ring", async () => {
   const { limiter, keyId, limits, store } = await harness({

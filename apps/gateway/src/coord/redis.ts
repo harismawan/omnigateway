@@ -88,14 +88,44 @@ const WINDOW_ROLLBACK = `
  * ZSET of slots scored by expiry, plus a SET indexing every key under its
  * prefix so `snapshot` is one script and never a `SCAN` of the keyspace.
  * Prunes, reads before, adds. Returns before.
+ *
+ * `ARGV[3]` is the slot's member name: the caller's holder when it named one,
+ * else a fresh uuid. `ZADD` on an existing member *moves its score* rather
+ * than adding a second, which is what makes a named acquire idempotent — so
+ * `before` subtracts the caller's own slot when it already held one, or a
+ * retry would read as a rival against its own ceiling.
+ *
+ * `PEXPIRE` is raised, never lowered: the key's TTL is a floor over the
+ * furthest slot, so a renewal that pushes one slot out must not be reclaimed
+ * by an earlier expiry set when the key was younger.
  */
 const GAUGE_ACQUIRE = `
   redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+  local mine = redis.call('ZSCORE', KEYS[1], ARGV[3])
   local before = redis.call('ZCARD', KEYS[1])
+  if mine then before = before - 1 end
   redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[2]), ARGV[3])
-  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  if redis.call('PTTL', KEYS[1]) < tonumber(ARGV[2]) then
+    redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  end
   redis.call('SADD', KEYS[2], KEYS[1])
   return before
+`;
+
+/**
+ * Moves one named slot's expiry. Silent when it holds none.
+ *
+ * `ZADD XX` refuses to create a member, which is the point: a renewal that
+ * lost the race with its own release, or landed after its slot lapsed, must
+ * not resurrect it as a phantom holder counted against a ceiling.
+ */
+const GAUGE_RENEW = `
+  redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+  redis.call('ZADD', KEYS[1], 'XX', tonumber(ARGV[1]) + tonumber(ARGV[2]), ARGV[3])
+  if redis.call('PTTL', KEYS[1]) < tonumber(ARGV[2]) then
+    redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  end
+  return 0
 `;
 
 const GAUGE_READ = `
@@ -103,22 +133,38 @@ const GAUGE_READ = `
   return redis.call('ZCARD', KEYS[1])
 `;
 
-/** Prunes first, so a lapsed slot is never the one given back for a live one. */
+/**
+ * Prunes first, so a lapsed slot is never the one given back for a live one.
+ * With a holder name (`ARGV[2]`) it drops that slot; without, the oldest.
+ */
 const GAUGE_RELEASE = `
   redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
-  redis.call('ZPOPMIN', KEYS[1])
+  if ARGV[2] == '' then
+    redis.call('ZPOPMIN', KEYS[1])
+  else
+    redis.call('ZREM', KEYS[1], ARGV[2])
+  end
   return 0
 `;
 
-/** Every indexed key's live count; drops empty keys from the index as it goes. */
+/**
+ * Every indexed key's live count; drops empty keys from the index as it goes.
+ *
+ * The index is keyed by prefix-up-to-the-first-colon, which is coarser than an
+ * arbitrary `prefix` argument, so the requested prefix is re-checked here:
+ * `snapshot("load:a")` must not return `load:b` just because both live in the
+ * `load:` index. Memory filters the same way.
+ */
 const GAUGE_SNAPSHOT = `
   local out = {}
   for _, key in ipairs(redis.call('SMEMBERS', KEYS[1])) do
     redis.call('ZREMRANGEBYSCORE', key, '-inf', ARGV[1])
     local count = redis.call('ZCARD', key)
     if count > 0 then
-      out[#out + 1] = key
-      out[#out + 1] = count
+      if string.sub(key, 1, string.len(ARGV[2])) == ARGV[2] then
+        out[#out + 1] = key
+        out[#out + 1] = count
+      end
     else
       redis.call('SREM', KEYS[1], key)
     end
@@ -204,6 +250,7 @@ const SCRIPTS = [
   WINDOW_CLAIM,
   WINDOW_ROLLBACK,
   GAUGE_ACQUIRE,
+  GAUGE_RENEW,
   GAUGE_READ,
   GAUGE_RELEASE,
   GAUGE_SNAPSHOT,
@@ -263,6 +310,16 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
   const indexOf = (name: string): string => {
     const colon = name.indexOf(":");
     return `${NS}gidx:${colon === -1 ? name : name.slice(0, colon + 1)}`;
+  };
+
+  /**
+   * `""` is this implementation's "unnamed" sentinel on the wire, so it cannot
+   * also be a valid holder name: a blank-named release would pop whichever
+   * slot was nearest expiry instead of the caller's. Refused here and in the
+   * memory implementation, so one contract holds across the fail-open boundary.
+   */
+  const blankHolder = (holder: string | undefined): void => {
+    if (holder === "") throw new TypeError("gauge holder must be a non-empty string");
   };
 
   // `healthy` says whether the last call reached Redis, so a coordinator that
@@ -479,25 +536,40 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
     },
 
     gauge: {
-      acquire(name, ttlMs) {
+      acquire(name, ttlMs, holder) {
+        blankHolder(holder);
         return attempt(
           async () =>
             (await evalScript(
               GAUGE_ACQUIRE,
               [key("g", name), indexOf(name)],
-              [now(), ttlMs, crypto.randomUUID()],
+              // An unnamed slot gets a uuid, so it is a distinct ZSET member
+              // that nothing can address; a named one *is* its name.
+              [now(), ttlMs, holder ?? crypto.randomUUID()],
             )) as number,
-          () => fallback.gauge.acquire(name, ttlMs),
+          () => fallback.gauge.acquire(name, ttlMs, holder),
         );
       },
-      release(name) {
+      renew(name, holder, ttlMs) {
+        blankHolder(holder);
         return attempt(
           async () => {
-            // The oldest live slot goes. Which slot is not a distinction the
-            // count carries, and the oldest is the one nearest its own expiry.
-            await evalScript(GAUGE_RELEASE, [key("g", name)], [now()]);
+            await evalScript(GAUGE_RENEW, [key("g", name)], [now(), ttlMs, holder]);
           },
-          () => fallback.gauge.release(name),
+          () => fallback.gauge.renew(name, holder, ttlMs),
+        );
+      },
+      release(name, holder) {
+        blankHolder(holder);
+        return attempt(
+          async () => {
+            // The oldest live slot goes when unnamed. Which slot is not a
+            // distinction the count carries, and the oldest is the one nearest
+            // its own expiry. Empty string is "unnamed" on the wire: Lua has
+            // no undefined, and a holder is never blank.
+            await evalScript(GAUGE_RELEASE, [key("g", name)], [now(), holder ?? ""]);
+          },
+          () => fallback.gauge.release(name, holder),
         );
       },
       read(name) {
@@ -509,9 +581,13 @@ export function redisCoord(deps: RedisCoordDeps): RedisCoord {
       snapshot(prefix) {
         return attempt(
           async () => {
-            const flat = (await evalScript(GAUGE_SNAPSHOT, [indexOf(prefix)], [now()])) as Array<
-              string | number
-            >;
+            // The index is coarser than an arbitrary prefix, so the full
+            // namespaced prefix goes to the script and it filters.
+            const flat = (await evalScript(
+              GAUGE_SNAPSHOT,
+              [indexOf(prefix)],
+              [now(), key("g", prefix)],
+            )) as Array<string | number>;
             const out = new Map<string, number>();
             for (let i = 0; i + 1 < flat.length; i += 2) {
               out.set(String(flat[i]).slice(key("g", "").length), Number(flat[i + 1]));

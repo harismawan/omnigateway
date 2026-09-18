@@ -727,12 +727,13 @@ async function handle(
         //
         // This is the only thing that frees a streaming request's slot, so the
         // gauge is owned entirely by whether the body is consumed. A `Response`
-        // that is never read and never cancelled therefore holds its slot for
-        // good, and no window expires a gauge. Bun's server always pulls or
-        // cancels, so the case is unreachable in production and reachable from
-        // a test calling `app.handle` directly. Deliberately not defended: a
-        // reaper would have to guess when a legitimately slow stream is dead,
-        // and guessing wrong frees a slot that is still in use.
+        // that is never read and never cancelled therefore holds its slot until
+        // renewal stops at `MAX_RENEWED_MS` and the TTL reclaims it. Bun's
+        // server always pulls or cancels, so the case is unreachable in
+        // production and reachable from a test calling `app.handle` directly.
+        // Deliberately not defended further: a reaper would have to guess when
+        // a legitimately slow stream is dead, and guessing wrong frees a slot
+        // that is still in use.
         release?.();
         await log(cancelled, failure);
       };

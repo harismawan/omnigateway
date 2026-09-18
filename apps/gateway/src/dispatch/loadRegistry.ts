@@ -57,11 +57,29 @@ export type LoadRegistry = {
 const PREFIX = "load:";
 
 /**
- * How long a shared gauge holds a slot for a process that never released it.
- * Ignored in memory; see the same constant in `auth/rateLimit.ts` for why it
- * is a floor on a leaked slot's life rather than a bound on a request's.
+ * How long a shared gauge holds a slot before it must be renewed.
+ *
+ * Expiry applies in the memory gauge too — `liveSlots` filters on it — so this
+ * bounds a *live* request's slot, not only a leaked one, and
+ * `requestDeadlineMs` (0 by default) no longer keeps requests under it. The
+ * slot is therefore named and renewed while the request runs; without that, a
+ * request past five minutes stops counting toward load and ranking stacks
+ * further traffic onto the same credential and model.
  */
 const SLOT_TTL_MS = 300_000;
+
+/** A third of the TTL, so two consecutive failures still leave a full interval. */
+const RENEW_INTERVAL_MS = 100_000;
+
+/**
+ * How long renewal may go on before a slot is left to lapse.
+ *
+ * Same bound and same reason as `MAX_RENEWED_MS` in `auth/rateLimit.ts`: the
+ * TTL is what reclaims a slot whose release never ran, so renewing forever
+ * would make a dropped `DispatchOutcome` undercount this node's load for the
+ * life of the process rather than for five minutes.
+ */
+const MAX_RENEWED_MS = 86_400_000;
 
 /** Weight of the newest latency sample. Low enough to ride out one slow call. */
 const EWMA_ALPHA = 0.3;
@@ -80,12 +98,31 @@ export function createLoadRegistry(
       const key = healthKey(credentialId, model);
       local.set(key, (local.get(key) ?? 0) + 1);
       if (provider !== undefined) providers.set(provider, (providers.get(provider) ?? 0) + 1);
-      void coord.gauge.acquire(PREFIX + key, SLOT_TTL_MS);
+      // Named and renewed for the same reason as the concurrency slot: the TTL
+      // expires a live holder, and no request deadline bounds one by default.
+      // The local map is exact regardless; this keeps the *shared* count honest
+      // for other replicas. A uuid rather than a node id and counter, because
+      // the name needs only to be unique, and this registry is handed no
+      // identity of its own.
+      const holder = crypto.randomUUID();
+      void coord.gauge.acquire(PREFIX + key, SLOT_TTL_MS, holder);
+      const renewUntil = now() + MAX_RENEWED_MS;
+      const renewal = setInterval(() => {
+        // Bounded for the same reason as the concurrency slot: a consumer that
+        // drops its events never releases, and the TTL is what reclaims that.
+        if (now() >= renewUntil) {
+          clearInterval(renewal);
+          return;
+        }
+        void coord.gauge.renew(PREFIX + key, holder, SLOT_TTL_MS);
+      }, RENEW_INTERVAL_MS);
+      renewal.unref?.();
 
       let released = false;
       return (ttftMs) => {
         if (released) return;
         released = true;
+        clearInterval(renewal);
         const prior = history.get(key)?.ewmaTtftMs ?? null;
         history.set(key, {
           lastReleasedAt: now(),
@@ -104,7 +141,7 @@ export function createLoadRegistry(
           if (providerCount > 0) providers.set(provider, providerCount);
           else providers.delete(provider);
         }
-        void coord.gauge.release(PREFIX + key);
+        void coord.gauge.release(PREFIX + key, holder);
       };
     },
 
