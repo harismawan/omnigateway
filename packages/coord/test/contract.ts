@@ -249,6 +249,114 @@ export function coordContract(name: string, make: (now: () => number) => Promise
     expect(await coord.gauge.acquire("g", 50)).toBe(0);
   });
 
+  /**
+   * A named slot is the mechanism a ceiling relies on once a request may run
+   * longer than the TTL, and every implementation has to hold all four parts:
+   * renewal keeps a live slot counted, re-acquiring one name never stacks, a
+   * named release drops that slot alone, and a renewal for a slot that has
+   * gone must not bring it back as a holder nothing will release.
+   */
+  test(`${name}: a named gauge slot renews, stays single, and is never resurrected`, async () => {
+    let clock = T0;
+    const coord = await make(() => clock);
+
+    expect(await coord.gauge.acquire("g", 100, "a")).toBe(0);
+    // Same name: moves the expiry, never adds a slot, and does not count
+    // itself among the rivals it reports.
+    expect(await coord.gauge.acquire("g", 100, "a")).toBe(0);
+    expect(await coord.gauge.read("g")).toBe(1);
+
+    // Renewed twice inside the TTL, then read past the ORIGINAL expiry: a
+    // slot that renewal did not move would be gone by now.
+    for (let i = 0; i < 2; i++) {
+      clock += 60;
+      await Bun.sleep(60);
+      await coord.gauge.renew("g", "a", 100);
+    }
+    expect(await coord.gauge.read("g")).toBe(1);
+
+    // A rival sees it held.
+    expect(await coord.gauge.acquire("g", 100, "b")).toBe(1);
+
+    // The named release drops exactly one slot.
+    await coord.gauge.release("g", "a");
+    expect(await coord.gauge.read("g")).toBe(1);
+
+    // Renewing the released name adds nothing back.
+    await coord.gauge.renew("g", "a", 100);
+    expect(await coord.gauge.read("g")).toBe(1);
+
+    await coord.gauge.release("g", "b");
+    expect(await coord.gauge.read("g")).toBe(0);
+  });
+
+  /**
+   * The gaps the named-slot contract has to close in every implementation.
+   *
+   * Each of these was a real divergence risk rather than a hypothetical: the
+   * Redis implementation spends `""` as its unnamed sentinel on the wire, its
+   * key index is coarser than an arbitrary snapshot prefix, and an unnamed
+   * release picks by expiry while a named one picks by name.
+   */
+  test(`${name}: a blank holder is refused rather than treated as unnamed`, async () => {
+    const coord = await make(() => T0);
+    expect(() => coord.gauge.acquire("g", 1_000, "")).toThrow();
+    expect(() => coord.gauge.renew("g", "", 1_000)).toThrow();
+    expect(() => coord.gauge.release("g", "")).toThrow();
+  });
+
+  test(`${name}: snapshot honours a prefix narrower than the key index`, async () => {
+    const coord = await make(() => T0);
+    await coord.gauge.acquire("load:a", 1_000);
+    await coord.gauge.acquire("load:b", 1_000);
+    // Both keys share the `load:` index, so a narrower prefix has to be
+    // filtered rather than answered from the index alone.
+    expect(await coord.gauge.snapshot("load:a")).toEqual(new Map([["load:a", 1]]));
+    expect(await coord.gauge.snapshot("load:")).toEqual(
+      new Map([
+        ["load:a", 1],
+        ["load:b", 1],
+      ]),
+    );
+  });
+
+  test(`${name}: named and unnamed slots coexist on one key`, async () => {
+    let clock = T0;
+    const coord = await make(() => clock);
+    // The unnamed slot expires first, so an unnamed release — which picks the
+    // slot nearest its expiry — must take it and leave the named one.
+    await coord.gauge.acquire("g", 50);
+    await coord.gauge.acquire("g", 10_000, "mine");
+    expect(await coord.gauge.read("g")).toBe(2);
+
+    await coord.gauge.release("g");
+    expect(await coord.gauge.read("g")).toBe(1);
+    // The named slot is the survivor: renewing it still finds something.
+    clock += 60;
+    await Bun.sleep(60);
+    await coord.gauge.renew("g", "mine", 10_000);
+    expect(await coord.gauge.read("g")).toBe(1);
+    await coord.gauge.release("g", "mine");
+    expect(await coord.gauge.read("g")).toBe(0);
+  });
+
+  test(`${name}: a holder whose slot lapsed re-acquires beside live rivals`, async () => {
+    let clock = T0;
+    const coord = await make(() => clock);
+    await coord.gauge.acquire("g", 10_000, "rival");
+    await coord.gauge.acquire("g", 50, "mine");
+    expect(await coord.gauge.read("g")).toBe(2);
+
+    // `mine` lapses; `rival` does not.
+    clock += 60;
+    await Bun.sleep(60);
+    expect(await coord.gauge.read("g")).toBe(1);
+
+    // Re-acquiring reports the one live rival, not zero and not two.
+    expect(await coord.gauge.acquire("g", 10_000, "mine")).toBe(1);
+    expect(await coord.gauge.read("g")).toBe(2);
+  });
+
   test(`${name}: publishSequenced numbers deliveries in one step`, async () => {
     const coord = await make(() => T0);
     const seen: string[] = [];

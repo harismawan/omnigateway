@@ -39,18 +39,50 @@ const GRAIN_MS: Record<LongWindow, number> = { "5h": 60_000, "1w": 3_600_000 };
 const SEED_LOCK_MS = 5_000;
 
 /**
- * How long a gauge holds a slot for a process that never released it.
+ * How long a concurrency slot is held before it must be renewed.
  *
  * A slot leaks when its process dies mid-request, and when a release lands on
  * the memory fallback because the coordinator faulted between acquire and
- * release; either way the key is locked out for this long. Five minutes: past
- * the default request deadline, short enough that a fault is not an hour of
- * refusals on a `concurrency: 1` key. A request that runs longer frees its
- * slot early and admits one more, which is the direction the limiter permits.
- * ponytail: one constant; renew the slot from the stream loop if hour-long
- * requests ever meet a shared gauge.
+ * release; either way the key is locked out for this long. Five minutes: long
+ * enough that renewal is cheap, short enough that a fault is not an hour of
+ * refusals on a `concurrency: 1` key.
+ *
+ * Expiry applies in every gauge implementation, so this TTL bounds a *live*
+ * holder as much as a dead one — and `requestDeadlineMs` is 0 (unlimited) by
+ * default, so nothing else keeps a request under it. That is why the slot is
+ * named and renewed on `RENEW_INTERVAL_MS`: without renewal a request running
+ * past five minutes stops being counted and the next one is admitted beside
+ * it, breaking a ceiling `docs/operations.md` promises "goes on enforcing
+ * exactly".
  */
 const GAUGE_TTL_MS = 300_000;
+
+/**
+ * How often a live request pushes its slot's expiry out.
+ *
+ * A third of the TTL, so two consecutive failures still leave a full interval
+ * before the slot lapses. Renewal is one command against a key already in
+ * cache, and only for keys that set `concurrency`, so the cost is a rounding
+ * error against the request it protects.
+ */
+const RENEW_INTERVAL_MS = 100_000;
+
+/**
+ * How long renewal may go on before a slot is left to lapse.
+ *
+ * Renewal is what keeps the ceiling honest for a long request, but an
+ * unrenewed slot's TTL is also the only thing that reclaims one whose release
+ * never ran — a streaming `Response` nobody reads is the reachable case
+ * (`routes/proxy.ts` documents it). Renewing forever would make that leak
+ * permanent instead of five minutes long, trading a ceiling that breaks late
+ * for a ceiling that never recovers.
+ *
+ * A day: far past any real inference request, so the cap is invisible to
+ * legitimate traffic, and short enough that a leaked slot does not outlive the
+ * gateway. Past it the old behaviour returns exactly — the slot lapses and one
+ * extra request is admitted beside it.
+ */
+const MAX_RENEWED_MS = 86_400_000;
 
 /** Where a key's long-window buckets live: `lim:<keyId>:<window>`. */
 function bucketKey(keyId: string, window: LongWindow): string {
@@ -64,8 +96,18 @@ function bucketKey(keyId: string, window: LongWindow): string {
  * rate-limit headers are rendered from. Both come from the one evaluation, so a
  * route never asks the limiter a second question about a decision it already
  * made.
+ *
+ * `renew` pushes the slot's expiry out and is what the limiter's own timer
+ * calls. It is on the admission rather than the limiter because the slot's name
+ * is private: the holder is the only thing entitled to renew it, and handing
+ * out the name would let one request renew another's.
  */
-export type Admission = { release: () => void; headroom: HeadroomByDimension };
+export type Admission = {
+  release: () => void;
+  headroom: HeadroomByDimension;
+  /** Idempotent no-op for a key with no `concurrency` ceiling. */
+  renew: () => Promise<void>;
+};
 
 /**
  * One request's place in a key's counters, taken before the check could yield.
@@ -85,6 +127,12 @@ type Claim = {
   stamp: number;
   /** Whether the gauge was raised. `consume` claims a ring slot and nothing else. */
   gauge: boolean;
+  /**
+   * The slot's name, when the key has a `concurrency` ceiling. A rollback
+   * addresses this slot rather than whichever is nearest its expiry, so a
+   * refusal cannot hand back a live request's slot.
+   */
+  holder: string | undefined;
   before: { requests: WindowCounter; concurrency: number };
 };
 
@@ -189,18 +237,34 @@ export class ApiKeyRateLimiter {
    *
    * Returns the release for that slot. It is idempotent, and it must be called
    * at the true end of the request rather than when the response head is sent:
-   * a gauge is expired by nothing, so a leak locks the key out permanently and
-   * says nothing while it does.
+   * a gauge is expired by nothing the caller can see, so a leak locks the key
+   * out permanently and says nothing while it does.
+   *
+   * The slot is named — with a uuid this method owns, never `requestId` — and
+   * renewed while the request runs, because `GAUGE_TTL_MS` expires a live
+   * holder as readily as a dead one and no request deadline bounds it by
+   * default. The release stops the renewal; renewal itself stops at
+   * `MAX_RENEWED_MS`.
    */
   async admit(keyId: string, limits: LimitConfig, requestId?: string): Promise<Admission> {
     // An unlimited key allocates nothing, so an install that sets no limits
     // pays no memory for the mechanism — and renders no headers, because there
     // is no ceiling to report a distance from.
-    if (!anyLimit(limits)) return { release: () => {}, headroom: {} };
+    if (!anyLimit(limits)) return { release: () => {}, renew: async () => {}, headroom: {} };
 
     const now = this.now();
     this.limits.set(keyId, limits);
-    const claim = await this.claim(keyId, now, true);
+    // The limiter owns this name; it is deliberately NOT `requestId`.
+    //
+    // A named slot is idempotent by design — re-acquiring one name moves its
+    // expiry instead of adding a slot — so the name has to be unique per
+    // *admission*, and a caller-supplied id cannot be trusted to be. Two
+    // concurrent requests sharing one id would hold a single slot between
+    // them, and the ceiling would admit past itself: a limit that under-counts
+    // is worse than no limit, because the operator believes they set one.
+    // `requestId` stays what it was, a log correlation key.
+    const holder = configured(limits.concurrency) ? crypto.randomUUID() : undefined;
+    const claim = await this.claim(keyId, now, true, holder);
 
     let admitted = false;
     try {
@@ -210,17 +274,51 @@ export class ApiKeyRateLimiter {
       admitted = true;
 
       let released = false;
+      // Renewal is bounded, because an unbounded one turns a leak that used to
+      // heal into one that never does.
+      //
+      // The slot's TTL was what reclaimed a slot whose release never ran — a
+      // streaming `Response` nobody reads, a consumer that drops the events.
+      // A timer that renews forever keeps that slot, and its key's ceiling,
+      // occupied for the life of the process. So renewal stops at
+      // `MAX_RENEWED_MS`: past that the slot lapses on its own and the leak
+      // heals exactly as it did before renewal existed. A request legitimately
+      // running longer than the cap loses its slot and admits one extra
+      // alongside — the old failure, now reachable only after a day rather
+      // than after five minutes.
+      const renewUntil = now + MAX_RENEWED_MS;
+      const renew = async () => {
+        if (released || holder === undefined) return;
+        await this.coord.gauge.renew(keyId, holder, GAUGE_TTL_MS);
+      };
+      // Nothing to renew for a key without a concurrency ceiling: its gauge
+      // slot is not judged against anything.
+      const renewal =
+        holder === undefined
+          ? null
+          : setInterval(() => {
+              if (this.now() >= renewUntil) {
+                clearInterval(renewal ?? undefined);
+                return;
+              }
+              void renew();
+            }, RENEW_INTERVAL_MS);
+      // A renewal timer must never be what keeps the process alive: the
+      // request it tracks is the thing being waited on.
+      renewal?.unref?.();
+
       const release = () => {
         if (released) return;
         released = true;
-        void this.coord.gauge.release(keyId);
+        if (renewal !== null) clearInterval(renewal);
+        void this.coord.gauge.release(keyId, holder);
       };
-      return { release, headroom: decision.headroom };
+      return { release, renew, headroom: decision.headroom };
     } finally {
       // Where the claim stops being provisional. An admitted request keeps it
       // until its release; anything else — a refusal, or a failure while judging
-      // — gives every part of it back, because no window expires a gauge and a
-      // slot leaked here locks the key out permanently and silently.
+      // — gives every part of it back, because a leak here locks the key out
+      // for `MAX_RENEWED_MS` and says nothing while it does.
       if (!admitted) await this.rollback(keyId, claim);
     }
   }
@@ -263,18 +361,18 @@ export class ApiKeyRateLimiter {
    * burst. `Coord` promises each claim is visible the instant the call is
    * made, so the `await`s here yield after the record, never before it.
    */
-  private async claim(keyId: string, now: number, gauge: boolean): Promise<Claim> {
+  private async claim(keyId: string, now: number, gauge: boolean, holder?: string): Promise<Claim> {
     const ring = await this.coord.window.claim(keyId, WINDOW_MS["1m"], now);
     const concurrency = gauge
-      ? await this.coord.gauge.acquire(keyId, GAUGE_TTL_MS)
+      ? await this.coord.gauge.acquire(keyId, GAUGE_TTL_MS, holder)
       : await this.coord.gauge.read(keyId);
-    return { stamp: ring.stamp, gauge, before: { requests: ring.before, concurrency } };
+    return { stamp: ring.stamp, gauge, holder, before: { requests: ring.before, concurrency } };
   }
 
   /** Gives back every part of a claim, for a request that will not be served. */
   private async rollback(keyId: string, claim: Claim): Promise<void> {
     await this.coord.window.rollback(keyId, claim.stamp);
-    if (claim.gauge) await this.coord.gauge.release(keyId);
+    if (claim.gauge) await this.coord.gauge.release(keyId, claim.holder);
   }
 
   /**

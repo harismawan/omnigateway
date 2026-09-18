@@ -142,7 +142,10 @@ focused changed-behavior tests and every check in `.github/workflows/ci.yml`.
     `loadRegistry.ts` keep synchronous local map, read shared gauge only through `refresh()`
     before rank. Thread `coord` through **all** of call graph;
     `apps/gateway/test/cluster/sharedCoord.test.ts` fail on any site still reading module-scope
-    map. **`add` on unseeded bucket is no-op** (row already in store the seed read). Redis impl
+    map. **`add` on unseeded bucket is no-op** (row already in store the seed read). **Gauge slot
+    expire while holder live, memory impl included** — caller whose work outlast `ttlMs` must pass
+    `holder` and `renew`; named acquire idempotent, so name must be unique per *admission* and
+    never a caller-supplied id. Redis impl
     in `apps/gateway/src/coord/redis.ts` fail-open per table via `attempt()`, logged through
     closed `LogFields` keys `coord`/`coordFallback`. Layers, seeding, lease, pubsub, claim
     semantics: `ARCHITECTURE.md#clustering`. Design:
@@ -532,7 +535,24 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Keep `CONNECT_ATTEMPT_TIMEOUT_MS` above one Linux TCP retransmit (>1s); do not use Node's shorter
   Happy Eyeballs default.
 - Streaming responses need downstream `: keepalive` comments because provider heartbeats decoded
-  away. Keep server idle timeout above request deadline.
+  away; cadence is 10s, or 4s on `responses` (Codex drop a connection silent ~5s).
+  `requestDeadlineMs` default **0** = unlimited. The three **inference** routes alone clear Bun's
+  per-request ceiling with `server.timeout(request, 0)` — `/v1/models` and
+  `/v1/messages/count_tokens` do not, so server `idleTimeout: 255` still bound them.
+  Non-streaming request get no heartbeat, so unlimited one is bound
+  by the intermediary's read timeout, not by us. Positive deadline is **not** bounded by 255 — the
+  setting is consumed only by inference dispatch, whose routes cleared their ceiling.
+- **A gauge slot expires while its holder is live, in every impl** (`liveSlots` filters on expiry),
+  so work that can outlast a TTL must name its slot and `renew` it. `GAUGE_TTL_MS` (concurrency
+  ceiling) and `SLOT_TTL_MS` (load) do, on a third-of-TTL timer that is `unref`ed and cleared by the
+  release, and **capped at `MAX_RENEWED_MS`** — expiry is what reclaims a slot whose release never
+  ran, so renewing forever turn a five-minute leak permanent. `PROBE_TTL_MS` deliberately does
+  **not** renew — a bounded double-probe beat one long probe holding a recovering pair out of
+  rotation. **The slot name is the limiter's own uuid, never `requestId`**: a named acquire is
+  idempotent, so a caller-supplied id shared by two requests makes one slot and the ceiling admits
+  past itself. `""` is refused as a holder in both impls (Redis spend it as its unnamed sentinel).
+  Pins: `packages/coord/test/{memory,contract}.test.ts`,
+  `apps/gateway/test/routes/rateLimit.test.ts`, `apps/gateway/test/auth/rateLimit.test.ts`.
 - Socket registry close every connection **before** `app.stop()`; its `stopLoops` position is
   what make that true. `stop()` called without `true`, so it drain. Close with `1001`; `4401` mean
   "do not reconnect", for expired session alone.

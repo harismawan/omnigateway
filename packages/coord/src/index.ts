@@ -33,12 +33,34 @@ export interface Coord {
      * Raises the gauge and reports what it held before.
      *
      * `ttlMs` bounds how long a slot is held by a process that never releases
-     * it. An in-memory gauge dies with its process and ignores it; a shared one
-     * cannot know a holder died any other way.
+     * it. Expiry applies in **every** implementation, the in-memory one
+     * included, so the TTL bounds a live holder as much as a dead one: a
+     * caller whose work can outlast `ttlMs` must name a `holder` and `renew`,
+     * or its slot stops being counted while it is still running.
+     *
+     * A named slot is addressable and idempotent — re-acquiring the same
+     * `holder` moves its expiry rather than adding a second slot — which is
+     * what lets `renew` and a precise `release` exist. An anonymous slot
+     * cannot be either, and is only correct for work that finishes well
+     * inside the TTL.
+     *
+     * A `holder` must be a non-empty string. The empty string is rejected
+     * rather than accepted as a name, because the Redis implementation spends
+     * it as its "unnamed" sentinel on the wire and would silently treat a
+     * blank-named release as an anonymous one.
      */
-    acquire(key: string, ttlMs: number): Promise<number>;
-    /** Lowers the gauge. Never below zero. */
-    release(key: string): Promise<void>;
+    acquire(key: string, ttlMs: number, holder?: string): Promise<number>;
+    /**
+     * Moves a named slot's expiry `ttlMs` further out. Silent no-op when the
+     * holder does not hold one, which is what a renewal racing its own release
+     * looks like.
+     */
+    renew(key: string, holder: string, ttlMs: number): Promise<void>;
+    /**
+     * Lowers the gauge. Never below zero. With a `holder`, drops that slot;
+     * without one, drops the slot nearest its own expiry.
+     */
+    release(key: string, holder?: string): Promise<void>;
     read(key: string): Promise<number>;
     /** Every held key under `prefix`, with its count. Zero counts are absent. */
     snapshot(prefix: string): Promise<ReadonlyMap<string, number>>;
@@ -162,11 +184,30 @@ export type MemoryCoordOptions = {
 export function memoryCoord(options: MemoryCoordOptions = {}): MemoryCoord {
   const now = options.now ?? (() => Date.now());
   const windows = new Map<string, SlidingWindow>();
-  /** Slot expiries per key. A slot past its expiry is a holder that died. */
-  const gauges = new Map<string, number[]>();
-  const liveSlots = (key: string): number[] => {
+  /**
+   * Slots per key: an expiry, and a holder name when the caller gave one.
+   *
+   * A named slot is addressable, so `renew` can move exactly one expiry and
+   * `release` can drop exactly one slot. Anonymous slots keep the older
+   * behaviour and are told apart by `holder === undefined`, never by position.
+   */
+  const gauges = new Map<string, { expiresAt: number; holder?: string }[]>();
+  /**
+   * The empty string is not a name.
+   *
+   * The Redis implementation spends `""` as its "unnamed" sentinel on the
+   * wire, so accepting it here would make the two disagree: memory would
+   * address a blank-named slot precisely while Redis popped whichever slot was
+   * nearest expiry. Refusing it in both keeps one contract.
+   */
+  const named = (holder: string | undefined): string | undefined => {
+    if (holder === undefined) return undefined;
+    if (holder === "") throw new TypeError("gauge holder must be a non-empty string");
+    return holder;
+  };
+  const liveSlots = (key: string): { expiresAt: number; holder?: string }[] => {
     const at = now();
-    const held = (gauges.get(key) ?? []).filter((expiresAt) => expiresAt > at);
+    const held = (gauges.get(key) ?? []).filter((slot) => slot.expiresAt > at);
     if (held.length === 0) gauges.delete(key);
     else gauges.set(key, held);
     return held;
@@ -228,19 +269,50 @@ export function memoryCoord(options: MemoryCoordOptions = {}): MemoryCoord {
     },
 
     gauge: {
-      acquire(key, ttlMs) {
+      acquire(key, ttlMs, rawHolder) {
+        const holder = named(rawHolder);
         const held = liveSlots(key);
+        const expiresAt = now() + ttlMs;
+        // Re-acquiring under the same name moves that slot rather than adding
+        // one, so a retry cannot inflate the count a ceiling is judged on.
+        const mine = holder === undefined ? -1 : held.findIndex((s) => s.holder === holder);
+        if (mine !== -1 && holder !== undefined) {
+          held[mine] = { expiresAt, holder };
+          gauges.set(key, held);
+          // `before` excludes the caller's own slot: what the gauge held
+          // besides it, which is the question a ceiling asks.
+          return Promise.resolve(held.length - 1);
+        }
         const before = held.length;
-        held.push(now() + ttlMs);
+        held.push(holder === undefined ? { expiresAt } : { expiresAt, holder });
         gauges.set(key, held);
         return Promise.resolve(before);
       },
-      release(key) {
-        // The oldest slot goes: which slot is not a distinction the count
-        // carries, and the oldest is the one nearest its own expiry.
+      renew(key, holder, ttlMs) {
+        named(holder);
         const held = liveSlots(key);
-        held.sort((x, y) => x - y).shift();
+        const mine = held.findIndex((slot) => slot.holder === holder);
+        // Absent is not an error: a renewal racing its own release, or landing
+        // after the slot already lapsed, has nothing to move.
+        if (mine !== -1) {
+          held[mine] = { expiresAt: now() + ttlMs, holder };
+          gauges.set(key, held);
+        }
+        return Promise.resolve();
+      },
+      release(key, holder) {
+        named(holder);
+        const held = liveSlots(key);
+        if (holder === undefined) {
+          // The oldest slot goes: which slot is not a distinction the count
+          // carries, and the oldest is the one nearest its own expiry.
+          held.sort((x, y) => x.expiresAt - y.expiresAt).shift();
+        } else {
+          const mine = held.findIndex((slot) => slot.holder === holder);
+          if (mine !== -1) held.splice(mine, 1);
+        }
         if (held.length === 0) gauges.delete(key);
+        else gauges.set(key, held);
         return Promise.resolve();
       },
       read(key) {

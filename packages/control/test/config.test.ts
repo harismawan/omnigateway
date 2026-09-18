@@ -13,6 +13,23 @@ test("request deadline accepts zero and rejects negative values", () => {
   expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, requestDeadlineMs: -1 })).toThrow();
 });
 
+/**
+ * The default is unlimited, and that is a decision rather than an oversight.
+ *
+ * A finite default cuts off long agent turns mid-stream, and the three
+ * inference routes already clear Bun's per-request socket ceiling with
+ * `server.timeout(request, 0)`, so no socket budget argues for one.
+ *
+ * Restoring a positive default would also silently re-tighten two fixed TTLs
+ * that are documented against this value and are no longer bounded by it:
+ * `GAUGE_TTL_MS` (the concurrency ceiling, `auth/rateLimit.ts`) and
+ * `SLOT_TTL_MS` (load accounting, `dispatch/loadRegistry.ts`).
+ */
+test("the default request deadline is unlimited", () => {
+  expect(DEFAULT_SETTINGS.requestDeadlineMs).toBe(0);
+  expect(settingsSchema.parse(DEFAULT_SETTINGS).requestDeadlineMs).toBe(0);
+});
+
 test("applies defaults for everything but the encryption key", () => {
   const config = loadConfig(base);
   expect(config.port).toBe(9000);

@@ -28,6 +28,13 @@ early rather than let past a ceiling you set. If the database cannot answer they
 stop enforcing and the gateway logs it, while `1m` and `concurrency` are held in
 memory and go on enforcing exactly.
 
+`concurrency` holds for as long as a request runs: its slot is renewed while
+the request is alive, so a stream that runs for an hour keeps occupying one.
+Two things still end a slot early — a process that dies mid-request (its slot
+lapses five minutes later) and a request that outlives a day, where renewal
+stops so a slot whose release never ran cannot be held for the life of the
+gateway.
+
 Limits are editable after the key exists, unlike `--no-bodies`. `omni keys
 list` prints a compact summary; the full matrix and what has gone against it
 need one key's id:
