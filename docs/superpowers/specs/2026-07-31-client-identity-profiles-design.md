@@ -93,11 +93,11 @@ binaries. `${...}` marks an environment-substitutable value.
 
 | Header | Value |
 | --- | --- |
-| `User-Agent` | `claude-cli/${2.1.258} (external, cli)` |
+| `User-Agent` | `claude-cli/${2.1.278} (external, cli)` |
 | `x-app` | `cli` |
 | `anthropic-dangerous-direct-browser-access` | `true` |
 | `X-Stainless-Lang` | `js` |
-| `X-Stainless-Package-Version` | `${0.94.0}` |
+| `X-Stainless-Package-Version` | `${0.112.1}` |
 | `X-Stainless-OS` | from `stainlessHost` |
 | `X-Stainless-Arch` | from `stainlessHost` |
 | `X-Stainless-Runtime` | `node` |
@@ -262,7 +262,7 @@ Real Claude Code prepends a system block carrying a billing header and an
 integrity token over the request body:
 
 ```
-system[0] = "x-anthropic-billing-header: cc_version=2.1.258.<3 hex>; cc_entrypoint=cli; cch=<5 hex>;"
+system[0] = "x-anthropic-billing-header: cc_version=2.1.278.<3 hex>; cc_entrypoint=cli; cch=<5 hex>;"
 ```
 
 The token is `xxHash64(serialized_body, 0x6e52736ac806831e) & 0xFFFFF`, rendered
@@ -277,9 +277,9 @@ against canonical XXH64 vectors: `""` → `ef46db3751d8e999`, `"a"` →
 OmniRoute's `xxhash-wasm` import exists because Node has no built-in.
 
 `cc_version` is the CLI version plus a three-hex-digit suffix that is **not** a
-build revision. Read from the 2.1.258 bundle: the CLI takes the characters at
-indices 4, 7 and 20 of the first user text (`"0"` where the text is shorter),
-prepends the salt `59cf53e54c78`, appends the version string, SHA-256s that and
+build revision. Verified again from the 2.1.278 bundle: the CLI takes the characters at
+indices 4, 7 and 20 of the first non-meta user text (`"0"` where the text is shorter),
+prepends the unchanged salt `59cf53e54c78`, appends the version string, SHA-256s that and
 keeps the first three hex digits. So the suffix is one value per conversation.
 `ccVersionSuffix` in `body.ts` reproduces it; the salt is pinned there beside
 `ANTHROPIC_CLI_VERSION`, and a version bump that does not also re-read the salt
@@ -335,7 +335,7 @@ a header no real client would emit.
 
 ```
 OMNI_UA_ANTHROPIC=                          # replaces the whole User-Agent string
-OMNI_ANTHROPIC_CLI_VERSION=2.1.258
+OMNI_ANTHROPIC_CLI_VERSION=2.1.278
 OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION=0.112.1
 OMNI_ANTHROPIC_STAINLESS_RUNTIME_VERSION=v26.3.0
 OMNI_ANTHROPIC_STAINLESS_OS=                # blank = derive from host

@@ -241,8 +241,8 @@ test("applyAnthropicSystem is idempotent", () => {
 test("ccVersionSuffix matches the CLI's own derivation", () => {
   // Characters 4, 7 and 20 of the first user text, salted and hashed with the
   // version. Values track ANTHROPIC_CLI_VERSION, so a default bump moves them.
-  expect(ccVersionSuffix("Fix the auth middleware, please. Thanks")).toBe("bc4");
+  expect(ccVersionSuffix("Fix the auth middleware, please. Thanks")).toBe("e33");
   // Short text pads with "0", so empty and "hi" collapse to the same suffix.
-  expect(ccVersionSuffix("")).toBe("1e2");
-  expect(ccVersionSuffix("hi")).toBe("1e2");
+  expect(ccVersionSuffix("")).toBe("4ea");
+  expect(ccVersionSuffix("hi")).toBe("4ea");
 });
