@@ -66,7 +66,13 @@ const CCH_MASK = 0xfffffn;
 /** Salt the CLI hashes its `cc_version` suffix with (2.1.258, `LFo`). */
 const CCV_SALT = "59cf53e54c78";
 
-const BILLING_PREFIX = "x-anthropic-billing-header:";
+/**
+ * Exported for the same reason as `AGENT_PREAMBLE`: `antigravity/wire.ts` drops
+ * the paragraph that opens with it. A prefix rather than a whole string because
+ * the rest of the line is per-conversation — `cc_version`'s suffix hashes the
+ * first user message and `cch` hashes the body.
+ */
+export const BILLING_PREFIX = "x-anthropic-billing-header:";
 /**
  * Exported because `antigravity/wire.ts` has to drop this exact paragraph —
  * Cloud Code fingerprints it and answers `429 RESOURCE_EXHAUSTED`. One copy, so

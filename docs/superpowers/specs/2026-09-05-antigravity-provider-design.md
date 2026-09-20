@@ -746,3 +746,76 @@ normalise every blank-line run in a prompt this has no business editing.
 
 Verified against the live account 20 seconds apart, byte-identical but for that
 paragraph: restored, `429`; the encoder's own body, `200`.
+
+### The same 429, fifteen days later, on the line that was fine
+
+Reported 2026-09-20: `gemini-3.8-flash-high` unusable from Claude Code while
+`hermes` and `devops` kept working off the same credential. Same signature as
+above — `429 RESOURCE_EXHAUSTED`, `quota_windows` at `0` of `100` on both
+windows — but the message was the *bare* `Resource has been exhausted (e.g.
+check quota).` with no `details`, where the preamble fingerprint returns the
+detailed `RATE_LIMIT_EXCEEDED` form.
+
+**The table above says `billing-header block alone | 200`. It is now `429`.**
+The upstream filter grew an entry; the 2026-09-05 row was a correct measurement
+of a surface that has since changed. Re-probe rather than reasoning from either
+dated table.
+
+Bisected by replaying a stored 110KB refusal (`req_eff875c0`, the captured
+`parameters` schemas rebuilt), each probe spaced past the 60s cooldown:
+
+| variant | bytes | answer |
+| --- | --- | --- |
+| as captured | 110,653 | **429** |
+| no `tools` | 50,006 | **429** |
+| history replaced with `Say OK.` | 71,877 | **429** |
+| `generationConfig` removed, and replaced with a working client's | ~110,600 | **429** |
+| **no `systemInstruction`** | 99,741 | **200** |
+
+Then the prompt, then the line:
+
+| system prompt | answer |
+| --- | --- |
+| full, 10,712 chars | **429** |
+| second half | 200 |
+| first 200 chars | **429** |
+| **`x-anthropic-billing-header: cc_version=2.1.278.0ed; cc_entrypoint=cli;`** | **429** |
+| `You are Claude Code, Anthropic's official CLI for Claude.` | 200 |
+| the full prompt minus that one line | 200 |
+
+And the line itself, which narrows further than the preamble did:
+
+| text | answer |
+| --- | --- |
+| **`x-anthropic-billing-header:`** | **429** |
+| `x-anthropic-billing-header` (no colon) | 200 |
+| `X-Anthropic-Billing-Header:` | 200 |
+| `x-anthropic-billing-header :` | 200 |
+| `x-openai-billing-header:`, `x-foo-billing-header:` | 200 |
+| `cc_version=2.1.278.0ed; cc_entrypoint=cli;` | 200 |
+| the string in a **user** turn, no system | 200 |
+| the string buried mid-paragraph in system | **429** |
+
+Exact, case-sensitive, system-text only, and the colon is load-bearing. So
+`dropFingerprints` matches this one by **prefix** where it matches the preamble
+by equality: the rest of the line is per-conversation, since `cc_version`'s
+suffix hashes the first user message and `cch` hashes the body. Prefix rather
+than substring, though the upstream refuses it mid-paragraph too — a prompt that
+*quotes* the line is the operator's text, and this encoder deleting a paragraph
+around it would be editing a prompt to satisfy a filter that may move again.
+Recorded as `antigravity:billing-header-dropped`, separately from the preamble:
+one prompt can carry both and a shared constant would not say which was refused.
+
+Claude Code sends this block on **every** request, not subagents alone, which is
+why this took the whole model out rather than one code path. Verified on the
+live account: the captured body verbatim, `429`; the same body with that one
+line removed, `200`.
+
+The 60s bench is a separate finding from the same investigation, left alone
+here: `decode.ts` maps every `RESOURCE_EXHAUSTED` to `RATE_LIMIT` and parses no
+`RetryInfo`, so `recordFailure`'s `DEFAULT_RATE_LIMIT_MS` parks the credential
+for a minute on a 429 whose own `retryDelay` reads `483ms`. With one antigravity
+credential that turns each refusal into a minute of `NO_CANDIDATES` — 236 of
+them against 51 real 429s on the reporting key. Measured separately: the account
+admits exactly **10 concurrent** requests on this model, `200`×10 and
+`RATE_LIMIT_EXCEEDED` for the rest at bursts of 12, 30 and 60.

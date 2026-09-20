@@ -1,5 +1,5 @@
 import type { ChatRequest, ContentBlock, ToolChoice } from "@omni/ir";
-import { AGENT_PREAMBLE } from "../body.ts";
+import { AGENT_PREAMBLE, BILLING_PREFIX } from "../body.ts";
 import { systemText } from "../system.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { MAX_OUTPUT_TOKENS } from "./models.ts";
@@ -215,15 +215,56 @@ const PRUNED = "antigravity:tool-schema-pruned";
  */
 const AGENT_PREAMBLE_DROPPED = "antigravity:agent-preamble-dropped";
 
-function dropAgentPreamble(system: string, note: (d: string) => void): string {
+/**
+ * **The second fingerprint, and the same disguise.**
+ *
+ * Measured 2026-09-20 by replaying a stored 110KB refusal against a live
+ * account whose quota RPC read 0% of both windows. Removing the tools, the
+ * history or the `generationConfig` each still answered 429; removing the
+ * `systemInstruction` answered 200. Bisecting that: the whole prompt minus its
+ * first line answered 200, and the first line **alone** — 70 characters —
+ * answered 429. Narrowing the line: `x-anthropic-billing-header:` by itself is
+ * refused, and `x-anthropic-billing-header` without the colon,
+ * `X-Anthropic-Billing-Header:`, `x-openai-billing-header:` and the
+ * `cc_version=…; cc_entrypoint=cli;` remainder each answer 200. The same string
+ * in a *user* turn answers 200, so the match is on system text alone.
+ *
+ * Claude Code sends it as its own leading system block on **every** request,
+ * which is why this one took a whole model out rather than subagents alone.
+ *
+ * Prefix rather than equality, unlike the preamble: the rest of the line is
+ * per-conversation. Matching a paragraph that merely *contains* the string
+ * would delete prompt text that happens to quote it — a grep output pasted into
+ * a system prompt. **That leaves a known hole**: the upstream refuses the string
+ * mid-paragraph too, so such a prompt still answers 429. Deleting the operator's
+ * surrounding text to avoid it is the worse trade, and the gap is pinned rather
+ * than left to be rediscovered.
+ */
+const BILLING_HEADER_DROPPED = "antigravity:billing-header-dropped";
+
+function dropFingerprints(system: string, note: (d: string) => void): string {
   // CRLF included: a paragraph separated that way is still a paragraph to the
   // upstream, and a split that misses it leaves the refused text on the wire.
   const paragraphs = system.split(/(?:\r?\n){2,}/);
-  const kept = paragraphs.filter((p) => p.trim() !== AGENT_PREAMBLE);
+  let preamble = false;
+  let billing = false;
+  const kept = paragraphs.filter((p) => {
+    const trimmed = p.trim();
+    if (trimmed === AGENT_PREAMBLE) {
+      preamble = true;
+      return false;
+    }
+    if (trimmed.startsWith(BILLING_PREFIX)) {
+      billing = true;
+      return false;
+    }
+    return true;
+  });
   // The untouched string back, not a rejoined copy of itself: rebuilding would
   // normalise every blank-line run in a prompt this has no business editing.
   if (kept.length === paragraphs.length) return system;
-  note(AGENT_PREAMBLE_DROPPED);
+  if (preamble) note(AGENT_PREAMBLE_DROPPED);
+  if (billing) note(BILLING_HEADER_DROPPED);
   return kept.join("\n\n");
 }
 
@@ -712,7 +753,7 @@ export function toAntigravityWire(
   };
 
   const joined = systemText(req.system, "antigravity", note);
-  const system = joined === undefined ? undefined : dropAgentPreamble(joined, note);
+  const system = joined === undefined ? undefined : dropFingerprints(joined, note);
   // `trim` rather than `length`: dropping the preamble out of a block that held
   // little else leaves whitespace, and a `systemInstruction` of one space is an
   // instruction that says nothing and still costs a part.

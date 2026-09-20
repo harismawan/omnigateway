@@ -3,7 +3,7 @@ import type { ChatRequest } from "@omni/ir";
 import { buildToolCloak, cloakName, uncloakName } from "../src/antigravity/cloak.ts";
 import { ANTIGRAVITY_MODELS } from "../src/antigravity/models.ts";
 import { toAntigravityWire } from "../src/antigravity/wire.ts";
-import { AGENT_PREAMBLE } from "../src/body.ts";
+import { AGENT_PREAMBLE, BILLING_PREFIX } from "../src/body.ts";
 
 const base: ChatRequest = { model: "gemini-3.6-flash-high", messages: [], stream: true };
 
@@ -144,6 +144,96 @@ describe("message mapping", () => {
       parts: [{ text: "You are an agent, built on the Claude Agent SDK." }],
     });
     expect(degradations).not.toContain("antigravity:agent-preamble-dropped");
+  });
+
+  test("drops Claude Code's billing header block, which the upstream refuses too", () => {
+    const { body, degradations } = build({
+      system: [
+        { type: "text", text: `${BILLING_PREFIX} cc_version=2.1.278.0ed; cc_entrypoint=cli;` },
+        { type: "text", text: "You are Claude Code." },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body.request.systemInstruction).toEqual({ parts: [{ text: "You are Claude Code." }] });
+    expect(degradations).toContain("antigravity:billing-header-dropped");
+  });
+
+  test("leaves a paragraph that only quotes the billing header alone", () => {
+    // Prefix, not substring: a prompt pasting the line into a sentence is text
+    // the upstream takes, and deleting it would be editing the operator's prompt.
+    const text = `the CLI sends ${BILLING_PREFIX} cc_version=1; on every request`;
+    const { body, degradations } = build({
+      system: [{ type: "text", text }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body.request.systemInstruction).toEqual({ parts: [{ text }] });
+    expect(degradations).not.toContain("antigravity:billing-header-dropped");
+  });
+
+  test("drops a fingerprint paragraph the client indented or padded", () => {
+    // The match is on the trimmed paragraph: a client that pads its blocks
+    // still puts the refused string on the wire.
+    const { body, degradations } = build({
+      system: [{ type: "text", text: `  ${BILLING_PREFIX} cch=00000; \n\n  ${AGENT_PREAMBLE}  ` }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body.request.systemInstruction).toBeUndefined();
+    expect(degradations).toContain("antigravity:billing-header-dropped");
+    expect(degradations).toContain("antigravity:agent-preamble-dropped");
+  });
+
+  test("leaves the billing header's near misses alone, as the upstream does", () => {
+    // Each of these answered 200 live on 2026-09-20; the colon and the casing
+    // are both load-bearing, so a looser match here deletes operator text the
+    // upstream would have taken.
+    for (const text of [
+      "x-anthropic-billing-header cc_version=1;",
+      "X-Anthropic-Billing-Header: cc_version=1;",
+      `${BILLING_PREFIX.slice(0, -1)} : cc_version=1;`,
+      "x-openai-billing-header: cc_version=1;",
+    ]) {
+      const { body, degradations } = build({
+        system: [{ type: "text", text }],
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      });
+      expect(body.request.systemInstruction).toEqual({ parts: [{ text }] });
+      expect(degradations).not.toContain("antigravity:billing-header-dropped");
+    }
+  });
+
+  test("drops every billing paragraph, wherever it sits and however many", () => {
+    // Not the first paragraph, after the preamble has already matched, and more
+    // than one: a filter that stops at any of those leaves a refused string on
+    // the wire, and the 429 that follows names the account instead.
+    const { body, degradations } = build({
+      system: [
+        { type: "text", text: AGENT_PREAMBLE },
+        { type: "text", text: "keep me" },
+        { type: "text", text: `${BILLING_PREFIX} cch=00000;` },
+        { type: "text", text: "keep me too" },
+        { type: "text", text: `${BILLING_PREFIX} cc_version=2.1.278.0ed;` },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body.request.systemInstruction).toEqual({
+      parts: [{ text: "keep me\n\nkeep me too" }],
+    });
+    expect(degradations).toContain("antigravity:billing-header-dropped");
+    expect(degradations).toContain("antigravity:agent-preamble-dropped");
+  });
+
+  test("records both fingerprints when a prompt carries both", () => {
+    const { body, degradations } = build({
+      system: [
+        { type: "text", text: `${BILLING_PREFIX} cch=00000;` },
+        { type: "text", text: AGENT_PREAMBLE },
+        { type: "text", text: "keep me" },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body.request.systemInstruction).toEqual({ parts: [{ text: "keep me" }] });
+    expect(degradations).toContain("antigravity:billing-header-dropped");
+    expect(degradations).toContain("antigravity:agent-preamble-dropped");
   });
 
   test("a mid-conversation system turn keeps its position as a user turn", () => {
