@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { moveToResponsesText } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 
 export type MuseResponsesBody = {
@@ -276,6 +277,11 @@ export function toMuseWire(
   const key = suppliedKey(req) ?? cacheKey(req, instructions ?? "", input[0]);
 
   Object.assign(body, req.vendor?.openai ?? {});
+
+  // The Chat Completions spelling, which this API refuses; see the note in
+  // `openai/wire.ts`. Same bag, same backend shape, same translation.
+  const moved = moveToResponsesText(req, body, "muse");
+  if (moved !== undefined) note(moved);
 
   // Written **after** the vendor merge, and the order is the whole point. The
   // merge copies the client's bag verbatim, including a `prompt_cache_key` that

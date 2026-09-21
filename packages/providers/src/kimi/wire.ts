@@ -1,4 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { readResponseFormat, requestsResponseFormat } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 
 export type ChatBody = {
@@ -119,6 +120,25 @@ export function toChatWire(
   if (req.reasoning !== undefined) note("kimi:reasoning-dropped");
 
   Object.assign(body, req.vendor?.[vendor] ?? {});
+
+  // Only when the merge above did not already carry it, which is the same
+  // question as "which bag was merged". `custom/` calls this encoder with
+  // `"openai"` — the bag every OpenAI-shaped ingress writes — so there the
+  // client's own `response_format` is already in the body, already in this
+  // endpoint's spelling, and this is a no-op. The kimi arm merges a bag no
+  // ingress produces, so without this the field is lost with nothing recorded.
+  const format = readResponseFormat(req);
+  if (format !== undefined && body.response_format === undefined) {
+    body.response_format = {
+      type: "json_schema",
+      json_schema: { name: format.name, schema: format.schema, strict: true },
+    };
+    note("kimi:response-format-translated");
+  } else if (format === undefined && requestsResponseFormat(req)) {
+    // Asked, and the reader refused — a schema too deep to serialize. Dropping
+    // it is correct; dropping it without a word is not.
+    note("kimi:response-schema-too-deep");
+  }
 
   return { body, degradations };
 }

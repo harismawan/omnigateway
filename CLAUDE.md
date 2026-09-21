@@ -338,6 +338,38 @@ Translation invariants:
 - Outbound: OpenAI surface render canonical thinking as `reasoning_content` (stream deltas and
   non-streaming field); Anthropic surface keep dialect, unsigned blocks suppressed.
 - Carry `anthropic-beta` as both header and body passthrough. Never synthesize missing beta.
+- **A structured-output request arrives in three spellings and leaves in four, and the wrong one
+  fails the request.** Each ingress writes the bag named after its own *surface* —
+  `/v1/chat/completions` → `vendor.openai.response_format`, `/v1/responses` →
+  `vendor.openai.text.format`, `/v1/messages` → `vendor.anthropic.output_config.format` — so a
+  request kept its schema only when ingress and target happened to share a dialect.
+  `packages/providers/src/responseFormat.ts` is the only reader, reads all three at their own depth
+  in that precedence, and refuses a malformed earlier spelling rather than falling through to the
+  next. Outbound: `text.format` (Responses-shaped, via the shared `moveToResponsesText`),
+  `output_config.format` (anthropic), `generationConfig.responseSchema` (antigravity),
+  `response_format` (chat-completions). **The vendor merge is bag-shaped, not endpoint-shaped**:
+  every encoder whose bag can carry a foreign spelling must delete it — even when the schema could
+  not be read, since an unreadable field is still one the backend never defined. A client's own
+  `text.format` / `output_config` outranks the translation, but only a **readable** one, meaning
+  what `readableFormat` means: a record with a `json_schema` discriminator and a record schema, so
+  `{format: null}` and `{type: "wrong"}` alike lose to a valid earlier spelling. Anthropic's vendor
+  bag is merged whole, so anything the encoder wrote to `output_config` — the translation, and the
+  reasoning path's `effort` — is carried into the object replacing it, **without** outranking the
+  client's own members; with nothing to rescue the bag passes through untouched.
+  **Anthropic's schema is closed whichever route it took**: that backend refuses an object node not
+  explicitly `additionalProperties: false`, at every depth and including one the client set to
+  `true` (measured 2026-09-21), so `closeObjects` runs after the vendor merge and reports through
+  `stats` — comparing before to after with `JSON.stringify` recurses as deep as the schema and
+  overflows the stack the walker's depth cap exists to prevent. That cap binds the **reader** too
+  (`fromSpec`), because every codec serializes with `JSON.stringify`. Both walks count **schema
+  levels through the same position tables**: converting raw object levels with a multiplier fits
+  only positions that cross a container first (`properties`), and a schema nested through `items`
+  was read at twice the depth the walker would close, then sent half-closed. A refusal is never
+  silent — the encoder reports `<provider>:response-schema-too-deep`. Tool `input_schema` is never
+  closed. That backend also rejects tuple-form `items` and `patternProperties` outright, whoever
+  wrote them. Pins: `packages/providers/test/responseFormat.test.ts`,
+  `apps/gateway/test/ingress/responseFormatRouting.test.ts` (3x9 matrix: arrives in the right
+  spelling, and no other spelling rides along).
 - `ToolDef` discriminant is `kind`: `"portable"` or `"provider"` plus real `ProviderId`.
   `ProviderToolDef` is provider arm; `AnthropicToolDef` is **narrowing** requiring `family`.
   `AnthropicToolDef` carry exact versioned `type`, never normalized or upgraded; versions in
