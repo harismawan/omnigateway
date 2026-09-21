@@ -5,7 +5,12 @@ import {
   estimateInputPrefixes,
   GatewayError,
 } from "@omni/ir";
-import { closeObjects, readableFormat, readResponseFormatResult } from "../responseFormat.ts";
+import {
+  canSerialize,
+  closeObjects,
+  readableFormat,
+  readResponseFormatResult,
+} from "../responseFormat.ts";
 import { systemTextBlocks } from "../system.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { anthropicReasoningForm } from "./models.ts";
@@ -797,20 +802,8 @@ function closeOutputConfigSchema(body: AnthropicBody, note: (d: string) => void)
   // `stats` rather than comparing before to after: a schema deep enough to need
   // the walker's depth cap is deep enough to overflow the stack in
   // `JSON.stringify`, which would defeat the cap by crashing right after it.
-  if (stats.truncated) {
-    // The cap stopped the walk, but the schema itself is still that deep, and
-    // the codec serializes this body with `JSON.stringify` — which recurses just
-    // as far and throws. Sending it half-closed was the intent; it is not
-    // reachable, so the schema goes rather than the request.
+  if (stats.truncated || !canSerialize(closed)) {
     const { format: _tooDeep, ...rest } = config;
-    body.output_config = rest;
-    note("anthropic:response-schema-too-deep");
-    return;
-  }
-  try {
-    JSON.stringify(closed);
-  } catch {
-    const { format: _unserializable, ...rest } = config;
     body.output_config = rest;
     note("anthropic:response-schema-too-deep");
     return;
