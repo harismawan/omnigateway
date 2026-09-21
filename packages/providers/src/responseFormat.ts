@@ -119,16 +119,37 @@ export function readableFormat(spec: unknown): spec is Record<string, unknown> {
 /**
  * Whether a value can be serialized to JSON without throwing.
  *
- * Catches in-memory values from plugins that cannot be represented in JSON
- * (BigInt, objects with hostile `toJSON` hooks throwing TypeError).
+ * Traverses unique objects iteratively with a seen set so a shared-node DAG does
+ * not expand exponentially. Catches in-memory values from plugins that cannot be
+ * represented in JSON (BigInt, objects with hostile `toJSON` hooks).
  */
 export function canSerialize(value: unknown): boolean {
-  try {
-    JSON.stringify(value);
-    return true;
-  } catch {
-    return false;
+  if (typeof value === "bigint") return false;
+  if (typeof value !== "object" || value === null) return true;
+  const seen = new WeakSet<object>();
+  const stack: object[] = [value];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node === undefined) break;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    if (typeof (node as { toJSON?: unknown }).toJSON === "function") {
+      try {
+        const res = (node as { toJSON: () => unknown }).toJSON();
+        if (typeof res === "bigint") return false;
+      } catch {
+        return false;
+      }
+    }
+    const values = Array.isArray(node) ? node : Object.values(node);
+    for (const val of values) {
+      if (typeof val === "bigint") return false;
+      if (typeof val === "object" && val !== null) {
+        stack.push(val);
+      }
+    }
   }
+  return true;
 }
 
 /** The `{type?, name?, schema}` leaf all three spellings share. */
