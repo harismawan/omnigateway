@@ -1,6 +1,6 @@
 import type { ChatRequest, ContentBlock, ToolChoice } from "@omni/ir";
 import { AGENT_PREAMBLE, BILLING_PREFIX } from "../body.ts";
-import { readResponseFormat, requestsResponseFormat } from "../responseFormat.ts";
+import { readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { MAX_OUTPUT_TOKENS } from "./models.ts";
@@ -845,11 +845,12 @@ export function toAntigravityWire(
   // what makes a draft-07 schema survive the proto — the same reason tool
   // schemas go through it. Placed before the ceiling repairs below so the
   // config is complete when they read it.
-  const format = readResponseFormat(req);
-  if (format !== undefined) {
+  const read = readResponseFormatResult(req);
+  if (read.kind === "readable") {
+    const format = read.format;
     generationConfig.responseSchema = pruneSchema(format.schema, note);
     note("antigravity:response-format-translated");
-  } else if (requestsResponseFormat(req)) {
+  } else if (read.kind === "tooDeep") {
     // Asked, and the reader refused — a schema too deep to serialize. Dropping
     // it is correct; dropping it without a word is not.
     note("antigravity:response-schema-too-deep");

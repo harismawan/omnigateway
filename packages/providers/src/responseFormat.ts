@@ -49,7 +49,27 @@ export const isRecord = (v: unknown): v is Record<string, unknown> =>
  * already accepted it, and failing the request at encode time would turn a
  * field the gateway used to ignore into a hard error.
  */
-export function readResponseFormat(req: ChatRequest): ResponseFormat | undefined {
+/**
+ * What the client asked for, and — when nothing usable came back — why.
+ *
+ * One reader rather than a predicate beside it: "asked and we refused" and
+ * "never asked" are different facts, and an encoder deciding between them from a
+ * second walk of the same three spellings gets a *guess*. It cannot tell a
+ * schema too deep to send from one whose discriminator was misspelled, so it
+ * reported both as too deep — and the second walk drifted from the first the
+ * moment either changed.
+ *
+ * `malformed` and `absent` are deliberately not distinguished by callers today:
+ * a malformed field is left to the backend to refuse, exactly as it was before
+ * any of this existed. Only `tooDeep` is ours to report.
+ */
+export type ResponseFormatRead =
+  | { kind: "absent" }
+  | { kind: "malformed" }
+  | { kind: "tooDeep" }
+  | { kind: "readable"; format: ResponseFormat };
+
+export function readResponseFormatResult(req: ChatRequest): ResponseFormatRead {
   const openai = req.vendor?.openai;
   // Each spelling is read at the depth its own surface defines: the chat one
   // wraps the schema in `json_schema`, the other two carry it flat. Checking a
@@ -57,30 +77,22 @@ export function readResponseFormat(req: ChatRequest): ResponseFormat | undefined
   // unrelated vendor field that happens to contain one from being read as this.
   const chat = openai?.response_format;
   if (chat !== undefined) {
-    if (!isRecord(chat) || chat.type !== "json_schema") return undefined;
+    if (!isRecord(chat) || chat.type !== "json_schema") return { kind: "malformed" };
     return fromSpec(chat.json_schema);
   }
   const responses = openai?.text;
-  if (responses !== undefined) return isRecord(responses) ? fromSpec(responses.format) : undefined;
+  if (isRecord(responses) && responses.format !== undefined) return fromSpec(responses.format);
+  if (responses !== undefined) return { kind: "malformed" };
   const messages = req.vendor?.anthropic?.output_config;
-  if (messages !== undefined) return isRecord(messages) ? fromSpec(messages.format) : undefined;
-  return undefined;
+  if (isRecord(messages) && messages.format !== undefined) return fromSpec(messages.format);
+  if (messages !== undefined) return { kind: "malformed" };
+  return { kind: "absent" };
 }
 
-/**
- * Whether the client asked for a schema at all, in any of the three spellings.
- *
- * Separate from {@link readResponseFormat} because "asked and we refused" and
- * "never asked" are different facts, and only the first one is a degradation. An
- * encoder that reports every empty read would claim a loss on every plain
- * request.
- */
-export function requestsResponseFormat(req: ChatRequest): boolean {
-  const openai = req.vendor?.openai;
-  if (isRecord(openai?.response_format)) return true;
-  if (isRecord(openai?.text) && openai.text.format !== undefined) return true;
-  const messages = req.vendor?.anthropic?.output_config;
-  return isRecord(messages) && messages.format !== undefined;
+/** The readable format alone, for the callers that have nothing to report. */
+export function readResponseFormat(req: ChatRequest): ResponseFormat | undefined {
+  const read = readResponseFormatResult(req);
+  return read.kind === "readable" ? read.format : undefined;
 }
 
 /**
@@ -91,6 +103,10 @@ export function requestsResponseFormat(req: ChatRequest): boolean {
  * client's own spelling outranks a translation. A record is not enough: a wrong
  * discriminator or a missing schema is a field the backend cannot answer, and
  * letting one of those outrank a valid spelling loses the schema silently.
+ *
+ * Structural only. Depth is `fromSpec`'s question, because a schema the codec
+ * cannot serialize is unsendable whoever wrote it — so a caller using this to
+ * decide that a native field may stay must ask about depth separately.
  */
 export function readableFormat(spec: unknown): spec is Record<string, unknown> {
   return (
@@ -100,53 +116,149 @@ export function readableFormat(spec: unknown): spec is Record<string, unknown> {
   );
 }
 
+/**
+ * Whether a value can be serialized to JSON without throwing.
+ *
+ * Catches in-memory values from plugins that cannot be represented in JSON
+ * (BigInt, objects with hostile `toJSON` hooks throwing TypeError).
+ */
+export function canSerialize(value: unknown): boolean {
+  try {
+    JSON.stringify(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The `{type?, name?, schema}` leaf all three spellings share. */
-function fromSpec(spec: unknown): ResponseFormat | undefined {
-  if (!readableFormat(spec)) return undefined;
+function fromSpec(spec: unknown): ResponseFormatRead {
+  if (!readableFormat(spec)) return { kind: "malformed" };
   const schema = spec.schema;
-  if (!isRecord(schema)) return undefined;
+  if (!isRecord(schema)) return { kind: "malformed" };
   // A schema nested past the walker's cap cannot be serialized either: every
   // codec renders its body with `JSON.stringify`, which recurses as far as the
-  // schema does and throws. Refusing it here — at the one gate all three
-  // spellings pass through — turns an unsendable request into a dropped field
-  // on every target, rather than a stack overflow on some of them.
-  if (tooDeepToSerialize(schema)) return undefined;
+  // schema does and throws. A cycle or an in-memory BigInt / hostile `toJSON` is
+  // the same refusal: `JSON.stringify` rejects it outright, at any depth.
+  // Refusing them here — at the one gate all three spellings pass through —
+  // turns an unsendable request into a dropped field on every target, rather
+  // than a throw on some of them.
+  // `isCyclic` and `tooDeepToSerialize` run first to guarantee depth is bounded
+  // before `canSerialize` safely invokes `JSON.stringify`.
+  if (isCyclic(schema) || tooDeepToSerialize(schema) || !canSerialize(schema)) {
+    return { kind: "tooDeep" };
+  }
   return {
-    schema,
-    name: typeof spec.name === "string" && spec.name.length > 0 ? spec.name : "response",
+    kind: "readable",
+    format: {
+      schema,
+      name: typeof spec.name === "string" && spec.name.length > 0 ? spec.name : "response",
+    },
   };
+}
+
+/**
+ * Every subschema member of `nodes`, in one place because three walks ask it.
+ *
+ * Sharing the enumeration is what keeps them from drifting: a position added to
+ * the tables reaches the depth walk, the cycle check and the closer together,
+ * and the two depth rules disagreeing by one position is a bug this file has
+ * already shipped once.
+ */
+function forEachSubschema(
+  nodes: readonly Record<string, unknown>[],
+  visit: (member: Record<string, unknown>, parent: Record<string, unknown>) => void,
+): void {
+  for (const node of nodes) {
+    for (const [key, value] of Object.entries(node)) {
+      if ((SUBSCHEMA_MAP as readonly string[]).includes(key) && isRecord(value)) {
+        for (const member of Object.values(value)) if (isRecord(member)) visit(member, node);
+      } else if ((SUBSCHEMA_LIST as readonly string[]).includes(key) && Array.isArray(value)) {
+        for (const member of value) if (isRecord(member)) visit(member, node);
+      } else if ((SUBSCHEMA as readonly string[]).includes(key) && isRecord(value)) {
+        visit(value, node);
+      }
+    }
+  }
+}
+
+/**
+ * Whether a schema reaches itself.
+ *
+ * A separate question from depth, and not one the depth walk can answer: that
+ * walk skips a node it has already seen, which is correct for a second path
+ * *to* a node and hides a path *through* it, so a cycle reads as "shallow
+ * enough to send". It is not sendable at any depth — `JSON.stringify` refuses a
+ * cyclic structure outright rather than running out of stack, so every codec
+ * throws on a body carrying one. JSON cannot express a cycle, but the IR is also
+ * built in-process by plugins.
+ *
+ * Traverses every enumerable object and array — not only recognized subschema
+ * positions — because `JSON.stringify` serializes annotations (`default`,
+ * `examples`, `enum`) and extension keywords too, and a back-edge through any of
+ * them crashes the codec just as surely.
+ *
+ * Depth-first with the path as a set, so the answer is exact rather than a
+ * budget: only nodes on the current path are held, never the whole schema.
+ */
+function isCyclic(schema: Record<string, unknown>): boolean {
+  const onPath = new Set<object>();
+  const done = new WeakSet<object>();
+  const stack: { node: object; entering: boolean }[] = [{ node: schema, entering: true }];
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    if (frame === undefined) break;
+    const node = frame.node;
+    if (!frame.entering) {
+      onPath.delete(node);
+      done.add(node);
+      continue;
+    }
+    if (onPath.has(node)) return true;
+    if (done.has(node)) continue;
+    onPath.add(node);
+    stack.push({ node, entering: false });
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (typeof item === "object" && item !== null) {
+          stack.push({ node: item, entering: true });
+        }
+      }
+    } else {
+      for (const val of Object.values(node)) {
+        if (typeof val === "object" && val !== null) {
+          stack.push({ node: val, entering: true });
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /**
  * Whether a schema nests deeper than {@link MAX_DEPTH} schema levels.
  *
- * Walks the same positions as {@link closeNode}, one level per iteration, so the
- * two refuse at the same boundary. An earlier version counted raw object levels
- * and converted with a constant, which held only for positions that cross a
- * container before the child (`properties`, `anyOf`): a single-subschema
- * position like `items` crosses one level per schema level, so a schema nested
- * through it was read at twice the depth the walker would close — accepted here
- * and then sent half-closed, the exact 400 this cap exists to prevent. There is
- * no multiplier that fits both shapes; the units have to be the same.
+ * Walks the same positions as {@link closeNode}, one level per iteration, so
+ * the two refuse at the same boundary. Iterative on purpose: a schema with
+ * thousands of levels must not overflow the JavaScript call stack.
  *
- * Iterative on purpose: the question is whether recursion would overflow, so
- * asking it recursively would overflow first.
+ * Deduplicates per level rather than globally: a global seen set would record
+ * a shared node at its shallowest path and miss a deeper path through the same
+ * node, disagreeing with {@link closeNode}. Deduplicating per level keeps
+ * diamond DAGs from expanding exponentially (at most |V| nodes per level,
+ * bounded by {@link MAX_DEPTH} iterations) while correctly measuring the
+ * longest path to every leaf.
  */
 function tooDeepToSerialize(schema: Record<string, unknown>): boolean {
   let level: Record<string, unknown>[] = [schema];
   for (let depth = 0; depth < MAX_DEPTH; depth++) {
     const next: Record<string, unknown>[] = [];
-    for (const node of level) {
-      for (const [key, value] of Object.entries(node)) {
-        if ((SUBSCHEMA_MAP as readonly string[]).includes(key) && isRecord(value)) {
-          for (const member of Object.values(value)) if (isRecord(member)) next.push(member);
-        } else if ((SUBSCHEMA_LIST as readonly string[]).includes(key) && Array.isArray(value)) {
-          for (const member of value) if (isRecord(member)) next.push(member);
-        } else if ((SUBSCHEMA as readonly string[]).includes(key) && isRecord(value)) {
-          next.push(value);
-        }
-      }
-    }
+    const seenThisLevel = new WeakSet<Record<string, unknown>>();
+    forEachSubschema(level, (member) => {
+      if (seenThisLevel.has(member)) return;
+      seenThisLevel.add(member);
+      next.push(member);
+    });
     if (next.length === 0) return false;
     level = next;
   }
@@ -188,14 +300,20 @@ export function moveToResponsesText(
   // outranks a translation. A `text` carrying anything else — `verbosity`, say —
   // is not a format, so the format joins it rather than replacing it.
   //
-  // Only a *readable* native format outranks, and readable means what
-  // `readResponseFormat` means by it: a record alone is not enough, since
-  // `{type: "wrong"}` or `{schema: null}` is a field this API cannot answer any
-  // more than `null` is. Anything less would let a malformed native spelling
-  // silently bury the valid `response_format` the same request carried.
+  // Only a format this gateway can *send* outranks, which is a stricter question
+  // than `readableFormat` answers: a structurally valid schema nested past the
+  // cap is one `JSON.stringify` cannot render, so leaving it here would put an
+  // unserializable body on the wire — and a malformed one would silently bury
+  // the valid `response_format` the same request carried.
+  const read = readResponseFormatResult(req);
   const clientText = isRecord(body.text) ? body.text : undefined;
-  if (readableFormat(clientText?.format)) return undefined;
-  const malformedFormat = clientText !== undefined && clientText.format !== undefined;
+  const clientFormat = clientText?.format;
+  // `readResponseFormatResult` reads the chat spelling first, so a request
+  // carrying both lands on the translation and only a request carrying this one
+  // alone returns `readable` from it — which is exactly when the client's own
+  // field may stay.
+  if (readableFormat(clientFormat) && read.kind === "readable") return undefined;
+  const malformedFormat = clientText !== undefined && clientFormat !== undefined;
   // Copied rather than edited: this object is the caller's own
   // `req.vendor.openai.text`, carried here by a shallow merge, and the IR is
   // shared across dispatch retries. Deleting from it would mutate the request
@@ -206,8 +324,8 @@ export function moveToResponsesText(
 
   // Read from the request, not from `raw`: a `/v1/messages` client's schema
   // never touches this body, and it needs translating just the same.
-  const format = readResponseFormat(req);
-  if (format !== undefined) {
+  if (read.kind === "readable") {
+    const format = read.format;
     body.text = {
       ...text,
       format: { type: "json_schema", name: format.name, schema: format.schema, strict: true },
@@ -221,6 +339,10 @@ export function moveToResponsesText(
     body.text = { ...text, format: { type: "json_object" } };
     return `${provider}:response-format-translated`;
   }
+  // A schema the codec cannot serialize is refused by the reader, and that is
+  // ours to report on every target — including one whose vendor bag never
+  // carried the spelling it arrived in, where nothing above would have noticed.
+  if (read.kind === "tooDeep") return `${provider}:response-schema-too-deep`;
   // Nothing readable was requested. Report only if something was actually
   // removed: a request that never asked for structured output must not be
   // logged as having lost it.
@@ -270,7 +392,8 @@ export function closeObjects(
     stats.changed = false;
     stats.truncated = false;
   }
-  return closeNode(schema, 0, stats ?? { changed: false, truncated: false });
+  // The memo is per call: it holds output objects for this walk alone.
+  return closeNode(schema, 0, stats ?? { changed: false, truncated: false }, new Map());
 }
 
 /**
@@ -336,12 +459,26 @@ function closeNode(
   schema: Record<string, unknown>,
   depth: number,
   stats: { changed: boolean; truncated: boolean },
+  memo: Map<number, WeakMap<Record<string, unknown>, Record<string, unknown>>>,
 ): Record<string, unknown> {
   if (depth >= MAX_DEPTH) {
     stats.truncated = true;
     return schema;
   }
+  // Keyed on depth as well as identity: the same node reached lower down has
+  // less budget left and may truncate where the shallower visit did not. Without
+  // this, one object sitting at several positions is cloned once per path, which
+  // is exponential in the number of shared edges — a 22-node schema took nearly
+  // a second. JSON cannot express sharing, but the IR is also built in-process.
+  let atDepth = memo.get(depth);
+  if (atDepth === undefined) {
+    atDepth = new WeakMap();
+    memo.set(depth, atDepth);
+  }
+  const done = atDepth.get(schema);
+  if (done !== undefined) return done;
   const out: Record<string, unknown> = {};
+  atDepth.set(schema, out);
   for (const [key, value] of Object.entries(schema)) {
     if ((SUBSCHEMA_MAP as readonly string[]).includes(key) && isRecord(value)) {
       const members: Record<string, unknown> = {};
@@ -350,7 +487,7 @@ function closeNode(
         // named `__proto__`, and plain assignment would invoke the setter and
         // drop the property instead of carrying it.
         Object.defineProperty(members, name, {
-          value: isRecord(member) ? closeNode(member, depth + 1, stats) : member,
+          value: isRecord(member) ? closeNode(member, depth + 1, stats, memo) : member,
           writable: true,
           enumerable: true,
           configurable: true,
@@ -360,11 +497,11 @@ function closeNode(
       continue;
     }
     if ((SUBSCHEMA as readonly string[]).includes(key) && isRecord(value)) {
-      out[key] = closeNode(value, depth + 1, stats);
+      out[key] = closeNode(value, depth + 1, stats, memo);
       continue;
     }
     if ((SUBSCHEMA_LIST as readonly string[]).includes(key) && Array.isArray(value)) {
-      out[key] = value.map((arm) => (isRecord(arm) ? closeNode(arm, depth + 1, stats) : arm));
+      out[key] = value.map((arm) => (isRecord(arm) ? closeNode(arm, depth + 1, stats, memo) : arm));
       continue;
     }
     out[key] = value;

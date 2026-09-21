@@ -8,7 +8,11 @@ import { toKiloWire } from "../src/kilo/wire.ts";
 import { toChatWire } from "../src/kimi/wire.ts";
 import { toMuseWire } from "../src/muse/wire.ts";
 import { toResponsesWire } from "../src/openai/wire.ts";
-import { closeObjects, readResponseFormat } from "../src/responseFormat.ts";
+import {
+  closeObjects,
+  readResponseFormat,
+  readResponseFormatResult,
+} from "../src/responseFormat.ts";
 
 /**
  * One structured-output request, encoded by every provider.
@@ -918,8 +922,336 @@ describe("every encoder sends the spelling its backend accepts", () => {
     );
     expect(toChatWire(req, "k2").degradations).toContain("kimi:response-schema-too-deep");
     expect(toResponsesWire(req, "gpt-5", { oauth: false }).degradations).toContain(
-      "openai:response-format-dropped",
+      "openai:response-schema-too-deep",
     );
+  });
+
+  test("a refusal names its own reason, and a malformed field is not called deep", () => {
+    // One reader, so the encoder is told *why* nothing came back. A second walk
+    // beside it could only guess, and guessed "too deep" for every shape it
+    // could not read — a misspelled discriminator, an empty object, a schemaless
+    // `json_object`. None of those is a depth problem and none is ours to claim.
+    const MALFORMED: unknown[] = [
+      { type: "wrong" },
+      {},
+      { type: "json_schema", json_schema: null },
+      { type: "json_object" },
+    ];
+    for (const response_format of MALFORMED) {
+      const req: ChatRequest = { ...base, vendor: { openai: { response_format } } };
+      const label = JSON.stringify(response_format);
+      const deep = (notes: readonly string[]): boolean =>
+        notes.some((n) => n.endsWith(":response-schema-too-deep"));
+      expect(`${label} ${deep(toChatWire(req, "k2").degradations)}`).toBe(`${label} false`);
+      expect(
+        `${label} ${deep(toWire(req, "claude-opus-4-5", { oauth: false }).degradations)}`,
+      ).toBe(`${label} false`);
+    }
+  });
+
+  test("a native too-deep format is removed, not forwarded unserializable", () => {
+    // `readableFormat` is structural, so a schema past the cap looks like a
+    // field the client may keep. It is not: `JSON.stringify` recurses as deep as
+    // the schema, so leaving it puts a body on the wire the codec cannot render.
+    let deep: Record<string, unknown> = { type: "object" };
+    for (let i = 0; i < 80; i++) deep = { type: "array", items: deep };
+    const req: ChatRequest = {
+      ...base,
+      vendor: { openai: { text: { format: { type: "json_schema", name: "d", schema: deep } } } },
+    };
+    const { body, degradations } = toResponsesWire(req, "gpt-5", { oauth: false });
+    expect((body.text as { format?: unknown } | undefined)?.format).toBeUndefined();
+    expect(degradations).toContain("openai:response-schema-too-deep");
+  });
+
+  test("a target whose bag never carried the spelling still reports the refusal", () => {
+    // Grok merges `vendor.grok`, so a chat-spelling schema never reaches its
+    // body at all. Nothing was removed there — but the client asked, the reader
+    // refused, and silence would read as a request that never asked.
+    let deep: Record<string, unknown> = { type: "object" };
+    for (let i = 0; i < 80; i++) deep = { type: "array", items: deep };
+    const req: ChatRequest = {
+      ...base,
+      vendor: {
+        openai: {
+          response_format: { type: "json_schema", json_schema: { name: "d", schema: deep } },
+        },
+      },
+    };
+    expect(toGrokWire(req, "grok-4").degradations).toContain("grok:response-schema-too-deep");
+  });
+
+  test("anthropic: a readable native format keeps the effort beside it", () => {
+    // The bag is merged whole. A readable `format` rightly wins the format, but
+    // it is not a statement about `effort` — which the reasoning path wrote to
+    // this same field and which the client never mentioned.
+    const req: ChatRequest = {
+      ...base,
+      reasoning: { mode: "adaptive", effort: "high" },
+      vendor: {
+        anthropic: {
+          output_config: { format: { type: "json_schema", schema: { type: "object" } } },
+        },
+      },
+    };
+    const { body, degradations } = toWire(req, "claude-opus-4-5", { oauth: false });
+    const config = body.output_config as { effort?: string; format?: unknown };
+    expect(config.effort).toBe("high");
+    expect(config.format).not.toBeUndefined();
+    // Nothing of the client's was discarded, so nothing may claim it was.
+    expect(degradations).not.toContain("anthropic:response-format-dropped");
+  });
+
+  test("anthropic: a rescue keeps the client's own siblings", () => {
+    const req: ChatRequest = {
+      ...base,
+      reasoning: { mode: "adaptive", effort: "high" },
+      vendor: { anthropic: { output_config: { format: null, marker: "kept" } } },
+    };
+    const config = toWire(req, "claude-opus-4-5", { oauth: false }).body.output_config as {
+      marker?: string;
+      effort?: string;
+    };
+    expect(config.marker).toBe("kept");
+    expect(config.effort).toBe("high");
+  });
+
+  test("one node at many positions costs what one node costs", () => {
+    // JSON cannot express sharing, but a plugin building IR in-process can, and
+    // walking each path separately is exponential in the shared edges: this
+    // schema has 22 distinct nodes and took over a second before the walk
+    // remembered what it had seen.
+    let node: Record<string, unknown> = { type: "object" };
+    for (let i = 0; i < 21; i++) node = { type: "object", properties: { a: node, b: node } };
+    const started = Date.now();
+    const read = readResponseFormat({
+      ...base,
+      vendor: {
+        openai: {
+          response_format: { type: "json_schema", json_schema: { name: "c", schema: node } },
+        },
+      },
+    });
+    closeObjects(node, { changed: false, truncated: false });
+    expect(read).not.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(250);
+  });
+
+  test("an array schema is not a readable native format", () => {
+    // `[1,2,3]` is a record to `typeof`, not a schema to a backend. Accepting it
+    // here would let it outrank — and silently bury — the valid chat spelling
+    // the same request carried.
+    const req: ChatRequest = {
+      ...base,
+      vendor: {
+        openai: {
+          response_format: { type: "json_schema", json_schema: { name: "c", schema: SCHEMA } },
+          text: { format: { type: "json_schema", schema: [1, 2, 3] } },
+        },
+      },
+    };
+    const { body, degradations } = toResponsesWire(req, "gpt-5", { oauth: false });
+    expect((body.text as { format: { schema: unknown } }).format.schema).toEqual(SCHEMA);
+    expect(degradations).toContain("openai:response-format-translated");
+  });
+
+  test("a shared node closed at two depths keeps each depth's own budget", () => {
+    // The memo that makes sharing cheap must not make it wrong: the same object
+    // reached lower down has less budget left, and reusing the shallow result
+    // for it would report `truncated: false` for a schema the reader refuses —
+    // the reader/walker disagreement, back by another route.
+    const child: Record<string, unknown> = {
+      type: "object",
+      properties: { leaf: { type: "object" } },
+    };
+    let chain: Record<string, unknown> = child;
+    for (let i = 0; i < 62; i++) chain = { type: "object", properties: { n: chain } };
+    const stats = { changed: false, truncated: false };
+    closeObjects({ type: "object", properties: { a: child, b: chain } }, stats);
+    expect(stats.truncated).toBe(true);
+  });
+
+  test("a cyclic schema is refused, not handed to a codec that cannot render it", () => {
+    // `JSON.stringify` rejects a cycle outright, at any depth — so a cycle is
+    // unsendable for a different reason than depth, and the depth walk cannot
+    // answer it: that walk skips a node it has already seen, which hides a path
+    // *through* a node behind a path *to* it. JSON cannot express a cycle, but
+    // the IR is also built in-process by plugins.
+    const schema: Record<string, unknown> = { type: "object" };
+    schema.properties = { self: schema };
+    const req: ChatRequest = {
+      ...base,
+      vendor: {
+        openai: {
+          response_format: { type: "json_schema", json_schema: { name: "cyc", schema } },
+        },
+      },
+    };
+    expect(readResponseFormatResult(req).kind).toBe("tooDeep");
+    // The refusal has to reach the wire: before it did, these two threw.
+    for (const encoded of [toChatWire(req, "k2"), toResponsesWire(req, "gpt-5")]) {
+      expect(() => JSON.stringify(encoded.body)).not.toThrow();
+      expect(encoded.degradations.some((n) => n.endsWith(":response-schema-too-deep"))).toBe(true);
+    }
+  });
+
+  test("the tagged reader tells a malformed field from no request at all", () => {
+    // Every encoder treats these alike on purpose — a malformed field is the
+    // backend's to refuse — so nothing downstream pins the distinction. It is
+    // still the reason the reader is tagged rather than boolean, and a future
+    // caller that does distinguish them needs it to already be right.
+    const { vendor: _vendor, ...bare } = base;
+    expect(readResponseFormatResult(bare)).toEqual({ kind: "absent" });
+    const MALFORMED: Record<string, Record<string, unknown>>[] = [
+      { openai: { response_format: { type: "json_schema" } } },
+      { openai: { response_format: null } },
+      { openai: { text: {} } },
+      { anthropic: { output_config: {} } },
+    ];
+    for (const vendor of MALFORMED) {
+      expect(readResponseFormatResult({ ...bare, vendor })).toEqual({ kind: "malformed" });
+    }
+  });
+
+  test("a malformed earlier spelling does not fall through to a later one", () => {
+    // Precedence is chat, then Responses, then Messages, and it is fixed: an
+    // earlier spelling wins even when malformed. Falling through would answer a
+    // different request than the client wrote.
+    const req: ChatRequest = {
+      ...base,
+      vendor: {
+        openai: { text: {} },
+        anthropic: {
+          output_config: { format: { type: "json_schema", name: "messages", schema: SCHEMA } },
+        },
+      },
+    };
+    expect(readResponseFormatResult(req)).toEqual({ kind: "malformed" });
+  });
+
+  test("one depth boundary holds through a chain that changes position at every level", () => {
+    // Every existing depth test nests one position homogeneously. A mixed chain
+    // is what catches unit drift between the two walks: each edge is one schema
+    // level whatever the container shape, which is the rule a multiplier broke.
+    const WRAP: ((child: Record<string, unknown>) => Record<string, unknown>)[] = [
+      (child) => ({ $defs: { d: child } }),
+      (child) => ({ type: "array", items: child }),
+      (child) => ({ anyOf: [child] }),
+      (child) => ({ type: "object", properties: { p: child } }),
+    ];
+    const nest = (levels: number): Record<string, unknown> => {
+      let node: Record<string, unknown> = { type: "object" };
+      for (let i = 0; i < levels; i++) node = WRAP[i % WRAP.length]?.(node) ?? node;
+      return node;
+    };
+    const verdict = (levels: number): { reads: boolean; truncates: boolean } => {
+      const schema = nest(levels);
+      const stats = { changed: false, truncated: false };
+      closeObjects(schema, stats);
+      return {
+        reads:
+          readResponseFormatResult({
+            ...base,
+            vendor: {
+              openai: { response_format: { type: "json_schema", json_schema: { schema } } },
+            },
+          }).kind === "readable",
+        truncates: stats.truncated,
+      };
+    };
+    expect(verdict(63)).toEqual({ reads: true, truncates: false });
+    expect(verdict(64)).toEqual({ reads: false, truncates: true });
+  });
+
+  test("anthropic: a vendor config with no format is not reported as a dropped one", () => {
+    // The rescue carries encoder members into the replacement object, which is
+    // work — but nothing of the client's was discarded, so nothing may say so.
+    const { vendor: _vendor, ...bare } = base;
+    const { degradations } = toWire(
+      {
+        ...bare,
+        reasoning: { mode: "adaptive", effort: "high" },
+        vendor: { anthropic: { output_config: { marker: "kept" } } },
+      },
+      "claude-opus-4-5",
+      { oauth: false },
+    );
+    expect(degradations).not.toContain("anthropic:response-format-dropped");
+  });
+
+  test("a cycle through an annotation property (default, examples) is refused", () => {
+    // `JSON.stringify` traverses all enumerable properties, not just known subschemas.
+    const schema: Record<string, unknown> = { type: "object" };
+    schema.default = schema;
+    const req: ChatRequest = {
+      ...base,
+      vendor: {
+        openai: {
+          response_format: { type: "json_schema", json_schema: { name: "cyc-annot", schema } },
+        },
+      },
+    };
+    expect(readResponseFormatResult(req).kind).toBe("tooDeep");
+    const encoded = toCustomChatWire(req, "m");
+    expect(() => JSON.stringify(encoded.body)).not.toThrow();
+    expect(encoded.body.response_format).toBeUndefined();
+    expect(encoded.degradations).toContain("custom:response-schema-too-deep");
+  });
+
+  test("DAG with both shallow and deep paths to a shared node agrees with closer", () => {
+    // When a shared leaf has both a shallow path (depth 1) and a deep path (depth 63),
+    // the longest path reaches depth 64 (>= MAX_DEPTH). Reader must refuse rather than
+    // taking the shortest BFS path and disagreeing with closeObjects.
+    const leaf = { type: "object" };
+    let chain: Record<string, unknown> = leaf;
+    for (let i = 0; i < 63; i++) {
+      chain = { type: "array", items: chain };
+    }
+    const schema = { type: "object", properties: { shallow: leaf, deep: chain } };
+    const req: ChatRequest = {
+      ...base,
+      vendor: {
+        openai: {
+          response_format: { type: "json_schema", json_schema: { name: "dag", schema } },
+        },
+      },
+    };
+    const read = readResponseFormatResult(req);
+    const stats = { changed: false, truncated: false };
+    closeObjects(schema, stats);
+    expect(read.kind).toBe("tooDeep");
+    expect(stats.truncated).toBe(true);
+  });
+
+  test("unserializable values (BigInt, hostile toJSON) are refused across all encoders", () => {
+    // In-memory IR from plugins may contain values JSON.stringify cannot serialize.
+    // Every encoder must refuse the schema safely rather than throwing in serialization.
+    const hostile = [
+      { type: "object", default: 1n },
+      {
+        type: "object",
+        custom: {
+          toJSON() {
+            return 1n;
+          },
+        },
+      },
+    ];
+    for (const schema of hostile) {
+      const req: ChatRequest = {
+        ...base,
+        vendor: {
+          openai: {
+            response_format: { type: "json_schema", json_schema: { name: "hostile", schema } },
+          },
+        },
+      };
+      expect(readResponseFormatResult(req).kind).toBe("tooDeep");
+      expect(() => JSON.stringify(toResponsesWire(req, "gpt-5").body)).not.toThrow();
+      expect(() =>
+        JSON.stringify(toWire(req, "claude-opus-4-5", { oauth: false }).body),
+      ).not.toThrow();
+    }
   });
 
   test("no structured-output request means no field and no degradation anywhere", () => {

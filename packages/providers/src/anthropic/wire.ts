@@ -5,12 +5,7 @@ import {
   estimateInputPrefixes,
   GatewayError,
 } from "@omni/ir";
-import {
-  closeObjects,
-  readableFormat,
-  readResponseFormat,
-  requestsResponseFormat,
-} from "../responseFormat.ts";
+import { closeObjects, readableFormat, readResponseFormatResult } from "../responseFormat.ts";
 import { systemTextBlocks } from "../system.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { anthropicReasoningForm } from "./models.ts";
@@ -706,7 +701,8 @@ export function toWire(
   // than falling through, and the merge below deletes what it cannot read.
   const native = req.vendor?.anthropic?.output_config;
   const nativeFormat = isRecord(native) && readableFormat(native.format);
-  const format = nativeFormat ? undefined : readResponseFormat(req);
+  const read = readResponseFormatResult(req);
+  const format = !nativeFormat && read.kind === "readable" ? read.format : undefined;
   if (format !== undefined) {
     body.output_config = {
       ...(isRecord(body.output_config) ? body.output_config : {}),
@@ -715,7 +711,7 @@ export function toWire(
       format: { type: "json_schema", schema: format.schema },
     };
     note("anthropic:response-format-translated");
-  } else if (!nativeFormat && requestsResponseFormat(req)) {
+  } else if (!nativeFormat && read.kind === "tooDeep") {
     // The client asked and the reader refused — a schema too deep to serialize
     // is the only way that happens here. Dropping it is correct; dropping it
     // silently is not, since the response then has no schema and nothing says
@@ -739,30 +735,24 @@ export function toWire(
   // Only when the encoder wrote something the merge would take: with nothing to
   // rescue, the bag is the client's own field and passes through as written —
   // including a value this API will reject, which is its answer to give.
-  if (encoderConfig !== undefined && !isRecord(vendorConfig)) {
-    if (vendorConfig !== undefined) {
+  if (encoderConfig !== undefined && vendorConfig !== undefined) {
+    if (!isRecord(vendorConfig)) {
       // Not an object at all: nothing in it to merge, and letting it through
       // replaces the encoder's own field with a string or an array.
       const { output_config: _unreadable, ...rest } = vendorRaw;
       vendor = rest;
       unreadableFormat = true;
-    }
-  } else if (
-    encoderConfig !== undefined &&
-    isRecord(vendorConfig) &&
-    !readableFormat(vendorConfig.format)
-  ) {
-    if (vendorConfig.format !== undefined) {
-      // Merged whole, so dropping the member is not enough: everything the
-      // encoder wrote — the translation, and the `effort` the reasoning path
-      // put on this same field — has to be carried into the replacement.
-      const { format: _unreadable, ...rest } = vendorConfig;
-      vendor = { ...vendorRaw, output_config: { ...encoderConfig, ...rest } };
-      unreadableFormat = true;
     } else {
-      // No format to argue about, but the merge still replaces the whole field,
-      // so the encoder's own members — `effort` — have to be carried across.
-      vendor = { ...vendorRaw, output_config: { ...encoderConfig, ...vendorConfig } };
+      // Merged whole, so the encoder's own members — a translated format, and
+      // the `effort` the reasoning path put on this same field — have to be
+      // carried into the replacement, whatever the bag itself holds. A `format`
+      // this API cannot read is dropped on the way; a readable one still wins,
+      // because vendor members are spread last.
+      const readable = readableFormat(vendorConfig.format);
+      const { format: _unreadable, ...withoutFormat } = vendorConfig;
+      const rest = readable ? vendorConfig : withoutFormat;
+      vendor = { ...vendorRaw, output_config: { ...encoderConfig, ...rest } };
+      unreadableFormat = !readable && vendorConfig.format !== undefined;
     }
   }
   Object.assign(
@@ -813,6 +803,14 @@ function closeOutputConfigSchema(body: AnthropicBody, note: (d: string) => void)
     // as far and throws. Sending it half-closed was the intent; it is not
     // reachable, so the schema goes rather than the request.
     const { format: _tooDeep, ...rest } = config;
+    body.output_config = rest;
+    note("anthropic:response-schema-too-deep");
+    return;
+  }
+  try {
+    JSON.stringify(closed);
+  } catch {
+    const { format: _unserializable, ...rest } = config;
     body.output_config = rest;
     note("anthropic:response-schema-too-deep");
     return;

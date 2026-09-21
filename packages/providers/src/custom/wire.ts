@@ -1,10 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
-import {
-  isRecord,
-  moveToResponsesText,
-  readResponseFormat,
-  requestsResponseFormat,
-} from "../responseFormat.ts";
+import { isRecord, moveToResponsesText, readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 
 /**
@@ -196,7 +191,8 @@ export function toCustomChatWire(
   const droppedText = body.text;
   delete body.text;
 
-  const format = readResponseFormat(req);
+  const read = readResponseFormatResult(req);
+  const format = read.kind === "readable" ? read.format : undefined;
   if (format !== undefined) {
     if (body.response_format === undefined) {
       body.response_format = {
@@ -209,9 +205,10 @@ export function toCustomChatWire(
     // Only when a format was actually there: `text` also carries siblings like
     // `verbosity`, and calling those a lost response format is a false log.
     note("custom:response-format-dropped");
-  } else if (requestsResponseFormat(req)) {
+  } else if (read.kind === "tooDeep") {
     // Asked, and the reader refused — a schema too deep to serialize. Dropping
     // it is correct; dropping it without a word is not.
+    delete body.response_format;
     note("custom:response-schema-too-deep");
   }
 

@@ -1,5 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
-import { readResponseFormat, requestsResponseFormat } from "../responseFormat.ts";
+import { readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 
 export type ChatBody = {
@@ -127,16 +127,18 @@ export function toChatWire(
   // client's own `response_format` is already in the body, already in this
   // endpoint's spelling, and this is a no-op. The kimi arm merges a bag no
   // ingress produces, so without this the field is lost with nothing recorded.
-  const format = readResponseFormat(req);
+  const read = readResponseFormatResult(req);
+  const format = read.kind === "readable" ? read.format : undefined;
   if (format !== undefined && body.response_format === undefined) {
     body.response_format = {
       type: "json_schema",
       json_schema: { name: format.name, schema: format.schema, strict: true },
     };
     note("kimi:response-format-translated");
-  } else if (format === undefined && requestsResponseFormat(req)) {
+  } else if (read.kind === "tooDeep") {
     // Asked, and the reader refused — a schema too deep to serialize. Dropping
     // it is correct; dropping it without a word is not.
+    delete body.response_format;
     note("kimi:response-schema-too-deep");
   }
 
