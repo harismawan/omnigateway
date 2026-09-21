@@ -1,4 +1,5 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { isRecord, moveToResponsesText, readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 
 /**
@@ -182,6 +183,35 @@ export function toCustomChatWire(
   // Last, so an operator's passthrough can override anything above.
   Object.assign(body, req.vendor?.openai ?? {});
 
+  // The merge above is bag-shaped, not endpoint-shaped: it carries whatever
+  // spelling the *client's* surface used, and only `response_format` is the one
+  // this endpoint accepts. A `/v1/responses` client's `text` arrives here as a
+  // field this API does not define, so it goes regardless of whether its schema
+  // could be read — an unreadable one is still not a field this backend takes.
+  const droppedText = body.text;
+  delete body.text;
+
+  const read = readResponseFormatResult(req);
+  const format = read.kind === "readable" ? read.format : undefined;
+  if (format !== undefined) {
+    if (body.response_format === undefined) {
+      body.response_format = {
+        type: "json_schema",
+        json_schema: { name: format.name, schema: format.schema, strict: true },
+      };
+      note("custom:response-format-translated");
+    }
+  } else if (isRecord(droppedText) && droppedText.format !== undefined) {
+    // Only when a format was actually there: `text` also carries siblings like
+    // `verbosity`, and calling those a lost response format is a false log.
+    note("custom:response-format-dropped");
+  } else if (read.kind === "tooDeep") {
+    // Asked, and the reader refused — a schema too deep to serialize. Dropping
+    // it is correct; dropping it without a word is not.
+    delete body.response_format;
+    note("custom:response-schema-too-deep");
+  }
+
   return { body, degradations };
 }
 
@@ -302,6 +332,12 @@ export function toCustomResponsesWire(
 
   // Last, so an operator's passthrough can override anything above.
   Object.assign(body, req.vendor?.openai ?? {});
+
+  // The Chat Completions spelling on a Responses endpoint; see the note in
+  // `openai/wire.ts`. The chat encoder above needs no such translation — there
+  // the merged field is already the one the endpoint takes.
+  const moved = moveToResponsesText(req, body, "custom");
+  if (moved !== undefined) note(moved);
 
   return { body, degradations };
 }

@@ -5,6 +5,7 @@ import {
   type Message,
   type ToolChoice,
 } from "@omni/ir";
+import { readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 
 /**
@@ -192,6 +193,25 @@ export function toKiloWire(
 
   // Last, so an operator's passthrough can override anything above.
   Object.assign(body, req.vendor?.kilo ?? {});
+
+  // Same gap as grok's: the bag above is named after a provider, and every
+  // ingress writes one named after a *surface*, so a structured-output request
+  // never reaches it. This endpoint speaks Chat Completions, where the client's
+  // own spelling is already the right one.
+  const read = readResponseFormatResult(req);
+  const format = read.kind === "readable" ? read.format : undefined;
+  if (format !== undefined && body.response_format === undefined) {
+    body.response_format = {
+      type: "json_schema",
+      json_schema: { name: format.name, schema: format.schema, strict: true },
+    };
+    note("kilo:response-format-translated");
+  } else if (read.kind === "tooDeep") {
+    // Asked, and the reader refused — a schema too deep to serialize. Dropping
+    // it is correct; dropping it without a word is not.
+    delete body.response_format;
+    note("kilo:response-schema-too-deep");
+  }
 
   return { body, degradations };
 }

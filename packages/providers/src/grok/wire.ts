@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { moveToResponsesText } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 
 /**
@@ -216,5 +217,13 @@ export function toGrokWire(
   // `frequency_penalty`, `logprobs`, `top_logprobs` and `stop`, which the
   // encoder never emits — a passthrough carrying one is the likely cause.
   Object.assign(body, req.vendor?.grok ?? {});
+
+  // A structured-output request rides `vendor.openai`, which nothing above
+  // reads: every ingress writes the bag named after the *surface* the client
+  // spoke, and no ingress produces a `grok` one. Without this the field is
+  // dropped with nothing recorded. This is a Responses endpoint, so the
+  // spelling is `text.format`; see `openai/wire.ts`.
+  const moved = moveToResponsesText(req, body, "grok");
+  if (moved !== undefined) note(moved);
   return { body, degradations };
 }

@@ -5,6 +5,7 @@ import {
   estimateInputPrefixes,
   GatewayError,
 } from "@omni/ir";
+import { closeObjects, readableFormat, readResponseFormatResult } from "../responseFormat.ts";
 import { systemTextBlocks } from "../system.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { anthropicReasoningForm } from "./models.ts";
@@ -685,14 +686,136 @@ export function toWire(
     }
   }
 
+  // A structured-output request made on the *other* surface. `response_format`
+  // is an OpenAI spelling this API answers `Extra inputs are not permitted` to,
+  // so it is translated rather than forwarded; a client already speaking
+  // Anthropic sends `output_config` itself and reaches the merge below
+  // untouched. Written before that merge for exactly that reason — the client's
+  // own field outranks a translation of someone else's.
+  //
+  // Skipped entirely when the bag already carries a *readable* format: the merge
+  // is about to overwrite whatever is written here, so translating would record
+  // a translation that never reached the wire. A malformed `format` is not a
+  // request this API can answer, so it does not outrank a valid spelling the
+  // same request carried — `readResponseFormat` refuses malformed input rather
+  // than falling through, and the merge below deletes what it cannot read.
+  const native = req.vendor?.anthropic?.output_config;
+  const nativeFormat = isRecord(native) && readableFormat(native.format);
+  const read = readResponseFormatResult(req);
+  const format = !nativeFormat && read.kind === "readable" ? read.format : undefined;
+  if (format !== undefined) {
+    body.output_config = {
+      ...(isRecord(body.output_config) ? body.output_config : {}),
+      // Left open here; `closeOutputConfigSchema` below closes whatever survives
+      // the vendor merge, so both routes onto this field go through one rule.
+      format: { type: "json_schema", schema: format.schema },
+    };
+    note("anthropic:response-format-translated");
+  } else if (!nativeFormat && read.kind === "tooDeep") {
+    // The client asked and the reader refused — a schema too deep to serialize
+    // is the only way that happens here. Dropping it is correct; dropping it
+    // silently is not, since the response then has no schema and nothing says
+    // why.
+    note("anthropic:response-schema-too-deep");
+  }
+
   // Vendor passthrough is applied last: an operator setting a raw Anthropic
   // field is stating an explicit intent that outranks our mapping.
-  const vendor = req.vendor?.anthropic ?? {};
+  //
+  // `output_config` is merged whole, so a bag whose value this API cannot read
+  // would erase what was written above — both a translated format and the
+  // `effort` the reasoning path put on the same field. Only a readable
+  // `output_config` carrying a readable `format` outranks; anything else is
+  // dropped and reported, and what it would have buried survives.
+  const vendorRaw = req.vendor?.anthropic ?? {};
+  const vendorConfig = vendorRaw.output_config;
+  const encoderConfig = isRecord(body.output_config) ? body.output_config : undefined;
+  let unreadableFormat = false;
+  let vendor = vendorRaw;
+  // Only when the encoder wrote something the merge would take: with nothing to
+  // rescue, the bag is the client's own field and passes through as written —
+  // including a value this API will reject, which is its answer to give.
+  if (encoderConfig !== undefined && vendorConfig !== undefined) {
+    if (!isRecord(vendorConfig)) {
+      // Not an object at all: nothing in it to merge, and letting it through
+      // replaces the encoder's own field with a string or an array.
+      const { output_config: _unreadable, ...rest } = vendorRaw;
+      vendor = rest;
+      unreadableFormat = true;
+    } else {
+      // Merged whole, so the encoder's own members — a translated format, and
+      // the `effort` the reasoning path put on this same field — have to be
+      // carried into the replacement, whatever the bag itself holds. A `format`
+      // this API cannot read is dropped on the way; a readable one still wins,
+      // because vendor members are spread last.
+      const readable = readableFormat(vendorConfig.format);
+      const { format: _unreadable, ...withoutFormat } = vendorConfig;
+      const rest = readable ? vendorConfig : withoutFormat;
+      vendor = { ...vendorRaw, output_config: { ...encoderConfig, ...rest } };
+      unreadableFormat = !readable && vendorConfig.format !== undefined;
+    }
+  }
   Object.assign(
     body,
     anthropicReasoningForm(model) === "budget" ? withoutEffort(vendor, note) : vendor,
   );
+  // Reported whenever the client's own field was discarded — which is the fact
+  // it names — not only when nothing took its place. A translation surviving
+  // in its stead does not make the discarded field un-discarded, and asking
+  // about the survivor instead logged nothing when the client sent a malformed
+  // `output_config` and no other spelling.
+  if (unreadableFormat) note("anthropic:response-format-dropped");
+
+  // After the merge, because the merge is what puts a `/v1/messages` client's
+  // own `output_config` on the body — and that schema needs closing just as much
+  // as a translated one. **This backend rejects an object node that does not say
+  // `additionalProperties: false`, at every depth, and rejects `true` outright**
+  // (measured 2026-09-21), so the client's own schema cannot go out as written.
+  // Closing is idempotent, so the translated copy passing through again is free.
+  closeOutputConfigSchema(body, note);
+
   stripUnsupportedEdits(body, note);
 
   return { body, degradations };
+}
+
+/**
+ * Closes every object node of whatever schema ended up on `output_config`.
+ *
+ * Separate from the translation because the two arrive by different routes: a
+ * cross-surface request is translated above, a native one rides the vendor bag,
+ * and only this runs after both. Tool `input_schema` is deliberately untouched —
+ * the same backend accepts those without the flag.
+ */
+function closeOutputConfigSchema(body: AnthropicBody, note: (d: string) => void): void {
+  const config = body.output_config;
+  if (!isRecord(config)) return;
+  const format = config.format;
+  if (!isRecord(format) || !isRecord(format.schema)) return;
+  const stats = { changed: false, truncated: false };
+  const closed = closeObjects(format.schema, stats);
+  // `stats` rather than comparing before to after: a schema deep enough to need
+  // the walker's depth cap is deep enough to overflow the stack in
+  // `JSON.stringify`, which would defeat the cap by crashing right after it.
+  if (stats.truncated) {
+    // The cap stopped the walk, but the schema itself is still that deep, and
+    // the codec serializes this body with `JSON.stringify` — which recurses just
+    // as far and throws. Sending it half-closed was the intent; it is not
+    // reachable, so the schema goes rather than the request.
+    const { format: _tooDeep, ...rest } = config;
+    body.output_config = rest;
+    note("anthropic:response-schema-too-deep");
+    return;
+  }
+  try {
+    JSON.stringify(closed);
+  } catch {
+    const { format: _unserializable, ...rest } = config;
+    body.output_config = rest;
+    note("anthropic:response-schema-too-deep");
+    return;
+  }
+  if (!stats.changed) return;
+  body.output_config = { ...config, format: { ...format, schema: closed } };
+  note("anthropic:response-schema-closed");
 }

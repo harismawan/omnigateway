@@ -1,5 +1,6 @@
 import type { ChatRequest, ContentBlock, ToolChoice } from "@omni/ir";
 import { AGENT_PREAMBLE, BILLING_PREFIX } from "../body.ts";
+import { readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { MAX_OUTPUT_TOKENS } from "./models.ts";
@@ -55,6 +56,14 @@ type GenerationConfig = {
   temperature?: number;
   stopSequences?: string[];
   thinkingConfig?: { thinkingBudget?: number; includeThoughts: boolean };
+  /**
+   * Structured output. **`responseSchema` alone is what works** — measured
+   * 2026-09-21 against `v1internal`: `responseMimeType: "application/json"` on
+   * its own still returned prose, `responseJsonSchema` was accepted and
+   * silently ignored, and the OpenAI spelling answers
+   * `Invalid JSON payload received. Unknown name`.
+   */
+  responseSchema?: unknown;
 };
 
 type GeminiRequest = {
@@ -829,6 +838,22 @@ export function toAntigravityWire(
         if (req.reasoning.effort !== undefined) note("antigravity:reasoning-effort-dropped");
         break;
     }
+  }
+
+  // A structured-output request, translated. The OpenAI spelling fails this
+  // backend outright (`Unknown name "response_format"`), and `pruneSchema` is
+  // what makes a draft-07 schema survive the proto — the same reason tool
+  // schemas go through it. Placed before the ceiling repairs below so the
+  // config is complete when they read it.
+  const read = readResponseFormatResult(req);
+  if (read.kind === "readable") {
+    const format = read.format;
+    generationConfig.responseSchema = pruneSchema(format.schema, note);
+    note("antigravity:response-format-translated");
+  } else if (read.kind === "tooDeep") {
+    // Asked, and the reader refused — a schema too deep to serialize. Dropping
+    // it is correct; dropping it without a word is not.
+    note("antigravity:response-schema-too-deep");
   }
 
   // **Cloud Code refuses more than this, whatever the model's own ceiling is.**

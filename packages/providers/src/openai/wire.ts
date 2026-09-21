@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
+import { moveToResponsesText } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 
 export type ResponsesBody = {
@@ -291,6 +292,13 @@ export function toResponsesWire(
   const key = suppliedKey(req) ?? cacheKey(req, instructions ?? "", input[0]);
 
   Object.assign(body, req.vendor?.openai ?? {});
+
+  // **The merge above copies `response_format` in, and this API refuses it** —
+  // `Unsupported parameter: response_format`, measured 2026-09-21. It is the
+  // Chat Completions spelling; the Responses API takes `text.format`. Shared
+  // with the other two Responses encoders, which had the same field to move.
+  const moved = moveToResponsesText(req, body, "openai");
+  if (moved !== undefined) note(moved);
 
   // Written **after** the vendor merge, and the order is the whole point. The
   // merge copies the client's bag verbatim, including a `prompt_cache_key` that
