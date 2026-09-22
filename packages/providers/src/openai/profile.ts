@@ -1,6 +1,6 @@
 import { type ClientProfile, env, envOrder } from "../headers.ts";
 
-const OPENAI_CLI_VERSION = env("OMNI_OPENAI_CLI_VERSION", "0.144.1");
+const OPENAI_CLI_VERSION = env("OMNI_OPENAI_CLI_VERSION", "0.155.1");
 const OPENAI_UA_PLATFORM = env("OMNI_OPENAI_UA_PLATFORM", "Windows 10.0.26200");
 const OPENAI_UA_ARCH = env("OMNI_OPENAI_UA_ARCH", "x64");
 
