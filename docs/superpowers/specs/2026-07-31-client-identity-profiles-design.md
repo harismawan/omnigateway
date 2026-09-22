@@ -109,9 +109,9 @@ binaries. `${...}` marks an environment-substitutable value.
 
 | Header | Value |
 | --- | --- |
-| `User-Agent` | `codex-cli/${0.144.1} (${Windows 10.0.26200}; ${x64})` |
+| `User-Agent` | `codex-cli/${0.155.1} (${Windows 10.0.26200}; ${x64})` |
 | `originator` | `${codex_cli_rs}` |
-| `Version` | `${0.144.1}` |
+| `Version` | `${0.155.1}` |
 | `Openai-Beta` | `responses=experimental` |
 | `X-Codex-Beta-Features` | `responses_websockets` |
 
@@ -343,7 +343,7 @@ OMNI_ANTHROPIC_STAINLESS_ARCH=              # blank = derive from host
 OMNI_ORDER_ANTHROPIC=                       # comma-separated; blank = built-in order
 
 OMNI_UA_OPENAI=
-OMNI_OPENAI_CLI_VERSION=0.144.1
+OMNI_OPENAI_CLI_VERSION=0.155.1
 OMNI_OPENAI_ORIGINATOR=codex_cli_rs
 OMNI_OPENAI_UA_PLATFORM=Windows 10.0.26200
 OMNI_OPENAI_UA_ARCH=x64

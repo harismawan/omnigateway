@@ -34,11 +34,11 @@ const pending = { verifier: "v", challenge: "c", state: "s", redirectUri: "http:
 const OPENAI_TOKEN_HEADERS = [
   ["Content-Type", "application/x-www-form-urlencoded"],
   ["originator", "codex_cli_rs"],
-  ["Version", "0.144.1"],
+  ["Version", "0.155.1"],
   ["Openai-Beta", "responses=experimental"],
   ["X-Codex-Beta-Features", "responses_websockets"],
   ["Accept", "application/json"],
-  ["User-Agent", "codex-cli/0.144.1 (Windows 10.0.26200; x64)"],
+  ["User-Agent", "codex-cli/0.155.1 (Windows 10.0.26200; x64)"],
 ] as const;
 
 /** OpenAI's endpoints are compiled in, so `start` must not reach the network. */
