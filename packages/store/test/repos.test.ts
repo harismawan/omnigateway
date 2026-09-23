@@ -541,22 +541,6 @@ test("setModelAllowlist replaces the column whole and keeps null and [] distinct
   expect((await s.keys.findByHash(hash))?.modelAllowlist).toBeNull();
   s.close();
 });
-test("a model's malformed persisted ponytail mode reads as following the setting", async () => {
-  const s = await store();
-  await s.config.putModel({ id: "m", targets: [], strategy: "score", isAlias: false });
-  // Same way in as the settings case below: a hand-edited or restored row.
-  // Guessing a mode would rewrite prompts nobody asked to rewrite.
-  await s.config.putModel({
-    id: "m",
-    targets: [],
-    strategy: "score",
-    isAlias: false,
-    ponytailMode: "FULL" as Settings["ponytailMode"],
-  });
-  expect((await s.config.listModels())[0]).not.toHaveProperty("ponytailMode");
-  s.close();
-});
-
 test("settings normalize a malformed persisted ponytail mode to off", async () => {
   const s = await store();
   expect((await s.config.getSettings()).ponytailMode).toBe("off");

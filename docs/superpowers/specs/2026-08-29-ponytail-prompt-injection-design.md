@@ -45,14 +45,12 @@ In scope:
 
 - A pure `@omni/ponytail` package holding the vendored ruleset and a pure injection function.
 - One call site in `apps/gateway/src/dispatch/index.ts`, and one in the `count_tokens` route.
-- One install-wide setting, reachable from the dashboard and the CLI, which a virtual model may
-  override for itself in either direction (`VirtualModel.ponytailMode`; absent follows the
-  setting). RTK's `rtkEnabled` has the same per-model override.
+- One install-wide setting, reachable from the dashboard and the CLI.
 - Per-request record of what was applied, on the existing `degradations` column.
 
 Out of scope, and deliberately so:
 
-- **Per-API-key control.** Global plus per-model only. Adding a key level later means a third editable field on
+- **Per-API-key control.** Global only. Adding it later means a third editable field on
   `api_keys`, which today carries exactly two (`limits`, `modelAllowlist`).
 - **In-conversation switching.** Upstream's `/ponytail lite|full|ultra` and its
   "stop ponytail" escape hatch cannot work server-side; see *The text* for what replaces them.
@@ -199,16 +197,12 @@ Two cases, and the second is the one that could go wrong quietly.
 `apps/gateway/src/dispatch/index.ts`, immediately after the existing `transformRequest` block:
 
 ```ts
-const overrides = snapshot.models.get(request.model);
-const lazy = injectPonytail(transformed.request, {
-  mode: overrides?.ponytailMode ?? snapshot.settings.ponytailMode,
-});
+const lazy = injectPonytail(transformed.request, { mode: snapshot.settings.ponytailMode });
 dispatchRequest = lazy.request;
 noteDegradations(ponytailNotes(lazy.report));
 ```
 
-The override is read from the configured model row by the requested name; a prefix-routed
-name has no row and follows the setting. Once per request, before `resolveModel` and before ranking, so every attempt of a failover
+Once per request, before `resolveModel` and before ranking, so every attempt of a failover
 reads the same prompt. Order against RTK does not matter behaviourally — RTK rewrites
 `toolResult` content, ponytail touches `system` — and is fixed as RTK-then-ponytail only to be
 deterministic.
@@ -216,16 +210,13 @@ deterministic.
 `POST /v1/messages/count_tokens` (`apps/gateway/src/routes/proxy.ts`) estimates locally and
 never dispatches, so with ponytail on it would under-report by the whole ruleset on every call
 while the real request pays for it. The same pure function runs there before estimating, reading
-the same effective mode (model override, else `settings.ponytailMode`) off the snapshot the route
-already holds. It writes no
+the same `settings.ponytailMode` off the snapshot the route already holds. It writes no
 degradations: that route creates no request-log row.
 
 ## Configuration
 
 `Settings.ponytailMode: PonytailMode`, default `"off"` — the third request-rewriting flag,
-beside `rtkEnabled` and `autoCacheEnabled`. `VirtualModel.ponytailMode?: PonytailMode` overrides
-it per model, stored in nullable `virtual_models.ponytail_mode` (sqlite 018, postgres 006); NULL
-or an unknown stored value follows the setting.
+beside `rtkEnabled` and `autoCacheEnabled`.
 
 **Read boundary** (`packages/store/src/sqlite/config.ts`):
 
@@ -349,10 +340,6 @@ line in `docs/`, and the ceiling is named there.
   Both were confirmed to fail when the marker move is removed.
 - a failover sees identical system content on both attempts
 - `count_tokens` includes the ruleset when on and excludes it when off
-- a model's `ponytailMode` beats the setting in both directions, and absent follows it (dispatch
-  and `count_tokens`)
-- `virtual_models.ponytail_mode` round-trips on both backends; an unknown stored value reads as
-  absent
 
 Store, control, CLI, dashboard:
 

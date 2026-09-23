@@ -153,51 +153,6 @@ test("models put seeds a target from the catalog, with its list pricing", async 
   expect(body.model.targets[0]?.costPerMTok.input).toBeGreaterThan(0);
 });
 
-test("models put carries transform overrides, and refuses a bad one", async () => {
-  const root = await installation();
-  const put = await cli(
-    [
-      "models",
-      "put",
-      "fast",
-      "--from-catalog",
-      "anthropic:claude-opus-5",
-      "--rtk",
-      "off",
-      "--ponytail",
-      "ultra",
-    ],
-    { root },
-  );
-  expect(put.code).toBe(0);
-  const shown = await cli(["models", "show", "fast", "--json"], { root });
-  expect(JSON.parse(shown.out).model).toMatchObject({ rtkEnabled: false, ponytailMode: "ultra" });
-  const text = (await cli(["models", "show", "fast"], { root })).out;
-  expect(text).toMatch(/rtk\s+off/);
-  expect(text).toMatch(/ponytail\s+ultra/);
-
-  await cli(["models", "put", "fast", "--from-catalog", "anthropic:claude-opus-5"], { root });
-  const inherit = (await cli(["models", "show", "fast"], { root })).out;
-  expect(inherit).toMatch(/rtk\s+global/);
-  expect(inherit).toMatch(/ponytail\s+global/);
-
-  const withFile = await cli(["models", "put", "fast", "-f", "model.json", "--rtk", "on"], {
-    root,
-  });
-  expect(withFile.code).not.toBe(0);
-
-  const bad = await cli(
-    ["models", "put", "fast", "--from-catalog", "anthropic:claude-opus-5", "--ponytail", "max"],
-    { root },
-  );
-  expect(bad.code).not.toBe(0);
-  const badRtk = await cli(
-    ["models", "put", "fast", "--from-catalog", "anthropic:claude-opus-5", "--rtk", "yes"],
-    { root },
-  );
-  expect(badRtk.code).not.toBe(0);
-});
-
 test("models show prices every token class, not just input and output", async () => {
   const root = await installation();
   await cli(["models", "put", "fast", "--from-catalog", "anthropic:claude-opus-5"], { root });

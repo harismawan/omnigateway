@@ -271,19 +271,13 @@ export async function dispatch(
   let model: VirtualModel;
   try {
     checkCancellation();
-    // A configured model may override either global transform setting, in
-    // either direction. Only configured rows carry overrides — a prefix-routed
-    // name has none — so the plain map read is the whole lookup.
-    const overrides = snapshot.models.get(request.model);
-    const transformed = transformRequest(request, {
-      enabled: overrides?.rtkEnabled ?? snapshot.settings.rtkEnabled,
-    });
+    const transformed = transformRequest(request, { enabled: snapshot.settings.rtkEnabled });
     // Both transforms run once here, ahead of routing, so every attempt of a
     // failover sends the same bytes. Their order is not load-bearing — RTK
     // rewrites tool results and ponytail appends to the system prompt — and is
     // fixed only so the recorded degradations read the same way every time.
     const lazy = injectPonytail(transformed.request, {
-      mode: overrides?.ponytailMode ?? snapshot.settings.ponytailMode,
+      mode: snapshot.settings.ponytailMode,
     });
     dispatchRequest = lazy.request;
     noteDegradations(ponytailNotes(lazy.report));

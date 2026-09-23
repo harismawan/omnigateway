@@ -12,7 +12,19 @@ import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { AccessPanel } from "./AccessPanel.tsx";
 import { AgentSetup } from "./AgentSetup.tsx";
-import { PONYTAIL_LEVELS } from "./ponytail.ts";
+
+/**
+ * The ponytail levels, in the order an operator escalates through them.
+ *
+ * A `Record` over the union rather than a list: adding a level upstream then
+ * fails this build instead of quietly offering one fewer option than exists.
+ */
+const PONYTAIL_LEVELS: Record<PonytailMode, string> = {
+  off: "Off",
+  lite: "Lite — names the lazier option",
+  full: "Full — the ladder enforced",
+  ultra: "Ultra — challenges the requirement",
+};
 
 type WeightKey = keyof Settings["weights"];
 
@@ -468,10 +480,7 @@ export function SettingsBoard() {
               pair of faces of different heights reads as one panel cropped
               rather than two panels of different lengths. */}
           <Grid $min="380px" $stretch>
-            <Module
-              legend="Request handling"
-              meta="applied before dispatch; a model may override RTK and lazy senior dev"
-            >
+            <Module legend="Request handling" meta="applied before dispatch">
               <Options>
                 <SwitchOption
                   label="Enable RTK compression"

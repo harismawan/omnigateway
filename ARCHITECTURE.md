@@ -131,9 +131,9 @@ sequenceDiagram
   In-->>Route: ChatRequest (provider-neutral IR)
   Route->>Route: model allowlist,<br/>after alias normalization
   Route->>Disp: dispatch(request, signal)
-  Disp->>RTK: filter tool results (off by default; per-model override)
+  Disp->>RTK: filter tool results (off by default)
   RTK-->>Disp: rewritten request + savings report
-  Disp->>Pony: append ponytail ruleset (off by default; per-model override)
+  Disp->>Pony: append ponytail ruleset (off by default)
   Pony-->>Disp: request with ruleset last in system
   Disp->>Router: rank(snapshot, load)
   Router-->>Disp: ordered candidates + exclusion reasons
