@@ -18,9 +18,10 @@ const PROVIDERS = [
 
 const EXPECTED = {
   anthropic: {
-    defaultModel: "claude-opus-5",
+    defaultModel: "claude-opus-5-5",
     ids: [
       "claude-fable-5-1",
+      "claude-opus-5-5",
       "claude-fable-5",
       "claude-opus-5",
       "claude-sonnet-5",
@@ -28,8 +29,16 @@ const EXPECTED = {
     ],
   },
   openai: {
-    defaultModel: "gpt-5.6",
-    ids: ["gpt-6-astra", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+    defaultModel: "gpt-6-sol",
+    ids: [
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-5.6",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+    ],
   },
   kimi: {
     defaultModel: "k3-256k",
@@ -379,6 +388,27 @@ test("the bare OpenAI alias is priced as the tier it routes to", () => {
 });
 
 test("catalogPricing reports an unlisted model rather than guessing", () => {
+  expect(catalogPricing("anthropic", "claude-opus-5-5")).toEqual({
+    input: 4,
+    output: 20,
+    cacheRead: 0.2,
+    cacheWrite5m: 5,
+    cacheWrite1h: 8,
+  });
+  expect(catalogPricing("openai", "gpt-6-sol")).toEqual({
+    input: 2,
+    output: 10,
+    cacheRead: 0.2,
+    cacheWrite5m: 2.5,
+    cacheWrite1h: 0,
+  });
+  expect(catalogPricing("openai", "gpt-6-luna")).toEqual({
+    input: 0.1,
+    output: 0.5,
+    cacheRead: 0.01,
+    cacheWrite5m: 0.125,
+    cacheWrite1h: 0,
+  });
   expect(catalogPricing("anthropic", "claude-opus-5")).toEqual({
     input: 5,
     output: 25,

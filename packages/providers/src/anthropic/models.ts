@@ -3,10 +3,10 @@ import type { ProviderModelCatalogEntry, ProviderReasoningForm } from "../catalo
 /**
  * Anthropic's curated models and their list prices.
  *
- * Prices checked 2026-09-04 against Anthropic's published API pricing. Cache
- * reads are 0.1x of base input across the range *except* on Claude Fable 5.1,
- * which reads at 0.025x; the figures below are absolute because a target stores
- * a number, not a multiplier.
+ * Prices checked 2026-09-23 against Anthropic's published API pricing. Cache
+ * reads are 0.1x of base input across the range *except* on Claude Fable 5.1
+ * (0.025x) and Claude Opus 5.5 (0.05x); the figures below are absolute because
+ * a target stores a number, not a multiplier.
  *
  * Claude Sonnet 5's $2.00 / $10.00 launch rate is now its standard price — the
  * increase to $3.00 / $15.00 scheduled for 2026-09-01 was cancelled.
@@ -19,7 +19,7 @@ import type { ProviderModelCatalogEntry, ProviderReasoningForm } from "../catalo
  * Fable, Opus and Sonnet entries is the default there, not an opt-in tier.
  */
 export const ANTHROPIC_MODELS: ProviderModelCatalogEntry = {
-  defaultModel: "claude-opus-5",
+  defaultModel: "claude-opus-5-5",
   // A subscription token, or a console API key sent as `x-api-key`.
   authTypes: ["oauth", "apiKey"],
   models: [
@@ -28,6 +28,13 @@ export const ANTHROPIC_MODELS: ProviderModelCatalogEntry = {
       label: "Claude Fable 5.1",
       // Cache reads are 0.025x here, not the 0.1x every other entry pays.
       pricing: { input: 10, output: 50, cacheRead: 0.25, cacheWrite5m: 12.5, cacheWrite1h: 20 },
+      limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+    },
+    {
+      id: "claude-opus-5-5",
+      label: "Claude Opus 5.5",
+      // Cache reads are 0.05x here ($0.20/MTok on $4 base input).
+      pricing: { input: 4, output: 20, cacheRead: 0.2, cacheWrite5m: 5, cacheWrite1h: 8 },
       limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
     },
     {
