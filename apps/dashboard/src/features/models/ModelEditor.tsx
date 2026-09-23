@@ -15,6 +15,7 @@ import { Module } from "../../ui/Panel.tsx";
 import { Legend, Row, Spacer, Stack } from "../../ui/primitives.ts";
 import { describeError } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
+import { PONYTAIL_LEVELS } from "../settings/ponytail.ts";
 import {
   blankModel,
   blankTarget,
@@ -182,6 +183,47 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
             )}
           </Field>
           {strategy === undefined ? null : <Blurb>{strategy.blurb}</Blurb>}
+
+          <Field
+            label="Tool-output compression (RTK)"
+            hint="Overrides the global setting for this model only."
+          >
+            {(props) => (
+              <Select
+                {...props}
+                value={draft.rtk}
+                onChange={(event) =>
+                  setDraft({ ...draft, rtk: event.target.value as ModelDraft["rtk"] })
+                }
+              >
+                <option value="">Follow global setting</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </Select>
+            )}
+          </Field>
+
+          <Field
+            label="Lazy senior dev (ponytail)"
+            hint="Overrides the global setting for this model only."
+          >
+            {(props) => (
+              <Select
+                {...props}
+                value={draft.ponytail}
+                onChange={(event) =>
+                  setDraft({ ...draft, ponytail: event.target.value as ModelDraft["ponytail"] })
+                }
+              >
+                <option value="">Follow global setting</option>
+                {Object.entries(PONYTAIL_LEVELS).map(([mode, label]) => (
+                  <option key={mode} value={mode}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
 
           <AliasRow>
             <Toggle

@@ -54,7 +54,8 @@ unchanged.
 - Custom/project/global filter files or arbitrary regular expressions.
 - Raw-output storage or recovery.
 - Learned filters, filter suggestions, or discovery APIs.
-- Per-model, per-provider, per-key, or per-request configuration.
+- Per-provider, per-key, or per-request configuration. (A per-model override was added later:
+  `VirtualModel.rtkEnabled`, absent = follow the setting.)
 - Daily RTK aggregate tables or billing changes.
 - Exact tokenizer-based savings claims.
 
@@ -90,7 +91,8 @@ authenticate
 → enforce normalized model allowlist
 → enter dispatch and establish its absolute deadline
 → obtain one routing snapshot, including settings
-→ transform canonical tool results once using that snapshot's rtkEnabled
+→ transform canonical tool results once using the requested model's rtkEnabled override, else
+  that snapshot's global rtkEnabled
 → resolve and rank candidates
 → send the same transformed request on every attempt
 → persist the RTK report when the request completes
@@ -331,9 +333,10 @@ Dashboard Settings page adds one toggle with concise disclosure:
 > detector recognizes a high-confidence shell-output format. Compression is deterministic and
 > lossy. Disabled by default.
 
-No request header override exists in MVP. No virtual-model or target schema changes are needed.
-Dispatch obtains one routing snapshot per request and uses its settings for RTK, deadline, ranking,
-and every attempt. A concurrent toggle affects subsequent snapshots, never an in-flight request.
+No request header override exists. A virtual model may carry `rtkEnabled` to override the setting
+in either direction (nullable `virtual_models.rtk_enabled`, NULL = follow the setting). Dispatch
+obtains one routing snapshot per request and uses the requested model's row, else its settings, for
+RTK; and its settings for deadline, ranking, and every attempt. A concurrent toggle affects subsequent snapshots, never an in-flight request.
 
 ## Telemetry and Persistence
 
@@ -502,5 +505,5 @@ Focused changed-behavior suites run first. Formatting follows repository Biome r
 3. Observe structured per-request metrics and false-positive reports.
 4. Expand filters only through separately reviewed built-in fixtures and adversarial tests.
 
-Custom filters, raw recovery, preview APIs, per-model policy, and broader prompt compression require
+Custom filters, raw recovery, preview APIs, and broader prompt compression require
 separate designs. They are not implied by this MVP.

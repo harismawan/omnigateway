@@ -16,6 +16,7 @@ import keyExpiry014 from "./migrations/014_key_expiry.sql" with { type: "text" }
 import logKeyset015 from "./migrations/015_log_keyset.sql" with { type: "text" };
 import logFilterIndexes016 from "./migrations/016_log_filter_indexes.sql" with { type: "text" };
 import logTextSearch017 from "./migrations/017_log_text_search.sql" with { type: "text" };
+import modelOverrides018 from "./migrations/018_model_overrides.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -58,6 +59,8 @@ const MIGRATIONS: ReadonlyArray<{
   // Index-only. The typed filters match substrings, which no per-column index can
   // seek, so those columns move into the keyset index the scan already walks.
   { id: 17, sql: logTextSearch017 },
+  // Two nullable columns; NULL is "follow the global setting", so no backfill.
+  { id: 18, sql: modelOverrides018 },
 ];
 
 /**
