@@ -1,6 +1,7 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
+import { splitFiles, withFileText } from "../toolResultFiles.ts";
 
 export type ChatBody = {
   model: string;
@@ -69,18 +70,22 @@ export function toChatWire(
             function: { name: block.name, arguments: JSON.stringify(block.input) },
           });
           break;
-        case "toolResult":
+        case "toolResult": {
           // Unreachable: the router pins a result's native parts to their producer.
           if (block.native !== undefined) note("kimi:anthropic-native-block-dropped");
-          // A tool result is its own message in this API, not a content block.
+          // A tool result is its own message in this API, not a content block;
+          // its text files are decoded into it, and nothing else fits.
+          const files = splitFiles(block.files ?? [], () => false);
           messages.push({
             role: "tool",
             tool_call_id: block.toolUseId,
-            content: block.content,
+            content: withFileText(block.content, files.text),
           });
           if (block.images !== undefined) note("kimi:images-dropped");
-          if (block.files !== undefined) note("kimi:files-dropped");
+          if (files.text.length > 0) note("kimi:tool-result-files-inlined");
+          if (files.dropped) note("kimi:files-dropped");
           break;
+        }
         case "providerNative":
           // Unreachable: the router excludes this provider from any request
           // carrying another provider's native history. Recorded, not ignored.

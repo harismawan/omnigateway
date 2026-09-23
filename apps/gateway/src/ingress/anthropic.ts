@@ -1,6 +1,7 @@
 import type {
   ChatRequest,
   ContentBlock,
+  FileBlock,
   ImageBlock,
   Message,
   ProviderNativeBlock,
@@ -334,12 +335,14 @@ const TOOL_RESULT_NATIVE = new Set(["document", "search_result"]);
 function readToolResult(content: string | unknown[] | undefined): {
   content: string;
   images?: ImageBlock[];
+  files?: FileBlock[];
   native?: ProviderNativeBlock[];
 } {
   if (typeof content === "string") return { content };
   if (!Array.isArray(content)) return { content: "" };
   const text: string[] = [];
   const images: ImageBlock[] = [];
+  const files: FileBlock[] = [];
   const native: ProviderNativeBlock[] = [];
   for (const part of content) {
     if (typeof part === "string") {
@@ -363,6 +366,17 @@ function readToolResult(content: string | unknown[] | undefined): {
     const nativeSchema =
       p?.type !== undefined && TOOL_RESULT_NATIVE.has(p.type) ? nativeSchemas[p.type] : undefined;
     const parsed = nativeSchema?.safeParse(part);
+    if (p?.type === "document" && parsed?.success === true) {
+      // A document every provider can be handed becomes portable: a base64 PDF
+      // is a file, text is text. Only what names Anthropic's own storage or
+      // asks for its citations stays native and pins the route.
+      const portable = portableDocument(parsed.data);
+      if (portable !== undefined) {
+        if (typeof portable === "string") text.push(portable);
+        else files.push(portable);
+        continue;
+      }
+    }
     if (p?.type !== undefined && parsed?.success === true) {
       const { type: _type, cache_control, ...data } = parsed.data;
       native.push({
@@ -381,8 +395,46 @@ function readToolResult(content: string | unknown[] | undefined): {
   return {
     content: text.join("\n"),
     ...(images.length > 0 && { images }),
+    ...(files.length > 0 && { files }),
     ...(native.length > 0 && { native }),
   };
+}
+
+/**
+ * A tool-result document as portable IR, or undefined when it must stay
+ * Anthropic's. `document` takes exactly a base64 PDF, `text/plain` text, or
+ * text/image `content` (measured: any other media type is a 400), so those
+ * translate losslessly. Citations, `context`, a cache marker, a URL, or a
+ * `file_id` are Anthropic behaviour or storage, and keep the block native.
+ */
+function portableDocument(doc: Record<string, unknown>): FileBlock | string | undefined {
+  if (
+    (doc.citations !== undefined && doc.citations !== null) ||
+    (doc.context !== undefined && doc.context !== null) ||
+    (doc.cache_control !== undefined && doc.cache_control !== null)
+  ) {
+    return undefined;
+  }
+  const source = doc.source as {
+    type: string;
+    media_type?: string;
+    data?: unknown;
+    content?: unknown;
+  };
+  const title = typeof doc.title === "string" ? doc.title : undefined;
+  if (source.type === "base64" && typeof source.data === "string") {
+    return {
+      type: "file",
+      mediaType: "application/pdf",
+      data: source.data,
+      ...(title !== undefined && { filename: title }),
+    };
+  }
+  // The title names the document to the model; kept as its first line.
+  if (source.type === "text" && typeof source.data === "string") {
+    return title === undefined ? source.data : `${title}\n${source.data}`;
+  }
+  return undefined;
 }
 
 function toIrBlock(b: z.infer<typeof block>): ContentBlock {

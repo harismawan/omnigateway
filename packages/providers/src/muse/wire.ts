@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { moveToResponsesText } from "../responseFormat.ts";
-import { responsesFiles } from "../responsesFile.ts";
 import { systemText } from "../system.ts";
+import { responsesFiles, withFileText } from "../toolResultFiles.ts";
 
 export type MuseResponsesBody = {
   model: string;
@@ -213,7 +213,7 @@ export function toMuseWire(
           input.push({
             type: "function_call_output",
             call_id: block.toolUseId,
-            output: [block.content, ...files.text].filter((t) => t.length > 0).join("\n\n"),
+            output: withFileText(block.content, files.text),
           });
           // `output` stays text; the result's images go as input parts of the
           // following Responses message, and the move is recorded.

@@ -1,7 +1,7 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { isRecord, moveToResponsesText, readResponseFormatResult } from "../responseFormat.ts";
-import { responsesFiles } from "../responsesFile.ts";
 import { systemText } from "../system.ts";
+import { responsesFiles, splitFiles, withFileText } from "../toolResultFiles.ts";
 
 /**
  * Custom's own wire codecs, one per protocol.
@@ -128,18 +128,22 @@ export function toCustomChatWire(
             function: { name: block.name, arguments: JSON.stringify(block.input) },
           });
           break;
-        case "toolResult":
+        case "toolResult": {
           // Unreachable: the router pins a result's native parts to their producer.
           if (block.native !== undefined) note("custom:anthropic-native-block-dropped");
-          // A tool result is its own message in this API, not a content block.
+          // A tool result is its own message in this API, not a content block;
+          // its text files are decoded into it, and nothing else fits.
+          const files = splitFiles(block.files ?? [], () => false);
           messages.push({
             role: "tool",
             tool_call_id: block.toolUseId,
-            content: block.content,
+            content: withFileText(block.content, files.text),
           });
           if (block.images !== undefined) note("custom:images-dropped");
-          if (block.files !== undefined) note("custom:files-dropped");
+          if (files.text.length > 0) note("custom:tool-result-files-inlined");
+          if (files.dropped) note("custom:files-dropped");
           break;
+        }
         case "providerNative":
           // Unreachable: the router excludes this provider from any request
           // carrying another provider's native history. Recorded, not ignored.
@@ -299,7 +303,7 @@ export function toCustomResponsesWire(
           input.push({
             type: "function_call_output",
             call_id: block.toolUseId,
-            output: [block.content, ...files.text].filter((t) => t.length > 0).join("\n\n"),
+            output: withFileText(block.content, files.text),
           });
           // `output` stays text; the result's images go as input parts of the
           // following Responses message, and the move is recorded.

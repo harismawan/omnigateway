@@ -2,6 +2,7 @@ import type { ChatRequest, ContentBlock, ToolChoice } from "@omni/ir";
 import { AGENT_PREAMBLE, BILLING_PREFIX } from "../body.ts";
 import { readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
+import { splitFiles, withFileText } from "../toolResultFiles.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { MAX_OUTPUT_TOKENS } from "./models.ts";
 
@@ -731,12 +732,16 @@ export function toAntigravityWire(
           // therefore reaches the model as an ordinary one whose text happens to
           // describe an error, which is a real loss of meaning and is recorded.
           if (block.isError === true) note("antigravity:tool-result-error-flag-dropped");
+          // Text files are decoded into the output; every other type rides as
+          // `inlineData`, which Cloud Code accepted for every type probed.
+          const files = splitFiles(block.files ?? [], () => true);
+          if (files.text.length > 0) note("antigravity:tool-result-files-inlined");
           parts.push({
             functionResponse: {
               // Cloaked whichever it is: the recovered name and the id
               // fallback both land in the same field under the same grammar.
               name: cloakName(cloak, name ?? block.toolUseId),
-              response: { output: block.content },
+              response: { output: withFileText(block.content, files.text) },
             },
           });
           // `functionResponse` carries text; its images ride beside it as
@@ -744,7 +749,7 @@ export function toAntigravityWire(
           for (const image of block.images ?? []) {
             parts.push({ inlineData: { mimeType: image.mediaType, data: image.data } });
           }
-          for (const file of block.files ?? []) {
+          for (const file of files.carried) {
             parts.push({ inlineData: { mimeType: file.mediaType, data: file.data } });
           }
           // **A turn carrying a function response must be `user`**, whatever the

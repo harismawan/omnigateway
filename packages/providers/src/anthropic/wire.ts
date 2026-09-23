@@ -12,6 +12,7 @@ import {
   readResponseFormatResult,
 } from "../responseFormat.ts";
 import { systemTextBlocks } from "../system.ts";
+import { splitFiles, withFileText } from "../toolResultFiles.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
 import { anthropicReasoningForm } from "./models.ts";
 
@@ -101,28 +102,15 @@ function encodeBlock(b: ContentBlock, cloak: ToolCloak | null): unknown {
         ...cache,
       };
     case "toolResult": {
-      // A PDF is what `document` takes as base64 and plain text is what it
-      // takes as text; `toWire` records any other file as dropped.
-      const documents = (b.files ?? []).flatMap((file) => {
-        const source =
-          file.mediaType === "application/pdf"
-            ? { type: "base64", media_type: file.mediaType, data: file.data }
-            : file.mediaType === "text/plain"
-              ? {
-                  type: "text",
-                  media_type: file.mediaType,
-                  data: Buffer.from(file.data, "base64").toString("utf8"),
-                }
-              : undefined;
-        if (source === undefined) return [];
-        return [
-          {
-            type: "document",
-            source,
-            ...(file.filename !== undefined && { title: file.filename }),
-          },
-        ];
-      });
+      // Text files join the result's text; a PDF is what `document` takes as
+      // base64. `toWire` records any other file as dropped.
+      const files = splitFiles(b.files ?? [], (t) => t === "application/pdf");
+      const text = withFileText(b.content, files.text);
+      const documents = files.carried.map((file) => ({
+        type: "document",
+        source: { type: "base64", media_type: file.mediaType, data: file.data },
+        ...(file.filename !== undefined && { title: file.filename }),
+      }));
       const parts = [
         ...(b.images ?? []).map((image) => encodeBlock(image, cloak)),
         ...documents,
@@ -135,8 +123,8 @@ function encodeBlock(b: ContentBlock, cloak: ToolCloak | null): unknown {
         // before — including when every file was dropped.
         content:
           parts.length === 0
-            ? b.content
-            : [...(b.content.length > 0 ? [{ type: "text", text: b.content }] : []), ...parts],
+            ? text
+            : [...(text.length > 0 ? [{ type: "text", text }] : []), ...parts],
         is_error: b.isError,
         ...cache,
       };
@@ -624,11 +612,10 @@ export function toWire(
   if (systemCache.lost) note("anthropic:system-turn-cache-control-dropped");
   for (const m of req.messages) {
     for (const b of m.content) {
-      if (
-        b.type === "toolResult" &&
-        b.files?.some((f) => f.mediaType !== "application/pdf" && f.mediaType !== "text/plain")
-      ) {
-        note("anthropic:files-dropped");
+      if (b.type === "toolResult" && b.files !== undefined) {
+        const files = splitFiles(b.files, (t) => t === "application/pdf");
+        if (files.text.length > 0) note("anthropic:tool-result-files-inlined");
+        if (files.dropped) note("anthropic:files-dropped");
       }
     }
   }
