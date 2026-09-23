@@ -59,7 +59,12 @@ function blockTokens(block: ContentBlock): number {
     case "toolUse":
       return BLOCK_OVERHEAD + fromText(block.name) + fromText(safeJson(block.input));
     case "toolResult":
-      return BLOCK_OVERHEAD + fromText(block.toolUseId) + fromText(block.content);
+      return (
+        BLOCK_OVERHEAD +
+        fromText(block.toolUseId) +
+        fromText(block.content) +
+        (block.images?.length ?? 0) * IMAGE_TOKENS
+      );
     case "providerNative":
       // A web-search result block is mostly its payload, and a session that
       // searches repeatedly carries several. Counting only the discriminator
@@ -187,6 +192,11 @@ export function estimateCachedInputTokens(request: ChatRequest): number {
     for (const block of message.content) {
       running += blockTokens(block);
       if (cacheControlOf(block) !== undefined) cached = running;
+      // A tool result's images sit inside it on the wire, so a marker on one
+      // caches through the whole block.
+      if (block.type === "toolResult" && block.images?.some((i) => i.cacheControl !== undefined)) {
+        cached = running;
+      }
     }
   }
 

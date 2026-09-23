@@ -1,4 +1,11 @@
-import type { CacheControl, ChatRequest, ContentBlock, Message, ToolChoice } from "@omni/ir";
+import type {
+  CacheControl,
+  ChatRequest,
+  ContentBlock,
+  ImageBlock,
+  Message,
+  ToolChoice,
+} from "@omni/ir";
 import { GatewayError, REASONING_EFFORTS, validateRequest } from "@omni/ir";
 import { z } from "zod";
 import { MODEL_NAME_MAX, normalizeClientModel } from "./model.ts";
@@ -228,14 +235,28 @@ export function parseOpenAIRequest(body: unknown, headers?: Headers): ChatReques
       if (m.tool_call_id === undefined) {
         throw new GatewayError("BAD_REQUEST", "messages: tool message requires tool_call_id");
       }
-      // The IR follows Anthropic: a tool result is user-turn content.
+      // The IR follows Anthropic: a tool result is user-turn content. An array
+      // content is read like any message's, text joined and images kept. A
+      // remote image is dropped, as on the Responses surface: this array was
+      // read as "" before, so refusing one here would fail requests that used
+      // to succeed.
+      const parts = contentBlocks(
+        Array.isArray(m.content)
+          ? m.content.filter((p) => p.type !== "image_url" || p.image_url.url.startsWith("data:"))
+          : m.content,
+      );
+      const images = parts.filter((b): b is ImageBlock => b.type === "image");
       messages.push({
         role: "user",
         content: [
           {
             type: "toolResult",
             toolUseId: m.tool_call_id,
-            content: typeof m.content === "string" ? m.content : "",
+            content:
+              typeof m.content === "string"
+                ? m.content
+                : parts.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n"),
+            ...(images.length > 0 && { images }),
             isError: false,
             ...looseCacheControl(m.cache_control),
           },

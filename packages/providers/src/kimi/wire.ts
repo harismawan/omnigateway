@@ -76,6 +76,7 @@ export function toChatWire(
             tool_call_id: block.toolUseId,
             content: block.content,
           });
+          if (block.images !== undefined) note("kimi:images-dropped");
           break;
         case "providerNative":
           // Unreachable: the router excludes this provider from any request

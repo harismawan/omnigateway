@@ -1,6 +1,7 @@
 import type {
   ChatRequest,
   ContentBlock,
+  ImageBlock,
   Message,
   ReasoningConfig,
   ReasoningEffort,
@@ -321,20 +322,40 @@ const KNOWN = [
   "metadata",
 ] as const;
 
-/** Tool result content may be blocks; flatten to the text the model will see. */
-function flattenToolResult(content: string | unknown[] | undefined): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (typeof part === "string") return part;
-      const p =
-        part !== null && typeof part === "object"
-          ? (part as { type?: string; text?: string })
-          : undefined;
-      return p?.type === "text" && typeof p.text === "string" ? p.text : JSON.stringify(part);
-    })
-    .join("\n");
+/**
+ * Tool result content may be blocks: text flattens to the string the model
+ * reads, a base64 image is kept as an image. Anything else is stringified.
+ */
+function readToolResult(content: string | unknown[] | undefined): {
+  content: string;
+  images?: ImageBlock[];
+} {
+  if (typeof content === "string") return { content };
+  if (!Array.isArray(content)) return { content: "" };
+  const text: string[] = [];
+  const images: ImageBlock[] = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      text.push(part);
+      continue;
+    }
+    const image = imageBlock.safeParse(part);
+    if (image.success) {
+      images.push({
+        type: "image",
+        mediaType: image.data.source.media_type,
+        data: image.data.source.data,
+        ...irCacheControl(image.data.cache_control),
+      });
+      continue;
+    }
+    const p =
+      part !== null && typeof part === "object"
+        ? (part as { type?: string; text?: string })
+        : undefined;
+    text.push(p?.type === "text" && typeof p.text === "string" ? p.text : JSON.stringify(part));
+  }
+  return { content: text.join("\n"), ...(images.length > 0 && { images }) };
 }
 
 function toIrBlock(b: z.infer<typeof block>): ContentBlock {
@@ -371,7 +392,7 @@ function toIrBlock(b: z.infer<typeof block>): ContentBlock {
       return {
         type: "toolResult",
         toolUseId: b.tool_use_id,
-        content: flattenToolResult(b.content),
+        ...readToolResult(b.content),
         isError: b.is_error ?? false,
         ...irCacheControl(b.cache_control),
       };

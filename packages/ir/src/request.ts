@@ -62,19 +62,22 @@ export type ToolUseBlock = {
   cacheControl?: CacheControl;
 };
 /**
- * `content` is flattened text, not blocks.
+ * `content` is flattened text; `images` are the result's images, kept apart.
  *
- * Anthropic accepts blocks here; OpenAI's `function_call_output` and Kimi's
- * `tool` message both take a plain string. Carrying blocks would mean the IR
- * models something two of three providers cannot express, so ingress flattens
- * once (Task 16) and every encoder passes the string straight through. The
- * cost is images inside a tool result, which no provider in this set accepts
- * anyway.
+ * Text is flattened because OpenAI's and Kimi's tool-result slots take a plain
+ * string. Images are not: flattening one serialises its base64 into the text,
+ * where it is billed as prose — a client reading an image-only PDF page by page
+ * sent over a million tokens that way. Each encoder puts `images` where its wire
+ * allows, or records that it dropped them.
+ *
+ * ponytail: text and images lose their relative order (text first); carry a
+ * block list if a client ever depends on interleaving.
  */
 export type ToolResultBlock = {
   type: "toolResult";
   toolUseId: string;
   content: string;
+  images?: ImageBlock[];
   isError?: boolean;
   cacheControl?: CacheControl;
 };

@@ -234,3 +234,52 @@ test("a request with no cache breakpoint has no cached prefix", () => {
   };
   expect(estimateCachedInputTokens(request)).toBe(0);
 });
+
+/** A tool result carrying one image, with the image's marker set or not. */
+function withToolImage(marked: boolean): ChatRequest {
+  return {
+    model: "m",
+    stream: false,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "t",
+            content: "page",
+            images: [
+              {
+                type: "image",
+                mediaType: "image/png",
+                data: "A".repeat(40_000),
+                ...(marked && { cacheControl: { type: "ephemeral" as const } }),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+test("a tool result's image counts as an image, not as its base64", () => {
+  const request = withToolImage(false);
+  const without: ChatRequest = {
+    ...request,
+    messages: [
+      { role: "user", content: [{ type: "toolResult", toolUseId: "t", content: "page" }] },
+    ],
+  };
+  expect(estimateInputTokens(request) - estimateInputTokens(without)).toBe(1_600);
+  expect(estimateInputPrefixes(request).total).toBe(estimateInputTokens(request));
+});
+
+test("a marker on a tool result's image caches through that result", () => {
+  // Auto-cache runs only when this is zero, so a missed nested marker adds
+  // breakpoints beside the client's own.
+  expect(estimateCachedInputTokens(withToolImage(false))).toBe(0);
+  expect(estimateCachedInputTokens(withToolImage(true))).toBe(
+    estimateInputTokens(withToolImage(true)),
+  );
+});

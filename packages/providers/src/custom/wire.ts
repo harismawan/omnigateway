@@ -134,6 +134,7 @@ export function toCustomChatWire(
             tool_call_id: block.toolUseId,
             content: block.content,
           });
+          if (block.images !== undefined) note("custom:images-dropped");
           break;
         case "providerNative":
           // Unreachable: the router excludes this provider from any request
@@ -293,6 +294,17 @@ export function toCustomResponsesWire(
             call_id: block.toolUseId,
             output: block.content,
           });
+          // `output` stays text; the result's images go as input parts of the
+          // following Responses message, and the move is recorded.
+          if (block.images !== undefined) {
+            note("custom:tool-result-images-moved");
+            for (const image of block.images) {
+              parts.push({
+                type: "input_image",
+                image_url: `data:${image.mediaType};base64,${image.data}`,
+              });
+            }
+          }
           break;
         case "providerNative":
           // Unreachable in practice: the router excludes this provider from any
