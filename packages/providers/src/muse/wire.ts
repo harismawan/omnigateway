@@ -205,6 +205,8 @@ export function toMuseWire(
           });
           break;
         case "toolResult":
+          // Unreachable: the router pins a result's native parts to their producer.
+          if (block.native !== undefined) note("muse:foreign-native-block-dropped");
           flush();
           input.push({
             type: "function_call_output",

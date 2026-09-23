@@ -92,6 +92,9 @@ export function requiredProviders(request: ChatRequest): ReadonlySet<ProviderId>
   for (const message of request.messages) {
     for (const block of message.content) {
       if (block.type === "providerNative") owners.add(block.provider);
+      // A tool result's own native parts (an Anthropic `document`) bind the
+      // same way: no other encoder can express them.
+      if (block.type === "toolResult") for (const n of block.native ?? []) owners.add(n.provider);
     }
   }
   return owners;

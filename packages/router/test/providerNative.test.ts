@@ -58,6 +58,26 @@ test("provider-native history names its producer", () => {
   expect([...requiredProviders({ ...req, messages: nativeHistory })]).toEqual(["anthropic"]);
 });
 
+test("a native part inside a tool result names its producer", () => {
+  // An Anthropic `document` a tool returned: no other encoder can express it.
+  const messages: ChatRequest["messages"] = [
+    {
+      role: "user",
+      content: [
+        {
+          type: "toolResult",
+          toolUseId: "t",
+          content: "",
+          native: [
+            { type: "providerNative", provider: "anthropic", blockType: "document", data: {} },
+          ],
+        },
+      ],
+    },
+  ];
+  expect([...requiredProviders({ ...req, messages })]).toEqual(["anthropic"]);
+});
+
 /**
  * A request naming two providers, which the singular version could not express.
  *

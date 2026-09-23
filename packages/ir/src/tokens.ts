@@ -63,7 +63,8 @@ function blockTokens(block: ContentBlock): number {
         BLOCK_OVERHEAD +
         fromText(block.toolUseId) +
         fromText(block.content) +
-        (block.images?.length ?? 0) * IMAGE_TOKENS
+        (block.images?.length ?? 0) * IMAGE_TOKENS +
+        (block.native ?? []).reduce((sum, n) => sum + blockTokens(n), 0)
       );
     case "providerNative":
       // A web-search result block is mostly its payload, and a session that
@@ -192,9 +193,12 @@ export function estimateCachedInputTokens(request: ChatRequest): number {
     for (const block of message.content) {
       running += blockTokens(block);
       if (cacheControlOf(block) !== undefined) cached = running;
-      // A tool result's images sit inside it on the wire, so a marker on one
-      // caches through the whole block.
-      if (block.type === "toolResult" && block.images?.some((i) => i.cacheControl !== undefined)) {
+      // A tool result's images and native parts sit inside it on the wire, so
+      // a marker on one caches through the whole block.
+      if (
+        block.type === "toolResult" &&
+        [...(block.images ?? []), ...(block.native ?? [])].some((p) => p.cacheControl !== undefined)
+      ) {
         cached = running;
       }
     }

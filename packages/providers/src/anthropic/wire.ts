@@ -106,11 +106,12 @@ function encodeBlock(b: ContentBlock, cloak: ToolCloak | null): unknown {
         tool_use_id: b.toolUseId,
         // A plain string when there are no images, byte-identical to before.
         content:
-          b.images === undefined
+          b.images === undefined && b.native === undefined
             ? b.content
             : [
                 ...(b.content.length > 0 ? [{ type: "text", text: b.content }] : []),
-                ...b.images.map((image) => encodeBlock(image, cloak)),
+                ...(b.images ?? []).map((image) => encodeBlock(image, cloak)),
+                ...(b.native ?? []).map((part) => encodeBlock(part, cloak)),
               ],
         is_error: b.isError,
         ...cache,
