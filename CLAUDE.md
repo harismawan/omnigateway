@@ -390,6 +390,9 @@ Translation invariants:
   notes `<provider>:tool-result-images-moved` when it moves them to a later message, or
   `<provider>:images-dropped`. A Responses `input_file` rides `ToolResultBlock.files` the same way
   (`<provider>:tool-result-files-moved` / `files-dropped`; Anthropic takes a PDF as `document`).
+  A Responses backend refuses the **whole request** for a file type it does not take, so
+  `responsesFile.ts` sends only its measured allowlist as `input_file`, decodes other text into the
+  output (`tool-result-files-inlined`), drops the rest.
   Anthropic `document`/`search_result` parts ride
   `ToolResultBlock.native` and pin routing like a top-level `providerNative` block. Pin:
   `packages/providers/test/toolResultImages.test.ts`.
