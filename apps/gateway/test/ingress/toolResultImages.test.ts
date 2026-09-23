@@ -206,3 +206,51 @@ test("anthropic: a malformed document part still flattens rather than failing", 
     isError: false,
   });
 });
+
+test("responses: an input_file in a function_call_output stays a file, not text", () => {
+  const pdf = "JVBERi0x".padEnd(4096, "C");
+  const outputs = [`data:application/pdf;base64,${pdf}`, pdf];
+  for (const file_data of outputs) {
+    const req = parseResponsesRequest({
+      model: "gpt-5",
+      input: [
+        { type: "function_call", call_id: "c", name: "read", arguments: "{}" },
+        {
+          type: "function_call_output",
+          call_id: "c",
+          output: [
+            { type: "input_text", text: "the pdf" },
+            { type: "input_file", filename: "r.pdf", file_data },
+          ],
+        },
+      ],
+    });
+    expect(result(req.messages[1]?.content)).toEqual({
+      type: "toolResult",
+      toolUseId: "c",
+      content: "the pdf",
+      files: [{ type: "file", mediaType: "application/pdf", data: pdf, filename: "r.pdf" }],
+      isError: false,
+    });
+  }
+});
+
+test("responses: a file_id reference stays a short text reference", () => {
+  const req = parseResponsesRequest({
+    model: "gpt-5",
+    input: [
+      { type: "function_call", call_id: "c", name: "read", arguments: "{}" },
+      {
+        type: "function_call_output",
+        call_id: "c",
+        output: [{ type: "input_file", file_id: "file-abc" }],
+      },
+    ],
+  });
+  expect(result(req.messages[1]?.content)).toEqual({
+    type: "toolResult",
+    toolUseId: "c",
+    content: '{"type":"input_file","file_id":"file-abc"}',
+    isError: false,
+  });
+});

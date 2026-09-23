@@ -64,6 +64,9 @@ function blockTokens(block: ContentBlock): number {
         fromText(block.toolUseId) +
         fromText(block.content) +
         (block.images?.length ?? 0) * IMAGE_TOKENS +
+        // A file's real cost depends on its pages, which base64 does not say;
+        // counted like a native document's payload, over- rather than under.
+        (block.files ?? []).reduce((sum, f) => sum + fromText(f.data), 0) +
         (block.native ?? []).reduce((sum, n) => sum + blockTokens(n), 0)
       );
     case "providerNative":

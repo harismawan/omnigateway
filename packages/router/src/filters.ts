@@ -122,8 +122,14 @@ export function requiredProviders(request: ChatRequest): ReadonlySet<ProviderId>
  * fails a cell rather than waiting for a review to look at the right pair.
  */
 export function requiredCapabilities(request: ChatRequest): ProviderCapabilities {
+  // A tool result's images and files ride inside it and need a vision target
+  // as much as a top-level image does.
   const hasImage = (blocks: readonly ContentBlock[]): boolean =>
-    blocks.some((b) => b.type === "image");
+    blocks.some(
+      (b) =>
+        b.type === "image" ||
+        (b.type === "toolResult" && (b.images !== undefined || b.files !== undefined)),
+    );
   const images =
     hasImage(request.system ?? []) || request.messages.some((m) => hasImage(m.content));
   return {

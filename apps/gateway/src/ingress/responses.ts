@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   ChatRequest,
   ContentBlock,
+  FileBlock,
   ImageBlock,
   Message,
   ReasoningConfig,
@@ -211,14 +212,20 @@ function contentPart(part: unknown): ContentBlock | null {
 
 /**
  * A `function_call_output`'s `output`: a string, or content parts. Text parts
- * join into the text, a data-URL `input_image` stays an image, and anything
- * else is stringified as before rather than refused.
+ * join into the text, a data-URL `input_image` stays an image, a base64
+ * `input_file` stays a file, and anything else is stringified as before rather
+ * than refused.
  */
-function readToolOutput(output: unknown): { content: string; images?: ImageBlock[] } {
+function readToolOutput(output: unknown): {
+  content: string;
+  images?: ImageBlock[];
+  files?: FileBlock[];
+} {
   if (typeof output === "string") return { content: output };
   if (!Array.isArray(output)) return { content: JSON.stringify(output ?? "") };
   const text: string[] = [];
   const images: ImageBlock[] = [];
+  const files: FileBlock[] = [];
   for (const part of output) {
     if (isRecord(part) && (part.type === "input_text" || part.type === "output_text")) {
       text.push(String(part.text ?? ""));
@@ -229,11 +236,37 @@ function readToolOutput(output: unknown): { content: string; images?: ImageBlock
       part.image_url.startsWith("data:")
     ) {
       images.push({ type: "image", ...parseDataUrl(part.image_url) });
+    } else if (isRecord(part) && part.type === "input_file" && typeof part.file_data === "string") {
+      files.push({
+        type: "file",
+        ...fileData(part.file_data),
+        ...(typeof part.filename === "string" && { filename: part.filename }),
+      });
     } else {
+      // A `file_id` or `file_url` names a file this gateway cannot fetch; as
+      // text it is a short reference, not a payload.
       text.push(JSON.stringify(part));
     }
   }
-  return { content: text.join("\n"), ...(images.length > 0 && { images }) };
+  return {
+    content: text.join("\n"),
+    ...(images.length > 0 && { images }),
+    ...(files.length > 0 && { files }),
+  };
+}
+
+/**
+ * `file_data` as a data URL, which is what the API takes. A bare base64
+ * payload is also read, as a PDF when it opens like one: the upstream refuses
+ * it bare, but as text it would reach the model as prose.
+ */
+function fileData(raw: string): { mediaType: string; data: string } {
+  const url = /^data:([^;,]+);base64,(.*)$/s.exec(raw);
+  if (url !== null) return { mediaType: url[1] as string, data: url[2] as string };
+  return {
+    mediaType: raw.startsWith("JVBERi") ? "application/pdf" : "application/octet-stream",
+    data: raw,
+  };
 }
 
 /** A message item's content, which the API allows to be a bare string. */

@@ -388,7 +388,9 @@ Translation invariants:
 - Tool-result images ride `ToolResultBlock.images`, never serialised into `content` text (base64
   billed as prose broke 1M windows). Every ingress reads them; each encoder sends them in place,
   notes `<provider>:tool-result-images-moved` when it moves them to a later message, or
-  `<provider>:images-dropped`. Anthropic `document`/`search_result` parts ride
+  `<provider>:images-dropped`. A Responses `input_file` rides `ToolResultBlock.files` the same way
+  (`<provider>:tool-result-files-moved` / `files-dropped`; Anthropic takes a PDF as `document`).
+  Anthropic `document`/`search_result` parts ride
   `ToolResultBlock.native` and pin routing like a top-level `providerNative` block. Pin:
   `packages/providers/test/toolResultImages.test.ts`.
 - Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in

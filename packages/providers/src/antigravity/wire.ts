@@ -744,6 +744,9 @@ export function toAntigravityWire(
           for (const image of block.images ?? []) {
             parts.push({ inlineData: { mimeType: image.mediaType, data: image.data } });
           }
+          for (const file of block.files ?? []) {
+            parts.push({ inlineData: { mimeType: file.mediaType, data: file.data } });
+          }
           // **A turn carrying a function response must be `user`**, whatever the
           // IR said. Gemini refuses a `functionResponse` on a `model` turn, and
           // an Anthropic-shaped client that puts a tool result on the assistant

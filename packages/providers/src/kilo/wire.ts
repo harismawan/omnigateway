@@ -34,7 +34,8 @@ export type KiloChatBody = {
 /** One entry of a multipart chat message content array. */
 type ContentPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+  | { type: "image_url"; image_url: { url: string } }
+  | { type: "file"; file: { filename?: string; file_data: string } };
 
 function encodeToolChoice(c: ToolChoice): unknown {
   switch (c.type) {
@@ -157,6 +158,16 @@ export function toKiloWire(
             toolImages.push({
               type: "image_url",
               image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+            });
+          }
+          for (const file of block.files ?? []) {
+            note("kilo:tool-result-files-moved");
+            toolImages.push({
+              type: "file",
+              file: {
+                ...(file.filename !== undefined && { filename: file.filename }),
+                file_data: `data:${file.mediaType};base64,${file.data}`,
+              },
             });
           }
           break;

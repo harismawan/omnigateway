@@ -314,3 +314,26 @@ test("a tool result's native part is counted and its marker is seen", () => {
   expect(estimateCachedInputTokens(document(false))).toBe(0);
   expect(estimateCachedInputTokens(document(true))).toBe(estimateInputTokens(document(true)));
 });
+
+test("a tool result's file is counted from its payload", () => {
+  const file = (data: string): ChatRequest => ({
+    model: "m",
+    stream: false,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "t",
+            content: "",
+            files: [{ type: "file", mediaType: "application/pdf", data }],
+          },
+        ],
+      },
+    ],
+  });
+  expect(estimateInputTokens(file("A".repeat(4_000)))).toBeGreaterThan(
+    estimateInputTokens(file("")) + 900,
+  );
+});
