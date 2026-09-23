@@ -100,22 +100,47 @@ function encodeBlock(b: ContentBlock, cloak: ToolCloak | null): unknown {
         input: b.input,
         ...cache,
       };
-    case "toolResult":
+    case "toolResult": {
+      // A PDF is what `document` takes as base64 and plain text is what it
+      // takes as text; `toWire` records any other file as dropped.
+      const documents = (b.files ?? []).flatMap((file) => {
+        const source =
+          file.mediaType === "application/pdf"
+            ? { type: "base64", media_type: file.mediaType, data: file.data }
+            : file.mediaType === "text/plain"
+              ? {
+                  type: "text",
+                  media_type: file.mediaType,
+                  data: Buffer.from(file.data, "base64").toString("utf8"),
+                }
+              : undefined;
+        if (source === undefined) return [];
+        return [
+          {
+            type: "document",
+            source,
+            ...(file.filename !== undefined && { title: file.filename }),
+          },
+        ];
+      });
+      const parts = [
+        ...(b.images ?? []).map((image) => encodeBlock(image, cloak)),
+        ...documents,
+        ...(b.native ?? []).map((part) => encodeBlock(part, cloak)),
+      ];
       return {
         type: "tool_result",
         tool_use_id: b.toolUseId,
-        // A plain string when there are no images, byte-identical to before.
+        // A plain string when nothing rides beside the text, byte-identical to
+        // before — including when every file was dropped.
         content:
-          b.images === undefined && b.native === undefined
+          parts.length === 0
             ? b.content
-            : [
-                ...(b.content.length > 0 ? [{ type: "text", text: b.content }] : []),
-                ...(b.images ?? []).map((image) => encodeBlock(image, cloak)),
-                ...(b.native ?? []).map((part) => encodeBlock(part, cloak)),
-              ],
+            : [...(b.content.length > 0 ? [{ type: "text", text: b.content }] : []), ...parts],
         is_error: b.isError,
         ...cache,
       };
+    }
     // Rebuilt from the payload the decoder kept, so citations, container ids,
     // caller metadata and error objects go back exactly as they arrived. The
     // discriminator is spread last so a stray `type` inside `data` cannot
@@ -597,6 +622,16 @@ export function toWire(
 
   const systemCache = systemCacheControl(req);
   if (systemCache.lost) note("anthropic:system-turn-cache-control-dropped");
+  for (const m of req.messages) {
+    for (const b of m.content) {
+      if (
+        b.type === "toolResult" &&
+        b.files?.some((f) => f.mediaType !== "application/pdf" && f.mediaType !== "text/plain")
+      ) {
+        note("anthropic:files-dropped");
+      }
+    }
+  }
   const body: AnthropicBody = {
     model,
     messages: req.messages.flatMap((m): { role: string; content: unknown }[] => {

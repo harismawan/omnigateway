@@ -53,6 +53,13 @@ export type ImageBlock = {
   data: string;
   cacheControl?: CacheControl;
 };
+/** A base64 file carried inside a tool result; see `ToolResultBlock.files`. */
+export type FileBlock = {
+  type: "file";
+  mediaType: string;
+  data: string;
+  filename?: string;
+};
 export type ThinkingBlock = { type: "thinking"; text: string; signature?: string };
 export type ToolUseBlock = {
   type: "toolUse";
@@ -73,6 +80,10 @@ export type ToolUseBlock = {
  * ponytail: text and images lose their relative order (text first); carry a
  * block list if a client ever depends on interleaving.
  *
+ * `files` are the result's base64 files (a PDF a tool returned), for the same
+ * reason as `images`: flattened, their base64 is billed as prose. Unlike
+ * `native` they are portable — each encoder carries them or records the drop.
+ *
  * `native` holds provider-owned parts of the result (an Anthropic `document`
  * or `search_result`), kept verbatim for their producer. They pin routing to
  * that provider exactly as a top-level native block does.
@@ -82,6 +93,7 @@ export type ToolResultBlock = {
   toolUseId: string;
   content: string;
   images?: ImageBlock[];
+  files?: FileBlock[];
   native?: ProviderNativeBlock[];
   isError?: boolean;
   cacheControl?: CacheControl;

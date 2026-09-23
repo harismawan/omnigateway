@@ -201,3 +201,182 @@ for (const [name, encode] of ENCODERS) {
     expect(degradations).toContain(NATIVE_DROPPED[name] ?? "");
   });
 }
+
+/**
+ * A file a tool returned (a Responses `input_file`) follows the same rule: its
+ * base64 reaches the wire as a file, never as text. Carriers measured live:
+ * Codex reads `input_file` in the following message, Cloud Code reads PDF
+ * `inlineData` beside `functionResponse`, Anthropic reads a `document` inside
+ * `tool_result`.
+ */
+const PDF = "JVBERi0x".padEnd(4096, "B");
+
+function withFile(mediaType: string): ChatRequest {
+  return {
+    ...noImages,
+    messages: [
+      ...req.messages.slice(0, 2),
+      {
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "call_1",
+            content: "page 1",
+            files: [{ type: "file", mediaType, data: PDF, filename: "r.pdf" }],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function fileCarriers(value: unknown, key = ""): string[] {
+  if (typeof value === "string") return value.includes(PDF) ? [key] : [];
+  if (Array.isArray(value)) return value.flatMap((v) => fileCarriers(v, key));
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value).flatMap(([k, v]) => fileCarriers(v, k));
+  }
+  return [];
+}
+
+/** Field the PDF must land in (none = dropped), and the note it owes. */
+const FILE_CARRIERS: Record<string, [string[], string | undefined]> = {
+  anthropic: [["data"], undefined],
+  antigravity: [["data"], undefined],
+  openai: [["file_data"], "openai:tool-result-files-moved"],
+  grok: [["file_data"], "grok:tool-result-files-moved"],
+  muse: [["file_data"], "muse:tool-result-files-moved"],
+  "custom-responses": [["file_data"], "custom:tool-result-files-moved"],
+  kilo: [["file_data"], "kilo:tool-result-files-moved"],
+  kimi: [[], "kimi:files-dropped"],
+  "custom-chat": [[], "custom:files-dropped"],
+};
+
+for (const [name, encode] of ENCODERS) {
+  test(`${name}: a tool result's file goes out as a file, or is recorded as dropped`, () => {
+    const [expected, owed] = FILE_CARRIERS[name] ?? [[], "missing row"];
+    const { body, degradations } = encode(withFile("application/pdf"));
+    expect(`${name}:${fileCarriers(body).join(",")}`).toBe(`${name}:${expected.join(",")}`);
+    const notes = degradations.filter((d) => d.includes("files"));
+    expect(`${name}:${notes.join(",")}`).toBe(`${name}:${owed ?? ""}`);
+  });
+}
+
+test("anthropic: a PDF becomes a document inside the tool_result", () => {
+  const { body } = toWire(withFile("application/pdf"), "m", { oauth: false });
+  const result = (body.messages[2] as { content: { content: unknown }[] }).content[0];
+  expect(result?.content).toEqual([
+    { type: "text", text: "page 1" },
+    {
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: PDF },
+      title: "r.pdf",
+    },
+  ]);
+});
+
+test("anthropic: a file document cannot hold is dropped and noted, not sent as text", () => {
+  const { body, degradations } = toWire(withFile("application/zip"), "m", { oauth: false });
+  expect(fileCarriers(body)).toEqual([]);
+  expect(degradations).toContain("anthropic:files-dropped");
+});
+
+test("openai: the file follows its function_call_output as a data URL", () => {
+  const { body } = toResponsesWire(withFile("application/pdf"), "m");
+  const input = body.input as { type: string; content?: unknown }[];
+  const at = input.findIndex((i) => i.type === "function_call_output");
+  expect(input[at + 1] as unknown).toEqual({
+    type: "message",
+    role: "user",
+    content: [
+      { type: "input_file", filename: "r.pdf", file_data: `data:application/pdf;base64,${PDF}` },
+    ],
+  });
+});
+
+test("anthropic: a text/plain file becomes a text document, decoded", () => {
+  const text: ChatRequest = {
+    ...withFile("text/plain"),
+    messages: [
+      ...req.messages.slice(0, 2),
+      {
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "call_1",
+            content: "",
+            files: [
+              {
+                type: "file",
+                mediaType: "text/plain",
+                data: Buffer.from("BANANA 42").toString("base64"),
+                filename: "r.txt",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const { body, degradations } = toWire(text, "m", { oauth: false });
+  const result = (body.messages[2] as { content: { content: unknown }[] }).content[0];
+  expect(result?.content).toEqual([
+    {
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: "BANANA 42" },
+      title: "r.txt",
+    },
+  ]);
+  expect(degradations).not.toContain("anthropic:files-dropped");
+});
+
+test("anthropic: a result whose every file was dropped keeps its string form", () => {
+  const dropped: ChatRequest = {
+    ...noImages,
+    messages: [
+      ...req.messages.slice(0, 2),
+      {
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "call_1",
+            content: "",
+            files: [{ type: "file", mediaType: "application/zip", data: PDF }],
+          },
+        ],
+      },
+    ],
+  };
+  const { body } = toWire(dropped, "m", { oauth: false });
+  const result = (body.messages[2] as { content: { content: unknown }[] }).content[0];
+  expect(result?.content).toBe("");
+});
+
+test("anthropic: each document keeps its own title when an earlier file is dropped", () => {
+  const mixed: ChatRequest = {
+    ...noImages,
+    messages: [
+      ...req.messages.slice(0, 2),
+      {
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "call_1",
+            content: "",
+            files: [
+              { type: "file", mediaType: "application/zip", data: "x", filename: "a.zip" },
+              { type: "file", mediaType: "application/pdf", data: PDF, filename: "b.pdf" },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const { body } = toWire(mixed, "m", { oauth: false });
+  const result = (body.messages[2] as { content: { content: { title?: string }[] }[] }).content[0];
+  expect(result?.content.map((d) => d.title)).toEqual(["b.pdf"]);
+});

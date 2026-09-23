@@ -137,6 +137,7 @@ export function toCustomChatWire(
             content: block.content,
           });
           if (block.images !== undefined) note("custom:images-dropped");
+          if (block.files !== undefined) note("custom:files-dropped");
           break;
         case "providerNative":
           // Unreachable: the router excludes this provider from any request
@@ -306,6 +307,17 @@ export function toCustomResponsesWire(
               parts.push({
                 type: "input_image",
                 image_url: `data:${image.mediaType};base64,${image.data}`,
+              });
+            }
+          }
+          // Its files go the same way, as `input_file` data URLs.
+          if (block.files !== undefined) {
+            note("custom:tool-result-files-moved");
+            for (const file of block.files) {
+              parts.push({
+                type: "input_file",
+                ...(file.filename !== undefined && { filename: file.filename }),
+                file_data: `data:${file.mediaType};base64,${file.data}`,
               });
             }
           }

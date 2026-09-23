@@ -161,6 +161,17 @@ export function toGrokWire(
               });
             }
           }
+          // Its files go the same way, as `input_file` data URLs.
+          if (block.files !== undefined) {
+            note("grok:tool-result-files-moved");
+            for (const file of block.files) {
+              parts.push({
+                type: "input_file",
+                ...(file.filename !== undefined && { filename: file.filename }),
+                file_data: `data:${file.mediaType};base64,${file.data}`,
+              });
+            }
+          }
           break;
         case "providerNative":
           // Unreachable in practice: the router excludes this provider from any

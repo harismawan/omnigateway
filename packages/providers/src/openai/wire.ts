@@ -227,6 +227,17 @@ export function toResponsesWire(
               });
             }
           }
+          // Its files go the same way, as `input_file` data URLs.
+          if (block.files !== undefined) {
+            note("openai:tool-result-files-moved");
+            for (const file of block.files) {
+              parts.push({
+                type: "input_file",
+                ...(file.filename !== undefined && { filename: file.filename }),
+                file_data: `data:${file.mediaType};base64,${file.data}`,
+              });
+            }
+          }
           break;
         case "providerNative":
           if (block.provider === "openai") {

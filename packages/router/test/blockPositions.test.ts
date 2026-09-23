@@ -136,3 +136,26 @@ test("a request with no such block reads clean in every position", () => {
     expect(requiredCapabilities(at(position, text)).images).toBe(false);
   }
 });
+
+test("an image or file inside a tool result needs a vision target", () => {
+  const withResult = (
+    extra: Partial<Extract<ContentBlock, { type: "toolResult" }>>,
+  ): ChatRequest => ({
+    model: "m",
+    stream: false,
+    messages: [
+      { role: "user", content: [{ type: "toolResult", toolUseId: "t", content: "", ...extra }] },
+    ],
+  });
+  expect(requiredCapabilities(withResult({})).images).toBe(false);
+  expect(
+    requiredCapabilities(
+      withResult({ images: [{ type: "image", mediaType: "image/png", data: "" }] }),
+    ).images,
+  ).toBe(true);
+  expect(
+    requiredCapabilities(
+      withResult({ files: [{ type: "file", mediaType: "application/pdf", data: "" }] }),
+    ).images,
+  ).toBe(true);
+});
