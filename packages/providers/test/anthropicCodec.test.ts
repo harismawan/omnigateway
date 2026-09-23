@@ -126,8 +126,8 @@ test("an API key request is signed over exactly these bytes", async () => {
 
   expect(sent.body).toBe(
     '{"model":"claude-opus-4","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],' +
-      '"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.278.4ea; ' +
-      'cc_entrypoint=cli; cch=2e128;"},{"type":"text","text":"You are a Claude agent, built on ' +
+      '"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.280.d7b; ' +
+      'cc_entrypoint=cli; cch=52ded;"},{"type":"text","text":"You are a Claude agent, built on ' +
       'Anthropic\'s Claude Agent SDK."}],"max_tokens":4096,"stream":true}',
   );
   expect(result.degradations).toEqual([]);
@@ -161,7 +161,7 @@ test("an OAuth request adds the beta, the preamble, and its own signature", asyn
 
   // The OAuth leg carries a second system block the API-key leg does not, and a
   // different `cch` because the token is computed over the finished bytes.
-  expect(sent.body).toContain("cch=e332d;");
+  expect(sent.body).toContain("cch=474a6;");
   expect(sent.body).toContain("You are Claude Code, Anthropic's official CLI for Claude.");
   expect(result.degradations).toEqual(["anthropic:oauth-system-prefix"]);
 });
@@ -186,7 +186,7 @@ test("cc_version is hashed from the first user message's first text block", asyn
   const expected = ccVersionSuffix(userText);
   expect(expected).not.toBe(ccVersionSuffix(""));
   expect(expected).not.toBe(ccVersionSuffix(assistantText));
-  expect(sent.body).toContain(`cc_version=2.1.278.${expected}; `);
+  expect(sent.body).toContain(`cc_version=2.1.280.${expected}; `);
 });
 
 test("the client's own betas ride along, and the OAuth beta is added not substituted", async () => {

@@ -8,7 +8,7 @@ const host = stainlessHost(process.platform, process.arch);
  * usage with plain axios, so that request reports `claude-code/<version>`
  * rather than `claude-cli/<version> (external, cli)`.
  */
-export const ANTHROPIC_CLI_VERSION = env("OMNI_ANTHROPIC_CLI_VERSION", "2.1.278");
+export const ANTHROPIC_CLI_VERSION = env("OMNI_ANTHROPIC_CLI_VERSION", "2.1.280");
 
 export const anthropicProfile: ClientProfile = {
   headers: [

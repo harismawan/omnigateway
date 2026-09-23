@@ -54,7 +54,7 @@ test("declares that it supports the manual paste flow", () => {
 const ANTHROPIC_TOKEN_HEADERS = [
   ["Accept", "application/json"],
   ["Content-Type", "application/json"],
-  ["User-Agent", "claude-cli/2.1.278 (external, cli)"],
+  ["User-Agent", "claude-cli/2.1.280 (external, cli)"],
   ["X-Stainless-Arch", stainlessHost(process.platform, process.arch).arch],
   ["X-Stainless-Lang", "js"],
   ["X-Stainless-OS", stainlessHost(process.platform, process.arch).os],

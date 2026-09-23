@@ -63,7 +63,7 @@ const CCH_PLACEHOLDER = "00000";
 const CCH_SEED = 0x6e52736ac806831en;
 const CCH_MASK = 0xfffffn;
 
-/** Salt the CLI hashes its `cc_version` suffix with (verified in 2.1.278). */
+/** Salt the CLI hashes its `cc_version` suffix with (verified in 2.1.280). */
 const CCV_SALT = "59cf53e54c78";
 
 /**
