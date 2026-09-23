@@ -1,5 +1,6 @@
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { isRecord, moveToResponsesText, readResponseFormatResult } from "../responseFormat.ts";
+import { responsesFiles } from "../responsesFile.ts";
 import { systemText } from "../system.ts";
 
 /**
@@ -290,14 +291,15 @@ export function toCustomResponsesWire(
             arguments: JSON.stringify(block.input),
           });
           break;
-        case "toolResult":
+        case "toolResult": {
           // Unreachable: the router pins a result's native parts to their producer.
           if (block.native !== undefined) note("custom:anthropic-native-block-dropped");
           flush();
+          const files = responsesFiles(block.files ?? []);
           input.push({
             type: "function_call_output",
             call_id: block.toolUseId,
-            output: block.content,
+            output: [block.content, ...files.text].filter((t) => t.length > 0).join("\n\n"),
           });
           // `output` stays text; the result's images go as input parts of the
           // following Responses message, and the move is recorded.
@@ -310,18 +312,16 @@ export function toCustomResponsesWire(
               });
             }
           }
-          // Its files go the same way, as `input_file` data URLs.
-          if (block.files !== undefined) {
+          // Its files go the same way, as `input_file` data URLs, where the
+          // backend takes their type.
+          if (files.parts.length > 0) {
             note("custom:tool-result-files-moved");
-            for (const file of block.files) {
-              parts.push({
-                type: "input_file",
-                ...(file.filename !== undefined && { filename: file.filename }),
-                file_data: `data:${file.mediaType};base64,${file.data}`,
-              });
-            }
+            parts.push(...files.parts);
           }
+          if (files.text.length > 0) note("custom:tool-result-files-inlined");
+          if (files.dropped) note("custom:files-dropped");
           break;
+        }
         case "providerNative":
           // Unreachable in practice: the router excludes this provider from any
           // request carrying another provider's native history. Recorded rather

@@ -9,6 +9,7 @@ import { toKiloWire } from "../src/kilo/wire.ts";
 import { toChatWire } from "../src/kimi/wire.ts";
 import { toMuseWire } from "../src/muse/wire.ts";
 import { toResponsesWire } from "../src/openai/wire.ts";
+import { responsesFiles } from "../src/responsesFile.ts";
 
 /**
  * An image a tool returned must reach the wire as an image, never as its own
@@ -379,4 +380,70 @@ test("anthropic: each document keeps its own title when an earlier file is dropp
   const { body } = toWire(mixed, "m", { oauth: false });
   const result = (body.messages[2] as { content: { content: { title?: string }[] }[] }).content[0];
   expect(result?.content.map((d) => d.title)).toEqual(["b.pdf"]);
+});
+
+/**
+ * A Responses backend refuses the whole request for a file type it does not
+ * take (measured on Codex: `application/zip`, `text/yaml`). Such a file must
+ * never reach it as `input_file`: text is decoded into the output, anything
+ * else is dropped — each recorded.
+ */
+const RESPONSES_ENCODERS = ENCODERS.filter(([name]) =>
+  ["openai", "grok", "muse", "custom-responses"].includes(name),
+);
+
+for (const [name, encode] of RESPONSES_ENCODERS) {
+  const provider = name.replace("-responses", "");
+  test(`${name}: a refused type never goes out as input_file`, () => {
+    const log = Buffer.from("INFO code=BANANA 42").toString("base64");
+    const request: ChatRequest = {
+      ...noImages,
+      messages: [
+        ...req.messages.slice(0, 2),
+        {
+          role: "user",
+          content: [
+            {
+              type: "toolResult",
+              toolUseId: "call_1",
+              content: "page 1",
+              files: [
+                { type: "file", mediaType: "text/x-log", data: log },
+                { type: "file", mediaType: "application/zip", data: PDF },
+                { type: "file", mediaType: "text/csv", data: log, filename: "a.csv" },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const { body, degradations } = encode(request);
+    const input = (body as { input: { type: string; output?: string; content?: unknown }[] }).input;
+    const at = input.findIndex((i) => i.type === "function_call_output");
+    expect(input[at]?.output).toBe("page 1\n\nINFO code=BANANA 42");
+    expect(input[at + 1]?.content).toEqual([
+      { type: "input_file", filename: "a.csv", file_data: `data:text/csv;base64,${log}` },
+    ]);
+    expect(fileCarriers(body)).toEqual([]);
+    expect(degradations.filter((d) => d.includes("files")).sort()).toEqual(
+      [
+        `${provider}:files-dropped`,
+        `${provider}:tool-result-files-inlined`,
+        `${provider}:tool-result-files-moved`,
+      ].sort(),
+    );
+  });
+}
+
+test("responses: a result of text alone keeps its output byte-identical", () => {
+  const { body } = toResponsesWire(noImages, "m");
+  const input = (body as { input: { type: string; output?: string }[] }).input;
+  expect(input.find((i) => i.type === "function_call_output")?.output).toBe("page 1");
+});
+
+test("responses: text the backend refuses as a file is decoded, not dropped", () => {
+  const { text, dropped } = responsesFiles([
+    { type: "file", mediaType: "application/xml", data: Buffer.from("<a/>").toString("base64") },
+  ]);
+  expect({ text, dropped }).toEqual({ text: ["<a/>"], dropped: false });
 });
