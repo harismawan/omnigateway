@@ -102,6 +102,10 @@ export function toKiloWire(
   for (const message of req.messages) {
     let parts: ContentPart[] = [];
     const toolCalls: unknown[] = [];
+    // A tool message takes text only, and nothing may sit between the tool
+    // messages answering one assistant turn, so a result's images wait for a
+    // user message after all of them.
+    const toolImages: ContentPart[] = [];
 
     // A tool result is its own message in this API, so anything accumulated
     // before it has to be emitted first or the turn arrives out of order.
@@ -146,6 +150,13 @@ export function toKiloWire(
             tool_call_id: block.toolUseId,
             content: block.content,
           });
+          for (const image of block.images ?? []) {
+            note("kilo:tool-result-images-moved");
+            toolImages.push({
+              type: "image_url",
+              image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+            });
+          }
           break;
         case "providerNative":
           // Unreachable: the router excludes this provider from any request
@@ -156,6 +167,7 @@ export function toKiloWire(
     }
 
     flush();
+    if (toolImages.length > 0) messages.push({ role: "user", content: toolImages });
   }
 
   // The adapter always streams upstream, and an OpenAI-compatible chat stream

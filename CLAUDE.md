@@ -385,6 +385,11 @@ Translation invariants:
   the target already has the client's marker, and record
   `anthropic:system-turn-cache-control-retargeted`. History: auto-cache spec.
 - `pauseTurn` own stop reason; never fold into `endTurn` or `toolUse`.
+- Tool-result images ride `ToolResultBlock.images`, never serialised into `content` text (base64
+  billed as prose broke 1M windows). Every ingress reads them; each encoder sends them in place,
+  notes `<provider>:tool-result-images-moved` when it moves them to a later message, or
+  `<provider>:images-dropped`. `document` parts still flatten (no IR carrier). Pin:
+  `packages/providers/test/toolResultImages.test.ts`.
 - Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in
   `anthropic/decode.ts` — never at egress. Anthropic fingerprint some name sets, refuse them
   through billing placeholder; `FINGERPRINT_REFUSED` name that. Restore site load-bearing: RTK

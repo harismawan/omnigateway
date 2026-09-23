@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   ChatRequest,
   ContentBlock,
+  ImageBlock,
   Message,
   ReasoningConfig,
   ToolChoice,
@@ -208,6 +209,33 @@ function contentPart(part: unknown): ContentBlock | null {
   );
 }
 
+/**
+ * A `function_call_output`'s `output`: a string, or content parts. Text parts
+ * join into the text, a data-URL `input_image` stays an image, and anything
+ * else is stringified as before rather than refused.
+ */
+function readToolOutput(output: unknown): { content: string; images?: ImageBlock[] } {
+  if (typeof output === "string") return { content: output };
+  if (!Array.isArray(output)) return { content: JSON.stringify(output ?? "") };
+  const text: string[] = [];
+  const images: ImageBlock[] = [];
+  for (const part of output) {
+    if (isRecord(part) && (part.type === "input_text" || part.type === "output_text")) {
+      text.push(String(part.text ?? ""));
+    } else if (
+      isRecord(part) &&
+      part.type === "input_image" &&
+      typeof part.image_url === "string" &&
+      part.image_url.startsWith("data:")
+    ) {
+      images.push({ type: "image", ...parseDataUrl(part.image_url) });
+    } else {
+      text.push(JSON.stringify(part));
+    }
+  }
+  return { content: text.join("\n"), ...(images.length > 0 && { images }) };
+}
+
 /** A message item's content, which the API allows to be a bare string. */
 function messageBlocks(content: unknown): ContentBlock[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
@@ -286,7 +314,7 @@ function readInputItems(items: readonly unknown[]): Message[] {
           {
             type: "toolResult",
             toolUseId: clampCallId(callId),
-            content: typeof raw.output === "string" ? raw.output : JSON.stringify(raw.output ?? ""),
+            ...readToolOutput(raw.output),
             isError: false,
           },
         ]);

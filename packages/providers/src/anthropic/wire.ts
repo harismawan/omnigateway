@@ -104,7 +104,14 @@ function encodeBlock(b: ContentBlock, cloak: ToolCloak | null): unknown {
       return {
         type: "tool_result",
         tool_use_id: b.toolUseId,
-        content: b.content,
+        // A plain string when there are no images, byte-identical to before.
+        content:
+          b.images === undefined
+            ? b.content
+            : [
+                ...(b.content.length > 0 ? [{ type: "text", text: b.content }] : []),
+                ...b.images.map((image) => encodeBlock(image, cloak)),
+              ],
         is_error: b.isError,
         ...cache,
       };
