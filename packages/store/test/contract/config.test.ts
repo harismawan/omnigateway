@@ -47,6 +47,26 @@ forEachStore((backend) => {
     expect((await s.config.listModels()).map((m) => m.id)).toEqual(["alias"]);
   });
 
+  test("virtual model transform overrides round-trip both ways and clear back to absent", async () => {
+    const s = await backend.fresh();
+    const model: VirtualModel = { id: "m", targets: [], strategy: "score", isAlias: false };
+    await s.config.putModel({ ...model, rtkEnabled: false, ponytailMode: "ultra" });
+    expect((await s.config.listModels())[0]).toEqual({
+      ...model,
+      rtkEnabled: false,
+      ponytailMode: "ultra",
+    });
+    await s.config.putModel({ ...model, rtkEnabled: true, ponytailMode: "off" });
+    expect((await s.config.listModels())[0]).toEqual({
+      ...model,
+      rtkEnabled: true,
+      ponytailMode: "off",
+    });
+    // Absent is "follow the global setting", and a put without them clears them.
+    await s.config.putModel(model);
+    expect((await s.config.listModels())[0]).toEqual(model);
+  });
+
   test("admin password hash starts null, initialises once, and replaces", async () => {
     const s = await backend.fresh();
     expect(await s.config.getAdminPasswordHash()).toBeNull();

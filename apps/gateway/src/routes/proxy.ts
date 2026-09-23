@@ -937,8 +937,10 @@ export function proxyRoutes(deps: ProxyDeps) {
           // be added by hand — a count that omitted it would under-report by
           // the whole prompt on every call while the real request paid for it,
           // and this number is what a client paces its compaction with.
-          const { settings } = await dispatchDeps.snapshots.get(deps.now());
-          const counted = injectPonytail(chatRequest, { mode: settings.ponytailMode }).request;
+          // The model's own override wins, exactly as dispatch resolves it.
+          const { settings, models } = await dispatchDeps.snapshots.get(deps.now());
+          const mode = models.get(chatRequest.model)?.ponytailMode ?? settings.ponytailMode;
+          const counted = injectPonytail(chatRequest, { mode }).request;
           // No request-log row: nothing was dispatched and no tokens were spent,
           // so a row here would be counted by every usage aggregate. That is
           // also why no degradation is recorded for the injection above.

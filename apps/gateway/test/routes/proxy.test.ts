@@ -2000,6 +2000,24 @@ test("counts the ponytail ruleset the gateway will append", async () => {
   expect(after.input_tokens).toBeGreaterThan(before.input_tokens + 500);
 });
 
+// Dispatch honours a model's own ponytail override, so the count must too.
+test("counts the model's own ponytail override, in both directions", async () => {
+  const { call, store } = await harness();
+  const body = { model: "fast", messages: [{ role: "user", content: "hi" }] };
+  const count = async () =>
+    ((await (await call("/v1/messages/count_tokens", body)).json()) as { input_tokens: number })
+      .input_tokens;
+  const fast = (await store.config.listModels())[0];
+  if (fast === undefined) throw new Error("seeded model missing");
+
+  const bare = await count();
+  await store.config.putModel({ ...fast, ponytailMode: "full" });
+  expect(await count()).toBeGreaterThan(bare + 500);
+  await store.config.putSettings({ ponytailMode: "full" });
+  await store.config.putModel({ ...fast, ponytailMode: "off" });
+  expect(await count()).toBe(bare);
+});
+
 test("a refused model name reaches neither the client nor the log unbounded", async () => {
   // The allowlist refusal quotes the model back, and `reasonField` prints it:
   // this error names no provider, so it is printed at default level. Both of

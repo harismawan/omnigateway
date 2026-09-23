@@ -3668,6 +3668,91 @@ test("leaves the request alone and records nothing when ponytail is off", async 
   store.close();
 });
 
+// A model's override beats the global setting in both directions, streaming or
+// not; a model without one follows the global setting.
+for (const stream of [false, true]) {
+  for (const [global, own, injected] of [
+    ["off", "full", true],
+    ["full", "off", false],
+    ["full", undefined, true],
+  ] as const) {
+    test(`ponytail: global ${global}, model ${own ?? "inherit"} → ${injected} (stream ${stream})`, async () => {
+      const store = await seeded(1);
+      await store.config.putSettings({ ponytailMode: global });
+      const fast = (await store.config.listModels())[0];
+      if (fast === undefined) throw new Error("seeded model missing");
+      await store.config.putModel(own === undefined ? fast : { ...fast, ponytailMode: own });
+      const adapter = stubAdapter(() => textStream("ok"));
+      const seen: string[] = [];
+      systemSent(adapter, seen);
+      const input: ChatRequest = {
+        model: "fast",
+        stream,
+        system: [{ type: "text", text: "you are helpful" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      };
+
+      const outcome = await dispatch(
+        input,
+        deps(store, adapter),
+        new AbortController().signal,
+        "req_pov",
+      );
+      await drain(outcome.events);
+
+      expect(seen[0]?.includes("You are a lazy senior developer.")).toBe(injected);
+      expect(outcome.log().degradations.includes("ponytail:full")).toBe(injected);
+      store.close();
+    });
+  }
+}
+
+for (const [global, own, applied] of [
+  [false, true, true],
+  [true, false, false],
+  [true, undefined, true],
+] as const) {
+  test(`rtk: global ${global}, model ${own ?? "inherit"} → applied ${applied}`, async () => {
+    const store = await seeded(1);
+    await store.config.putSettings({ rtkEnabled: global });
+    const fast = (await store.config.listModels())[0];
+    if (fast === undefined) throw new Error("seeded model missing");
+    await store.config.putModel(own === undefined ? fast : { ...fast, rtkEnabled: own });
+    const repeated = [
+      "bun test v1.4.0",
+      ...Array.from({ length: 600 }, () => "case passed"),
+      "600 pass",
+      "0 fail",
+      "Ran 600 tests across 20 files",
+    ].join("\n");
+    const input: ChatRequest = {
+      model: "fast",
+      stream: false,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "toolUse", id: "t1", name: "bash", input: "bun test" }],
+        },
+        { role: "user", content: [{ type: "toolResult", toolUseId: "t1", content: repeated }] },
+      ],
+    };
+
+    const outcome = await dispatch(
+      input,
+      deps(
+        store,
+        stubAdapter(() => textStream("ok")),
+      ),
+      new AbortController().signal,
+      "req_rov",
+    );
+    await drain(outcome.events);
+
+    expect(outcome.log().rtkApplied).toBe(applied);
+    store.close();
+  });
+}
+
 test("records a moved cache breakpoint separately from the level", async () => {
   const store = await seeded(1);
   await store.config.putSettings({ ponytailMode: "lite" });

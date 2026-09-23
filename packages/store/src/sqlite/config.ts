@@ -8,7 +8,7 @@ import type {
   Target,
   VirtualModel,
 } from "../types.ts";
-import { DEFAULT_SETTINGS } from "../types.ts";
+import { DEFAULT_SETTINGS, withOverrides } from "../types.ts";
 
 const SETTINGS_KEY = "settings";
 const ADMIN_HASH_KEY = "adminPasswordHash";
@@ -63,26 +63,49 @@ export function createConfigRepo(
 
   return {
     async listModels() {
-      type R = { id: string; targets: string; strategy: string; is_alias: number };
+      type R = {
+        id: string;
+        targets: string;
+        strategy: string;
+        is_alias: number;
+        rtk_enabled: number | null;
+        ponytail_mode: string | null;
+      };
       return db
         .query<R, []>("SELECT * FROM virtual_models ORDER BY id")
         .all()
-        .map((r) => ({
-          id: r.id,
-          targets: JSON.parse(r.targets) as Target[],
-          strategy: r.strategy as Strategy,
-          isAlias: r.is_alias === 1,
-        }));
+        .map((r) =>
+          withOverrides(
+            {
+              id: r.id,
+              targets: JSON.parse(r.targets) as Target[],
+              strategy: r.strategy as Strategy,
+              isAlias: r.is_alias === 1,
+            },
+            r.rtk_enabled === null ? null : r.rtk_enabled === 1,
+            r.ponytail_mode,
+          ),
+        );
     },
 
     async putModel(model: VirtualModel) {
       db.run(
-        `INSERT INTO virtual_models (id, targets, strategy, is_alias) VALUES (?,?,?,?)
+        `INSERT INTO virtual_models (id, targets, strategy, is_alias, rtk_enabled, ponytail_mode)
+         VALUES (?,?,?,?,?,?)
          ON CONFLICT (id) DO UPDATE SET
            targets = excluded.targets,
            strategy = excluded.strategy,
-           is_alias = excluded.is_alias`,
-        [model.id, JSON.stringify(model.targets), model.strategy, model.isAlias ? 1 : 0],
+           is_alias = excluded.is_alias,
+           rtk_enabled = excluded.rtk_enabled,
+           ponytail_mode = excluded.ponytail_mode`,
+        [
+          model.id,
+          JSON.stringify(model.targets),
+          model.strategy,
+          model.isAlias ? 1 : 0,
+          model.rtkEnabled === undefined ? null : model.rtkEnabled ? 1 : 0,
+          model.ponytailMode ?? null,
+        ],
       );
       emit({ type: "modelsChanged" });
     },

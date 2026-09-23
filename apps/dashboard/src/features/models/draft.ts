@@ -9,6 +9,7 @@ import type {
   CatalogModel,
   CatalogProvider,
   Credential,
+  PonytailMode,
   ProviderId,
   Strategy,
   Target,
@@ -111,6 +112,9 @@ export type ModelDraft = {
   strategy: Strategy;
   isAlias: boolean;
   targets: TargetDraft[];
+  /** `""` follows the global setting; anything else overrides it. */
+  rtk: "" | "on" | "off";
+  ponytail: "" | PonytailMode;
 };
 
 export const STRATEGIES: ReadonlyArray<{ id: Strategy; label: string; blurb: string }> = [
@@ -447,7 +451,14 @@ export function blankTarget(catalog: Catalog, provider?: ProviderId): TargetDraf
 }
 
 export function blankModel(catalog: Catalog): ModelDraft {
-  return { id: "", strategy: "score", isAlias: false, targets: [blankTarget(catalog)] };
+  return {
+    id: "",
+    strategy: "score",
+    isAlias: false,
+    targets: [blankTarget(catalog)],
+    rtk: "",
+    ponytail: "",
+  };
 }
 
 export function toDraft(model: VirtualModel): ModelDraft {
@@ -455,6 +466,8 @@ export function toDraft(model: VirtualModel): ModelDraft {
     id: model.id,
     strategy: model.strategy,
     isAlias: model.isAlias,
+    rtk: model.rtkEnabled === undefined ? "" : model.rtkEnabled ? "on" : "off",
+    ponytail: model.ponytailMode ?? "",
     targets: model.targets.map((target) => ({
       key: nextKey(),
       provider: target.provider,
@@ -586,5 +599,16 @@ export function parseDraft(draft: ModelDraft): Parsed {
     });
   }
 
-  return { ok: true, model: { id, strategy: draft.strategy, isAlias: draft.isAlias, targets } };
+  return {
+    ok: true,
+    model: {
+      id,
+      strategy: draft.strategy,
+      isAlias: draft.isAlias,
+      targets,
+      // Omitted when following the global setting: absent is the inherit state.
+      ...(draft.rtk === "" ? {} : { rtkEnabled: draft.rtk === "on" }),
+      ...(draft.ponytail === "" ? {} : { ponytailMode: draft.ponytail }),
+    },
+  };
 }
