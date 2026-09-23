@@ -87,6 +87,18 @@ describe("Module", () => {
     expect(screen.getByRole("button", { name: "Manage" })).toBeTruthy();
     expect(screen.getByText("body")).toBeTruthy();
   });
+
+  /** The rack's main column scrolls; a panel that shrinks into it clips its rows instead. */
+  test("keeps its content height inside the rack's scrolling column", () => {
+    renderWithProviders(
+      <Module legend="Issued keys">
+        <p>body</p>
+      </Module>,
+    );
+    const panel = screen.getByText("body").closest("section");
+    if (panel === null) throw new Error("module renders no section");
+    expect(getComputedStyle(panel).flexShrink).toBe("0");
+  });
 });
 
 describe("States", () => {

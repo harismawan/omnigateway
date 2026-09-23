@@ -50,6 +50,20 @@ describe("KeysBoard", () => {
     expect(screen.getByText("omni_sk_a1b2…")).toBeTruthy();
   });
 
+  /** Like the request log: the key table scrolls inside its module, under the page head. */
+  test("scrolls key rows inside the bounded keys module", async () => {
+    stubKeys();
+    renderWithProviders(<KeysBoard />);
+
+    const table = await screen.findByRole("table");
+    const scroller = table.parentElement;
+    if (scroller === null) throw new Error("key table has no scroller");
+    expect(getComputedStyle(scroller).overflowY).toBe("auto");
+    const panel = scroller.closest("section");
+    if (panel === null) throw new Error("key table sits in no module");
+    expect(getComputedStyle(panel).flexGrow).toBe("1");
+  });
+
   test("a revoked key keeps its row but loses its action", async () => {
     stubKeys();
     renderWithProviders(<KeysBoard />);

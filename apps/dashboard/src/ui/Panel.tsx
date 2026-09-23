@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import styled from "styled-components";
-import { Legend, Row, Spacer } from "./primitives.ts";
+import { Legend, Row, ScrollX, Spacer } from "./primitives.ts";
 
 /**
  * A module in the rack. Every screen is built from these: a face with a
@@ -16,6 +16,35 @@ export const Panel = styled.section<{ $flush?: boolean }>`
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* A panel is a flex item of the rack's scrolling column, and overflow: hidden
+     drops its automatic minimum height to zero: left shrinkable it squeezes to the
+     viewport and clips its own rows instead of letting the column scroll. Boards
+     that want a panel to fill and scroll inside itself say so with flex: 1. */
+  flex-shrink: 0;
+`;
+
+/**
+ * A module that fills the rest of the rack's column and scrolls inside itself,
+ * so a long table keeps the page head and the sticky column headings in view.
+ * `flex: 1` overrides the panel's `flex-shrink: 0`; the body is made a flex
+ * column so `FillScroller` can take the remaining height.
+ */
+export const FillModule = styled(Module)`
+  flex: 1;
+  min-height: 0;
+
+  > div {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+`;
+
+export const FillScroller = styled(ScrollX)`
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 `;
 
 const Head = styled.header`

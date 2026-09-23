@@ -18,8 +18,8 @@ import { useLive } from "../../session/live.tsx";
 import { Button } from "../../ui/Button.tsx";
 import { Select } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
-import { Module } from "../../ui/Panel.tsx";
-import { Muted, Row, ScrollX } from "../../ui/primitives.ts";
+import { FillModule, FillScroller } from "../../ui/Panel.tsx";
+import { Muted, Row } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { BodyArtifact } from "./BodyArtifact.tsx";
 import { LogFilterBar } from "./LogFilterBar.tsx";
@@ -50,24 +50,6 @@ const More = styled(Row)`
   justify-content: center;
   gap: ${({ theme }) => theme.space(2)};
   padding: ${({ theme }) => theme.space(3)};
-`;
-
-const RequestLogModule = styled(Module)`
-  flex: 1;
-  min-height: 0;
-
-  > div {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    min-height: 0;
-  }
-`;
-
-const RequestLogScroller = styled(ScrollX)`
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
 `;
 
 /**
@@ -174,7 +156,7 @@ export function LogsBoard() {
         }
       />
 
-      <RequestLogModule legend="Request log" meta={`${rows.length} shown`} flush>
+      <FillModule legend="Request log" meta={`${rows.length} shown`} flush>
         {logs.isError ? (
           <Failure error={logs.error} onRetry={() => void logs.refetch()} />
         ) : logs.isLoading ? (
@@ -195,7 +177,7 @@ export function LogsBoard() {
             }
           />
         ) : (
-          <RequestLogScroller
+          <FillScroller
             ref={scroller}
             data-testid="request-log-scroller"
             onScroll={(event) => {
@@ -222,9 +204,9 @@ export function LogsBoard() {
                 ) : null}
               </More>
             ) : null}
-          </RequestLogScroller>
+          </FillScroller>
         )}
-      </RequestLogModule>
+      </FillModule>
 
       <Modal
         open={open !== null}
