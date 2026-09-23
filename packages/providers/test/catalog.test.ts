@@ -399,14 +399,14 @@ test("catalogPricing reports an unlisted model rather than guessing", () => {
     input: 2,
     output: 10,
     cacheRead: 0.2,
-    cacheWrite5m: 0,
+    cacheWrite5m: 2.5,
     cacheWrite1h: 0,
   });
   expect(catalogPricing("openai", "gpt-6-luna")).toEqual({
     input: 0.1,
     output: 0.5,
     cacheRead: 0.01,
-    cacheWrite5m: 0,
+    cacheWrite5m: 0.125,
     cacheWrite1h: 0,
   });
   expect(catalogPricing("anthropic", "claude-opus-5")).toEqual({

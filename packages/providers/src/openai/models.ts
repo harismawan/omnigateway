@@ -5,7 +5,8 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  *
  * Prices checked 2026-09-23 against OpenAI's published API pricing. Cache reads
  * keep the 90% discount, so each cache-read figure is a tenth of that tier's
- * input price.
+ * input price. Cache writes are billed at 1.25x the base input token rate
+ * (recorded under cacheWrite5m; OpenAI does not offer a separate 1h tier).
  *
  * OpenAI prices these models in two context tiers, split at 272,000 input
  * tokens. **The figures here are the short-context tier**, because that is the
@@ -38,49 +39,49 @@ export const OPENAI_MODELS: ProviderModelCatalogEntry = {
     {
       id: "gpt-6-astra",
       label: "GPT-6 Astra",
-      pricing: { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 0, cacheWrite1h: 0 },
+      pricing: { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
     {
       id: "gpt-6-sol",
       label: "GPT-6 Sol",
-      pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 0, cacheWrite1h: 0 },
+      pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
     {
       id: "gpt-6-luna",
       label: "GPT-6 Luna",
-      pricing: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite5m: 0, cacheWrite1h: 0 },
+      pricing: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite5m: 0.125, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
     {
       id: "gpt-5.6",
       label: "GPT-5.6 — routes to Sol",
-      pricing: { input: 4, output: 20, cacheRead: 0.4, cacheWrite5m: 0, cacheWrite1h: 0 },
+      pricing: { input: 4, output: 20, cacheRead: 0.4, cacheWrite5m: 5, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
     {
       id: "gpt-5.6-sol",
       label: "GPT-5.6 Sol",
-      pricing: { input: 4, output: 20, cacheRead: 0.4, cacheWrite5m: 0, cacheWrite1h: 0 },
+      pricing: { input: 4, output: 20, cacheRead: 0.4, cacheWrite5m: 5, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
     {
       id: "gpt-5.6-terra",
       label: "GPT-5.6 Terra",
-      pricing: { input: 2, output: 12, cacheRead: 0.2, cacheWrite5m: 0, cacheWrite1h: 0 },
+      pricing: { input: 2, output: 12, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
     {
       id: "gpt-5.6-luna",
       label: "GPT-5.6 Luna",
-      pricing: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite5m: 0, cacheWrite1h: 0 },
+      pricing: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite5m: 0.25, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
