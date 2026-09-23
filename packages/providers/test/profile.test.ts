@@ -18,7 +18,7 @@ test("orderHeaders puts listed names first, in order, case-insensitively", () =>
   const pairs: [string, string][] = [
     ["anthropic-version", "2023-06-01"],
     ["Accept", "application/json"],
-    ["User-Agent", "claude-cli/2.1.278 (external, cli)"],
+    ["User-Agent", "claude-cli/2.1.280 (external, cli)"],
   ];
   const out = orderHeaders(pairs, ["Accept", "USER-AGENT"]);
   expect(out.map(([n]) => n)).toEqual(["Accept", "User-Agent", "anthropic-version"]);
@@ -78,8 +78,8 @@ test("openai profile carries the codex-cli identity", () => {
   const h = new Map(
     entry(PROFILES, "openai", "PROFILES").headers.map(([n, v]) => [n.toLowerCase(), v]),
   );
-  expect(h.get("user-agent")).toBe("codex-cli/0.155.1 (Windows 10.0.26200; x64)");
-  expect(h.get("version")).toBe("0.155.1");
+  expect(h.get("user-agent")).toBe("codex-cli/0.156.0 (Windows 10.0.26200; x64)");
+  expect(h.get("version")).toBe("0.156.0");
   expect(h.get("originator")).toBe("codex_cli_rs");
   expect(h.get("openai-beta")).toBe("responses=experimental");
 });

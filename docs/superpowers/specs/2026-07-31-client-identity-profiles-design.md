@@ -93,7 +93,7 @@ binaries. `${...}` marks an environment-substitutable value.
 
 | Header | Value |
 | --- | --- |
-| `User-Agent` | `claude-cli/${2.1.278} (external, cli)` |
+| `User-Agent` | `claude-cli/${2.1.280} (external, cli)` |
 | `x-app` | `cli` |
 | `anthropic-dangerous-direct-browser-access` | `true` |
 | `X-Stainless-Lang` | `js` |
@@ -109,9 +109,9 @@ binaries. `${...}` marks an environment-substitutable value.
 
 | Header | Value |
 | --- | --- |
-| `User-Agent` | `codex-cli/${0.155.1} (${Windows 10.0.26200}; ${x64})` |
+| `User-Agent` | `codex-cli/${0.156.0} (${Windows 10.0.26200}; ${x64})` |
 | `originator` | `${codex_cli_rs}` |
-| `Version` | `${0.155.1}` |
+| `Version` | `${0.156.0}` |
 | `Openai-Beta` | `responses=experimental` |
 | `X-Codex-Beta-Features` | `responses_websockets` |
 
@@ -262,7 +262,7 @@ Real Claude Code prepends a system block carrying a billing header and an
 integrity token over the request body:
 
 ```
-system[0] = "x-anthropic-billing-header: cc_version=2.1.278.<3 hex>; cc_entrypoint=cli; cch=<5 hex>;"
+system[0] = "x-anthropic-billing-header: cc_version=2.1.280.<3 hex>; cc_entrypoint=cli; cch=<5 hex>;"
 ```
 
 The token is `xxHash64(serialized_body, 0x6e52736ac806831e) & 0xFFFFF`, rendered
@@ -277,7 +277,7 @@ against canonical XXH64 vectors: `""` → `ef46db3751d8e999`, `"a"` →
 OmniRoute's `xxhash-wasm` import exists because Node has no built-in.
 
 `cc_version` is the CLI version plus a three-hex-digit suffix that is **not** a
-build revision. Verified again from the 2.1.278 bundle: the CLI takes the characters at
+build revision. Verified again from the 2.1.280 bundle: the CLI takes the characters at
 indices 4, 7 and 20 of the first non-meta user text (`"0"` where the text is shorter),
 prepends the unchanged salt `59cf53e54c78`, appends the version string, SHA-256s that and
 keeps the first three hex digits. So the suffix is one value per conversation.
@@ -335,7 +335,7 @@ a header no real client would emit.
 
 ```
 OMNI_UA_ANTHROPIC=                          # replaces the whole User-Agent string
-OMNI_ANTHROPIC_CLI_VERSION=2.1.278
+OMNI_ANTHROPIC_CLI_VERSION=2.1.280
 OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION=0.112.1
 OMNI_ANTHROPIC_STAINLESS_RUNTIME_VERSION=v26.3.0
 OMNI_ANTHROPIC_STAINLESS_OS=                # blank = derive from host
@@ -343,7 +343,7 @@ OMNI_ANTHROPIC_STAINLESS_ARCH=              # blank = derive from host
 OMNI_ORDER_ANTHROPIC=                       # comma-separated; blank = built-in order
 
 OMNI_UA_OPENAI=
-OMNI_OPENAI_CLI_VERSION=0.155.1
+OMNI_OPENAI_CLI_VERSION=0.156.0
 OMNI_OPENAI_ORIGINATOR=codex_cli_rs
 OMNI_OPENAI_UA_PLATFORM=Windows 10.0.26200
 OMNI_OPENAI_UA_ARCH=x64
