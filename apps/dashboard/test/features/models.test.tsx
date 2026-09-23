@@ -174,19 +174,6 @@ describe("parseDraft", () => {
     if (parsed.ok) expect(parsed.model).toEqual(original);
   });
 
-  test("transform overrides round-trip both ways, and inherit sends no field", () => {
-    for (const overrides of [
-      { rtkEnabled: true, ponytailMode: "ultra" as const },
-      { rtkEnabled: false, ponytailMode: "off" as const },
-      {},
-    ]) {
-      const original = { ...model(), ...overrides };
-      const parsed = parseDraft(toDraft(original));
-      expect(parsed.ok).toBe(true);
-      if (parsed.ok) expect(parsed.model).toEqual(original);
-    }
-  });
-
   test("omits cacheRead entirely when the field is blank", () => {
     const draft = toDraft(model());
     const target = draft.targets[0];
@@ -573,26 +560,6 @@ describe("ModelsBoard", () => {
         provider: "custom",
         endpointId: "local-vllm",
         model: "local-model",
-      });
-    });
-  });
-
-  test("the transform overrides are sent with the model", async () => {
-    const user = userEvent.setup();
-    const stub = stubModels({ "PUT /api/models/fast": () => ({ ok: true }) });
-    renderWithProviders(<ModelsBoard />);
-
-    await openEditor();
-    await user.selectOptions(screen.getByLabelText("Tool-output compression (RTK)"), "off");
-    await user.selectOptions(screen.getByLabelText("Lazy senior dev (ponytail)"), "full");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
-
-    await waitFor(() => {
-      const put = stub.calls.find((call) => call.init?.method === "PUT");
-      expect(JSON.parse(String(put?.init?.body))).toEqual({
-        ...model(),
-        rtkEnabled: false,
-        ponytailMode: "full",
       });
     });
   });

@@ -1,5 +1,5 @@
 import type { ProviderId } from "@omni/ir";
-import { isPonytailMode, type PonytailMode } from "@omni/ponytail/catalog";
+import type { PonytailMode } from "@omni/ponytail/catalog";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
 import type { RtkFilterId } from "@omni/rtk/catalog";
 
@@ -581,32 +581,7 @@ export type VirtualModel = {
   strategy: Strategy;
   /** True when this row was generated from an alias for a concrete model name. */
   isAlias: boolean;
-  /**
-   * Per-model overrides of the global `rtkEnabled` / `ponytailMode` settings.
-   * Absent means "follow the global setting"; present wins in either direction,
-   * so a model can turn a transform on while the install has it off, or off
-   * while the install has it on.
-   */
-  rtkEnabled?: boolean | undefined;
-  ponytailMode?: PonytailMode | undefined;
 };
-
-/**
- * Attaches the stored overrides to a model row, both backends' one reader.
- *
- * NULL is "follow the global setting" and so is an unrecognised mode: a restored
- * or hand-edited row must degrade to the install's choice, never fail the list.
- * The fields stay absent rather than `undefined` (`exactOptionalPropertyTypes`).
- */
-export function withOverrides(
-  model: VirtualModel,
-  rtkEnabled: boolean | null,
-  ponytailMode: string | null,
-): VirtualModel {
-  if (rtkEnabled !== null) model.rtkEnabled = rtkEnabled;
-  if (isPonytailMode(ponytailMode)) model.ponytailMode = ponytailMode;
-  return model;
-}
 
 export type ApiKey = {
   id: string;

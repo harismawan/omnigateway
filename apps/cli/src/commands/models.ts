@@ -2,7 +2,7 @@ import { dryRun, getModel, listModels, putModel, removeModel } from "@omni/contr
 import type { ProviderId } from "@omni/ir";
 import { choiceLimits, entryPricing, type ProviderModelChoice } from "@omni/providers/catalog";
 import type { ProviderDescriptors } from "@omni/providers/descriptors";
-import type { PonytailMode, Target, VirtualModel } from "@omni/store";
+import type { Target, VirtualModel } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider, state } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -58,8 +58,6 @@ export const modelsShow: Command = {
           ["id", model.id],
           ["strategy", model.strategy],
           ["alias", model.isAlias ? "yes" : "no"],
-          ["rtk", model.rtkEnabled === undefined ? "global" : model.rtkEnabled ? "on" : "off"],
-          ["ponytail", model.ponytailMode ?? "global"],
         ]),
         "",
         table(
@@ -259,19 +257,13 @@ export const modelsCatalog: Command = {
 };
 
 export const modelsPut: Command = {
-  usage:
-    "models put <id> (-f model.json | --from-catalog <provider>:<model> ... [--rtk on|off] [--ponytail off|lite|full|ultra])",
+  usage: "models put <id> (-f model.json | --from-catalog <provider>:<model> ...)",
   summary: "Create or replace a virtual model",
   options: {
     file: { type: "string", short: "f" },
     "from-catalog": { type: "string", multiple: true },
     strategy: { type: "string" },
     alias: { type: "boolean" },
-    // Per-model overrides for `--from-catalog`; absent follows the global
-    // setting. `--rtk` is checked here because it maps to a boolean; `--ponytail`
-    // passes through and `putModel`'s schema refuses an unknown mode.
-    rtk: { type: "string" },
-    ponytail: { type: "string" },
   },
   async run(args, { ctx, writer }) {
     const id = requirePositional(args, 0, "model id");
@@ -280,17 +272,6 @@ export const modelsPut: Command = {
 
     if (file !== undefined && catalog !== undefined) {
       throw new UsageError("pass either -f or --from-catalog, not both");
-    }
-    // With -f the file carries both fields; ignoring the flags would report
-    // success while clearing whatever override the file left out.
-    if (
-      file !== undefined &&
-      (stringFlag(args.values, "rtk") !== undefined ||
-        stringFlag(args.values, "ponytail") !== undefined)
-    ) {
-      throw new UsageError(
-        "--rtk and --ponytail apply to --from-catalog; set rtkEnabled / ponytailMode in the file",
-      );
     }
 
     let model: unknown;
@@ -313,13 +294,6 @@ export const modelsPut: Command = {
         isAlias: boolFlag(args.values, "alias"),
         targets: catalog.map((spec) => targetFromCatalog(spec, descriptors)),
       };
-      const rtk = stringFlag(args.values, "rtk");
-      if (rtk !== undefined) {
-        if (rtk !== "on" && rtk !== "off") throw new UsageError("--rtk takes on or off");
-        draft.rtkEnabled = rtk === "on";
-      }
-      const ponytail = stringFlag(args.values, "ponytail");
-      if (ponytail !== undefined) draft.ponytailMode = ponytail as PonytailMode;
       model = draft;
     } else {
       throw new UsageError("pass -f <file> or --from-catalog <provider>:<model>");

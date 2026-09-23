@@ -179,9 +179,6 @@ export const modelSchema = z.object({
   strategy: z.enum(["score", "priority", "roundRobin", "weighted"]),
   isAlias: z.boolean(),
   targets: z.array(targetSchema).min(1, "a virtual model needs at least one target"),
-  /** Absent follows the global setting; present overrides it either way. */
-  rtkEnabled: z.boolean().optional(),
-  ponytailMode: z.enum(PONYTAIL_MODES).optional(),
 });
 
 /**

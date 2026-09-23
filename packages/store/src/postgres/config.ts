@@ -9,7 +9,7 @@ import type {
   Target,
   VirtualModel,
 } from "../types.ts";
-import { DEFAULT_SETTINGS, withOverrides } from "../types.ts";
+import { DEFAULT_SETTINGS } from "../types.ts";
 import type { Rows } from "./db.ts";
 
 const SETTINGS_KEY = "settings";
@@ -63,47 +63,24 @@ export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void
 
   return {
     async listModels() {
-      type R = {
-        id: string;
-        targets: string;
-        strategy: string;
-        is_alias: boolean;
-        rtk_enabled: boolean | null;
-        ponytail_mode: string | null;
-      };
+      type R = { id: string; targets: string; strategy: string; is_alias: boolean };
       const rows = await sql.unsafe<Rows<R>>("SELECT * FROM virtual_models ORDER BY id");
-      return rows.map((r) =>
-        withOverrides(
-          {
-            id: r.id,
-            targets: JSON.parse(r.targets) as Target[],
-            strategy: r.strategy as Strategy,
-            isAlias: r.is_alias,
-          },
-          r.rtk_enabled,
-          r.ponytail_mode,
-        ),
-      );
+      return rows.map((r) => ({
+        id: r.id,
+        targets: JSON.parse(r.targets) as Target[],
+        strategy: r.strategy as Strategy,
+        isAlias: r.is_alias,
+      }));
     },
 
     async putModel(model: VirtualModel) {
       await sql.unsafe(
-        `INSERT INTO virtual_models (id, targets, strategy, is_alias, rtk_enabled, ponytail_mode)
-         VALUES ($1,$2,$3,$4,$5,$6)
+        `INSERT INTO virtual_models (id, targets, strategy, is_alias) VALUES ($1,$2,$3,$4)
          ON CONFLICT (id) DO UPDATE SET
            targets = EXCLUDED.targets,
            strategy = EXCLUDED.strategy,
-           is_alias = EXCLUDED.is_alias,
-           rtk_enabled = EXCLUDED.rtk_enabled,
-           ponytail_mode = EXCLUDED.ponytail_mode`,
-        [
-          model.id,
-          JSON.stringify(model.targets),
-          model.strategy,
-          model.isAlias,
-          model.rtkEnabled ?? null,
-          model.ponytailMode ?? null,
-        ],
+           is_alias = EXCLUDED.is_alias`,
+        [model.id, JSON.stringify(model.targets), model.strategy, model.isAlias],
       );
       emit({ type: "modelsChanged" });
     },

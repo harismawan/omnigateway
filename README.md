@@ -331,10 +331,7 @@ changed without a restart: the six routing weights, `maxAttempts`,
 `breakerCooldownMs`, `logRetentionDays`, `quotaPollIntervalMs`, `rtkEnabled`,
 `ponytailMode` (`off` | `lite` | `full` | `ultra`),
 and the two body-capture switches. Edit them with `omni settings set` or in the
-console. A virtual model may override `rtkEnabled` and `ponytailMode` for itself, in
-either direction: `omni models put <id> --rtk on|off --ponytail off|lite|full|ultra`
-(or those fields in the `-f` file), or the model editor; leave one out to follow the
-global value. `quotaPollIntervalMs` is the one exception: the poller reads it once at
+console. `quotaPollIntervalMs` is the one exception: the poller reads it once at
 boot, so a change to it takes a restart. `requestDeadlineMs` defaults to `0`,
 which imposes no deadline at all; what that means for whatever sits in front of
 the gateway is
