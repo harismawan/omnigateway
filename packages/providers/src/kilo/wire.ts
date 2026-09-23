@@ -7,6 +7,7 @@ import {
 } from "@omni/ir";
 import { readResponseFormatResult } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
+import { fileName, splitFiles, withFileText } from "../toolResultFiles.ts";
 
 /**
  * Kilo's request body: OpenAI chat completions, plus OpenRouter's `reasoning`.
@@ -144,15 +145,20 @@ export function toKiloWire(
             function: { name: block.name, arguments: JSON.stringify(block.input) },
           });
           break;
-        case "toolResult":
+        case "toolResult": {
           // Unreachable: the router pins a result's native parts to their producer.
           if (block.native !== undefined) note("kilo:anthropic-native-block-dropped");
           flush();
+          // Text files are decoded into the result; a PDF is the one file type
+          // the chat `file` part is known to carry.
+          const files = splitFiles(block.files ?? [], (t) => t === "application/pdf");
           messages.push({
             role: "tool",
             tool_call_id: block.toolUseId,
-            content: block.content,
+            content: withFileText(block.content, files.text),
           });
+          if (files.text.length > 0) note("kilo:tool-result-files-inlined");
+          if (files.dropped) note("kilo:files-dropped");
           for (const image of block.images ?? []) {
             note("kilo:tool-result-images-moved");
             toolImages.push({
@@ -160,17 +166,18 @@ export function toKiloWire(
               image_url: { url: `data:${image.mediaType};base64,${image.data}` },
             });
           }
-          for (const file of block.files ?? []) {
+          for (const file of files.carried) {
             note("kilo:tool-result-files-moved");
             toolImages.push({
               type: "file",
               file: {
-                ...(file.filename !== undefined && { filename: file.filename }),
+                filename: fileName(file),
                 file_data: `data:${file.mediaType};base64,${file.data}`,
               },
             });
           }
           break;
+        }
         case "providerNative":
           // Unreachable: the router excludes this provider from any request
           // carrying another provider's native history. Recorded, not ignored.

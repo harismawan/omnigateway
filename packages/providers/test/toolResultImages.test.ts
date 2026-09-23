@@ -9,7 +9,7 @@ import { toKiloWire } from "../src/kilo/wire.ts";
 import { toChatWire } from "../src/kimi/wire.ts";
 import { toMuseWire } from "../src/muse/wire.ts";
 import { toResponsesWire } from "../src/openai/wire.ts";
-import { responsesFiles } from "../src/responsesFile.ts";
+import { responsesFiles } from "../src/toolResultFiles.ts";
 
 /**
  * An image a tool returned must reach the wire as an image, never as its own
@@ -296,7 +296,7 @@ test("openai: the file follows its function_call_output as a data URL", () => {
   });
 });
 
-test("anthropic: a text/plain file becomes a text document, decoded", () => {
+test("anthropic: a text/plain file is decoded into the result text", () => {
   const text: ChatRequest = {
     ...withFile("text/plain"),
     messages: [
@@ -323,14 +323,10 @@ test("anthropic: a text/plain file becomes a text document, decoded", () => {
   };
   const { body, degradations } = toWire(text, "m", { oauth: false });
   const result = (body.messages[2] as { content: { content: unknown }[] }).content[0];
-  expect(result?.content).toEqual([
-    {
-      type: "document",
-      source: { type: "text", media_type: "text/plain", data: "BANANA 42" },
-      title: "r.txt",
-    },
-  ]);
+  // A plain string, as a text-only result always was.
+  expect(result?.content).toBe("BANANA 42");
   expect(degradations).not.toContain("anthropic:files-dropped");
+  expect(degradations).toContain("anthropic:tool-result-files-inlined");
 });
 
 test("anthropic: a result whose every file was dropped keeps its string form", () => {
@@ -394,7 +390,7 @@ const RESPONSES_ENCODERS = ENCODERS.filter(([name]) =>
 
 for (const [name, encode] of RESPONSES_ENCODERS) {
   const provider = name.replace("-responses", "");
-  test(`${name}: a refused type never goes out as input_file`, () => {
+  test(`${name}: text is inlined, a refused type never goes out as input_file`, () => {
     const log = Buffer.from("INFO code=BANANA 42").toString("base64");
     const request: ChatRequest = {
       ...noImages,
@@ -410,7 +406,13 @@ for (const [name, encode] of RESPONSES_ENCODERS) {
               files: [
                 { type: "file", mediaType: "text/x-log", data: log },
                 { type: "file", mediaType: "application/zip", data: PDF },
-                { type: "file", mediaType: "text/csv", data: log, filename: "a.csv" },
+                {
+                  type: "file",
+                  mediaType:
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  data: log,
+                  filename: "a.docx",
+                },
               ],
             },
           ],
@@ -422,7 +424,11 @@ for (const [name, encode] of RESPONSES_ENCODERS) {
     const at = input.findIndex((i) => i.type === "function_call_output");
     expect(input[at]?.output).toBe("page 1\n\nINFO code=BANANA 42");
     expect(input[at + 1]?.content).toEqual([
-      { type: "input_file", filename: "a.csv", file_data: `data:text/csv;base64,${log}` },
+      {
+        type: "input_file",
+        filename: "a.docx",
+        file_data: `data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,${log}`,
+      },
     ]);
     expect(fileCarriers(body)).toEqual([]);
     expect(degradations.filter((d) => d.includes("files")).sort()).toEqual(
@@ -446,4 +452,122 @@ test("responses: text the backend refuses as a file is decoded, not dropped", ()
     { type: "file", mediaType: "application/xml", data: Buffer.from("<a/>").toString("base64") },
   ]);
   expect({ text, dropped }).toEqual({ text: ["<a/>"], dropped: false });
+});
+
+/**
+ * Text files are decoded into the tool output on every wire (measured: models
+ * read decoded text reliably and file-part text unreliably), and a binary file
+ * goes only where that wire has a carrier for it.
+ */
+const TEXT_AND_BINARY: Record<string, [string, string[], string[]]> = {
+  // name: [result text, binary carriers, file notes]
+  anthropic: [
+    "page 1\n\nBANANA 42",
+    ["data"],
+    ["anthropic:files-dropped", "anthropic:tool-result-files-inlined"],
+  ],
+  antigravity: ["page 1\n\nBANANA 42", ["data", "data"], ["antigravity:tool-result-files-inlined"]],
+  openai: [
+    "page 1\n\nBANANA 42",
+    ["file_data"],
+    ["openai:files-dropped", "openai:tool-result-files-inlined", "openai:tool-result-files-moved"],
+  ],
+  grok: [
+    "page 1\n\nBANANA 42",
+    ["file_data"],
+    ["grok:files-dropped", "grok:tool-result-files-inlined", "grok:tool-result-files-moved"],
+  ],
+  muse: [
+    "page 1\n\nBANANA 42",
+    ["file_data"],
+    ["muse:files-dropped", "muse:tool-result-files-inlined", "muse:tool-result-files-moved"],
+  ],
+  "custom-responses": [
+    "page 1\n\nBANANA 42",
+    ["file_data"],
+    ["custom:files-dropped", "custom:tool-result-files-inlined", "custom:tool-result-files-moved"],
+  ],
+  kilo: [
+    "page 1\n\nBANANA 42",
+    ["file_data"],
+    ["kilo:files-dropped", "kilo:tool-result-files-inlined", "kilo:tool-result-files-moved"],
+  ],
+  kimi: ["page 1\n\nBANANA 42", [], ["kimi:files-dropped", "kimi:tool-result-files-inlined"]],
+  "custom-chat": [
+    "page 1\n\nBANANA 42",
+    [],
+    ["custom:files-dropped", "custom:tool-result-files-inlined"],
+  ],
+};
+
+const mixed: ChatRequest = {
+  ...noImages,
+  messages: [
+    ...req.messages.slice(0, 2),
+    {
+      role: "user",
+      content: [
+        {
+          type: "toolResult",
+          toolUseId: "call_1",
+          content: "page 1",
+          files: [
+            {
+              type: "file",
+              mediaType: "text/markdown",
+              data: Buffer.from("BANANA 42").toString("base64"),
+            },
+            { type: "file", mediaType: "application/pdf", data: PDF },
+            {
+              type: "file",
+              mediaType: "application/zip",
+              data: PDF.replace("JVBERi0x", "UEsDBBQA"),
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+function allStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(allStrings);
+  if (value !== null && typeof value === "object") return Object.values(value).flatMap(allStrings);
+  return [];
+}
+
+for (const [name, encode] of ENCODERS) {
+  test(`${name}: text files are read as text, binary files only where carried`, () => {
+    const [resultText, carriers, notes] = TEXT_AND_BINARY[name] ?? ["missing", [], []];
+    const { body, degradations } = encode(mixed);
+    const strings = allStrings(body);
+    expect(`${name}:${strings.some((v) => v.includes("BANANA 42"))}`).toBe(`${name}:true`);
+    expect(`${name}:${strings.includes(resultText)}`).toBe(`${name}:true`);
+    // The zip travels only on the wire that carries any type (Gemini inlineData).
+    const zip = PDF.replace("JVBERi0x", "UEsDBBQA");
+    expect(`${name}:${fileCarriers(body).join(",")}`).toBe(
+      `${name}:${carriers.slice(0, 1).join(",")}`,
+    );
+    expect(`${name}:${strings.some((v) => v.includes(zip))}`).toBe(
+      `${name}:${carriers.length === 2}`,
+    );
+    expect(
+      `${name}:${degradations
+        .filter((d) => d.includes("files"))
+        .sort()
+        .join(",")}`,
+    ).toBe(`${name}:${[...notes].sort().join(",")}`);
+  });
+}
+
+test("responses: an input_file always carries a filename, derived when none came", () => {
+  const { parts } = responsesFiles([
+    { type: "file", mediaType: "application/pdf", data: "JVBERi0x" },
+    { type: "file", mediaType: "application/pdf", data: "JVBERi0x", filename: "r.pdf" },
+  ]);
+  expect(parts).toEqual([
+    { type: "input_file", filename: "file.pdf", file_data: "data:application/pdf;base64,JVBERi0x" },
+    { type: "input_file", filename: "r.pdf", file_data: "data:application/pdf;base64,JVBERi0x" },
+  ]);
 });

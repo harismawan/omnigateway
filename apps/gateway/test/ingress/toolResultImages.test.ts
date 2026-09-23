@@ -145,9 +145,10 @@ test("openai: a remote image in a tool message is dropped, not refused", () => {
   });
 });
 
-test("anthropic: a tool_result PDF document is kept whole, not serialised into text", () => {
+test("anthropic: a tool_result PDF document becomes a portable file, same wire back", () => {
   // The same amplification as an image: a base64 PDF flattened into the text
-  // is billed as prose.
+  // is billed as prose. It is a plain file, so any provider may take it, and
+  // Anthropic receives exactly the document the client sent.
   const pdf = "JVBERi0x".padEnd(4096, "A");
   const req = parseAnthropicRequest({
     model: "claude-opus-4",
@@ -172,9 +173,12 @@ test("anthropic: a tool_result PDF document is kept whole, not serialised into t
       },
     ],
   });
-  expect(result(req.messages[1]?.content)).toMatchObject({
+  expect(result(req.messages[1]?.content)).toEqual({
+    type: "toolResult",
+    toolUseId: "t",
     content: "the pdf",
-    native: [{ type: "providerNative", provider: "anthropic", blockType: "document" }],
+    files: [{ type: "file", mediaType: "application/pdf", data: pdf }],
+    isError: false,
   });
   const wire = toWire(req, "claude-opus-4", { oauth: false }).body.messages[1] as {
     content: { content: unknown }[];
@@ -253,4 +257,61 @@ test("responses: a file_id reference stays a short text reference", () => {
     content: '{"type":"input_file","file_id":"file-abc"}',
     isError: false,
   });
+});
+
+function docResult(document: Record<string, unknown>) {
+  const req = parseAnthropicRequest({
+    model: "claude-opus-4",
+    max_tokens: 64,
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Read", input: {} }] },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "t", content: [document] }],
+      },
+    ],
+  });
+  return result(req.messages[1]?.content) as {
+    content: string;
+    files?: unknown[];
+    native?: unknown[];
+  };
+}
+
+test("anthropic: a text document becomes the result's text, and its title a filename", () => {
+  expect(
+    docResult({ type: "document", source: { type: "text", media_type: "text/plain", data: "hi" } }),
+  ).toMatchObject({ content: "hi" });
+  expect(
+    docResult({
+      type: "document",
+      title: "daily report",
+      source: { type: "text", media_type: "text/plain", data: "hi" },
+    }),
+  ).toMatchObject({ content: "daily report\nhi" });
+  const titled = docResult({
+    type: "document",
+    title: "r.pdf",
+    source: { type: "base64", media_type: "application/pdf", data: "JVBERi0x" },
+  });
+  expect(titled.files).toEqual([
+    { type: "file", mediaType: "application/pdf", data: "JVBERi0x", filename: "r.pdf" },
+  ]);
+});
+
+test("anthropic: a document only Anthropic can honour stays native", () => {
+  const pdf = { type: "base64", media_type: "application/pdf", data: "JVBERi0x" };
+  for (const document of [
+    { type: "document", source: pdf, citations: { enabled: true } },
+    { type: "document", source: pdf, context: "from the wiki" },
+    { type: "document", source: pdf, cache_control: { type: "ephemeral" } },
+    { type: "document", source: { type: "url", url: "https://x/y.pdf" } },
+    { type: "document", source: { type: "file", file_id: "file_1" } },
+    { type: "document", source: { type: "content", content: [{ type: "text", text: "hi" }] } },
+  ]) {
+    const r = docResult(document);
+    expect(`${JSON.stringify(document)}:${r.native?.length ?? 0}:${r.files?.length ?? 0}`).toBe(
+      `${JSON.stringify(document)}:1:0`,
+    );
+  }
 });

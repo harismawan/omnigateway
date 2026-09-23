@@ -388,12 +388,13 @@ Translation invariants:
 - Tool-result images ride `ToolResultBlock.images`, never serialised into `content` text (base64
   billed as prose broke 1M windows). Every ingress reads them; each encoder sends them in place,
   notes `<provider>:tool-result-images-moved` when it moves them to a later message, or
-  `<provider>:images-dropped`. A Responses `input_file` rides `ToolResultBlock.files` the same way
-  (`<provider>:tool-result-files-moved` / `files-dropped`; Anthropic takes a PDF as `document`).
-  A Responses backend refuses the **whole request** for a file type it does not take, so
-  `responsesFile.ts` sends only its measured allowlist as `input_file`, decodes other text into the
-  output (`tool-result-files-inlined`), drops the rest.
-  Anthropic `document`/`search_result` parts ride
+  `<provider>:images-dropped`. A Responses `input_file`, and an Anthropic `document` that is a plain
+  base64 PDF or text, ride `ToolResultBlock.files` / the result text, portable to every provider.
+  `toolResultFiles.ts` is the one rule: text files are decoded into the output on every wire
+  (`tool-result-files-inlined`; models read file-part text unreliably), a binary goes only through
+  the wire's own carrier (`tool-result-files-moved`), else `files-dropped`. A Responses backend
+  refuses the **whole request** for an unlisted type, so its carrier is a measured allowlist.
+  Anthropic `search_result` and a `document` with citations/context/cache marker/url/file id ride
   `ToolResultBlock.native` and pin routing like a top-level `providerNative` block. Pin:
   `packages/providers/test/toolResultImages.test.ts`.
 - Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in
