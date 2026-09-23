@@ -128,6 +128,8 @@ export function toCustomChatWire(
           });
           break;
         case "toolResult":
+          // Unreachable: the router pins a result's native parts to their producer.
+          if (block.native !== undefined) note("custom:anthropic-native-block-dropped");
           // A tool result is its own message in this API, not a content block.
           messages.push({
             role: "tool",
@@ -288,6 +290,8 @@ export function toCustomResponsesWire(
           });
           break;
         case "toolResult":
+          // Unreachable: the router pins a result's native parts to their producer.
+          if (block.native !== undefined) note("custom:anthropic-native-block-dropped");
           flush();
           input.push({
             type: "function_call_output",

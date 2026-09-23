@@ -144,6 +144,8 @@ export function toKiloWire(
           });
           break;
         case "toolResult":
+          // Unreachable: the router pins a result's native parts to their producer.
+          if (block.native !== undefined) note("kilo:anthropic-native-block-dropped");
           flush();
           messages.push({
             role: "tool",

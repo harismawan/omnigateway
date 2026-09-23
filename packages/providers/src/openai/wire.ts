@@ -208,6 +208,8 @@ export function toResponsesWire(
           });
           break;
         case "toolResult":
+          // Unreachable: the router pins a result's native parts to their producer.
+          if (block.native !== undefined) note("openai:anthropic-native-block-dropped");
           flush();
           input.push({
             type: "function_call_output",

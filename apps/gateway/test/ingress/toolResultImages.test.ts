@@ -144,3 +144,65 @@ test("openai: a remote image in a tool message is dropped, not refused", () => {
     isError: false,
   });
 });
+
+test("anthropic: a tool_result PDF document is kept whole, not serialised into text", () => {
+  // The same amplification as an image: a base64 PDF flattened into the text
+  // is billed as prose.
+  const pdf = "JVBERi0x".padEnd(4096, "A");
+  const req = parseAnthropicRequest({
+    model: "claude-opus-4",
+    max_tokens: 64,
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Read", input: {} }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t",
+            content: [
+              { type: "text", text: "the pdf" },
+              {
+                type: "document",
+                source: { type: "base64", media_type: "application/pdf", data: pdf },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  expect(result(req.messages[1]?.content)).toMatchObject({
+    content: "the pdf",
+    native: [{ type: "providerNative", provider: "anthropic", blockType: "document" }],
+  });
+  const wire = toWire(req, "claude-opus-4", { oauth: false }).body.messages[1] as {
+    content: { content: unknown }[];
+  };
+  expect(wire.content[0]?.content).toEqual([
+    { type: "text", text: "the pdf" },
+    { type: "document", source: { type: "base64", media_type: "application/pdf", data: pdf } },
+  ]);
+});
+
+test("anthropic: a malformed document part still flattens rather than failing", () => {
+  const req = parseAnthropicRequest({
+    model: "claude-opus-4",
+    max_tokens: 64,
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Read", input: {} }] },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "t", content: [{ type: "document", bogus: 1 }] },
+        ],
+      },
+    ],
+  });
+  expect(result(req.messages[1]?.content)).toEqual({
+    type: "toolResult",
+    toolUseId: "t",
+    content: '{"type":"document","bogus":1}',
+    isError: false,
+  });
+});

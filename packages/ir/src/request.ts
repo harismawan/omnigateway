@@ -72,12 +72,17 @@ export type ToolUseBlock = {
  *
  * ponytail: text and images lose their relative order (text first); carry a
  * block list if a client ever depends on interleaving.
+ *
+ * `native` holds provider-owned parts of the result (an Anthropic `document`
+ * or `search_result`), kept verbatim for their producer. They pin routing to
+ * that provider exactly as a top-level native block does.
  */
 export type ToolResultBlock = {
   type: "toolResult";
   toolUseId: string;
   content: string;
   images?: ImageBlock[];
+  native?: ProviderNativeBlock[];
   isError?: boolean;
   cacheControl?: CacheControl;
 };

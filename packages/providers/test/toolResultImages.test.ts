@@ -150,3 +150,54 @@ test("openai: the image follows the function_call_output", () => {
   const types = (body.input as { type: string }[]).map((i) => i.type);
   expect(types.slice(-2)).toEqual(["function_call_output", "message"]);
 });
+
+/** A tool result carrying an Anthropic `document`, which only Anthropic can take. */
+const withDocument: ChatRequest = {
+  ...noImages,
+  messages: [
+    ...req.messages.slice(0, 2),
+    {
+      role: "user",
+      content: [
+        {
+          type: "toolResult",
+          toolUseId: "call_1",
+          content: "",
+          native: [
+            {
+              type: "providerNative",
+              provider: "anthropic",
+              blockType: "document",
+              data: { source: { type: "base64", media_type: "application/pdf", data: DATA } },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const NATIVE_DROPPED: Record<string, string> = {
+  antigravity: "antigravity:provider-native-block-dropped",
+  openai: "openai:anthropic-native-block-dropped",
+  grok: "grok:anthropic-native-block-dropped",
+  muse: "muse:foreign-native-block-dropped",
+  "custom-responses": "custom:anthropic-native-block-dropped",
+  kilo: "kilo:anthropic-native-block-dropped",
+  kimi: "kimi:anthropic-native-block-dropped",
+  "custom-chat": "custom:anthropic-native-block-dropped",
+};
+
+for (const [name, encode] of ENCODERS) {
+  test(`${name}: a tool result's native part is sent by its producer, noted elsewhere`, () => {
+    const { body, degradations } = encode(withDocument);
+    if (name === "anthropic") {
+      expect(carriers(body)).toEqual(["data"]);
+      return;
+    }
+    // Unreachable through the router, which pins the request to Anthropic;
+    // an encoder reached anyway says what it lost, and never ships the bytes.
+    expect(carriers(body)).toEqual([]);
+    expect(degradations).toContain(NATIVE_DROPPED[name] ?? "");
+  });
+}

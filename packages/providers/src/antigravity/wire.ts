@@ -723,6 +723,8 @@ export function toAntigravityWire(
           });
           break;
         case "toolResult": {
+          // Unreachable: the router pins a result's native parts to their producer.
+          if (block.native !== undefined) note("antigravity:provider-native-block-dropped");
           const name = names.get(block.toolUseId);
           if (name === undefined) note("antigravity:tool-result-unmatched");
           // Gemini's `functionResponse` has no failure flag. A failed tool result

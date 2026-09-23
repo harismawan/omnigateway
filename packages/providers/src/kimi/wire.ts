@@ -70,6 +70,8 @@ export function toChatWire(
           });
           break;
         case "toolResult":
+          // Unreachable: the router pins a result's native parts to their producer.
+          if (block.native !== undefined) note("kimi:anthropic-native-block-dropped");
           // A tool result is its own message in this API, not a content block.
           messages.push({
             role: "tool",

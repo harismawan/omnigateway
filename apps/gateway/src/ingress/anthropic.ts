@@ -3,6 +3,7 @@ import type {
   ContentBlock,
   ImageBlock,
   Message,
+  ProviderNativeBlock,
   ReasoningConfig,
   ReasoningEffort,
   ToolChoice,
@@ -322,18 +323,24 @@ const KNOWN = [
   "metadata",
 ] as const;
 
+/** Anthropic's own block types a `tool_result` may carry besides text and images. */
+const TOOL_RESULT_NATIVE = new Set(["document", "search_result"]);
+
 /**
  * Tool result content may be blocks: text flattens to the string the model
- * reads, a base64 image is kept as an image. Anything else is stringified.
+ * reads, a base64 image is kept as an image, and a `document` or
+ * `search_result` is kept whole for Anthropic. Anything else is stringified.
  */
 function readToolResult(content: string | unknown[] | undefined): {
   content: string;
   images?: ImageBlock[];
+  native?: ProviderNativeBlock[];
 } {
   if (typeof content === "string") return { content };
   if (!Array.isArray(content)) return { content: "" };
   const text: string[] = [];
   const images: ImageBlock[] = [];
+  const native: ProviderNativeBlock[] = [];
   for (const part of content) {
     if (typeof part === "string") {
       text.push(part);
@@ -353,9 +360,29 @@ function readToolResult(content: string | unknown[] | undefined): {
       part !== null && typeof part === "object"
         ? (part as { type?: string; text?: string })
         : undefined;
+    const nativeSchema =
+      p?.type !== undefined && TOOL_RESULT_NATIVE.has(p.type) ? nativeSchemas[p.type] : undefined;
+    const parsed = nativeSchema?.safeParse(part);
+    if (p?.type !== undefined && parsed?.success === true) {
+      const { type: _type, cache_control, ...data } = parsed.data;
+      native.push({
+        type: "providerNative",
+        provider: "anthropic",
+        blockType: p.type,
+        data,
+        ...(cache_control === undefined || cache_control === null
+          ? {}
+          : irCacheControl(cache_control as z.infer<typeof cacheControl>)),
+      });
+      continue;
+    }
     text.push(p?.type === "text" && typeof p.text === "string" ? p.text : JSON.stringify(part));
   }
-  return { content: text.join("\n"), ...(images.length > 0 && { images }) };
+  return {
+    content: text.join("\n"),
+    ...(images.length > 0 && { images }),
+    ...(native.length > 0 && { native }),
+  };
 }
 
 function toIrBlock(b: z.infer<typeof block>): ContentBlock {

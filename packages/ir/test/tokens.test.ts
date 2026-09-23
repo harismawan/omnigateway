@@ -283,3 +283,34 @@ test("a marker on a tool result's image caches through that result", () => {
     estimateInputTokens(withToolImage(true)),
   );
 });
+
+test("a tool result's native part is counted and its marker is seen", () => {
+  const document = (marked: boolean): ChatRequest => ({
+    model: "m",
+    stream: false,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "t",
+            content: "",
+            native: [
+              {
+                type: "providerNative",
+                provider: "anthropic",
+                blockType: "document",
+                data: { source: { data: "A".repeat(4_000) } },
+                ...(marked && { cacheControl: { type: "ephemeral" as const } }),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  expect(estimateInputTokens(document(false))).toBeGreaterThan(900);
+  expect(estimateCachedInputTokens(document(false))).toBe(0);
+  expect(estimateCachedInputTokens(document(true))).toBe(estimateInputTokens(document(true)));
+});

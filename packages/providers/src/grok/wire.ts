@@ -142,6 +142,8 @@ export function toGrokWire(
           });
           break;
         case "toolResult":
+          // Unreachable: the router pins a result's native parts to their producer.
+          if (block.native !== undefined) note("grok:anthropic-native-block-dropped");
           flush();
           input.push({
             type: "function_call_output",
