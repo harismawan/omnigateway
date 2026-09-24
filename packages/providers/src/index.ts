@@ -2,7 +2,7 @@
 // Task 17 can drive it without a live HTTP call.
 
 export { anthropicAdapter, decodeAnthropic, toWire as toAnthropicWire } from "./anthropic/index.ts";
-export { anthropicOAuthFlow, parseAnthropicUsage } from "./anthropic/oauth.ts";
+export { anthropicOAuthFlow, parseAnthropicUsage, parseResetGrants } from "./anthropic/oauth.ts";
 export * from "./anthropic/tools.ts";
 export {
   antigravityAdapter,

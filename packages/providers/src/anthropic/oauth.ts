@@ -1,8 +1,12 @@
+import type { ErrorCode } from "@omni/ir";
 import {
   type AuthHelpers,
   type AuthStep,
   type FlowResult,
   type PkcePluginFlow,
+  type ResetCredit,
+  type ResetCredits,
+  type ResetRedeemed,
   tokenErrorCode,
   tokenErrorMessage,
   type UsageReport,
@@ -181,4 +185,166 @@ export const anthropicOAuthFlow: PkcePluginFlow = {
     if (!usageReadable(res.status, "anthropic")) return null;
     return parseAnthropicUsage(parseBody(res.body), now());
   },
+
+  async *resetCredits({ secrets }) {
+    if (secrets.accessToken === null) return null;
+    const res = yield getJsonRequest(RESET_STATUS_URL, anthropicProfile, {
+      accessToken: secrets.accessToken,
+      extraHeaders: SIDE_HEADERS,
+    });
+    if (!usageReadable(res.status, "anthropic")) return null;
+    const root = recordOf(parseBody(res.body));
+    // No block at all is "not enrolled", which is an empty list, not unreadable.
+    return root === null ? null : parseResetGrants(root.cedar_ember ?? null);
+  },
+
+  async *redeemReset({ secrets, creditId, requestId, fail }) {
+    if (secrets.accessToken === null) throw fail("AUTH", "credential holds no access token");
+    const grantId = grantOf(creditId);
+    if (grantId === null) throw fail("CONFLICT", "that reset credit is not available");
+    // The claim is addressed to the organisation, which the token does not
+    // carry; the CLI reads it from the profile the same way.
+    const profile = yield getJsonRequest(PROFILE_URL, anthropicProfile, {
+      accessToken: secrets.accessToken,
+      extraHeaders: SIDE_HEADERS,
+    });
+    if (profile.status < 200 || profile.status >= 300) {
+      throw fail(redeemErrorCode(profile.status), `profile read refused: http_${profile.status}`, {
+        status: profile.status,
+      });
+    }
+    const orgId = orgIdOf(parseBody(profile.body));
+    if (orgId === null) throw fail("UPSTREAM", "profile names no organization");
+
+    const res = yield postJsonRequest(
+      `https://api.anthropic.com/api/organizations/${orgId}/reset_rate_limits`,
+      anthropicProfile,
+      {
+        contentType: "application/json",
+        body: JSON.stringify({ program: RESET_PROGRAM, grant_id: grantId, request_id: requestId }),
+        extraHeaders: [["Authorization", `Bearer ${secrets.accessToken}`], ...SIDE_HEADERS],
+      },
+    );
+    if (res.status < 200 || res.status >= 300) {
+      // Status only, never the body: this text reaches the operator's log.
+      throw fail(redeemErrorCode(res.status), `reset claim refused: http_${res.status}`, {
+        status: res.status,
+      });
+    }
+    return claimOutcome(parseBody(res.body), fail);
+  },
 };
+
+/**
+ * Anthropic's banked-reset program, as the Claude CLI names it. Status rides a
+ * flagged read of the usage endpoint; the claim is per organisation.
+ * Undocumented; shapes below are the CLI's own validation schema.
+ */
+const RESET_PROGRAM = "cedar_ember";
+const RESET_STATUS_URL = `${USAGE_URL}?cedar_ember=1&skip_spend=1`;
+const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
+/** The CLI checks both before sending; so does this, so a bad id never reaches the wire. */
+const ORG_ID = /^[A-Za-z0-9-]{1,64}$/;
+
+/**
+ * The reset calls wear the profile's own inference identity: the server
+ * derives the program's `surface` from the User-Agent, and answers
+ * `ineligible_reason: "surface"` to the usage probe's `claude-code/<v>`
+ * (measured live). Only the OAuth beta is added.
+ */
+const SIDE_HEADERS: [string, string][] = [["anthropic-beta", "oauth-2025-04-20"]];
+
+/**
+ * A grant keeps its id across uses, so the credit id also names which use:
+ * `<grant>-u<uses left>`. After a spend the list shows the next use under a new
+ * id, so a repeated submission of the old one is refused as not available
+ * instead of spending again.
+ */
+const USE_SUFFIX = /-u(\d+)$/;
+
+function creditIdOf(grantId: string, left: number): string {
+  return `${grantId}-u${left}`;
+}
+
+function grantOf(creditId: string): string | null {
+  const grant = creditId.replace(USE_SUFFIX, "");
+  return grant === creditId || grant === "" ? null : grant;
+}
+
+function orgIdOf(value: unknown): string | null {
+  const org = recordOf(recordOf(value)?.organization);
+  const uuid = org?.uuid;
+  return typeof uuid === "string" && ORG_ID.test(uuid) ? uuid : null;
+}
+
+/**
+ * Maps the `cedar_ember` status block to credits.
+ *
+ * A grant holds `resets_left` uses. It is `available` only when the server
+ * would take it now: usable, unpaused, with uses left, and — when the server
+ * names one — the `next_grant_id`, since claiming any other is refused as
+ * `not_next_grant`, and, for a grant that `use_requires_limit`, only while the
+ * account is `at_limit` (else `not_limited`). `null` block means not enrolled:
+ * an empty list; a block without a `grants` array is unreadable, not empty.
+ */
+export function parseResetGrants(value: unknown): ResetCredits | null {
+  if (value === null) return { available: 0, credits: [] };
+  const block = recordOf(value);
+  if (block === null || !Array.isArray(block.grants)) return null;
+  const next = typeof block.next_grant_id === "string" ? block.next_grant_id : null;
+  const atLimit = block.at_limit === true;
+  let available = 0;
+  const credits: ResetCredit[] = block.grants.flatMap((raw: unknown) => {
+    const g = recordOf(raw);
+    if (g === null || typeof g.id !== "string") return [];
+    const left = typeof g.resets_left === "number" ? g.resets_left : 0;
+    const claimable =
+      left > 0 &&
+      g.usable_now === true &&
+      g.paused !== true &&
+      (g.use_requires_limit !== true || atLimit) &&
+      (next === null || next === g.id);
+    if (claimable) available += left;
+    return [
+      {
+        id: creditIdOf(g.id, left),
+        status: claimable ? "available" : left > 0 ? "unavailable" : "used",
+        title: typeof g.label === "string" && g.label !== "" ? g.label : null,
+        grantedAt: isoOrNull(g.starts_at),
+        expiresAt: isoOrNull(g.ends_at),
+      },
+    ];
+  });
+  return { available, credits };
+}
+
+/**
+ * A 200 is not a reset here: the body says what happened. Only `reset` is
+ * success; every other result is a refusal the operator can read.
+ */
+function claimOutcome(value: unknown, fail: AuthHelpers["fail"]): ResetRedeemed {
+  const body = recordOf(value);
+  const result = typeof body?.result === "string" ? body.result : null;
+  if (result === "reset") {
+    return { windowsReset: Array.isArray(body?.cleared) ? body.cleared.length : null };
+  }
+  if (result === "cooldown") throw fail("RATE_LIMIT", "reset claim refused: cooldown");
+  if (result === "already_used" || result === "not_limited" || result === "ineligible") {
+    throw fail("CONFLICT", `reset claim refused: ${result}`);
+  }
+  // "unavailable", or a shape this gateway does not know: the spend is unknown.
+  throw fail("UPSTREAM", "reset claim answered without a reset");
+}
+
+function redeemErrorCode(status: number): ErrorCode {
+  if (status === 429) return "RATE_LIMIT";
+  if (status === 401 || status === 403) return "AUTH";
+  if (status >= 400 && status < 500) return "CONFLICT";
+  return "UPSTREAM";
+}
+
+function isoOrNull(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : at;
+}
