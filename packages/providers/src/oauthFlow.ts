@@ -175,6 +175,26 @@ export type UsageWindowReport = {
 export type UsageReport = { windows: UsageWindowReport[] };
 
 /**
+ * One banked quota reset the provider granted the account.
+ *
+ * Codex grants these ("Full reset") and redeeming one clears the account's
+ * rate-limit windows immediately. `status` is the provider's own word
+ * (`available`, `redeemed`, `expired`); only `available` can be redeemed.
+ */
+export type ResetCredit = {
+  id: string;
+  status: string;
+  title: string | null;
+  grantedAt: number | null;
+  expiresAt: number | null;
+};
+
+export type ResetCredits = { available: number; credits: ResetCredit[] };
+
+/** What redeeming one credit did. `windowsReset` is null when the provider did not say. */
+export type ResetRedeemed = { windowsReset: number | null };
+
+/**
  * The flow a provider declares beside its descriptor and codec.
  *
  * Mirrors `OAuthProvider` in `@omni/control`, which is what the host consumes,
@@ -191,6 +211,27 @@ type PluginFlowBase = {
   usage?(
     input: { secrets: UsageSecrets; providerData: Record<string, unknown> } & AuthHelpers,
   ): AuthStep<UsageReport | null>;
+  /**
+   * Lists the account's banked quota resets. Optional, like `usage`, and handed
+   * the same secret. `null` means the endpoint answered with nothing usable.
+   */
+  resetCredits?(
+    input: { secrets: UsageSecrets; providerData: Record<string, unknown> } & AuthHelpers,
+  ): AuthStep<ResetCredits | null>;
+  /**
+   * Spends one named credit. The caller names it rather than "the next one" so
+   * that a repeated click redeems nothing twice: the second attempt names a
+   * credit the provider has already consumed. `requestId` is the host's
+   * idempotency key for this one attempt.
+   */
+  redeemReset?(
+    input: {
+      secrets: UsageSecrets;
+      providerData: Record<string, unknown>;
+      creditId: string;
+      requestId: string;
+    } & AuthHelpers,
+  ): AuthStep<ResetRedeemed>;
 };
 
 /** A redirect flow. Mirrors `PkceOAuthProvider`. */

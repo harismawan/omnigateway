@@ -343,3 +343,53 @@ test("only an outcome that left the reading stale exits nonzero", async () => {
   expect(unmet({ kind: "unsupported", credentialId: "c1" })).toBe(false);
   expect(unmet({ kind: "disabled", credentialId: "c1" })).toBe(false);
 });
+
+test("quota reset asks before spending, and a refusal spends nothing", async () => {
+  // A declined prompt must stop the command before any provider is asked.
+  const root = await installation();
+  const store = await openStore(root);
+  await seedCredential(store, { id: "cx-1", label: "codex-main", provider: "openai" });
+  store.close();
+
+  const asked: string[] = [];
+  const declined = await cli(["quota", "reset", "cx-1"], {
+    root,
+    prompt: {
+      isTty: false,
+      secret: async () => "",
+      confirm: async (question: string) => {
+        asked.push(question);
+        return false;
+      },
+    },
+  });
+  expect(asked).toHaveLength(1);
+  expect(asked[0]).toContain("codex-main");
+  expect(declined.code).toBe(1);
+  expect(declined.err).toContain("cancelled");
+});
+
+test("quota reset refuses an account whose provider has no resets", async () => {
+  const root = await installation();
+  await account(root, "cred-1", "claude-main");
+
+  const listed = await cli(["quota", "resets", "cred-1"], { root });
+  expect(listed.code).toBe(1);
+  expect(listed.err).toContain("has no quota resets");
+
+  // And never asks first.
+  const asked: string[] = [];
+  const spent = await cli(["quota", "reset", "cred-1"], {
+    root,
+    prompt: {
+      isTty: false,
+      secret: async () => "",
+      confirm: async (question: string) => {
+        asked.push(question);
+        return true;
+      },
+    },
+  });
+  expect(spent.code).toBe(1);
+  expect(asked).toEqual([]);
+});

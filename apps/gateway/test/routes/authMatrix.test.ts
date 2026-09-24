@@ -227,6 +227,10 @@ const ROUTES: ReadonlyArray<{
     allow: ["admin"],
     body: { kind: "all" },
   },
+  // Listing reaches the provider; redeeming spends a credit that cannot be
+  // returned. Neither is a reader's to press.
+  { method: "GET", path: "/api/credentials/c1/resets", allow: ["admin"] },
+  { method: "POST", path: "/api/credentials/c1/resets/redeem", allow: ["admin"], body: {} },
 ];
 
 /**

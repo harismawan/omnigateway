@@ -1,9 +1,12 @@
+import type { ErrorCode } from "@omni/ir";
 import type { WindowType } from "@omni/store/types";
 import {
   type AuthHelpers,
   type AuthStep,
   type FlowResult,
   type PkcePluginFlow,
+  type ResetCredit,
+  type ResetCredits,
   tokenErrorCode,
   tokenErrorMessage,
   type UsageReport,
@@ -25,6 +28,11 @@ const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const SCOPES = "openid profile email offline_access";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+/**
+ * Banked rate-limit resets. Undocumented; the same endpoint the official
+ * Codex desktop app and VS Code extension call. `/consume` spends one.
+ */
+const RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 type TokenResponse = {
   accessToken: string;
@@ -296,4 +304,84 @@ export const openaiOAuthFlow: PkcePluginFlow = {
     if (!usageReadable(res.status, "openai")) return null;
     return parseOpenAIUsage(parseBody(res.body), now());
   },
+
+  async *resetCredits({ secrets, providerData }) {
+    if (secrets.accessToken === null) return null;
+    const res = yield getJsonRequest(RESET_CREDITS_URL, openaiProfile, {
+      accessToken: secrets.accessToken,
+      extraHeaders: accountHeader(providerData),
+    });
+    if (!usageReadable(res.status, "openai")) return null;
+    return parseResetCredits(parseBody(res.body));
+  },
+
+  async *redeemReset({ secrets, providerData, creditId, requestId, fail }) {
+    if (secrets.accessToken === null) throw fail("AUTH", "credential holds no access token");
+    const res = yield postJsonRequest(`${RESET_CREDITS_URL}/consume`, openaiProfile, {
+      contentType: "application/json",
+      body: JSON.stringify({ credit_id: creditId, redeem_request_id: requestId }),
+      extraHeaders: [
+        ["Authorization", `Bearer ${secrets.accessToken}`],
+        ...accountHeader(providerData),
+      ],
+    });
+    if (res.status < 200 || res.status >= 300) {
+      // Status only, never the body: this text reaches the operator's log.
+      throw fail(redeemErrorCode(res.status), `reset credit redeem refused: http_${res.status}`, {
+        status: res.status,
+      });
+    }
+    const body = recordOf(parseBody(res.body));
+    const windowsReset = body === null ? null : numberOf(body, ["windows_reset"]);
+    return { windowsReset };
+  },
 };
+
+/** Same account selector inference and `usage` send. */
+function accountHeader(providerData: Record<string, unknown>): [string, string][] {
+  const accountId = accountIdFromProviderData(providerData);
+  return accountId === null ? [] : [["chatgpt-account-id", accountId]];
+}
+
+/**
+ * 401/403 is the token; 404/409/400 is the credit (gone, spent, expired) —
+ * `CONFLICT`, so the operator reads "refresh the list", not "reconnect".
+ */
+function redeemErrorCode(status: number): ErrorCode {
+  if (status === 429) return "RATE_LIMIT";
+  if (status === 401 || status === 403) return "AUTH";
+  if (status >= 400 && status < 500) return "CONFLICT";
+  return "UPSTREAM";
+}
+
+function isoOrNull(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? at : null;
+}
+
+/**
+ * Reads `GET /wham/rate-limit-reset-credits`. Measured shape (2026-09-24):
+ * `{credits: [{id, status, title, granted_at, expires_at, …}], available_count}`.
+ * Exported for fixture tests.
+ */
+export function parseResetCredits(value: unknown): ResetCredits | null {
+  const root = recordOf(value);
+  if (root === null || !Array.isArray(root.credits)) return null;
+  const credits: ResetCredit[] = root.credits.flatMap((raw: unknown) => {
+    const c = recordOf(raw);
+    if (c === null || typeof c.id !== "string" || typeof c.status !== "string") return [];
+    return [
+      {
+        id: c.id,
+        status: c.status,
+        title: typeof c.title === "string" ? c.title : null,
+        grantedAt: isoOrNull(c.granted_at),
+        expiresAt: isoOrNull(c.expires_at),
+      },
+    ];
+  });
+  // Counted from the rows rather than trusting `available_count`, so the number
+  // shown and the credits a redeem can name never disagree.
+  return { available: credits.filter((c) => c.status === "available").length, credits };
+}

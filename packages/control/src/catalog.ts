@@ -28,6 +28,12 @@ export type CatalogProvider = {
   defaultModel: string;
   authTypes: readonly CatalogAuth[];
   models: readonly CatalogModel[];
+  /**
+   * Present, and true, when this provider's OAuth accounts carry banked quota
+   * resets the console may list and redeem. Decided by the flow's own
+   * declaration, so the console never names a provider to find out.
+   */
+  quotaResets?: true;
 };
 
 /**

@@ -31,6 +31,7 @@ import {
   quotaRefreshSchema,
   readConsole,
   readRequestBody,
+  redeemResetSchema,
   removeCredential,
   removeModel,
   revokeKey,
@@ -170,6 +171,12 @@ export function adminRoutes(deps: AdminDeps) {
    * a target and reports what came back.
    */
   const changed = (topic: string): void => deps.broadcaster?.invalidate(topic);
+  const quotaOrRefuse = (): QuotaOps => {
+    if (deps.quota === undefined) {
+      throw new GatewayError("INTERNAL", "quota operations are not available on this process");
+    }
+    return deps.quota;
+  };
   return (
     new Elysia()
       .onError(apiErrorHandler)
@@ -338,6 +345,31 @@ export function adminRoutes(deps: AdminDeps) {
         return result;
       })
 
+      /**
+       * An account's banked quota resets (Codex grants these). Admin-only for
+       * the reason refresh is: it reaches the provider and may rotate a token.
+       */
+      .get("/api/credentials/:id/resets", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        return quotaOrRefuse().resetCredits(params.id);
+      })
+
+      /**
+       * Spends one banked reset. Irreversible at the provider, so the console
+       * confirms before calling this; the quota re-read that follows is what
+       * puts the account back into rotation before the next poll.
+       */
+      .post("/api/credentials/:id/resets/redeem", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        // The path names the account; the body may name one credit, nothing else.
+        const raw = await readJsonRecord(request);
+        if (raw === null) throw new GatewayError("BAD_REQUEST", "body must be a JSON object");
+        const body = parseOrThrow(redeemResetSchema, { ...raw, credentialId: params.id });
+        const result = await quotaOrRefuse().redeemReset(body);
+        changed("res:quota");
+        return result;
+      })
+
       .patch("/api/credentials/:id", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         await patchCredential(deps, params.id, await readJson(request));
@@ -370,7 +402,12 @@ export function adminRoutes(deps: AdminDeps) {
       // prices, none of it installation state.
       .get("/api/catalog", async ({ request }) => {
         await requireReader(request, deps.admin);
-        return { providers: providerCatalog(reportCatalogProblem) };
+        const quota = deps.quota;
+        return {
+          providers: providerCatalog(reportCatalogProblem).map((provider) =>
+            quota?.hasResets(provider.id) === true ? { ...provider, quotaResets: true } : provider,
+          ),
+        };
       })
 
       .put("/api/models/:id", async ({ request, params }) => {

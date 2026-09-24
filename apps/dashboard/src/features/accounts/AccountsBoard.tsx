@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
 import {
@@ -9,6 +9,7 @@ import {
   useIsAdmin,
   useModels,
   useProviderCatalog,
+  useRedeemReset,
   useRefreshQuota,
   useSettings,
   useUpdateCredential,
@@ -45,6 +46,7 @@ import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { ConnectDialog } from "./ConnectDialog.tsx";
 import { QuotaHistory } from "./QuotaHistory.tsx";
+import { ResetDialog } from "./ResetDialog.tsx";
 
 /** Carries the provider's identity on the module edge, so the tables need not. */
 const ProviderModule = styled(Module)<{ $provider: ProviderId }>`
@@ -185,6 +187,9 @@ export function AccountsBoard() {
   const catalogQuery = useProviderCatalog();
   const remove = useDeleteCredential();
   const refresh = useRefreshQuota();
+  const redeem = useRedeemReset();
+  /** The account whose reset dialog is open. */
+  const [resetting, setResetting] = useState<Credential | null>(null);
   const isAdmin = useIsAdmin();
   const { commit } = useCommit();
 
@@ -449,7 +454,7 @@ export function AccountsBoard() {
                         <Th $align="right" $width="130px">
                           Token expires
                         </Th>
-                        <Th $width="112px" />
+                        <Th $width="144px" />
                       </tr>
                     </thead>
                     <tbody>
@@ -601,6 +606,24 @@ export function AccountsBoard() {
                                       {open ? <ChevronDown /> : <ChevronRight />}
                                     </IconButton>
                                   )}
+                                  {/* Only where the provider's own flow declares
+                                        resets; the catalog says which, so no
+                                        provider is named here. */}
+                                  {isAdmin &&
+                                  credential.authType === "oauth" &&
+                                  findProvider(catalog, credential.provider)?.quotaResets ===
+                                    true ? (
+                                    <IconButton
+                                      type="button"
+                                      $variant="ghost"
+                                      $size="sm"
+                                      aria-label={`Reset quota for ${credential.label}`}
+                                      title={`Reset quota for ${credential.label}`}
+                                      onClick={() => setResetting(credential)}
+                                    >
+                                      <RotateCcw />
+                                    </IconButton>
+                                  ) : null}
                                   {isAdmin ? (
                                     <IconButton
                                       type="button"
@@ -666,6 +689,31 @@ export function AccountsBoard() {
         credentials={credentials.data ?? []}
         onOpenChange={setConnecting}
         onConnected={() => void credentials.refetch()}
+      />
+
+      <ResetDialog
+        credential={resetting}
+        busy={redeem.isPending}
+        onOpenChange={(next) => {
+          if (!next) setResetting(null);
+        }}
+        onConfirm={(credential, creditId) => {
+          setRefreshNote(null);
+          setRefreshDetail([]);
+          redeem.mutate(
+            { credentialId: credential.id, creditId },
+            {
+              onSuccess: (result) =>
+                setRefreshNote(
+                  result.quotaRefreshed
+                    ? `Quota reset for ${credential.label}.`
+                    : `Quota reset for ${credential.label}; the meter updates at the next poll.`,
+                ),
+              onError: () => setRefreshNote(`Quota reset failed for ${credential.label}.`),
+              onSettled: () => setResetting(null),
+            },
+          );
+        }}
       />
 
       <Confirm

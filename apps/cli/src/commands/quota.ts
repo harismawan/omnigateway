@@ -14,10 +14,10 @@ import { memoryCoord } from "@omni/coord";
 import { nodeHttpClient } from "@omni/providers";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { type QuotaWindow, quotaVerdict, type Store, type WindowType } from "@omni/store";
-import { UsageError } from "../args.ts";
+import { requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, provider } from "../command.ts";
-import { CliError } from "../context.ts";
-import { emit, formatSpan, note, paint, table } from "../output.ts";
+import { CliError, type Context } from "../context.ts";
+import { emit, formatSpan, formatTime, note, paint, table } from "../output.ts";
 import { connectRegistryFor } from "./plugins.ts";
 
 /** Shortest window first, so a row reads soonest-to-latest. */
@@ -237,23 +237,7 @@ export const quotaRefresh: Command = {
     // narrows which provider modules have to be loaded, nothing more.
     const wanted = id === undefined ? credentials : credentials.filter((c) => c.id === id);
 
-    // The same short-circuit `credentials refresh` makes, for the same reason:
-    // loading every provider-declaring plugin runs third-party top-level code,
-    // and it is only needed when one of the accounts in scope came from one.
-    const providers = wanted.every((c) => Object.hasOwn(PROVIDER_DESCRIPTORS, c.provider))
-      ? OAUTH_PROVIDERS
-      : (await connectRegistryFor(ctx.root.root)).providers;
-    const http = nodeHttpClient();
-    const ops = quotaOps({
-      store,
-      // One process, one pass: nothing else is probing these accounts, so the
-      // in-memory coordinator is the whole truth about who holds what.
-      coord: memoryCoord({ now: ctx.now }),
-      providers,
-      http,
-      refresh: createRefresher({ store, providers, http, now: ctx.now }),
-      now: ctx.now,
-    });
+    const ops = await opsFor(ctx, wanted);
 
     note(ctx, writer, id === undefined ? "refreshing every account…" : `refreshing ${id}…`);
     const result = await ops.refresh(
@@ -296,5 +280,86 @@ export const quotaRefresh: Command = {
           : `quota refresh did not run for ${bad.length} of ${result.outcomes.length} accounts`,
       );
     }
+  },
+};
+
+/**
+ * The quota operation for a one-shot CLI process.
+ *
+ * Plugins are loaded only when an account in scope came from one: loading
+ * every provider-declaring plugin runs third-party top-level code.
+ */
+async function opsFor(ctx: Context, wanted: readonly { provider: string }[]) {
+  const store = await ctx.store();
+  const providers = wanted.every((c) => Object.hasOwn(PROVIDER_DESCRIPTORS, c.provider))
+    ? OAUTH_PROVIDERS
+    : (await connectRegistryFor(ctx.root.root)).providers;
+  const http = nodeHttpClient();
+  return quotaOps({
+    store,
+    // One process, one pass: nothing else is probing these accounts, so the
+    // in-memory coordinator is the whole truth about who holds what.
+    coord: memoryCoord({ now: ctx.now }),
+    providers,
+    http,
+    refresh: createRefresher({ store, providers, http, now: ctx.now }),
+    now: ctx.now,
+  });
+}
+
+export const quotaResets: Command = {
+  usage: "quota resets <id>",
+  summary: "List an account's banked quota resets (Codex)",
+  async run(args, { ctx, writer }) {
+    const id = requirePositional(args, 0, "credential id");
+    const credentials = (await listCredentials(await ctx.store())).filter((c) => c.id === id);
+    const listed = await (await opsFor(ctx, credentials)).resetCredits(id);
+    emit(ctx, writer, listed, () =>
+      [
+        table(
+          [{ header: "CREDIT" }, { header: "STATUS" }, { header: "TITLE" }, { header: "EXPIRES" }],
+          listed.credits.map((c) => [c.id, c.status, c.title ?? dash, formatTime(c.expiresAt)]),
+        ),
+        "",
+        `${listed.available} available`,
+      ].join("\n"),
+    );
+  },
+};
+
+export const quotaReset: Command = {
+  usage: "quota reset <id> [--credit CREDIT_ID]",
+  summary: "Spend one banked quota reset on an account (irreversible)",
+  options: { credit: { type: "string" } },
+  async run(args, { ctx, writer, prompt }) {
+    const id = requirePositional(args, 0, "credential id");
+    const creditId = stringFlag(args.values, "credit");
+    const credentials = (await listCredentials(await ctx.store())).filter((c) => c.id === id);
+    const label = credentials[0]?.label ?? id;
+    const ops = await opsFor(ctx, credentials);
+    // Asked only of an account that can answer it, so nobody confirms a spend
+    // that was always going to be refused.
+    const provider = credentials[0]?.provider;
+    if (provider === undefined) throw new CliError("no such credential");
+    if (!ops.hasResets(provider)) throw new CliError("this account's provider has no quota resets");
+    // Spent at the provider the moment this returns; there is no undo.
+    if (!(await prompt.confirm(`spend one banked quota reset on "${label}" (${id})?`))) {
+      throw new CliError("cancelled");
+    }
+    const result = await ops.redeemReset({
+      credentialId: id,
+      ...(creditId === undefined ? {} : { creditId }),
+    });
+    emit(
+      ctx,
+      writer,
+      result,
+      () =>
+        `${label}: reset ${result.creditId} redeemed` +
+        (result.windowsReset === null ? "" : `, ${result.windowsReset} window(s) reset`) +
+        (result.quotaRefreshed
+          ? "; quota re-read"
+          : "; quota re-read failed, next poll will update it"),
+    );
   },
 };

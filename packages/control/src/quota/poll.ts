@@ -8,10 +8,16 @@ import {
   type ProviderId,
 } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
-import type { CredentialView, QuotaWindow, Store } from "@omni/store";
+import type { CredentialView, QuotaWindow, Store, UsageSecrets } from "@omni/store";
 import { SCHEDULER_REFRESH_LEAD_MS } from "../oauth/lead.ts";
 import type { Refresher } from "../oauth/refresh.ts";
-import type { OAuthProvider } from "../oauth/types.ts";
+import type { OAuthProvider, ResetCredits } from "../oauth/types.ts";
+import {
+  listResetCredits,
+  type RedeemResetRequest,
+  type RedeemResetResult,
+  redeemResetCredit,
+} from "./resets.ts";
 
 /** Accounts probed at once. Enough to keep the sweep short, few enough to be quiet. */
 const CONCURRENCY = 4;
@@ -45,13 +51,13 @@ const COOLDOWN_PREFIX = "quota:cooldown:";
  * asked for the same account finds the first one's reading already written
  * instead of making the same call again.
  */
-const PROBE_LOCK_PREFIX = "quota:probe:";
+export const PROBE_LOCK_PREFIX = "quota:probe:";
 
 /** How long a lock survives a holder that never returns. */
-const PROBE_LOCK_TTL_MS = 60_000;
+export const PROBE_LOCK_TTL_MS = 60_000;
 
 /** How long a waiter queues before giving up and probing unlocked. */
-const PROBE_LOCK_WAIT_MS = 30_000;
+export const PROBE_LOCK_WAIT_MS = 30_000;
 
 /** What one account's refresh is asked for. Bulk is explicit; absence never means all. */
 export type QuotaRefreshRequest = { kind: "one"; credentialId: string } | { kind: "all" };
@@ -97,6 +103,27 @@ export type PollerDeps = {
 };
 
 /**
+ * The access token a usage-surface call should carry.
+ *
+ * A call with a stale token would read as an auth failure and report nothing,
+ * so refresh first on the same lead the scheduler uses.
+ */
+export async function usageSecretsFor(
+  deps: Pick<PollerDeps, "refresh" | "now">,
+  credential: CredentialView,
+): Promise<UsageSecrets> {
+  const refreshed =
+    credential.hasRefreshToken &&
+    credential.expiresAt !== null &&
+    credential.expiresAt - SCHEDULER_REFRESH_LEAD_MS <= deps.now()
+      ? await deps.refresh(credential)
+      : null;
+  return refreshed === null
+    ? await credential.openForUsage()
+    : { accessToken: refreshed.accessToken };
+}
+
+/**
  * Reads one credential's usage and writes it as a snapshot.
  *
  * Returns the rows written, or null when there was nothing to record: an
@@ -112,16 +139,7 @@ export async function probe(
   const provider = deps.providers[credential.provider];
   if (provider?.usage === undefined) return null;
 
-  // A probe with a stale token would read as an auth failure and report
-  // nothing, so refresh first on the same lead the scheduler uses.
-  const refreshed =
-    credential.hasRefreshToken &&
-    credential.expiresAt !== null &&
-    credential.expiresAt - SCHEDULER_REFRESH_LEAD_MS <= deps.now()
-      ? await deps.refresh(credential)
-      : null;
-  const secrets =
-    refreshed === null ? await credential.openForUsage() : { accessToken: refreshed.accessToken };
+  const secrets = await usageSecretsFor(deps, credential);
 
   const report = await provider.usage(
     secrets,
@@ -193,6 +211,12 @@ export type QuotaOps = {
   poll(): Promise<number>;
   /** Refreshes on demand. One outcome per account considered, in list order. */
   refresh(request: QuotaRefreshRequest): Promise<QuotaRefreshResult>;
+  /** Lists an account's banked quota resets. */
+  resetCredits(credentialId: string): Promise<ResetCredits & { credentialId: string }>;
+  /** Spends one banked reset and re-reads the account's quota. */
+  redeemReset(request: RedeemResetRequest): Promise<RedeemResetResult>;
+  /** Whether a provider's flow can list and redeem resets; read by the catalog. */
+  hasResets(provider: ProviderId): boolean;
 };
 
 export function quotaOps(deps: PollerDeps): QuotaOps {
@@ -400,6 +424,13 @@ export function quotaOps(deps: PollerDeps): QuotaOps {
         );
       }
       return { outcomes };
+    },
+
+    resetCredits: (credentialId) => listResetCredits(deps, credentialId),
+    redeemReset: (request) => redeemResetCredit(deps, request),
+    hasResets: (provider) => {
+      const flow = deps.providers[provider];
+      return flow?.resetCredits !== undefined && flow.redeemReset !== undefined;
     },
   };
 }

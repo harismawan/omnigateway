@@ -322,6 +322,28 @@ export type QuotaRefreshOutcome =
 
 export type QuotaRefreshResult = { outcomes: QuotaRefreshOutcome[] };
 
+/** One banked quota reset, as `GET /api/credentials/:id/resets` lists it. */
+export type ResetCredit = {
+  id: string;
+  status: string;
+  title: string | null;
+  grantedAt: number | null;
+  expiresAt: number | null;
+};
+
+export type ResetCreditsResponse = {
+  credentialId: string;
+  available: number;
+  credits: ResetCredit[];
+};
+
+export type RedeemResetResult = {
+  credentialId: string;
+  creditId: string;
+  windowsReset: number | null;
+  quotaRefreshed: boolean;
+};
+
 export type CredentialPatch = {
   label?: string;
   enabled?: boolean;
@@ -827,6 +849,8 @@ export type CatalogProvider = {
   /** Which kinds of credential the gateway can hold for this provider. */
   authTypes: readonly AuthType[];
   models: readonly CatalogModel[];
+  /** Present when this provider's OAuth accounts carry banked quota resets. */
+  quotaResets?: true;
 };
 
 export type CatalogResponse = { providers: CatalogProvider[] };

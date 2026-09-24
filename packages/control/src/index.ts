@@ -233,7 +233,14 @@ export {
   type QuotaRefreshResult,
   quotaOps,
   RATE_LIMIT_COOLDOWN_MS,
+  usageSecretsFor,
 } from "./quota/poll.ts";
+export {
+  listResetCredits,
+  type RedeemResetRequest,
+  type RedeemResetResult,
+  redeemResetCredit,
+} from "./quota/resets.ts";
 export {
   credentialPatchSchema,
   dimensionSchema,
@@ -244,6 +251,7 @@ export {
   parseOrThrow,
   providerIdSchema,
   quotaRefreshSchema,
+  redeemResetSchema,
   requireDimension,
   retentionSchema,
   settingsSchema,

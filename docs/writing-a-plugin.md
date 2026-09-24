@@ -505,6 +505,10 @@ const oauth = {
 
   async *refresh(input) { /* same shape */ },
   async *usage(input) { /* optional; omit and accounts read as unknown */ },
+  // Optional pair: banked quota resets. Declare both or neither; the console
+  // offers the control only when both exist. `requestId` is host-minted.
+  async *resetCredits(input) { /* returns ResetCredits | null */ },
+  async *redeemReset(input) { /* spends input.creditId; returns ResetRedeemed */ },
 };
 ```
 
