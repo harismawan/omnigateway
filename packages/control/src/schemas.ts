@@ -390,6 +390,26 @@ export const quotaRefreshSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("all") }).strict(),
 ]);
 
+const accountIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9_-]+$/, "credentialId must be an account id");
+
+export const redeemResetSchema = z
+  .object({
+    credentialId: accountIdSchema,
+    // Provider-minted (`RateLimitResetCredit_<hex>`); bounded, never interpolated.
+    creditId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9_-]+$/)
+      .optional(),
+  })
+  .strict();
+
 /** Mirrors `UsageDimension` exactly; the store whitelists the column. */
 export const dimensionSchema = z.enum([
   "credential",

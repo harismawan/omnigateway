@@ -783,3 +783,30 @@ test("a token call gets 30s and a usage probe gets 15s, as the design says", asy
     AbortSignal.timeout = real;
   }
 });
+
+test("a reset step's answer is checked before control trusts it", async () => {
+  // Redeem runs after an irreversible POST: a malformed answer must fail
+  // loudly, never read as a spend that worked.
+  const { deps } = transport(() => ({ status: 200, body: "{}" }));
+  const broken: PluginOAuthFlow = {
+    ...kiloShaped,
+    // biome-ignore lint/correctness/useYield: the answer, not the request, is under test
+    async *resetCredits() {
+      return { available: 1, credits: [{ id: 3 }] } as never;
+    },
+    // biome-ignore lint/correctness/useYield: the answer, not the request, is under test
+    async *redeemReset() {
+      return undefined as never;
+    },
+  };
+  const provider = oauthAdapter("acme", broken, { origins: ORIGINS });
+
+  for (const call of [
+    () => provider.resetCredits?.({ accessToken: "t" }, deps, {}),
+    () => provider.redeemReset?.({ accessToken: "t" }, deps, {}, "c", "r"),
+  ]) {
+    const error = await call()?.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GatewayError);
+    expect((error as GatewayError).message).toContain("cannot use");
+  }
+});

@@ -4,6 +4,8 @@ import type {
   FlowResult,
   HttpClient,
   PendingFlow,
+  ResetCredits,
+  ResetRedeemed,
   UsageReport,
 } from "@omni/providers";
 import type { UsageSecrets } from "@omni/store";
@@ -25,6 +27,9 @@ export {
   isAuthorizationPending,
   type PendingFlow,
   pendingError,
+  type ResetCredit,
+  type ResetCredits,
+  type ResetRedeemed,
   tokenErrorCode,
   tokenErrorMessage,
   type UsageReport,
@@ -86,6 +91,22 @@ type OAuthProviderBase = {
     deps: OAuthDeps,
     providerData: Record<string, unknown>,
   ): Promise<UsageReport | null>;
+
+  /** Banked quota resets; see `PluginFlowBase.resetCredits`. Never judges the credential either. */
+  resetCredits?(
+    secrets: UsageSecrets,
+    deps: OAuthDeps,
+    providerData: Record<string, unknown>,
+  ): Promise<ResetCredits | null>;
+
+  /** Spends one named credit; see `PluginFlowBase.redeemReset`. */
+  redeemReset?(
+    secrets: UsageSecrets,
+    deps: OAuthDeps,
+    providerData: Record<string, unknown>,
+    creditId: string,
+    requestId: string,
+  ): Promise<ResetRedeemed>;
 };
 
 /**

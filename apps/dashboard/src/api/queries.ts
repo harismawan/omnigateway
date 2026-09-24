@@ -52,8 +52,10 @@ import type {
   QuotaHistoryResponse,
   QuotaRefreshRequest,
   QuotaRefreshResult,
+  RedeemResetResult,
   RequestBodyResponse,
   RequestLog,
+  ResetCreditsResponse,
   RestoreResult,
   RetentionPolicy,
   Settings,
@@ -1027,6 +1029,38 @@ export function useRefreshQuota(): UseMutationResult<
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.credentialHealth });
       void client.invalidateQueries({ queryKey: ["quota-history"] });
+    },
+  });
+}
+
+/**
+ * An account's banked quota resets. Fetched only while the reset dialog is
+ * open: listing reaches the provider, which a ten-second poll must not do.
+ */
+export function useResetCredits(credentialId: string | null): UseQueryResult<ResetCreditsResponse> {
+  return useQuery({
+    queryKey: ["credentials", "resets", credentialId],
+    queryFn: ({ signal }) =>
+      get<ResetCreditsResponse>(`/api/credentials/${credentialId}/resets`, signal),
+    enabled: credentialId !== null,
+    staleTime: 0,
+  });
+}
+
+/** Spends one reset; invalidates the meters its follow-up quota read rewrote. */
+export function useRedeemReset(): UseMutationResult<
+  RedeemResetResult,
+  Error,
+  { credentialId: string; creditId: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ credentialId, creditId }) =>
+      post<RedeemResetResult>(`/api/credentials/${credentialId}/resets/redeem`, { creditId }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.credentialHealth });
+      void client.invalidateQueries({ queryKey: ["quota-history"] });
+      void client.invalidateQueries({ queryKey: ["credentials", "resets"] });
     },
   });
 }

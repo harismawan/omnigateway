@@ -205,6 +205,11 @@ function validateOAuthFlow(id: string, value: unknown): PluginOAuthFlow | undefi
   if (value.usage !== undefined) {
     checkAt(typeof value.usage === "function", id, "oauth.usage", "a function");
   }
+  for (const fn of ["resetCredits", "redeemReset"] as const) {
+    if (value[fn] !== undefined) {
+      checkAt(typeof value[fn] === "function", id, `oauth.${fn}`, "a function");
+    }
+  }
   if (kind === "device") {
     checkAt(typeof value.begin === "function", id, "oauth.begin", "a function");
     checkAt(typeof value.needsDeviceId === "boolean", id, "oauth.needsDeviceId", "a boolean");

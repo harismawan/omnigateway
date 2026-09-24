@@ -38,7 +38,7 @@ export * from "./oauthFlow.ts";
 export * from "./oauthRequests.ts";
 export * from "./oauthUsage.ts";
 export { decodeResponses, openaiAdapter, toResponsesWire } from "./openai/index.ts";
-export { openaiOAuthFlow, parseOpenAIUsage } from "./openai/oauth.ts";
+export { openaiOAuthFlow, parseOpenAIUsage, parseResetCredits } from "./openai/oauth.ts";
 export { isHttpMethod, isSendableUrl, withinOrigins } from "./origins.ts";
 export * from "./profile.ts";
 export type { ProviderRegistryEntry } from "./registry.ts";

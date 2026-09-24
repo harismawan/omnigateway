@@ -443,6 +443,42 @@ export function oauthAdapter(
             return runStep(id, "usage", step, deps, origins);
           },
         }),
+    ...(flow.resetCredits === undefined
+      ? {}
+      : {
+          resetCredits: (
+            secrets: UsageSecrets,
+            deps: OAuthDeps,
+            providerData: Record<string, unknown>,
+          ) => {
+            const step = flow.resetCredits?.({ secrets, providerData, ...helpers(deps) });
+            if (step === undefined) return Promise.resolve(null);
+            return runStep(id, "resetCredits", step, deps, origins);
+          },
+        }),
+    ...(flow.redeemReset === undefined
+      ? {}
+      : {
+          redeemReset: (
+            secrets: UsageSecrets,
+            deps: OAuthDeps,
+            providerData: Record<string, unknown>,
+            creditId: string,
+            requestId: string,
+          ) => {
+            const step = flow.redeemReset?.({
+              secrets,
+              providerData,
+              creditId,
+              requestId,
+              ...helpers(deps),
+            });
+            if (step === undefined) {
+              return Promise.reject(flowFailure(id, "redeemReset", "has no redeem step"));
+            }
+            return runStep(id, "redeemReset", step, deps, origins);
+          },
+        }),
   };
 
   if (flow.kind === "pkce") return { ...base, kind: "pkce" };
@@ -500,12 +536,43 @@ function isAuthorizeStart(value: unknown): boolean {
   );
 }
 
+/** `resetCredits` may answer `null`; anything else must be a list control can sort. */
+function isResetCreditsOrNull(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value !== "object") return false;
+  const candidate = value as { available?: unknown; credits?: unknown };
+  return (
+    typeof candidate.available === "number" &&
+    Array.isArray(candidate.credits) &&
+    candidate.credits.every((c: unknown) => {
+      if (typeof c !== "object" || c === null) return false;
+      const row = c as Record<string, unknown>;
+      return (
+        typeof row.id === "string" &&
+        typeof row.status === "string" &&
+        (row.title === null || typeof row.title === "string") &&
+        (row.grantedAt === null || typeof row.grantedAt === "number") &&
+        (row.expiresAt === null || typeof row.expiresAt === "number")
+      );
+    })
+  );
+}
+
+/** Checked after an irreversible POST, so a malformed answer fails loudly, not as success. */
+function isResetRedeemed(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const held = (value as { windowsReset?: unknown }).windowsReset;
+  return held === null || typeof held === "number";
+}
+
 /** What each step must have returned, by name. */
 const RETURN_SHAPE: Readonly<Record<string, (value: unknown) => boolean>> = {
   start: isAuthorizeStart,
   begin: isAuthorizeStart,
   exchange: isFlowResult,
   refresh: isFlowResult,
+  resetCredits: isResetCreditsOrNull,
+  redeemReset: isResetRedeemed,
   // `usage` may legitimately answer `null` — "the endpoint exists and said
   // nothing usable" — which is why it is not in this table at all rather than
   // having a predicate that accepts everything.

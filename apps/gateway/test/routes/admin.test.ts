@@ -6,6 +6,7 @@ import type { CatalogProvider as ServerCatalogProvider } from "@omni/control";
 import {
   ADMIN_COOKIE,
   createAdminAuth,
+  type QuotaOps,
   type QuotaRefreshRequest,
   type QuotaRefreshResult,
 } from "@omni/control";
@@ -129,6 +130,14 @@ async function harness({
     quota: quota ?? {
       poll: async () => 0,
       refresh: async () => ({ outcomes: [{ kind: "refreshed", credentialId: "c1", windows: 2 }] }),
+      resetCredits: async (credentialId) => ({ credentialId, available: 0, credits: [] }),
+      redeemReset: async ({ credentialId }) => ({
+        credentialId,
+        creditId: "rc1",
+        windowsReset: 1,
+        quotaRefreshed: true,
+      }),
+      hasResets: (provider) => provider === "openai",
     },
   });
 
@@ -1806,6 +1815,14 @@ const MUTATIONS: ReadonlyArray<{
     body: { kind: "all" },
     topics: ["res:quota"],
   },
+  // Spends a reset and re-reads quota, so the meters move.
+  {
+    route: "/api/credentials/:id/resets/redeem",
+    method: "POST",
+    path: "/api/credentials/c1/resets/redeem",
+    body: {},
+    topics: ["res:quota"],
+  },
   // A POST that writes nothing: it ranks the targets a model already has.
   {
     route: "/api/models/:id/dry-run",
@@ -2148,7 +2165,7 @@ test("the catalog response carries exactly the keys the console declares", async
   const body = raw;
 
   // Optional in the console's type, so present on some providers and not others.
-  const OPTIONAL = new Set(["pasteHint", "callback"]);
+  const OPTIONAL = new Set(["pasteHint", "callback", "quotaResets"]);
   const REQUIRED = ["id", "label", "order", "colour", "defaultModel", "authTypes", "models"];
 
   for (const provider of body.providers) {
@@ -2206,13 +2223,20 @@ test("a catalog with nothing to repair says nothing", async () => {
 function stubQuota(
   outcomes: QuotaRefreshResult["outcomes"],
   seen: QuotaRefreshRequest[],
-): AdminDeps["quota"] {
+): QuotaOps {
   return {
     poll: async () => 0,
     refresh: async (request) => {
       seen.push(request);
       return { outcomes };
     },
+    resetCredits: async () => {
+      throw new Error("not under test");
+    },
+    redeemReset: async () => {
+      throw new Error("not under test");
+    },
+    hasResets: () => false,
   };
 }
 
@@ -2323,4 +2347,48 @@ test("a malformed target is refused before the operation is asked anything", asy
 
   expect(seen).toEqual([]);
   expect(topics).toEqual([]);
+});
+
+test("a redeem takes the account from the path and at most a credit from the body", async () => {
+  const seen: unknown[] = [];
+  const { call, topics } = await harness({
+    quota: {
+      ...stubQuota([], []),
+      redeemReset: async (request) => {
+        seen.push(request);
+        return {
+          credentialId: request.credentialId,
+          creditId: "rc1",
+          windowsReset: 1,
+          quotaRefreshed: true,
+        };
+      },
+    },
+  });
+
+  const ok = await call("POST", "/api/credentials/c1/resets/redeem", { creditId: "rc1" });
+  expect(ok.status).toBe(200);
+  expect(seen).toEqual([{ credentialId: "c1", creditId: "rc1" }]);
+  expect(topics).toEqual(["res:quota"]);
+
+  // The body cannot redirect the redeem to another account.
+  const smuggled = await call("POST", "/api/credentials/c1/resets/redeem", {
+    credentialId: "c2",
+  });
+  expect(seen).toHaveLength(2);
+  expect(seen[1]).toEqual({ credentialId: "c1" });
+  expect(smuggled.status).toBe(200);
+
+  const bad = await call("POST", "/api/credentials/c1/resets/redeem", { creditId: "../x" });
+  expect(bad.status).toBe(400);
+  expect(seen).toHaveLength(2);
+});
+
+test("the catalog marks the providers whose flow declares quota resets", async () => {
+  const { call } = await harness();
+  const body = (await (await call("GET", "/api/catalog")).json()) as {
+    providers: { id: string; quotaResets?: true }[];
+  };
+  const marked = body.providers.filter((p) => p.quotaResets === true).map((p) => p.id);
+  expect(marked).toEqual(["openai"]);
 });

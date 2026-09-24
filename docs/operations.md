@@ -143,6 +143,28 @@ A failure never disables a credential and never clears the previous reading. Mis
 means unknown, never zero and never unlimited, so an account that could not be probed keeps its
 last reading with its normal stale marking.
 
+## Spending a banked quota reset (Codex)
+
+OpenAI occasionally grants a ChatGPT/Codex subscription a free "Full reset" credit (usually valid
+30 days). Redeeming one zeroes that account's usage windows at OpenAI. The gateway can list and
+spend them without the Codex app:
+
+```bash
+omni quota resets <credential-id>                  # list credits and expiry
+omni quota reset  <credential-id> [--credit ID]    # spend one; asks first
+```
+
+Or press the reset control on an OpenAI OAuth row of the Accounts page. With no `--credit`, the
+available credit expiring soonest is spent. Admin-only, like refresh. **Irreversible**: the credit
+is consumed at OpenAI the moment the call returns. After a redeem the account's quota is re-read
+immediately so routing sees the cleared windows without waiting for the next poll; if that read
+fails the redeem still stands and the next poll picks it up.
+
+The endpoint (`/backend-api/wham/rate-limit-reset-credits`) is the one the official Codex apps
+call and is undocumented; a provider change surfaces as an upstream error, never a silent success.
+Which providers offer this is decided by their OAuth flow (`resetCredits` + `redeemReset`), and
+the console reads it from `/api/catalog` as `quotaResets`.
+
 ## Logs
 
 Gateway events are written to stdout as one greppable line each: process lifecycle, OAuth

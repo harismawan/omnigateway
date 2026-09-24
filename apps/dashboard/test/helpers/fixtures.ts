@@ -532,6 +532,7 @@ export function wireCatalogFixture(): CatalogProvider[] {
       callback: { uri: "http://localhost:1455/auth/callback", label: "OpenAI" },
       defaultModel: "gpt-5.6",
       authTypes: ["oauth", "apiKey"],
+      quotaResets: true,
       models: [
         {
           id: "gpt-5.6",

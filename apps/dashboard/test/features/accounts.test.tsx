@@ -1769,3 +1769,76 @@ describe("AccountsBoard quota refresh", () => {
     expect(screen.getByText("codex-work: cooling down")).toBeTruthy();
   });
 });
+
+describe("AccountsBoard quota reset", () => {
+  const codex = credential({ id: "cred-2", provider: "openai", label: "codex-work" });
+
+  test("only an admin, only on a provider that declares resets, sees the control", async () => {
+    stubAccounts({ "GET /api/credentials": () => ({ credentials: [credential(), codex] }) });
+    const admin = renderWithProviders(<AccountsBoard />);
+    expect(await screen.findByRole("button", { name: "Reset quota for codex-work" })).toBeTruthy();
+    // Anthropic's flow declares none: named by the catalog, not by the board.
+    expect(screen.queryByRole("button", { name: "Reset quota for claude-main" })).toBeNull();
+    admin.unmount();
+
+    stubAccounts({
+      "GET /api/status": () => ({ ...ADMIN, principal: { kind: "viewer" } }),
+      "GET /api/credentials": () => ({ credentials: [codex] }),
+    });
+    renderWithProviders(<AccountsBoard />);
+    expect(await screen.findByText("OpenAI")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Reset quota for codex-work" })).toBeNull();
+  });
+
+  test("the dialog reads the credits, then spends one on confirm", async () => {
+    const redeemed: string[] = [];
+    stubAccounts({
+      "GET /api/credentials": () => ({ credentials: [codex] }),
+      "GET /api/credentials/cred-2/resets": () => ({
+        credentialId: "cred-2",
+        available: 1,
+        credits: [
+          { id: "rc1", status: "available", title: "Full reset", grantedAt: NOW, expiresAt: null },
+        ],
+      }),
+      "POST /api/credentials/cred-2/resets/redeem": ({ init }) => {
+        // The credit shown is the credit named, so a repeat cannot spend the next.
+        expect(JSON.parse(String(init?.body))).toEqual({ creditId: "rc1" });
+        redeemed.push("cred-2");
+        return { credentialId: "cred-2", creditId: "rc1", windowsReset: 1, quotaRefreshed: true };
+      },
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Reset quota for codex-work" }),
+    );
+    expect(await screen.findByText(/Spend one of 1 reset credit on "codex-work"/)).toBeTruthy();
+    expect(redeemed).toEqual([]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Spend reset" }));
+    await waitFor(() => expect(redeemed).toEqual(["cred-2"]));
+    const status = await screen.findByRole("status");
+    await waitFor(() => expect(status.textContent).toBe("Quota reset for codex-work."));
+  });
+
+  test("with no credit available, the confirm cannot be pressed", async () => {
+    stubAccounts({
+      "GET /api/credentials": () => ({ credentials: [codex] }),
+      "GET /api/credentials/cred-2/resets": () => ({
+        credentialId: "cred-2",
+        available: 0,
+        credits: [],
+      }),
+    });
+    renderWithProviders(<AccountsBoard />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Reset quota for codex-work" }),
+    );
+    expect(await screen.findByText('"codex-work" has no reset credits available.')).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: /Spend reset|Working/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+});
