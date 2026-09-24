@@ -143,7 +143,7 @@ A failure never disables a credential and never clears the previous reading. Mis
 means unknown, never zero and never unlimited, so an account that could not be probed keeps its
 last reading with its normal stale marking.
 
-## Spending a banked quota reset (Codex)
+## Spending a banked quota reset (Codex, Claude)
 
 OpenAI occasionally grants a ChatGPT/Codex subscription a free "Full reset" credit (usually valid
 30 days). Redeeming one zeroes that account's usage windows at OpenAI. The gateway can list and
@@ -154,9 +154,10 @@ omni quota resets <credential-id>                  # list credits and expiry
 omni quota reset  <credential-id> [--credit ID]    # spend one; asks first
 ```
 
-Or press the reset control on an OpenAI OAuth row of the Accounts page. With no `--credit`, the
+Or press the reset control on the account's row of the Accounts page (shown only for providers
+that offer resets). With no `--credit`, the
 available credit expiring soonest is spent. Admin-only, like refresh. **Irreversible**: the credit
-is consumed at OpenAI the moment the call returns. After a redeem the account's quota is re-read
+is consumed at the provider the moment the call returns. After a redeem the account's quota is re-read
 immediately so routing sees the cleared windows without waiting for the next poll; if that read
 fails the redeem still stands and the next poll picks it up.
 
@@ -164,6 +165,20 @@ The endpoint (`/backend-api/wham/rate-limit-reset-credits`) is the one the offic
 call and is undocumented; a provider change surfaces as an upstream error, never a silent success.
 Which providers offer this is decided by their OAuth flow (`resetCredits` + `redeemReset`), and
 the console reads it from `/api/catalog` as `quotaResets`.
+
+**Claude (Anthropic OAuth)** runs the same commands against Anthropic's reset program: status is
+the `cedar_ember` block of a flagged `/api/oauth/usage` read, and a claim is
+`POST /api/organizations/<org>/reset_rate_limits` (the organisation is read from
+`/api/oauth/profile` first). Differences from Codex:
+
+- A grant can hold several uses; the count shown is uses, not grants.
+- Only the grant Anthropic names as next is offered — claiming another is refused.
+- An account not enrolled in the program lists nothing; it is not an error.
+- The server answers 200 with a `result`. Only `reset` is success; `already_used`, `not_limited`
+  and `ineligible` read as a conflict, `cooldown` as rate limited, anything else as upstream.
+
+Both endpoints are undocumented and follow the Claude CLI's own validation schema. They were
+**not** exercised live against an enrolled account.
 
 ## Logs
 
