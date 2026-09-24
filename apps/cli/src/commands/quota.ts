@@ -309,7 +309,7 @@ async function opsFor(ctx: Context, wanted: readonly { provider: string }[]) {
 
 export const quotaResets: Command = {
   usage: "quota resets <id>",
-  summary: "List an account's banked quota resets (Codex)",
+  summary: "List an account's banked quota resets (Codex, Claude)",
   async run(args, { ctx, writer }) {
     const id = requirePositional(args, 0, "credential id");
     const credentials = (await listCredentials(await ctx.store())).filter((c) => c.id === id);

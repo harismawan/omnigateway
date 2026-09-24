@@ -371,7 +371,10 @@ test("quota reset asks before spending, and a refusal spends nothing", async () 
 
 test("quota reset refuses an account whose provider has no resets", async () => {
   const root = await installation();
-  await account(root, "cred-1", "claude-main");
+  // Kimi's flow declares no reset steps; any such provider would do.
+  const store = await openStore(root);
+  await seedCredential(store, { id: "cred-1", label: "kimi-main", provider: "kimi" });
+  store.close();
 
   const listed = await cli(["quota", "resets", "cred-1"], { root });
   expect(listed.code).toBe(1);

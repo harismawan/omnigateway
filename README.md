@@ -251,7 +251,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni usage` | spend and tokens, by provider, model, key, or day |
 | `omni quota` | provider quota per window: use, burn rate, and when it runs out |
 | `omni quota refresh <id> \| --all` | read provider quota now, without waiting for the next poll |
-| `omni quota resets <id>` / `omni quota reset <id>` | list / spend a banked Codex quota reset (irreversible) |
+| `omni quota resets <id>` / `omni quota reset <id>` | list / spend a banked Codex or Claude quota reset (irreversible) |
 | `omni connect <provider>` | authorize an account from the terminal |
 | `omni credentials …` | list, show, enable, disable, `set`, `rm`, refresh, `add-key`, health |
 | `omni models …` | list, show, put, `rm`, `dry-run`, `catalog` |
