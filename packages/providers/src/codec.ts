@@ -111,6 +111,16 @@ export type CodecInput = {
    */
   autoCacheEnabled?: boolean | undefined;
   /**
+   * The target's output ceiling as the operator saved it, when they saved one.
+   *
+   * For a codec whose wire requires an output limit the client may omit: it is
+   * this target's own saved figure, the per-target source of what `GET
+   * /v1/models` reports (which is the pool's minimum across targets). Absent
+   * means use the model's own ceiling. Never a cap on a figure the client did
+   * send.
+   */
+  maxOutputTokens?: number | undefined;
+  /**
    * Builds a classified error, using the **host's** `GatewayError`.
    *
    * A codec must reach for this rather than `new GatewayError(…)`, and the

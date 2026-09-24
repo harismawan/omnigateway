@@ -66,6 +66,8 @@ export type AdapterRequest = {
    * all read as the caller's own. Only the Anthropic adapter reads it.
    */
   autoCache?: boolean;
+  /** The target's saved output ceiling, when the operator set one. See `CodecInput`. */
+  maxOutputTokens?: number;
 };
 
 export type AdapterResult = {

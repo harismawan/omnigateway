@@ -571,10 +571,30 @@ function addAutoCacheBreakpoints(
   note("anthropic:history-cache-breakpoint-added");
 }
 
+/**
+ * The `max_tokens` sent when the client named none.
+ *
+ * A saved ceiling may lower the model's, never raise it: Anthropic refuses one
+ * token over the published figure (`max_tokens: N > M, which is the maximum
+ * allowed`), so an operator figure above it would turn every request that
+ * omitted the field into a 400 that sending the model's own ceiling avoids.
+ */
+function defaultMaxTokens(model: string, saved: number | undefined): number {
+  const ceiling = anthropicMaxOutputTokens(model);
+  if (saved === undefined) return ceiling ?? 4096;
+  return ceiling === undefined ? saved : Math.min(saved, ceiling);
+}
+
 export function toWire(
   req: ChatRequest,
   model: string,
-  opts: { oauth: boolean; cloak?: ToolCloak | null; autoCache?: boolean },
+  opts: {
+    oauth: boolean;
+    cloak?: ToolCloak | null;
+    autoCache?: boolean;
+    /** The target's saved output ceiling, when the operator set one. */
+    maxOutputTokens?: number;
+  },
 ): { body: AnthropicBody; degradations: string[] } {
   const cloak = opts.cloak ?? null;
   const degradations: string[] = [];
@@ -634,10 +654,10 @@ export function toWire(
       return [{ role: m.role, content: encodeSystemTurn(m.content, cloak) }];
     }),
     // Required on this wire, and no other surface requires it, so a Chat or
-    // Responses client routed here usually sent none. The model's own ceiling
-    // is what those clients get from their native backends; 4096 remains only
-    // for an operator's own model id, about which the catalog knows nothing.
-    max_tokens: req.maxTokens ?? anthropicMaxOutputTokens(model) ?? 4096,
+    // Responses client routed here usually sent none. It gets this target's
+    // saved ceiling, else the model's own; 4096 remains only for an unlisted
+    // model with nothing saved.
+    max_tokens: req.maxTokens ?? defaultMaxTokens(model, opts.maxOutputTokens),
     stream: req.stream,
   };
 

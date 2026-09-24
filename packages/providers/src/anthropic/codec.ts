@@ -74,6 +74,7 @@ export const anthropicCodec: ProviderCodec = {
       oauth,
       cloak,
       autoCache: input.autoCacheEnabled === true,
+      ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
     });
 
     // The billing block and the agent preamble go in as system blocks, and the

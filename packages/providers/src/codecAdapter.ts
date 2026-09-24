@@ -232,6 +232,7 @@ export function codecAdapter(
           fail,
           ...(req.requestId === undefined ? {} : { requestId: req.requestId }),
           ...(req.autoCache === undefined ? {} : { autoCacheEnabled: req.autoCache }),
+          ...(req.maxOutputTokens === undefined ? {} : { maxOutputTokens: req.maxOutputTokens }),
         }),
       );
       // **Copied first, then only the copy is read — checks included.**
