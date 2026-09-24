@@ -14,7 +14,7 @@ import {
 import { systemTextBlocks } from "../system.ts";
 import { splitFiles, withFileText } from "../toolResultFiles.ts";
 import { cloakName, type ToolCloak } from "./cloak.ts";
-import { anthropicReasoningForm } from "./models.ts";
+import { anthropicMaxOutputTokens, anthropicReasoningForm } from "./models.ts";
 
 export const OAUTH_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -633,7 +633,11 @@ export function toWire(
       }
       return [{ role: m.role, content: encodeSystemTurn(m.content, cloak) }];
     }),
-    max_tokens: req.maxTokens ?? 4096,
+    // Required on this wire, and no other surface requires it, so a Chat or
+    // Responses client routed here usually sent none. The model's own ceiling
+    // is what those clients get from their native backends; 4096 remains only
+    // for an operator's own model id, about which the catalog knows nothing.
+    max_tokens: req.maxTokens ?? anthropicMaxOutputTokens(model) ?? 4096,
     stream: req.stream,
   };
 

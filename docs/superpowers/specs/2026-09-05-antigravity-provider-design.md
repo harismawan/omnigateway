@@ -562,12 +562,15 @@ a tool result followed by a user turn — are refused with
 needs `includeThoughts` beside its budget, or the model spends the tokens and
 returns no thought parts.
 
-**The catalog advertised limits the wrapper refuses.** Cloud Code caps
-`maxOutputTokens` at 16,384 whatever the model holds. Every row states that
-figure and the encoder clamps above it, recording
+**The catalog advertised limits the wrapper refuses.** Cloud Code was measured
+capping `maxOutputTokens` at 16,384 whatever the model held, so every row stated
+that figure and the encoder clamped above it, recording
 `antigravity:max-tokens-clamped`; a budget at or above the ceiling also has the
 ceiling raised past it, since Cloud Code refuses that combination rather than
-reconciling it.
+reconciling it. *Superseded:* the ceiling became the live catalog's 65,536 on
+2026-09-05, and a 2026-09-24 re-measure found the wrapper accepting figures up
+to 1,000,000 — the clamp now enforces the model's published ceiling, not a
+wrapper refusal.
 
 **The usage arithmetic was half right.** `cachedContentTokenCount` is inside
 `promptTokenCount`, as stated — but `thoughtsTokenCount` is *beside*
