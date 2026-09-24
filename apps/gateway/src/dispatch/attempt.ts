@@ -73,5 +73,8 @@ export async function attempt(opts: {
     signal,
     ...(opts.requestId === undefined ? {} : { requestId: opts.requestId }),
     ...(opts.autoCache === undefined ? {} : { autoCache: opts.autoCache }),
+    ...(candidate.target.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: candidate.target.maxOutputTokens }),
   });
 }

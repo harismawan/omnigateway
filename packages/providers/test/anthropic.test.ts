@@ -70,6 +70,20 @@ test("an absent max_tokens becomes the catalog ceiling; the client's own figure 
   expect(out("claude-opus-4")).toBe(4096);
 });
 
+// The target's saved ceiling is the default — but only downward: one token
+// over the model's own answers 400.
+test("a saved target ceiling is the default, clamped to the model's, never over the client", () => {
+  const out = (model: string, saved: number, maxTokens?: number) =>
+    toWire(maxTokens === undefined ? base : { ...base, maxTokens }, model, {
+      oauth: false,
+      maxOutputTokens: saved,
+    }).body.max_tokens;
+  expect(out("claude-opus-5-5", 32_000)).toBe(32_000);
+  expect(out("claude-haiku-4-5", 128_000)).toBe(64_000);
+  expect(out("claude-opus-4", 9_000)).toBe(9_000);
+  expect(out("claude-opus-5-5", 32_000, 100_000)).toBe(100_000);
+});
+
 test("passes the system prompt through as blocks", () => {
   const { body } = toWire(
     { ...base, system: [{ type: "text", text: "be terse" }] },

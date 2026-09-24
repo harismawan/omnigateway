@@ -3073,6 +3073,19 @@ test("auto-cache still declines when the client marked its own prompt", async ()
   store.close();
 });
 
+test("the target's saved output ceiling reaches the wire when the client named none", async () => {
+  // store -> router candidate -> attempt -> adapter -> codec -> toWire, the same
+  // silently-open spread chain as auto-cache. A client that omitted
+  // `max_tokens` must be sent the target's saved figure.
+  const store = await seeded(1);
+  const fast = (await store.config.listModels()).find((m) => m.id === "fast");
+  const target = fast?.targets[0];
+  if (fast === undefined || target === undefined) throw new Error("seed missing");
+  await store.config.putModel({ ...fast, targets: [{ ...target, maxOutputTokens: 32_000 }] });
+  expect(JSON.parse(await wireBodyFor(store)).max_tokens).toBe(32_000);
+  store.close();
+});
+
 test("the auto-cache setting reaches the wire, on and off", async () => {
   // The setting travels store -> snapshot -> dispatch -> attempt -> adapter ->
   // toWire, and every hop but the last was assertable only by reading the code.

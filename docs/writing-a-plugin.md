@@ -463,6 +463,12 @@ two ways: routing only produces candidates for your own provider id, so you see
 your provider's secrets and no other; and the codec never holds the HTTP client
 or the store, so it cannot send them anywhere the host did not ask for.
 
+`maxOutputTokens`, when present, is the output ceiling the operator saved on
+this target (`GET /v1/models` reports the smallest across a pool's targets, so a
+given attempt may see a larger one). Use it only as the default for
+a wire that requires an output limit the client omitted; the client's own figure
+always wins, since limits are advertised, not enforced.
+
 ### 6.1 Authorizing it
 
 An API key is a complete way in and needs nothing more. If your provider uses
