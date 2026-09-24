@@ -9,7 +9,7 @@ import { CONSOLE_TOPIC, invalidateTopic } from "../../session/invalidation.ts";
 import { useLive } from "../../session/live.tsx";
 import { type TopicMessage, useHeldStreamTopic, useStreamTopic } from "../../session/stream.tsx";
 import { Select } from "../../ui/Field.tsx";
-import { Module } from "../../ui/Panel.tsx";
+import { FillModule, FillScroller } from "../../ui/Panel.tsx";
 import { Muted, Row } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { keepLevel, readConsoleFrame } from "./pushedLines.ts";
@@ -30,32 +30,6 @@ const Controls = styled(Row)`
 
 const Narrow = styled(Select)`
   width: auto;
-`;
-
-const Board = styled.div`
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: ${({ theme }) => theme.space(4)};
-  min-height: 0;
-  flex: 1;
-`;
-
-const ConsoleModule = styled(Module)`
-  min-height: 0;
-
-  > div {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    min-height: 0;
-  }
-`;
-
-const Terminal = styled.div`
-  flex: 1;
-  min-height: 0;
-  overflow-x: auto;
-  overflow-y: auto;
 `;
 
 const Lines = styled.pre`
@@ -281,7 +255,7 @@ export function ConsoleBoard() {
   }, [rows]);
 
   return (
-    <Board>
+    <>
       <PageHead
         legend="Console"
         title="Gateway output"
@@ -332,13 +306,13 @@ export function ConsoleBoard() {
         }
       />
 
-      <ConsoleModule
+      <FillModule
         legend="Process output"
         meta={read === undefined ? undefined : <Muted>{sourceLabel(read)}</Muted>}
         flush
       >
         {read === undefined ? null : <SourceHint read={read} />}
-        <Terminal
+        <FillScroller
           ref={terminalRef}
           data-testid="console-terminal"
           onScroll={(event) => {
@@ -378,9 +352,9 @@ export function ConsoleBoard() {
               ))}
             </Lines>
           )}
-        </Terminal>
-      </ConsoleModule>
-    </Board>
+        </FillScroller>
+      </FillModule>
+    </>
   );
 }
 

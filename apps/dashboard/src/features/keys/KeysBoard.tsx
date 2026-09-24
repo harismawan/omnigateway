@@ -15,8 +15,8 @@ import { PageHead } from "../../components/Rack.tsx";
 import { formatDateTime } from "../../lib/format.ts";
 import { Button, IconButton } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
-import { Module } from "../../ui/Panel.tsx";
-import { Legend, Row, ScrollX, Truncate } from "../../ui/primitives.ts";
+import { FillModule, FillScroller } from "../../ui/Panel.tsx";
+import { Legend, Row, Truncate } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { EditExpiryDialog } from "./EditExpiryDialog.tsx";
@@ -111,7 +111,7 @@ export function KeysBoard() {
         }
       />
 
-      <Module legend="Issued keys" meta={`${rows.length}`} flush>
+      <FillModule legend="Issued keys" meta={`${rows.length}`} flush>
         {keys.isError ? (
           <Failure error={keys.error} onRetry={() => void keys.refetch()} />
         ) : keys.isLoading ? (
@@ -129,7 +129,7 @@ export function KeysBoard() {
             }
           />
         ) : (
-          <ScrollX>
+          <FillScroller>
             <Table>
               <thead>
                 <tr>
@@ -307,9 +307,9 @@ export function KeysBoard() {
                 })}
               </tbody>
             </Table>
-          </ScrollX>
+          </FillScroller>
         )}
-      </Module>
+      </FillModule>
 
       <MintKeyDialog open={minting} onOpenChange={setMinting} />
 
