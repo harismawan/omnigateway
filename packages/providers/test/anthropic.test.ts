@@ -57,6 +57,19 @@ test("maps messages and model onto the wire body", () => {
   expect(body.max_tokens).toBe(4096);
 });
 
+// Only this wire requires `max_tokens`, so a Chat/Responses client routed here
+// usually sent none; 4096 truncated them long before the model's own ceiling.
+test("an absent max_tokens becomes the catalog ceiling; the client's own figure wins", () => {
+  const out = (model: string, maxTokens?: number) =>
+    toWire(maxTokens === undefined ? base : { ...base, maxTokens }, model, { oauth: false }).body
+      .max_tokens;
+  expect(out("claude-opus-5-5")).toBe(128_000);
+  expect(out("claude-haiku-4-5-20251001")).toBe(64_000);
+  expect(out("claude-sonnet-5[1m]")).toBe(128_000);
+  expect(out("claude-opus-5-5", 1000)).toBe(1000);
+  expect(out("claude-opus-4")).toBe(4096);
+});
+
 test("passes the system prompt through as blocks", () => {
   const { body } = toWire(
     { ...base, system: [{ type: "text", text: "be terse" }] },

@@ -1,4 +1,8 @@
-import type { ProviderModelCatalogEntry, ProviderReasoningForm } from "../catalog-types.ts";
+import type {
+  ProviderModelCatalogEntry,
+  ProviderModelChoice,
+  ProviderReasoningForm,
+} from "../catalog-types.ts";
 
 /**
  * Anthropic's curated models and their list prices.
@@ -74,17 +78,34 @@ const ONE_M_SUFFIX = "[1m]";
 const DATED_SUFFIX = /-\d{8}$/;
 
 /**
- * Resolves a configured model string to the thinking form it accepts.
+ * Finds the catalog row for a configured model string.
  *
  * Operators store the model verbatim, so the same catalog entry arrives spelled
  * several ways: bare, dated, or with the 1M marker still attached. Those two
- * suffixes are stripped and nothing else is guessed — a name that is not in the
- * catalog is assumed to be a model published after this table was written, and
- * new models speak the current form.
+ * suffixes are stripped and nothing else is guessed.
  */
-export function anthropicReasoningForm(model: string): ProviderReasoningForm {
+function anthropicChoice(model: string): ProviderModelChoice | undefined {
   let id = model.trim();
   if (id.toLowerCase().endsWith(ONE_M_SUFFIX)) id = id.slice(0, -ONE_M_SUFFIX.length).trim();
   id = id.replace(DATED_SUFFIX, "");
-  return ANTHROPIC_MODELS.models.find((m) => m.id === id)?.reasoningForm ?? "adaptive";
+  return ANTHROPIC_MODELS.models.find((m) => m.id === id);
+}
+
+/**
+ * Resolves a configured model string to the thinking form it accepts. A name
+ * not in the catalog is assumed to be a model published after this table was
+ * written, and new models speak the current form.
+ */
+export function anthropicReasoningForm(model: string): ProviderReasoningForm {
+  return anthropicChoice(model)?.reasoningForm ?? "adaptive";
+}
+
+/**
+ * The output ceiling for a configured model string, or undefined when the
+ * catalog does not list it. Anthropic enforces this exact figure — one token
+ * over answers 400 `max_tokens: N > M, which is the maximum allowed` — and does
+ * not count the prompt against it, so it is safe to send at any prompt size.
+ */
+export function anthropicMaxOutputTokens(model: string): number | undefined {
+  return anthropicChoice(model)?.limits.maxOutputTokens;
 }

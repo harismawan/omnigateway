@@ -84,13 +84,11 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  * `wire.ts` reads it to clamp a client that named a larger figure of its own,
  * and to leave room above a thinking budget.
  *
- * **This was 16,384 until 2026-09-05**, on a reading that Cloud Code answered
- * `400 Invalid Argument` above that whatever the model could do. The live
- * catalog advertises 65,536 on every Flash row and 65,535 on the Pro and Lite
- * rows, so the figure was raised to what the backend itself publishes. That
- * raise was **not** re-confirmed against a live `streamGenerateContent`: if
- * large `max_tokens` requests start failing as invalid argument, this constant
- * is the first thing to suspect, and the earlier 16,384 the thing to restore.
+ * The live catalog advertises 65,536 on every Flash row and 65,535 on the Pro
+ * and Lite rows. It was 16,384 until 2026-09-05, on a reading that Cloud Code
+ * answered `400 Invalid Argument` above that; re-measured 2026-09-24 against a
+ * live `streamGenerateContent`, figures up to 1,000,000 answered 200, so that
+ * refusal no longer holds and this is purely the published model ceiling.
  */
 export const MAX_OUTPUT_TOKENS = 65_536;
 

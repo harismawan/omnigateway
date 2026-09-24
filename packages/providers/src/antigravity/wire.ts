@@ -871,12 +871,13 @@ export function toAntigravityWire(
     note("antigravity:response-schema-too-deep");
   }
 
-  // **Cloud Code refuses more than this, whatever the model's own ceiling is.**
-  // 16,384 is the wrapper's limit, confirmed upstream against both a Gemini and
-  // a Claude row; a request asking for the model's full 65K answers
-  // `400 Invalid Argument`. The catalog advertises this number too, so a client
-  // that paces itself by `GET /v1/models` never builds one — this clamp is for
-  // the client that names its own figure.
+  // **The model's own ceiling, not the wrapper's.** Cloud Code accepted every
+  // figure measured on 2026-09-24 (`gemini-3.8-flash-low`: 65,537, 131,072 and
+  // 1,000,000 all answered 200), and a small figure is honoured (50 ends in
+  // `MAX_TOKENS`). An earlier reading that it refused anything above 16,384 did
+  // not reproduce. The clamp keeps a request inside what the catalog advertises,
+  // so a client that paces itself by `GET /v1/models` and one that names its
+  // own figure get the same ceiling.
   const max = generationConfig.maxOutputTokens;
   if (max !== undefined && max > MAX_OUTPUT_TOKENS) {
     generationConfig.maxOutputTokens = MAX_OUTPUT_TOKENS;
