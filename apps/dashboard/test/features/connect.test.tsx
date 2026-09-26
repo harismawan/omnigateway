@@ -3,6 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ConnectDialog } from "../../src/features/accounts/ConnectDialog.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
+import { credential } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 const pkceStart = {
@@ -286,5 +287,42 @@ describe("ConnectDialog", () => {
 
     expect(within(dialog).getByText(pkceStart.authorizeUrl)).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "Copy authorization link" })).toBeTruthy();
+  });
+
+  test("reconnecting an existing credential sends credentialId and locks provider", async () => {
+    const user = userEvent.setup();
+    const stub = createFetchStub({ "POST /api/connect/start": () => pkceStart });
+    const existingCred = credential({
+      id: "cred-reconnect-123",
+      provider: "anthropic",
+      label: "claude prod",
+      authType: "oauth",
+    });
+
+    renderWithProviders(
+      <ConnectDialog
+        open={true}
+        credential={existingCred}
+        onOpenChange={() => {}}
+        onConnected={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("Reconnect claude prod")).toBeTruthy();
+    // Provider selector is hidden in reconnect mode
+    expect(screen.queryByLabelText("Provider")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Start authorization" }));
+
+    await waitFor(() => {
+      const call = stub.calls.find((entry) => entry.url === "/api/connect/start");
+      expect(call?.init?.body).toBe(
+        JSON.stringify({
+          provider: "anthropic",
+          label: "claude prod",
+          credentialId: "cred-reconnect-123",
+        }),
+      );
+    });
   });
 });

@@ -76,6 +76,37 @@ async function installation(): Promise<string> {
   return root;
 }
 
+test("connect passes --credential flag to flows.start for in-place reconnect", async () => {
+  const root = await installation();
+  const stub = stubFlows({ start: { kind: "pkce" } });
+  const calls: unknown[] = [];
+  stub.flows.start = async (...args) => {
+    calls.push(args);
+    return {
+      flowId: "flow-1",
+      authorizeUrl: "https://auth.example.com",
+      userCode: null,
+      kind: "pkce",
+      supportsManualPaste: true,
+      pollIntervalMs: 5000,
+    };
+  };
+  const result = await cli(
+    ["connect", "anthropic", "--label", "work", "--credential", "c-123", "--json"],
+    {
+      root,
+      connect: () => stub.flows,
+      prompt: {
+        isTty: true,
+        secret: () => Promise.resolve("auth-code"),
+        confirm: () => Promise.resolve(true),
+      },
+    },
+  );
+  expect(result.code).toBe(0);
+  expect(calls).toEqual([["anthropic", "work", "c-123"]]);
+});
+
 test("a redirect flow prints the URL and completes with what the operator pasted", async () => {
   const root = await installation();
   const stub = stubFlows({ start: { kind: "pkce" } });

@@ -8,9 +8,9 @@ import { emit, note } from "../output.ts";
 const DEVICE_TIMEOUT_MS = 600_000;
 
 export const connect: Command = {
-  usage: "connect <provider> [--label L]",
+  usage: "connect <provider> [--label L] [--credential ID]",
   summary: "Authorize a provider account from the terminal",
-  options: { label: { type: "string" } },
+  options: { label: { type: "string" }, credential: { type: "string" } },
   async run(args, { ctx, writer, prompt, connect: connectFlows, connectable }) {
     const providerId = requirePositional(args, 0, "provider");
 
@@ -37,8 +37,9 @@ export const connect: Command = {
     }
 
     const flows = await connectFlows(await ctx.store());
+    const credentialId = stringFlag(args.values, "credential");
 
-    const start = await flows.start(providerId, stringFlag(args.values, "label"));
+    const start = await flows.start(providerId, stringFlag(args.values, "label"), credentialId);
 
     // Printed rather than opened: this command is run over SSH as often as not,
     // and a browser launched on the wrong machine helps nobody.

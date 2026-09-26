@@ -87,6 +87,48 @@ test("start requires an admin session", async () => {
   expect(res.status).toBe(401);
 });
 
+test("start accepts a credentialId for reconnecting an existing account", async () => {
+  const { post, store } = await harness();
+  await store.credentials.create({
+    id: "cred-to-reconnect",
+    provider: "anthropic",
+    label: "my anthropic",
+    authType: "oauth",
+    enabled: false,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: "tokenRejected",
+    disabledAt: 100,
+    accessToken: "old",
+    refreshToken: "old",
+    apiKey: null,
+    idToken: null,
+  });
+
+  const res = await post("/api/connect/start", {
+    provider: "anthropic",
+    label: "my anthropic",
+    credentialId: "cred-to-reconnect",
+  });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { flowId: string };
+
+  const finishRes = await post("/api/connect/finish", {
+    flowId: body.flowId,
+    code: "auth-code",
+  });
+  expect(finishRes.status).toBe(200);
+  const finishBody = (await finishRes.json()) as { id: string };
+  expect(finishBody.id).toBe("cred-to-reconnect");
+
+  const after = await store.credentials.get("cred-to-reconnect");
+  expect(after?.enabled).toBe(true);
+  expect(after?.disabledReason).toBeNull();
+});
+
 test("start rejects an unknown provider", async () => {
   const { post } = await harness();
   expect((await post("/api/connect/start", { provider: "nope", label: "x" })).status).toBe(400);

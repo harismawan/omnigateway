@@ -506,6 +506,7 @@ describe("AccountsBoard", () => {
     expect(
       await screen.findByText("reconnect needed — provider rejected the refresh token"),
     ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reconnect claude-main" })).toBeTruthy();
   });
 
   test("an account the operator switched off reads as disabled, not as broken", async () => {

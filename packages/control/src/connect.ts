@@ -224,6 +224,30 @@ export function createConnectFlows(deps: ConnectDeps) {
       { http: deps.http, now: deps.now },
     );
 
+    // Reconnecting an existing credential updates token material in place and
+    // re-enables it, preserving the credential id that model pins point at.
+    if (flow.credentialId !== undefined) {
+      const existing = await deps.store.credentials.get(flow.credentialId);
+      if (existing === null) throw new GatewayError("BAD_REQUEST", "credential not found");
+      await deps.store.credentials.updateSecrets(
+        flow.credentialId,
+        result.secrets,
+        result.expiresAt,
+      );
+      await deps.store.credentials.update(flow.credentialId, {
+        enabled: true,
+        disabledReason: null,
+        disabledAt: null,
+        accountEmail: result.accountEmail,
+        providerData: result.providerData,
+      });
+      logger.info("oauth reconnect completed", {
+        provider: flow.provider,
+        credentialId: flow.credentialId,
+      });
+      return { id: flow.credentialId };
+    }
+
     const id = crypto.randomUUID();
     await deps.store.credentials.create({
       id,
@@ -277,7 +301,11 @@ export function createConnectFlows(deps: ConnectDeps) {
     connectableIds,
 
     /** Begins an authorization and returns what the operator must act on. */
-    async start(providerInput: unknown, labelInput?: unknown): Promise<ConnectStart> {
+    async start(
+      providerInput: unknown,
+      labelInput?: unknown,
+      credentialIdInput?: unknown,
+    ): Promise<ConnectStart> {
       // One answer, not two. A name this gateway has never heard of and a
       // provider with no authorization to start are the same thing to the
       // caller — there is nothing here to begin — and the useful half of the
@@ -290,6 +318,23 @@ export function createConnectFlows(deps: ConnectDeps) {
       if (!exists(providerInput)) throw unconnectable();
       const provider = deps.providers[providerInput];
       if (provider === undefined) throw unconnectable();
+
+      let credentialId: string | undefined;
+      if (credentialIdInput !== undefined) {
+        if (typeof credentialIdInput !== "string" || credentialIdInput.trim().length === 0) {
+          throw new GatewayError("BAD_REQUEST", "invalid credential for reconnect");
+        }
+        const id = credentialIdInput.trim();
+        const existing = await deps.store.credentials.get(id);
+        if (
+          existing === null ||
+          existing.provider !== providerInput ||
+          existing.authType !== "oauth"
+        ) {
+          throw new GatewayError("BAD_REQUEST", "invalid credential for reconnect");
+        }
+        credentialId = id;
+      }
 
       const label =
         typeof labelInput === "string" && labelInput.trim().length > 0
@@ -308,6 +353,7 @@ export function createConnectFlows(deps: ConnectDeps) {
         provider: providerInput,
         label,
         pending: start.pending,
+        ...(credentialId === undefined ? {} : { credentialId }),
         ...(start.userCode === undefined ? {} : { userCode: start.userCode }),
       });
 
