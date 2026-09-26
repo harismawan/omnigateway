@@ -1240,7 +1240,7 @@ export function useSetViewerPassword(): UseMutationResult<{ ok: true }, Error, s
 export function useConnectStart(): UseMutationResult<
   ConnectStart,
   Error,
-  { provider: ProviderId; label: string }
+  { provider: ProviderId; label: string; credentialId?: string }
 > {
   return useMutation({
     mutationFn: (input) => post<ConnectStart>("/api/connect/start", input),

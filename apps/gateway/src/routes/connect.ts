@@ -19,7 +19,7 @@ export function connectRoutes(deps: ConnectRouteDeps) {
     .post("/api/connect/start", async ({ request }) => {
       await requireAdmin(request, deps.admin);
       const body = await readJsonRecord(request);
-      return flows.start(body?.provider, body?.label);
+      return flows.start(body?.provider, body?.label, body?.credentialId);
     })
 
     .post("/api/connect/finish", async ({ request }) => {

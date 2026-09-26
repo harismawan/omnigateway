@@ -89,6 +89,152 @@ test("a forged state in a pasted grok callback is refused", async () => {
   ).rejects.toThrow(GatewayError);
 });
 
+test("a reconnect updates the existing credential in place", async () => {
+  const provider: OAuthProvider = {
+    id: "grok",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: ({ redirectUri }) => ({
+      authorizeUrl: "https://auth.x.ai/oauth2/auth",
+      pending: { verifier: "v", challenge: "c", state: "the-state", redirectUri },
+    }),
+    exchange: async () => ({
+      secrets: {
+        accessToken: "new-access-token",
+        refreshToken: "new-refresh-token",
+        apiKey: null,
+        idToken: null,
+      },
+      expiresAt: 7_200_000,
+      accountEmail: "updated@example.com",
+      providerData: { accountId: "acct_updated" },
+    }),
+    refresh: async () => RESULT,
+  };
+  const store = await memoryStore();
+  await store.credentials.create({
+    id: "cred-orig-id",
+    provider: "grok",
+    label: "original grok",
+    authType: "oauth",
+    enabled: false,
+    tier: 2,
+    weight: 1.5,
+    expiresAt: 1_000,
+    accountEmail: "old@example.com",
+    providerData: { accountId: "acct_old" },
+    disabledReason: "tokenRejected",
+    disabledAt: 500,
+    accessToken: "old-access",
+    refreshToken: "old-refresh",
+    apiKey: null,
+    idToken: null,
+  });
+
+  const flows = createConnectFlows({
+    store,
+    providers: { grok: provider },
+    http: noHttp,
+    now: () => 0,
+  });
+
+  const start = await flows.start("grok", "original grok", "cred-orig-id");
+  const finished = await flows.finish(
+    start.flowId,
+    "http://127.0.0.1:56121/callback?code=auth-code&state=the-state",
+  );
+
+  expect(finished.id).toBe("cred-orig-id");
+
+  const after = await store.credentials.get("cred-orig-id");
+  expect(after).not.toBeNull();
+  expect(after?.enabled).toBe(true);
+  expect(after?.disabledReason).toBeNull();
+  expect(after?.disabledAt).toBeNull();
+  expect(after?.expiresAt).toBe(7_200_000);
+  expect(after?.accountEmail).toBe("updated@example.com");
+  expect(after?.tier).toBe(2);
+  expect(after?.weight).toBe(1.5);
+
+  const secrets = await after?.secrets();
+  expect(secrets?.accessToken).toBe("new-access-token");
+  expect(secrets?.refreshToken).toBe("new-refresh-token");
+
+  // And no duplicate row was created:
+  const all = await store.credentials.list();
+  expect(all.length).toBe(1);
+});
+
+test("start refuses an invalid or mismatched credential id for reconnect", async () => {
+  const provider: OAuthProvider = {
+    id: "grok",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: ({ redirectUri }) => ({
+      authorizeUrl: "https://auth.x.ai/oauth2/auth",
+      pending: { verifier: "v", challenge: "c", state: "the-state", redirectUri },
+    }),
+    exchange: async () => RESULT,
+    refresh: async () => RESULT,
+  };
+  const store = await memoryStore();
+  await store.credentials.create({
+    id: "cred-other-provider",
+    provider: "openai",
+    label: "my openai",
+    authType: "oauth",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: null,
+    idToken: null,
+  });
+
+  const flows = createConnectFlows({
+    store,
+    providers: { grok: provider },
+    http: noHttp,
+    now: () => 0,
+  });
+
+  // Non-existent id:
+  await expect(flows.start("grok", "grok", "nonexistent-id")).rejects.toThrow(GatewayError);
+  // Provider mismatch:
+  await expect(flows.start("grok", "grok", "cred-other-provider")).rejects.toThrow(GatewayError);
+  // Empty or whitespace credential id:
+  await expect(flows.start("grok", "grok", "")).rejects.toThrow(GatewayError);
+  await expect(flows.start("grok", "grok", "   ")).rejects.toThrow(GatewayError);
+  await expect(flows.start("grok", "grok", 123)).rejects.toThrow(GatewayError);
+
+  // authType mismatch (API key credential cannot be reconnected as OAuth):
+  await store.credentials.create({
+    id: "cred-grok-api-key",
+    provider: "grok",
+    label: "grok key",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "xai-key",
+    idToken: null,
+  });
+  await expect(flows.start("grok", "grok", "cred-grok-api-key")).rejects.toThrow(GatewayError);
+});
+
 test("concurrent pending polls share one device exchange", async () => {
   let exchangeCalls = 0;
   const exchange = Promise.withResolvers<FlowResult>();

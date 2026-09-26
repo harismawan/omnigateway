@@ -103,6 +103,7 @@ const Waiting = styled.p`
 export type ConnectDialogProps = {
   open: boolean;
   credentials?: Credential[];
+  credential?: Credential | null;
   onOpenChange: (open: boolean) => void;
   onConnected: () => void;
 };
@@ -117,6 +118,7 @@ export type ConnectDialogProps = {
 export function ConnectDialog({
   open,
   credentials,
+  credential,
   onOpenChange,
   onConnected,
 }: ConnectDialogProps) {
@@ -136,12 +138,24 @@ export function ConnectDialog({
    * Read once, in an initialiser, because the gate has already resolved the
    * catalog by the time this mounts — there is no later value to wait for.
    */
-  const [provider, setProvider] = useState<ProviderId>(() => firstProvider(catalog));
-  const entry = findProvider(catalog, provider);
-  const [authType, setAuthType] = useState<AuthType>(() =>
-    defaultWayIn(findProvider(catalog, firstProvider(catalog))),
+  const [provider, setProvider] = useState<ProviderId>(
+    () => credential?.provider ?? firstProvider(catalog),
   );
-  const [label, setLabel] = useState("");
+  const entry = findProvider(catalog, provider);
+  const [authType, setAuthType] = useState<AuthType>(
+    () =>
+      credential?.authType ??
+      defaultWayIn(findProvider(catalog, credential?.provider ?? firstProvider(catalog))),
+  );
+  const [label, setLabel] = useState(() => credential?.label ?? "");
+
+  useEffect(() => {
+    if (credential) {
+      setProvider(credential.provider);
+      setAuthType(credential.authType);
+      setLabel(credential.label);
+    }
+  }, [credential]);
   // The id itself for a provider the catalog does not name, which is what an
   // operator would have to type anyway — never the empty string.
   const providerLabel = entry?.label ?? provider;
@@ -246,7 +260,11 @@ export function ConnectDialog({
       return;
     }
     start.mutate(
-      { provider, label: label.trim().length === 0 ? providerLabel : label.trim() },
+      {
+        provider,
+        label: label.trim().length === 0 ? providerLabel : label.trim(),
+        ...(credential ? { credentialId: credential.id } : {}),
+      },
       {
         onSuccess: (result) => setFlow(result),
         onError: (error) => setProblem(describeError(error)),
@@ -274,7 +292,7 @@ export function ConnectDialog({
     <Modal
       open={open}
       onOpenChange={close}
-      title="Connect an account"
+      title={credential ? `Reconnect ${credential.label}` : "Connect an account"}
       description="The gateway stores the resulting token encrypted. It is never shown again after this dialog."
       footer={
         flow === null ? (
@@ -321,29 +339,31 @@ export function ConnectDialog({
       <Step>
         {flow === null ? (
           <Stack $gap={3}>
-            <Field label="Provider">
-              {(props) => (
-                <Select
-                  {...props}
-                  value={provider}
-                  onChange={(event) => {
-                    const next = event.target.value as ProviderId;
-                    setProvider(next);
-                    // The way in belongs to the provider. Carrying the old one
-                    // across would offer to store a key under a provider that
-                    // has no key path, or authorize one that has no flow.
-                    setAuthType(defaultWayIn(findProvider(catalog, next)));
-                  }}
-                >
-                  {catalog.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.label}
-                    </option>
-                  ))}
-                </Select>
-              )}
-            </Field>
-            {waysIn(entry).length > 1 ? (
+            {credential ? null : (
+              <Field label="Provider">
+                {(props) => (
+                  <Select
+                    {...props}
+                    value={provider}
+                    onChange={(event) => {
+                      const next = event.target.value as ProviderId;
+                      setProvider(next);
+                      // The way in belongs to the provider. Carrying the old one
+                      // across would offer to store a key under a provider that
+                      // has no key path, or authorize one that has no flow.
+                      setAuthType(defaultWayIn(findProvider(catalog, next)));
+                    }}
+                  >
+                    {catalog.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {candidate.label}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            )}
+            {credential ? null : waysIn(entry).length > 1 ? (
               <Field label="How to connect">
                 {(props) => (
                   <Select

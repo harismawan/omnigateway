@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Link2, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
 import {
@@ -221,6 +221,7 @@ export function AccountsBoard() {
    */
   const [refreshing, setRefreshing] = useState<ReadonlySet<string>>(new Set());
   const [refreshingAll, setRefreshingAll] = useState(false);
+  const [reconnecting, setReconnecting] = useState<Credential | null>(null);
   const [doomed, setDoomed] = useState<Credential | null>(null);
   // Which rows have their history open. Local to the board: an expansion is a
   // glance at one account, not a preference worth outliving the visit.
@@ -624,6 +625,18 @@ export function AccountsBoard() {
                                       <RotateCcw />
                                     </IconButton>
                                   ) : null}
+                                  {isAdmin && credential.authType === "oauth" ? (
+                                    <IconButton
+                                      type="button"
+                                      $variant="ghost"
+                                      $size="sm"
+                                      aria-label={`Reconnect ${credential.label}`}
+                                      title={`Reconnect ${credential.label}`}
+                                      onClick={() => setReconnecting(credential)}
+                                    >
+                                      <Link2 />
+                                    </IconButton>
+                                  ) : null}
                                   {isAdmin ? (
                                     <IconButton
                                       type="button"
@@ -685,9 +698,17 @@ export function AccountsBoard() {
       )}
 
       <ConnectDialog
-        open={connecting}
+        open={connecting || reconnecting !== null}
         credentials={credentials.data ?? []}
-        onOpenChange={setConnecting}
+        credential={reconnecting}
+        onOpenChange={(open) => {
+          if (!open) {
+            setConnecting(false);
+            setReconnecting(null);
+          } else {
+            setConnecting(true);
+          }
+        }}
         onConnected={() => void credentials.refetch()}
       />
 

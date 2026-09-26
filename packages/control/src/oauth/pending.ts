@@ -5,6 +5,7 @@ import type { PendingFlow } from "./types.ts";
 export type StoredFlow = {
   provider: ProviderId;
   label: string;
+  credentialId?: string;
   pending: PendingFlow;
   userCode?: string;
 };
