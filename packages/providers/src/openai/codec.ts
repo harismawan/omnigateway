@@ -39,10 +39,11 @@ export const openaiCodec: ProviderCodec = {
       throw input.fail("AUTH", "openai credential has no token");
     }
 
-    // The Codex backend partitions its prompt cache by session: the body field
-    // alone hit 2 of 5 where the measured `session_id` header hit 14 of 15.
-    // Codex 0.159.2 names it `session-id` and sends it on both hosts. This rename
-    // has not been re-measured live. Root-thread identity uses the same cache key.
+    // The Codex backend routes its prompt cache by `session-id` alone, measured
+    // live: with it stable, sends 2-4 read ~16.5k of ~16.7k tokens; with the body
+    // field alone, or a stable `thread-id` under a changing `session-id`, zero.
+    // `thread-id` and `x-client-request-id` are identity, not affinity; Codex
+    // 0.159.2 sends all three on both hosts. Numbers: client-identity spec History.
     protocol.push(
       ["x-client-request-id", cacheKey],
       ["session-id", cacheKey],

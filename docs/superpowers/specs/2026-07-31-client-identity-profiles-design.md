@@ -453,6 +453,38 @@ On 2026-09-30 the OpenAI profile, previously copied from OmniRoute's
 lowercase names, `x-codex-beta-features: remote_compaction_v2`, and `OpenAI-Beta`
 dropped (Codex sends it on WebSocket only). The `session_id` header became
 `session-id`, alongside `thread-id` and `x-client-request-id`, sent on both hosts.
-The header rename has not been re-measured live against the prompt cache.
 Not implemented: window-id, turn-metadata, turn-state, client_metadata, zstd,
 or WebSocket transport.
+
+The rename was then measured live the same day against the Codex backend
+(`chatgpt.com/backend-api/codex/responses`, one ChatGPT OAuth account,
+`gpt-6-astra`). Each variant had its own ~16.7k-token prefix and made four
+sends, each the previous plus one exchange appended at the end, 4s apart.
+Cells are cached/input tokens per send:
+
+| Variant | 1 | 2 | 3 | 4 |
+| --- | --- | --- | --- | --- |
+| `session-id` + `thread-id` + `x-client-request-id` (this change) | 0/16701 | 16512/16723 | 16512/16745 | 16512/16767 |
+| `session_id` (previous header) | 0/16704 | 16512/16726 | 16512/16748 | 16512/16770 |
+| body `prompt_cache_key` only | 0/16714 | 0/16736 | 0/16758 | 0/16780 |
+| no key anywhere | 0/16797 | 0/16819 | 0/16841 | 0/16863 |
+| `session-id` stable, `thread-id` fresh per send | 0/16780 | 16640/16802 | 16640/16824 | 16640/16846 |
+| `session-id` fresh per send, `thread-id` stable | 0/16739 | 0/16761 | 0/16783 | 0/16805 |
+
+`session-id` alone decides affinity; `thread-id` and `x-client-request-id` do
+not, and the body field does nothing on this host. The old `session_id` spelling
+is also still honoured.
+
+Subagents. Codex sends a spawned thread's `session-id` and `prompt_cache_key` as
+the **root** session id, and its own id only in `thread-id` /
+`x-client-request-id` (`core/src/session/session.rs`, `responses_session_id`).
+The gateway cannot see that split and sends the root key in all three. Measured:
+a child with its own prefix cached identically in both shapes (sends 2-4 read
+16512-16640 of ~16.8k), and the parent's next send still hit after the child's
+four. A child forked from the parent's history (same prefix plus one new
+message) read the parent's cache on its **first** send under the root
+`session-id` (16512/16733, 16512/16753 over two trials), and missed it under a
+different one (0/16733, 0/16753; sent first, so it could not read the other
+child's write). Sharing needs both the same leading tokens and the same
+`session-id`; the root key is what lets a Codex subagent reuse its parent's
+cache, and a gateway forwarding the client's `prompt_cache_key` preserves it.
