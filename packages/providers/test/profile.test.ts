@@ -78,8 +78,8 @@ test("openai profile carries the codex-cli identity", () => {
   const h = new Map(
     entry(PROFILES, "openai", "PROFILES").headers.map(([n, v]) => [n.toLowerCase(), v]),
   );
-  expect(h.get("user-agent")).toBe("codex-cli/0.156.0 (Windows 10.0.26200; x64)");
-  expect(h.get("version")).toBe("0.156.0");
+  expect(h.get("user-agent")).toBe("codex-cli/0.159.2 (Windows 10.0.26200; x64)");
+  expect(h.get("version")).toBe("0.159.2");
   expect(h.get("originator")).toBe("codex_cli_rs");
   expect(h.get("openai-beta")).toBe("responses=experimental");
 });
