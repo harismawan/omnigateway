@@ -86,25 +86,28 @@ test("an OAuth credential goes to the Codex host, naming its billing account", a
   expect(sent.url).toBe("https://chatgpt.com/backend-api/codex/responses");
   expect(sent.body).toBe(BODY);
   expect(sent.headers.map(([name]) => name)).toEqual([
-    "Content-Type",
-    "Authorization",
-    "chatgpt-account-id",
+    "version",
+    "x-codex-beta-features",
     "originator",
-    "session_id",
-    "Version",
-    "Openai-Beta",
-    "X-Codex-Beta-Features",
-    "Accept",
-    "User-Agent",
+    "x-client-request-id",
+    "session-id",
+    "thread-id",
+    "accept",
+    "content-type",
+    "authorization",
+    "chatgpt-account-id",
+    "user-agent",
   ]);
-  expect(sent.headers).toContainEqual(["Authorization", "Bearer oa-tok"]);
+  expect(sent.headers).toContainEqual(["authorization", "Bearer oa-tok"]);
   expect(sent.headers).toContainEqual(["chatgpt-account-id", "acct-9"]);
   expect(sent.headers).toContainEqual(["originator", "codex_cli_rs"]);
   // Header and body carry one value. They are derived at different layers —
   // the encoder returns the key, the codec places the header — so the two can
   // drift apart, and a backend handed two names for one session caches under
   // neither.
-  expect(sent.headers).toContainEqual(["session_id", KEY]);
+  expect(sent.headers).toContainEqual(["session-id", KEY]);
+  expect(sent.headers).toContainEqual(["thread-id", KEY]);
+  expect(sent.headers).toContainEqual(["x-client-request-id", KEY]);
   expect(sent.body).toContain(`"prompt_cache_key":"${KEY}"`);
 });
 
@@ -121,10 +124,11 @@ test("an API key goes to the public host, with no account header at all", async 
 
   expect(sent.url).toBe("https://api.openai.com/v1/responses");
   expect(sent.body).toBe(BODY);
-  expect(sent.headers).toContainEqual(["Authorization", "Bearer sk-oa"]);
+  expect(sent.headers).toContainEqual(["authorization", "Bearer sk-oa"]);
   expect(sent.headers.some(([name]) => name === "chatgpt-account-id")).toBe(false);
-  // `session_id` is the Codex backend's own affinity mechanism. This host has
-  // no such header and takes `prompt_cache_key`, which the body above carries.
+  expect(sent.headers).toContainEqual(["session-id", KEY]);
+  expect(sent.headers).toContainEqual(["thread-id", KEY]);
+  expect(sent.headers).toContainEqual(["x-client-request-id", KEY]);
   expect(sent.headers.some(([name]) => name === "session_id")).toBe(false);
 });
 
@@ -177,4 +181,21 @@ test("tells the decoder to keep reasoning native exactly when the client asked f
     fail: (code, message) => new GatewayError(code, message),
   });
   expect(silent.decodeState).toEqual({ nativeReasoning: false });
+});
+
+test("unsafe client affinity keys produce equal header-safe values on both hosts", async () => {
+  for (const credentials of [creds({ accessToken: "oa-tok" }), creds({ apiKey: "sk-oa" })]) {
+    for (const value of ["bad\r\nx-injected: yes", "日本語"]) {
+      const sent = await sentFor(credentials, {
+        ...request,
+        vendor: { openai: { prompt_cache_key: value, session_id: value } },
+      });
+      const body: { prompt_cache_key: string } = JSON.parse(sent.body);
+      expect(body.prompt_cache_key).toBe(KEY);
+      expect(body.prompt_cache_key).toMatch(/^[\x21-\x7e]+$/);
+      for (const name of ["session-id", "thread-id", "x-client-request-id"]) {
+        expect(sent.headers).toContainEqual([name, body.prompt_cache_key]);
+      }
+    }
+  }
 });

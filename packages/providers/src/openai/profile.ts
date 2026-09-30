@@ -1,46 +1,46 @@
 import { type ClientProfile, env, envOrder } from "../headers.ts";
 
-const OPENAI_CLI_VERSION = env("OMNI_OPENAI_CLI_VERSION", "0.156.0");
+const OPENAI_CLI_VERSION = env("OMNI_OPENAI_CLI_VERSION", "0.159.2");
 const OPENAI_UA_PLATFORM = env("OMNI_OPENAI_UA_PLATFORM", "Windows 10.0.26200");
-const OPENAI_UA_ARCH = env("OMNI_OPENAI_UA_ARCH", "x64");
+const OPENAI_UA_ARCH = env("OMNI_OPENAI_UA_ARCH", "x86_64");
+const OPENAI_UA_TERMINAL = env("OMNI_OPENAI_UA_TERMINAL", "WindowsTerminal");
+const originator = env("OMNI_OPENAI_ORIGINATOR", "codex_cli_rs");
 
 export const openaiProfile: ClientProfile = {
   headers: [
     [
-      "User-Agent",
+      "user-agent",
       env(
         "OMNI_UA_OPENAI",
-        `codex-cli/${OPENAI_CLI_VERSION} (${OPENAI_UA_PLATFORM}; ${OPENAI_UA_ARCH})`,
+        `${originator}/${OPENAI_CLI_VERSION} (${OPENAI_UA_PLATFORM}; ${OPENAI_UA_ARCH}) ${OPENAI_UA_TERMINAL}`,
       ),
     ],
-    ["originator", env("OMNI_OPENAI_ORIGINATOR", "codex_cli_rs")],
-    ["Version", OPENAI_CLI_VERSION],
-    ["Openai-Beta", "responses=experimental"],
-    ["X-Codex-Beta-Features", "responses_websockets"],
-    ["Accept", "text/event-stream"],
+    ["originator", originator],
+    ["version", OPENAI_CLI_VERSION],
+    ["x-codex-beta-features", "remote_compaction_v2"],
+    ["accept", "text/event-stream"],
   ],
   // The operator override is applied here rather than where the table is
   // assembled. An adapter reads this value directly, so a table that applied
   // something the direct read did not would differ only on installations that
   // set the variable — which is the shape of bug this repository keeps finding.
   order: envOrder("OMNI_ORDER_OPENAI", [
-    "Host",
-    "Content-Type",
-    "Authorization",
-    "chatgpt-account-id",
+    "host",
+    "version",
+    "x-codex-beta-features",
     "originator",
-    // Not a profile header: the codec supplies it per request, and it is listed
-    // here so an identity header keeps its place in the CLI's order rather than
-    // appending after `User-Agent`, which is where `orderHeaders` puts a name it
-    // does not know. Same arrangement `Authorization` already has.
-    "session_id",
-    "Version",
-    "Openai-Beta",
-    "X-Codex-Beta-Features",
-    "Accept",
-    "User-Agent",
-    "Accept-Encoding",
-    "Content-Length",
+    // Codec-supplied names stay in the CLI's order rather than appending after
+    // `user-agent`, where `orderHeaders` puts names it does not know.
+    "x-client-request-id",
+    "session-id",
+    "thread-id",
+    "accept",
+    "content-type",
+    "authorization",
+    "chatgpt-account-id",
+    "user-agent",
+    "accept-encoding",
+    "content-length",
   ]),
 };
 

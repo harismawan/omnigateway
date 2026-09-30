@@ -68,13 +68,44 @@ test("an empty or non-string client key falls through rather than being sent", (
   // Asserted on the **body**, not only on the returned key. The vendor bag is
   // merged onto the body verbatim, so a version of this that checked the return
   // value alone passed while the merge wrote the rejected value straight back
-  // into `prompt_cache_key` — and on the API-key leg, where no `session_id`
-  // header exists, that field is the only mechanism there is.
+  // into `prompt_cache_key`, disagreeing with the session headers on the wire.
   for (const rejected of [{ prompt_cache_key: "" }, { session_id: 42 }, { prompt_cache_key: 7 }]) {
     const { body, cacheKey } = toResponsesWire({ ...base, vendor: { openai: rejected } }, "gpt-5");
     expect(cacheKey).toMatch(/^[0-9a-f]{32}$/);
     expect(body.prompt_cache_key).toBe(cacheKey);
   }
+});
+
+test("header-unsafe client keys fall through each candidate without changing body affinity", () => {
+  for (const value of [
+    "bad\r\nx-injected: yes",
+    "日本語",
+    "has space",
+    "\t",
+    "\x7f",
+    "x".repeat(1025),
+  ]) {
+    for (const name of ["prompt_cache_key", "session_id"] as const) {
+      const { body, cacheKey } = toResponsesWire(
+        { ...base, vendor: { openai: { [name]: value } } },
+        "gpt-5",
+      );
+      expect(cacheKey).toBe(keyOf(base));
+      expect(body.prompt_cache_key).toBe(cacheKey);
+    }
+    expect(
+      keyOf({ ...base, vendor: { openai: { prompt_cache_key: value, session_id: "safe" } } }),
+    ).toBe("safe");
+    const conversation = { ...base, conversationId: "conversation" };
+    expect(
+      keyOf({
+        ...conversation,
+        vendor: { openai: { prompt_cache_key: value, session_id: value } },
+      }),
+    ).toBe(keyOf(conversation));
+  }
+  const value = "x".repeat(1024);
+  expect(keyOf({ ...base, vendor: { openai: { prompt_cache_key: value } } })).toBe(value);
 });
 
 test("a client's own key survives the vendor merge rather than being overwritten by it", () => {

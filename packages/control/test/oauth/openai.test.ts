@@ -32,13 +32,12 @@ function stubHttp(status: number, body: unknown): HttpClient & { last: () => Htt
 const pending = { verifier: "v", challenge: "c", state: "s", redirectUri: "http://localhost/cb" };
 
 const OPENAI_TOKEN_HEADERS = [
-  ["Content-Type", "application/x-www-form-urlencoded"],
+  ["version", "0.159.2"],
+  ["x-codex-beta-features", "remote_compaction_v2"],
   ["originator", "codex_cli_rs"],
-  ["Version", "0.156.0"],
-  ["Openai-Beta", "responses=experimental"],
-  ["X-Codex-Beta-Features", "responses_websockets"],
   ["Accept", "application/json"],
-  ["User-Agent", "codex-cli/0.156.0 (Windows 10.0.26200; x64)"],
+  ["Content-Type", "application/x-www-form-urlencoded"],
+  ["user-agent", "codex_cli_rs/0.159.2 (Windows 10.0.26200; x86_64) WindowsTerminal"],
 ] as const;
 
 /** OpenAI's endpoints are compiled in, so `start` must not reach the network. */

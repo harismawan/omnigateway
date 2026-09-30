@@ -78,10 +78,13 @@ test("openai profile carries the codex-cli identity", () => {
   const h = new Map(
     entry(PROFILES, "openai", "PROFILES").headers.map(([n, v]) => [n.toLowerCase(), v]),
   );
-  expect(h.get("user-agent")).toBe("codex-cli/0.156.0 (Windows 10.0.26200; x64)");
-  expect(h.get("version")).toBe("0.156.0");
+  expect(h.get("user-agent")).toBe(
+    "codex_cli_rs/0.159.2 (Windows 10.0.26200; x86_64) WindowsTerminal",
+  );
+  expect(h.get("version")).toBe("0.159.2");
   expect(h.get("originator")).toBe("codex_cli_rs");
-  expect(h.get("openai-beta")).toBe("responses=experimental");
+  expect(h.get("x-codex-beta-features")).toBe("remote_compaction_v2");
+  expect(h.has("openai-beta")).toBe(false);
 });
 
 test("kimi profile carries the kimi-code-cli identity", () => {

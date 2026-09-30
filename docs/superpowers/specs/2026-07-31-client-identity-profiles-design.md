@@ -85,8 +85,8 @@ not retained as a fallback.
 
 ### Profile values
 
-Captured from OmniRoute, which derives them from mitmproxy traces of the real
-binaries. `${...}` marks an environment-substitutable value.
+Originally captured from OmniRoute, which derives them from mitmproxy traces of the real
+binaries; OpenAI now follows Codex source as noted below. `${...}` marks an environment-substitutable value.
 
 **Anthropic** — `open-sse/services/claudeCodeCompatible.ts`,
 `src/shared/constants/claudeCodeClient.ts`:
@@ -105,15 +105,24 @@ binaries. `${...}` marks an environment-substitutable value.
 | `X-Stainless-Retry-Count` | `0` |
 | `X-Stainless-Timeout` | request timeout in whole seconds |
 
-**OpenAI** — `open-sse/config/codexClient.ts`:
+**OpenAI** — Codex `rust-v0.159.2`, HTTP Responses path, default root thread:
 
 | Header | Value |
 | --- | --- |
-| `User-Agent` | `codex-cli/${0.156.0} (${Windows 10.0.26200}; ${x64})` |
+| `version` | `${0.159.2}` |
+| `x-codex-beta-features` | `remote_compaction_v2` |
 | `originator` | `${codex_cli_rs}` |
-| `Version` | `${0.156.0}` |
-| `Openai-Beta` | `responses=experimental` |
-| `X-Codex-Beta-Features` | `responses_websockets` |
+| `x-client-request-id` | body `prompt_cache_key` |
+| `session-id` | body `prompt_cache_key` |
+| `thread-id` | body `prompt_cache_key` |
+| `accept` | `text/event-stream` |
+| `content-type` | `application/json` |
+| `authorization` | credential bearer token |
+| `chatgpt-account-id` | OAuth account only |
+| `user-agent` | `${codex_cli_rs}/${0.159.2} (${Windows 10.0.26200}; ${x86_64}) ${WindowsTerminal}` |
+
+The originator override also supplies the User-Agent prefix unless `OMNI_UA_OPENAI`
+replaces the whole value. Session headers are sent on both credential legs.
 
 **Kimi** — `open-sse/config/providers/registry/kimi/coding/runtime.ts`:
 
@@ -132,10 +141,13 @@ claims a timeout the client does not honour is itself a mismatch.
 
 ### Header order
 
-Order arrays for Anthropic and OpenAI are taken from OmniRoute's
-`CLI_FINGERPRINTS`, which documents them as mitmproxy captures of the real
-binaries. Anthropic's order is Title-Case Stainless keys alphabetically, then
+Anthropic's order array is taken from OmniRoute's `CLI_FINGERPRINTS`, which
+documents it as a mitmproxy capture of the real binary. Anthropic's order is Title-Case Stainless keys alphabetically, then
 lowercase Anthropic keys alphabetically, then transport headers.
+
+OpenAI follows the Codex HTTP insertion order shown above, with `host` first
+(standing in for HTTP/2 `:authority`) and transport-added `accept-encoding` and
+`content-length` last. Names are lowercase, as hyper emits them.
 
 OmniRoute has **no captured fingerprint for Kimi**. Its order array is our own
 construction — protocol headers, then identity headers, then transport — and is
@@ -343,10 +355,11 @@ OMNI_ANTHROPIC_STAINLESS_ARCH=              # blank = derive from host
 OMNI_ORDER_ANTHROPIC=                       # comma-separated; blank = built-in order
 
 OMNI_UA_OPENAI=
-OMNI_OPENAI_CLI_VERSION=0.156.0
+OMNI_OPENAI_CLI_VERSION=0.159.2
 OMNI_OPENAI_ORIGINATOR=codex_cli_rs
 OMNI_OPENAI_UA_PLATFORM=Windows 10.0.26200
-OMNI_OPENAI_UA_ARCH=x64
+OMNI_OPENAI_UA_ARCH=x86_64
+OMNI_OPENAI_UA_TERMINAL=WindowsTerminal
 OMNI_ORDER_OPENAI=
 
 OMNI_UA_KIMI=
@@ -422,7 +435,7 @@ Stated rather than solved.
 - **Prompt rewriting.** The system pipeline modifies the operator's own prompt
   text (§ Anthropic body integrity). Requests are not byte-faithful to what the
   client sent.
-- **Missing session headers.** `X-Claude-Code-Session-Id` and
+- **Missing Anthropic session headers.** `X-Claude-Code-Session-Id` and
   `x-client-request-id` are absent, as described above.
 - **Kimi has no capture.** Its header order, body field order, and device header
   block are constructed rather than observed.
@@ -432,3 +445,46 @@ Stated rather than solved.
 
 Header and body mimicry raises the cost of separating this traffic. It does not
 make it indistinguishable, and the design should not be read as claiming it does.
+
+## History
+
+On 2026-09-30 the OpenAI profile, previously copied from OmniRoute's
+`codexClient.ts`, was matched to Codex `rust-v0.159.2` source: UA format,
+lowercase names, `x-codex-beta-features: remote_compaction_v2`, and `OpenAI-Beta`
+dropped (Codex sends it on WebSocket only). The `session_id` header became
+`session-id`, alongside `thread-id` and `x-client-request-id`, sent on both hosts.
+Not implemented: window-id, turn-metadata, turn-state, client_metadata, zstd,
+or WebSocket transport.
+
+The rename was then measured live the same day against the Codex backend
+(`chatgpt.com/backend-api/codex/responses`, one ChatGPT OAuth account,
+`gpt-6-astra`). Each variant had its own ~16.7k-token prefix and made four
+sends, each the previous plus one exchange appended at the end, 4s apart.
+Cells are cached/input tokens per send:
+
+| Variant | 1 | 2 | 3 | 4 |
+| --- | --- | --- | --- | --- |
+| `session-id` + `thread-id` + `x-client-request-id` (this change) | 0/16701 | 16512/16723 | 16512/16745 | 16512/16767 |
+| `session_id` (previous header) | 0/16704 | 16512/16726 | 16512/16748 | 16512/16770 |
+| body `prompt_cache_key` only | 0/16714 | 0/16736 | 0/16758 | 0/16780 |
+| no key anywhere | 0/16797 | 0/16819 | 0/16841 | 0/16863 |
+| `session-id` stable, `thread-id` fresh per send | 0/16780 | 16640/16802 | 16640/16824 | 16640/16846 |
+| `session-id` fresh per send, `thread-id` stable | 0/16739 | 0/16761 | 0/16783 | 0/16805 |
+
+`session-id` alone decides affinity; `thread-id` and `x-client-request-id` do
+not, and the body field does nothing on this host. The old `session_id` spelling
+is also still honoured.
+
+Subagents. Codex sends a spawned thread's `session-id` and `prompt_cache_key` as
+the **root** session id, and its own id only in `thread-id` /
+`x-client-request-id` (`core/src/session/session.rs`, `responses_session_id`).
+The gateway cannot see that split and sends the root key in all three. Measured:
+a child with its own prefix cached identically in both shapes (sends 2-4 read
+16512-16640 of ~16.8k), and the parent's next send still hit after the child's
+four. A child forked from the parent's history (same prefix plus one new
+message) read the parent's cache on its **first** send under the root
+`session-id` (16512/16733, 16512/16753 over two trials), and missed it under a
+different one (0/16733, 0/16753; sent first, so it could not read the other
+child's write). Sharing needs both the same leading tokens and the same
+`session-id`; the root key is what lets a Codex subagent reuse its parent's
+cache, and a gateway forwarding the client's `prompt_cache_key` preserves it.
