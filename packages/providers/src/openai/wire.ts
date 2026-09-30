@@ -18,12 +18,22 @@ export type ResponsesBody = {
   [key: string]: unknown;
 };
 
-/** A client-supplied cache key, when it is a usable string. */
+// Gateway header budget, not an upstream schema limit: the key rides three
+// headers, so 1 KiB leaves room for auth within common 8 KiB header limits.
+const MAX_CACHE_KEY_LENGTH = 1024;
+const HEADER_SAFE_KEY = /^[\x21-\x7e]+$/;
+
+/** A client-supplied cache key, safe for both the body and session headers. */
 function suppliedKey(req: ChatRequest): string | undefined {
   const vendor = req.vendor?.openai;
   for (const name of ["prompt_cache_key", "session_id"] as const) {
     const value = vendor?.[name];
-    if (typeof value === "string" && value.length > 0) return value;
+    if (
+      typeof value === "string" &&
+      value.length <= MAX_CACHE_KEY_LENGTH &&
+      HEADER_SAFE_KEY.test(value)
+    )
+      return value;
   }
   return undefined;
 }

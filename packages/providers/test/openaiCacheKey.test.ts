@@ -76,6 +76,38 @@ test("an empty or non-string client key falls through rather than being sent", (
   }
 });
 
+test("header-unsafe client keys fall through each candidate without changing body affinity", () => {
+  for (const value of [
+    "bad\r\nx-injected: yes",
+    "日本語",
+    "has space",
+    "\t",
+    "\x7f",
+    "x".repeat(1025),
+  ]) {
+    for (const name of ["prompt_cache_key", "session_id"] as const) {
+      const { body, cacheKey } = toResponsesWire(
+        { ...base, vendor: { openai: { [name]: value } } },
+        "gpt-5",
+      );
+      expect(cacheKey).toBe(keyOf(base));
+      expect(body.prompt_cache_key).toBe(cacheKey);
+    }
+    expect(
+      keyOf({ ...base, vendor: { openai: { prompt_cache_key: value, session_id: "safe" } } }),
+    ).toBe("safe");
+    const conversation = { ...base, conversationId: "conversation" };
+    expect(
+      keyOf({
+        ...conversation,
+        vendor: { openai: { prompt_cache_key: value, session_id: value } },
+      }),
+    ).toBe(keyOf(conversation));
+  }
+  const value = "x".repeat(1024);
+  expect(keyOf({ ...base, vendor: { openai: { prompt_cache_key: value } } })).toBe(value);
+});
+
 test("a client's own key survives the vendor merge rather than being overwritten by it", () => {
   // The other direction of the same ordering. The resolved key is written after
   // the merge, so this proves the write is not simply clobbering whatever the

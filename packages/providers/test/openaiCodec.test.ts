@@ -182,3 +182,20 @@ test("tells the decoder to keep reasoning native exactly when the client asked f
   });
   expect(silent.decodeState).toEqual({ nativeReasoning: false });
 });
+
+test("unsafe client affinity keys produce equal header-safe values on both hosts", async () => {
+  for (const credentials of [creds({ accessToken: "oa-tok" }), creds({ apiKey: "sk-oa" })]) {
+    for (const value of ["bad\r\nx-injected: yes", "日本語"]) {
+      const sent = await sentFor(credentials, {
+        ...request,
+        vendor: { openai: { prompt_cache_key: value, session_id: value } },
+      });
+      const body: { prompt_cache_key: string } = JSON.parse(sent.body);
+      expect(body.prompt_cache_key).toBe(KEY);
+      expect(body.prompt_cache_key).toMatch(/^[\x21-\x7e]+$/);
+      for (const name of ["session-id", "thread-id", "x-client-request-id"]) {
+        expect(sent.headers).toContainEqual([name, body.prompt_cache_key]);
+      }
+    }
+  }
+});
