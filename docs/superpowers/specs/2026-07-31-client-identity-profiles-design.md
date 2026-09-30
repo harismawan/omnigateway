@@ -85,8 +85,8 @@ not retained as a fallback.
 
 ### Profile values
 
-Captured from OmniRoute, which derives them from mitmproxy traces of the real
-binaries. `${...}` marks an environment-substitutable value.
+Originally captured from OmniRoute, which derives them from mitmproxy traces of the real
+binaries; OpenAI now follows Codex source as noted below. `${...}` marks an environment-substitutable value.
 
 **Anthropic** — `open-sse/services/claudeCodeCompatible.ts`,
 `src/shared/constants/claudeCodeClient.ts`:
@@ -105,15 +105,24 @@ binaries. `${...}` marks an environment-substitutable value.
 | `X-Stainless-Retry-Count` | `0` |
 | `X-Stainless-Timeout` | request timeout in whole seconds |
 
-**OpenAI** — `open-sse/config/codexClient.ts`:
+**OpenAI** — Codex `rust-v0.159.2`, HTTP Responses path, default root thread:
 
 | Header | Value |
 | --- | --- |
-| `User-Agent` | `codex-cli/${0.159.2} (${Windows 10.0.26200}; ${x64})` |
+| `version` | `${0.159.2}` |
+| `x-codex-beta-features` | `remote_compaction_v2` |
 | `originator` | `${codex_cli_rs}` |
-| `Version` | `${0.159.2}` |
-| `Openai-Beta` | `responses=experimental` |
-| `X-Codex-Beta-Features` | `responses_websockets` |
+| `x-client-request-id` | body `prompt_cache_key` |
+| `session-id` | body `prompt_cache_key` |
+| `thread-id` | body `prompt_cache_key` |
+| `accept` | `text/event-stream` |
+| `content-type` | `application/json` |
+| `authorization` | credential bearer token |
+| `chatgpt-account-id` | OAuth account only |
+| `user-agent` | `${codex_cli_rs}/${0.159.2} (${Windows 10.0.26200}; ${x86_64}) ${WindowsTerminal}` |
+
+The originator override also supplies the User-Agent prefix unless `OMNI_UA_OPENAI`
+replaces the whole value. Session headers are sent on both credential legs.
 
 **Kimi** — `open-sse/config/providers/registry/kimi/coding/runtime.ts`:
 
@@ -132,10 +141,13 @@ claims a timeout the client does not honour is itself a mismatch.
 
 ### Header order
 
-Order arrays for Anthropic and OpenAI are taken from OmniRoute's
-`CLI_FINGERPRINTS`, which documents them as mitmproxy captures of the real
-binaries. Anthropic's order is Title-Case Stainless keys alphabetically, then
+Anthropic's order array is taken from OmniRoute's `CLI_FINGERPRINTS`, which
+documents it as a mitmproxy capture of the real binary. Anthropic's order is Title-Case Stainless keys alphabetically, then
 lowercase Anthropic keys alphabetically, then transport headers.
+
+OpenAI follows the Codex HTTP insertion order shown above, with `host` first
+(standing in for HTTP/2 `:authority`) and transport-added `accept-encoding` and
+`content-length` last. Names are lowercase, as hyper emits them.
 
 OmniRoute has **no captured fingerprint for Kimi**. Its order array is our own
 construction — protocol headers, then identity headers, then transport — and is
@@ -346,7 +358,8 @@ OMNI_UA_OPENAI=
 OMNI_OPENAI_CLI_VERSION=0.159.2
 OMNI_OPENAI_ORIGINATOR=codex_cli_rs
 OMNI_OPENAI_UA_PLATFORM=Windows 10.0.26200
-OMNI_OPENAI_UA_ARCH=x64
+OMNI_OPENAI_UA_ARCH=x86_64
+OMNI_OPENAI_UA_TERMINAL=WindowsTerminal
 OMNI_ORDER_OPENAI=
 
 OMNI_UA_KIMI=
@@ -422,7 +435,7 @@ Stated rather than solved.
 - **Prompt rewriting.** The system pipeline modifies the operator's own prompt
   text (§ Anthropic body integrity). Requests are not byte-faithful to what the
   client sent.
-- **Missing session headers.** `X-Claude-Code-Session-Id` and
+- **Missing Anthropic session headers.** `X-Claude-Code-Session-Id` and
   `x-client-request-id` are absent, as described above.
 - **Kimi has no capture.** Its header order, body field order, and device header
   block are constructed rather than observed.
@@ -432,3 +445,14 @@ Stated rather than solved.
 
 Header and body mimicry raises the cost of separating this traffic. It does not
 make it indistinguishable, and the design should not be read as claiming it does.
+
+## History
+
+On 2026-09-30 the OpenAI profile, previously copied from OmniRoute's
+`codexClient.ts`, was matched to Codex `rust-v0.159.2` source: UA format,
+lowercase names, `x-codex-beta-features: remote_compaction_v2`, and `OpenAI-Beta`
+dropped (Codex sends it on WebSocket only). The `session_id` header became
+`session-id`, alongside `thread-id` and `x-client-request-id`, sent on both hosts.
+The header rename has not been re-measured live against the prompt cache.
+Not implemented: window-id, turn-metadata, turn-state, client_metadata, zstd,
+or WebSocket transport.

@@ -436,8 +436,9 @@ Translation invariants:
   instructions + opening item, not tool list/first message; gateway-generated ids use the fallback.
   In `openai/wire.ts`, resolve client `prompt_cache_key` → client `session_id` → hashed
   `conversationId` → fallback before vendor `Object.assign`. `openai/codec.ts` sends the same value
-  in OAuth `session_id` header; API-key leg uses body. Keep `session_id` in `openaiProfile.order` and
-  `store: false` for Codex. Inspect client key sets, not one member. History: responses-ingress spec.
+  as `session-id`, `thread-id`, `x-client-request-id` headers on both legs; keep those names in
+  `openaiProfile.order`. Keep `store: false` for Codex. Inspect client key sets, not one member.
+  History: responses-ingress spec.
 - OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /
   `experimental_attachments` as well as `content`. Payload's own container header beat any
   declared type; remote URL never fetched. `images` is Ollama's images-only field, so

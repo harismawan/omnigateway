@@ -25,27 +25,31 @@ export const openaiCodec: ProviderCodec = {
     const oauth = input.credentials.accessToken !== null;
     const { body, degradations, cacheKey } = toResponsesWire(input.request, input.model, { oauth });
 
-    const protocol: HeaderPair[] = [["Content-Type", "application/json"]];
+    const protocol: HeaderPair[] = [["content-type", "application/json"]];
 
     if (oauth) {
-      protocol.push(["Authorization", `Bearer ${input.credentials.accessToken}`]);
+      protocol.push(["authorization", `Bearer ${input.credentials.accessToken}`]);
       // Required by the Codex backend to select the billing account. Stored on
       // the credential at OAuth time.
       const accountId = input.credentials.providerData.accountId;
       if (typeof accountId === "string") protocol.push(["chatgpt-account-id", accountId]);
-      // The Codex backend partitions its prompt cache by session, and reads
-      // this header rather than `prompt_cache_key` to do it — measured, and the
-      // body field alone hit 2 of 5 where the header hit 14 of 15. Sent on this
-      // path only: `api.openai.com` has no such mechanism and takes the body
-      // field, which both hosts already carry.
-      protocol.push(["session_id", cacheKey]);
     } else if (input.credentials.apiKey !== null) {
-      protocol.push(["Authorization", `Bearer ${input.credentials.apiKey}`]);
+      protocol.push(["authorization", `Bearer ${input.credentials.apiKey}`]);
     } else {
       throw input.fail("AUTH", "openai credential has no token");
     }
 
-    // `originator` and `Accept: text/event-stream` come from the profile.
+    // The Codex backend partitions its prompt cache by session: the body field
+    // alone hit 2 of 5 where the measured `session_id` header hit 14 of 15.
+    // Codex 0.159.2 names it `session-id` and sends it on both hosts. This rename
+    // has not been re-measured live. Root-thread identity uses the same cache key.
+    protocol.push(
+      ["x-client-request-id", cacheKey],
+      ["session-id", cacheKey],
+      ["thread-id", cacheKey],
+    );
+
+    // `originator` and `accept: text/event-stream` come from the profile.
     const headers = orderHeaders(
       mergeHeaders(openaiProfile.headers, protocol),
       openaiProfile.order,

@@ -68,8 +68,7 @@ test("an empty or non-string client key falls through rather than being sent", (
   // Asserted on the **body**, not only on the returned key. The vendor bag is
   // merged onto the body verbatim, so a version of this that checked the return
   // value alone passed while the merge wrote the rejected value straight back
-  // into `prompt_cache_key` — and on the API-key leg, where no `session_id`
-  // header exists, that field is the only mechanism there is.
+  // into `prompt_cache_key`, disagreeing with the session headers on the wire.
   for (const rejected of [{ prompt_cache_key: "" }, { session_id: 42 }, { prompt_cache_key: 7 }]) {
     const { body, cacheKey } = toResponsesWire({ ...base, vendor: { openai: rejected } }, "gpt-5");
     expect(cacheKey).toMatch(/^[0-9a-f]{32}$/);
