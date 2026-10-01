@@ -399,7 +399,7 @@ test("catalogPricing reports an unlisted model rather than guessing", () => {
   expect(catalogPricing("openai", "gpt-6.1-sol")).toEqual({
     input: 2,
     output: 10,
-    cacheRead: 0.2,
+    cacheRead: 0.1,
     cacheWrite5m: 2.5,
     cacheWrite1h: 0,
   });
