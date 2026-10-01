@@ -29,9 +29,10 @@ const EXPECTED = {
     ],
   },
   openai: {
-    defaultModel: "gpt-6-sol",
+    defaultModel: "gpt-6.1-sol",
     ids: [
       "gpt-6-astra",
+      "gpt-6.1-sol",
       "gpt-6-sol",
       "gpt-6-luna",
       "gpt-5.6",
@@ -394,6 +395,13 @@ test("catalogPricing reports an unlisted model rather than guessing", () => {
     cacheRead: 0.2,
     cacheWrite5m: 5,
     cacheWrite1h: 8,
+  });
+  expect(catalogPricing("openai", "gpt-6.1-sol")).toEqual({
+    input: 2,
+    output: 10,
+    cacheRead: 0.1,
+    cacheWrite5m: 2.5,
+    cacheWrite1h: 0,
   });
   expect(catalogPricing("openai", "gpt-6-sol")).toEqual({
     input: 2,

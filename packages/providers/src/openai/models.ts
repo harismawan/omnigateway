@@ -3,9 +3,9 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
 /**
  * OpenAI's curated models and their list prices.
  *
- * Prices checked 2026-09-23 against OpenAI's published API pricing. Cache reads
- * keep the 90% discount, so each cache-read figure is a tenth of that tier's
- * input price. Cache writes are billed at 1.25x the base input token rate
+ * Prices checked 2026-10-01 against OpenAI's published API pricing. Cache reads
+ * keep the 90% discount on most models ($0.10/MTok on gpt-6.1-sol's $2.00 base input,
+ * a 95% discount). Cache writes are billed at 1.25x the base input token rate
  * (recorded under cacheWrite5m; OpenAI does not offer a separate 1h tier).
  *
  * OpenAI prices these models in two context tiers, split at 272,000 input
@@ -31,7 +31,7 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  * never advertised the API's window by default.
  */
 export const OPENAI_MODELS: ProviderModelCatalogEntry = {
-  defaultModel: "gpt-6-sol",
+  defaultModel: "gpt-6.1-sol",
   // OAuth reaches the narrower Codex surface; a platform key reaches the API.
   // Both are bearer tokens, and the adapter picks the URL from which it has.
   authTypes: ["oauth", "apiKey"],
@@ -40,6 +40,13 @@ export const OPENAI_MODELS: ProviderModelCatalogEntry = {
       id: "gpt-6-astra",
       label: "GPT-6 Astra",
       pricing: { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 0 },
+      limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
+      oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
+    },
+    {
+      id: "gpt-6.1-sol",
+      label: "GPT-6.1 Sol",
+      pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite5m: 2.5, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
