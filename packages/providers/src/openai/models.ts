@@ -31,7 +31,7 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  * never advertised the API's window by default.
  */
 export const OPENAI_MODELS: ProviderModelCatalogEntry = {
-  defaultModel: "gpt-6-sol",
+  defaultModel: "gpt-6.1-sol",
   // OAuth reaches the narrower Codex surface; a platform key reaches the API.
   // Both are bearer tokens, and the adapter picks the URL from which it has.
   authTypes: ["oauth", "apiKey"],
@@ -40,6 +40,13 @@ export const OPENAI_MODELS: ProviderModelCatalogEntry = {
       id: "gpt-6-astra",
       label: "GPT-6 Astra",
       pricing: { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 0 },
+      limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
+      oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
+    },
+    {
+      id: "gpt-6.1-sol",
+      label: "GPT-6.1 Sol",
+      pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
     },
