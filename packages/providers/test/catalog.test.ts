@@ -24,7 +24,9 @@ const EXPECTED = {
       "claude-opus-5-5",
       "claude-fable-5",
       "claude-opus-5",
+      "claude-sonnet-5-5",
       "claude-sonnet-5",
+      "claude-haiku-5-5",
       "claude-haiku-4-5",
     ],
   },
@@ -395,6 +397,21 @@ test("catalogPricing reports an unlisted model rather than guessing", () => {
     cacheRead: 0.2,
     cacheWrite5m: 5,
     cacheWrite1h: 8,
+  });
+  expect(catalogPricing("anthropic", "claude-sonnet-5-5")).toEqual({
+    input: 2,
+    output: 10,
+    // 0.05x, where Sonnet 5 at the same base input pays 0.1x.
+    cacheRead: 0.1,
+    cacheWrite5m: 2.5,
+    cacheWrite1h: 4,
+  });
+  expect(catalogPricing("anthropic", "claude-haiku-5-5")).toEqual({
+    input: 0.1,
+    output: 0.5,
+    cacheRead: 0.01,
+    cacheWrite5m: 0.125,
+    cacheWrite1h: 0.2,
   });
   expect(catalogPricing("openai", "gpt-6.1-sol")).toEqual({
     input: 2,

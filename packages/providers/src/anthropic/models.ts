@@ -7,10 +7,15 @@ import type {
 /**
  * Anthropic's curated models and their list prices.
  *
- * Prices checked 2026-09-23 against Anthropic's published API pricing. Cache
+ * Prices checked 2026-10-09 against Anthropic's published API pricing. Cache
  * reads are 0.1x of base input across the range *except* on Claude Fable 5.1
- * (0.025x) and Claude Opus 5.5 (0.05x); the figures below are absolute because
- * a target stores a number, not a multiplier.
+ * (0.025x) and Claude Opus 5.5 and Sonnet 5.5 (0.05x); the figures below are
+ * absolute because a target stores a number, not a multiplier.
+ *
+ * Claude Haiku 5.5 is priced by prompt length: a request whose prompt (cache
+ * reads and writes included) exceeds 100,000 tokens pays 5x on every class, for
+ * every token in it. The catalog cannot express that, so the figures are the
+ * **up-to-100K** rates; an operator running long prompts edits the stored price.
  *
  * Claude Sonnet 5's $2.00 / $10.00 launch rate is now its standard price — the
  * increase to $3.00 / $15.00 scheduled for 2026-09-01 was cancelled.
@@ -54,9 +59,23 @@ export const ANTHROPIC_MODELS: ProviderModelCatalogEntry = {
       limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
     },
     {
+      id: "claude-sonnet-5-5",
+      label: "Claude Sonnet 5.5",
+      // Cache reads are 0.05x here ($0.10/MTok on $2 base input).
+      pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite5m: 2.5, cacheWrite1h: 4 },
+      limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+    },
+    {
       id: "claude-sonnet-5",
       label: "Claude Sonnet 5",
       pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite5m: 2.5, cacheWrite1h: 4 },
+      limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+    },
+    {
+      id: "claude-haiku-5-5",
+      label: "Claude Haiku 5.5",
+      // The up-to-100K rates; see the header for the over-100K band.
+      pricing: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite5m: 0.125, cacheWrite1h: 0.2 },
       limits: { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
     },
     {
