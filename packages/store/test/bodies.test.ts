@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { expect, spyOn, test } from "bun:test";
 import { mkdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1777,6 +1778,77 @@ test("the orphan sweep removes artifact files with no row and spares the rest", 
   // Idempotent, and it does not mistake a live artifact for an orphan on a
   // second pass.
   expect(await store.bodies.sweepOrphans()).toBe(0);
+  await cleanup(store, root);
+});
+
+/** Points a row at the bytes a test wrote over its artifact file, as `put` would have. */
+function describeBytes(
+  dbPath: string,
+  requestId: string,
+  sealed: { bytes: Uint8Array; sha256: string },
+): void {
+  const db = new Database(dbPath);
+  try {
+    db.run("UPDATE request_bodies SET size_bytes = ?, sha256 = ? WHERE request_id = ?", [
+      sealed.bytes.length,
+      sealed.sha256,
+      requestId,
+    ]);
+  } finally {
+    db.close();
+  }
+}
+
+test("the orphan sweep goes by path, so binary artifacts are spared with a row and swept without", async () => {
+  const { store, root, dbPath, dir } = await tempStore();
+  const input = artifact({ requestId: "req_binary_kept" });
+  const kept = await store.bodies.put(input);
+  const key = await deriveKey("test-secret-value-for-unit-tests");
+  const sealed = await sealBinaryArtifact(key, prepareArtifact(input).json);
+  await writeArtifact(dir, kept.relPath ?? "", sealed.bytes);
+  describeBytes(dbPath, input.requestId, sealed);
+  await writeArtifact(dir, "2025/12/31/req_binary_orphan.json.enc", sealed.bytes);
+
+  expect(await store.bodies.sweepOrphans()).toBe(1);
+  expect(await exists(join(dir, "2025/12/31/req_binary_orphan.json.enc"))).toBe(false);
+  expect(await exists(join(dir, kept.relPath ?? ""))).toBe(true);
+  // The binary envelope sits under the unchanged `.json.enc` name and is read
+  // back by the row that points at it.
+  expect(new TextDecoder().decode(sealed.bytes.slice(0, 4))).toBe("OGBA");
+  expect(kept.relPath?.endsWith(".json.enc")).toBe(true);
+  expect((await store.bodies.get(input.requestId))?.artifact).toEqual(
+    prepareArtifact(input).artifact,
+  );
+  expect(await store.bodies.sweepOrphans()).toBe(0);
+  await cleanup(store, root);
+});
+
+test("a snapshot carries the row but not a binary artifact file, so the restored pointer is missing", async () => {
+  const { store, root, dbPath, dir } = await tempStore();
+  const input = artifact({ requestId: "req_binary_snap" });
+  const row = await store.bodies.put(input);
+  const key = await deriveKey("test-secret-value-for-unit-tests");
+  const sealed = await sealBinaryArtifact(key, prepareArtifact(input).json);
+  await writeArtifact(dir, row.relPath ?? "", sealed.bytes);
+  describeBytes(dbPath, input.requestId, sealed);
+  expect((await store.bodies.get(input.requestId))?.row.detailState).toBe("ready");
+
+  const snapshot = join(root, "snap", "omnigateway.db");
+  await mkdir(join(root, "snap"), { recursive: true });
+  await store.maintenance.snapshotTo(snapshot);
+  expect(await exists(join(root, "snap", "request_bodies"))).toBe(false);
+
+  // A restored database is opened where the artifact directory is not.
+  const restored = await createStore({ path: snapshot, encryptionKey: key });
+  try {
+    const read = await restored.bodies.get(input.requestId);
+    expect(read?.row.sha256).toBe(sealed.sha256);
+    expect(read?.row.sizeBytes).toBe(sealed.bytes.length);
+    expect(read?.row.detailState).toBe("missing");
+    expect(read?.artifact).toBeNull();
+  } finally {
+    restored.close();
+  }
   await cleanup(store, root);
 });
 

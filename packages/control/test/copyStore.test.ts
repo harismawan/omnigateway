@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import { mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createStore, deriveKey } from "@omni/store";
 import {
   memoryStore,
   requestLog,
@@ -56,6 +60,40 @@ test("copies configuration, credentials, keys and completed logs into an empty s
   await expect(copyStore(source, target_)).rejects.toThrow("already holds data");
   source.close();
   target_.close();
+});
+
+/**
+ * Bodies are the one corpus a copy leaves behind, whatever envelope the source
+ * stored them in: the report says so, and the target holds no row for them.
+ */
+test("a copy leaves request bodies with the source and says so", async () => {
+  const root = join(tmpdir(), `omni-copy-bodies-${crypto.randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const source = await createStore({
+    path: join(root, "source.db"),
+    encryptionKey: await deriveKey("test-encryption-key-0123456789"),
+  });
+  const target_ = await memoryStore();
+  try {
+    await source.bodies.put({
+      schemaVersion: 1,
+      requestId: "req_copy-1",
+      at: 1_700_000_000_000,
+      client: { request: { q: "kept at the source" }, response: null, truncated: false },
+      attempts: [],
+      error: null,
+    });
+    expect((await source.bodies.get("req_copy-1"))?.row.detailState).toBe("ready");
+
+    const report = await copyStore(source, target_);
+    expect(report.notCarried.some((line) => line.startsWith("request bodies"))).toBe(true);
+    expect(await target_.bodies.get("req_copy-1")).toBeNull();
+    expect((await source.bodies.get("req_copy-1"))?.row.detailState).toBe("ready");
+  } finally {
+    source.close();
+    target_.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 /** The move itself, SQLite onto a real Postgres, when one is to hand. */
