@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { expect, spyOn, test } from "bun:test";
+import { mkdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,7 +7,10 @@ import {
   decodeArtifact,
   MAX_ARTIFACT_BYTES,
   prepareArtifact,
+  readArtifact,
   relPathFor,
+  sealArtifact,
+  sealBinaryArtifact,
   sha256Hex,
   writeArtifact,
 } from "../src/bodies/artifact.ts";
@@ -948,14 +951,416 @@ test("an oversized but authenticated legacy frame is a real fixture past the pro
   expect(bytes.length).toBeGreaterThan(2 * MAX_ARTIFACT_BYTES + 65);
 });
 
-test("an oversized legacy frame decodes today because no acquisition bound exists yet", async () => {
-  // Documents current behaviour, not a promise: the controller ruling is that
-  // legacy envelopes above 2 * MAX_ARTIFACT_BYTES + 65 become `corrupt` once
-  // bounded acquisition lands, and this assertion flips with it.
-  const { prepared, bytes, digest } = await oversizedLegacy;
-  const read = await decodeArtifact(await legacyKey, bytes, digest);
+/** The read ceiling every envelope answers to, restated rather than imported. */
+const GLOBAL_CEILING = 2 * MAX_ARTIFACT_BYTES + 65;
+/** Header, IV, and tag around at most one artifact budget of ciphertext. */
+const BINARY_CEILING = MAX_ARTIFACT_BYTES + 38;
+const CORRUPT = JSON.stringify({ ok: false, failure: "corrupt" });
+
+/**
+ * Decodes with crypto watched, so a rejection can be shown to have happened on
+ * the shape alone: no digest computed and nothing decrypted. Digests the caller
+ * wants to supply must be computed before this is called.
+ */
+async function decodeUnwatched(
+  bytes: Uint8Array,
+  expected: string | null,
+): Promise<{ read: string; digests: number; decrypts: number }> {
+  const key = await legacyKey;
+  const digest = spyOn(crypto.subtle, "digest");
+  const decrypt = spyOn(crypto.subtle, "decrypt");
+  try {
+    const read = JSON.stringify(await decodeArtifact(key, bytes, expected));
+    return { read, digests: digest.mock.calls.length, decrypts: decrypt.mock.calls.length };
+  } finally {
+    digest.mockRestore();
+    decrypt.mockRestore();
+  }
+}
+
+/** A JSON object of exactly `n` UTF-8 bytes. */
+function paddedJson(n: number): string {
+  return `{"pad":"${"x".repeat(n - 10)}"}`;
+}
+
+test("an oversized legacy frame is corrupt, rejected before any digest or decryption", async () => {
+  // The ruling: a legacy envelope past 2 * MAX_ARTIFACT_BYTES + 65 is not one a
+  // supported writer produced, and its size alone is the verdict.
+  const { bytes, digest } = await oversizedLegacy;
+  for (const expected of [digest, null]) {
+    const seen = await decodeUnwatched(bytes, expected);
+    expect(seen).toEqual({ read: CORRUPT, digests: 0, decrypts: 0 });
+  }
+});
+
+test("a legacy envelope exactly at the read ceiling decodes; the next size up is corrupt", async () => {
+  const atCeiling = await legacySeal(paddedJson(MAX_ARTIFACT_BYTES));
+  expect(atCeiling.length).toBe(GLOBAL_CEILING);
+  const read = await decodeArtifact(await legacyKey, atCeiling, await sha256Hex(atCeiling));
+  expect(read.ok).toBe(true);
+
+  const past = await legacySeal(paddedJson(MAX_ARTIFACT_BYTES + 1));
+  expect(past.length).toBe(GLOBAL_CEILING + 2);
+  const seen = await decodeUnwatched(past, null);
+  expect(seen).toEqual({ read: CORRUPT, digests: 0, decrypts: 0 });
+});
+
+/** Writes `bytes` under a fresh bodies directory, for the acquisition tests. */
+async function plantFile(
+  bytes: Uint8Array | null,
+): Promise<{ root: string; dir: string; rel: string }> {
+  const root = join(tmpdir(), `omni-bodies-${crypto.randomUUID()}`);
+  const dir = join(root, "request_bodies");
+  const rel = relPathFor(LEGACY_INPUT.requestId, LEGACY_INPUT.at);
+  if (bytes !== null) await writeArtifact(dir, rel, bytes);
+  return { root, dir, rel };
+}
+
+test("an artifact file past the ceiling is corrupt, not missing, and is never read whole", async () => {
+  const { bytes, digest } = await oversizedLegacy;
+  const planted = await plantFile(bytes);
+  try {
+    expect(await readArtifact(await legacyKey, planted.dir, planted.rel, digest)).toEqual({
+      ok: false,
+      failure: "corrupt",
+    });
+
+    // Thirty-two tebibytes of hole. Reading it whole is not possible on any
+    // machine this runs on, so `corrupt` here can only mean the size was judged
+    // from the handle before anything was allocated for it.
+    await truncate(join(planted.dir, planted.rel), 2 ** 45);
+    expect(await readArtifact(await legacyKey, planted.dir, planted.rel, null)).toEqual({
+      ok: false,
+      failure: "corrupt",
+    });
+  } finally {
+    await rm(planted.root, { recursive: true, force: true });
+  }
+});
+
+test("an artifact file exactly at the ceiling is read, and an absent one is missing", async () => {
+  const atCeiling = await legacySeal(paddedJson(MAX_ARTIFACT_BYTES));
+  const planted = await plantFile(atCeiling);
+  try {
+    const read = await readArtifact(
+      await legacyKey,
+      planted.dir,
+      planted.rel,
+      await sha256Hex(atCeiling),
+    );
+    expect(read.ok).toBe(true);
+    expect(
+      await readArtifact(await legacyKey, planted.dir, "2026/08/17/nope.json.enc", null),
+    ).toEqual({ ok: false, failure: "missing" });
+  } finally {
+    await rm(planted.root, { recursive: true, force: true });
+  }
+});
+
+test("an oversized legacy file reads as corrupt through the repository", async () => {
+  const root = join(tmpdir(), `omni-bodies-${crypto.randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const dbPath = join(root, "omnigateway.db");
+  const dir = bodiesDirFor(dbPath);
+  const db = openDb(dbPath);
+  const repo = createBodyRepo(db, await legacyKey, dir);
+  const { bytes, digest } = await oversizedLegacy;
+  const relPath = relPathFor(LEGACY_INPUT.requestId, LEGACY_INPUT.at);
+  await writeArtifact(dir, relPath, bytes);
+  db.run(
+    `INSERT INTO request_bodies (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated)
+     VALUES (?,?,?,?,?,?,?)`,
+    [LEGACY_INPUT.requestId, LEGACY_INPUT.at, relPath, bytes.length, digest, "ready", 0],
+  );
+
+  const read = await repo.get(LEGACY_INPUT.requestId);
+  expect(read?.row.detailState).toBe("corrupt");
+  expect(read?.artifact).toBeNull();
+
+  db.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Binary envelope. Fixtures are sealed here with WebCrypto from the published
+// layout — magic, version, codec, claimed length, IV, ciphertext and tag, the
+// first ten bytes as additional data — never by the artifact writer, so the
+// reader is proven against the format rather than against its own writer.
+// ---------------------------------------------------------------------------
+
+type BinaryFields = {
+  magic?: string;
+  version?: number;
+  codec?: number;
+  claimed?: number;
+  /** What GCM authenticates as additional data; the header itself by default. */
+  aad?: Uint8Array<ArrayBuffer>;
+  key?: CryptoKey;
+};
+
+function binaryHeader(magic: string, version: number, codec: number, claimed: number) {
+  const header = new Uint8Array(10);
+  header.set(encoder.encode(magic).subarray(0, 4));
+  header[4] = version;
+  header[5] = codec;
+  new DataView(header.buffer).setUint32(6, claimed, false);
+  return header;
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
+async function binarySeal(
+  payload: Uint8Array<ArrayBuffer>,
+  fields: BinaryFields = {},
+): Promise<Uint8Array> {
+  const header = binaryHeader(
+    fields.magic ?? "OGBA",
+    fields.version ?? 1,
+    fields.codec ?? 0,
+    fields.claimed ?? payload.length,
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: fields.aad ?? header, tagLength: 128 },
+    fields.key ?? (await legacyKey),
+    payload,
+  );
+  return concat(header, iv, new Uint8Array(sealed));
+}
+
+test("a binary envelope sealed from the spec decodes to the prepared artifact", async () => {
+  const prepared = prepareArtifact(LEGACY_INPUT);
+  const bytes = await binarySeal(encoder.encode(prepared.json));
+  expect(bytes.length).toBe(Buffer.byteLength(prepared.json) + 38);
+
+  const digest = await sha256Hex(bytes);
+  for (const expected of [digest, null]) {
+    const read = await decodeArtifact(await legacyKey, bytes, expected);
+    expect(`${expected === null ? "null" : "digest"}: ${read.ok}`).toBe(
+      `${expected === null ? "null" : "digest"}: true`,
+    );
+    if (read.ok) expect(read.artifact).toEqual(prepared.artifact);
+  }
+});
+
+test("a binary envelope exactly at its ceiling decodes", async () => {
+  const bytes = await binarySeal(encoder.encode(paddedJson(MAX_ARTIFACT_BYTES)));
+  expect(bytes.length).toBe(BINARY_CEILING);
+  expect((await decodeArtifact(await legacyKey, bytes, await sha256Hex(bytes))).ok).toBe(true);
+});
+
+test("a binary envelope that fails authentication is corrupt, digest or no digest", async () => {
+  const json = encoder.encode(prepareArtifact(LEGACY_INPUT).json);
+  const valid = await binarySeal(json);
+  const flip = (offset: number): Uint8Array => {
+    const out = valid.slice();
+    out[offset] = (out[offset] ?? 0) ^ 0x01;
+    return out;
+  };
+  const other = await deriveKey("another-secret-value-for-unit-tests");
+
+  const cases: Array<[string, Uint8Array]> = [
+    ["iv byte flipped", flip(10)],
+    ["ciphertext byte flipped", flip(22)],
+    ["tag byte flipped", flip(valid.length - 1)],
+    ["sealed under another key", await binarySeal(json, { key: other })],
+    // The header must be what GCM authenticated: sealed with none, or with a
+    // header that differs from the one stored, neither may decode.
+    ["sealed without additional data", await binarySeal(json, { aad: new Uint8Array(0) })],
+    [
+      "sealed over a different claimed length",
+      await binarySeal(json, { aad: binaryHeader("OGBA", 1, 0, json.length + 1) }),
+    ],
+    [
+      "sealed over a different codec",
+      await binarySeal(json, { aad: binaryHeader("OGBA", 1, 1, json.length) }),
+    ],
+    [
+      "sealed over a different magic",
+      await binarySeal(json, { aad: binaryHeader("OGBX", 1, 0, json.length) }),
+    ],
+  ];
+
+  const key = await legacyKey;
+  for (const [name, bytes] of cases) {
+    // Both with no digest and with the digest of exactly these bytes, so the
+    // checksum can never be what is standing in for authentication.
+    for (const expected of [null, await sha256Hex(bytes)]) {
+      expect(`${name}: ${JSON.stringify(await decodeArtifact(key, bytes, expected))}`).toBe(
+        `${name}: ${CORRUPT}`,
+      );
+    }
+  }
+  expect(await decodeArtifact(key, valid, "0".repeat(64))).toEqual({
+    ok: false,
+    failure: "corrupt",
+  });
+});
+
+test("a binary header this reader does not implement is corrupt before any crypto runs", async () => {
+  const json = encoder.encode(prepareArtifact(LEGACY_INPUT).json);
+  const valid = await binarySeal(json);
+  const legacy = await legacySeal(prepareArtifact(LEGACY_INPUT).json);
+  const n = json.length;
+
+  // Every one authenticates under its own header, so GCM would accept it: only
+  // the reader's own reading of the header can turn it away.
+  const cases: Array<[string, Uint8Array]> = [
+    ["version 0", await binarySeal(json, { version: 0 })],
+    ["version 2", await binarySeal(json, { version: 2 })],
+    ["version 255", await binarySeal(json, { version: 255 })],
+    ["codec 1 (gzip, not yet read)", await binarySeal(json, { codec: 1 })],
+    ["codec 2", await binarySeal(json, { codec: 2 })],
+    ["codec 255", await binarySeal(json, { codec: 255 })],
+    ["claimed length zero, empty payload", await binarySeal(new Uint8Array(0))],
+    ["claimed length one short", await binarySeal(json, { claimed: n - 1 })],
+    ["claimed length one long", await binarySeal(json, { claimed: n + 1 })],
+    ["claimed length 2^32 - 1", await binarySeal(json, { claimed: 2 ** 32 - 1 })],
+    [
+      "one byte past the binary ceiling",
+      await binarySeal(encoder.encode(paddedJson(MAX_ARTIFACT_BYTES + 1))),
+    ],
+    ["tag truncated by a byte", valid.subarray(0, valid.length - 1)],
+    ["trailing byte after the tag", concat(valid, new Uint8Array([0]))],
+    ["header only", valid.subarray(0, 10)],
+    ["header and iv only", valid.subarray(0, 22)],
+    ["one byte short of the minimum", valid.subarray(0, 37)],
+    ["magic alone", encoder.encode("OGBA")],
+    // Magic is compared exactly and whole; nothing near it is either format.
+    ["magic in lower case", await binarySeal(json, { magic: "ogba" })],
+    ["magic with a wrong last byte", await binarySeal(json, { magic: "OGBX" })],
+    ["legacy prefix without its colon", encoder.encode("enc:v1")],
+    // Neither format falls back to the other.
+    ["binary magic ahead of a legacy envelope", concat(encoder.encode("OGBA"), legacy)],
+    ["legacy prefix ahead of a binary envelope", concat(encoder.encode("enc:v1:"), valid)],
+    ["empty input", new Uint8Array(0)],
+  ];
+
+  for (const [name, bytes] of cases) {
+    const digest = await sha256Hex(bytes);
+    for (const expected of [null, digest]) {
+      const seen = await decodeUnwatched(bytes, expected);
+      expect(`${name}: ${JSON.stringify(seen)}`).toBe(
+        `${name}: ${JSON.stringify({ read: CORRUPT, digests: 0, decrypts: 0 })}`,
+      );
+    }
+  }
+});
+
+test("an authenticated binary plaintext that is not a UTF-8 JSON object is corrupt", async () => {
+  const key = await legacyKey;
+  const text = (s: string) => encoder.encode(s);
+  const cases: Array<[string, Uint8Array<ArrayBuffer>]> = [
+    // A lenient decoder turns each of these into U+FFFD inside a valid object.
+    ["invalid byte in a string", concat(text('{"a":"'), new Uint8Array([0xff]), text('"}'))],
+    ["overlong encoding", concat(text('{"a":"'), new Uint8Array([0xc0, 0xaf]), text('"}'))],
+    ["lone continuation byte", concat(text('{"a":"'), new Uint8Array([0x80]), text('"}'))],
+    ["not json", text("not json {")],
+    ["array", text("[]")],
+    ["null", text("null")],
+    ["number", text("42")],
+    ["truncated object", text('{"a":')],
+  ];
+  for (const [name, payload] of cases) {
+    const bytes = await binarySeal(payload);
+    const read = await decodeArtifact(key, bytes, await sha256Hex(bytes));
+    expect(`${name}: ${JSON.stringify(read)}`).toBe(`${name}: ${CORRUPT}`);
+  }
+});
+
+test("a binary file reads as ready through the repository", async () => {
+  const root = join(tmpdir(), `omni-bodies-${crypto.randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const dbPath = join(root, "omnigateway.db");
+  const dir = bodiesDirFor(dbPath);
+  const db = openDb(dbPath);
+  const repo = createBodyRepo(db, await legacyKey, dir);
+
+  const prepared = prepareArtifact(LEGACY_INPUT);
+  const bytes = await binarySeal(encoder.encode(prepared.json));
+  const relPath = relPathFor(LEGACY_INPUT.requestId, LEGACY_INPUT.at);
+  await writeArtifact(dir, relPath, bytes);
+  db.run(
+    `INSERT INTO request_bodies (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated)
+     VALUES (?,?,?,?,?,?,?)`,
+    [LEGACY_INPUT.requestId, LEGACY_INPUT.at, relPath, bytes.length, null, "corrupt", 0],
+  );
+
+  // A null digest and a row previously marked corrupt: GCM alone vouches, and
+  // the state recovers on the read that succeeds.
+  const read = await repo.get(LEGACY_INPUT.requestId);
+  expect(read?.row.detailState).toBe("ready");
+  expect(read?.artifact).toEqual(prepared.artifact);
+
+  db.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("the binary writer emits the published layout, readable with WebCrypto alone", async () => {
+  const prepared = prepareArtifact(LEGACY_INPUT);
+  const json = encoder.encode(prepared.json);
+  const sealed = await sealBinaryArtifact(await legacyKey, prepared.json);
+  const { bytes } = sealed;
+
+  expect(decoder.decode(bytes.subarray(0, 4))).toBe("OGBA");
+  expect(bytes[4]).toBe(1);
+  expect(bytes[5]).toBe(0);
+  expect(new DataView(bytes.buffer, bytes.byteOffset).getUint32(6, false)).toBe(json.length);
+  expect(bytes.length).toBe(json.length + 38);
+  expect(sealed.sha256).toBe(await sha256Hex(bytes));
+
+  // Opened here without the reader: the first ten bytes are the additional data.
+  const plain = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: bytes.slice(10, 22),
+      additionalData: bytes.slice(0, 10),
+      tagLength: 128,
+    },
+    await legacyKey,
+    bytes.slice(22),
+  );
+  expect(new Uint8Array(plain)).toEqual(json);
+
+  const read = await decodeArtifact(await legacyKey, bytes, sealed.sha256);
   expect(read.ok).toBe(true);
   if (read.ok) expect(read.artifact).toEqual(prepared.artifact);
+});
+
+test("the same JSON sealed twice gets a fresh IV and different bytes in either format", async () => {
+  const { json } = prepareArtifact(LEGACY_INPUT);
+  const key = await legacyKey;
+
+  const [a, b] = [await sealBinaryArtifact(key, json), await sealBinaryArtifact(key, json)];
+  expect(a.bytes.subarray(0, 10)).toEqual(b.bytes.subarray(0, 10));
+  expect(toHex(a.bytes.subarray(10, 22))).not.toBe(toHex(b.bytes.subarray(10, 22)));
+  expect(toHex(a.bytes)).not.toBe(toHex(b.bytes));
+  expect(a.sha256).not.toBe(b.sha256);
+
+  const [c, d] = [await sealArtifact(key, json), await sealArtifact(key, json)];
+  expect(legacyParts(c.bytes).iv).not.toBe(legacyParts(d.bytes).iv);
+  expect(toHex(c.bytes)).not.toBe(toHex(d.bytes));
+});
+
+test("the default writer still emits the legacy envelope", async () => {
+  const { bytes } = await sealArtifact(await legacyKey, prepareArtifact(LEGACY_INPUT).json);
+  expect(decoder.decode(bytes).startsWith("enc:v1:")).toBe(true);
+});
+
+test("the binary writer refuses plaintext outside one byte to the artifact budget", async () => {
+  const key = await legacyKey;
+  await expect(sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES + 1))).rejects.toThrow();
+  await expect(sealBinaryArtifact(key, "")).rejects.toThrow();
+  const atBudget = await sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES));
+  expect(atBudget.bytes.length).toBe(BINARY_CEILING);
 });
 
 // ---------------------------------------------------------------------------
