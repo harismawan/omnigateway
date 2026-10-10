@@ -710,8 +710,16 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
       : readConversationHeader(headers ?? undefined);
   if (conversation !== undefined) request.conversationId = conversation;
 
-  const extras = extraFields(body as Record<string, unknown>, KNOWN);
-  if (extras !== undefined) request.vendor = { anthropic: extras };
+  const rawThinking = (body as Record<string, unknown>).thinking;
+  const thinkingExtras =
+    parsed.thinking !== undefined && typeof rawThinking === "object" && rawThinking !== null
+      ? extraFields(rawThinking as Record<string, unknown>, ["type", "display", "budget_tokens"])
+      : undefined;
+  const extras = {
+    ...extraFields(body as Record<string, unknown>, KNOWN),
+    ...(thinkingExtras === undefined ? {} : { thinking: thinkingExtras }),
+  };
+  if (Object.keys(extras).length > 0) request.vendor = { anthropic: extras };
 
   if (named.betas.length > 0) request.betas = named.betas;
 

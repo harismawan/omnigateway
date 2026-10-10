@@ -2,13 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { ChatRequest } from "@omni/ir";
 import { toWire } from "../../../../packages/providers/src/anthropic/wire.ts";
 import { toAntigravityWire } from "../../../../packages/providers/src/antigravity/wire.ts";
-import { toKiloWire } from "../../../../packages/providers/src/kilo/wire.ts";
-import { toChatWire } from "../../../../packages/providers/src/kimi/wire.ts";
 import {
   toCustomChatWire,
   toCustomResponsesWire,
 } from "../../../../packages/providers/src/custom/wire.ts";
 import { toGrokWire } from "../../../../packages/providers/src/grok/wire.ts";
+import { toKiloWire } from "../../../../packages/providers/src/kilo/wire.ts";
+import { toChatWire } from "../../../../packages/providers/src/kimi/wire.ts";
 import { toMuseWire } from "../../../../packages/providers/src/muse/wire.ts";
 import { toResponsesWire } from "../../../../packages/providers/src/openai/wire.ts";
 import { parseAnthropicRequest } from "../../src/ingress/anthropic.ts";
@@ -99,4 +99,65 @@ describe("between-tools reasoning", () => {
       });
     }
   }
+});
+
+describe("unparsed thinking fields", () => {
+  const block_binding = { prefix_mismatch_behavior: "drop_block" };
+  for (const oauth of [false, true]) {
+    for (const stream of [false, true]) {
+      test(`preserves generic extras, oauth=${oauth}, stream=${stream}`, () => {
+        const req = parseAnthropicRequest({
+          ...betweenToolsBody,
+          stream,
+          thinking: {
+            type: "adaptive",
+            display: "updates",
+            block_binding,
+            future_field: { value: 1 },
+          },
+        });
+        expect(req.vendor?.anthropic?.thinking).toEqual({
+          block_binding,
+          future_field: { value: 1 },
+        });
+        expect(toWire(req, req.model, { oauth }).body.thinking).toEqual({
+          type: "adaptive",
+          display: "updates",
+          block_binding,
+          future_field: { value: 1 },
+        });
+        for (const [, encode] of encoders) {
+          expect(encode(req, "m").body).not.toHaveProperty("thinking");
+        }
+      });
+    }
+  }
+  test("extras cannot replace IR-derived members or create thinking", () => {
+    const req = parseAnthropicRequest({
+      ...betweenToolsBody,
+      thinking: { type: "adaptive", display: "updates" },
+    });
+    req.vendor = {
+      anthropic: { thinking: { type: "disabled", display: "summarized", block_binding } },
+    };
+    expect(toWire(req, req.model, { oauth: false }).body.thinking).toEqual({
+      type: "adaptive",
+      display: "updates",
+      block_binding,
+    });
+    delete req.reasoning;
+    expect(toWire(req, req.model, { oauth: false }).body).not.toHaveProperty("thinking");
+  });
+});
+
+test("between-tools extras do not re-enable clear_thinking context edits", () => {
+  const req = parseAnthropicRequest({
+    ...betweenToolsBody,
+    thinking: { type: "between_tools", future_field: true },
+    context_management: { edits: [{ type: "clear_thinking_20251015" }] },
+  });
+  const { body, degradations } = toWire(req, req.model, { oauth: false });
+  expect(body.thinking).toEqual({ type: "between_tools", future_field: true });
+  expect(body.context_management).toBeUndefined();
+  expect(degradations).toContain("anthropic:clear-thinking-unsupported");
 });

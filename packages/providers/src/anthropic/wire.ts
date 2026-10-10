@@ -36,11 +36,13 @@ export type AnthropicBody = {
    */
   tools?: Record<string, unknown>[];
   tool_choice?: unknown;
-  thinking?:
+  thinking?: (
     | { type: "between_tools" }
     | { type: "adaptive"; display?: "summarized" | "omitted" | "updates" }
     | { type: "enabled"; budget_tokens: number }
-    | { type: "disabled" };
+    | { type: "disabled" }
+  ) &
+    Record<string, unknown>;
   /**
    * Set by this encoder as an object, but vendor passthrough merges whatever a
    * client sent under the same key, and a client can send anything. Declared as
@@ -353,8 +355,8 @@ function thinkingIsOff(thinking: unknown): boolean {
  * validate request shape per model, but it already knows this pairing is
  * rejected.
  *
- * Read after the vendor merge, not before: passthrough can set `thinking`
- * itself, and it outranks the mapping. Edit types are matched exactly — an
+ * Read after the vendor merge, which supplies context edits and thinking extras.
+ * IR-derived thinking members remain authoritative. Edit types match exactly — an
  * unfamiliar dated version is left for upstream to rule on rather than
  * prefix-matched into something this table has never seen.
  */
@@ -791,7 +793,11 @@ export function toWire(
   // `effort` the reasoning path put on the same field. Only a readable
   // `output_config` carrying a readable `format` outranks; anything else is
   // dropped and reported, and what it would have buried survives.
-  const vendorRaw = req.vendor?.anthropic ?? {};
+  const { thinking: thinkingExtras, ...vendorRaw } = req.vendor?.anthropic ?? {};
+  // The bag holds only unparsed members; it cannot replace or create IR thinking.
+  if (body.thinking !== undefined && isRecord(thinkingExtras)) {
+    body.thinking = { ...thinkingExtras, ...body.thinking };
+  }
   const vendorConfig = vendorRaw.output_config;
   const encoderConfig = isRecord(body.output_config) ? body.output_config : undefined;
   let unreadableFormat = false;
