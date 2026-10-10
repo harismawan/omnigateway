@@ -35,6 +35,41 @@ describe("SettingsBoard", () => {
     expect((screen.getByLabelText("Load") as HTMLInputElement).value).toBe("2");
   });
 
+  /** Bodies can expire sooner without shortening metadata history. */
+  test("edits body retention independently of log retention", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
+    renderWithProviders(<SettingsBoard />);
+    const field = (await screen.findByLabelText("Body retention")) as HTMLInputElement;
+    expect(field.value).toBe("1");
+    expect(field.min).toBe("1");
+    expect(field.max).toBe("3650");
+    await user.clear(field);
+    await user.type(field, "7");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body))).toMatchObject({
+        bodyRetentionDays: 7,
+        logRetentionDays: 30,
+      });
+    });
+  });
+
+  test("refuses invalid body retention before saving", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings();
+    renderWithProviders(<SettingsBoard />);
+    const field = await screen.findByLabelText("Body retention");
+    for (const value of ["0", "1.5", "3651"]) {
+      await user.clear(field);
+      await user.type(field, value);
+      await user.click(screen.getByRole("button", { name: "Save changes" }));
+      expect(await screen.findByRole("alert")).toBeTruthy();
+      expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+    }
+  });
+
   test("toggles deterministic lossy RTK compression and sends the setting", async () => {
     const user = userEvent.setup();
     const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });

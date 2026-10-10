@@ -1,4 +1,6 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
+import { SQL } from "bun";
 import { DEFAULT_SETTINGS, type VirtualModel } from "../../src/types.ts";
 import { forEachStore } from "./harness.ts";
 
@@ -23,6 +25,43 @@ forEachStore((backend) => {
     const again = await s.config.putSettings({ rtkEnabled: true });
     expect(again.maxAttempts).toBe(5);
     expect(again.rtkEnabled).toBe(true);
+  });
+
+  /** Old or malformed stored settings must not turn expiry into unbounded retention. */
+  test("body retention defaults old rows and rejects malformed stored windows", async () => {
+    const s = await backend.fresh();
+    expect((await s.config.getSettings()).bodyRetentionDays).toBe(1);
+    const write = async (value: string) => {
+      if (backend.name === "sqlite") {
+        const db = new Database(s.databasePath);
+        try {
+          db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [value]);
+        } finally {
+          db.close();
+        }
+      } else {
+        const sql = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string, max: 1 });
+        try {
+          await sql.unsafe(
+            "INSERT INTO settings (key, value) VALUES ('settings', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            [value],
+          );
+        } finally {
+          await sql.close();
+        }
+      }
+    };
+    await write(JSON.stringify({ logRetentionDays: 14 }));
+    expect((await s.config.getSettings()).bodyRetentionDays).toBe(1);
+    expect((await s.config.getSettings()).logRetentionDays).toBe(14);
+    for (const bodyRetentionDays of [0, -1, 1.5, 3_651, "7", null]) {
+      await write(JSON.stringify({ bodyRetentionDays }));
+      expect((await s.config.getSettings()).bodyRetentionDays).toBe(1);
+    }
+    await s.config.putSettings({ bodyRetentionDays: 7 });
+    expect((await s.config.getSettings()).bodyRetentionDays).toBe(7);
+    await s.config.putSettings({ logRetentionDays: 2 });
+    expect((await s.config.getSettings()).bodyRetentionDays).toBe(7);
   });
 
   test("virtual models round-trip nested targets, replace on put, and remove", async () => {

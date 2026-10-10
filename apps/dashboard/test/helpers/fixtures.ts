@@ -302,6 +302,7 @@ export const settings: Settings = {
   breakerThreshold: 3,
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,
+  bodyRetentionDays: 1,
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
   autoCacheEnabled: true,

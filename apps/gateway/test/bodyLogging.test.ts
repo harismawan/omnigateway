@@ -8,6 +8,7 @@ import { type BodyArtifact, createStore, deriveKey, type Settings, type Store } 
 import {
   type CaptureLogger,
   captureLogger,
+  requestLog,
   seedApiKey,
   seedCredential,
   target,
@@ -1056,6 +1057,45 @@ function artifactFor(requestId: string, at: number): BodyArtifact {
   };
 }
 
+/** Body expiry must remove payloads without removing still-retained request metadata. */
+test("body retention defaults to one day without expiring request metadata", async () => {
+  const { store, root } = await tempStore();
+  const day = 24 * 60 * 60 * 1000;
+  const at = NOW - 2 * day;
+  await store.usage.append(requestLog({ id: "req_old_body", at }));
+  const row = await store.bodies.put(artifactFor("req_old_body", at));
+  await store.bodies.put(artifactFor("req_boundary", NOW - day));
+
+  const swept = await pruneLogs(store, NOW);
+  expect(swept.raw).toBe(0);
+  expect(swept.bodies).toBe(1);
+  expect(await store.bodies.get("req_old_body")).toBeNull();
+  expect((await store.usage.recent(10)).map((log) => log.id)).toEqual(["req_old_body"]);
+  expect(await store.bodies.get("req_boundary")).not.toBeNull();
+  await expect(readFile(join(root, "request_bodies", row.relPath ?? ""))).rejects.toThrow();
+  await cleanup(store, root);
+});
+
+/** A saved body window can be longer than the default, but not longer than metadata. */
+test("body retention honours its own setting and is capped by metadata retention", async () => {
+  const { store, root } = await tempStore();
+  const day = 24 * 60 * 60 * 1000;
+  try {
+    await store.config.putSettings({ bodyRetentionDays: 7 });
+    await store.bodies.put(artifactFor("req_two_days", NOW - 2 * day));
+    await store.bodies.put(artifactFor("req_eight_days", NOW - 8 * day));
+    expect((await pruneLogs(store, NOW)).bodies).toBe(1);
+    expect(await store.bodies.get("req_two_days")).not.toBeNull();
+    expect(await store.bodies.get("req_eight_days")).toBeNull();
+
+    await store.config.putSettings({ logRetentionDays: 1 });
+    expect((await pruneLogs(store, NOW)).bodies).toBe(1);
+    expect(await store.bodies.get("req_two_days")).toBeNull();
+  } finally {
+    await cleanup(store, root);
+  }
+});
+
 test("sweeps body rows and their files on the retention window, the row cap, and orphans", async () => {
   const { store, root } = await tempStore();
   const day = 24 * 60 * 60 * 1000;
@@ -1072,7 +1112,7 @@ test("sweeps body rows and their files on the retention window, the row cap, and
     path: join(root, "omnigateway.db"),
     encryptionKey: await deriveKey(ENCRYPTION_KEY),
   });
-  await reopened.config.putSettings({ logRetentionDays: 30 });
+  await reopened.config.putSettings({ logRetentionDays: 30, bodyRetentionDays: 30 });
   // Drop the row and leave the file, the way an interrupted write would.
   await dropRow(root, "req_orphan");
 

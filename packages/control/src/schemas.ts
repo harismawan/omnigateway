@@ -320,6 +320,8 @@ export const settingsSchema = z.object({
   breakerThreshold: z.number().int().min(1),
   breakerCooldownMs: z.number().int().positive(),
   logRetentionDays: z.number().int().min(1),
+  /** Omission preserves the saved window for clients predating independent body retention. */
+  bodyRetentionDays: retentionSchema.shape.maxAgeDays.optional(),
   /** Zero disables quota polling. Takes effect at the next restart. */
   quotaPollIntervalMs: z.number().int().min(0),
   rtkEnabled: z.boolean(),
@@ -341,7 +343,7 @@ export const settingsSchema = z.object({
   /** Raw SSE frames per attempt. Gated apart because it is far the largest. */
   bodyLoggingCaptureStreamChunks: z.boolean(),
   /**
-   * The one pair of settings fields that may be omitted.
+   * Snapshot retention fields may also be omitted.
    *
    * Retention is edited from the database panel through its own operation, so a
    * settings save from a client that has never heard of it carries neither

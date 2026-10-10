@@ -152,7 +152,10 @@ lands.
 
 Two independent limits, because either alone fails:
 
-- `settings.logRetentionDays`, the existing window, applied to body rows and their artifacts.
+- `settings.bodyRetentionDays` (default 1 day, whole days from 1 to 3650), applied to body rows
+  and their artifacts, capped by `settings.logRetentionDays` (default 30 days). Metadata and
+  quota samples retain the log window. Missing body settings in old rows default to 1 day;
+  settings saves from old clients preserve the saved body window.
 - A row cap of 100000 body rows, pruning oldest first.
 
 The time window is what an operator reasons about. The row cap is what actually bounds disk: at
@@ -160,7 +163,7 @@ sustained load a seven-day window over full traffic is unbounded in practice, an
 backstop that keeps a busy week from filling the disk.
 
 Both run inside `pruneLogs` in `apps/gateway/src/maintenance.ts`, the existing hourly sweep that
-already applies the same window to `request_logs` and to `quota_samples`. One sweep means one
+already applies the log window to `request_logs` and to `quota_samples`. One sweep means one
 schedule to reason about, and body rows expiring on a different tick from the request logs they
 belong to would leave an artifact whose row has no log.
 
