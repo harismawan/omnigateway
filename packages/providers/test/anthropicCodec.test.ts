@@ -22,6 +22,7 @@
 
 import { expect, test } from "bun:test";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
+import { parseAnthropicRequest } from "../../../apps/gateway/src/ingress/anthropic.ts";
 import { anthropicAdapter } from "../src/anthropic/index.ts";
 import { ccVersionSuffix } from "../src/body.ts";
 import type { AdapterCredentials, HttpRequest, HttpResponse } from "../src/types.ts";
@@ -201,6 +202,50 @@ test("the client's own betas ride along, and the OAuth beta is added not substit
     "context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14",
   ]);
 });
+
+for (const stream of [false, true]) {
+  for (const credentials of [apiKey, oauth]) {
+    test(`updates display and client beta survive ${credentials.name}, stream=${stream}`, async () => {
+      const beta = "thinking-display-updates-2026-08-18";
+      for (const withBeta of [false, true]) {
+        const request = parseAnthropicRequest(
+          {
+            model: "claude-opus-4",
+            max_tokens: 1024,
+            stream,
+            messages: [{ role: "user", content: "hi" }],
+            thinking: { type: "adaptive", display: "updates" },
+          },
+          new Headers(withBeta ? { "anthropic-beta": beta } : {}),
+        );
+        const { sent } = await send(
+          request,
+          credentials(),
+          stream
+            ? undefined
+            : {
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  id: "m",
+                  model: "claude-opus-4",
+                  content: [],
+                  stop_reason: "end_turn",
+                  usage: { input_tokens: 1, output_tokens: 0 },
+                }),
+              },
+        );
+        expect(JSON.parse(sent.body ?? "{}").thinking).toEqual({
+          type: "adaptive",
+          display: "updates",
+        });
+        const betas =
+          sent.headers.find(([name]) => name === "anthropic-beta")?.[1].split(",") ?? [];
+        expect(betas.includes(beta)).toBe(withBeta);
+        if (credentials === oauth) expect(betas).toContain("oauth-2025-04-20");
+      }
+    });
+  }
+}
 
 test("the OAuth leg cloaks tool names, and reports how many", async () => {
   const withTools: ChatRequest = {

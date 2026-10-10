@@ -846,9 +846,10 @@ export function toAntigravityWire(
         //
         // `includeThoughts` is still stated, because the depth is the model's
         // decision and whether the client sees the result is the client's:
-        // `display: "omitted"` is the one request to keep them hidden.
+        // Both omitted and updates hide reasoning; this provider has no progress updates.
         generationConfig.thinkingConfig = {
-          includeThoughts: req.reasoning.display !== "omitted",
+          includeThoughts:
+            req.reasoning.display !== "omitted" && req.reasoning.display !== "updates",
         };
         if (req.reasoning.effort !== undefined) note("antigravity:reasoning-effort-dropped");
         break;

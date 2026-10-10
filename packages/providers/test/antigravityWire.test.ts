@@ -1503,8 +1503,8 @@ describe("generation config and tools", () => {
     expect(body.request.generationConfig?.thinkingConfig).toEqual({ includeThoughts: true });
   });
 
-  test("an adaptive request that asked for silence gets it", () => {
-    const { body } = build({ reasoning: { mode: "adaptive", display: "omitted" } });
+  test.each(["omitted", "updates"] as const)("adaptive display %s hides thoughts", (display) => {
+    const { body } = build({ reasoning: { mode: "adaptive", display } });
     expect(body.request.generationConfig?.thinkingConfig).toEqual({ includeThoughts: false });
   });
 });

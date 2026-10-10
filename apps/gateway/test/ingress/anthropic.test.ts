@@ -151,12 +151,21 @@ test("accepts adaptive thinking, the current wire shape", () => {
   expect(req.reasoning).toEqual({ mode: "adaptive" });
 });
 
-test("carries the thinking display preference", () => {
+test.each(["summarized", "omitted", "updates"])("carries thinking display %s", (display) => {
   const req = parseAnthropicRequest({
     ...minimal,
-    thinking: { type: "adaptive", display: "summarized" },
+    thinking: { type: "adaptive", display },
   });
-  expect(req.reasoning).toEqual({ mode: "adaptive", display: "summarized" });
+  expect(req.reasoning).toEqual({ mode: "adaptive", display });
+});
+
+test("rejects an unknown thinking display", () => {
+  expect(() =>
+    parseAnthropicRequest({
+      ...minimal,
+      thinking: { type: "adaptive", display: "bogus" },
+    }),
+  ).toThrow(GatewayError);
 });
 
 test("reads effort out of output_config so it survives cross-provider routing", () => {

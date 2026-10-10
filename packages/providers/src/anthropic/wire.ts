@@ -37,7 +37,7 @@ export type AnthropicBody = {
   tools?: Record<string, unknown>[];
   tool_choice?: unknown;
   thinking?:
-    | { type: "adaptive"; display?: "summarized" | "omitted" }
+    | { type: "adaptive"; display?: "summarized" | "omitted" | "updates" }
     | { type: "enabled"; budget_tokens: number }
     | { type: "disabled" };
   /**

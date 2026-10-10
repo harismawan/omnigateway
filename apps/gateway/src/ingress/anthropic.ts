@@ -284,7 +284,7 @@ const schema = z.object({
       // (in output_config) tunes the depth.
       z.object({
         type: z.literal("adaptive"),
-        display: z.enum(["summarized", "omitted"]).optional(),
+        display: z.enum(["summarized", "omitted", "updates"]).optional(),
       }),
       // The older fixed-budget form. Still accepted from a client that asks
       // for it, though current models reject it upstream.
