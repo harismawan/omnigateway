@@ -60,18 +60,8 @@ COPY --from=build /app/apps/gateway apps/gateway
 # Dropping the cache is the other half: bun fills ~/.bun/install with every
 # tarball it unpacked, which is a build input that would otherwise ship. It has
 # to go in this RUN -- a later layer cannot shrink an earlier one.
-#
-# tsc arrives as an optional peer of elysia and nothing invokes it -- the
-# gateway runs its TypeScript through bun. Both deletions are needed to be rid
-# of it and neither works alone: the store entry and the cache entry are
-# hardlinks to one copy, so the layer keeps that copy until the last link goes.
-# Dropping just one frees ~0.1MB and reads like the removal did nothing.
-#
-# `--omit` cannot reach tsc: `=peer` also drops @sinclair/typebox, which elysia
-# requires at runtime.
 RUN find packages apps -maxdepth 2 -name node_modules -type d -exec rm -rf {} + \
  && bun install --frozen-lockfile --production --filter=@omni/gateway \
- && rm -rf node_modules/.bun/typescript@* node_modules/.bun/@typescript+* \
  && rm -rf /root/.bun/install
 # `dashboardDir()` looks here second, after `apps/gateway/src/public`; the
 # path is the one a checkout would have, so no OMNI_STATIC_DIR is needed.
