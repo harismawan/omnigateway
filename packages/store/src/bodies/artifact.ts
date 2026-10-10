@@ -1,6 +1,8 @@
 import type { Dirent } from "node:fs";
 import { type FileHandle, mkdir, open, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
+import { promisify } from "node:util";
+import { gunzip, gzip } from "node:zlib";
 import { decrypt, encrypt } from "../encryption.ts";
 import type { BodyArtifact, BodyAttempt } from "../types.ts";
 import { boundValue } from "./bound.ts";
@@ -259,12 +261,56 @@ const BINARY_TAG_BYTES = 16;
 const BINARY_OVERHEAD = BINARY_HEADER_BYTES + BINARY_IV_BYTES + BINARY_TAG_BYTES;
 const MAX_BINARY_ENVELOPE_BYTES = MAX_ARTIFACT_BYTES + BINARY_OVERHEAD;
 
-/** Plaintext stored as it is. The only codec this reader implements so far. */
+/** Plaintext stored as it is. */
 const CODEC_RAW = 0;
+/** Plaintext as a gzip stream (RFC 1952), compressed before it is encrypted. */
+const CODEC_GZIP = 1;
+
+/**
+ * The write policy, internal and provisional: benchmarks choose the values
+ * before the binary writer becomes the default. Below the cutoff gzip is not
+ * tried, since its header and footer eat most of what a small body could save.
+ * Level 1 is the cheapest native setting. A saving under the minimum is not
+ * worth a decompression on every read.
+ */
+const GZIP_MIN_PLAINTEXT_BYTES = 1024;
+const GZIP_LEVEL = 1;
+const GZIP_MIN_SAVING_BYTES = 64;
+/** A gzip member's fixed header and footer, before any deflate data. */
+const GZIP_FRAME_BYTES = 18;
+
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
+
+async function gzipFast(plain: Uint8Array): Promise<Uint8Array> {
+  return gzipAsync(plain, { level: GZIP_LEVEL });
+}
 
 /** Copies a range into a buffer of its own, which is what WebCrypto accepts. */
 function own(bytes: Uint8Array, start: number, end?: number): Uint8Array<ArrayBuffer> {
   return bytes.slice(start, end);
+}
+
+/**
+ * The codec and payload the policy chooses for one plaintext.
+ *
+ * A compressor that fails costs only the saving: the raw payload is already
+ * within bounds, and it is encrypted exactly as a gzip one would be.
+ */
+async function pack(
+  plain: Uint8Array,
+  compress: (plain: Uint8Array) => Promise<Uint8Array>,
+): Promise<{ codec: number; payload: Uint8Array }> {
+  const raw = { codec: CODEC_RAW, payload: plain };
+  if (plain.length < GZIP_MIN_PLAINTEXT_BYTES) return raw;
+  let packed: Uint8Array;
+  try {
+    packed = await compress(plain);
+  } catch {
+    return raw;
+  }
+  if (plain.length - packed.length < GZIP_MIN_SAVING_BYTES) return raw;
+  return { codec: CODEC_GZIP, payload: packed };
 }
 
 /**
@@ -273,20 +319,25 @@ function own(bytes: Uint8Array, start: number, end?: number): Uint8Array<ArrayBu
  * Not the writer yet — `sealArtifact` stays legacy until every reader in the
  * fleet can open this one. The budget is enforced here rather than trusted from
  * `prepareArtifact`, whose last fallback does not recheck it: an envelope the
- * reader would refuse must not be one this writer will make.
+ * reader would refuse must not be one this writer will make. It is enforced on
+ * the plaintext, before compression, so a body over budget is never admitted for
+ * compressing well. `compress` is replaceable only so tests can reach the
+ * policy's boundaries and its fallback.
  */
 export async function sealBinaryArtifact(
   key: CryptoKey,
   json: string,
+  compress: (plain: Uint8Array) => Promise<Uint8Array> = gzipFast,
 ): Promise<{ bytes: Uint8Array; sha256: string }> {
   const plain = encoder.encode(json);
   if (plain.length < 1 || plain.length > MAX_ARTIFACT_BYTES) {
     throw new Error("artifact plaintext is outside the binary envelope's bounds");
   }
-  const bytes = new Uint8Array(BINARY_OVERHEAD + plain.length);
+  const { codec, payload } = await pack(plain, compress);
+  const bytes = new Uint8Array(BINARY_OVERHEAD + payload.length);
   bytes.set(BINARY_MAGIC, 0);
   bytes[4] = BINARY_VERSION;
-  bytes[5] = CODEC_RAW;
+  bytes[5] = codec;
   new DataView(bytes.buffer).setUint32(6, plain.length, false);
   const iv = crypto.getRandomValues(new Uint8Array(BINARY_IV_BYTES));
   const sealed = await crypto.subtle.encrypt(
@@ -297,7 +348,7 @@ export async function sealBinaryArtifact(
       tagLength: BINARY_TAG_BYTES * 8,
     },
     key,
-    plain,
+    own(payload, 0),
   );
   bytes.set(iv, BINARY_HEADER_BYTES);
   bytes.set(new Uint8Array(sealed), BINARY_HEADER_BYTES + BINARY_IV_BYTES);
@@ -398,6 +449,7 @@ function isLegacyStructure(text: string): boolean {
 type BinaryEnvelope = {
   header: Uint8Array<ArrayBuffer>;
   codec: number;
+  claimed: number;
   iv: Uint8Array<ArrayBuffer>;
   sealed: Uint8Array<ArrayBuffer>;
 };
@@ -405,25 +457,70 @@ type BinaryEnvelope = {
 /**
  * Whether a payload of this length is one the codec could have produced for the
  * claimed plaintext length. False for a codec this reader does not implement,
- * which is how an unknown codec is refused before anything is decrypted.
+ * which is how an unknown codec is refused before anything is decrypted. A gzip
+ * payload says nothing about its expanded length, so beyond holding a frame it
+ * answers only to the binary ceiling, like any other.
  */
 function payloadFits(codec: number, payloadBytes: number, claimed: number): boolean {
   switch (codec) {
     case CODEC_RAW:
       return payloadBytes === claimed;
+    case CODEC_GZIP:
+      return payloadBytes >= GZIP_FRAME_BYTES;
     default:
       return false;
   }
 }
 
 /** The authenticated payload, turned back into the UTF-8 JSON it was sealed from. */
-function expand(codec: number, payload: Uint8Array): Uint8Array {
+async function expand(codec: number, payload: Uint8Array, claimed: number): Promise<Uint8Array> {
   switch (codec) {
     case CODEC_RAW:
       return payload;
+    case CODEC_GZIP:
+      return gunzipArtifact(payload, claimed);
     default:
       throw new Error("unsupported artifact codec");
   }
+}
+
+/**
+ * Expands an authenticated gzip payload to exactly `claimed` bytes, or throws.
+ *
+ * The budget is zlib's own `maxOutputLength`, so a payload that would expand
+ * past it is stopped inside the inflate rather than measured after it: thirty
+ * concatenated members of zeros fit under the binary ceiling and stand for half
+ * a gigabyte. Concatenated members are a gzip stream like any other and decode
+ * when their whole output is the claimed length.
+ *
+ * zlib stops at a zero byte after a member and returns what it had, treating
+ * the rest as padding; anything else after a member it refuses. `bytesWritten`
+ * counts the input it consumed, which stops short of that padding, so it must be
+ * the whole payload. Exported for the test that proves the limit is native.
+ */
+export async function gunzipArtifact(payload: Uint8Array, claimed: number): Promise<Uint8Array> {
+  const result: unknown = await gunzipAsync(payload, {
+    maxOutputLength: MAX_ARTIFACT_BYTES,
+    info: true,
+  });
+  const inflated = inflateResult(result);
+  if (inflated === null) throw new Error("gzip result has an unexpected shape");
+  if (inflated.consumed !== payload.length) throw new Error("bytes follow the gzip stream");
+  if (inflated.output.length !== claimed) throw new Error("gzip output is not the claimed length");
+  return inflated.output;
+}
+
+/**
+ * `info: true` resolves to `{ buffer, engine }`, which the zlib typings do not
+ * describe, so it is narrowed from `unknown` rather than asserted.
+ */
+function inflateResult(result: unknown): { output: Uint8Array; consumed: number } | null {
+  if (typeof result !== "object" || result === null) return null;
+  if (!("buffer" in result) || !("engine" in result)) return null;
+  const { buffer, engine } = result;
+  if (!(buffer instanceof Uint8Array) || typeof engine !== "object" || engine === null) return null;
+  if (!("bytesWritten" in engine) || typeof engine.bytesWritten !== "number") return null;
+  return { output: buffer, consumed: engine.bytesWritten };
 }
 
 /**
@@ -444,6 +541,7 @@ function parseBinary(bytes: Uint8Array): BinaryEnvelope | null {
   return {
     header: own(bytes, 0, BINARY_HEADER_BYTES),
     codec,
+    claimed,
     iv: own(bytes, BINARY_HEADER_BYTES, BINARY_HEADER_BYTES + BINARY_IV_BYTES),
     sealed: own(bytes, BINARY_HEADER_BYTES + BINARY_IV_BYTES),
   };
@@ -460,10 +558,11 @@ async function openBinary(key: CryptoKey, envelope: BinaryEnvelope): Promise<str
     key,
     envelope.sealed,
   );
-  // Fatal, so a byte that is not UTF-8 is a corrupt artifact rather than a
-  // replacement character inside one that parses.
+  // Only now, with the header authenticated, may its codec and claimed length
+  // decide how the payload is expanded. Fatal, so a byte that is not UTF-8 is a
+  // corrupt artifact rather than a replacement character inside one that parses.
   return new TextDecoder("utf-8", { fatal: true }).decode(
-    expand(envelope.codec, new Uint8Array(payload)),
+    await expand(envelope.codec, new Uint8Array(payload), envelope.claimed),
   );
 }
 

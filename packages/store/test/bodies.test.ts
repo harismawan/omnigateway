@@ -2,9 +2,11 @@ import { expect, spyOn, test } from "bun:test";
 import { mkdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 import {
   bodiesDirFor,
   decodeArtifact,
+  gunzipArtifact,
   MAX_ARTIFACT_BYTES,
   prepareArtifact,
   readArtifact,
@@ -1140,6 +1142,11 @@ async function binarySeal(
   return concat(header, iv, new Uint8Array(sealed));
 }
 
+/** gzip from zlib directly, never the artifact writer, copied into a buffer of its own. */
+function gz(data: Uint8Array | string): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(gzipSync(data));
+}
+
 test("a binary envelope sealed from the spec decodes to the prepared artifact", async () => {
   const prepared = prepareArtifact(LEGACY_INPUT);
   const bytes = await binarySeal(encoder.encode(prepared.json));
@@ -1191,6 +1198,16 @@ test("a binary envelope that fails authentication is corrupt, digest or no diges
       "sealed over a different magic",
       await binarySeal(json, { aad: binaryHeader("OGBX", 1, 0, json.length) }),
     ],
+    // And the reverse: gzip stored, raw authenticated. Only the header GCM
+    // vouched for may decide that the payload is expanded at all.
+    [
+      "gzip sealed over a raw header",
+      await binarySeal(gz(json), {
+        codec: 1,
+        claimed: json.length,
+        aad: binaryHeader("OGBA", 1, 0, json.length),
+      }),
+    ],
   ];
 
   const key = await legacyKey;
@@ -1214,6 +1231,7 @@ test("a binary header this reader does not implement is corrupt before any crypt
   const valid = await binarySeal(json);
   const legacy = await legacySeal(prepareArtifact(LEGACY_INPUT).json);
   const n = json.length;
+  const gzipped = gz(json);
 
   // Every one authenticates under its own header, so GCM would accept it: only
   // the reader's own reading of the header can turn it away.
@@ -1221,7 +1239,6 @@ test("a binary header this reader does not implement is corrupt before any crypt
     ["version 0", await binarySeal(json, { version: 0 })],
     ["version 2", await binarySeal(json, { version: 2 })],
     ["version 255", await binarySeal(json, { version: 255 })],
-    ["codec 1 (gzip, not yet read)", await binarySeal(json, { codec: 1 })],
     ["codec 2", await binarySeal(json, { codec: 2 })],
     ["codec 255", await binarySeal(json, { codec: 255 })],
     ["claimed length zero, empty payload", await binarySeal(new Uint8Array(0))],
@@ -1246,6 +1263,21 @@ test("a binary header this reader does not implement is corrupt before any crypt
     ["binary magic ahead of a legacy envelope", concat(encoder.encode("OGBA"), legacy)],
     ["legacy prefix ahead of a binary envelope", concat(encoder.encode("enc:v1:"), valid)],
     ["empty input", new Uint8Array(0)],
+    // gzip: the payload no longer fixes the claimed length, so each bound on
+    // the header stands on its own.
+    ["gzip claiming zero bytes", await binarySeal(gzipped, { codec: 1, claimed: 0 })],
+    [
+      "gzip claiming one byte past the budget",
+      await binarySeal(gzipped, { codec: 1, claimed: MAX_ARTIFACT_BYTES + 1 }),
+    ],
+    [
+      "gzip payload one byte past the binary ceiling",
+      await binarySeal(new Uint8Array(MAX_ARTIFACT_BYTES + 1), { codec: 1, claimed: n }),
+    ],
+    [
+      "gzip payload too short for a gzip header and footer",
+      await binarySeal(gzipped.slice(0, 17), { codec: 1, claimed: n }),
+    ],
   ];
 
   for (const [name, bytes] of cases) {
@@ -1361,10 +1393,334 @@ test("the default writer still emits the legacy envelope", async () => {
 
 test("the binary writer refuses plaintext outside one byte to the artifact budget", async () => {
   const key = await legacyKey;
-  await expect(sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES + 1))).rejects.toThrow();
-  await expect(sealBinaryArtifact(key, "")).rejects.toThrow();
+  const calls: number[] = [];
+  const watched = async (plain: Uint8Array): Promise<Uint8Array> => {
+    calls.push(plain.length);
+    return gz(plain);
+  };
+  // Padding compresses to almost nothing, so a writer that judged the budget on
+  // the compressed size would admit this; the budget is on what the reader
+  // gets back, and the compressor is never even asked.
+  await expect(
+    sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES + 1), watched),
+  ).rejects.toThrow();
+  await expect(sealBinaryArtifact(key, "", watched)).rejects.toThrow();
+  expect(calls).toEqual([]);
+
   const atBudget = await sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES));
-  expect(atBudget.bytes.length).toBe(BINARY_CEILING);
+  expect(atBudget.bytes[5]).toBe(1);
+  expect((await decodeArtifact(key, atBudget.bytes, atBudget.sha256)).ok).toBe(true);
+  const rawAtBudget = await sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES), failing);
+  expect(rawAtBudget.bytes.length).toBe(BINARY_CEILING);
+});
+
+// ---------------------------------------------------------------------------
+// gzip. Compressed before encryption, because ciphertext does not compress;
+// expanded only after GCM has vouched for the header that says to, and never
+// past the artifact budget whatever the payload asks for.
+// ---------------------------------------------------------------------------
+
+/** A compressor that always fails, for the writer's fallback. */
+async function failing(): Promise<Uint8Array> {
+  throw new Error("compressor unavailable");
+}
+
+/** A compressor whose output is exactly `size(n)` bytes for an `n`-byte input. */
+function sized(size: (n: number) => number) {
+  const calls: number[] = [];
+  const compress = async (plain: Uint8Array): Promise<Uint8Array> => {
+    calls.push(plain.length);
+    return new Uint8Array(size(plain.length));
+  };
+  return { calls, compress };
+}
+
+/** The writer's header fields and payload length, read back by hand. */
+function layout(bytes: Uint8Array): { codec: number; claimed: number; payload: number } {
+  return {
+    codec: bytes[5] ?? -1,
+    claimed: new DataView(bytes.buffer, bytes.byteOffset).getUint32(6, false),
+    payload: bytes.length - 38,
+  };
+}
+
+/** Opens an envelope with WebCrypto alone and returns the authenticated payload. */
+async function openByHand(bytes: Uint8Array): Promise<Uint8Array> {
+  const plain = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: bytes.slice(10, 22),
+      additionalData: bytes.slice(0, 10),
+      tagLength: 128,
+    },
+    await legacyKey,
+    bytes.slice(22),
+  );
+  return new Uint8Array(plain);
+}
+
+/** A compressible artifact past the gzip cutoff: repetitive stream frames. */
+const COMPRESSIBLE_INPUT = artifact({
+  attempts: [
+    {
+      attempt: 1,
+      provider: "anthropic",
+      request: { model: "claude-opus-4-1-20250805" },
+      response: { stop_reason: "end_turn" },
+      streamChunks: Array.from(
+        { length: 200 },
+        (_, i) => `event: content_block_delta\ndata: {"index":0,"delta":{"text":"word ${i}"}}`,
+      ),
+      truncated: false,
+    },
+  ],
+});
+
+test("a gzip envelope sealed from the spec decodes to the prepared artifact", async () => {
+  const prepared = prepareArtifact(COMPRESSIBLE_INPUT);
+  const json = encoder.encode(prepared.json);
+  const payload = gz(json);
+  expect(payload.length).toBeLessThan(json.length);
+  const bytes = await binarySeal(payload, { codec: 1, claimed: json.length });
+
+  for (const expected of [await sha256Hex(bytes), null]) {
+    const read = await decodeArtifact(await legacyKey, bytes, expected);
+    expect(`${expected === null ? "null" : "digest"}: ${read.ok}`).toBe(
+      `${expected === null ? "null" : "digest"}: true`,
+    );
+    if (read.ok) expect(read.artifact).toEqual(prepared.artifact);
+  }
+});
+
+test("concatenated gzip members decode when their whole output is the claimed length", async () => {
+  const json = encoder.encode(prepareArtifact(COMPRESSIBLE_INPUT).json);
+  const half = Math.floor(json.length / 2);
+  const payload = concat(gz(json.subarray(0, half)), gz(json.subarray(half)));
+  const bytes = await binarySeal(payload, { codec: 1, claimed: json.length });
+  const read = await decodeArtifact(await legacyKey, bytes, await sha256Hex(bytes));
+  expect(read.ok).toBe(true);
+  if (read.ok) expect(read.artifact).toEqual(prepareArtifact(COMPRESSIBLE_INPUT).artifact);
+});
+
+test("authenticated gzip that does not expand to exactly the claimed bytes is corrupt", async () => {
+  const json = encoder.encode(prepareArtifact(COMPRESSIBLE_INPUT).json);
+  const n = json.length;
+  const valid = gz(json);
+  const flip = (offset: number): Uint8Array<ArrayBuffer> => {
+    const out = valid.slice();
+    out[offset] = (out[offset] ?? 0) ^ 0x01;
+    return out;
+  };
+  const half = Math.floor(n / 2);
+  const first = gz(json.subarray(0, half));
+
+  // Every payload is authenticated under the header it is stored with, so GCM
+  // accepts each one: only the expansion can turn it away, after decryption.
+  const cases: Array<[string, Uint8Array<ArrayBuffer>, number]> = [
+    ["claimed one short", valid, n - 1],
+    ["claimed one long", valid, n + 1],
+    ["truncated by a byte", valid.slice(0, -1), n],
+    ["footer missing", valid.slice(0, -8), n],
+    ["deflate stream cut in half", valid.slice(0, Math.floor(valid.length / 2)), n],
+    ["crc flipped", flip(valid.length - 8), n],
+    ["length field flipped", flip(valid.length - 1), n],
+    ["trailing garbage", concat(valid, new Uint8Array([1, 2, 3])), n],
+    ["a partial second member", concat(valid, new Uint8Array([0x1f, 0x8b])), n],
+    // zlib skips trailing zero bytes as padding and returns the member before
+    // them, so these decode natively; the reader must refuse them itself.
+    ["one trailing zero byte", concat(valid, new Uint8Array(1)), n],
+    ["eight trailing zero bytes", concat(valid, new Uint8Array(8)), n],
+    [
+      "valid members then a zero byte",
+      concat(first, gz(json.subarray(half)), new Uint8Array(1)),
+      n,
+    ],
+    ["a second member past the claimed length", concat(first, gz(json.subarray(half))), half],
+    ["plain JSON stored as gzip", json, n],
+    ["gzip of nothing", gz(""), 1],
+    ["gzip of an array", gz("[1]"), 3],
+  ];
+
+  for (const [name, payload, claimed] of cases) {
+    const bytes = await binarySeal(payload, { codec: 1, claimed });
+    const digest = await sha256Hex(bytes);
+    const seen = await decodeUnwatched(bytes, digest);
+    expect(`${name}: ${JSON.stringify(seen)}`).toBe(
+      `${name}: ${JSON.stringify({ read: CORRUPT, digests: 1, decrypts: 1 })}`,
+    );
+  }
+});
+
+/**
+ * A JSON object whose gzip stream is exactly as long as the object itself, so
+ * one payload satisfies a raw header's length and a gzip expansion's at once.
+ * Searched for rather than written down, from a fixed generator, so a different
+ * zlib build finds its own instead of breaking the premise.
+ */
+function gzipAsLongAsItself(): { json: string; payload: Uint8Array<ArrayBuffer> } {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let length = 1; length < 1000; length++) {
+    let state = length;
+    const next = () => {
+      state = (state * 1103515245 + 12345) % 2 ** 31;
+      return state >>> 16;
+    };
+    const json = JSON.stringify({
+      k: Array.from({ length }, () => alphabet[next() % 64]).join(""),
+    });
+    const payload = gz(json);
+    if (payload.length === encoder.encode(json).length) return { json, payload };
+  }
+  throw new Error("no JSON object gzips to its own length");
+}
+
+test("the codec comes from the authenticated header, never from the payload's shape", async () => {
+  const key = await legacyKey;
+  const { json, payload } = gzipAsLongAsItself();
+
+  // Raw, holding a perfectly good gzip stream of a JSON object whose length is
+  // the claimed length: a reader that sniffed the gzip magic would expand it and
+  // hand the object back. Stored as it is, it is not UTF-8, so it is corrupt.
+  const raw = await binarySeal(payload, { codec: 0, claimed: payload.length });
+  expect(await decodeArtifact(key, raw, null)).toEqual({ ok: false, failure: "corrupt" });
+
+  // The same stream under a gzip header is the object.
+  const gzipped = await binarySeal(payload, { codec: 1, claimed: payload.length });
+  expect(await decodeArtifact(key, gzipped, null)).toEqual({
+    ok: true,
+    artifact: JSON.parse(json),
+  });
+});
+
+/**
+ * Sixteen mebibytes of zeros gzips to about sixteen kilobytes; thirty of those
+ * members fit under the binary ceiling and stand for 480 MiB. Building it costs
+ * one compression, and inflating it unbounded would cost half a gigabyte.
+ */
+const BOMB_MEMBER = gz(new Uint8Array(16 * 1024 * 1024));
+const BOMB = concat(...Array.from({ length: 30 }, () => BOMB_MEMBER));
+
+test("an authenticated gzip bomb is stopped inside bounded decompression", async () => {
+  expect(BOMB.length).toBeLessThanOrEqual(MAX_ARTIFACT_BYTES);
+
+  for (const [name, payload] of [
+    ["single member", BOMB_MEMBER],
+    ["thirty members", BOMB],
+  ] as const) {
+    for (const claimed of [1000, MAX_ARTIFACT_BYTES]) {
+      // The native limit is what refuses it: zlib's own error, raised before
+      // the output passes the budget, not the reader's length comparison
+      // after an unbounded inflate.
+      await expect(gunzipArtifact(payload, claimed)).rejects.toMatchObject({
+        code: "ERR_BUFFER_TOO_LARGE",
+      });
+
+      const bytes = await binarySeal(payload, { codec: 1, claimed });
+      const seen = await decodeUnwatched(bytes, null);
+      expect(`${name} claiming ${claimed}: ${JSON.stringify(seen)}`).toBe(
+        `${name} claiming ${claimed}: ${JSON.stringify({ read: CORRUPT, digests: 0, decrypts: 1 })}`,
+      );
+    }
+  }
+});
+
+test("gzip expanding to exactly the budget decodes; one byte more is stopped by the bound", async () => {
+  const atBudget = encoder.encode(paddedJson(MAX_ARTIFACT_BYTES));
+  const bytes = await binarySeal(gz(atBudget), { codec: 1, claimed: MAX_ARTIFACT_BYTES });
+  expect((await decodeArtifact(await legacyKey, bytes, null)).ok).toBe(true);
+  expect(await gunzipArtifact(gz(atBudget), MAX_ARTIFACT_BYTES)).toEqual(atBudget);
+
+  const past = gz(paddedJson(MAX_ARTIFACT_BYTES + 1));
+  await expect(gunzipArtifact(past, MAX_ARTIFACT_BYTES)).rejects.toMatchObject({
+    code: "ERR_BUFFER_TOO_LARGE",
+  });
+});
+
+test("the writer stores plaintext under the cutoff raw and compressible plaintext as gzip", async () => {
+  const key = await legacyKey;
+
+  // Padding saves far more than the minimum, so only the cutoff can keep 1023
+  // bytes raw.
+  const small = await sealBinaryArtifact(key, paddedJson(1023));
+  expect(layout(small.bytes)).toEqual({ codec: 0, claimed: 1023, payload: 1023 });
+  expect(decoder.decode(await openByHand(small.bytes))).toBe(paddedJson(1023));
+
+  const cutoff = await sealBinaryArtifact(key, paddedJson(1024));
+  expect(layout(cutoff.bytes).codec).toBe(1);
+  expect(layout(cutoff.bytes).claimed).toBe(1024);
+  expect(layout(cutoff.bytes).payload).toBeLessThanOrEqual(1024 - 64);
+  // Opened and expanded here with WebCrypto and zlib alone.
+  expect(decoder.decode(gunzipSync(await openByHand(cutoff.bytes)))).toBe(paddedJson(1024));
+
+  const prepared = prepareArtifact(COMPRESSIBLE_INPUT);
+  const sealed = await sealBinaryArtifact(key, prepared.json);
+  const json = encoder.encode(prepared.json);
+  expect(layout(sealed.bytes).codec).toBe(1);
+  expect(layout(sealed.bytes).claimed).toBe(json.length);
+  expect(layout(sealed.bytes).payload).toBeLessThan(json.length / 2);
+  expect(sealed.sha256).toBe(await sha256Hex(sealed.bytes));
+  const read = await decodeArtifact(key, sealed.bytes, sealed.sha256);
+  expect(read.ok).toBe(true);
+  if (read.ok) expect(read.artifact).toEqual(prepared.artifact);
+});
+
+test("the writer only asks for gzip at or past the cutoff, and keeps it at a 64-byte saving", async () => {
+  const key = await legacyKey;
+
+  const under = sized(() => 1);
+  const raw = await sealBinaryArtifact(key, paddedJson(1023), under.compress);
+  expect(under.calls).toEqual([]);
+  expect(layout(raw.bytes).codec).toBe(0);
+
+  const n = 2000;
+  const saves63 = sized((len) => len - 63);
+  const kept63 = await sealBinaryArtifact(key, paddedJson(n), saves63.compress);
+  expect(saves63.calls).toEqual([n]);
+  expect(layout(kept63.bytes)).toEqual({ codec: 0, claimed: n, payload: n });
+
+  const saves64 = sized((len) => len - 64);
+  const kept64 = await sealBinaryArtifact(key, paddedJson(n), saves64.compress);
+  expect(layout(kept64.bytes)).toEqual({ codec: 1, claimed: n, payload: n - 64 });
+
+  const atCutoff = sized((len) => len - 64);
+  const gzipAtCutoff = await sealBinaryArtifact(key, paddedJson(1024), atCutoff.compress);
+  expect(atCutoff.calls).toEqual([1024]);
+  expect(layout(gzipAtCutoff.bytes).codec).toBe(1);
+});
+
+test("incompressible plaintext, or a failed compression, is stored raw without growth", async () => {
+  const key = await legacyKey;
+  const json = prepareArtifact(COMPRESSIBLE_INPUT).json;
+  const n = encoder.encode(json).length;
+
+  for (const [name, compress] of [
+    ["grows", sized((len) => len + 20).compress],
+    ["no saving", sized((len) => len).compress],
+    ["fails", failing],
+  ] as const) {
+    const sealed = await sealBinaryArtifact(key, json, compress);
+    expect(`${name}: ${JSON.stringify(layout(sealed.bytes))}`).toBe(
+      `${name}: ${JSON.stringify({ codec: 0, claimed: n, payload: n })}`,
+    );
+    expect(decoder.decode(await openByHand(sealed.bytes))).toBe(json);
+    expect((await decodeArtifact(key, sealed.bytes, sealed.sha256)).ok).toBe(true);
+  }
+
+  // Random bytes, hex-encoded: real gzip saves some of the hex's redundancy,
+  // and whichever arm the policy picks the envelope is never larger than raw.
+  const noise = toHex(crypto.getRandomValues(new Uint8Array(4096)));
+  const real = await sealBinaryArtifact(key, JSON.stringify({ noise }));
+  expect(real.bytes.length).toBeLessThanOrEqual(JSON.stringify({ noise }).length + 38);
+  expect((await decodeArtifact(key, real.bytes, real.sha256)).ok).toBe(true);
+});
+
+test("an encryption failure propagates from the writer rather than storing anything", async () => {
+  const decryptOnly = await crypto.subtle.importKey("raw", new Uint8Array(32), "AES-GCM", false, [
+    "decrypt",
+  ]);
+  for (const json of [paddedJson(100), prepareArtifact(COMPRESSIBLE_INPUT).json]) {
+    await expect(sealBinaryArtifact(decryptOnly, json)).rejects.toThrow();
+  }
 });
 
 // ---------------------------------------------------------------------------
