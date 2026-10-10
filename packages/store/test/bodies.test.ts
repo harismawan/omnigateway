@@ -1025,10 +1025,14 @@ test("an artifact file past the ceiling is corrupt, not missing, and is never re
       failure: "corrupt",
     });
 
-    // Thirty-two tebibytes of hole. Reading it whole is not possible on any
-    // machine this runs on, so `corrupt` here can only mean the size was judged
-    // from the handle before anything was allocated for it.
-    await truncate(join(planted.dir, planted.rel), 2 ** 45);
+    // Sixty-four gibibytes of hole: past Bun's typed-array cap (allocating
+    // 2 ** 32 bytes already fails) and past any CI runner's memory, so neither
+    // an unbounded read nor an unbounded buffer can succeed, and `corrupt` here
+    // can only mean the size was judged from the handle before anything was
+    // allocated for it. The old whole-file read reported this as `missing`.
+    // Kept well under ext4's 16 TiB file-size limit, so the truncate itself is
+    // portable.
+    await truncate(join(planted.dir, planted.rel), 2 ** 36);
     expect(await readArtifact(await legacyKey, planted.dir, planted.rel, null)).toEqual({
       ok: false,
       failure: "corrupt",
