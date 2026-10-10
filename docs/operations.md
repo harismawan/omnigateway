@@ -316,7 +316,16 @@ a second path that erases forensic evidence on request loses incident records.
 
 Artifacts live at `request_bodies/YYYY/MM/DD/<requestId>.json.enc` beside the
 database, AES-256-GCM under `OMNI_ENCRYPTION_KEY`; changing that key invalidates
-every artifact. Bounds: log-retention expiry plus a hard **100,000-row cap**, so
+every artifact. `bodyRetentionDays` defaults to **1 day**, independently of
+`logRetentionDays` (**30 days**). Set it in console Settings or with
+`omni settings set bodyRetentionDays 7` (whole days, 1–3650). The hourly sweep
+expires bodies at the shorter of these two windows; metadata and quota samples
+keep the log window. Existing installations without `bodyRetentionDays` adopt the
+one-day default after upgrade: the first successful sweep can delete older bodies
+without a settings edit. To retain the former body window, save an explicit
+`bodyRetentionDays` value before that sweep. Expiry runs on successful maintenance
+sweeps, not at an exact 24-hour access deadline. Lowering body retention deletes
+existing bodies on the next sweep without deleting still-retained request metadata. A hard **100,000-row cap** also applies, so
 capture is forensics, not an archive — size a volume against roughly 100 GB
 worst case, though most artifacts are kilobytes.
 

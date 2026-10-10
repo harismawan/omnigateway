@@ -370,7 +370,7 @@ flowchart TB
     logs["<b>request_logs</b><br/>metadata + tokens, state pending→done<br/><i>pruned at logRetentionDays</i>"]
     daily["<b>usage_daily</b><br/>rollup<br/><i>kept 400 days</i>"]
     hourly["<b>usage_rollup</b><br/>per-key hourly counters, derived<br/><i>pruned with request_logs</i>"]
-    bodies["<b>request_bodies</b><br/>pointer + sha256, never a body<br/><i>pruned at logRetentionDays, capped at 100k rows</i>"]
+    bodies["<b>request_bodies</b><br/>pointer + sha256, never a body<br/><i>pruned at min(bodyRetentionDays, logRetentionDays), capped at 100k rows</i>"]
     artifact["<i>request_bodies/YYYY/MM/DD/&lt;id&gt;.json.enc</i> 🔒<br/>client pair + one pair per attempt"]
   end
 
@@ -479,7 +479,7 @@ flowchart LR
 
   oauth["<b>OAuth refresh</b><br/>every 60s"] --> oauthJob["renew inside lead window<br/>disable if expired, no refresh token"]
   quota["<b>Quota poller</b><br/>every quotaPollIntervalMs<br/><i>default 300s; 0 disables</i>"] --> quotaJob["ask providers what is left<br/><i>failed probe ⇒ unknown, never disabled</i>"]
-  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs and usage_rollup at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d<br/>prune body rows at retention, cap at 100k<br/>sweep artifact files with no row<br/>prune snapshots at retention<br/>sweep staging files older than 1h"]
+  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs and usage_rollup at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d<br/>prune body rows at min(bodyRetentionDays, logRetentionDays), cap at 100k<br/>sweep artifact files with no row<br/>prune snapshots at retention<br/>sweep staging files older than 1h"]
   bus["<b>Plugin event bus</b><br/><i>no interval — setTimeout(…, 0) drain</i>"] --> busJob["deliver to handlers off the request path<br/><i>bounded queue; drops rather than grows</i>"]
 
   oauthJob -.-> oauth

@@ -122,6 +122,12 @@ export function createConfigRepo(
           // The same question its neighbours ask, put to a union instead of a
           // boolean: anything that is not one of the four names means off.
           ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
+          bodyRetentionDays:
+            Number.isInteger(stored.bodyRetentionDays) &&
+            (stored.bodyRetentionDays ?? 0) >= 1 &&
+            (stored.bodyRetentionDays ?? 0) <= 3_650
+              ? (stored.bodyRetentionDays as number)
+              : DEFAULT_SETTINGS.bodyRetentionDays,
           bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
           bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
           weights: knownWeights(stored.weights),

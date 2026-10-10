@@ -62,6 +62,7 @@ const LIMITS: ReadonlyArray<{
   unit: string;
   step: number;
   min: number;
+  max?: number;
 }> = [
   {
     id: "maxAttempts",
@@ -102,6 +103,15 @@ const LIMITS: ReadonlyArray<{
     unit: "days",
     step: 1,
     min: 1,
+  },
+  {
+    id: "bodyRetentionDays",
+    label: "Body retention",
+    hint: "Captured bodies only. Never longer than log retention; swept hourly.",
+    unit: "days",
+    step: 1,
+    min: 1,
+    max: 3_650,
   },
   {
     id: "quotaPollIntervalMs",
@@ -304,6 +314,9 @@ function parseDraft(
         problem: `${limit.label} must be a whole number of ${limit.min} or more.`,
       };
     }
+    if (limit.max !== undefined && value > limit.max) {
+      return { ok: false, problem: `${limit.label} cannot exceed ${limit.max}.` };
+    }
     limits[limit.id] = value;
   }
   if (limits.maxAttempts > 10) {
@@ -459,6 +472,7 @@ export function SettingsBoard() {
                           {...props}
                           type="number"
                           min={limit.min}
+                          max={limit.max}
                           step={limit.step}
                           value={draft[limit.id] ?? ""}
                           onChange={(event) =>
@@ -553,7 +567,7 @@ export function SettingsBoard() {
                   >
                     Stores what each client sent and each provider returned, encrypted beside the
                     database. Tokens and keys are masked; headers are never captured. Expires on the
-                    log retention window above.
+                    body retention window above, never later than the request log.
                   </SwitchOption>
 
                   <SwitchOption

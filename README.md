@@ -329,7 +329,7 @@ that output was captured; it does not redirect it — see
 Everything else lives in the database rather than the environment, so it can be
 changed without a restart: the six routing weights, `maxAttempts`,
 `requestDeadlineMs`, the circuit breaker's `breakerThreshold` and
-`breakerCooldownMs`, `logRetentionDays`, `quotaPollIntervalMs`, `rtkEnabled`,
+`breakerCooldownMs`, `logRetentionDays`, `bodyRetentionDays`, `quotaPollIntervalMs`, `rtkEnabled`,
 `ponytailMode` (`off` | `lite` | `full` | `ultra`),
 and the two body-capture switches. Edit them with `omni settings set` or in the
 console. `quotaPollIntervalMs` is the one exception: the poller reads it once at

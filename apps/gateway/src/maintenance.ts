@@ -23,7 +23,7 @@ export const ROLLUP_RETENTION_DAYS = 400;
  * sample describes one moment of one window, and nothing rolls it up into a
  * cheaper form worth keeping for a year.
  *
- * Captured bodies go on the raw horizon too, and for a reason beyond symmetry:
+ * Captured bodies have their own shorter window, capped by the raw horizon:
  * an artifact whose request log has already expired is a prompt corpus nothing
  * can be joined to. Two further sweeps run with it, because either alone fails.
  * The window is what an operator reasons about and it bounds nothing — a week
@@ -52,7 +52,9 @@ export async function pruneLogs(
   const raw = await store.usage.prune(rawHorizon);
   const daily = await store.usage.pruneDaily(now - ROLLUP_RETENTION_DAYS * DAY_MS);
   const quotaSamples = await store.credentials.pruneQuotaSamples(rawHorizon);
-  const bodies = await store.bodies.prune(rawHorizon);
+  const bodyHorizon =
+    now - Math.min(settings.bodyRetentionDays, settings.logRetentionDays) * DAY_MS;
+  const bodies = await store.bodies.prune(bodyHorizon);
   const bodiesOverCap = await store.bodies.pruneToCap();
   const bodyOrphans = await store.bodies.sweepOrphans();
   return { raw, daily, quotaSamples, bodies, bodiesOverCap, bodyOrphans };

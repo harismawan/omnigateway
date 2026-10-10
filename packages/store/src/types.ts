@@ -753,6 +753,8 @@ export type Settings = {
   breakerThreshold: number;
   breakerCooldownMs: number;
   logRetentionDays: number;
+  /** Captured bodies expire independently, never later than request metadata. */
+  bodyRetentionDays: number;
   /** How often provider quota is polled. Zero disables polling entirely. */
   quotaPollIntervalMs: number;
   rtkEnabled: boolean;
@@ -1642,6 +1644,7 @@ export const DEFAULT_SETTINGS: Settings = {
   breakerThreshold: 3,
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,
+  bodyRetentionDays: 1,
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
   autoCacheEnabled: true,
