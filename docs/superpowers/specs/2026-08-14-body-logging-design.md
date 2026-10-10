@@ -248,9 +248,11 @@ on the digest being present; a null digest still requires a valid tag. Only auth
 fields govern decompression, which is bounded natively to the 512 KB budget and must produce exactly
 the authenticated length.
 
-Read limits are a compatibility restriction: an encoded artifact above `2 * MAX_ARTIFACT_BYTES + 65`
-bytes (legacy or binary), or a binary one above `MAX_ARTIFACT_BYTES + 38`, reads as `corrupt` without
-being read whole or decrypted. The gateway never writes one: attempts are capped at 10, so a stripped
+Read limits are a compatibility restriction. An encoded artifact above `2 * MAX_ARTIFACT_BYTES + 65`
+bytes (either format) reads as `corrupt` before it is read whole: SQLite checks the size on the open
+handle, PostgreSQL withholds the `bytea` by `octet_length` in the query. A binary one above
+`MAX_ARTIFACT_BYTES + 38` is also `corrupt`; that tighter ceiling is checked after the bytes are in
+memory, before the digest is taken or anything is decrypted. The gateway never writes one: attempts are capped at 10, so a stripped
 frame is far under the budget. Only a direct store-API caller with thousands of attempts can. The
 bytes are not deleted, and the existing `corrupt` to `ready` recovery restores such an artifact if a
 reader that accepts it is run later.
