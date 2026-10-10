@@ -135,8 +135,12 @@ export function requiredCapabilities(request: ChatRequest): ProviderCapabilities
   return {
     tools: (request.tools?.length ?? 0) > 0,
     images,
-    // An explicit opt-out is not a requirement for a reasoning-capable target.
-    reasoning: request.reasoning !== undefined && request.reasoning.mode !== "off",
+    // Off and between-tools need no reasoning-capable target; encoders without
+    // between-tools support degrade it to off rather than excluding the target.
+    reasoning:
+      request.reasoning !== undefined &&
+      request.reasoning.mode !== "off" &&
+      request.reasoning.mode !== "betweenTools",
   };
 }
 

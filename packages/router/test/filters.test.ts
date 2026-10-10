@@ -36,6 +36,22 @@ test("derives required capabilities from the request", () => {
   ).toBe(true);
 });
 
+test("between-tools keeps a non-reasoning target that adaptive reasoning excludes", () => {
+  const input = {
+    model: model([target({ capabilities: { tools: true, images: true, reasoning: false } })]),
+    snapshot: snapshot({ credentials: [credential({ id: "a" })] }),
+    now: NOW,
+    rand: 0,
+    load: new Map(),
+  };
+  const between = eligible({ ...input, request: { ...req, reasoning: { mode: "betweenTools" } } });
+  expect(between.pairs.map((pair) => pair.credential.id)).toEqual(["a"]);
+  expect(between.excluded).toEqual([]);
+  const adaptive = eligible({ ...input, request: { ...req, reasoning: { mode: "adaptive" } } });
+  expect(adaptive.pairs).toEqual([]);
+  expect(adaptive.excluded.map((item) => item.reason)).toEqual(["capability:reasoning"]);
+});
+
 test("pairs each target with every credential of its provider", () => {
   const a = credential({ id: "a", provider: "anthropic" });
   const k = credential({ id: "k", provider: "kimi" });
