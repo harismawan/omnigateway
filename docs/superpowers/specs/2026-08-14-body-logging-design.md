@@ -97,8 +97,9 @@ written for one rule and none of them can see a rule weakening another.
 
 Artifacts are encrypted at rest with AES-256-GCM under a key derived from the required
 `OMNI_ENCRYPTION_KEY`, the same derived key provider credentials use. The artifact envelope is its
-own format, not the credential string: credentials keep `enc:v1:` hex, artifacts have the legacy
-`enc:v1:` envelope and the binary `OGBA` envelope described under [Storage envelope](#storage-envelope).
+own format, not the credential string: credentials keep `enc:v1:` hex, artifacts are written in the
+binary `OGBA` envelope and older ones remain in the legacy `enc:v1:` envelope, both described under
+[Storage envelope](#storage-envelope).
 Artifact files copied without the key yield nothing. An operator who never enables the setting
 stores nothing at all.
 
@@ -141,9 +142,9 @@ stronger promise, and an operator reading an artifact that large learns nothing 
 
 512 KB is a plaintext cap. What is stored is an envelope, and its size depends on the format: the
 legacy envelope hex-encodes, so a plaintext of N bytes stores as `2N + 65` bytes, about twice the
-cap at the limit; the binary envelope stores `N + 38` raw, or fewer when its gzip codec is used.
-Until binary writing is enabled every artifact is legacy, so the row cap bounds the body corpus at
-roughly 100 GB of stored envelope bytes, not 50, and that is the worst-case figure
+cap at the limit; the binary envelope, which is what is written, stores `N + 38`. While legacy rows
+remain the row cap bounds the body corpus at up to roughly 100 GB of stored envelope bytes, not 50;
+once they have expired under retention the bound is about 50 GB. Those are the figures
 `docs/operations.md` gives an operator sizing a volume. See [Storage envelope](#storage-envelope).
 
 The same constant is reused as the in-memory cap on one captured body, and the two bounds are not the
@@ -223,22 +224,26 @@ encryption key.
 
 ### Storage envelope
 
-The artifact JSON is sealed into one of two envelopes, chosen by the exact leading bytes. Anything
-else is `corrupt`; a malformed envelope of one kind is never retried as the other.
+Writers seal the artifact JSON into the binary envelope with the raw codec. Readers accept either
+envelope, chosen by the exact leading bytes, and both binary codecs. Anything else is `corrupt`; a
+malformed envelope of one kind is never retried as the other.
 
 - **Legacy**: the credential string `enc:v1:<iv-hex>:<ciphertext-hex>:<tag-hex>`, UTF-8 encoded.
-  `2N + 65` bytes for N bytes of JSON.
+  `2N + 65` bytes for N bytes of JSON. Read, no longer written.
 - **Binary**: magic `OGBA`, version byte `1`, codec byte (`0` raw UTF-8 JSON, `1` gzip), the
   uncompressed length as a big-endian uint32, a 12-byte random IV, then AES-256-GCM ciphertext with
   its 16-byte tag. The first 10 bytes are the GCM additional data, so version, codec, and claimed
-  length are authenticated. Overhead is 38 bytes: `N + 38` raw, smaller when gzip is selected. The
-  same derived key is used; `encryption.ts` and credential ciphertext are unchanged.
+  length are authenticated. Overhead is 38 bytes: `N + 38` raw. The same derived key is used;
+  `encryption.ts` and credential ciphertext are unchanged. Gzip is read but not written: at the
+  512 KB cap it cost more seal latency than its budget allowed
+  ([benchmark](../plans/2026-10-10-body-artifact-storage-benchmark.md)), so raw is the only codec a
+  writer emits.
 
 The plaintext budget (512 KB, applied after masking and structural bounding) is a limit on the
 serialized JSON and does not move: a plaintext that compresses well is not admitted above it. What
 the `size_bytes` column and the console and CLI "on disk" figures report is the stored envelope,
-so it differs by format. A corpus is mixed once binary artifacts are written, because legacy rows
-stay until retention removes them. These are logical stored-envelope bytes. They are not PostgreSQL
+so it differs by format. A corpus is mixed: legacy rows written before binary writing stay until
+body retention removes them, and nothing rewrites them. These are logical stored-envelope bytes. They are not PostgreSQL
 table, TOAST, or WAL size (PostgreSQL may already compress repetitive hex), and no compression ratio
 is promised for production traffic: it depends on content.
 
@@ -252,17 +257,25 @@ Read limits are a compatibility restriction. An encoded artifact above `2 * MAX_
 bytes (either format) reads as `corrupt` before it is read whole: SQLite checks the size on the open
 handle, PostgreSQL withholds the `bytea` by `octet_length` in the query. A binary one above
 `MAX_ARTIFACT_BYTES + 38` is also `corrupt`; that tighter ceiling is checked after the bytes are in
-memory, before the digest is taken or anything is decrypted. The gateway never writes one: captured
-entries are outbound calls, bounded by `maxAttempts` (max 10) plus refresh retries (an AUTH refresh
-gets its own entry), so a stripped frame is far under the budget. Only a direct store-API caller
-with thousands of attempts can. The bytes are not deleted, and the existing `corrupt` to `ready`
-recovery restores such an artifact if a reader that accepts it is run later.
+memory, before the digest is taken or anything is decrypted. No writer makes one: `put` refuses a
+plaintext over the budget and throws before any byte or row is written. The gateway does not reach
+that refusal — captured entries are outbound calls, bounded by `maxAttempts` (max 10) plus refresh
+retries (an AUTH refresh gets its own entry), so a stripped frame is far under the budget — and
+were it reached, `finishLog` reports a failed body write and keeps the request and its row. Only a
+direct store-API caller with thousands of attempts can produce such a frame. Bytes past a ceiling
+that are already stored are not deleted, and the existing `corrupt` to `ready` recovery restores
+such an artifact if a reader that accepts it is run later.
 
-**Rollout.** Readers that understand both envelopes ship first (Release A); writers still emit
-legacy. Binary writing (Release B) ships only after every reader of a shared corpus runs a
-dual-reading version: every gateway replica, the CLI, standbys, and anything that restores a
-snapshot or dump. A reader older than Release A reports a binary artifact as unreadable, and
-rolling back after Release B must stop at a dual-reading version, not before it.
+**Rollout.** Readers that understand both envelopes shipped first (Release A, v0.13.5) while
+writers still emitted legacy. Binary writing (Release B) follows, and an operator deploys it only
+after every reader of a shared corpus runs v0.13.5 or later: every gateway replica, every CLI
+install, standbys, and anything that restores a snapshot or dump. A reader older than v0.13.5
+reports a binary artifact `corrupt`, and may record that on the row; a dual reader that reads the
+row again recovers it to `ready`. Roll back only to v0.13.5 or later; v0.13.5 itself stops new
+binary writes and reads the binary rows already written. Rolling back further is unsafe until every binary row has
+expired under body retention. The sequence — legacy rows, binary rows, a rollback to legacy writing,
+a pre-v0.13.5 reader over all of them — is rehearsed on both backends in
+`packages/store/test/contract/bodies.test.ts`.
 
 Snapshots and `copyStore` are unchanged by the envelope: SQLite snapshots exclude the body
 directory, `copyStore` does not carry body rows or corpus, and a PostgreSQL dump carries the bytes

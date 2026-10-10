@@ -330,22 +330,26 @@ capture is forensics, not an archive — size a volume against roughly 100 GB
 worst case, though most artifacts are kilobytes.
 
 That figure is stored-envelope bytes, not PostgreSQL table, TOAST, or WAL size.
-The 512 KB cap applies to the plaintext JSON; the stored file is larger. The
-current envelope hex-encodes, so a plaintext of N bytes stores as `2N + 65`
-bytes, about twice the cap at the limit. A newer, smaller binary envelope
-(`N + 38` bytes, or less when gzip helps) is readable by this version but not yet
-written. Once a later release writes it, a corpus is mixed until older artifacts
-expire under `bodyRetentionDays`, and the 100 GB worst case holds until then. No
-compression ratio is promised: it depends on what was captured. `SIZE` in
-`omni bodies` and the console is the stored envelope, so it differs by format.
+The 512 KB cap applies to the plaintext JSON; the stored file is larger. This
+version writes the binary envelope, `N + 38` bytes for a plaintext of N bytes.
+Earlier versions wrote a hex envelope, `2N + 65` bytes, about twice the cap at
+the limit; those artifacts stay readable, and nothing rewrites them, so a corpus
+is mixed until they expire under `bodyRetentionDays`, and the 100 GB worst case
+holds until then. A gzip codec is readable but not written
+([benchmark](superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md)).
+No compression ratio is promised. `SIZE` in `omni bodies` and the console is the
+stored envelope, so it differs by format.
 
-Upgrade readers before writers. Binary artifacts are written only by a later
-release, and that release should ship only once every reader of the corpus can open
-them: every gateway replica, the CLI, standbys, and anything restoring a dump. A
-version older than this one reports a binary artifact as `captured, but
-unreadable`. Roll back after that release only to a version that reads both
-formats. An artifact above the reader's encoded-size ceiling (`1,048,641` bytes
-for the current envelope, `524,326` for the binary one) reads as unreadable
+Upgrade every reader before deploying this version. Every gateway replica, every
+CLI install, standbys, and anything restoring a dump that opens the same corpus
+must already run v0.13.5 or later, which reads both formats. A version older
+than v0.13.5 reports a binary artifact as `captured, but unreadable` and may
+record it `corrupt`; a v0.13.5-or-later reader recovers the row the next time it
+reads it. Roll back only to v0.13.5 or later; v0.13.5 itself stops binary writes
+and still reads the ones written. Rolling back further is unsafe until every binary
+artifact has expired under body retention, and disabling capture does not make it
+safe. An artifact above the reader's encoded-size ceiling (`1,048,641` bytes
+for the hex envelope, `524,326` for the binary one) reads as unreadable
 without being deleted; the gateway never writes one, and it recovers on its own if
 a reader accepts it later. The row digest covers the whole stored envelope and is
 checkable without the key; GCM authentication is what decides whether a body is
