@@ -245,9 +245,9 @@ export function BodyArtifact({ requestId }: { requestId: string }) {
       ? undefined
       : // "on disk" rather than a bare size, because this is the stored envelope:
         // it is measured after masking and structural bounding and then after
-        // encoding and encryption (hex in the legacy format), so it is neither what crossed the wire nor the size of the
-        // JSON below it. Naming the thing measured is cheaper than an operator
-        // reading it as a request size.
+        // encoding and encryption (hex in the legacy format), so it is neither
+        // what crossed the wire nor the size of the JSON below it. Naming the thing
+        // measured is cheaper than an operator reading it as a request size.
         `${BYTES.format(body.data.sizeBytes)} bytes on disk`;
 
   return (

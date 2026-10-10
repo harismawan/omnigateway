@@ -252,10 +252,11 @@ Read limits are a compatibility restriction. An encoded artifact above `2 * MAX_
 bytes (either format) reads as `corrupt` before it is read whole: SQLite checks the size on the open
 handle, PostgreSQL withholds the `bytea` by `octet_length` in the query. A binary one above
 `MAX_ARTIFACT_BYTES + 38` is also `corrupt`; that tighter ceiling is checked after the bytes are in
-memory, before the digest is taken or anything is decrypted. The gateway never writes one: attempts are capped at 10, so a stripped
-frame is far under the budget. Only a direct store-API caller with thousands of attempts can. The
-bytes are not deleted, and the existing `corrupt` to `ready` recovery restores such an artifact if a
-reader that accepts it is run later.
+memory, before the digest is taken or anything is decrypted. The gateway never writes one: captured
+entries are outbound calls, bounded by `maxAttempts` (max 10) plus refresh retries (an AUTH refresh
+gets its own entry), so a stripped frame is far under the budget. Only a direct store-API caller
+with thousands of attempts can. The bytes are not deleted, and the existing `corrupt` to `ready`
+recovery restores such an artifact if a reader that accepts it is run later.
 
 **Rollout.** Readers that understand both envelopes ship first (Release A); writers still emit
 legacy. Binary writing (Release B) ships only after every reader of a shared corpus runs a
