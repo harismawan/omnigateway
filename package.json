@@ -18,7 +18,7 @@
     "check:claims": "bun run scripts/stale-claims.ts",
     "check:dead": "bun run scripts/dead-exports.ts",
     "fmt": "biome format --write .",
-    "typecheck:core": "tsc --noEmit --pretty false -p tsconfig.json",
+    "typecheck:core": "bun check --no-pretty -p tsconfig.json",
     "typecheck:dashboard": "bun run --cwd apps/dashboard typecheck",
     "typecheck": "bun run typecheck:core && bun run typecheck:dashboard",
     "build:npm": "bun scripts/build-npm.ts"
@@ -26,7 +26,6 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
     "@types/bun": "^1.4.2",
-    "bun-types": "^1.4.2",
-    "typescript": "^7.0.2"
+    "bun-types": "^1.4.2"
   }
 }
