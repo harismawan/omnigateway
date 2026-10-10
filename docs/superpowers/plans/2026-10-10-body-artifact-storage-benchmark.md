@@ -6,12 +6,20 @@ Task 5. Script: `scripts/bench-body-artifacts.ts`.
 
 **Recommendation: binary-raw.** The decision rule is the plan's acceptance thresholds: binary-auto
 ships only if it meets every one of them. Otherwise binary-raw ships if it meets its own, and
-otherwise the work stops. Binary-auto passes size, memory, event-loop, throughput and PostgreSQL. It
-fails the CPU/latency budget at the 512 KiB cap. At concurrency 1 the synthetic incompressible cap
-fixture adds 5.8 ms of p95 seal time over raw, against a 5 ms budget. At concurrency 16 every cap
-fixture is over budget: seal adds up to 15.5 ms and decode up to 11.5 ms. Binary-raw passes every
-threshold that applies to it. The plan says to ship binary-raw "only after approval", so this needs
-an explicit go before Task 8 switches the writer.
+otherwise the work stops.
+
+- **Binary-auto passes** size, decode latency, memory, event-loop delay, throughput and PostgreSQL.
+- **It fails one budget: p95 seal overhead at the 512 KiB cap.** The failing fixture is the
+  synthetic incompressible `high-entropy`, at +5.83 / +5.77 ms over raw against a 5 ms budget in
+  the two passes. That is not a tail near-miss: its *median* overhead is already 5.17 ms. Both
+  representative and best-case cap fixtures pass (at most +2.39 ms).
+- **Concurrency-16 per-class deltas are not used for verdicts.** They are scheduling artefacts.
+  Fixtures that do identical work in raw and auto differ several-fold there (see below).
+- **Binary-raw passes every threshold that applies to it.**
+
+The plan's options are binary-raw "after approval" or "stop and revisit". Both are put to the plan
+owner in the Recommendation, because the only valid failure is a single synthetic worst-case
+fixture. Either way, Task 8 should not switch the writer without an explicit decision.
 
 All numbers below come from synthetic data on one machine. They describe these fixtures on this
 host. They are **not** an estimate of production savings, and the unweighted corpus averages are no
@@ -76,7 +84,8 @@ column below also includes bounding: `sse-frames` 2.44x and `tool-schema` 1.19x 
   (pass a: raw, auto, legacy; pass b: auto, raw, legacy), at concurrency 1 and at concurrency 16.
   Every run used a separate process.
 - **PostgreSQL:** 10,000 rows per mode at concurrency 16, in 5 batches of 2,000. Each mode got its
-  own new database, created with `createdb`, and ran in its own process. That was done twice: once
+  own new database, created with `createdb` as `omni_bench_<cohort>_<mode>`, and ran in its own
+  process. That was done twice: once
   for the representative cohort and once for all 12 classes. A row is one capture as
   `BodyRepo.put` performs it on Postgres: `prepareArtifact`, seal, then the same `INSERT … ON
   CONFLICT` statement. The script repeats that statement because the repo seals legacy only. The
@@ -86,7 +95,8 @@ column below also includes bounding: `sse-frames` 2.44x and `tool-schema` 1.19x 
   re-puts the first 1,000 rows.
 - **Timings:** seal and decode are `performance.now()` around each awaited call. At concurrency 16
   a timing includes time spent queued behind other in-flight operations on the JS thread or the
-  zlib thread pool, which is the latency a capture actually sees. CPU is `process.cpuUsage()` for
+  zlib thread pool. In this saturated closed loop that waiting is shared out between classes by
+  scheduling, so c16 per-class timings are not per-operation costs (see Limitations). CPU is `process.cpuUsage()` for
   the whole process across all threads, so native zlib work counts. Event-loop delay is
   `monitorEventLoopDelay({resolution: 1})` per phase. Memory is `process.memoryUsage()` sampled
   every 5 ms.
@@ -152,7 +162,19 @@ operations / 12 classes.
 | high-entropy | 22.007 / 26.881 | 0.777 / 1.554 | 5.947 / 7.383 | **5.829** | 88.307 / 95.428 | 0.716 / 1.184 | 2.593 / 3.512 | **2.328** | 11.994 | 3.438 |
 | masked-base64 | 2.328 / 3.374 | 0.155 / 0.229 | 0.301 / 0.492 | 0.263 | 3.533 / 4.678 | 0.157 / 0.272 | 0.287 / 0.429 | 0.157 | — | — |
 
-Concurrency 16, pass a. Each time includes queueing behind the other 15 in-flight operations.
+Concurrency 16, pass a. **Not interpretable as per-operation overhead; shown for completeness.** Each
+time includes queueing behind the other 15 in-flight operations in a saturated closed loop with no
+I/O, so the time attributed to one class depends on what the other operations were doing.
+
+The identical-work control shows the confound. `tiny-empty` (~160 B) and `omission-marker`
+(~693 B) are below the 1,024-byte gzip cutoff, so `pack` returns raw before calling any compressor.
+They do byte-for-byte the same work in raw and auto, yet here they differ several-fold:
+
+- `tiny-empty`: seal p95 4.81 ms raw against 1.34 ms auto.
+- `omission-marker`: seal p95 −4.24 ms auto−raw.
+
+Moving gzip off the JS thread in auto moves queue time between classes. Little's law gives the
+same mean in-flight time for both: 16 / 4,986 ops/s = 3.2 ms (raw), 16 / 4,728 = 3.4 ms (auto).
 
 | Class | Seal legacy | Seal raw | Seal auto | Seal auto−raw p95 | Decode legacy | Decode raw | Decode auto | Decode auto−raw p95 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -169,16 +191,14 @@ Concurrency 16, pass a. Each time includes queueing behind the other 15 in-fligh
 | high-entropy | 100.5 / 151.3 | 3.036 / 5.737 | 15.962 / 20.941 | **15.204** | 384.1 / 457.0 | 3.557 / 6.342 | 11.784 / 15.760 | **9.418** |
 | masked-base64 | 90.6 / 139.8 | 2.102 / 4.773 | 1.343 / 2.864 | −1.909 | 324.6 / 398.7 | 2.676 / 5.444 | 1.411 / 2.665 | −2.779 |
 
-Cap fixtures in both passes, as p95 auto − raw in ms. The cap budget is 5 ms.
+Cap fixtures at concurrency 1 in both passes, as auto − raw in ms. The cap budget is 5 ms on p95.
+The c16 columns are kept only as a record; they are confounded, as shown above.
 
-| Fixture | c1 seal a / b | c1 decode a / b | c16 seal a / b | c16 decode a / b |
-| --- | --- | --- | --- | --- |
-| near-cap-varied | 2.30 / 2.39 | 2.07 / 1.96 | **6.29 / 6.46** | **10.36 / 11.46** |
-| near-cap-repetitive | −0.79 / −0.71 | 0.40 / 0.37 | −2.60 / −2.54 | **6.13 / 6.64** |
-| high-entropy | **5.83 / 5.77** | 2.33 / 2.05 | **15.20 / 15.53** | **9.42 / 9.64** |
-
-The below-cap classes get faster under auto at concurrency 16. Encrypting and hashing fewer bytes
-on the JS thread outweighs the gzip work, which runs off-thread.
+| Fixture | Seal p95 a / b | Seal median a / b | Decode p95 a / b | c16 seal p95 a / b (confounded) | c16 decode p95 a / b (confounded) |
+| --- | --- | --- | --- | --- | --- |
+| near-cap-varied | 2.30 / 2.39 | 2.30 / 2.29 | 2.07 / 1.96 | 6.29 / 6.46 | 10.36 / 11.46 |
+| near-cap-repetitive | −0.79 / −0.71 | −0.19 / −0.20 | 0.40 / 0.37 | −2.60 / −2.54 | 6.13 / 6.64 |
+| high-entropy | **5.83 / 5.77** | **5.17 / 5.21** | 2.33 / 2.05 | 15.20 / 15.53 | 9.42 / 9.64 |
 
 ### Throughput, CPU, event loop, memory (in memory)
 
@@ -290,8 +310,8 @@ disposable server: 22 tests, 0 failures.
 | Raw: ≥45% logical reduction vs legacy for fixtures ≥1 KiB | 240/240 fixtures; class minimum 49.9% (`short-chat`) | PASS |
 | Auto: never larger than raw | 0 violations | PASS |
 | Auto: ≥20% further reduction, representative cohort | 49.1% logical (census); 49.0% `sum(octet_length)` in Postgres | PASS |
-| CPU/latency: p95 seal overhead at the 512 KiB cap ≤5 ms vs raw | c1: varied +2.30/+2.39, repetitive −0.79/−0.71, **high-entropy +5.83/+5.77**. c16: **varied +6.29/+6.46**, repetitive −2.60/−2.54, **high-entropy +15.20/+15.53** | **FAIL** |
-| CPU/latency: p95 decode overhead at the cap ≤5 ms vs raw | c1: +2.07/+1.96, +0.40/+0.37, +2.33/+2.05. c16: **+10.36/+11.46, +6.13/+6.64, +9.42/+9.64** | **FAIL** (c16) |
+| CPU/latency: p95 seal overhead at the 512 KiB cap ≤5 ms vs raw | c1: varied +2.30/+2.39, repetitive −0.79/−0.71, **high-entropy +5.83/+5.77** (median +5.17/+5.21). c16 not interpretable (scheduling confound). | **FAIL** (one fixture: synthetic worst case `high-entropy`) |
+| CPU/latency: p95 decode overhead at the cap ≤5 ms vs raw | c1: varied +2.07/+1.96, repetitive +0.40/+0.37, high-entropy +2.33/+2.05 (max +2.33). c16 not interpretable (scheduling confound). | PASS |
 | CPU/latency: p95 event-loop delay increase ≤5 ms | In memory c1 seal +0.09/+0.00 ms. c16 seal 3.0 vs 14.7 and 2.7 vs 16.3 (lower). Postgres c16 10.6 vs 12.0 and 18.0 vs 23.5 (lower) | PASS |
 | CPU/latency: capture-enabled throughput regression ≤5% at representative concurrency (16) | Postgres capture rows/s vs raw: −2.6% (representative), −1.8% (all classes). Against legacy, +450% and +361%. | PASS |
 | Memory: no monotonic RSS growth across repeats | RSS after GC flat in every run (above) | PASS |
@@ -301,7 +321,7 @@ disposable server: 22 tests, 0 failures.
 
 Binary-raw against the same budgets, measured relative to legacy where raw is the baseline above:
 
-- It is faster on every class and every concurrency.
+- It is faster on every class at concurrency 1, and has higher throughput at both concurrencies.
 - Its event-loop delay is lower: in memory at c16, 14.7 ms against 484 ms.
 - Its peak RSS is lower: in memory c16, 650 MiB against 1,124 MiB.
 - Its capture throughput is 5.6x legacy on the representative cohort.
@@ -310,26 +330,43 @@ Binary-raw against the same budgets, measured relative to legacy where raw is th
 ## Recommendation
 
 Per the decision rule, **binary-raw**, subject to the approval the plan requires. Binary-auto fails
-the cap latency budget, so its constants are not confirmed for shipping.
+the cap seal-latency budget, so its constants are not confirmed for shipping as they stand.
 
-The decision does not depend on the near-miss alone. The concurrency-1 failure is 0.8 ms over
-budget on a labelled synthetic worst case. The concurrency-16 failures are 1.1-10.5 ms over budget
-on all three cap fixtures, including the representative `near-cap-varied`, and they reproduce
-across both passes.
+The failure is real, but narrow:
 
-If auto is revisited later, these measurements bear on the constants:
+- **Real:** at concurrency 1, `high-entropy` costs +5.83 / +5.77 ms of p95 seal time over raw in
+  the two passes. Its median overhead is already +5.17 / +5.21 ms, so this is the steady cost of
+  trying gzip level 1 on 470 KB of incompressible text, not a tail near-miss. It reproduces in both
+  passes.
+- **Narrow:** it is the only valid failure, and it is on a labelled synthetic worst case. The
+  representative and best-case cap fixtures pass seal (at most +2.39 ms). Every fixture passes
+  decode (at most +2.33 ms).
+
+**Decision for the plan owner.** The plan allows either outcome when compression latency fails:
+"ship only binary raw after approval, or stop and revisit".
+
+- **Ship binary-raw now.** It halves stored bytes and WAL against legacy and passes every threshold
+  that applies to it.
+- **Stop and revisit auto first.** The fix targets one fixture class: decide before compressing
+  whether gzip can pay. Two options:
+  - an entropy pre-check, for example a byte histogram or a gzip trial on a small prefix;
+  - skipping gzip near the cap.
+
+  Either needs a production change and a re-run of this benchmark. Neither was measured here.
+
+If auto is revisited, these measurements also bear on the constants:
 
 - **`GZIP_MIN_SAVING_BYTES = 64` is absolute.** It admits a 0.1% saving on a 470 KB incompressible
-  body, which costs about 2 ms at c1 and 9-10 ms at c16 of p95 decode on every read for no
-  storage benefit. A relative minimum would have stored `high-entropy` raw, but it would not remove
-  the seal-time cost of trying gzip, which is the larger part of that fixture's overrun.
+  body, which costs about +2 ms of p95 decode (c1) on every read for no storage benefit. A relative
+  minimum would have stored `high-entropy` raw. It would not remove the seal-time cost of trying
+  gzip, which is the failing part.
 - **Level 1 on Bun's zlib** gains nothing from symbol statistics (above). Level 6 saves more (66.3%
   vs raw on the cohort, against 49.1%), but it doubles seal CPU and makes cap seal p95 worse:
-  10.6-12.0 ms at c1, 22.7-31.1 ms at c16. It is not a fix for the latency budget.
-- The latency budget applies to a capture that completes after the response
-  (`apps/gateway/src/routes/proxy.ts`). Whether a per-capture p95 measured under concurrency is the
-  right budget for that path is a question for the plan owner. This document only applies the
-  budget as written.
+  10.6-12.0 ms at c1. It is not a fix for the latency budget.
+- **The budget is applied as written.** It covers a capture that completes after the response
+  (`apps/gateway/src/routes/proxy.ts`). A per-operation latency under load would need an open-loop
+  harness, with a fixed arrival rate and identical-work control classes. This closed loop cannot
+  provide that.
 
 ## Limitations
 
@@ -342,8 +379,16 @@ If auto is revisited later, these measurements bear on the constants:
   not during them, so GC pauses fall into individual samples. Pass-to-pass spread is the noise
   estimate: up to about 5% for ops/s, up to about 35 MiB for binary peak RSS, and 212 MiB for
   legacy peak RSS.
-- **Concurrency-16 latency is queueing latency.** It includes waiting on the JS thread and on
-  Bun's zlib thread pool, whose size was not configured or measured.
+- **Concurrency-16 latency is queueing latency and is confounded across classes.** The harness is a
+  saturated closed loop with no I/O. Each sample includes waiting on the JS thread and on Bun's
+  zlib thread pool, whose size was not configured or measured.
+
+  The identical-work control proves the confound. `tiny-empty` and `omission-marker` sit below the
+  gzip cutoff and do byte-for-byte the same work in raw and auto. They still differ several-fold at
+  c16: `tiny-empty` seal p95 is 4.81 ms raw against 1.34 ms auto.
+
+  So c16 per-class deltas carry no verdict. Only c16 throughput, CPU, event-loop delay and memory
+  are used.
 - **Event-loop delay** uses Bun's `monitorEventLoopDelay` at 1 ms resolution, so differences under
   about 1 ms are not meaningful.
 - **WAL** includes checkpoint full-page images, and checkpoint counts differ by mode in proportion
@@ -357,7 +402,8 @@ If auto is revisited later, these measurements bear on the constants:
 ```bash
 bun scripts/bench-body-artifacts.ts --mode legacy|binary-raw|binary-auto --iterations 1000 --concurrency 1|16 --out "$TMPDIR/x.json"
 bun scripts/bench-body-artifacts.ts --mode binary-auto --iterations 1000 --concurrency 16 --gzip-level 6
-# One new disposable database per mode; the script refuses a non-loopback host and a non-empty table.
+# One new disposable database per mode. --postgres refuses a non-loopback host, any database name
+# not starting with omni_bench_, and a non-empty request_bodies, before any migration or write.
 docker exec omni-body-bench-pg createdb -U postgres omni_bench_auto
 OMNI_TEST_DATABASE_URL=postgres://postgres:verify@127.0.0.1:55432/omni_bench_auto \
   bun scripts/bench-body-artifacts.ts --mode binary-auto --iterations 10000 --concurrency 16 --postgres --cohort representative

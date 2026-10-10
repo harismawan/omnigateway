@@ -24,9 +24,10 @@
  * through the same seam), `--out <file>` for the JSON written to stdout.
  *
  * `--postgres` and `--verify-restored` read `OMNI_TEST_DATABASE_URL`, refuse a
- * non-loopback host, and never drop or truncate anything: `--postgres` refuses a
- * `request_bodies` table that already holds rows, and `--verify-restored` runs
- * on one read-only session. Run each mode in its own process and its own fresh
+ * non-loopback host, and never drop or truncate anything. `--postgres` refuses
+ * any database whose name does not start with `omni_bench_` before it migrates
+ * or writes, then refuses a `request_bodies` table that already holds rows.
+ * `--verify-restored` runs on one read-only session against any loopback name. Run each mode in its own process and its own fresh
  * database. Results: docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md.
  */
 import { writeFileSync } from "node:fs";
@@ -676,6 +677,25 @@ function databaseUrl(): string {
   return url;
 }
 
+/** The only database names `--postgres` will migrate, checkpoint, and write into. */
+const BENCH_DATABASE_PREFIX = "omni_bench_";
+
+/**
+ * The URL for a run that writes, refused unless its database is named as a
+ * benchmark database. Loopback and an empty table are not enough on their own:
+ * a local development install is both.
+ */
+function benchDatabaseUrl(): string {
+  const url = databaseUrl();
+  const name = decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
+  if (!name.startsWith(BENCH_DATABASE_PREFIX)) {
+    throw new Error(
+      `refusing database "${name}": --postgres writes only to a database named ${BENCH_DATABASE_PREFIX}*`,
+    );
+  }
+  return url;
+}
+
 type Prepared = {
   cls: FixtureClass;
   variant: number;
@@ -917,7 +937,7 @@ async function postgresRun(
   classes: readonly FixtureClass[],
   opts: { iterations: number; concurrency: number; repeats: number; variants: number },
 ) {
-  const sql = await openPg(databaseUrl());
+  const sql = await openPg(benchDatabaseUrl());
   try {
     if (Number(await scalar(sql, "SELECT count(*) AS v FROM request_bodies")) !== 0) {
       throw new Error(
