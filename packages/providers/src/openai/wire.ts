@@ -13,7 +13,7 @@ export type ResponsesBody = {
   temperature?: number;
   tools?: unknown[];
   tool_choice?: unknown;
-  reasoning?: { effort: string; summary: string };
+  reasoning?: { effort: string; summary?: string };
   store?: boolean;
   [key: string]: unknown;
 };
@@ -305,7 +305,13 @@ export function toResponsesWire(
     }));
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
-  if (req.reasoning !== undefined && req.reasoning.mode !== "off") {
+  if (req.reasoning?.mode === "betweenTools")
+    degradations.push("openai:reasoning-between-tools-as-off");
+  if (
+    req.reasoning !== undefined &&
+    req.reasoning.mode !== "off" &&
+    req.reasoning.mode !== "betweenTools"
+  ) {
     // This API takes a coarse effort level, not a token budget. A budget
     // request is therefore recorded as lost rather than mapped onto an
     // invented medium nobody chose — these models think by default, so
@@ -319,7 +325,12 @@ export function toResponsesWire(
       // unsupported value surfaces as the upstream error it is rather than
       // being pre-clamped into a different depth.
       const effort = req.reasoning.effort ?? "medium";
-      body.reasoning = { effort, summary: "auto" };
+      body.reasoning = {
+        effort,
+        ...(req.reasoning.display === "omitted" || req.reasoning.display === "updates"
+          ? {}
+          : { summary: "auto" }),
+      };
     }
   }
 

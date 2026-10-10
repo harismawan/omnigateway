@@ -21,7 +21,9 @@
  */
 
 import { expect, test } from "bun:test";
-import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
+import { type ChatRequest, collect, GatewayError, type StreamEvent } from "@omni/ir";
+import { anthropicResponse } from "../../../apps/gateway/src/egress/anthropic.ts";
+import { parseAnthropicRequest } from "../../../apps/gateway/src/ingress/anthropic.ts";
 import { anthropicAdapter } from "../src/anthropic/index.ts";
 import { ccVersionSuffix } from "../src/body.ts";
 import type { AdapterCredentials, HttpRequest, HttpResponse } from "../src/types.ts";
@@ -199,6 +201,93 @@ test("the client's own betas ride along, and the OAuth beta is added not substit
   expect(sent.headers).toContainEqual([
     "anthropic-beta",
     "context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14",
+  ]);
+});
+
+for (const stream of [false, true]) {
+  for (const credentials of [apiKey, oauth]) {
+    test(`updates display and client beta survive ${credentials.name}, stream=${stream}`, async () => {
+      const beta = "thinking-display-updates-2026-08-18";
+      for (const withBeta of [false, true]) {
+        const request = parseAnthropicRequest(
+          {
+            model: "claude-opus-4",
+            max_tokens: 1024,
+            stream,
+            messages: [{ role: "user", content: "hi" }],
+            thinking: { type: "adaptive", display: "updates" },
+          },
+          new Headers(withBeta ? { "anthropic-beta": beta } : {}),
+        );
+        const { sent } = await send(
+          request,
+          credentials(),
+          stream
+            ? undefined
+            : {
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  id: "m",
+                  model: "claude-opus-4",
+                  content: [],
+                  stop_reason: "end_turn",
+                  usage: { input_tokens: 1, output_tokens: 0 },
+                }),
+              },
+        );
+        expect(JSON.parse(sent.body ?? "{}").thinking).toEqual({
+          type: "adaptive",
+          display: "updates",
+        });
+        const betas =
+          sent.headers.find(([name]) => name === "anthropic-beta")?.[1].split(",") ?? [];
+        expect(betas.includes(beta)).toBe(withBeta);
+        if (credentials === oauth) expect(betas).toContain("oauth-2025-04-20");
+      }
+    });
+  }
+}
+
+test.each([false, true])("empty signed updates round-trip with stream=%s", async (stream) => {
+  // Both client modes use the same upstream SSE decoder; non-streaming collects it.
+  const body = [
+    [
+      "message_start",
+      {
+        message: { id: "m", model: "claude-opus-4", usage: { input_tokens: 1, output_tokens: 0 } },
+      },
+    ],
+    ["content_block_start", { index: 0, content_block: { type: "thinking", thinking: "" } }],
+    ["content_block_delta", { index: 0, delta: { type: "thinking_delta", thinking: "" } }],
+    [
+      "content_block_delta",
+      { index: 0, delta: { type: "signature_delta", signature: "signed-empty" } },
+    ],
+    ["content_block_stop", { index: 0 }],
+    ["message_stop", {}],
+  ]
+    .map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    .join("");
+  const { result } = await send(
+    { ...base, stream, reasoning: { mode: "adaptive", display: "updates" } },
+    apiKey(),
+    { body },
+  );
+  const events: StreamEvent[] = [];
+  for await (const event of result.events) events.push(event);
+  const collected = collect(events);
+  expect(collected.content).toEqual([{ type: "thinking", text: "", signature: "signed-empty" }]);
+  const assistant = anthropicResponse(collected, "request-empty");
+  const replay = parseAnthropicRequest({
+    model: base.model,
+    max_tokens: 1024,
+    stream,
+    thinking: { type: "adaptive", display: "updates" },
+    messages: [{ role: "user", content: "hi" }, assistant, { role: "user", content: "continue" }],
+  });
+  const { sent } = await send(replay, apiKey());
+  expect(JSON.parse(sent.body ?? "{}").messages[1].content).toEqual([
+    { type: "thinking", thinking: "", signature: "signed-empty" },
   ]);
 });
 

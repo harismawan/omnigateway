@@ -270,7 +270,7 @@ test("strips an effort a client sent without any thinking field", () => {
   ]);
 });
 
-test("lets vendor passthrough override the adaptive-thinking downgrade", () => {
+test("keeps the IR thinking type over conflicting vendor extras", () => {
   const { body } = toWire(
     {
       ...base,
@@ -280,7 +280,7 @@ test("lets vendor passthrough override the adaptive-thinking downgrade", () => {
     "claude-haiku-4-5",
     { oauth: false },
   );
-  expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+  expect(body.thinking).toEqual({ type: "disabled", budget_tokens: 2048 });
 });
 
 test("merges vendor passthrough last so it can override", () => {
@@ -361,9 +361,8 @@ test("leaves a clear_thinking edit alone while thinking is on", () => {
   }
 });
 
-test("keeps a clear_thinking edit when vendor passthrough re-enables thinking", () => {
-  // Passthrough outranks the mapping, so the strip reads the merged body rather
-  // than the downgrade decision that preceded it.
+test("drops clear_thinking when conflicting vendor extras cannot re-enable thinking", () => {
+  // Thinking extras cannot override the IR-derived disabled type.
   const { body, degradations } = toWire(
     {
       ...base,
@@ -378,8 +377,8 @@ test("keeps a clear_thinking edit when vendor passthrough re-enables thinking", 
     "claude-haiku-4-5",
     { oauth: false },
   );
-  expect(body.context_management).toEqual({ edits: [clearThinking] });
-  expect(degradations).not.toContain("anthropic:clear-thinking-unsupported");
+  expect(body.context_management).toBeUndefined();
+  expect(degradations).toContain("anthropic:clear-thinking-unsupported");
 });
 
 test("leaves a clear_thinking edit alone when no thinking field is sent at all", () => {
@@ -2249,4 +2248,46 @@ test("this provider's own native block and tool still encode unchanged", () => {
   expect(body.tools).toEqual([{ type: "web_search_20250305", name: "web_search", max_uses: 3 }]);
   const block = (body.messages[0] as { content: unknown[] }).content[0];
   expect(block).toEqual({ type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] });
+});
+
+test("input_transformations fields do not become unknown SSE events or blocks", async () => {
+  const input_transformations = [{ type: "thinking_block_dropped", index: 0 }];
+  const events = await collectEvents(
+    decodeAnthropic(
+      msgs(
+        {
+          event: "message_start",
+          data: JSON.stringify({
+            input_transformations,
+            message: {
+              id: "msg_binding",
+              model: "claude-sonnet-5-5",
+              input_transformations,
+              usage: { input_tokens: 2 },
+            },
+          }),
+        },
+        {
+          event: "message_delta",
+          data: JSON.stringify({
+            input_transformations,
+            delta: { stop_reason: "end_turn", input_transformations },
+            usage: { output_tokens: 3 },
+          }),
+        },
+        { event: "message_stop", data: "{}" },
+      ),
+    ),
+  );
+  expect(events.some((event) => event.type === "error")).toBe(false);
+  expect(events.at(-1)).toEqual({
+    type: "end",
+    stopReason: "endTurn",
+    usage: {
+      inputTokens: 2,
+      outputTokens: 3,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    },
+  });
 });

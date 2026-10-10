@@ -397,6 +397,11 @@ Worth knowing before you deploy it:
 - **The gateway does not know which model accepts which request shape.** An
   unsupported combination surfaces as the provider's own 400 rather than being
   caught earlier.
+- **Thinking controls retain their wire intent.** Anthropic `between_tools` passes
+  through; other providers treat it as off and report a degradation. Unparsed
+  Anthropic thinking fields (including beta controls) pass through only to
+  Anthropic; supply any required beta header yourself. Hidden adaptive display
+  omits generated Responses reasoning summaries, without inventing a default.
 - Not in scope: semantic caching, billing.
 
 What is missing on purpose, what is missing for now, and what is designed but not

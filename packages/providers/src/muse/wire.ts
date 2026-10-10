@@ -13,7 +13,7 @@ export type MuseResponsesBody = {
   temperature?: number;
   tools?: unknown[];
   tool_choice?: unknown;
-  reasoning?: { effort: string; summary: string };
+  reasoning?: { effort: string; summary?: string };
   store?: boolean;
   [key: string]: unknown;
 };
@@ -286,7 +286,12 @@ export function toMuseWire(
     }));
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
-  if (req.reasoning !== undefined && req.reasoning.mode !== "off") {
+  if (req.reasoning?.mode === "betweenTools") note("muse:reasoning-between-tools-as-off");
+  if (
+    req.reasoning !== undefined &&
+    req.reasoning.mode !== "off" &&
+    req.reasoning.mode !== "betweenTools"
+  ) {
     // This API takes a coarse effort level, not a token budget. A budget
     // request is therefore recorded as lost rather than mapped onto an invented
     // medium nobody chose.
@@ -294,7 +299,12 @@ export function toMuseWire(
       note("muse:reasoning-budget-dropped");
     } else {
       const effort = req.reasoning.effort ?? "medium";
-      body.reasoning = { effort, summary: "auto" };
+      body.reasoning = {
+        effort,
+        ...(req.reasoning.display === "omitted" || req.reasoning.display === "updates"
+          ? {}
+          : { summary: "auto" }),
+      };
     }
   }
 

@@ -284,12 +284,13 @@ const schema = z.object({
       // (in output_config) tunes the depth.
       z.object({
         type: z.literal("adaptive"),
-        display: z.enum(["summarized", "omitted"]).optional(),
+        display: z.enum(["summarized", "omitted", "updates"]).optional(),
       }),
       // The older fixed-budget form. Still accepted from a client that asks
       // for it, though current models reject it upstream.
       z.object({ type: z.literal("enabled"), budget_tokens: z.number().int().positive() }),
       z.object({ type: z.literal("disabled") }),
+      z.object({ type: z.literal("between_tools") }),
     ])
     .optional(),
   // `user_id` is the documented member and the one this surface reads. It is
@@ -610,6 +611,8 @@ function toIrReasoning(
       return { mode: "budget", budgetTokens: thinking.budget_tokens };
     case "disabled":
       return { mode: "off" };
+    case "between_tools":
+      return { mode: "betweenTools" };
   }
 }
 
@@ -707,8 +710,16 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
       : readConversationHeader(headers ?? undefined);
   if (conversation !== undefined) request.conversationId = conversation;
 
-  const extras = extraFields(body as Record<string, unknown>, KNOWN);
-  if (extras !== undefined) request.vendor = { anthropic: extras };
+  const rawThinking = (body as Record<string, unknown>).thinking;
+  const thinkingExtras =
+    parsed.thinking !== undefined && typeof rawThinking === "object" && rawThinking !== null
+      ? extraFields(rawThinking as Record<string, unknown>, ["type", "display", "budget_tokens"])
+      : undefined;
+  const extras = {
+    ...extraFields(body as Record<string, unknown>, KNOWN),
+    ...(thinkingExtras === undefined ? {} : { thinking: thinkingExtras }),
+  };
+  if (Object.keys(extras).length > 0) request.vendor = { anthropic: extras };
 
   if (named.betas.length > 0) request.betas = named.betas;
 

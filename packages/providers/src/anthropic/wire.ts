@@ -36,10 +36,13 @@ export type AnthropicBody = {
    */
   tools?: Record<string, unknown>[];
   tool_choice?: unknown;
-  thinking?:
-    | { type: "adaptive"; display?: "summarized" | "omitted" }
+  thinking?: (
+    | { type: "between_tools" }
+    | { type: "adaptive"; display?: "summarized" | "omitted" | "updates" }
     | { type: "enabled"; budget_tokens: number }
-    | { type: "disabled" };
+    | { type: "disabled" }
+  ) &
+    Record<string, unknown>;
   /**
    * Set by this encoder as an object, but vendor passthrough merges whatever a
    * client sent under the same key, and a client can send anything. Declared as
@@ -337,6 +340,7 @@ const THINKING_ONLY_EDITS = new Set(["clear_thinking_20251015"]);
  */
 function thinkingIsOff(thinking: unknown): boolean {
   if (!isRecord(thinking)) return thinking !== undefined;
+  // between_tools stays off here: clear_thinking support with it is unmeasured.
   return thinking.type !== "adaptive" && thinking.type !== "enabled";
 }
 
@@ -351,8 +355,8 @@ function thinkingIsOff(thinking: unknown): boolean {
  * validate request shape per model, but it already knows this pairing is
  * rejected.
  *
- * Read after the vendor merge, not before: passthrough can set `thinking`
- * itself, and it outranks the mapping. Edit types are matched exactly — an
+ * Read after the vendor merge, which supplies context edits and thinking extras.
+ * IR-derived thinking members remain authoritative. Edit types match exactly — an
  * unfamiliar dated version is left for upstream to rule on rather than
  * prefix-matched into something this table has never seen.
  */
@@ -712,6 +716,9 @@ export function toWire(
   if (opts.autoCache === true) addAutoCacheBreakpoints(body, req, note);
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
+      case "betweenTools":
+        body.thinking = { type: "between_tools" };
+        break;
       case "adaptive":
         if (anthropicReasoningForm(model) === "budget") {
           // This model only speaks the older fixed-budget API and rejects the
@@ -786,7 +793,11 @@ export function toWire(
   // `effort` the reasoning path put on the same field. Only a readable
   // `output_config` carrying a readable `format` outranks; anything else is
   // dropped and reported, and what it would have buried survives.
-  const vendorRaw = req.vendor?.anthropic ?? {};
+  const { thinking: thinkingExtras, ...vendorRaw } = req.vendor?.anthropic ?? {};
+  // The bag holds only unparsed members; it cannot replace or create IR thinking.
+  if (body.thinking !== undefined && isRecord(thinkingExtras)) {
+    body.thinking = { ...thinkingExtras, ...body.thinking };
+  }
   const vendorConfig = vendorRaw.output_config;
   const encoderConfig = isRecord(body.output_config) ? body.output_config : undefined;
   let unreadableFormat = false;

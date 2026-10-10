@@ -211,7 +211,12 @@ export function toKiloWire(
     }));
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
-  if (req.reasoning !== undefined && req.reasoning.mode !== "off") {
+  if (req.reasoning?.mode === "betweenTools") note("kilo:reasoning-between-tools-as-off");
+  if (
+    req.reasoning !== undefined &&
+    req.reasoning.mode !== "off" &&
+    req.reasoning.mode !== "betweenTools"
+  ) {
     if (req.reasoning.mode === "budget") {
       body.reasoning = { max_tokens: req.reasoning.budgetTokens };
     } else {

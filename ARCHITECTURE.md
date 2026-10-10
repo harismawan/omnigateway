@@ -284,6 +284,13 @@ Circuit-breaker state and latency written back on every terminal outcome, so nex
 
 ## Providers
 
+Anthropic ingress splits thinking into portable IR and unparsed vendor extras. The
+encoder merges extras only into an emitted thinking object, with IR-derived
+members winning; the generic vendor merge cannot replace that object. Context-edit
+filtering reads the final merged body. `betweenTools` preserves signed progress
+replay but is conservatively off for `clear_thinking` edits (upstream support is
+unmeasured); non-Anthropic encoders degrade it to their existing off behavior.
+
 Eight providers, each a directory of roughly same files — `descriptor.ts`, `codec.ts`, `wire.ts`, `decode.ts`, `models.ts`, `profile.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types and `cloak.ts` for the OAuth tool rename, `kimi` and `grok` carry `device.ts` for device-code flows. `muse` carries `endpoint.ts`, the one host check its mint and its codec share — its device flow ends in a second call that buys the Model API key inference actually uses.
 
 Three wire dialects, not two. Five of the seven speak an Anthropic- or OpenAI-shaped body; `antigravity` speaks Google's Cloud Code Assist — `v1internal:streamGenerateContent`, which nests a Gemini request inside an envelope carrying the account's own Cloud Code project id. That id is minted during OAuth rather than at request time, because a codec cannot make a network call; it lives on `credential.providerData` and the codec refuses a request that would send it blank. The endpoint is the streaming one even for a non-streaming client, since plain `generateContent` answers 400 on several models.

@@ -22,7 +22,7 @@ export type GrokResponsesBody = {
   temperature?: number;
   tools?: unknown[];
   tool_choice?: unknown;
-  reasoning?: { effort: string; summary: string };
+  reasoning?: { effort: string; summary?: string };
   [key: string]: unknown;
 };
 
@@ -221,7 +221,12 @@ export function toGrokWire(
     }));
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
-  if (req.reasoning !== undefined && req.reasoning.mode !== "off") {
+  if (req.reasoning?.mode === "betweenTools") note("grok:reasoning-between-tools-as-off");
+  if (
+    req.reasoning !== undefined &&
+    req.reasoning.mode !== "off" &&
+    req.reasoning.mode !== "betweenTools"
+  ) {
     // Forwarded unclamped: xAI clamps server-side — `xhigh` is treated as `high`
     // on models that lack it — so a second clamp here could only get it wrong as
     // the model line moves.
@@ -232,7 +237,12 @@ export function toGrokWire(
       note("grok:reasoning-budget-dropped");
     } else {
       const effort = req.reasoning.effort ?? "medium";
-      body.reasoning = { effort, summary: "concise" };
+      body.reasoning = {
+        effort,
+        ...(req.reasoning.display === "omitted" || req.reasoning.display === "updates"
+          ? {}
+          : { summary: "concise" }),
+      };
     }
   }
 

@@ -315,7 +315,9 @@ export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
  * so silently dropping the opt-out would turn thinking back on.
  */
 export type ReasoningConfig =
-  | { mode: "adaptive"; effort?: ReasoningEffort; display?: "summarized" | "omitted" }
+  // No up-front reasoning; signed progress between tool calls remains replayable.
+  | { mode: "betweenTools" }
+  | { mode: "adaptive"; effort?: ReasoningEffort; display?: "summarized" | "omitted" | "updates" }
   | { mode: "budget"; budgetTokens: number }
   | { mode: "off" };
 
