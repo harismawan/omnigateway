@@ -261,6 +261,36 @@ export async function readArtifact(
   return decodeArtifact(key, bytes, expectedSha256);
 }
 
+const LEGACY_HEX = /^(?:[0-9a-f]{2})*$/;
+const LEGACY_IV_HEX_CHARS = 24;
+const LEGACY_TAG_HEX_CHARS = 32;
+
+/**
+ * The shape this writer emits, checked before `decrypt` sees it.
+ *
+ * `decrypt` is the credential helper and accepts any IV length AES-GCM does, so
+ * an envelope sealed with a 16-byte IV would authenticate. Nothing here ever
+ * wrote one, and the reader should not vouch for the shape of a file it did not
+ * write. Kept out of `encryption.ts`, whose rules belong to credentials.
+ */
+function isLegacyStructure(text: string): boolean {
+  const parts = text.split(":");
+  const [scheme, version, iv, body, tag] = parts;
+  return (
+    parts.length === 5 &&
+    scheme === "enc" &&
+    version === "v1" &&
+    iv !== undefined &&
+    body !== undefined &&
+    tag !== undefined &&
+    iv.length === LEGACY_IV_HEX_CHARS &&
+    tag.length === LEGACY_TAG_HEX_CHARS &&
+    LEGACY_HEX.test(iv) &&
+    LEGACY_HEX.test(body) &&
+    LEGACY_HEX.test(tag)
+  );
+}
+
 /**
  * The half of a read that is about the bytes rather than where they came from:
  * digest check, decryption, and the shape check on the plaintext. Shared with
@@ -275,7 +305,9 @@ export async function decodeArtifact(
     if (expectedSha256 !== null && (await sha256Hex(bytes)) !== expectedSha256) {
       return { ok: false, failure: "corrupt" };
     }
-    const parsed: unknown = JSON.parse(await decrypt(key, new TextDecoder().decode(bytes)));
+    const text = new TextDecoder().decode(bytes);
+    if (!isLegacyStructure(text)) return { ok: false, failure: "corrupt" };
+    const parsed: unknown = JSON.parse(await decrypt(key, text));
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       return { ok: false, failure: "corrupt" };
     }

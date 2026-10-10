@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   bodiesDirFor,
+  decodeArtifact,
   MAX_ARTIFACT_BYTES,
   prepareArtifact,
   relPathFor,
+  sha256Hex,
   writeArtifact,
 } from "../src/bodies/artifact.ts";
 import {
@@ -16,7 +18,7 @@ import {
   MAX_STRING_BYTES,
 } from "../src/bodies/bound.ts";
 import { MASK_RULES, type MaskRule, type MaskRuleId, maskString } from "../src/bodies/mask.ts";
-import { deriveKey } from "../src/encryption.ts";
+import { deriveKey, encrypt } from "../src/encryption.ts";
 import { createBodyRepo } from "../src/sqlite/bodies.ts";
 import { openDb } from "../src/sqlite/db.ts";
 import { createStore } from "../src/sqlite/store.ts";
@@ -712,6 +714,248 @@ test("get returns null for a request that was never captured", async () => {
   const { store, root } = await tempStore();
   expect(await store.bodies.get("req_never")).toBeNull();
   await cleanup(store, root);
+});
+
+// ---------------------------------------------------------------------------
+// Legacy envelope compatibility. Every fixture below is emitted by the credential
+// helper (`encrypt` plus `TextEncoder`), never by the artifact writer, so a later
+// change to how artifacts are sealed cannot quietly redefine what "legacy" means.
+// ---------------------------------------------------------------------------
+
+const LEGACY_SECRET = "test-secret-value-for-unit-tests";
+const legacyKey = deriveKey(LEGACY_SECRET);
+const decoder = new TextDecoder();
+
+const LEGACY_INPUT = artifact({
+  attempts: [
+    {
+      attempt: 1,
+      provider: "anthropic",
+      request: { model: "claude-opus-4-1-20250805" },
+      response: { stop_reason: "end_turn" },
+      streamChunks: ["event: message_start", "event: message_stop"],
+      truncated: false,
+    },
+  ],
+});
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** The unchanged legacy seal: credential helper, then UTF-8 of its text. */
+async function legacySeal(json: string, key?: CryptoKey): Promise<Uint8Array> {
+  return encoder.encode(await encrypt(key ?? (await legacyKey), json));
+}
+
+/** Splits a legacy envelope into the five components `decrypt` expects. */
+function legacyParts(bytes: Uint8Array): { iv: string; body: string; tag: string } {
+  const [, , iv = "", body = "", tag = ""] = decoder.decode(bytes).split(":");
+  return { iv, body, tag };
+}
+
+function legacyText(parts: { iv: string; body: string; tag: string }): Uint8Array {
+  return encoder.encode(`enc:v1:${parts.iv}:${parts.body}:${parts.tag}`);
+}
+
+/** AES-GCM sealed independently of `encrypt`, so IV and tag lengths are ours to choose. */
+async function sealWith(
+  json: string,
+  ivBytes: number,
+  tagBits: number,
+): Promise<{ iv: string; body: string; tag: string }> {
+  const iv = crypto.getRandomValues(new Uint8Array(ivBytes));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, tagLength: tagBits },
+      await legacyKey,
+      encoder.encode(json),
+    ),
+  );
+  const split = sealed.length - tagBits / 8;
+  return {
+    iv: toHex(iv),
+    body: toHex(sealed.subarray(0, split)),
+    tag: toHex(sealed.subarray(split)),
+  };
+}
+
+test("a legacy envelope from the unchanged helper decodes to the prepared artifact", async () => {
+  const prepared = prepareArtifact(LEGACY_INPUT);
+  const bytes = await legacySeal(prepared.json);
+  expect(decoder.decode(bytes).startsWith("enc:v1:")).toBe(true);
+
+  const digest = await sha256Hex(bytes);
+  for (const expected of [digest, null]) {
+    const read = await decodeArtifact(await legacyKey, bytes, expected);
+    expect(`${expected === null ? "null" : "digest"}: ${read.ok}`).toBe(
+      `${expected === null ? "null" : "digest"}: true`,
+    );
+    if (read.ok) expect(read.artifact).toEqual(prepared.artifact);
+  }
+});
+
+test("a legacy envelope under the wrong key, or a wrong digest, is corrupt", async () => {
+  const bytes = await legacySeal(prepareArtifact(LEGACY_INPUT).json);
+  const digest = await sha256Hex(bytes);
+  const otherKey = await deriveKey("another-secret-value-for-unit-tests");
+
+  expect(await decodeArtifact(otherKey, bytes, digest)).toEqual({ ok: false, failure: "corrupt" });
+  // A null digest leaves GCM as the only boundary, and it must hold alone.
+  expect(await decodeArtifact(otherKey, bytes, null)).toEqual({ ok: false, failure: "corrupt" });
+  expect(await decodeArtifact(await legacyKey, bytes, "0".repeat(64))).toEqual({
+    ok: false,
+    failure: "corrupt",
+  });
+});
+
+test("malformed legacy envelopes are corrupt rather than thrown, digest or no digest", async () => {
+  const valid = await legacySeal(prepareArtifact(LEGACY_INPUT).json);
+  const { iv, body, tag } = legacyParts(valid);
+  expect(body.toUpperCase()).not.toBe(body);
+  const validText = decoder.decode(valid);
+
+  const cases: Array<[string, Uint8Array]> = [
+    ["extra component", encoder.encode(`${validText}:00`)],
+    ["extra empty component", encoder.encode(`${validText}:`)],
+    ["missing tag component", encoder.encode(`enc:v1:${iv}:${body}`)],
+    ["trailing newline", encoder.encode(`${validText}\n`)],
+    ["unknown version", encoder.encode(validText.replace("enc:v1:", "enc:v2:"))],
+    ["wrong scheme", encoder.encode(validText.replace("enc:v1:", "ENC:v1:"))],
+    ["odd-length body hex", legacyText({ iv, body: `${body}0`, tag })],
+    ["odd-length iv hex", legacyText({ iv: `${iv}0`, body, tag })],
+    ["odd-length tag hex", legacyText({ iv, body, tag: `${tag}0` })],
+    ["uppercase hex", legacyText({ iv, body: body.toUpperCase(), tag })],
+    ["non-hex character", legacyText({ iv, body: `g${body.slice(1)}`, tag })],
+    ["empty iv", legacyText({ iv: "", body, tag })],
+    ["empty tag", legacyText({ iv, body, tag: "" })],
+    ["empty body", legacyText({ iv, body: "", tag })],
+    ["short iv", legacyText({ iv: iv.slice(0, -2), body, tag })],
+    ["long iv", legacyText({ iv: `${iv}00`, body, tag })],
+    ["short tag", legacyText({ iv, body, tag: tag.slice(0, -2) })],
+    ["long tag", legacyText({ iv, body, tag: `${tag}00` })],
+    // Valid GCM under its own parameters, so only the fixed lengths reject them.
+    [
+      "authenticating 16-byte iv",
+      legacyText(await sealWith(prepareArtifact(LEGACY_INPUT).json, 16, 128)),
+    ],
+    [
+      "authenticating 8-byte iv",
+      legacyText(await sealWith(prepareArtifact(LEGACY_INPUT).json, 8, 128)),
+    ],
+    [
+      "authenticating 12-byte tag",
+      legacyText(await sealWith(prepareArtifact(LEGACY_INPUT).json, 12, 96)),
+    ],
+    ["not an envelope at all", encoder.encode("hello")],
+    ["empty input", new Uint8Array(0)],
+    ["non-UTF-8 bytes", new Uint8Array([0xff, 0xfe, 0x00, 0xc3, 0x28])],
+  ];
+
+  const key = await legacyKey;
+  for (const [name, bytes] of cases) {
+    expect(`${name}: ${JSON.stringify(await decodeArtifact(key, bytes, null))}`).toBe(
+      `${name}: ${JSON.stringify({ ok: false, failure: "corrupt" })}`,
+    );
+    // Again with the digest of exactly these bytes, so the digest cannot be what
+    // rejected them.
+    const digest = await sha256Hex(bytes);
+    expect(`${name}: ${JSON.stringify(await decodeArtifact(key, bytes, digest))}`).toBe(
+      `${name}: ${JSON.stringify({ ok: false, failure: "corrupt" })}`,
+    );
+  }
+});
+
+test("a legacy envelope that authenticates but is not a JSON object is corrupt", async () => {
+  const key = await legacyKey;
+  for (const plaintext of ["not json {", "", "[]", "null", "42", '"text"', "true", '{"a":']) {
+    const bytes = await legacySeal(plaintext);
+    const read = await decodeArtifact(key, bytes, await sha256Hex(bytes));
+    expect(`${JSON.stringify(plaintext)}: ${JSON.stringify(read)}`).toBe(
+      `${JSON.stringify(plaintext)}: ${JSON.stringify({ ok: false, failure: "corrupt" })}`,
+    );
+  }
+});
+
+test("a legacy file from the unchanged helper reads as ready through the repository", async () => {
+  const root = join(tmpdir(), `omni-bodies-${crypto.randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const dbPath = join(root, "omnigateway.db");
+  const dir = bodiesDirFor(dbPath);
+  const db = openDb(dbPath);
+  const repo = createBodyRepo(db, await legacyKey, dir);
+
+  const prepared = prepareArtifact(LEGACY_INPUT);
+  const bytes = await legacySeal(prepared.json);
+  const relPath = relPathFor(LEGACY_INPUT.requestId, LEGACY_INPUT.at);
+  await writeArtifact(dir, relPath, bytes);
+  db.run(
+    `INSERT INTO request_bodies (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated)
+     VALUES (?,?,?,?,?,?,?)`,
+    [
+      LEGACY_INPUT.requestId,
+      LEGACY_INPUT.at,
+      relPath,
+      bytes.length,
+      await sha256Hex(bytes),
+      "ready",
+      0,
+    ],
+  );
+
+  const read = await repo.get(LEGACY_INPUT.requestId);
+  expect(read?.row.detailState).toBe("ready");
+  expect(read?.artifact).toEqual(prepared.artifact);
+
+  db.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+/**
+ * An authenticated legacy frame past 2 * MAX_ARTIFACT_BYTES + 65 stored bytes.
+ *
+ * `prepareArtifact`'s last fallback keeps every attempt's frame and never
+ * rechecks the remaining size, so a many-attempt artifact built through the
+ * store API (the gateway caps dispatch at ten attempts) comes out larger than
+ * the budget it is meant to honour. Built once per file: it is megabytes of
+ * encrypted hex.
+ */
+const oversizedLegacy = (async () => {
+  const attempts = Array.from({ length: 6000 }, (_, i) => ({
+    attempt: i + 1,
+    provider: "anthropic",
+    request: { model: "fast" },
+    response: { ok: true },
+    streamChunks: null,
+    truncated: false,
+  }));
+  const prepared = prepareArtifact(
+    artifact({
+      client: { request: { model: "fast" }, response: { ok: true }, truncated: false },
+      attempts,
+    }),
+  );
+  const bytes = await legacySeal(prepared.json);
+  return { prepared, bytes, digest: await sha256Hex(bytes) };
+})();
+
+test("an oversized but authenticated legacy frame is a real fixture past the proposed ceiling", async () => {
+  const { prepared, bytes } = await oversizedLegacy;
+  // Pins the premise: the unchanged preparer really does emit past the budget,
+  // and the legacy envelope really is exactly 2N + 65 bytes.
+  expect(Buffer.byteLength(prepared.json)).toBeGreaterThan(MAX_ARTIFACT_BYTES);
+  expect(bytes.length).toBe(2 * Buffer.byteLength(prepared.json) + 65);
+  expect(bytes.length).toBeGreaterThan(2 * MAX_ARTIFACT_BYTES + 65);
+});
+
+test("an oversized legacy frame decodes today because no acquisition bound exists yet", async () => {
+  // Documents current behaviour, not a promise: the controller ruling is that
+  // legacy envelopes above 2 * MAX_ARTIFACT_BYTES + 65 become `corrupt` once
+  // bounded acquisition lands, and this assertion flips with it.
+  const { prepared, bytes, digest } = await oversizedLegacy;
+  const read = await decodeArtifact(await legacyKey, bytes, digest);
+  expect(read.ok).toBe(true);
+  if (read.ok) expect(read.artifact).toEqual(prepared.artifact);
 });
 
 // ---------------------------------------------------------------------------
