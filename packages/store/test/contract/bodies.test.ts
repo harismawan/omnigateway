@@ -3,16 +3,17 @@ import { expect, test } from "bun:test";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { SQL } from "bun";
 import {
   bodiesDirFor,
   MAX_ARTIFACT_BYTES,
   prepareArtifact,
+  relPathFor,
   sealArtifact,
-  sealBinaryArtifact,
   sha256Hex,
 } from "../../src/bodies/artifact.ts";
-import { deriveKey, encrypt } from "../../src/encryption.ts";
+import { decrypt, deriveKey, encrypt } from "../../src/encryption.ts";
 import { createBodyRepo } from "../../src/postgres/bodies.ts";
 import { createStore } from "../../src/sqlite/store.ts";
 import type { BodyArtifact, Store } from "../../src/types.ts";
@@ -103,21 +104,121 @@ async function stored(
   }
 }
 
+/** Sets a row's `detail_state` the way another reader's repository would have. */
+async function setState(
+  backend: Pick<Backend, "name">,
+  s: Store,
+  requestId: string,
+  state: string,
+): Promise<void> {
+  if (backend.name === "sqlite") {
+    const db = new Database(s.databasePath);
+    try {
+      db.run("UPDATE request_bodies SET detail_state = ? WHERE request_id = ?", [state, requestId]);
+    } finally {
+      db.close();
+    }
+    return;
+  }
+  const sql = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string, max: 1 });
+  try {
+    await sql.unsafe("UPDATE request_bodies SET detail_state = $1 WHERE request_id = $2", [
+      state,
+      requestId,
+    ]);
+  } finally {
+    await sql.close();
+  }
+}
+
+/** The `detail_state` a row holds, read past the repository so no read can repair it. */
+async function persistedState(
+  backend: Pick<Backend, "name">,
+  s: Store,
+  requestId: string,
+): Promise<string | undefined> {
+  if (backend.name === "sqlite") {
+    const db = new Database(s.databasePath);
+    try {
+      return db
+        .query<{ detail_state: string }, [string]>(
+          "SELECT detail_state FROM request_bodies WHERE request_id = ?",
+        )
+        .get(requestId)?.detail_state;
+    } finally {
+      db.close();
+    }
+  }
+  const sql = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string, max: 1 });
+  try {
+    const rows: { detail_state: string }[] = await sql.unsafe(
+      "SELECT detail_state FROM request_bodies WHERE request_id = $1",
+      [requestId],
+    );
+    return rows[0]?.detail_state;
+  } finally {
+    await sql.close();
+  }
+}
+
+/**
+ * The reader every release before v0.13.5 shipped, restated from its source:
+ * the digest, then the credential helper's `decrypt` over the bytes as text,
+ * then the object check. It knows one format, and anything else is `corrupt`.
+ */
+async function preDualRead(
+  key: CryptoKey,
+  bytes: Uint8Array,
+  expectedSha256: string | null,
+): Promise<"ready" | "corrupt"> {
+  try {
+    if (expectedSha256 !== null && (await sha256Hex(bytes)) !== expectedSha256) return "corrupt";
+    const parsed: unknown = JSON.parse(await decrypt(key, new TextDecoder().decode(bytes)));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return "corrupt";
+    return "ready";
+  } catch {
+    return "corrupt";
+  }
+}
+
 type Format = "legacy" | "raw" | "gzip";
 const FORMATS: Format[] = ["legacy", "raw", "gzip"];
 
 /**
- * One prepared artifact's JSON sealed in each stored format. `raw` is forced
- * with a compressor that fails, so the same body can be had in both binary
- * codecs; the tests assert which codec each came out as.
+ * One prepared artifact's JSON sealed in each stored format. `raw` is the
+ * writer the stores call; `legacy` and `gzip` are built here from the
+ * credential helper and from zlib plus WebCrypto, because no store writes
+ * either any more and a reader test must not depend on a writer to exist.
  */
 async function seal(format: Format, json: string, key?: CryptoKey): Promise<Uint8Array> {
   const k = key ?? (await deriveKey(SECRET));
-  if (format === "legacy") return (await sealArtifact(k, json)).bytes;
-  const refuse = async (): Promise<Uint8Array> => {
-    throw new Error("no gzip");
-  };
-  return (await sealBinaryArtifact(k, json, format === "raw" ? refuse : undefined)).bytes;
+  if (format === "legacy") return legacySeal(k, json);
+  if (format === "raw") return (await sealArtifact(k, json)).bytes;
+  const plain = new TextEncoder().encode(json);
+  const payload = new Uint8Array(gzipSync(plain));
+  const header = new Uint8Array(10);
+  header.set(new TextEncoder().encode("OGBA"));
+  header[4] = 1;
+  header[5] = 1;
+  new DataView(header.buffer).setUint32(6, plain.length, false);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: header, tagLength: 128 },
+      k,
+      payload,
+    ),
+  );
+  const out = new Uint8Array(header.length + iv.length + sealed.length);
+  out.set(header, 0);
+  out.set(iv, header.length);
+  out.set(sealed, header.length + iv.length);
+  return out;
+}
+
+/** What every release before this one wrote: the credential string, UTF-8 encoded. */
+async function legacySeal(key: CryptoKey, json: string): Promise<Uint8Array> {
+  return new TextEncoder().encode(await encrypt(key, json));
 }
 
 const KEY_CANARY = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
@@ -215,6 +316,120 @@ forEachStore((backend) => {
     expect((await s.bodies.get(input.requestId))?.row.at).toBe(AT + 1);
   });
 
+  // The writer's format is a contract with every reader of the corpus, so it is
+  // pinned where the bytes land — the file on SQLite, the column on Postgres —
+  // rather than on the sealing function either store happens to call.
+  test("put writes the binary raw envelope on every store", async () => {
+    const s = await backend.fresh();
+    // Compressible prose well past a kilobyte, so a writer that tried gzip
+    // would take it and the codec byte would say so.
+    const input = rich("req_writer_format");
+    const n = Buffer.byteLength(prepareArtifact(input).json);
+    const row = await s.bodies.put(input);
+    const bytes = await stored(backend, s, input.requestId, row.relPath ?? "");
+
+    expect(new TextDecoder().decode(bytes.subarray(0, 4))).toBe("OGBA");
+    expect([bytes[4], bytes[5]]).toEqual([1, 0]);
+    expect(new DataView(bytes.buffer, bytes.byteOffset).getUint32(6, false)).toBe(n);
+    expect(bytes.length).toBe(n + 38);
+    expect(row.sizeBytes).toBe(bytes.length);
+    expect(row.sha256).toBe(await sha256Hex(bytes));
+  });
+
+  /**
+   * The rollout rehearsed on one corpus: rows from the legacy writer, rows from
+   * this release's `put`, and a row from a rollback to v0.13.5, which writes
+   * legacy again. Every row must open under the current reader; a reader from
+   * before v0.13.5 must open the legacy rows and call the binary ones `corrupt`,
+   * which is why rolling back below v0.13.5 is unsafe while any binary row
+   * remains; and the `corrupt` such a reader records must not outlive it.
+   */
+  test("a mixed corpus survives the rollout, and only a dual reader opens all of it", async () => {
+    const s = await backend.fresh();
+    const key = await deriveKey(SECRET);
+    const writeLegacy = async (input: BodyArtifact): Promise<void> => {
+      const row = await s.bodies.put(input);
+      const bytes = await legacySeal(key, prepareArtifact(input).json);
+      await plant(backend, s, input.requestId, row.relPath ?? "", bytes);
+    };
+
+    const before = rich("req_rehearse_legacy");
+    await writeLegacy(before);
+    const binary = [rich("req_rehearse_binary"), artifact({ requestId: "req_rehearse_small" })];
+    for (const input of binary) await s.bodies.put(input);
+    const rolledBack = rich("req_rehearse_rollback");
+    await writeLegacy(rolledBack);
+    const corpus = [before, ...binary, rolledBack];
+
+    for (const input of corpus) {
+      const read = await s.bodies.get(input.requestId);
+      expect(`${input.requestId}: ${read?.row.detailState}`).toBe(`${input.requestId}: ready`);
+      expect(read?.artifact).toEqual(prepareArtifact(input).artifact);
+    }
+
+    // The old reader over the same stored bytes and digests, recording its
+    // verdict on the row as its own repository did.
+    const isBinary = new Set(binary.map((input) => input.requestId));
+    for (const input of corpus) {
+      const id = input.requestId;
+      const row = (await s.bodies.get(id))?.row;
+      const bytes = await stored(backend, s, id, row?.relPath ?? "");
+      const verdict = await preDualRead(key, bytes, row?.sha256 ?? null);
+      expect(`${id}: ${verdict}`).toBe(`${id}: ${isBinary.has(id) ? "corrupt" : "ready"}`);
+      await setState(backend, s, id, verdict);
+    }
+
+    // A dual reader reading the row again hands it back and repairs the state.
+    for (const input of binary) {
+      const id = input.requestId;
+      expect(await persistedState(backend, s, id)).toBe("corrupt");
+      const read = await s.bodies.get(id);
+      expect(read?.row.detailState).toBe("ready");
+      expect(read?.artifact).toEqual(prepareArtifact(input).artifact);
+      expect(await persistedState(backend, s, id)).toBe("ready");
+    }
+  });
+
+  /**
+   * `prepareArtifact` omits every body and then the error, and stops there: a
+   * frame of a few thousand attempts is still over budget with nothing left in
+   * it but markers. The writer refuses that plaintext, so `put` throws before
+   * any byte or row is written — the gateway reports a failed capture and keeps
+   * the request — rather than storing an envelope every reader calls `corrupt`.
+   */
+  test("an artifact over budget even once stripped is refused before anything is written", async () => {
+    const s = await backend.fresh();
+    const attempts = Array.from({ length: 2500 }, (_, i) => ({
+      attempt: i + 1,
+      provider: "anthropic",
+      request: { prompt: "lorem ipsum dolor sit amet ".repeat(12) },
+      response: null,
+      streamChunks: null,
+      truncated: false,
+    }));
+    const huge = (requestId: string): BodyArtifact => artifact({ requestId, attempts });
+    const stripped = prepareArtifact(huge("req_huge"));
+    expect(child(stripped.artifact.error, "omitted")).toBe(true);
+    expect(Buffer.byteLength(stripped.json)).toBeGreaterThan(MAX_ARTIFACT_BYTES);
+
+    await expect(s.bodies.put(huge("req_huge"))).rejects.toThrow(
+      /outside the binary envelope's bounds/,
+    );
+    expect(await s.bodies.get("req_huge")).toBeNull();
+    if (backend.name === "sqlite") {
+      const path = join(bodiesDirFor(s.databasePath), relPathFor("req_huge", AT));
+      await expect(readFile(path)).rejects.toThrow();
+    }
+
+    // A retry that is now over budget leaves the earlier write as it was.
+    const first = rich("req_huge_retry");
+    const row = await s.bodies.put(first);
+    await expect(s.bodies.put(huge("req_huge_retry"))).rejects.toThrow();
+    const read = await s.bodies.get("req_huge_retry");
+    expect(read?.row).toEqual(row);
+    expect(read?.artifact).toEqual(prepareArtifact(first).artifact);
+  });
+
   test("a request id that could escape a shard directory is rejected on every store", async () => {
     const s = await backend.fresh();
     for (const hostile of ["../../etc/passwd", "a/b", "req .json", "", "..", "req\0x"]) {
@@ -272,7 +487,7 @@ forEachStore((backend) => {
     const input = artifact();
     const row = await s.bodies.put(input);
     const prepared = prepareArtifact(input);
-    const sealed = await sealBinaryArtifact(await deriveKey(SECRET), prepared.json);
+    const sealed = await sealArtifact(await deriveKey(SECRET), prepared.json);
     await plant(backend, s, input.requestId, row.relPath ?? "", sealed.bytes);
 
     const read = await s.bodies.get(input.requestId);

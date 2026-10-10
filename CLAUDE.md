@@ -620,11 +620,9 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Snapshot is database alone. `request_bodies/` excluded; after restore, body rows and artifact
   files disagree until `sweepOrphans` reconcile. Snapshot still carry encrypted credentials and
   API-key hashes; downloads `no-store`.
-- Body writer stay legacy (`sealArtifact`); `sealBinaryArtifact` has no production caller until
-  every reader of a shared corpus read `OGBA` (older reader call it `corrupt`). After activation
-  roll back only to a dual-reading release. Pin: legacy-prefix assertion in
-  `packages/store/test/bodies.test.ts`. `MAX_ENVELOPE_BYTES` caps any envelope pre-read; binary
-  add `MAX_ARTIFACT_BYTES + 38` (`parseBinary`).
+- Body `put` write `OGBA` raw (`sealArtifact`), read legacy/raw/gzip; roll back only to >= v0.13.5
+  (older reader call binary `corrupt`). Pins: writer-format + mixed-corpus tests in store
+  `test/contract/bodies.test.ts`. `MAX_ENVELOPE_BYTES` caps pre-read; binary `+38` (`parseBinary`).
 - Lifecycle and swap rules below explained in `ARCHITECTURE.md#replacing-the-database-while-it-is-open`
   and `#stopping-and-restarting`. Read section before changing any.
 - Restart ask systemd, never self-SIGTERM; `--no-block` required.
