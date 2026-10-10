@@ -620,6 +620,10 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Snapshot is database alone. `request_bodies/` excluded; after restore, body rows and artifact
   files disagree until `sweepOrphans` reconcile. Snapshot still carry encrypted credentials and
   API-key hashes; downloads `no-store`.
+- Body artifact writer stay legacy (`sealArtifact`) until every reader of a shared corpus read binary
+  `OGBA` too; `sealBinaryArtifact` has no caller by design. Older reader call binary artifact `corrupt`,
+  so rollback past activation break reads. Read ceilings: `MAX_ENVELOPE_BYTES` (legacy), +38 (binary).
+  `ARCHITECTURE.md#body-capture-forensics`.
 - Lifecycle and swap rules below explained in `ARCHITECTURE.md#replacing-the-database-while-it-is-open`
   and `#stopping-and-restarting`. Read section before changing any.
 - Restart ask systemd, never self-SIGTERM; `--no-block` required.

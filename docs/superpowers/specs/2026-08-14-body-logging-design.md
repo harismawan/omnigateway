@@ -95,9 +95,12 @@ directions and for every rule, so the false-positive surface is a known quantity
 discovery made later — and by a property over the chain itself, because the surface tests are each
 written for one rule and none of them can see a rule weakening another.
 
-Artifacts are encrypted at rest under the required `OMNI_ENCRYPTION_KEY`, using the same encryption
-path as provider credentials. Artifact files copied without the key yield nothing. An operator who
-never enables the setting stores nothing at all.
+Artifacts are encrypted at rest with AES-256-GCM under a key derived from the required
+`OMNI_ENCRYPTION_KEY`, the same derived key provider credentials use. The artifact envelope is its
+own format, not the credential string: credentials keep `enc:v1:` hex, artifacts have the legacy
+`enc:v1:` envelope and the binary `OGBA` envelope described under [Storage envelope](#storage-envelope).
+Artifact files copied without the key yield nothing. An operator who never enables the setting
+stores nothing at all.
 
 ## Configuration contract
 
@@ -136,9 +139,12 @@ marker recording the reason, rather than being written oversized or dropped sile
 marker form itself exceed the budget, the recorded error goes too: "never written oversized" is the
 stronger promise, and an operator reading an artifact that large learns nothing more from the field.
 
-512 KB is a plaintext cap, and encryption emits hex, so the worst case on disk is about twice that.
-The row cap therefore bounds the body corpus at roughly 100 GB, not 50, and that is the number
-`README.md` must give an operator sizing a volume.
+512 KB is a plaintext cap. What is stored is an envelope, and its size depends on the format: the
+legacy envelope hex-encodes, so a plaintext of N bytes stores as `2N + 65` bytes, about twice the
+cap at the limit; the binary envelope stores `N + 38` raw, or fewer when its gzip codec is used.
+Until binary writing is enabled every artifact is legacy, so the row cap bounds the body corpus at
+roughly 100 GB of stored envelope bytes, not 50, and that is the worst-case figure
+`docs/operations.md` gives an operator sizing a volume. See [Storage envelope](#storage-envelope).
 
 The same constant is reused as the in-memory cap on one captured body, and the two bounds are not the
 same number. It bounds one artifact on disk; as a capture cap it applies to the client response and
@@ -214,6 +220,50 @@ a body corpus and its index will drift and the reader is where that has to be su
 
 `sha256` is taken over the stored bytes, so on-disk truncation or corruption is detectable without the
 encryption key.
+
+### Storage envelope
+
+The artifact JSON is sealed into one of two envelopes, chosen by the exact leading bytes. Anything
+else is `corrupt`; a malformed envelope of one kind is never retried as the other.
+
+- **Legacy**: the credential string `enc:v1:<iv-hex>:<ciphertext-hex>:<tag-hex>`, UTF-8 encoded.
+  `2N + 65` bytes for N bytes of JSON.
+- **Binary**: magic `OGBA`, version byte `1`, codec byte (`0` raw UTF-8 JSON, `1` gzip), the
+  uncompressed length as a big-endian uint32, a 12-byte random IV, then AES-256-GCM ciphertext with
+  its 16-byte tag. The first 10 bytes are the GCM additional data, so version, codec, and claimed
+  length are authenticated. Overhead is 38 bytes: `N + 38` raw, smaller when gzip is selected. The
+  same derived key is used; `encryption.ts` and credential ciphertext are unchanged.
+
+The plaintext budget (512 KB, applied after masking and structural bounding) is a limit on the
+serialized JSON and does not move: a plaintext that compresses well is not admitted above it. What
+the `size_bytes` column and the console and CLI "on disk" figures report is the stored envelope,
+so it differs by format. A corpus is mixed once binary artifacts are written, because legacy rows
+stay until retention removes them. These are logical stored-envelope bytes. They are not PostgreSQL
+table, TOAST, or WAL size (PostgreSQL may already compress repetitive hex), and no compression ratio
+is promised for production traffic: it depends on content.
+
+Two checks with different jobs. `sha256` covers the whole stored envelope and detects truncation,
+damage, and swapped files without the key. AES-GCM is the authentication boundary and does not rely
+on the digest being present; a null digest still requires a valid tag. Only authenticated header
+fields govern decompression, which is bounded natively to the 512 KB budget and must produce exactly
+the authenticated length.
+
+Read limits are a compatibility restriction: an encoded artifact above `2 * MAX_ARTIFACT_BYTES + 65`
+bytes (legacy or binary), or a binary one above `MAX_ARTIFACT_BYTES + 38`, reads as `corrupt` without
+being read whole or decrypted. The gateway never writes one: attempts are capped at 10, so a stripped
+frame is far under the budget. Only a direct store-API caller with thousands of attempts can. The
+bytes are not deleted, and the existing `corrupt` to `ready` recovery restores such an artifact if a
+reader that accepts it is run later.
+
+**Rollout.** Readers that understand both envelopes ship first (Release A); writers still emit
+legacy. Binary writing (Release B) ships only after every reader of a shared corpus runs a
+dual-reading version: every gateway replica, the CLI, standbys, and anything that restores a
+snapshot or dump. A reader older than Release A reports a binary artifact as unreadable, and
+rolling back after Release B must stop at a dual-reading version, not before it.
+
+Snapshots and `copyStore` are unchanged by the envelope: SQLite snapshots exclude the body
+directory, `copyStore` does not carry body rows or corpus, and a PostgreSQL dump carries the bytes
+opaquely. The missing and orphan reconciliation above still applies.
 
 ## Artifact shape
 
@@ -315,7 +365,7 @@ imply otherwise, because the wire size is recorded nowhere. The CLI's per-payloa
 over the stored payload, after masking and structural bounding; the gap is not marginal, since a
 payload made mostly of one long opaque token is replaced by an elision and reads as a fraction of
 what was sent. The dashboard's single figure is the encrypted file, which is that same bounded
-payload and then hex encoding, so it errs the other way. Each therefore names what it measured —
+payload and then the stored envelope (hex-encoded in the legacy format), so it errs the other way. Each therefore names what it measured —
 "stored" and "on disk" — rather than printing a bare size an operator will read as a request size.
 
 Settings edits go through the same schema the dashboard's do. `settings set` had accepted only
