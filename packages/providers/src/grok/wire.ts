@@ -22,7 +22,7 @@ export type GrokResponsesBody = {
   temperature?: number;
   tools?: unknown[];
   tool_choice?: unknown;
-  reasoning?: { effort: string; summary: string };
+  reasoning?: { effort: string; summary?: string };
   [key: string]: unknown;
 };
 
@@ -232,7 +232,12 @@ export function toGrokWire(
       note("grok:reasoning-budget-dropped");
     } else {
       const effort = req.reasoning.effort ?? "medium";
-      body.reasoning = { effort, summary: "concise" };
+      body.reasoning = {
+        effort,
+        ...(req.reasoning.display === "omitted" || req.reasoning.display === "updates"
+          ? {}
+          : { summary: "concise" }),
+      };
     }
   }
 

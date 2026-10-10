@@ -39,7 +39,7 @@ export type CustomResponsesBody = {
   temperature?: number;
   tools?: unknown[];
   tool_choice?: unknown;
-  reasoning?: { effort: string; summary: string };
+  reasoning?: { effort: string; summary?: string };
   store?: boolean;
   [key: string]: unknown;
 };
@@ -359,7 +359,14 @@ export function toCustomResponsesWire(
   if (req.toolChoice !== undefined) body.tool_choice = encodeResponsesToolChoice(req.toolChoice);
 
   const effort = customEffort(req.reasoning);
-  if (effort !== undefined) body.reasoning = { effort, summary: "auto" };
+  if (effort !== undefined)
+    body.reasoning = {
+      effort,
+      ...(req.reasoning?.mode === "adaptive" &&
+      (req.reasoning.display === "omitted" || req.reasoning.display === "updates")
+        ? {}
+        : { summary: "auto" }),
+    };
   else if (req.reasoning?.mode === "budget") note("custom:reasoning-budget-dropped");
 
   // Last, so an operator's passthrough can override anything above.

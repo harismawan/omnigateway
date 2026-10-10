@@ -13,7 +13,7 @@ export type MuseResponsesBody = {
   temperature?: number;
   tools?: unknown[];
   tool_choice?: unknown;
-  reasoning?: { effort: string; summary: string };
+  reasoning?: { effort: string; summary?: string };
   store?: boolean;
   [key: string]: unknown;
 };
@@ -294,7 +294,12 @@ export function toMuseWire(
       note("muse:reasoning-budget-dropped");
     } else {
       const effort = req.reasoning.effort ?? "medium";
-      body.reasoning = { effort, summary: "auto" };
+      body.reasoning = {
+        effort,
+        ...(req.reasoning.display === "omitted" || req.reasoning.display === "updates"
+          ? {}
+          : { summary: "auto" }),
+      };
     }
   }
 
