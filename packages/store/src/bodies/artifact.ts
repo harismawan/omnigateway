@@ -252,11 +252,12 @@ const CODEC_GZIP = 1;
 
 /**
  * The gzip policy the benchmark measured against raw, and which no store writes:
- * at the 512 KiB cap it cost more seal latency than its budget allowed
- * (docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md). Below
- * the cutoff gzip is not tried, since its header and footer eat most of what a
- * small body could save. Level 1 is the cheapest native setting. A saving under
- * the minimum is not worth a decompression on every read.
+ * on synthetic incompressible input at the 512 KiB cap its seal cost more
+ * latency than the budget allowed, though representative cap fixtures stayed
+ * within it (docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md).
+ * Below the cutoff gzip is not tried, since its header and footer eat most of
+ * what a small body could save. Level 1 is the cheapest native setting. A saving
+ * under the minimum is not worth a decompression on every read.
  */
 const GZIP_MIN_PLAINTEXT_BYTES = 1024;
 const GZIP_LEVEL = 1;
@@ -429,7 +430,8 @@ const LEGACY_TAG_HEX_CHARS = 32;
  * `decrypt` is the credential helper and accepts any IV length AES-GCM does, so
  * an envelope sealed with a 16-byte IV would authenticate. Nothing here ever
  * wrote one, and the reader should not vouch for the shape of a file it did not
- * write. Legacy is read only now, until the last such row expires. Kept out of `encryption.ts`, whose rules belong to credentials.
+ * write. Legacy is read only now, until the last such row expires. Kept out of
+ * `encryption.ts`, whose rules belong to credentials.
  */
 function isLegacyStructure(text: string): boolean {
   const parts = text.split(":");

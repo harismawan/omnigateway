@@ -32,16 +32,27 @@ production mix.
 All three modes seal the same `prepareArtifact(input).json`, so masking, structural bounding and the
 512 KiB omission budget are identical. Only the envelope differs.
 
+> **Note (2026-10-11).** These runs predate a25ab3d, which made binary raw the writer. Since then
+> `sealArtifact` is binary raw and the stores' only writer, the gzip policy is
+> `sealArtifactWithGzip` (with an explicit `level` in place of the `compress` seam), and the script
+> builds `legacy` itself from `encrypt`. The runs used the earlier calls — `sealArtifact` was then
+> the legacy writer, `binary-raw` went through `sealBinaryArtifact`'s `compress` seam with a
+> `keepRaw` compressor, `binary-auto` through its default. The measured work is the same: `keepRaw`
+> never compressed, so raw sealed the plaintext as `sealArtifact` now does, and gzip did not fail on
+> this corpus — the current `sealArtifactWithGzip` raises on a compressor failure rather than
+> falling back to raw, and a `binary-auto` run over the whole corpus completes. The table below
+> states the current calls.
+
 | Mode | Call | Notes |
 | --- | --- | --- |
-| `legacy` | `sealArtifact(key, json)` | Today's writer: `enc:v1:` hex, `2N + 65` bytes. |
-| `binary-raw` | `sealBinaryArtifact(key, json, keepRaw)` | **Uses the test-only `compress` seam.** `keepRaw` returns its input unchanged. The saving is then 0 bytes, under the policy's 64-byte minimum, so the production policy picks codec 0. Production code has no other way to force raw at or above 1 KiB. |
-| `binary-auto` | `sealBinaryArtifact(key, json)` | The production policy as written: skip below 1,024 B, gzip level 1, keep it only if it saves at least 64 B. |
-| `binary-auto --gzip-level 6` | Seam with `gzip(level 6)` | Informative only: the same policy with a different level. Not a candidate under the thresholds. |
+| `legacy` | `encrypt(key, json)`, UTF-8 encoded, in the script | The writer before binary raw: `enc:v1:` hex, `2N + 65` bytes. No store writes it now. |
+| `binary-raw` | `sealArtifact(key, json)` | The writer both stores call: codec 0, `N + 38` bytes. |
+| `binary-auto` | `sealArtifactWithGzip(key, json)` | The gzip policy: skip below 1,024 B, gzip level 1, keep it only if it saves at least 64 B. Measured, not chosen. |
+| `binary-auto --gzip-level 6` | `sealArtifactWithGzip(key, json, 6)` | Informative only: the same policy with a different level. Not a candidate under the thresholds. |
 
 Decode is `decodeArtifact(key, bytes, sha256)` in every mode. The key is derived once per process
-from a benchmark-only secret, and KDF time (~22 ms) is excluded from every timing. No production
-code was changed.
+from a benchmark-only secret, and KDF time (~22 ms) is excluded from every timing. The runs changed
+no production code; activating binary raw was a later, separate change.
 
 ### Corpus
 
@@ -88,7 +99,8 @@ column below also includes bounding: `sse-frames` 2.44x and `tool-schema` 1.19x 
   process. That was done twice: once
   for the representative cohort and once for all 12 classes. A row is one capture as
   `BodyRepo.put` performs it on Postgres: `prepareArtifact`, seal, then the same `INSERT … ON
-  CONFLICT` statement. The script repeats that statement because the repo seals legacy only. The
+  CONFLICT` statement. The script repeats that statement because it chooses the envelope per mode,
+  which `put` does not (at the time of the runs the repo sealed legacy only). The
   pool is `openPg`'s default (Bun `SQL`, default `max`), as in the gateway. There was one
   `CHECKPOINT` before the first batch. WAL is `pg_wal_lsn_diff` of `pg_current_wal_insert_lsn()`
   around each batch. Sizes were taken after the inserts and before a separate upsert batch, which
@@ -398,6 +410,9 @@ If auto is revisited, these measurements also bear on the constants:
   fewer connections. That pool limit is the same for all three modes.
 
 ## Reproducing
+
+PostgreSQL 16, as measured (postgres:16-alpine). PostgreSQL 17 moved the checkpoint columns out of
+`pg_stat_bgwriter`, so the script's checkpoint statistics need 16.
 
 ```bash
 bun scripts/bench-body-artifacts.ts --mode legacy|binary-raw|binary-auto --iterations 1000 --concurrency 1|16 --out "$TMPDIR/x.json"

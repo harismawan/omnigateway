@@ -62,7 +62,7 @@ function frame(read: RequestBodyRead): string {
     ["STATE", read.detailState],
     ["CAPTURED", formatTime(read.at)],
     // The stored envelope, so this differs from the plaintext bounds: the legacy
-    // format hex-encodes (about double), the binary one adds 38 bytes or compresses.
+    // format hex-encodes (about double), the binary one adds 38 bytes.
     // It is the number that fills a volume.
     ["SIZE", `${formatBytes(read.sizeBytes)} on disk`],
     ["TRUNCATED", read.truncated ? "yes" : "no"],

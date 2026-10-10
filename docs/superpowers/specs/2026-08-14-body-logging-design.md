@@ -234,8 +234,9 @@ malformed envelope of one kind is never retried as the other.
   uncompressed length as a big-endian uint32, a 12-byte random IV, then AES-256-GCM ciphertext with
   its 16-byte tag. The first 10 bytes are the GCM additional data, so version, codec, and claimed
   length are authenticated. Overhead is 38 bytes: `N + 38` raw. The same derived key is used;
-  `encryption.ts` and credential ciphertext are unchanged. Gzip is read but not written: at the
-  512 KB cap it cost more seal latency than its budget allowed
+  `encryption.ts` and credential ciphertext are unchanged. Gzip is read but not written: on
+  synthetic incompressible input at the 512 KB cap its seal cost more latency than the budget
+  allowed, though representative and best-case cap fixtures stayed within it
   ([benchmark](../plans/2026-10-10-body-artifact-storage-benchmark.md)), so raw is the only codec a
   writer emits.
 
@@ -243,9 +244,9 @@ The plaintext budget (512 KB, applied after masking and structural bounding) is 
 serialized JSON and does not move: a plaintext that compresses well is not admitted above it. What
 the `size_bytes` column and the console and CLI "on disk" figures report is the stored envelope,
 so it differs by format. A corpus is mixed: legacy rows written before binary writing stay until
-body retention removes them, and nothing rewrites them. These are logical stored-envelope bytes. They are not PostgreSQL
-table, TOAST, or WAL size (PostgreSQL may already compress repetitive hex), and no compression ratio
-is promised for production traffic: it depends on content.
+body retention removes them, and nothing rewrites them. These are logical stored-envelope bytes.
+They are not PostgreSQL table, TOAST, or WAL size (PostgreSQL may already compress repetitive hex),
+and no compression ratio is promised for production traffic: it depends on content.
 
 Two checks with different jobs. `sha256` covers the whole stored envelope and detects truncation,
 damage, and swapped files without the key. AES-GCM is the authentication boundary and does not rely
@@ -272,10 +273,10 @@ after every reader of a shared corpus runs v0.13.5 or later: every gateway repli
 install, standbys, and anything that restores a snapshot or dump. A reader older than v0.13.5
 reports a binary artifact `corrupt`, and may record that on the row; a dual reader that reads the
 row again recovers it to `ready`. Roll back only to v0.13.5 or later; v0.13.5 itself stops new
-binary writes and reads the binary rows already written. Rolling back further is unsafe until every binary row has
-expired under body retention. The sequence — legacy rows, binary rows, a rollback to legacy writing,
-a pre-v0.13.5 reader over all of them — is rehearsed on both backends in
-`packages/store/test/contract/bodies.test.ts`.
+binary writes and reads the binary rows already written. Rolling back further is unsafe until
+every binary row has expired under body retention. The sequence — legacy rows, binary rows, a
+rollback to legacy writing, a pre-v0.13.5 reader over all of them — is rehearsed on both backends
+in `packages/store/test/contract/bodies.test.ts`.
 
 Snapshots and `copyStore` are unchanged by the envelope: SQLite snapshots exclude the body
 directory, `copyStore` does not carry body rows or corpus, and a PostgreSQL dump carries the bytes

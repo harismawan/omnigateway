@@ -27,8 +27,9 @@
  * non-loopback host, and never drop or truncate anything. `--postgres` refuses
  * any database whose name does not start with `omni_bench_` before it migrates
  * or writes, then refuses a `request_bodies` table that already holds rows.
- * `--verify-restored` runs on one read-only session against any loopback name. Run each mode in its own process and its own fresh
- * database. Results: docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md.
+ * `--verify-restored` runs on one read-only session against any loopback name.
+ * Run each mode in its own process and its own fresh database. Results:
+ * docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md.
  */
 import { writeFileSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
@@ -1087,7 +1088,8 @@ async function verifyRestored(key: CryptoKey) {
           bytes: Uint8Array | null;
         }>
       >(
-        "SELECT request_id, at, size_bytes, sha256, bytes FROM request_bodies WHERE request_id > $1 ORDER BY request_id LIMIT 100",
+        "SELECT request_id, at, size_bytes, sha256, bytes FROM request_bodies " +
+          "WHERE request_id > $1 ORDER BY request_id LIMIT 100",
         [after],
       );
       if (page.length === 0) break;
