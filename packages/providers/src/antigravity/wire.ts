@@ -815,6 +815,10 @@ export function toAntigravityWire(
 
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
+      case "betweenTools":
+        note("antigravity:reasoning-between-tools-as-off");
+        generationConfig.thinkingConfig = { thinkingBudget: 0, includeThoughts: false };
+        break;
       case "off":
         // An explicit opt-out, and it has to be sent: these models think by
         // default, so saying nothing turns thinking back on. `includeThoughts`

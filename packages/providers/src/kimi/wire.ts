@@ -126,6 +126,7 @@ export function toChatWire(
     }));
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
+  if (req.reasoning?.mode === "betweenTools") note("kimi:reasoning-between-tools-as-off");
   if (req.reasoning !== undefined) note("kimi:reasoning-dropped");
 
   Object.assign(body, req.vendor?.[vendor] ?? {});

@@ -185,6 +185,7 @@ export function toCustomChatWire(
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeChatToolChoice(req.toolChoice);
 
+  if (req.reasoning?.mode === "betweenTools") note("custom:reasoning-between-tools-as-off");
   const effort = customEffort(req.reasoning);
   if (effort !== undefined) body.reasoning_effort = effort;
   else if (req.reasoning?.mode === "budget") note("custom:reasoning-budget-dropped");
@@ -358,6 +359,7 @@ export function toCustomResponsesWire(
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeResponsesToolChoice(req.toolChoice);
 
+  if (req.reasoning?.mode === "betweenTools") note("custom:reasoning-between-tools-as-off");
   const effort = customEffort(req.reasoning);
   if (effort !== undefined)
     body.reasoning = {

@@ -290,6 +290,7 @@ const schema = z.object({
       // for it, though current models reject it upstream.
       z.object({ type: z.literal("enabled"), budget_tokens: z.number().int().positive() }),
       z.object({ type: z.literal("disabled") }),
+      z.object({ type: z.literal("between_tools") }),
     ])
     .optional(),
   // `user_id` is the documented member and the one this surface reads. It is
@@ -610,6 +611,8 @@ function toIrReasoning(
       return { mode: "budget", budgetTokens: thinking.budget_tokens };
     case "disabled":
       return { mode: "off" };
+    case "between_tools":
+      return { mode: "betweenTools" };
   }
 }
 

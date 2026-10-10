@@ -37,6 +37,7 @@ export type AnthropicBody = {
   tools?: Record<string, unknown>[];
   tool_choice?: unknown;
   thinking?:
+    | { type: "between_tools" }
     | { type: "adaptive"; display?: "summarized" | "omitted" | "updates" }
     | { type: "enabled"; budget_tokens: number }
     | { type: "disabled" };
@@ -337,6 +338,7 @@ const THINKING_ONLY_EDITS = new Set(["clear_thinking_20251015"]);
  */
 function thinkingIsOff(thinking: unknown): boolean {
   if (!isRecord(thinking)) return thinking !== undefined;
+  // between_tools stays off here: clear_thinking support with it is unmeasured.
   return thinking.type !== "adaptive" && thinking.type !== "enabled";
 }
 
@@ -712,6 +714,9 @@ export function toWire(
   if (opts.autoCache === true) addAutoCacheBreakpoints(body, req, note);
   if (req.reasoning !== undefined) {
     switch (req.reasoning.mode) {
+      case "betweenTools":
+        body.thinking = { type: "between_tools" };
+        break;
       case "adaptive":
         if (anthropicReasoningForm(model) === "budget") {
           // This model only speaks the older fixed-budget API and rejects the

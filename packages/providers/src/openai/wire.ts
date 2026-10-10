@@ -305,7 +305,13 @@ export function toResponsesWire(
     }));
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
-  if (req.reasoning !== undefined && req.reasoning.mode !== "off") {
+  if (req.reasoning?.mode === "betweenTools")
+    degradations.push("openai:reasoning-between-tools-as-off");
+  if (
+    req.reasoning !== undefined &&
+    req.reasoning.mode !== "off" &&
+    req.reasoning.mode !== "betweenTools"
+  ) {
     // This API takes a coarse effort level, not a token budget. A budget
     // request is therefore recorded as lost rather than mapped onto an
     // invented medium nobody chose — these models think by default, so
