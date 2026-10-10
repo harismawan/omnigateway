@@ -320,8 +320,12 @@ every artifact. `bodyRetentionDays` defaults to **1 day**, independently of
 `logRetentionDays` (**30 days**). Set it in console Settings or with
 `omni settings set bodyRetentionDays 7` (whole days, 1–3650). The hourly sweep
 expires bodies at the shorter of these two windows; metadata and quota samples
-keep the log window. Lowering body retention deletes existing bodies on the next
-sweep without deleting still-retained request metadata. A hard **100,000-row cap** also applies, so
+keep the log window. Existing installations without `bodyRetentionDays` adopt the
+one-day default after upgrade: the first successful sweep can delete older bodies
+without a settings edit. To retain the former body window, save an explicit
+`bodyRetentionDays` value before that sweep. Expiry runs on successful maintenance
+sweeps, not at an exact 24-hour access deadline. Lowering body retention deletes
+existing bodies on the next sweep without deleting still-retained request metadata. A hard **100,000-row cap** also applies, so
 capture is forensics, not an archive — size a volume against roughly 100 GB
 worst case, though most artifacts are kilobytes.
 
