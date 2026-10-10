@@ -296,8 +296,8 @@ function plaintextOf(json: string): Uint8Array {
 /**
  * The writer both stores call: the binary envelope, codec raw.
  *
- * Every reader since v0.13.5 opens it; one older reads it as `corrupt`, which
- * is why it was a release of its own. The digest is over the whole stored
+ * Every reader since v0.13.5 opens it; a reader older than that calls it
+ * `corrupt`, which is why writing it was a release of its own. The digest is over the whole stored
  * envelope, not the plaintext, so on-disk truncation or bit-rot is detectable by
  * a reader that does not hold `OMNI_ENCRYPTION_KEY` at all.
  */
