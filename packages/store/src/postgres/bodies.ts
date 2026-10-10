@@ -3,6 +3,7 @@ import {
   BODY_ROW_CAP,
   decodeArtifact,
   isSafeRequestId,
+  MAX_ENVELOPE_BYTES,
   prepareArtifact,
   relPathFor,
   sealArtifact,
@@ -129,10 +130,19 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
     },
 
     async get(requestId: string): Promise<BodyRead | null> {
+      // The column is measured on the server and only sent when it is within
+      // the reader's ceiling, so a hostile `bytea` is refused without crossing
+      // the wire. The size comes back either way: NULL there means there are no
+      // bytes (`missing`), a size with no bytes means too many (`corrupt`).
       const found = (
-        await sql.unsafe<Rows<Row & { bytes: Uint8Array | null }>>(
-          "SELECT * FROM request_bodies WHERE request_id = $1",
-          [requestId],
+        await sql.unsafe<
+          Rows<Row & { bytes: Uint8Array | null; encoded_size: number | string | null }>
+        >(
+          `SELECT ${META},
+             CASE WHEN octet_length(bytes) <= $2 THEN bytes ELSE NULL END AS bytes,
+             octet_length(bytes) AS encoded_size
+           FROM request_bodies WHERE request_id = $1`,
+          [requestId, MAX_ENVELOPE_BYTES],
         )
       )[0];
       if (found === undefined) return null;
@@ -141,9 +151,11 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
       if (row.relPath === null || row.detailState === "none") return { row, artifact: null };
 
       const read =
-        found.bytes === null
+        found.encoded_size === null
           ? { ok: false as const, failure: "missing" as const }
-          : await decodeArtifact(key, new Uint8Array(found.bytes), row.sha256);
+          : found.bytes === null
+            ? { ok: false as const, failure: "corrupt" as const }
+            : await decodeArtifact(key, new Uint8Array(found.bytes), row.sha256);
       if (read.ok) {
         // A row that previously read as missing or corrupt and now reads back is
         // no longer either; the state is an observation, not a verdict.

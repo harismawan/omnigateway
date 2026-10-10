@@ -43,7 +43,7 @@ const encoder = new TextEncoder();
  * masked, structurally bounded copy, so every count here describes the *stored*
  * payload — which is the number worth printing, because it is the one an
  * operator compares against the bounds and against the other pairs in the same
- * request. The frame's `on disk` is the third number, the encrypted file, and
+ * request. The frame's `on disk` is the third number, the stored envelope, and
  * the table says which of the three it is rather than leaving a bare size to be
  * read as a request size.
  *
@@ -61,8 +61,9 @@ function frame(read: RequestBodyRead): string {
   return fields([
     ["STATE", read.detailState],
     ["CAPTURED", formatTime(read.at)],
-    // Ciphertext, so this is larger than the plaintext bounds suggest — roughly
-    // double, because encryption emits hex. It is the number that fills a volume.
+    // The stored envelope, so this differs from the plaintext bounds: the legacy
+    // format hex-encodes (about double), the binary one adds 38 bytes or compresses.
+    // It is the number that fills a volume.
     ["SIZE", `${formatBytes(read.sizeBytes)} on disk`],
     ["TRUNCATED", read.truncated ? "yes" : "no"],
   ]);
@@ -184,7 +185,7 @@ export const bodies: Command = {
         "",
         pairs(ctx, artifact),
         // What the columns measured, in the same breath as the columns. The
-        // frame above says "on disk" for the encrypted file; these are the
+        // frame above says "on disk" for the stored envelope; these are the
         // other number, and neither is the size of what crossed the wire —
         // which is recorded nowhere. A payload made mostly of one long opaque
         // token is stored as an elision and reads here as a fraction of what

@@ -315,8 +315,8 @@ changed `OMNI_ENCRYPTION_KEY`). There is no command to delete a captured body;
 a second path that erases forensic evidence on request loses incident records.
 
 Artifacts live at `request_bodies/YYYY/MM/DD/<requestId>.json.enc` beside the
-database, AES-256-GCM under `OMNI_ENCRYPTION_KEY`; changing that key invalidates
-every artifact. `bodyRetentionDays` defaults to **1 day**, independently of
+database (a `request_bodies` table row on PostgreSQL), AES-256-GCM under a key
+derived from `OMNI_ENCRYPTION_KEY`; changing that key invalidates every artifact. `bodyRetentionDays` defaults to **1 day**, independently of
 `logRetentionDays` (**30 days**). Set it in console Settings or with
 `omni settings set bodyRetentionDays 7` (whole days, 1–3650). The hourly sweep
 expires bodies at the shorter of these two windows; metadata and quota samples
@@ -328,6 +328,28 @@ sweeps, not at an exact 24-hour access deadline. Lowering body retention deletes
 existing bodies on the next sweep without deleting still-retained request metadata. A hard **100,000-row cap** also applies, so
 capture is forensics, not an archive — size a volume against roughly 100 GB
 worst case, though most artifacts are kilobytes.
+
+That figure is stored-envelope bytes, not PostgreSQL table, TOAST, or WAL size.
+The 512 KB cap applies to the plaintext JSON; the stored file is larger. The
+current envelope hex-encodes, so a plaintext of N bytes stores as `2N + 65`
+bytes, about twice the cap at the limit. A newer, smaller binary envelope
+(`N + 38` bytes, or less when gzip helps) is readable by this version but not yet
+written. Once a later release writes it, a corpus is mixed until older artifacts
+expire under `bodyRetentionDays`, and the 100 GB worst case holds until then. No
+compression ratio is promised: it depends on what was captured. `SIZE` in
+`omni bodies` and the console is the stored envelope, so it differs by format.
+
+Upgrade readers before writers. Binary artifacts are written only by a later
+release, and that release should ship only once every reader of the corpus can open
+them: every gateway replica, the CLI, standbys, and anything restoring a dump. A
+version older than this one reports a binary artifact as `captured, but
+unreadable`. Roll back after that release only to a version that reads both
+formats. An artifact above the reader's encoded-size ceiling (`1,048,641` bytes
+for the current envelope, `524,326` for the binary one) reads as unreadable
+without being deleted; the gateway never writes one, and it recovers on its own if
+a reader accepts it later. The row digest covers the whole stored envelope and is
+checkable without the key; GCM authentication is what decides whether a body is
+genuine.
 
 Masking is best-effort — bearer tokens, vendor-prefixed keys, long opaque
 tokens are elided before write — a reduction in exposure, not a guarantee, and
