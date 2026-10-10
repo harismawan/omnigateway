@@ -665,6 +665,42 @@ test("degrades a failed artifact write to a missing artifact, not a failed reque
 });
 
 /**
+ * The same isolation, reached through the store's own refusal rather than a
+ * stub. A frame of a few thousand attempts is over the artifact budget with
+ * every body already omitted, and the binary writer will not seal it, so the
+ * real `put` throws. The captured frame here has one attempt; the store is
+ * handed it with thousands, because no fixture provider fails over that often.
+ */
+test("an artifact the writer refuses as over budget costs the request nothing", async () => {
+  const logger: CaptureLogger = captureLogger("debug");
+  const { store, root, call } = await harness({ allowed: true, settings: CAPTURE_ON, logger });
+  const put = store.bodies.put;
+  store.bodies.put = (artifact) =>
+    put({
+      ...artifact,
+      attempts: Array.from({ length: 2500 }, (_, i) => ({
+        attempt: i + 1,
+        provider: "anthropic",
+        request: { prompt: "lorem ipsum dolor sit amet ".repeat(12) },
+        response: null,
+        streamChunks: null,
+        truncated: false,
+      })),
+    });
+
+  const res = await call(ASK);
+
+  expect(res.status).toBe(200);
+  expect(await store.bodies.get("req_1")).toBeNull();
+  const rows = await store.usage.recent(10);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]?.state).toBe("done");
+  const failure = logger.records.find((r) => r.msg === "failed to persist request bodies");
+  expect(failure?.fields.reason).toBe("artifact plaintext is outside the binary envelope's bounds");
+  await cleanup(store, root);
+});
+
+/**
  * The artifact is written after the drains have finished, not after they have
  * probably finished.
  *

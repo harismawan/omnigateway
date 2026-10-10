@@ -3,7 +3,7 @@ import { type FileHandle, mkdir, open, readdir, rmdir, unlink, writeFile } from 
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 import { gunzip, gzip } from "node:zlib";
-import { decrypt, encrypt } from "../encryption.ts";
+import { decrypt } from "../encryption.ts";
 import type { BodyArtifact, BodyAttempt } from "../types.ts";
 import { boundValue } from "./bound.ts";
 import { maskSecrets, maskString } from "./mask.ts";
@@ -218,22 +218,6 @@ export function prepareArtifact(input: BodyArtifact): { artifact: BodyArtifact; 
 }
 
 /**
- * Encrypts under the store's field key and reports the bytes as stored.
- *
- * The digest is over the ciphertext, not the plaintext, so on-disk truncation or
- * bit-rot is detectable by a reader that does not hold `OMNI_ENCRYPTION_KEY` at
- * all. That is what lets `corrupt` be a state the reader reports rather than an
- * exception it raises.
- */
-export async function sealArtifact(
-  key: CryptoKey,
-  json: string,
-): Promise<{ bytes: Uint8Array; sha256: string }> {
-  const bytes = encoder.encode(await encrypt(key, json));
-  return { bytes, sha256: await sha256Hex(bytes) };
-}
-
-/**
  * The largest stored envelope any reader will acquire: a legacy envelope around
  * one full artifact budget, `enc:v1:` hex being exactly `2N + 65` bytes.
  *
@@ -267,11 +251,12 @@ const CODEC_RAW = 0;
 const CODEC_GZIP = 1;
 
 /**
- * The write policy, internal and provisional: benchmarks choose the values
- * before the binary writer becomes the default. Below the cutoff gzip is not
- * tried, since its header and footer eat most of what a small body could save.
- * Level 1 is the cheapest native setting. A saving under the minimum is not
- * worth a decompression on every read.
+ * The gzip policy the benchmark measured against raw, and which no store writes:
+ * at the 512 KiB cap it cost more seal latency than its budget allowed
+ * (docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md). Below
+ * the cutoff gzip is not tried, since its header and footer eat most of what a
+ * small body could save. Level 1 is the cheapest native setting. A saving under
+ * the minimum is not worth a decompression on every read.
  */
 const GZIP_MIN_PLAINTEXT_BYTES = 1024;
 const GZIP_LEVEL = 1;
@@ -282,63 +267,82 @@ const GZIP_FRAME_BYTES = 18;
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
-async function gzipFast(plain: Uint8Array): Promise<Uint8Array> {
-  return gzipAsync(plain, { level: GZIP_LEVEL });
-}
-
 /** Copies a range into a buffer of its own, which is what WebCrypto accepts. */
 function own(bytes: Uint8Array, start: number, end?: number): Uint8Array<ArrayBuffer> {
   return bytes.slice(start, end);
 }
 
-/**
- * The codec and payload the policy chooses for one plaintext.
- *
- * A compressor that fails costs only the saving: the raw payload is already
- * within bounds, and it is encrypted exactly as a gzip one would be.
- */
-async function pack(
-  plain: Uint8Array,
-  compress: (plain: Uint8Array) => Promise<Uint8Array>,
-): Promise<{ codec: number; payload: Uint8Array }> {
-  const raw = { codec: CODEC_RAW, payload: plain };
-  if (plain.length < GZIP_MIN_PLAINTEXT_BYTES) return raw;
-  let packed: Uint8Array;
-  try {
-    packed = await compress(plain);
-  } catch {
-    return raw;
-  }
-  if (plain.length - packed.length < GZIP_MIN_SAVING_BYTES) return raw;
-  return { codec: CODEC_GZIP, payload: packed };
-}
+/** What a store records about the bytes it wrote: their length and their digest. */
+type SealedArtifact = { bytes: Uint8Array; sha256: string };
 
 /**
- * Seals under the binary envelope, the format a later release writes by default.
+ * The plaintext as the binary envelope carries it, or a refusal.
  *
- * Not the writer yet — `sealArtifact` stays legacy until every reader in the
- * fleet can open this one. The budget is enforced here rather than trusted from
- * `prepareArtifact`, whose last fallback does not recheck it: an envelope the
- * reader would refuse must not be one this writer will make. It is enforced on
- * the plaintext, before compression, so a body over budget is never admitted for
- * compressing well. `compress` is replaceable only so tests can reach the
- * policy's boundaries and its fallback.
+ * The budget is enforced here rather than trusted from `prepareArtifact`, whose
+ * last fallback does not recheck it — a frame of a few thousand attempts is over
+ * budget with every body already replaced by its marker. An envelope the reader
+ * would refuse must not be one a writer makes, so `put` throws instead, before
+ * anything is written. The plaintext is what is measured, never a compressed
+ * form, so a body over budget is not admitted for compressing well.
  */
-export async function sealBinaryArtifact(
-  key: CryptoKey,
-  json: string,
-  compress: (plain: Uint8Array) => Promise<Uint8Array> = gzipFast,
-): Promise<{ bytes: Uint8Array; sha256: string }> {
+function plaintextOf(json: string): Uint8Array {
   const plain = encoder.encode(json);
   if (plain.length < 1 || plain.length > MAX_ARTIFACT_BYTES) {
     throw new Error("artifact plaintext is outside the binary envelope's bounds");
   }
-  const { codec, payload } = await pack(plain, compress);
+  return plain;
+}
+
+/**
+ * The writer both stores call: the binary envelope, codec raw.
+ *
+ * Every reader since v0.13.5 opens it; one older reads it as `corrupt`, which
+ * is why it was a release of its own. The digest is over the whole stored
+ * envelope, not the plaintext, so on-disk truncation or bit-rot is detectable by
+ * a reader that does not hold `OMNI_ENCRYPTION_KEY` at all.
+ */
+export async function sealArtifact(key: CryptoKey, json: string): Promise<SealedArtifact> {
+  const plain = plaintextOf(json);
+  return sealBinary(key, plain.length, CODEC_RAW, plain);
+}
+
+/**
+ * The binary envelope under the gzip policy: codec gzip where the policy's
+ * cutoff and minimum saving are met, raw otherwise.
+ *
+ * Not a writer any store uses — see the policy above. It stays so the benchmark
+ * can go on measuring it against `sealArtifact`, and `level` is the benchmark's
+ * own knob. A compressor that fails is an error, not a quiet fallback to raw: the
+ * only caller is measuring gzip, and a raw envelope would misreport it.
+ */
+export async function sealArtifactWithGzip(
+  key: CryptoKey,
+  json: string,
+  level: number = GZIP_LEVEL,
+): Promise<SealedArtifact> {
+  const plain = plaintextOf(json);
+  if (plain.length < GZIP_MIN_PLAINTEXT_BYTES) {
+    return sealBinary(key, plain.length, CODEC_RAW, plain);
+  }
+  const packed = await gzipAsync(plain, { level });
+  if (plain.length - packed.length < GZIP_MIN_SAVING_BYTES) {
+    return sealBinary(key, plain.length, CODEC_RAW, plain);
+  }
+  return sealBinary(key, plain.length, CODEC_GZIP, packed);
+}
+
+/** Header, a fresh IV, and the payload sealed with the header as additional data. */
+async function sealBinary(
+  key: CryptoKey,
+  claimed: number,
+  codec: number,
+  payload: Uint8Array,
+): Promise<SealedArtifact> {
   const bytes = new Uint8Array(BINARY_OVERHEAD + payload.length);
   bytes.set(BINARY_MAGIC, 0);
   bytes[4] = BINARY_VERSION;
   bytes[5] = codec;
-  new DataView(bytes.buffer).setUint32(6, plain.length, false);
+  new DataView(bytes.buffer).setUint32(6, claimed, false);
   const iv = crypto.getRandomValues(new Uint8Array(BINARY_IV_BYTES));
   const sealed = await crypto.subtle.encrypt(
     {
@@ -420,12 +424,12 @@ const LEGACY_IV_HEX_CHARS = 24;
 const LEGACY_TAG_HEX_CHARS = 32;
 
 /**
- * The shape this writer emits, checked before `decrypt` sees it.
+ * The shape the legacy writer emitted, checked before `decrypt` sees it.
  *
  * `decrypt` is the credential helper and accepts any IV length AES-GCM does, so
  * an envelope sealed with a 16-byte IV would authenticate. Nothing here ever
  * wrote one, and the reader should not vouch for the shape of a file it did not
- * write. Kept out of `encryption.ts`, whose rules belong to credentials.
+ * write. Legacy is read only now, until the last such row expires. Kept out of `encryption.ts`, whose rules belong to credentials.
  */
 function isLegacyStructure(text: string): boolean {
   const parts = text.split(":");

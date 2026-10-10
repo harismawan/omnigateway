@@ -6,10 +6,10 @@
  *
  * Every mode seals the same `prepareArtifact` output — masking, bounding and the
  * omission budget run unchanged — so only the envelope differs. `binary-raw` is
- * forced through `sealBinaryArtifact`'s `compress` seam with a compressor that
- * returns its input: the saving is zero, under the policy's minimum, so the
- * production policy itself picks the raw codec. Production code has no other
- * way to ask for raw above the size cutoff.
+ * `sealArtifact`, the writer both stores call. `binary-auto` is
+ * `sealArtifactWithGzip`, the policy measured and not chosen. `legacy` is built
+ * here from the credential helper, as every release before the binary writer
+ * built it, since no store writes it any more.
  *
  * Synthetic only. The corpus is generated from fixed seeds, no provider is
  * called, and the field key is derived from a benchmark-only secret. Payload
@@ -20,8 +20,8 @@
  *   bun scripts/bench-body-artifacts.ts --verify-restored
  *
  * Also: `--repeats` (default 5), `--warmup`, `--variants` (distinct inputs per
- * class), `--cohort all|representative`, `--gzip-level` (binary-auto only,
- * through the same seam), `--out <file>` for the JSON written to stdout.
+ * class), `--cohort all|representative`, `--gzip-level` (binary-auto only, 0-9),
+ * `--out <file>` for the JSON written to stdout.
  *
  * `--postgres` and `--verify-restored` read `OMNI_TEST_DATABASE_URL`, refuse a
  * non-loopback host, and never drop or truncate anything. `--postgres` refuses
@@ -33,8 +33,7 @@
 import { writeFileSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { monitorEventLoopDelay } from "node:perf_hooks";
-import { parseArgs, promisify } from "node:util";
-import { gzip } from "node:zlib";
+import { parseArgs } from "node:util";
 import { SQL } from "bun";
 import {
   decodeArtifact,
@@ -42,9 +41,10 @@ import {
   prepareArtifact,
   relPathFor,
   sealArtifact,
-  sealBinaryArtifact,
+  sealArtifactWithGzip,
+  sha256Hex,
 } from "../packages/store/src/bodies/artifact.ts";
-import { deriveKey } from "../packages/store/src/encryption.ts";
+import { deriveKey, encrypt } from "../packages/store/src/encryption.ts";
 import { openPg, type Rows } from "../packages/store/src/postgres/db.ts";
 import type { BodyArtifact, BodyAttempt } from "../packages/store/src/types.ts";
 
@@ -546,24 +546,29 @@ const rowId = (cls: FixtureClass, variant: number, row: number): string =>
 type Sealed = { bytes: Uint8Array; sha256: string };
 type Sealer = (key: CryptoKey, json: string) => Promise<Sealed>;
 
-/** Saves nothing, so the policy's own minimum-saving rule selects the raw codec. */
-const keepRaw = async (plain: Uint8Array): Promise<Uint8Array> => plain;
-
 /**
- * `--gzip-level` swaps only the compressor, through the same seam, so a level
- * other than the policy's can be measured under the policy's cutoff and
- * minimum saving. Absent, `binary-auto` is the production policy untouched.
+ * `--gzip-level` changes only the level, so a level other than the policy's can
+ * be measured under the policy's cutoff and minimum saving. Absent,
+ * `binary-auto` is the policy as written. Checked here, because a level zlib
+ * refuses would otherwise fail every seal rather than the command line.
  */
 const GZIP_LEVEL = args["gzip-level"] === undefined ? undefined : Number(args["gzip-level"]);
-const gzipAsync = promisify(gzip);
+if (
+  GZIP_LEVEL !== undefined &&
+  !(Number.isInteger(GZIP_LEVEL) && GZIP_LEVEL >= 0 && GZIP_LEVEL <= 9)
+) {
+  throw new Error("--gzip-level must be an integer from 0 to 9");
+}
+
+const textEncoder = new TextEncoder();
 
 const SEALERS: Record<Mode, Sealer> = {
-  legacy: (key, json) => sealArtifact(key, json),
-  "binary-raw": (key, json) => sealBinaryArtifact(key, json, keepRaw),
-  "binary-auto": (key, json) =>
-    GZIP_LEVEL === undefined
-      ? sealBinaryArtifact(key, json)
-      : sealBinaryArtifact(key, json, (plain) => gzipAsync(plain, { level: GZIP_LEVEL })),
+  legacy: async (key, json) => {
+    const bytes = textEncoder.encode(await encrypt(key, json));
+    return { bytes, sha256: await sha256Hex(bytes) };
+  },
+  "binary-raw": (key, json) => sealArtifact(key, json),
+  "binary-auto": (key, json) => sealArtifactWithGzip(key, json, GZIP_LEVEL),
 };
 
 const OGBA = "OGBA";

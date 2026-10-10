@@ -3,7 +3,8 @@ import { expect, spyOn, test } from "bun:test";
 import { mkdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gunzipSync, gzip, gzipSync } from "node:zlib";
 import {
   bodiesDirFor,
   decodeArtifact,
@@ -13,7 +14,7 @@ import {
   readArtifact,
   relPathFor,
   sealArtifact,
-  sealBinaryArtifact,
+  sealArtifactWithGzip,
   sha256Hex,
   writeArtifact,
 } from "../src/bodies/artifact.ts";
@@ -618,7 +619,11 @@ test("stored artifact bytes never contain the plaintext they hold", async () => 
 
   const bytes = await readFile(join(dir, row.relPath ?? ""));
   expect(new TextDecoder().decode(bytes)).not.toContain(marker);
-  expect(new TextDecoder().decode(bytes).startsWith("enc:v1:")).toBe(true);
+  // The binary raw envelope: magic, version 1, codec 0, and nothing but its
+  // 38 bytes of overhead around the prepared JSON.
+  expect(new TextDecoder().decode(bytes.subarray(0, 4))).toBe("OGBA");
+  expect([bytes[4], bytes[5]]).toEqual([1, 0]);
+  expect(bytes.length).toBe(Buffer.byteLength(prepareArtifact(input).json) + 38);
   expect(row.sizeBytes).toBe(bytes.length);
 
   // And it is genuinely still there behind the key, so this is encryption rather
@@ -1341,10 +1346,10 @@ test("a binary file reads as ready through the repository", async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-test("the binary writer emits the published layout, readable with WebCrypto alone", async () => {
+test("the writer emits the published layout, readable with WebCrypto alone", async () => {
   const prepared = prepareArtifact(LEGACY_INPUT);
   const json = encoder.encode(prepared.json);
-  const sealed = await sealBinaryArtifact(await legacyKey, prepared.json);
+  const sealed = await sealArtifact(await legacyKey, prepared.json);
   const { bytes } = sealed;
 
   expect(decoder.decode(bytes.subarray(0, 4))).toBe("OGBA");
@@ -1372,47 +1377,49 @@ test("the binary writer emits the published layout, readable with WebCrypto alon
   if (read.ok) expect(read.artifact).toEqual(prepared.artifact);
 });
 
-test("the same JSON sealed twice gets a fresh IV and different bytes in either format", async () => {
+test("the same JSON sealed twice gets a fresh IV and different bytes", async () => {
   const { json } = prepareArtifact(LEGACY_INPUT);
   const key = await legacyKey;
 
-  const [a, b] = [await sealBinaryArtifact(key, json), await sealBinaryArtifact(key, json)];
+  const [a, b] = [await sealArtifact(key, json), await sealArtifact(key, json)];
   expect(a.bytes.subarray(0, 10)).toEqual(b.bytes.subarray(0, 10));
   expect(toHex(a.bytes.subarray(10, 22))).not.toBe(toHex(b.bytes.subarray(10, 22)));
   expect(toHex(a.bytes)).not.toBe(toHex(b.bytes));
   expect(a.sha256).not.toBe(b.sha256);
-
-  const [c, d] = [await sealArtifact(key, json), await sealArtifact(key, json)];
-  expect(legacyParts(c.bytes).iv).not.toBe(legacyParts(d.bytes).iv);
-  expect(toHex(c.bytes)).not.toBe(toHex(d.bytes));
 });
 
-test("the default writer still emits the legacy envelope", async () => {
-  const { bytes } = await sealArtifact(await legacyKey, prepareArtifact(LEGACY_INPUT).json);
-  expect(decoder.decode(bytes).startsWith("enc:v1:")).toBe(true);
-});
-
-test("the binary writer refuses plaintext outside one byte to the artifact budget", async () => {
+test("the writer stores raw whatever the body, even prose gzip would halve", async () => {
   const key = await legacyKey;
-  const calls: number[] = [];
-  const watched = async (plain: Uint8Array): Promise<Uint8Array> => {
-    calls.push(plain.length);
-    return gz(plain);
-  };
+  for (const json of [
+    paddedJson(1023),
+    paddedJson(4096),
+    prepareArtifact(COMPRESSIBLE_INPUT).json,
+  ]) {
+    const n = encoder.encode(json).length;
+    const sealed = await sealArtifact(key, json);
+    expect(layout(sealed.bytes)).toEqual({ codec: 0, claimed: n, payload: n });
+    expect(decoder.decode(await openByHand(sealed.bytes))).toBe(json);
+  }
+});
+
+test("both writers refuse plaintext outside one byte to the artifact budget", async () => {
+  const key = await legacyKey;
   // Padding compresses to almost nothing, so a writer that judged the budget on
   // the compressed size would admit this; the budget is on what the reader
-  // gets back, and the compressor is never even asked.
-  await expect(
-    sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES + 1), watched),
-  ).rejects.toThrow();
-  await expect(sealBinaryArtifact(key, "", watched)).rejects.toThrow();
-  expect(calls).toEqual([]);
+  // gets back.
+  for (const seal of [sealArtifact, sealArtifactWithGzip]) {
+    await expect(seal(key, paddedJson(MAX_ARTIFACT_BYTES + 1))).rejects.toThrow(
+      /outside the binary envelope's bounds/,
+    );
+    await expect(seal(key, "")).rejects.toThrow(/outside the binary envelope's bounds/);
+  }
 
-  const atBudget = await sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES));
-  expect(atBudget.bytes[5]).toBe(1);
-  expect((await decodeArtifact(key, atBudget.bytes, atBudget.sha256)).ok).toBe(true);
-  const rawAtBudget = await sealBinaryArtifact(key, paddedJson(MAX_ARTIFACT_BYTES), failing);
+  const rawAtBudget = await sealArtifact(key, paddedJson(MAX_ARTIFACT_BYTES));
   expect(rawAtBudget.bytes.length).toBe(BINARY_CEILING);
+  expect((await decodeArtifact(key, rawAtBudget.bytes, rawAtBudget.sha256)).ok).toBe(true);
+  const gzipAtBudget = await sealArtifactWithGzip(key, paddedJson(MAX_ARTIFACT_BYTES));
+  expect(gzipAtBudget.bytes[5]).toBe(1);
+  expect((await decodeArtifact(key, gzipAtBudget.bytes, gzipAtBudget.sha256)).ok).toBe(true);
 });
 
 // ---------------------------------------------------------------------------
@@ -1421,19 +1428,32 @@ test("the binary writer refuses plaintext outside one byte to the artifact budge
 // past the artifact budget whatever the payload asks for.
 // ---------------------------------------------------------------------------
 
-/** A compressor that always fails, for the writer's fallback. */
-async function failing(): Promise<Uint8Array> {
-  throw new Error("compressor unavailable");
-}
+const gzipAsync = promisify(gzip);
 
-/** A compressor whose output is exactly `size(n)` bytes for an `n`-byte input. */
-function sized(size: (n: number) => number) {
-  const calls: number[] = [];
-  const compress = async (plain: Uint8Array): Promise<Uint8Array> => {
-    calls.push(plain.length);
-    return new Uint8Array(size(plain.length));
+/**
+ * A JSON object past the gzip cutoff whose level-1 gzip stream is exactly
+ * `saving` bytes shorter than itself. Two-byte UTF-8 noise from a fixed
+ * generator barely compresses, and each `x` appended saves about a byte, so the
+ * search walks the saving up through every small value. Searched for rather
+ * than written down, so a different zlib build finds its own — and through the
+ * async API the writer calls, whose stream on Bun differs from `gzipSync`'s by a
+ * byte or two.
+ */
+async function savingExactly(saving: number): Promise<string> {
+  let state = 7;
+  const next = () => {
+    state = (state * 1103515245 + 12345) % 2 ** 31;
+    return state >>> 8;
   };
-  return { calls, compress };
+  let noise = "";
+  while (encoder.encode(noise).length < 1100)
+    noise += String.fromCodePoint(0x100 + (next() % 0x700));
+  for (let run = 0; run < 1000; run++) {
+    const json = JSON.stringify({ k: noise + "x".repeat(run) });
+    const plain = encoder.encode(json);
+    if (plain.length - (await gzipAsync(plain, { level: 1 })).length === saving) return json;
+  }
+  throw new Error(`no fixture saves exactly ${saving} bytes`);
 }
 
 /** The writer's header fields and payload length, read back by hand. */
@@ -1637,16 +1657,19 @@ test("gzip expanding to exactly the budget decodes; one byte more is stopped by 
   });
 });
 
-test("the writer stores plaintext under the cutoff raw and compressible plaintext as gzip", async () => {
+// The gzip policy is written by no store; the benchmark measures it against raw
+// through `sealArtifactWithGzip`, and these pin that it is the policy measured.
+
+test("the gzip policy stores plaintext under the cutoff raw and compressible plaintext as gzip", async () => {
   const key = await legacyKey;
 
   // Padding saves far more than the minimum, so only the cutoff can keep 1023
   // bytes raw.
-  const small = await sealBinaryArtifact(key, paddedJson(1023));
+  const small = await sealArtifactWithGzip(key, paddedJson(1023));
   expect(layout(small.bytes)).toEqual({ codec: 0, claimed: 1023, payload: 1023 });
   expect(decoder.decode(await openByHand(small.bytes))).toBe(paddedJson(1023));
 
-  const cutoff = await sealBinaryArtifact(key, paddedJson(1024));
+  const cutoff = await sealArtifactWithGzip(key, paddedJson(1024));
   expect(layout(cutoff.bytes).codec).toBe(1);
   expect(layout(cutoff.bytes).claimed).toBe(1024);
   expect(layout(cutoff.bytes).payload).toBeLessThanOrEqual(1024 - 64);
@@ -1654,7 +1677,7 @@ test("the writer stores plaintext under the cutoff raw and compressible plaintex
   expect(decoder.decode(gunzipSync(await openByHand(cutoff.bytes)))).toBe(paddedJson(1024));
 
   const prepared = prepareArtifact(COMPRESSIBLE_INPUT);
-  const sealed = await sealBinaryArtifact(key, prepared.json);
+  const sealed = await sealArtifactWithGzip(key, prepared.json);
   const json = encoder.encode(prepared.json);
   expect(layout(sealed.bytes).codec).toBe(1);
   expect(layout(sealed.bytes).claimed).toBe(json.length);
@@ -1665,62 +1688,49 @@ test("the writer stores plaintext under the cutoff raw and compressible plaintex
   if (read.ok) expect(read.artifact).toEqual(prepared.artifact);
 });
 
-test("the writer only asks for gzip at or past the cutoff, and keeps it at a 64-byte saving", async () => {
+test("the gzip policy keeps gzip only at a saving of 64 bytes or more", async () => {
   const key = await legacyKey;
-
-  const under = sized(() => 1);
-  const raw = await sealBinaryArtifact(key, paddedJson(1023), under.compress);
-  expect(under.calls).toEqual([]);
-  expect(layout(raw.bytes).codec).toBe(0);
-
-  const n = 2000;
-  const saves63 = sized((len) => len - 63);
-  const kept63 = await sealBinaryArtifact(key, paddedJson(n), saves63.compress);
-  expect(saves63.calls).toEqual([n]);
-  expect(layout(kept63.bytes)).toEqual({ codec: 0, claimed: n, payload: n });
-
-  const saves64 = sized((len) => len - 64);
-  const kept64 = await sealBinaryArtifact(key, paddedJson(n), saves64.compress);
-  expect(layout(kept64.bytes)).toEqual({ codec: 1, claimed: n, payload: n - 64 });
-
-  const atCutoff = sized((len) => len - 64);
-  const gzipAtCutoff = await sealBinaryArtifact(key, paddedJson(1024), atCutoff.compress);
-  expect(atCutoff.calls).toEqual([1024]);
-  expect(layout(gzipAtCutoff.bytes).codec).toBe(1);
-});
-
-test("incompressible plaintext, or a failed compression, is stored raw without growth", async () => {
-  const key = await legacyKey;
-  const json = prepareArtifact(COMPRESSIBLE_INPUT).json;
-  const n = encoder.encode(json).length;
-
-  for (const [name, compress] of [
-    ["grows", sized((len) => len + 20).compress],
-    ["no saving", sized((len) => len).compress],
-    ["fails", failing],
-  ] as const) {
-    const sealed = await sealBinaryArtifact(key, json, compress);
-    expect(`${name}: ${JSON.stringify(layout(sealed.bytes))}`).toBe(
-      `${name}: ${JSON.stringify({ codec: 0, claimed: n, payload: n })}`,
+  for (const saving of [-1, 0, 63, 64, 65]) {
+    const json = await savingExactly(saving);
+    const n = encoder.encode(json).length;
+    expect(n).toBeGreaterThanOrEqual(1024);
+    const sealed = await sealArtifactWithGzip(key, json, 1);
+    const expected =
+      saving >= 64
+        ? { codec: 1, claimed: n, payload: n - saving }
+        : { codec: 0, claimed: n, payload: n };
+    expect(`saving ${saving}: ${JSON.stringify(layout(sealed.bytes))}`).toBe(
+      `saving ${saving}: ${JSON.stringify(expected)}`,
     );
-    expect(decoder.decode(await openByHand(sealed.bytes))).toBe(json);
     expect((await decodeArtifact(key, sealed.bytes, sealed.sha256)).ok).toBe(true);
   }
 
   // Random bytes, hex-encoded: real gzip saves some of the hex's redundancy,
   // and whichever arm the policy picks the envelope is never larger than raw.
   const noise = toHex(crypto.getRandomValues(new Uint8Array(4096)));
-  const real = await sealBinaryArtifact(key, JSON.stringify({ noise }));
+  const real = await sealArtifactWithGzip(key, JSON.stringify({ noise }));
   expect(real.bytes.length).toBeLessThanOrEqual(JSON.stringify({ noise }).length + 38);
   expect((await decodeArtifact(key, real.bytes, real.sha256)).ok).toBe(true);
 });
 
-test("an encryption failure propagates from the writer rather than storing anything", async () => {
+test("the gzip level reaches zlib, and a compressor failure is an error, not raw", async () => {
+  const key = await legacyKey;
+  const json = prepareArtifact(COMPRESSIBLE_INPUT).json;
+  const n = encoder.encode(json).length;
+  // Level 0 stores without deflating, so the stream outgrows the plaintext.
+  const stored = await sealArtifactWithGzip(key, json, 0);
+  expect(layout(stored.bytes)).toEqual({ codec: 0, claimed: n, payload: n });
+  // A level zlib refuses: measuring gzip and getting raw back would misreport it.
+  await expect(sealArtifactWithGzip(key, json, 10)).rejects.toThrow();
+});
+
+test("an encryption failure propagates from either writer rather than storing anything", async () => {
   const decryptOnly = await crypto.subtle.importKey("raw", new Uint8Array(32), "AES-GCM", false, [
     "decrypt",
   ]);
   for (const json of [paddedJson(100), prepareArtifact(COMPRESSIBLE_INPUT).json]) {
-    await expect(sealBinaryArtifact(decryptOnly, json)).rejects.toThrow();
+    await expect(sealArtifact(decryptOnly, json)).rejects.toThrow();
+    await expect(sealArtifactWithGzip(decryptOnly, json)).rejects.toThrow();
   }
 });
 
@@ -1804,7 +1814,7 @@ test("the orphan sweep goes by path, so binary artifacts are spared with a row a
   const input = artifact({ requestId: "req_binary_kept" });
   const kept = await store.bodies.put(input);
   const key = await deriveKey("test-secret-value-for-unit-tests");
-  const sealed = await sealBinaryArtifact(key, prepareArtifact(input).json);
+  const sealed = await sealArtifact(key, prepareArtifact(input).json);
   await writeArtifact(dir, kept.relPath ?? "", sealed.bytes);
   describeBytes(dbPath, input.requestId, sealed);
   await writeArtifact(dir, "2025/12/31/req_binary_orphan.json.enc", sealed.bytes);
@@ -1828,7 +1838,7 @@ test("a snapshot carries the row but not a binary artifact file, so the restored
   const input = artifact({ requestId: "req_binary_snap" });
   const row = await store.bodies.put(input);
   const key = await deriveKey("test-secret-value-for-unit-tests");
-  const sealed = await sealBinaryArtifact(key, prepareArtifact(input).json);
+  const sealed = await sealArtifact(key, prepareArtifact(input).json);
   await writeArtifact(dir, row.relPath ?? "", sealed.bytes);
   describeBytes(dbPath, input.requestId, sealed);
   expect((await store.bodies.get(input.requestId))?.row.detailState).toBe("ready");
