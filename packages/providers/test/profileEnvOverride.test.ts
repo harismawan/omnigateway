@@ -17,6 +17,10 @@ const SRC = resolve(import.meta.dir, "../src");
 async function readUnderEnv(env: Record<string, string>): Promise<{
   anthropicOrder: string[];
   kiloBodyOrderLength: number;
+  openaiHeaders: Record<string, string>;
+  openaiOrder: string[];
+  openaiOriginator: string;
+  openaiSandbox: string;
 }> {
   const entry = resolve(SRC, "../test/fixtures/profileProbe.ts");
   const proc = Bun.spawn(["bun", entry], {
@@ -68,4 +72,39 @@ test("a malformed override falls back rather than failing the import", async () 
   const clean = await readUnderEnv({});
   const read = await readUnderEnv({ OMNI_ORDER_ANTHROPIC: "é,ü" });
   expect(read.anthropicOrder).toEqual(clean.anthropicOrder);
+});
+
+test("the OpenAI profile defaults to Codex 0.163.0's TUI", async () => {
+  const read = await readUnderEnv({});
+  expect(read.openaiHeaders.version).toBe("0.163.0");
+  expect(read.openaiHeaders.originator).toBe("codex-tui");
+  expect(read.openaiOriginator).toBe("codex-tui");
+  expect(read.openaiSandbox).toBe("windows_elevated");
+});
+
+test("the OpenAI identity overrides still apply, everywhere the value is read", async () => {
+  // The version and originator are read in four places now — the UA prefix,
+  // the UA's client suffix, their own headers, and the authorize URL's query —
+  // so an override that reached only some would send a mixed identity.
+  const read = await readUnderEnv({
+    OMNI_OPENAI_CLI_VERSION: "0.170.0",
+    OMNI_OPENAI_ORIGINATOR: "codex_exec",
+    OMNI_OPENAI_UA_PLATFORM: "Mac OS 15.1.0",
+    OMNI_OPENAI_UA_ARCH: "arm64",
+    OMNI_OPENAI_UA_TERMINAL: "iTerm.app/3.5.0",
+    OMNI_ORDER_OPENAI: "user-agent,version",
+  });
+  expect(read.openaiHeaders["user-agent"]).toBe(
+    "codex_exec/0.170.0 (Mac OS 15.1.0; arm64) iTerm.app/3.5.0 (codex_exec; 0.170.0)",
+  );
+  expect(read.openaiHeaders.version).toBe("0.170.0");
+  expect(read.openaiHeaders.originator).toBe("codex_exec");
+  expect(read.openaiOriginator).toBe("codex_exec");
+  // The sandbox label follows the platform, so a macOS UA never carries a
+  // Windows sandbox beside it.
+  expect(read.openaiSandbox).toBe("seatbelt");
+  expect(read.openaiOrder).toEqual(["user-agent", "version"]);
+
+  const whole = await readUnderEnv({ OMNI_UA_OPENAI: "custom/1.0" });
+  expect(whole.openaiHeaders["user-agent"]).toBe("custom/1.0");
 });

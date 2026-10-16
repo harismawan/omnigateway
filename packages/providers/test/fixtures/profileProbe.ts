@@ -10,12 +10,19 @@
  * test.
  */
 import { BODY_ORDER } from "../../src/body.ts";
+import { OPENAI_ORIGINATOR, OPENAI_SANDBOX } from "../../src/openai/profile.ts";
 import { PROFILES } from "../../src/profile.ts";
 import { entry } from "../entry.ts";
+
+const openai = entry(PROFILES, "openai", "PROFILES");
 
 process.stdout.write(
   JSON.stringify({
     anthropicOrder: [...entry(PROFILES, "anthropic", "PROFILES").order],
     kiloBodyOrderLength: entry(BODY_ORDER, "kilo", "BODY_ORDER").length,
+    openaiHeaders: Object.fromEntries(openai.headers),
+    openaiOrder: [...openai.order],
+    openaiOriginator: OPENAI_ORIGINATOR,
+    openaiSandbox: OPENAI_SANDBOX,
   }),
 );

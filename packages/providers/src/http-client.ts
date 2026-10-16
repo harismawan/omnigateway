@@ -1,7 +1,6 @@
 import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
-import { constants as zlibConstants, zstdCompressSync } from "node:zlib";
 import { type Logger, noopLogger } from "@omni/ir";
 import type { HttpClient, HttpRequest, HttpResponse } from "./types.ts";
 
@@ -163,11 +162,15 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
  * (`codex-rs/http-client/src/request.rs`, `encode_all(…, 3)`). The level shapes
  * the bytes, not the decoded body, so it is matched rather than left to a
  * library default that could move under a runtime upgrade.
+ *
+ * Bun's own zstd rather than `node:zlib`'s: this package's root is also bundled
+ * for the browser by the leaf-subpath probes, where `node:zlib` has no zstd,
+ * and the package already depends on the `Bun` global (`Bun.env`, `Bun.hash`).
  */
 function encodeBody(req: HttpRequest): Buffer {
   const raw = Buffer.from(req.body, "utf8");
   if (req.bodyEncoding !== "zstd") return raw;
-  return zstdCompressSync(raw, { params: { [zlibConstants.ZSTD_c_compressionLevel]: 3 } });
+  return Buffer.from(Bun.zstdCompressSync(raw, { level: 3 }));
 }
 
 function hasHeader(req: HttpRequest, lowerName: string): boolean {

@@ -78,11 +78,13 @@ test("openai profile carries the codex-cli identity", () => {
   const h = new Map(
     entry(PROFILES, "openai", "PROFILES").headers.map(([n, v]) => [n.toLowerCase(), v]),
   );
+  // Codex 0.163.0's interactive TUI: originator and UA prefix `codex-tui`, and
+  // the app-server's `(name; version)` client suffix.
   expect(h.get("user-agent")).toBe(
-    "codex_cli_rs/0.159.2 (Windows 10.0.26200; x86_64) WindowsTerminal",
+    "codex-tui/0.163.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.163.0)",
   );
-  expect(h.get("version")).toBe("0.159.2");
-  expect(h.get("originator")).toBe("codex_cli_rs");
+  expect(h.get("version")).toBe("0.163.0");
+  expect(h.get("originator")).toBe("codex-tui");
   expect(h.get("x-codex-beta-features")).toBe("remote_compaction_v2");
   expect(h.has("openai-beta")).toBe(false);
 });

@@ -1,8 +1,10 @@
-import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { moveToResponsesText } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 import { responsesFiles, withFileText } from "../toolResultFiles.ts";
+import { codexModel } from "./codexCatalog.ts";
+import { isUuid, threadIdFrom } from "./codexIdentity.ts";
+import { type CodexTurn, codexTurn, toLiteInput } from "./codexLite.ts";
 
 export type ResponsesBody = {
   model: string;
@@ -13,7 +15,7 @@ export type ResponsesBody = {
   temperature?: number;
   tools?: unknown[];
   tool_choice?: unknown;
-  reasoning?: { effort: string; summary?: string };
+  reasoning?: { effort: string; summary?: string; context?: string };
   store?: boolean;
   [key: string]: unknown;
 };
@@ -59,9 +61,28 @@ function suppliedKey(req: ChatRequest): string | undefined {
  * account uuid, so forwarding it raw is the habit not to form. The digest also
  * lands inside the character set the backend accepts, so there is no
  * validate-or-drop branch to get wrong.
+ *
+ * The key is Codex's thread id, which is a UUIDv7, so the digest is shaped as
+ * one (`threadIdFrom`). A client-supplied key that already is a UUID — a Codex
+ * client's own thread id — passes through unchanged; any other supplied key is
+ * hashed into the same form. Precedence is unchanged: client
+ * `prompt_cache_key`, client `session_id`, `conversationId`, fallback.
+ *
+ * Returns the key and the string it was derived from: the OAuth leg hashes the
+ * latter into the installation id when the credential names no account.
  */
-function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): string {
-  const stable =
+function cacheKey(
+  req: ChatRequest,
+  instructions: string,
+  firstInput: unknown,
+): { key: string; seed: string } {
+  const supplied = suppliedKey(req);
+  if (supplied !== undefined) {
+    if (isUuid(supplied)) return { key: supplied, seed: supplied };
+    const seed = JSON.stringify({ key: supplied });
+    return { key: threadIdFrom(seed), seed };
+  }
+  const seed =
     req.conversationId !== undefined && req.conversationId.length > 0
       ? JSON.stringify({ conversation: req.conversationId })
       : // `?? null` because `JSON.stringify` **omits** a property whose value is
@@ -75,7 +96,7 @@ function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): 
         // remaining collision between two of them costs nothing; what matters
         // is that the term stops vanishing without a trace.
         JSON.stringify({ instructions, firstInput: firstInput ?? null });
-  return createHash("sha256").update(stable).digest("hex").slice(0, 32);
+  return { key: threadIdFrom(seed), seed };
 }
 
 /**
@@ -128,6 +149,92 @@ function encodeToolChoice(c: ToolChoice): unknown {
   }
 }
 
+export type WireOptions = {
+  /**
+   * The Codex backend is a narrower surface than `api.openai.com`: it drives
+   * one product and rejects several standard Responses parameters outright.
+   * It is also the leg that presents itself as Codex 0.163.0, so everything in
+   * the fingerprint spec happens only when this is set.
+   */
+  oauth: boolean;
+  /** Seeds history ids that are fresh per request. OAuth leg only. */
+  requestId?: string | undefined;
+  /** When the request started, epoch ms: turn metadata and `create_time`. */
+  startedAt?: number | undefined;
+  /** The ChatGPT account the credential bills, which the installation id hashes. */
+  accountId?: string | undefined;
+};
+
+/**
+ * The reasoning block Codex sends, from the client's reasoning request.
+ *
+ * Codex always sends an effort, so every mode maps onto one: the client's own
+ * effort as sent today; nothing named, or a token budget this API cannot
+ * spell, the model's catalog default; `off` and `betweenTools` the lowest
+ * level the model supports, since `none` is in no current model's list.
+ * `summary` keeps the rule the API-key leg has — sent for a client reasoning
+ * request unless its display is `omitted` or `updates` — and `context` is
+ * `all_turns` whenever the model is lite, as Codex's `build_reasoning` writes.
+ */
+function codexReasoning(
+  req: ChatRequest,
+  model: string,
+  note: (d: string) => void,
+): { effort: string; summary?: string; context?: string } {
+  const catalog = codexModel(model);
+  const context = catalog.lite ? { context: "all_turns" } : {};
+  const r = req.reasoning;
+  if (r === undefined) return { effort: catalog.defaultEffort, ...context };
+  if (r.mode === "off") {
+    note("openai:reasoning-off-as-lowest");
+    return { effort: catalog.lowestEffort, ...context };
+  }
+  if (r.mode === "betweenTools") return { effort: catalog.lowestEffort, ...context };
+  if (r.mode === "budget") {
+    note("openai:reasoning-budget-dropped");
+    return { effort: catalog.defaultEffort, ...context };
+  }
+  return {
+    effort: r.effort ?? catalog.defaultEffort,
+    ...(r.display === "omitted" || r.display === "updates" ? {} : { summary: "auto" }),
+    ...context,
+  };
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * The client's vendor bag, merged onto a Codex-shaped body.
+ *
+ * `client_metadata` is always this leg's: a Codex client's own map carries its
+ * real installation id, which would go upstream unhashed and contradict the
+ * turn-metadata header, so it is dropped and the drop recorded. `text` and
+ * `reasoning` merge per field, the client winning each — a client `text.format`
+ * keeps Codex's `verbosity`, a client `reasoning.effort` keeps `context`. Every
+ * other key is the whole-value merge the API-key leg does.
+ */
+function mergeCodexVendor(
+  body: ResponsesBody,
+  vendor: Record<string, unknown>,
+  note: (d: string) => void,
+): void {
+  // Untyped view: a client may put anything under any key, `reasoning` included.
+  const target: Record<string, unknown> = body;
+  for (const [name, value] of Object.entries(vendor)) {
+    if (name === "client_metadata") {
+      note("openai:client-metadata-replaced");
+      continue;
+    }
+    const ours = target[name];
+    if ((name === "text" || name === "reasoning") && isRecord(ours) && isRecord(value)) {
+      target[name] = { ...ours, ...value };
+      continue;
+    }
+    target[name] = value;
+  }
+}
+
 /**
  * Flattens IR messages into Responses input items.
  *
@@ -137,18 +244,25 @@ function encodeToolChoice(c: ToolChoice): unknown {
 export function toResponsesWire(
   req: ChatRequest,
   model: string,
-  /**
-   * The Codex backend is a narrower surface than `api.openai.com`: it drives
-   * one product and rejects several standard Responses parameters outright.
-   * Defaults to the permissive API so only the OAuth path is constrained.
-   */
-  opts: { oauth: boolean } = { oauth: false },
-): { body: ResponsesBody; degradations: string[]; cacheKey: string } {
+  /** Defaults to the permissive API so only the OAuth path is constrained. */
+  opts: WireOptions = { oauth: false },
+): { body: ResponsesBody; degradations: string[]; cacheKey: string; codex?: CodexTurn } {
   const degradations: string[] = [];
   const input: unknown[] = [];
 
   const note = (d: string): void => {
     if (!degradations.includes(d)) degradations.push(d);
+  };
+
+  // The user turn each item belongs to, for the OAuth leg's turn ids. Codex's
+  // boundary: a user message that is not only tool results opens a turn, and a
+  // tool result answers the turn that asked for it even when new text follows
+  // it in the same message.
+  const turnOf = new WeakMap<object, number>();
+  let turn = -1;
+  const push = (item: object): void => {
+    input.push(item);
+    turnOf.set(item, Math.max(0, turn));
   };
 
   // There is no beta mechanism here, so a client asking for the 1M window is
@@ -184,11 +298,16 @@ export function toResponsesWire(
 
     const flush = (): void => {
       if (parts.length === 0) return;
-      input.push({ type: "message", role, content: [...parts] });
+      push({ type: "message", role, content: [...parts] });
       parts.length = 0;
     };
 
+    let opened = false;
     for (const block of message.content) {
+      if (message.role === "user" && !opened && block.type !== "toolResult") {
+        opened = true;
+        turn++;
+      }
       switch (block.type) {
         case "text":
           parts.push({
@@ -211,7 +330,7 @@ export function toResponsesWire(
           break;
         case "toolUse":
           flush();
-          input.push({
+          push({
             type: "function_call",
             call_id: block.id,
             name: block.name,
@@ -223,7 +342,7 @@ export function toResponsesWire(
           if (block.native !== undefined) note("openai:anthropic-native-block-dropped");
           flush();
           const files = responsesFiles(block.files ?? []);
-          input.push({
+          push({
             type: "function_call_output",
             call_id: block.toolUseId,
             output: withFileText(block.content, files.text),
@@ -259,7 +378,7 @@ export function toResponsesWire(
             // or regenerated on the way through.
             flush();
             const { id: _id, ...rest } = block.data;
-            input.push({ type: block.blockType, ...rest });
+            push({ type: block.blockType, ...rest });
             break;
           }
           // Another provider's. Unreachable in practice, since the router
@@ -279,7 +398,12 @@ export function toResponsesWire(
   const body: ResponsesBody = { model, input, stream: req.stream, store: false };
 
   const instructions = systemText(req.system, "openai", note);
-  if (instructions !== undefined && instructions.length > 0) body.instructions = instructions;
+  // Codex 0.163 sends base instructions inside `input` on every request, and,
+  // for a lite model, its tools too; the API-key leg keeps both body fields.
+  const lite = opts.oauth && codexModel(model).lite;
+  if (instructions !== undefined && instructions.length > 0 && !opts.oauth) {
+    body.instructions = instructions;
+  }
 
   if (req.maxTokens !== undefined) {
     // Rejected by the Codex backend with "Unsupported parameter".
@@ -292,22 +416,43 @@ export function toResponsesWire(
     if (opts.oauth) note("openai:temperature-dropped");
     else body.temperature = req.temperature;
   }
+  let liteTools: unknown[] | undefined;
   if (req.tools !== undefined) {
     // Same reasoning as the native block above: an Anthropic-defined tool has
     // no function schema to send, and the router never routes one here.
     const custom = req.tools.filter((t) => t.kind === "portable");
     if (custom.length !== req.tools.length) note("openai:anthropic-tool-dropped");
-    body.tools = custom.map((t) => ({
-      type: "function",
-      name: t.name,
-      description: t.description,
-      parameters: t.inputSchema,
-    }));
+    if (lite) {
+      // Codex's `ResponsesTool` for a function, `strict` included. They go in
+      // one `functions` namespace inside `additional_tools`; the backend
+      // returns calls from it with no `namespace`, so the decoder is unchanged.
+      liteTools = custom.map((t) => ({
+        type: "function",
+        name: t.name,
+        description: t.description,
+        strict: false,
+        parameters: t.inputSchema,
+      }));
+    } else {
+      body.tools = custom.map((t) => ({
+        type: "function",
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema,
+      }));
+    }
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
+  else if (opts.oauth) body.tool_choice = "auto";
+  // Codex sends `false` whenever the model is lite. Behaviour-changing — one
+  // tool call per turn for every client on this leg — and the operator's
+  // decision: exact over behaviour-preserving (spec, Decided).
+  if (lite) body.parallel_tool_calls = false;
   if (req.reasoning?.mode === "betweenTools")
     degradations.push("openai:reasoning-between-tools-as-off");
-  if (
+  if (opts.oauth) {
+    body.reasoning = codexReasoning(req, model, note);
+  } else if (
     req.reasoning !== undefined &&
     req.reasoning.mode !== "off" &&
     req.reasoning.mode !== "betweenTools"
@@ -334,9 +479,17 @@ export function toResponsesWire(
     }
   }
 
-  const key = suppliedKey(req) ?? cacheKey(req, instructions ?? "", input[0]);
+  const { key, seed } = cacheKey(req, instructions ?? "", input[0]);
 
-  Object.assign(body, req.vendor?.openai ?? {});
+  if (opts.oauth) {
+    // Codex's defaults for every request, which a client's own bag values
+    // still override below.
+    body.include = ["reasoning.encrypted_content"];
+    body.text = { verbosity: codexModel(model).verbosity };
+    mergeCodexVendor(body, req.vendor?.openai ?? {}, note);
+  } else {
+    Object.assign(body, req.vendor?.openai ?? {});
+  }
 
   // **The merge above copies `response_format` in, and this API refuses it** —
   // `Unsupported parameter: response_format`, measured 2026-09-21. It is the
@@ -353,5 +506,30 @@ export function toResponsesWire(
   // API-key leg this field is the only mechanism there is, so the request went
   // out with the useless value and nothing recorded it.
   body.prompt_cache_key = key;
-  return { body, degradations, cacheKey: key };
+  if (!opts.oauth) return { body, degradations, cacheKey: key };
+
+  // Base instructions go into `input` lite or not (0.163 removed the body
+  // field); `liteTools` is set only when the model is lite.
+  const built = toLiteInput({
+    threadId: key,
+    input,
+    turnOf,
+    tools: liteTools,
+    instructions,
+    requestId: opts.requestId,
+    startedAt: opts.startedAt,
+  });
+  body.input = built.input;
+  // The effort actually sent, after the client's bag had its say.
+  const sent = body.reasoning?.effort;
+  const codex = codexTurn({
+    threadId: key,
+    turnId: built.turnId,
+    installationSeed: opts.accountId ?? seed,
+    model,
+    effort: typeof sent === "string" ? sent : codexModel(model).defaultEffort,
+    startedAt: built.startedAt,
+  });
+  body.client_metadata = codex.clientMetadata;
+  return { body, degradations, cacheKey: key, codex };
 }

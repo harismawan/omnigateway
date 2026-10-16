@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import type { ChatRequest, Message } from "@omni/ir";
+import { threadIdFrom } from "../src/openai/codexIdentity.ts";
 import { toResponsesWire } from "../src/openai/wire.ts";
 
 /**
@@ -34,30 +34,80 @@ function withTurns(req: ChatRequest, count: number): ChatRequest {
   return { ...req, messages: [...req.messages, ...extra] };
 }
 
-test("a client's own prompt_cache_key is used verbatim, and matches the body", () => {
-  const req: ChatRequest = {
-    ...base,
-    vendor: { openai: { prompt_cache_key: "chosen-by-caller" } },
-  };
+/**
+ * Codex's thread id is a UUIDv7, and the key is that id: version 7, the RFC
+ * variant, and a timestamp that is never in the future.
+ */
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const instantOf = (uuid: string): number =>
+  Number.parseInt(uuid.replace(/-/g, "").slice(0, 12), 16);
+
+/** A Codex client's own thread id. */
+const CODEX_THREAD = "01a143df-3401-73a0-96db-901f105e1409";
+
+const keyFor = (vendor: Record<string, unknown>): string =>
+  keyOf({ ...base, vendor: { openai: vendor } });
+
+test("a client's own key that is already a UUID is used verbatim, and matches the body", () => {
+  const req: ChatRequest = { ...base, vendor: { openai: { prompt_cache_key: CODEX_THREAD } } };
   const { body, cacheKey } = toResponsesWire(req, "gpt-5");
 
-  expect(cacheKey).toBe("chosen-by-caller");
+  expect(cacheKey).toBe(CODEX_THREAD);
   // Resolved before the vendor merge for this reason: the merge writes the
   // caller's value into the body last, so a key resolved after it would send
   // one name in the header and another in the body.
-  expect(body.prompt_cache_key).toBe("chosen-by-caller");
+  expect(body.prompt_cache_key).toBe(CODEX_THREAD);
+});
+
+test("any other client key is hashed into the UUID form, stably and without leaking it", () => {
+  const key = keyFor({ prompt_cache_key: "chosen-by-caller" });
+  expect(key).toMatch(UUID_V7);
+  expect(key).not.toContain("chosen");
+  expect(keyFor({ prompt_cache_key: "chosen-by-caller" })).toBe(key);
+  expect(keyFor({ prompt_cache_key: "chosen-by-another" })).not.toBe(key);
+  const { body, cacheKey } = toResponsesWire(
+    { ...base, vendor: { openai: { prompt_cache_key: "chosen-by-caller" } } },
+    "gpt-5",
+  );
+  expect(body.prompt_cache_key).toBe(cacheKey);
+});
+
+test("every derived key is a UUIDv7 whose instant is in the past", () => {
+  const now = Date.now();
+  for (const key of [
+    keyOf(base),
+    keyOf({ ...base, conversationId: "conv-a" }),
+    keyFor({ prompt_cache_key: "chosen-by-caller" }),
+    keyFor({ session_id: "sess-77" }),
+  ]) {
+    expect(key).toMatch(UUID_V7);
+    expect(instantOf(key)).toBeLessThanOrEqual(now);
+    expect(instantOf(key)).toBeGreaterThan(Date.UTC(2025, 0, 1));
+  }
 });
 
 test("session_id is the second name a client may use for the same thing", () => {
-  expect(keyOf({ ...base, vendor: { openai: { session_id: "sess-77" } } })).toBe("sess-77");
+  expect(keyFor({ session_id: "sess-77" })).toBe(keyFor({ prompt_cache_key: "sess-77" }));
+  expect(keyFor({ session_id: "sess-77" })).not.toBe(keyOf(base));
+  expect(keyFor({ session_id: CODEX_THREAD })).toBe(CODEX_THREAD);
 });
 
 test("prompt_cache_key wins over session_id when a client sends both", () => {
-  const req: ChatRequest = {
+  expect(keyFor({ session_id: "sess-77", prompt_cache_key: "pck-1" })).toBe(
+    keyFor({ prompt_cache_key: "pck-1" }),
+  );
+  expect(keyFor({ session_id: "sess-77", prompt_cache_key: "pck-1" })).not.toBe(
+    keyFor({ session_id: "sess-77" }),
+  );
+});
+
+test("a client key beats the conversation id", () => {
+  const withBoth = keyOf({
     ...base,
-    vendor: { openai: { session_id: "sess-77", prompt_cache_key: "pck-1" } },
-  };
-  expect(keyOf(req)).toBe("pck-1");
+    conversationId: "conv-a",
+    vendor: { openai: { prompt_cache_key: "pck-1" } },
+  });
+  expect(withBoth).toBe(keyFor({ prompt_cache_key: "pck-1" }));
 });
 
 test("an empty or non-string client key falls through rather than being sent", () => {
@@ -71,7 +121,7 @@ test("an empty or non-string client key falls through rather than being sent", (
   // into `prompt_cache_key`, disagreeing with the session headers on the wire.
   for (const rejected of [{ prompt_cache_key: "" }, { session_id: 42 }, { prompt_cache_key: 7 }]) {
     const { body, cacheKey } = toResponsesWire({ ...base, vendor: { openai: rejected } }, "gpt-5");
-    expect(cacheKey).toMatch(/^[0-9a-f]{32}$/);
+    expect(cacheKey).toBe(keyOf(base));
     expect(body.prompt_cache_key).toBe(cacheKey);
   }
 });
@@ -95,7 +145,7 @@ test("header-unsafe client keys fall through each candidate without changing bod
     }
     expect(
       keyOf({ ...base, vendor: { openai: { prompt_cache_key: value, session_id: "safe" } } }),
-    ).toBe("safe");
+    ).toBe(keyFor({ session_id: "safe" }));
     const conversation = { ...base, conversationId: "conversation" };
     expect(
       keyOf({
@@ -104,18 +154,20 @@ test("header-unsafe client keys fall through each candidate without changing bod
       }),
     ).toBe(keyOf(conversation));
   }
+  // At the length budget it is still the client's key, hashed like any other.
   const value = "x".repeat(1024);
-  expect(keyOf({ ...base, vendor: { openai: { prompt_cache_key: value } } })).toBe(value);
+  expect(keyFor({ prompt_cache_key: value })).not.toBe(keyOf(base));
+  expect(keyFor({ prompt_cache_key: value })).toBe(keyFor({ session_id: value }));
 });
 
 test("a client's own key survives the vendor merge rather than being overwritten by it", () => {
   // The other direction of the same ordering. The resolved key is written after
   // the merge, so this proves the write is not simply clobbering whatever the
   // client asked for.
-  const req: ChatRequest = { ...base, vendor: { openai: { prompt_cache_key: "mine" } } };
+  const req: ChatRequest = { ...base, vendor: { openai: { prompt_cache_key: CODEX_THREAD } } };
   const { body, cacheKey } = toResponsesWire(req, "gpt-5");
-  expect(cacheKey).toBe("mine");
-  expect(body.prompt_cache_key).toBe("mine");
+  expect(cacheKey).toBe(CODEX_THREAD);
+  expect(body.prompt_cache_key).toBe(CODEX_THREAD);
 });
 
 test("other vendor fields still ride the merge untouched", () => {
@@ -124,7 +176,7 @@ test("other vendor fields still ride the merge untouched", () => {
   const req: ChatRequest = { ...base, vendor: { openai: { service_tier: "priority" } } };
   const { body } = toResponsesWire(req, "gpt-5");
   expect(body.service_tier).toBe("priority");
-  expect(body.prompt_cache_key).toMatch(/^[0-9a-f]{32}$/);
+  expect(body.prompt_cache_key).toMatch(UUID_V7);
 });
 
 test("a conversation id is hashed, never forwarded", () => {
@@ -135,7 +187,7 @@ test("a conversation id is hashed, never forwarded", () => {
   const userId = "user_abc_account_11111111-2222-3333-4444-555555555555_session_9";
   const { body, cacheKey } = toResponsesWire({ ...base, conversationId: userId }, "gpt-5");
 
-  expect(cacheKey).toMatch(/^[0-9a-f]{32}$/);
+  expect(cacheKey).toMatch(UUID_V7);
   expect(cacheKey).not.toContain("account");
   expect(JSON.stringify(body)).not.toContain(userId);
 });
@@ -184,12 +236,14 @@ test("an empty history does not reduce the key to the instructions alone", () =>
   // `validateRequest` strips the block, the message goes with it, and the
   // ingress non-empty guard has already run — on both surfaces.
   const noHistory: ChatRequest = { ...base, messages: [] };
-  const instructionsOnly = createHash("sha256")
-    .update(JSON.stringify({ instructions: "be brief" }))
-    .digest("hex")
-    .slice(0, 32);
+  const instructionsOnly = threadIdFrom(JSON.stringify({ instructions: "be brief" }));
 
   expect(keyOf(noHistory)).not.toBe(instructionsOnly);
+  // The control: the helper does map the full seed onto this key, so the
+  // inequality above is about the term, not about two unrelated hashes.
+  expect(keyOf(noHistory)).toBe(
+    threadIdFrom(JSON.stringify({ instructions: "be brief", firstInput: null })),
+  );
 });
 
 test("a request with history and one without do not collide", () => {

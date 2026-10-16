@@ -20,7 +20,7 @@ import {
   usageReadable,
   windowFrom,
 } from "../oauthUsage.ts";
-import { openaiProfile } from "./profile.ts";
+import { OPENAI_ORIGINATOR, openaiProfile } from "./profile.ts";
 
 /** Public client ID of the Codex CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -259,7 +259,9 @@ export const openaiOAuthFlow: PkcePluginFlow = {
     url.searchParams.set("id_token_add_organizations", "true");
     url.searchParams.set("codex_cli_simplified_flow", "true");
     url.searchParams.set("state", state);
-    url.searchParams.set("originator", "codex_cli_rs");
+    // The profile's originator, not a second literal: Codex's login reads the
+    // process originator, which the TUI's app-server sets before any login.
+    url.searchParams.set("originator", OPENAI_ORIGINATOR);
     url.searchParams.set("prompt", "login");
 
     return { authorizeUrl: url.toString(), pending: { verifier, challenge, state, redirectUri } };

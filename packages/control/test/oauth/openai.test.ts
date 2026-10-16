@@ -31,13 +31,18 @@ function stubHttp(status: number, body: unknown): HttpClient & { last: () => Htt
 
 const pending = { verifier: "v", challenge: "c", state: "s", redirectUri: "http://localhost/cb" };
 
+// The token requests wear the shared OpenAI profile, so they move with it: the
+// 0.163.0 TUI identity, and the originator header after the protocol headers.
 const OPENAI_TOKEN_HEADERS = [
-  ["version", "0.159.2"],
+  ["version", "0.163.0"],
   ["x-codex-beta-features", "remote_compaction_v2"],
-  ["originator", "codex_cli_rs"],
   ["Accept", "application/json"],
   ["Content-Type", "application/x-www-form-urlencoded"],
-  ["user-agent", "codex_cli_rs/0.159.2 (Windows 10.0.26200; x86_64) WindowsTerminal"],
+  ["originator", "codex-tui"],
+  [
+    "user-agent",
+    "codex-tui/0.163.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.163.0)",
+  ],
 ] as const;
 
 /** OpenAI's endpoints are compiled in, so `start` must not reach the network. */
@@ -56,7 +61,9 @@ test("builds an authorize url against the openai auth host", async () => {
   expect(url.searchParams.get("scope")).toContain("openid");
   expect(url.searchParams.get("id_token_add_organizations")).toBe("true");
   expect(url.searchParams.get("codex_cli_simplified_flow")).toBe("true");
-  expect(url.searchParams.get("originator")).toBe("codex_cli_rs");
+  // The TUI's login runs in its app-server after `initialize` has set the
+  // process originator, so the authorize URL names `codex-tui` too.
+  expect(url.searchParams.get("originator")).toBe("codex-tui");
   expect(url.searchParams.get("prompt")).toBe("login");
 });
 
