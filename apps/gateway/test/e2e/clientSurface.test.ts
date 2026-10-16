@@ -184,6 +184,52 @@ test("a key holder sees the request it served, end to end", async () => {
   store.close();
 });
 
+/**
+ * A key's per-model overrides are the holder's own limits, so the summary
+ * carries them: the readings name the model, and nothing else is added to a
+ * reading or to the summary for them — no credential, no counter beyond the
+ * key's own committed usage.
+ */
+test("the summary carries the key's own model overrides, and nothing beside them", async () => {
+  const { store, upstream, serve, api, login } = await harness();
+  const mine = await seedApiKey(store, {
+    label: "mine",
+    limits: { requests: { "1m": 60 }, models: { fast: { requests: { "1m": 5 } } } },
+  });
+  upstream.queue(ANTHROPIC_STREAM);
+  expect((await serve(mine.raw)).status).toBe(200);
+
+  const cookie = await login(mine.raw);
+  const summary = (await (await api("/api/client/summary", cookie)).json()) as Record<
+    string,
+    unknown
+  > & { limitUsage: Array<Record<string, unknown>> };
+  expect(summary.limitUsage).toEqual([
+    { dimension: "requests", window: "1m", limit: 60, used: 1, model: null },
+    { dimension: "requests", window: "1m", limit: 5, used: 1, model: "fast" },
+  ]);
+  expect(summary.limits).toEqual({
+    requests: { "1m": 60 },
+    models: { fast: { requests: { "1m": 5 } } },
+  });
+  expect(Object.keys(summary).sort()).toEqual(
+    [
+      "bodyLoggingOptOut",
+      "createdAt",
+      "dayOffsetMinutes",
+      "expiresAt",
+      "id",
+      "label",
+      "limitUsage",
+      "limits",
+      "modelAllowlist",
+      "prefix",
+      "revokedAt",
+    ].sort(),
+  );
+  store.close();
+});
+
 test("both surfaces report the same day offset through the real app", async () => {
   /**
    * `admin.test.ts` mounts `adminRoutes()` directly, so it pins the route and

@@ -229,12 +229,12 @@ test("a listed key reports one reading per configured limit, with committed usag
 
   const [listed] = await listKeys(store, now);
   expect(listed?.limitUsage).toEqual([
-    { dimension: "requests", window: "1m", limit: 60, used: 1 },
-    { dimension: "requests", window: "1w", limit: 5_000, used: 2 },
-    { dimension: "spend", window: "1w", limit: 25, used: 3.75 },
+    { dimension: "requests", window: "1m", limit: 60, used: 1, model: null },
+    { dimension: "requests", window: "1w", limit: 5_000, used: 2, model: null },
+    { dimension: "spend", window: "1w", limit: 25, used: 3.75, model: null },
     // A gauge held in the serving process. Zero would tell an operator running
     // the CLI beside a saturated gateway that nothing is in flight.
-    { dimension: "concurrency", window: null, limit: 8, used: null },
+    { dimension: "concurrency", window: null, limit: 8, used: null, model: null },
   ]);
   store.close();
 });
@@ -261,4 +261,56 @@ test("a key whose stored limits cannot be read keeps its row and reports no read
   expect(listed?.limitUsage).toEqual([]);
   store.close();
   rmSync(root, { recursive: true, force: true });
+});
+
+/**
+ * An override's readings are its own model's usage, named with the model, after
+ * the key-wide ones. The two models' rows sit in both windows, so a reading
+ * that summed the whole key, or another model, reads high here.
+ */
+test("a listed key reports each model override's readings from that model's rows", async () => {
+  const store = await memoryStore();
+  const now = 2_000_000_000_000;
+  const { key } = await seedApiKey(store, {
+    limits: {
+      requests: { "1m": 60 },
+      models: {
+        opus: { requests: { "1m": 5 }, spend: { "5h": 4 }, concurrency: 2 },
+        "llama3:8b": { tokens: { "1w": 1_000 } },
+      },
+    },
+  });
+  const row = (id: string, model: string, at: number, costUsd: number) =>
+    store.usage.append(
+      requestLog({ id, apiKeyId: key.id, requestedModel: model, at, costUsd, inputTokens: 7 }),
+    );
+  await row("o1", "opus", now - 30_000, 1);
+  await row("o2", "opus", now - 3_600_000, 0.5);
+  await row("f1", "fast", now - 20_000, 9);
+  await row("l1", "llama3:8b", now - 86_400_000, 0);
+
+  const [listed] = await listKeys(store, now);
+  expect(listed?.limitUsage).toEqual([
+    { dimension: "requests", window: "1m", limit: 60, used: 2, model: null },
+    { dimension: "requests", window: "1m", limit: 5, used: 1, model: "opus" },
+    { dimension: "spend", window: "5h", limit: 4, used: 1.5, model: "opus" },
+    { dimension: "concurrency", window: null, limit: 2, used: null, model: "opus" },
+    { dimension: "tokens", window: "1w", limit: 1_000, used: 8, model: "llama3:8b" },
+  ]);
+  store.close();
+});
+
+test("limits with model overrides are written whole, and an empty override is refused", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { limits: { requests: { "1m": 60 } } });
+  const limits = { requests: { "1m": 60 }, models: { opus: { concurrency: 1 } } };
+  expect((await setKeyLimits(store, key.id, { limits })).limits).toEqual(limits);
+  await expect(
+    setKeyLimits(store, key.id, { limits: { models: { opus: {} } } }),
+  ).rejects.toBeInstanceOf(GatewayError);
+  await expect(
+    setKeyLimits(store, key.id, { limits: { models: { opus: { models: {} } } } }),
+  ).rejects.toBeInstanceOf(GatewayError);
+  expect((await store.keys.get(key.id))?.limits).toEqual(limits);
+  store.close();
 });

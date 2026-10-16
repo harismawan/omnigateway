@@ -2,6 +2,8 @@ import { GatewayError } from "@omni/ir";
 import {
   type Dimension,
   type LimitConfig,
+  type LimitConfigBase,
+  modelOverride,
   WINDOW_MS,
   WINDOWS,
   type Window,
@@ -37,6 +39,11 @@ export type LimitReading = {
    * running the CLI beside a busy gateway that every key is idle.
    */
   used: number | null;
+  /**
+   * The model a per-model override applies to, or null for the key-wide
+   * limits. An override's `used` is that model's own traffic on this key.
+   */
+  model: string | null;
 };
 
 /** Everything about a key except the material needed to use it. */
@@ -51,7 +58,7 @@ export type ApiKeySummary = Omit<ApiKey, "hash"> & {
 };
 
 /** The windows any dimension of this matrix is counted over. */
-function configuredWindows(limits: LimitConfig): Window[] {
+function configuredWindows(limits: LimitConfigBase): Window[] {
   const needed = new Set<Window>();
   for (const dimension of ["requests", "tokens", "spend"] as const) {
     const windows: Partial<Record<Window, number | null | undefined>> | undefined =
@@ -66,11 +73,11 @@ function configuredWindows(limits: LimitConfig): Window[] {
 }
 
 /**
- * Reads what one key has spent against each of its ceilings.
+ * Reads what one key has spent against each of its ceilings: the key-wide
+ * ones first, then each model override's in the order the matrix holds them.
  *
- * One `sumSince` per distinct window rather than per pair: the sum answers all
- * three windowed dimensions at once, and a key with a full matrix is three
- * queries rather than eight. A key with no limits is none.
+ * An override is looked up through `modelOverride`, the one lookup there is;
+ * only its name is taken from the record's own keys.
  */
 async function readLimitUsage(
   store: Store,
@@ -79,10 +86,34 @@ async function readLimitUsage(
   now: number,
 ): Promise<LimitReading[]> {
   if (limits === null) return [];
+  const readings = await readScope(store, id, limits, null, now);
+  for (const model of Object.keys(limits.models ?? {})) {
+    const override = modelOverride(limits, model);
+    if (override === undefined) continue;
+    readings.push(...(await readScope(store, id, override, model, now)));
+  }
+  return readings;
+}
 
+/**
+ * One scope's readings, key-wide or one model's.
+ *
+ * One `sumSince` per distinct window rather than per pair: the sum answers all
+ * three windowed dimensions at once, and a key with a full matrix is three
+ * queries rather than eight. A scope with no limits is none. An override's sums
+ * are narrowed to its model.
+ */
+async function readScope(
+  store: Store,
+  id: string,
+  limits: LimitConfigBase,
+  model: string | null,
+  now: number,
+): Promise<LimitReading[]> {
   const sums = new Map<Window, UsageSums>();
   for (const window of configuredWindows(limits)) {
-    sums.set(window, await store.usage.sumSince(id, now - WINDOW_MS[window]));
+    const since = now - WINDOW_MS[window];
+    sums.set(window, await store.usage.sumSince(id, since, model ?? undefined));
   }
 
   const readings: LimitReading[] = [];
@@ -102,7 +133,7 @@ async function readLimitUsage(
             : dimension === "tokens"
               ? sum.tokens
               : sum.costUsd;
-      readings.push({ dimension, window, limit, used });
+      readings.push({ dimension, window, limit, used, model });
     }
   }
 
@@ -112,6 +143,7 @@ async function readLimitUsage(
       window: null,
       limit: limits.concurrency,
       used: null,
+      model,
     });
   }
   return readings;
