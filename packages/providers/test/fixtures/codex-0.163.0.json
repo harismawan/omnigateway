@@ -1,5 +1,5 @@
 {
-  "source": "Codex 0.163.0 (codex-tui, Responses over HTTPS) captured 2026-10-16 by scripts/codex-capture. Hand-sanitized: ids and timestamps replaced with placeholders, Codex's own prompt items and tool inventory removed, no paths, no installation id. The follow-up items come from the request after one tool call.",
+  "source": "Codex 0.163.0, Responses over HTTPS, captured 2026-10-16 by scripts/codex-capture. Hand-sanitized: ids and timestamps replaced with placeholders, Codex's own prompt items and tool inventory removed, no paths, no installation id. Two captures: headerNames, headerValues, turnMetadata, bodyKeys, body and clientMetadata come from the interactive TUI's main turn (originator codex-tui); followUpInput comes from a `codex exec` run (originator codex_exec, turn_trigger exec, sandbox_mode read-only), the request after one tool call, because only exec was driven through a tool loop. Item shapes do not depend on the entry point; the exec-only header and metadata values are not in this file.",
   "headerNames": [
     "version",
     "x-codex-beta-features",

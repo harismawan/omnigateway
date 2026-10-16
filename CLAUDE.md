@@ -435,13 +435,16 @@ Translation invariants:
   `x-session-id`, `x-session-affinity`, `x-deepseek-harness-session-id`, `session-id`. Fallback hashes
   instructions + opening item, not tool list/first message; gateway-generated ids use the fallback.
   In `openai/wire.ts`, resolve client `prompt_cache_key` → client `session_id` → hashed
-  `conversationId` → fallback before vendor `Object.assign`. `openai/codec.ts` sends the same value
+  `conversationId` → fallback before the vendor merge (`Object.assign` on the API-key leg,
+  `mergeCodexVendor` on OAuth). `openai/codec.ts` sends the same value
   as `session-id`, `thread-id`, `x-client-request-id` headers on both legs; keep those names in
   `openaiProfile.order`. Only `session-id` routes the Codex cache (measured); never drop it. Keep `store: false` for Codex. Inspect client key sets, not one member.
   History: responses-ingress spec. The key is a UUIDv7 thread id (a supplied UUID passes through).
   The OAuth leg wears Codex 0.163.0's TUI fingerprint, which moves only with a capture
   (`scripts/codex-capture/README.md`); `nativeReasoning` reads the **client's** `include`, never
-  the body's, which always carries Codex's. Pin: `openaiCodexFingerprint.test.ts`; design:
+  the body's, which always carries Codex's. Every id it derives is keyed with the credential's
+  `providerData.idSalt`, minted and backfilled by `openai/oauth.ts` alone; the unkeyed derivation
+  is only the fallback for a credential not yet refreshed. Pin: `openaiCodexFingerprint.test.ts`; design:
   [Codex 0.163 fingerprint](docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md).
 - OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /
   `experimental_attachments` as well as `content`. Payload's own container header beat any

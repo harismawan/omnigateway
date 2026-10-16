@@ -21,7 +21,8 @@ gets one tool call per turn and terser answers.
 - Every request on the OAuth leg is indistinguishable, field by field, from what Codex 0.163.0's
   interactive TUI sends for the same model, except where this document names a deliberate gap.
 - The shape is the **responses-lite** shape for every model whose Codex catalog entry sets
-  `use_responses_lite: true` (all current GPT targets; see History).
+  `use_responses_lite: true` (every 0.163.0 catalog row but `gpt-5.5`; see History), and Codex's
+  non-lite shape for the rest.
 - Prompt-cache behaviour is unchanged (measured: identical hit rates, History).
 - Updating to the next Codex release is a documented, repeatable procedure built on a local capture,
   not on reading source.
@@ -223,10 +224,13 @@ server-assigned or uuid7 at creation.
   level is not `low` for all of them — `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-terra` and
   `gpt-5.6-luna` default to `medium` in the 0.163.0 catalog, and that is what is copied. The two
   `node_repl_*` flags the turn metadata repeats are per-model too (`node_repl_auto_review_required`
-  is `true` for `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol` only) and are copied beside them. A
-  model id not in that data uses the lite shape and `low`/`low`/`low` with both flags `false`:
-  every GPT model in the catalog is lite, and a non-lite 0.163 request was never captured. My
-  call; the flag defaults are the builder's call. Data: `openai/codexCatalog.ts`.
+  is `true` for `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol` only) and are copied beside them.
+  **Every row is copied** (review fix): the hidden `gpt-daybreak-blue-latest`,
+  `gpt-daybreak-red-latest` (verbosity `high`, default `medium`) and `codex-auto-review`, and
+  `gpt-5.5`, which is **not** lite (default `medium`) — so "every GPT model is lite", as this line
+  first said, was wrong. A model id not in that data uses the lite shape and `low`/`low`/`low`
+  with both flags `false`: every other row is lite, and a non-lite 0.163 request was never
+  captured. My call; the flag defaults are the builder's call. Data: `openai/codexCatalog.ts`.
 - **Absent fields.** `service_tier`, `stream_options`, `access_programs` did not appear in any
   capture. They stay in the key order so a client bag value lands in Codex's position; the gateway
   never adds them.
@@ -302,10 +306,32 @@ What the builder decided for each point above, and for the gaps found while buil
   developer messages, `unknown` for assistant parts. A message holding a part Codex has no kind for
   (`input_file`, moved there from a tool result) is sent without the list rather than with a
   guessed kind, since the backend types the field.
-- **Lite and instructions.** Codex 0.163 sends base instructions inside `input` for every model,
+- **Lite and non-lite.** Codex 0.163 sends base instructions inside `input` for every model,
   lite or not (`instructions` left the request struct), so the OAuth leg never sends the body
-  field; only the tools' location, `parallel_tool_calls: false` and `reasoning.context` follow
-  `use_responses_lite`. Every listed model is lite, so this is unobservable today.
+  field. What follows `use_responses_lite`, from `client.rs` `build_responses_request` and
+  `tool_spec.rs`: lite puts the tools in the `additional_tools` namespace item, sends
+  `parallel_tool_calls: false`, `reasoning.context: "all_turns"` and the
+  `x-openai-internal-codex-responses-lite` header. Non-lite (`gpt-5.5`) sends the same function
+  objects flat in `tools` (`create_tools_raw_json_for_responses_api`), `parallel_tool_calls` as
+  the model's `supports_parallel_tool_calls` (true on every row; builder's call, since
+  `prompt.parallel_tool_calls` was read as that flag, not captured), no `reasoning.context`, and
+  no lite header. Pinned by `openaiCodexFingerprint.test.ts`.
+- **Per-credential secrets** (review fix, builder's call on the details). `installation_id` and the
+  derived ids were recomputable without a secret: the installation id hashed the account id sent
+  in the next header, and turn and context-window ids hashed the thread id beside them. The
+  OpenAI OAuth flow (`openai/oauth.ts`, provider-local, no store migration) now mints a random
+  UUIDv4 `installationId` and a 32-byte hex `idSalt` into `providerData` at connect, keeps valid
+  stored values on every refresh, and mints any missing or malformed one on refresh — which the
+  refresher (`control/src/oauth/refresh.ts`) merges over the stored row, so existing credentials
+  backfill on their next refresh. The codec reports the stored installation id and keys with
+  HMAC-SHA256 over the salt: the derived thread id (a supplied UUID still passes through), turn
+  ids, `context_window_id` and history ids. Codex's own UUIDv5 prefix ids stay unkeyed, as Codex
+  derives them. Until a credential has both values, today's unkeyed derivation stands. This also
+  closes the no-account case, whose installation id changed per conversation. Costs: the derived
+  thread id changes once at a credential's backfilling refresh (one cache reset), and two
+  credentials on one account now present two installations and two keys for one conversation.
+  `providerData` is stored unencrypted and shown to the admin console, like Kimi's device id; the
+  salt guards against recomputation upstream, not against an operator.
 - **`sandbox`** (builder's call): `windows_elevated` for a Windows profile. `sandbox_tags.rs` maps
   `WindowsSandboxSelection::Elevated` to that label (a fourth value beside the three named
   above); the TUI's first-run setup recommends the elevated sandbox and managed requirements
@@ -318,6 +344,16 @@ What the builder decided for each point above, and for the gaps found while buil
   default (not today's `medium`), with `summary: "auto"` under the existing display rule. `off`
   maps to the lowest level as decided and records a new degradation,
   `openai:reasoning-off-as-lowest`, because the client asked for no reasoning and got some.
+  `betweenTools` on this leg records `openai:reasoning-between-tools-as-lowest` (review fix): the
+  older `openai:reasoning-between-tools-as-off` described the API-key leg, which keeps it, and rows
+  carrying either stay readable.
+- **Effort in the header** (review fix). `reasoning_effort` in turn metadata is the sent effort only
+  when it is a named member of Codex's `ReasoningEffort` (`none` … `ultra`, `persistent`); a bag
+  value outside it — free text bound for a header — reports the catalog default instead, while the
+  body still carries what the client sent. `asciiJson` escapes everything outside printable ASCII
+  per UTF-16 unit; both pinned.
+- **Framing** (review fix). `codecAdapter` refuses a codec that sets its own `content-length`, a
+  zstd marker without exactly one `content-encoding: zstd`, or a `content-encoding` with no marker.
 - **`tool_choice`** (builder's call): a client's tool choice is encoded as today; absent, the OAuth
   leg sends Codex's `"auto"`. Overriding a client's forced choice would change behaviour the
   design did not ask to change.
@@ -330,16 +366,42 @@ What the builder decided for each point above, and for the gaps found while buil
   profile's `OPENAI_ORIGINATOR`, so `OMNI_OPENAI_ORIGINATOR` moves it with the headers. The token
   and usage requests wear the shared profile and so moved with it (new values, `originator`
   after the protocol headers).
-- **zstd** (builder's call): `Bun.zstdCompressSync` at level 3, Codex's level
-  (`codex-rs/http-client/src/request.rs`, `encode_all(…, 3)`). Not `node:zlib`: the package root
-  is bundled for the browser by the leaf-subpath probe, where `node:zlib` has no zstd, and the
-  package already uses the `Bun` global. The marker is `bodyEncoding: "zstd"` on
-  `CodecHttpRequest`/`HttpRequest`; `codecAdapter` refuses any other value as an unusable request;
-  the codec places `content-encoding` itself.
+- **zstd** (builder's call, corrected after review): `node:zlib`'s `createZstdCompress` at level
+  3, the body written to the stream once. Codex uses `zstd::stream::encode_all(…, 3)`
+  (`codex-rs/http-client/src/request.rs`), which never pledges a size: no frame content size, not
+  single-segment, level 3's own windowLog 21 (window descriptor `0x58`). The first version used
+  `Bun.zstdCompressSync`, a one-shot compress that knows the size, writes it, and shrinks the
+  window (descriptor `0xa0`/`0x38`) — decodable, but not Codex's frame. A namespace import keeps
+  the browser bundle of the package root building (its `node:zlib` has no zstd export); the
+  package root now lists `node:zlib` among its bare imports (`oauthStoreEdge.test.ts`). The marker
+  is `bodyEncoding: "zstd"` on `CodecHttpRequest`/`HttpRequest`; the codec places
+  `content-encoding` itself.
 - **`host` header**: the OAuth leg sets `host: chatgpt.com` so it lands in hyper's position.
-  **Known gap:** the shared transport writes `Content-Length` in that casing for every provider,
-  where hyper writes `content-length`. HTTP header names are case-insensitive; changing the casing
-  would change every other provider's wire, so it is left.
+
+### Known gaps
+
+Recorded, not fixed.
+
+- **Id timestamps.** The thread, turn and context-window UUIDv7 instants are derived (a past
+  window, or a Codex client's own thread instant), not near `turn_started_at_unix_ms`; and
+  `turn_started_at_unix_ms` is each request's start, so it changes on every request of a tool loop
+  where Codex keeps the turn's original start. Both need per-conversation state this gateway does
+  not hold.
+- **HTTP/1.1 framing.** Bun's `node:http` adds `Connection: keep-alive` and writes
+  `Content-Length` capitalised; hyper writes `content-length` and no `connection` header. The
+  transport is shared by every provider, so its casing is left.
+- **Transport and TLS.** The gateway speaks HTTP/1.1 over Bun's TLS. Codex uses reqwest 0.12
+  (default features include `http2`) over rustls, so it very likely speaks HTTP/2 to
+  `chatgpt.com`, and its TLS ClientHello differs from Bun's. **Operator decision, 2026-10-16:**
+  this is a known gap, not follow-up work; no transport change.
+- **Large bodies.** `encode_all` feeds zstd in `ZSTD_CStreamInSize` (~128 KiB) chunks; the gateway
+  writes the body once. Byte identity was verified on bodies up to ~74 KB; a body past ~128 KiB
+  may differ in block layout. Nothing that size was captured.
+- **Fixture provenance.** `test/fixtures/codex-0.163.0.json` combines two captures: headers, turn
+  metadata and body keys from the TUI's main turn (`codex-tui`), and `followUpInput` from a
+  `codex exec` follow-up (`codex_exec`, `turn_trigger: exec`, `sandbox_mode: read-only`), the only
+  run driven through a tool loop. Item shapes do not depend on the entry point; the exec-only
+  values are not in the fixture.
 - **Body order** (builder's call): one `openaiBodyOrder` for both legs, Codex 0.163's declaration
   order with `instructions` kept after `input` and `metadata` last for the API-key leg. The
   API-key leg's key order therefore moves where it has `tools`/`reasoning`; its keys and values
@@ -404,3 +466,15 @@ one exchange: today's shape 0 / 9728 / 9728 cached; lite + zstd 0 / 9728 / 9728.
 Then a third variant with the bulk (~9.7k tokens) moved into the **first history item** and every
 history item's `id`, `turn_id` and `create_time` regenerated on each send: 0 / 9728 / 9728. Ids
 and passthrough metadata are not part of the cached prompt.
+
+**Forced tool choice in lite mode**, measured 2026-10-16, two more live requests (25 in total),
+same account and model: `tool_choice: {type: "function", name}` and `tool_choice: "required"`,
+each with the tool only inside the `functions` namespace of `additional_tools`, both answered
+`200` with the call returned. No code change: a client's tool choice is encoded as before.
+
+**zstd byte identity**, a one-off verification on 2026-10-16. The four captured Codex 0.163.0
+request bodies (TUI title request and main turn, exec first request and follow-up; 13,024 to
+25,584 compressed bytes) were decompressed and sent back through `nodeHttpClient` with
+`bodyEncoding: "zstd"`; all four came out byte-identical to what Codex sent. The captures carry a
+local installation id and paths, so they are not committed; `http-client.test.ts` pins the frame
+header (no content size, windowLog 21) and a level-3 golden over a synthetic body instead.

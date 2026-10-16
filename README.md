@@ -402,6 +402,17 @@ Worth knowing before you deploy it:
   Anthropic thinking fields (including beta controls) pass through only to
   Anthropic; supply any required beta header yourself. Hidden adaptive display
   omits generated Responses reasoning summaries, without inventing a default.
+- **An OpenAI OAuth (ChatGPT) target presents itself as Codex, and answers like
+  it.** Requests on that leg match Codex 0.163.0's TUI field by field, which
+  changes model behaviour for every client routed there, Claude Code included:
+  one tool call per turn (`parallel_tool_calls: false`), terser answers
+  (`text.verbosity: "low"`), and a request that names no reasoning effort —
+  including adaptive thinking with no effort — runs at the model's Codex catalog
+  default (`low` or `medium`) rather than `medium`. A client's own `text`,
+  `reasoning` or tool choice still wins field by field. OpenAI API-key targets
+  are unaffected. Credentials connected before this pick up their per-credential
+  identity on their next token refresh. Details:
+  [the fingerprint design](docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md).
 - Not in scope: semantic caching, billing.
 
 What is missing on purpose, what is missing for now, and what is designed but not
