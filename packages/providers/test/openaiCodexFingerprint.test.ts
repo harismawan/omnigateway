@@ -9,7 +9,7 @@
  * Design: `docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md`.
  */
 
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { type ChatRequest, GatewayError, type Message } from "@omni/ir";
@@ -771,8 +771,105 @@ test("a mid-conversation system turn goes as a developer message stamped like a 
     FOLLOW_UP.messages[0] as Message,
     { role: "system", content: [{ type: "text", text: "operator note" }] },
   ];
-  const item = inputOf(build({ ...FOLLOW_UP, messages }))[3];
+  const built = build({ ...FOLLOW_UP, messages });
+  const item = inputOf(built)[3];
   expect(item).toMatchObject({ type: "message", role: "developer" });
   expect(passthroughOf(item).content_item_kinds).toEqual(["user.text"]);
   expect(item?.id).toMatch(/^msg_/);
+  // Stamped like a user message, but it opens no turn: only a user does.
+  const opening = passthroughOf(inputOf(built)[2]).turn_id;
+  expect(passthroughOf(item).turn_id).toBe(opening);
+  expect(metadataOf(built).turn_id).toBe(opening);
+});
+
+test("an output added for an orphaned call belongs to that call's turn", () => {
+  // `repairOrphanedCalls` adds the output, so no turn was recorded for it; it
+  // inherits the item before it — the call — not the first turn.
+  const messages: Message[] = [
+    { role: "user", content: [{ type: "text", text: "one" }] },
+    { role: "assistant", content: [{ type: "text", text: "ok" }] },
+    { role: "user", content: [{ type: "text", text: "two" }] },
+    {
+      role: "assistant",
+      content: [{ type: "toolUse", id: "call_9", name: "wait", input: {} }],
+    },
+  ];
+  const built = build({ ...FOLLOW_UP, messages });
+  const items = inputOf(built);
+  const output = items.find((item) => item.type === "function_call_output");
+  expect(output?.call_id).toBe("call_9");
+  expect(passthroughOf(output).turn_id).toBe(metadataOf(built).turn_id);
+  expect(passthroughOf(output).turn_id).not.toBe(passthroughOf(items[2]).turn_id);
+});
+
+const instantOf = (uuid: string): number =>
+  Number.parseInt(uuid.replace(/-/g, "").slice(0, 12), 16);
+
+test("a v7 thread claiming the future lends no instant", () => {
+  // 2100-01-01: a client's v7 from the future is not a real thread start, so
+  // the ids minted after it take a derived past instant instead.
+  const future = `${Date.UTC(2100, 0, 1)
+    .toString(16)
+    .padStart(12, "0")
+    .replace(/^(.{8})(.{4})$/, "$1-$2")}-7abc-8def-0123456789ab`;
+  const built = build({ ...FOLLOW_UP, vendor: { openai: { prompt_cache_key: future } } });
+  expect(bodyOf(built).prompt_cache_key).toBe(future);
+  expect(instantOf(metadataOf(built).context_window_id as string)).toBeLessThanOrEqual(STARTED_AT);
+});
+
+test("only a strict UUID passes through as the thread id", () => {
+  for (const near of [
+    "zzzzzzzz-3401-73a0-96db-901f105e1409",
+    "01a143df-3401-73a0-96db-901f105e140",
+    "01a143df340173a096db901f105e1409",
+  ]) {
+    const key = bodyOf(
+      build({ ...FOLLOW_UP, vendor: { openai: { prompt_cache_key: near } } }),
+    ).prompt_cache_key;
+    expect([near, key === near]).toEqual([near, false]);
+  }
+});
+
+test("an empty tool list sends no additional_tools item", () => {
+  const input = inputOf(build({ ...FOLLOW_UP, tools: [] }));
+  expect(input.some((item) => item.type === "additional_tools")).toBe(false);
+  expect(input[0]).toMatchObject({ type: "message", role: "developer" });
+});
+
+test("create_time is the start plus one microsecond per history item", () => {
+  const input = inputOf(build(FOLLOW_UP)).slice(2);
+  const created = (i: number) => passthroughOf(input[i]).create_time;
+  expect(created(0)).toBe(STARTED_AT / 1000);
+  // The output is the fifth history item.
+  expect(input[4]?.type).toBe("function_call_output");
+  expect(created(4)).toBe((STARTED_AT * 1000 + 4) / 1_000_000);
+});
+
+test("turn n's id is minted n milliseconds after the thread's instant", () => {
+  const next: Message[] = [
+    ...FOLLOW_UP.messages,
+    { role: "assistant", content: [{ type: "text", text: "hi" }] },
+    { role: "user", content: [{ type: "text", text: "again" }] },
+  ];
+  const built = build({ ...FOLLOW_UP, messages: next });
+  const turns = turnsOf(built);
+  expect(instantOf(turns[0] ?? "")).toBe(instantOf(THREAD));
+  expect(instantOf(turns.at(-1) ?? "")).toBe(instantOf(THREAD) + 1);
+});
+
+test("without a start instant the build reads no clock", () => {
+  // Outside dispatch there is no start instant; the thread's own instant
+  // stands in rather than `Date.now()`, so the build stays a function of its
+  // input. Two clocks either side of the thread's instant must not matter.
+  const clock = spyOn(Date, "now");
+  try {
+    clock.mockReturnValue(1_000_000_000_000);
+    const before = build(FOLLOW_UP, { requestStartedAt: undefined });
+    clock.mockReturnValue(4_000_000_000_000);
+    const after = build(FOLLOW_UP, { requestStartedAt: undefined });
+    expect(after.request).toEqual(before.request);
+    expect(metadataOf(before).turn_started_at_unix_ms).toBe(instantOf(THREAD));
+  } finally {
+    clock.mockRestore();
+  }
 });
