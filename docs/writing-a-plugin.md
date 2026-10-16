@@ -476,9 +476,17 @@ needs rather than reading a clock, so a failover or retry rebuilds the same byte
 A request may set `bodyEncoding: "zstd"` beside `body`. `body` stays the JSON
 string — it is what body capture records — and the host's transport compresses it
 and writes `content-length` in compressed bytes. Put exactly one
-`content-encoding: zstd` header in your own header list. Any other `bodyEncoding`
-value, a marker without that header, a `content-encoding` header without the
-marker, or a `content-length` of your own is refused as an unusable request.
+`content-encoding: zstd` header in your own header list, and no `content-length`
+of your own. Any other `bodyEncoding` value is refused as an unusable request.
+
+Without the marker, framing headers are optional and checked: a `content-length`
+you set (in any casing, once) must equal the body's UTF-8 byte length, and the
+transport then writes no second one; `content-encoding: identity` (once) is
+accepted. A mismatched length, either header twice, or any other
+`content-encoding` is refused, since the body would go out as plain bytes under
+a header claiming otherwise. These rules accept everything a codec built before
+the marker existed could correctly send, which is why the plugin-API generation
+did not change.
 
 ### 6.1 Authorizing it
 
@@ -533,7 +541,8 @@ On a **reconnect** of an existing credential, `exchange` also receives
 `input.providerData`: what that credential has stored. The `providerData` you
 return replaces the stored row whole, so carry forward anything you minted at
 first connect and want to keep — a device identity, a per-credential secret.
-It is absent on a first connect.
+It is absent on a first connect, and absent when the stored row belongs to a
+different provider: one provider's stored state is never handed to another's flow.
 
 **Each step is a generator that describes requests rather than making them**, the
 same inversion the codec uses. You are not handed an HTTP client, so an honest

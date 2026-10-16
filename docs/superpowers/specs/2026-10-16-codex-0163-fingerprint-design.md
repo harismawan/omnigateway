@@ -334,7 +334,9 @@ What the builder decided for each point above, and for the gaps found while buil
   result, so reconnecting re-minted both values. The exchange now receives the reconnected
   credential's stored `providerData` as an optional field control does not interpret
   (`OAuthProvider.exchange`, `PluginFlowBase.exchange`), and the OpenAI flow keeps valid values
-  from it. Remaining cost: none for ids; a reconnect that logs in to a different ChatGPT account
+  from it. It is passed only when the stored row's provider is the flow's provider (`start`
+  checks this, but the row is re-read at finish), so one provider's state never reaches another's
+  flow. Remaining cost: none for ids; a reconnect that logs in to a different ChatGPT account
   keeps the old installation id and salt, which reads as one machine switching accounts. The
   refresher's merge order (refreshed value over stored) is what lets a refresh repair a malformed
   stored value; it is pinned in `refresh.test.ts`.
@@ -362,12 +364,20 @@ What the builder decided for each point above, and for the gaps found while buil
   value outside it — free text bound for a header — reports the catalog default instead, while the
   body still carries what the client sent. `asciiJson` escapes everything outside printable ASCII
   per UTF-16 unit; both pinned.
-- **Framing** (review fix). `codecAdapter` refuses a codec that sets its own `content-length`, a
-  zstd marker without exactly one `content-encoding: zstd`, or a `content-encoding` with no marker.
-  This tightens the plugin codec contract: a plugin codec that set its own `Content-Length` or a
-  `content-encoding: identity` is now refused. The repository keeps no changelog — GitHub releases
-  are cut with `gh release create --generate-notes` from PR titles — so the plugin-facing note
-  lives in `docs/writing-a-plugin.md` §6 and belongs in the PR description.
+- **Framing** (review fix, then made non-breaking; operator-approved). `codecAdapter` checks a
+  codec's framing headers against its `bodyEncoding`. Marked `zstd`: exactly one
+  `content-encoding: zstd` and no codec `content-length` (the transport counts compressed bytes).
+  Unmarked: a codec `content-length` is accepted once, in any casing, when it equals the body's
+  UTF-8 byte length — the transport then writes no second one — and `content-encoding: identity`
+  once is accepted; a mismatched length, either header twice, or any other `content-encoding` is
+  refused. A first version refused every codec `content-length` and `identity`, which would have
+  broken a plugin codec that correctly set either. **No plugin-API generation bump**
+  (`PLUGIN_API_VERSION` stays 3): everything a codec written before the marker could correctly
+  send is still accepted; what is refused — a wrong length, a duplicate, a real encoding the
+  transport never applied — already produced a request the upstream would misread. The
+  repository keeps no changelog (releases use `gh release create --generate-notes` from PR
+  titles), so the plugin-facing note lives in `docs/writing-a-plugin.md` §6 and the PR
+  description.
 - **`tool_choice`** (builder's call): a client's tool choice is encoded as today; absent, the OAuth
   leg sends Codex's `"auto"`. Overriding a client's forced choice would change behaviour the
   design did not ask to change.
