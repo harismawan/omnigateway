@@ -1,6 +1,6 @@
 # Codex 0.163.0 fingerprint for the OpenAI OAuth leg
 
-Status: draft, 2026-10-16.
+Status: implemented, 2026-10-16. Builder's calls recorded under "Left to the builder".
 
 ## Intent
 
@@ -218,9 +218,15 @@ server-assigned or uuid7 at creation.
 - **Per-model values come from Codex's bundled catalog** (`codex-rs/models-manager/models.json` at
   the release tag): `use_responses_lite`, `default_verbosity`, default reasoning level, lowest
   supported level. Copied into the openai provider's own model data (`openai/models.ts` or beside
-  it), with the release they were read from noted. Current GPT models all read lite / `low` / `low` /
-  `low`. A model id not in that data uses the lite shape and the same defaults: every GPT model in
-  the catalog is lite, and a non-lite 0.163 request was never captured. My call.
+  it), with the release they were read from noted. Current GPT models all read lite / `low`
+  verbosity / `low` lowest level. **Correction found while building:** the *default* reasoning
+  level is not `low` for all of them — `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-terra` and
+  `gpt-5.6-luna` default to `medium` in the 0.163.0 catalog, and that is what is copied. The two
+  `node_repl_*` flags the turn metadata repeats are per-model too (`node_repl_auto_review_required`
+  is `true` for `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol` only) and are copied beside them. A
+  model id not in that data uses the lite shape and `low`/`low`/`low` with both flags `false`:
+  every GPT model in the catalog is lite, and a non-lite 0.163 request was never captured. My
+  call; the flag defaults are the builder's call. Data: `openai/codexCatalog.ts`.
 - **Absent fields.** `service_tier`, `stream_options`, `access_programs` did not appear in any
   capture. They stay in the key order so a client bag value lands in Codex's position; the gateway
   never adds them.
@@ -254,6 +260,92 @@ server-assigned or uuid7 at creation.
   this design was made on: `capture.ts`, `mkauth.ts`, `tui.py`, `show.ts`) and may be lifted as a
   starting point; it needs a throwaway CA (`openssl`, `CODEX_CA_CERTIFICATE`) because Codex refuses
   a non-HTTPS workspace backend origin, and an `accounts/check` answer naming that origin.
+
+### Builder's calls
+
+What the builder decided for each point above, and for the gaps found while building. Code in
+`packages/providers/src/openai/` (`codexIdentity.ts`, `codexLite.ts`, `codexCatalog.ts`, `wire.ts`,
+`codec.ts`, `profile.ts`); pins in `openaiCodexFingerprint.test.ts` against the sanitized fixture
+`test/fixtures/codex-0.163.0.json`.
+
+- **Thread id** (builder's call). `threadIdFrom(seed)`: a UUIDv7 whose random bits are
+  `sha256(seed)` and whose 48-bit instant is drawn from the same digest into a fixed one-year
+  window ending 2026-10-01 — entirely past, so never a future time whatever day it is sent, and
+  stable per conversation. The seed is today's `cacheKey` input unchanged (conversation JSON or
+  instructions + opening item); a supplied non-UUID key is hashed as `{"key": …}`. A supplied
+  UUID — a Codex client's own thread — passes through verbatim. Header-safety and length checks on
+  supplied keys are unchanged. The API-key leg uses the same key.
+- **Prefix ids** (builder's call): Codex's derivation exactly — namespace `UUIDv5(NAMESPACE_OID,
+  thread id)`, `at_` = `UUIDv5(ns, JSON of the namespace array)`, base-instructions `msg_` =
+  `UUIDv5(ns, text)`. Verified bit-exact against both prefix ids of the real TUI capture (serde's
+  key order is the declaration order the literal repeats). The test pins vectors computed with
+  Python's `uuid.uuid5`, not with the repository's helper.
+- **`context_window_id`, turn ids, history ids** (builder's call). `context_window_id` is a
+  UUIDv7 seeded by the thread at the thread's instant. Turn `n`'s id is a UUIDv7 seeded by
+  `thread:turn:n` at the thread's instant + `n` ms, so a past turn keeps its id and a tool-loop
+  follow-up shares its turn's. The thread's instant is its own v7 timestamp when it is a v7 not
+  after the request's start (a Codex client's real thread), else derived into the past window.
+  History ids (`msg_`/`fc_`/`fco_`) are UUIDv7s at the request's start, seeded by `requestId` and
+  the item index (thread id when there is no request id). `create_time` is the request's start in
+  fractional seconds plus one microsecond per item index, so it reads monotonic as Codex's does.
+  Without `requestStartedAt` (outside dispatch) the thread's instant stands in, keeping the build
+  pure.
+- **Turn boundary inside a message** (builder's call): a user message opens its turn at its first
+  block that is not a tool result, so a tool result answering the previous turn's call stays in
+  that turn even when new user text follows it in the same IR message.
+- **Passthrough on replayed reasoning** (builder's call). Codex stamps `{turn_id}` on reasoning
+  items (capture), so a replayed openai `reasoning` block gets it too; its id is still stripped
+  (the rule above). Other `providerNative` item types are replayed untouched: not every Responses
+  item type carries the passthrough field, and none was captured.
+- **`content_item_kinds`** (builder's call): one per content part, as Codex's
+  "aligned with the item's content entries" says — `user.text`/`user.image` for user and
+  developer messages, `unknown` for assistant parts. A message holding a part Codex has no kind for
+  (`input_file`, moved there from a tool result) is sent without the list rather than with a
+  guessed kind, since the backend types the field.
+- **Lite and instructions.** Codex 0.163 sends base instructions inside `input` for every model,
+  lite or not (`instructions` left the request struct), so the OAuth leg never sends the body
+  field; only the tools' location, `parallel_tool_calls: false` and `reasoning.context` follow
+  `use_responses_lite`. Every listed model is lite, so this is unobservable today.
+- **`sandbox`** (builder's call): `windows_elevated` for a Windows profile. `sandbox_tags.rs` maps
+  `WindowsSandboxSelection::Elevated` to that label (a fourth value beside the three named
+  above); the TUI's first-run setup recommends the elevated sandbox and managed requirements
+  prefer it, and `none` would describe a user who declined. Derived from
+  `OMNI_OPENAI_UA_PLATFORM`, so a macOS UA sends `seatbelt` and anything else `seccomp`, never a
+  Windows label beside a non-Windows UA.
+- **`reasoning_effort`**: `body.reasoning.effort` after the client's bag merged, else the catalog
+  default.
+- **Reasoning, two details** (builder's call). `adaptive` with no effort named sends the catalog
+  default (not today's `medium`), with `summary: "auto"` under the existing display rule. `off`
+  maps to the lowest level as decided and records a new degradation,
+  `openai:reasoning-off-as-lowest`, because the client asked for no reasoning and got some.
+- **`tool_choice`** (builder's call): a client's tool choice is encoded as today; absent, the OAuth
+  leg sends Codex's `"auto"`. Overriding a client's forced choice would change behaviour the
+  design did not ask to change.
+- **Routing hint** (builder's call): `model=<model>`, plus `;tier=<service_tier>` when the merged
+  body carries one, as Codex's `build_routing_hint_header` writes it. A value outside printable
+  ASCII is left out rather than failing the header write.
+- **Authorize URL `originator`**: `codex-tui`. The TUI's login runs in its in-process app-server
+  after `initialize` has set the process originator to the client name (`initialize_processor.rs`
+  → `set_default_originator`), and `build_authorize_url` reads `originator()`. It reads the
+  profile's `OPENAI_ORIGINATOR`, so `OMNI_OPENAI_ORIGINATOR` moves it with the headers. The token
+  and usage requests wear the shared profile and so moved with it (new values, `originator`
+  after the protocol headers).
+- **zstd** (builder's call): `Bun.zstdCompressSync` at level 3, Codex's level
+  (`codex-rs/http-client/src/request.rs`, `encode_all(…, 3)`). Not `node:zlib`: the package root
+  is bundled for the browser by the leaf-subpath probe, where `node:zlib` has no zstd, and the
+  package already uses the `Bun` global. The marker is `bodyEncoding: "zstd"` on
+  `CodecHttpRequest`/`HttpRequest`; `codecAdapter` refuses any other value as an unusable request;
+  the codec places `content-encoding` itself.
+- **`host` header**: the OAuth leg sets `host: chatgpt.com` so it lands in hyper's position.
+  **Known gap:** the shared transport writes `Content-Length` in that casing for every provider,
+  where hyper writes `content-length`. HTTP header names are case-insensitive; changing the casing
+  would change every other provider's wire, so it is left.
+- **Body order** (builder's call): one `openaiBodyOrder` for both legs, Codex 0.163's declaration
+  order with `instructions` kept after `input` and `metadata` last for the API-key leg. The
+  API-key leg's key order therefore moves where it has `tools`/`reasoning`; its keys and values
+  do not.
+- **Harness**: lifted into `scripts/codex-capture/` with paths taken from arguments and
+  environment, and the CA steps in its README.
 
 ## Testing
 

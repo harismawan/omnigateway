@@ -469,6 +469,16 @@ given attempt may see a larger one). Use it only as the default for
 a wire that requires an output limit the client omitted; the client's own figure
 always wins, since limits are advertised, not enforced.
 
+`requestStartedAt`, when present, is the instant the gateway accepted the request
+(epoch ms), the same on every attempt of it. Use it for any timestamp your wire
+needs rather than reading a clock, so a failover or retry rebuilds the same bytes.
+
+A request may set `bodyEncoding: "zstd"` beside `body`. `body` stays the JSON
+string — it is what body capture records — and the host's transport compresses it
+and writes `content-length` in compressed bytes. Put the `content-encoding: zstd`
+header in your own header list; any other `bodyEncoding` value is refused as an
+unusable request.
+
 ### 6.1 Authorizing it
 
 An API key is a complete way in and needs nothing more. If your provider uses

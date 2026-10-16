@@ -438,7 +438,11 @@ Translation invariants:
   `conversationId` → fallback before vendor `Object.assign`. `openai/codec.ts` sends the same value
   as `session-id`, `thread-id`, `x-client-request-id` headers on both legs; keep those names in
   `openaiProfile.order`. Only `session-id` routes the Codex cache (measured); never drop it. Keep `store: false` for Codex. Inspect client key sets, not one member.
-  History: responses-ingress spec.
+  History: responses-ingress spec. The key is a UUIDv7 thread id (a supplied UUID passes through).
+  The OAuth leg wears Codex 0.163.0's TUI fingerprint, which moves only with a capture
+  (`scripts/codex-capture/README.md`); `nativeReasoning` reads the **client's** `include`, never
+  the body's, which always carries Codex's. Pin: `openaiCodexFingerprint.test.ts`; design:
+  [Codex 0.163 fingerprint](docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md).
 - OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /
   `experimental_attachments` as well as `content`. Payload's own container header beat any
   declared type; remote URL never fetched. `images` is Ollama's images-only field, so
