@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { CounterSnapshot } from "../src/index.ts";
-import { evaluate, retryAfterMs } from "../src/index.ts";
+import { combine, evaluate, lastToClear, retryAfterMs } from "../src/index.ts";
 
 const NOW = 1_000_000;
 
@@ -192,4 +192,122 @@ test("retryAfterMs never goes negative on a reset already in the past", () => {
     retryAfterMs({ dimension: "requests", window: "1m", limit: 1, used: 1, resetAt: 5 }, 10),
   ).toBe(0);
   expect(retryAfterMs(null, 10)).toBe(0);
+});
+
+/**
+ * `combine` joins the key-wide decision and a model override's.
+ *
+ * Built from `evaluate` rather than written by hand, so the shapes the tests
+ * feed it are the shapes the limiter feeds it.
+ */
+const keyWide = (used: number, resetAt: number) =>
+  evaluate({ requests: { "1m": 10 } }, { requests: { "1m": { used, resetAt } } }, NOW);
+const modelScope = (used: number, resetAt: number) =>
+  evaluate({ requests: { "5h": 4 } }, { requests: { "5h": { used, resetAt } } }, NOW);
+
+test("combine allows only what both scopes allow", () => {
+  expect(combine(keyWide(1, NOW + 1), modelScope(1, NOW + 2)).allowed).toBe(true);
+
+  const keyOnly = combine(keyWide(10, NOW + 30_000), modelScope(1, NOW + 2));
+  expect(keyOnly.allowed).toBe(false);
+  expect(keyOnly.violation).toEqual({
+    dimension: "requests",
+    window: "1m",
+    limit: 10,
+    used: 10,
+    resetAt: NOW + 30_000,
+  });
+
+  const modelOnly = combine(keyWide(1, NOW + 1), modelScope(4, NOW + 90_000));
+  expect(modelOnly.allowed).toBe(false);
+  expect(modelOnly.violation?.window).toBe("5h");
+  expect(modelOnly.violation?.resetAt).toBe(NOW + 90_000);
+});
+
+test("combine reports the violation clearing last, whichever scope holds it", () => {
+  // Asserted in both arrangements, so neither "key wins" nor "model wins" passes.
+  const modelLater = combine(keyWide(10, NOW + 30_000), modelScope(4, NOW + 90_000));
+  expect(modelLater.violation?.window).toBe("5h");
+  const keyLater = combine(keyWide(10, NOW + 95_000), modelScope(4, NOW + 90_000));
+  expect(keyLater.violation?.window).toBe("1m");
+  expect(retryAfterMs(keyLater.violation, NOW)).toBe(95_000);
+});
+
+test("combine reports, per dimension, the headroom nearer exhaustion", () => {
+  // Key-wide 6/10 against the model's 1/4: the key is nearer.
+  const keyNearer = combine(keyWide(6, NOW + 1), modelScope(1, NOW + 2));
+  expect(keyNearer.headroom.requests).toEqual({
+    window: "1m",
+    limit: 10,
+    used: 6,
+    remaining: 4,
+    resetAt: NOW + 1,
+  });
+  // Key-wide 6/10 against the model's 3/4: the model is.
+  const modelNearer = combine(keyWide(6, NOW + 1), modelScope(3, NOW + 2));
+  expect(modelNearer.headroom.requests).toEqual({
+    window: "5h",
+    limit: 4,
+    used: 3,
+    remaining: 1,
+    resetAt: NOW + 2,
+  });
+});
+
+test("combine keeps a dimension only one scope configures", () => {
+  const key = evaluate(
+    { tokens: { "1m": 100 } },
+    { tokens: { "1m": { used: 5, resetAt: 7 } } },
+    NOW,
+  );
+  const model = evaluate({ spend: { "1w": 4 } }, { spend: { "1w": { used: 1, resetAt: 9 } } }, NOW);
+  const combined = combine(key, model);
+  expect(combined.headroom.tokens?.limit).toBe(100);
+  expect(combined.headroom.spend?.limit).toBe(4);
+  expect(combined.headroom.requests).toBeUndefined();
+  // Either side alone, in either position.
+  expect(combine(model, key).headroom).toEqual(combined.headroom);
+});
+
+test("combine keeps the key-wide headroom when both scopes are equally near", () => {
+  // 5/10 against 2/4: the same proportion. Either position must give the same
+  // answer about which entry wins, so the rule is "strictly nearer replaces".
+  const combined = combine(keyWide(5, NOW + 1), modelScope(2, NOW + 2));
+  expect(combined.headroom.requests?.window).toBe("1m");
+});
+
+test("a decision carries every violation, not only the one reported", () => {
+  const decision = evaluate(
+    { requests: { "1m": 1, "1w": 1 }, concurrency: 1 },
+    {
+      requests: { "1m": { used: 1, resetAt: NOW + 1 }, "1w": { used: 1, resetAt: NOW + 2 } },
+      concurrency: 1,
+    },
+    NOW,
+  );
+  expect(decision.violations.map((v) => `${v.dimension}:${v.window}`).sort()).toEqual(
+    ["concurrency:null", "requests:1m", "requests:1w"].sort(),
+  );
+  expect(decision.violation?.window).toBe("1w");
+  expect(evaluate({ requests: { "1m": 5 } }, {}, NOW).violations).toEqual([]);
+});
+
+test("combine carries both scopes' violations", () => {
+  const combined = combine(keyWide(10, NOW + 30_000), modelScope(4, NOW + 90_000));
+  expect(combined.violations.map((v) => v.window).sort()).toEqual(["1m", "5h"]);
+  expect(combine(keyWide(1, NOW), modelScope(4, NOW + 90_000)).violations).toHaveLength(1);
+  expect(combine(keyWide(10, NOW), modelScope(1, NOW)).violations).toHaveLength(1);
+});
+
+test("lastToClear picks the latest reset, then the larger overshoot", () => {
+  const at = (resetAt: number, used: number) => ({
+    dimension: "requests" as const,
+    window: "1m" as const,
+    limit: 10,
+    used,
+    resetAt,
+  });
+  expect(lastToClear([at(5, 10), at(9, 10), at(7, 10)])?.resetAt).toBe(9);
+  expect(lastToClear([at(9, 10), at(9, 30)])?.used).toBe(30);
+  expect(lastToClear([])).toBeNull();
 });

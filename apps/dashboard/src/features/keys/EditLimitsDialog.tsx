@@ -1,13 +1,20 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import styled from "styled-components";
-import { useSetKeyLimits } from "../../api/queries.ts";
-import type { ApiKeySummary } from "../../api/types.ts";
+import { useModels, useSetKeyLimits } from "../../api/queries.ts";
+import type { ApiKeySummary, LimitConfig } from "../../api/types.ts";
 import { Button } from "../../ui/Button.tsx";
+import { Field, Input } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
-import { Stack } from "../../ui/primitives.ts";
+import { Legend, Row, Stack } from "../../ui/primitives.ts";
 import { describeError } from "../../ui/States.tsx";
 import { LimitFields } from "./LimitFields.tsx";
-import { draftFrom, draftToLimits } from "./limits.ts";
+import {
+  draftFrom,
+  draftToLimits,
+  type OverrideDraft,
+  overridesFrom,
+  overridesToModels,
+} from "./limits.ts";
 
 const Problem = styled.p`
   font-size: 12px;
@@ -17,6 +24,23 @@ const Problem = styled.p`
 const Broken = styled.p`
   font-size: 12px;
   color: ${({ theme }) => theme.color.warn};
+`;
+
+const SectionTitle = styled.h3`
+  font-size: 12px;
+  font-weight: 600;
+  color: ${({ theme }) => theme.color.ink};
+`;
+
+/** One override's block, ruled off from the next so its fields read as one. */
+const Override = styled(Stack)`
+  padding-top: ${({ theme }) => theme.space(2)};
+  border-top: 1px solid ${({ theme }) => theme.color.rule};
+`;
+
+const Hint = styled.p`
+  font-size: 11px;
+  color: ${({ theme }) => theme.color.inkDim};
 `;
 
 export type EditLimitsDialogProps = {
@@ -39,8 +63,20 @@ export type EditLimitsDialogProps = {
  */
 export function EditLimitsDialog({ apiKey, onOpenChange }: EditLimitsDialogProps) {
   const save = useSetKeyLimits();
+  const models = useModels();
   const [draft, setDraft] = useState(() => draftFrom(apiKey?.limits ?? {}));
+  // Kept beside the key-wide draft rather than inside it, and always sent back:
+  // an edit to the key-wide fields that dropped the overrides would remove
+  // every per-model ceiling without the operator touching one.
+  const [overrides, setOverrides] = useState(() => overridesFrom(apiKey?.limits ?? {}));
+  const [added, setAdded] = useState(0);
   const [problem, setProblem] = useState<string | null>(null);
+  const suggestions = useId();
+  const configured = (models.data ?? []).map((entry) => entry.id);
+
+  const update = (id: string, patch: Partial<OverrideDraft>) => {
+    setOverrides((rows) => rows.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+  };
 
   const submit = () => {
     if (apiKey === null) return;
@@ -49,9 +85,19 @@ export function EditLimitsDialog({ apiKey, onOpenChange }: EditLimitsDialogProps
       setProblem(result.problem);
       return;
     }
+    const perModel = overridesToModels(overrides);
+    if ("problem" in perModel) {
+      setProblem(perModel.problem);
+      return;
+    }
+    // `models` only when there is one: no overrides has one spelling, absent.
+    const limits: LimitConfig =
+      Object.keys(perModel.models).length === 0
+        ? result.limits
+        : { ...result.limits, models: perModel.models };
     setProblem(null);
     save.mutate(
-      { id: apiKey.id, limits: result.limits },
+      { id: apiKey.id, limits },
       {
         onSuccess: () => onOpenChange(false),
         onError: (error) => setProblem(describeError(error)),
@@ -94,6 +140,86 @@ export function EditLimitsDialog({ apiKey, onOpenChange }: EditLimitsDialogProps
         ) : null}
 
         <LimitFields draft={draft} onChange={setDraft} disabled={save.isPending} />
+
+        <Stack $gap={2}>
+          <SectionTitle>Per-model overrides</SectionTitle>
+          <Legend>
+            A stricter ceiling for one model, matched exactly against the model a request names. It
+            stacks with the limits above: a request for that model must pass both.
+          </Legend>
+          {overrides.map((row) => {
+            const model = row.model;
+            const name = model.trim().length === 0 ? "a new model" : model;
+            // A hint, not an error: an override the key cannot reach is
+            // harmless, and refusing it would make unrelated edits unsavable
+            // the day a model is renamed.
+            const unreachable =
+              model.trim().length > 0 &&
+              apiKey?.modelAllowlist !== null &&
+              apiKey?.modelAllowlist !== undefined &&
+              !apiKey.modelAllowlist.includes(model);
+            return (
+              <Override key={row.id} $gap={2} role="group" aria-label={`Override for ${name}`}>
+                <Row $gap={2} $align="flex-end">
+                  <Field label="Model">
+                    {(props) => (
+                      <Input
+                        {...props}
+                        list={suggestions}
+                        disabled={save.isPending}
+                        value={row.model}
+                        placeholder="model name"
+                        onChange={(event) => update(row.id, { model: event.target.value })}
+                      />
+                    )}
+                  </Field>
+                  <Button
+                    type="button"
+                    $variant="ghost"
+                    disabled={save.isPending}
+                    aria-label={`Remove override for ${name}`}
+                    onClick={() => setOverrides((rows) => rows.filter((r) => r.id !== row.id))}
+                  >
+                    Remove
+                  </Button>
+                </Row>
+                {unreachable ? (
+                  <Hint>
+                    {model} is not in this key's allowed models, so this override applies to no
+                    request until it is.
+                  </Hint>
+                ) : null}
+                <LimitFields
+                  draft={row.slots}
+                  onChange={(slots) => update(row.id, { slots })}
+                  disabled={save.isPending}
+                />
+              </Override>
+            );
+          })}
+          <div>
+            <Button
+              type="button"
+              disabled={save.isPending}
+              onClick={() => {
+                setOverrides((rows) => [
+                  ...rows,
+                  { id: `added-${added}`, model: "", stored: null, slots: draftFrom({}) },
+                ]);
+                setAdded((count) => count + 1);
+              }}
+            >
+              Add model override
+            </Button>
+          </div>
+          {/* Free text, with what the installation serves offered as you type:
+              an override may name a model before it is configured. */}
+          <datalist id={suggestions}>
+            {configured.map((id) => (
+              <option key={id} value={id} />
+            ))}
+          </datalist>
+        </Stack>
 
         {problem === null ? null : <Problem role="alert">{problem}</Problem>}
       </Stack>

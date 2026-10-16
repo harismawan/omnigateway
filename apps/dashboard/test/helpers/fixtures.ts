@@ -12,6 +12,7 @@ import type {
   DryRunResult,
   LifecycleCapability,
   LimitConfig,
+  LimitConfigBase,
   LimitReading,
   QuotaSample,
   QuotaWindow,
@@ -182,9 +183,20 @@ export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
   };
 }
 
-/** One idle reading per configured ceiling, in the order the route emits them. */
+/**
+ * One idle reading per configured ceiling, in the order the route emits them:
+ * key-wide first, then each model override's.
+ */
 function readingsFor(limits: LimitConfig | null): LimitReading[] {
   if (limits === null) return [];
+  const readings = scopeReadings(limits, null);
+  for (const [model, override] of Object.entries(limits.models ?? {})) {
+    readings.push(...scopeReadings(override, model));
+  }
+  return readings;
+}
+
+function scopeReadings(limits: LimitConfigBase, model: string | null): LimitReading[] {
   const readings: LimitReading[] = [];
   for (const dimension of ["requests", "tokens", "spend"] as const) {
     const windows = limits[dimension];
@@ -192,7 +204,7 @@ function readingsFor(limits: LimitConfig | null): LimitReading[] {
     for (const window of ["1m", "5h", "1w"] as const) {
       const limit: number | null | undefined = windows[window as keyof typeof windows];
       if (limit === undefined || limit === null) continue;
-      readings.push({ dimension, window, limit, used: 0 });
+      readings.push({ dimension, window, limit, used: 0, model });
     }
   }
   if (limits.concurrency !== undefined && limits.concurrency !== null) {
@@ -201,6 +213,7 @@ function readingsFor(limits: LimitConfig | null): LimitReading[] {
       window: null,
       limit: limits.concurrency,
       used: null,
+      model,
     });
   }
   return readings;

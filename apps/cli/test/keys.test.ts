@@ -184,6 +184,7 @@ type LimitsOutput = {
     window: string | null;
     limit: number;
     used: number | null;
+    model: string | null;
   }>;
 };
 
@@ -239,9 +240,9 @@ test("keys limits shows the configured matrix and what has gone against it", asy
     (await cli(["keys", "limits", id, "--json"], { root })).out,
   ) as LimitsOutput;
   expect(json.limitUsage).toEqual([
-    { dimension: "requests", window: "1w", limit: 100, used: 2 },
-    { dimension: "spend", window: "1w", limit: 25, used: 3.75 },
-    { dimension: "concurrency", window: null, limit: 8, used: null },
+    { dimension: "requests", window: "1w", limit: 100, used: 2, model: null },
+    { dimension: "spend", window: "1w", limit: 25, used: 3.75, model: null },
+    { dimension: "concurrency", window: null, limit: 8, used: null, model: null },
   ]);
 });
 
@@ -639,4 +640,232 @@ test("the listed state follows keyUsable exactly, boundary included", () => {
   // Revoked wins over both, and is the answer `keyUsable` cannot give.
   expect(keyState({ revokedAt: 1, expiresAt: now + 1 }, now)).toBe("revoked");
   expect(keyState({ revokedAt: 1, expiresAt: now }, now)).toBe("revoked");
+});
+
+/**
+ * Anchored on the right, so a model name may carry the separator: the last
+ * segment is the window (or the bare gauge), the one before it the dimension,
+ * and everything before that is the model.
+ */
+test("--model-limit parses from the right, so model names keep their colons", async () => {
+  const root = makeRoot();
+  const created = await cli(
+    [
+      "keys",
+      "create",
+      "--label",
+      "ci",
+      "--limit",
+      "requests:1m=600",
+      "--model-limit",
+      "llama3:8b:tokens:1w=2000000",
+      "--model-limit",
+      "openai/gpt-4o:requests:1m=20",
+      "--model-limit",
+      "claude-opus-4@20250514:concurrency=2",
+      "--model-limit",
+      "claude-opus-4@20250514:spend:5h=5",
+      "--json",
+    ],
+    { root },
+  );
+  expect(created.code).toBe(0);
+  expect(await limitsOf(root, "ci")).toEqual({
+    requests: { "1m": 600 },
+    models: {
+      "llama3:8b": { tokens: { "1w": 2_000_000 } },
+      "openai/gpt-4o": { requests: { "1m": 20 } },
+      "claude-opus-4@20250514": { concurrency: 2, spend: { "5h": 5 } },
+    },
+  });
+});
+
+test("a malformed --model-limit names the flag", async () => {
+  const root = makeRoot();
+  for (const bad of [
+    "opus",
+    "opus:requests:1m",
+    "opus:requests:1m=",
+    "opus:requests:1m=lots",
+    "opus:requests=5",
+    "requests:1m=5",
+    ":requests:1m=5",
+    "opus::1m=5",
+  ]) {
+    const result = await cli(["keys", "create", "--label", "bad", "--model-limit", bad], { root });
+    expect({ bad, code: result.code === 0 }).toEqual({ bad, code: false });
+    expect(result.err).toContain("--model-limit");
+  }
+  // An empty or unknown slot is the schema's to refuse, and it does.
+  for (const bad of ["opus:bandwidth:1m=5", "opus:requests:2m=5", "opus:requests:1m=0"]) {
+    const result = await cli(["keys", "create", "--label", "bad", "--model-limit", bad], { root });
+    expect({ bad, code: result.code === 0 }).toEqual({ bad, code: false });
+  }
+  const listed = await cli(["keys", "list", "--json"], { root });
+  expect((JSON.parse(listed.out) as { keys: ListedKey[] }).keys).toHaveLength(0);
+});
+
+test("__proto__ is refused as a model, a dimension, or a window of --model-limit", async () => {
+  const root = makeRoot();
+  for (const bad of [
+    "__proto__:requests:1m=5",
+    "__proto__:concurrency=1",
+    "opus:__proto__:1m=5",
+    "opus:requests:__proto__=5",
+  ]) {
+    const result = await cli(["keys", "create", "--label", "p", "--model-limit", bad], { root });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("__proto__");
+  }
+  await cli(["keys", "create", "--label", "ci", "--json"], { root });
+  const id = await idOf(root, "ci");
+  for (const bad of ["__proto__:concurrency", "opus:requests:__proto__"]) {
+    const result = await cli(["keys", "limits", id, "--unset-model-limit", bad], { root });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("__proto__");
+  }
+});
+
+test("--limit refuses `models`, which only --model-limit may write", async () => {
+  const root = makeRoot();
+  for (const bad of ["models=5", "models:opus=5"]) {
+    const result = await cli(["keys", "create", "--label", "x", "--limit", bad], { root });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("--model-limit");
+  }
+});
+
+test("an edit with --set keeps every model override, and --model-limit adds to one", async () => {
+  const root = makeRoot();
+  await cli(
+    [
+      "keys",
+      "create",
+      "--label",
+      "ci",
+      "--model-limit",
+      "opus:requests:1m=20",
+      "--model-limit",
+      "haiku:concurrency=4",
+      "--json",
+    ],
+    { root },
+  );
+  const id = await idOf(root, "ci");
+
+  expect((await cli(["keys", "limits", id, "--set", "requests:1m=600"], { root })).code).toBe(0);
+  expect(
+    (await cli(["keys", "limits", id, "--model-limit", "opus:spend:1w=5"], { root })).code,
+  ).toBe(0);
+  expect(await limitsOf(root, "ci")).toEqual({
+    requests: { "1m": 600 },
+    models: { opus: { requests: { "1m": 20 }, spend: { "1w": 5 } }, haiku: { concurrency: 4 } },
+  });
+});
+
+test("--unset-model-limit removes one slot, and the last slot takes the override with it", async () => {
+  const root = makeRoot();
+  await cli(
+    [
+      "keys",
+      "create",
+      "--label",
+      "ci",
+      "--limit",
+      "requests:1m=600",
+      "--model-limit",
+      "llama3:8b:requests:1m=20",
+      "--model-limit",
+      "llama3:8b:concurrency=2",
+      "--model-limit",
+      "haiku:concurrency=4",
+      "--json",
+    ],
+    { root },
+  );
+  const id = await idOf(root, "ci");
+
+  const one = await cli(["keys", "limits", id, "--unset-model-limit", "llama3:8b:concurrency"], {
+    root,
+  });
+  expect(one.code).toBe(0);
+  expect(await limitsOf(root, "ci")).toEqual({
+    requests: { "1m": 600 },
+    models: { "llama3:8b": { requests: { "1m": 20 } }, haiku: { concurrency: 4 } },
+  });
+
+  await cli(["keys", "limits", id, "--unset-model-limit", "llama3:8b:requests:1m"], { root });
+  expect(await limitsOf(root, "ci")).toEqual({
+    requests: { "1m": 600 },
+    models: { haiku: { concurrency: 4 } },
+  });
+
+  // The last override going leaves no `models` husk behind.
+  await cli(["keys", "limits", id, "--unset-model-limit", "haiku:concurrency"], { root });
+  expect(await limitsOf(root, "ci")).toEqual({ requests: { "1m": 600 } });
+
+  // A slot that is not there is a loud refusal, not a silent success.
+  for (const missing of ["haiku:concurrency", "opus:requests:1m", "haiku:requests"]) {
+    const result = await cli(["keys", "limits", id, "--unset-model-limit", missing], { root });
+    expect({ missing, ok: result.code === 0 }).toEqual({ missing, ok: false });
+  }
+});
+
+test("keys list and keys limits show model overrides in the flag's own syntax", async () => {
+  const root = makeRoot();
+  await cli(
+    [
+      "keys",
+      "create",
+      "--label",
+      "ci",
+      "--limit",
+      "requests:1m=600",
+      "--model-limit",
+      "llama3:8b:requests:1m=20",
+      "--json",
+    ],
+    { root },
+  );
+  const id = await idOf(root, "ci");
+  const listed = await cli(["keys", "list"], { root });
+  expect(listed.out).toContain("llama3:8b:requests:1m=20");
+
+  const shown = await cli(["keys", "limits", id], { root });
+  expect(shown.code).toBe(0);
+  expect(shown.out).toContain("llama3:8b");
+  const json = JSON.parse(
+    (await cli(["keys", "limits", id, "--json"], { root })).out,
+  ) as LimitsOutput;
+  expect(json.limitUsage.map((reading) => reading.model)).toEqual([null, "llama3:8b"]);
+});
+
+test("--model-limit keeps a model named for a prototype member, or carrying `=`", async () => {
+  const root = makeRoot();
+  const created = await cli(
+    [
+      "keys",
+      "create",
+      "--label",
+      "odd",
+      "--model-limit",
+      "constructor:requests:1m=5",
+      "--model-limit",
+      "toString:concurrency=1",
+      "--model-limit",
+      "tier=gold:tokens:1w=100",
+      "--json",
+    ],
+    { root },
+  );
+  expect(created.code).toBe(0);
+  expect(await limitsOf(root, "odd")).toEqual({
+    models: {
+      constructor: { requests: { "1m": 5 } },
+      toString: { concurrency: 1 },
+      "tier=gold": { tokens: { "1w": 100 } },
+    },
+  });
+  // Nothing leaked onto the prototype a plain object would have handed back.
+  expect(Object.hasOwn(Object, "requests")).toBe(false);
 });

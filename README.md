@@ -174,6 +174,18 @@ pair is unlimited. Windows slide, `tokens` and `spend` are debited on
 completion, and limits are editable afterwards with `omni keys limits`; the
 semantics are in [docs/operations.md](docs/operations.md#key-limits).
 
+One model can be held to a stricter ceiling than the rest of the key's traffic
+with `--model-limit <model>:<dimension>:<window>=<value>` (or
+`<model>:concurrency=<value>`) — `omni keys create --label ci --limit
+requests:1m=600 --model-limit opus:requests:1m=20`. The model is the one the
+request names, matched exactly; an override stacks with the key-wide limits, so
+a request for that model must pass both. `omni keys limits <id>
+--unset-model-limit opus:requests:1m` removes a slot, and the last slot takes
+the override with it. **Rolling back** to a build without per-model limits
+refuses every key that carries an override (the older build cannot parse the
+stored limits, so the key answers 500 until its overrides are removed); keys
+without one are unaffected.
+
 A key can also carry an expiry, which is optional and off by default — a key
 with none works until it is revoked, and no upgrade ever attaches one:
 

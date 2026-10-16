@@ -45,11 +45,39 @@ omni keys limits <id> --set tokens:1w=50000000
 omni keys limits <id> --unset spend:5h
 ```
 
+A key can also hold one model to a stricter ceiling. An override has the
+key-wide shape, keyed by the model a request names — exactly, after `[1m]`
+normalization, with no patterns — and stacks with the key-wide limits: a request
+for that model must pass both, and the one that will deny first names the
+headers and the `Retry-After`. A model without an override is held to the
+key-wide limits alone.
+
+```bash
+omni keys create --label ci --limit requests:1m=600 \
+  --model-limit opus:requests:1m=20 --model-limit opus:concurrency=2
+omni keys limits <id> --model-limit llama3:8b:tokens:1w=2000000
+omni keys limits <id> --unset-model-limit opus:concurrency
+```
+
+The flag is read from the right, so model names keep their own colons and
+slashes (`llama3:8b`, `openai/gpt-4o`). Removing an override's last slot removes
+the override; an empty one is refused. At most 64 overrides per key. An override
+on a model the key's allowlist excludes is accepted and does nothing — the
+console's limits dialog says so beside it. Because the model must be known
+before the limit can be judged, a key over its ceiling that sends a malformed
+body or a disallowed model is told that (400 or 401) rather than 429.
+
+Overrides live inside the same `api_keys.limits` column, so rolling back to a
+build without them fails closed: that build cannot parse a key that carries
+one, refuses it at `/v1`, and lists it as unreadable. Remove the overrides
+before rolling back, or expect those keys to stop working until you do.
+
 `--unset` names a pair that is actually set, so a typo fails rather than
 reporting a change it did not make. The usage shown counts completed requests
 only, so it reads at or below what the gateway is enforcing, and `concurrency`
-shows no figure — that gauge lives in the process, not the database. The
-console's Keys screen shows and edits the same matrix.
+shows no figure — that gauge lives in the process, not the database. An
+override's usage counts that model's requests on the key alone. The console's
+Keys screen shows and edits the same matrix, overrides included.
 
 The headers a client sees for these limits are in
 [client-api.md](client-api.md#rate-limit-headers).

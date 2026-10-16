@@ -1,4 +1,10 @@
-import type { Dimension, LimitConfig, LimitReading, Window } from "../../api/types.ts";
+import type {
+  Dimension,
+  LimitConfig,
+  LimitConfigBase,
+  LimitReading,
+  Window,
+} from "../../api/types.ts";
 
 /**
  * One editable cell of the matrix.
@@ -44,6 +50,34 @@ export const WINDOW_LABEL: Record<Window, string> = {
 export function describeSlot(slot: LimitSlot): string {
   const dimension = DIMENSION_LABEL[slot.dimension];
   return slot.window === null ? dimension : `${dimension} ${WINDOW_LABEL[slot.window]}`;
+}
+
+/**
+ * How one reading reads in a sentence, naming the model for an override:
+ * `Requests per minute for opus`. Without the model an override's ceiling
+ * would read as the whole key's.
+ */
+export function describeReading(reading: LimitReading): string {
+  const name = describeSlot({ dimension: reading.dimension, window: reading.window });
+  return reading.model === null ? name : `${name} for ${reading.model}`;
+}
+
+/** One scope's readings: the key-wide ones (`model: null`) or one model's. */
+export type ReadingGroup = { model: string | null; readings: LimitReading[] };
+
+/**
+ * Readings grouped by scope, in the order the route emits them — key-wide
+ * first, then each override. Grouped on `reading.model` rather than looked up
+ * in `limits.models`, so the console never indexes that record by a name.
+ */
+export function groupReadings(readings: readonly LimitReading[]): ReadingGroup[] {
+  const groups: ReadingGroup[] = [];
+  for (const reading of readings) {
+    const group = groups.find((entry) => entry.model === reading.model);
+    if (group === undefined) groups.push({ model: reading.model, readings: [reading] });
+    else group.readings.push(reading);
+  }
+  return groups;
 }
 
 export function formatLimitValue(dimension: Dimension, value: number): string {
@@ -94,7 +128,7 @@ export function nearestExhaustion(readings: readonly LimitReading[]): LimitReadi
 /** Every configured limit as typed text, keyed by slot. Blank means unset. */
 export type LimitDraft = Record<string, string>;
 
-export function draftFrom(limits: LimitConfig | null): LimitDraft {
+export function draftFrom(limits: LimitConfigBase | null): LimitDraft {
   const draft: LimitDraft = {};
   for (const slot of LIMIT_SLOTS) draft[slotKey(slot)] = "";
   if (limits === null) return draft;
@@ -117,7 +151,7 @@ export function draftFrom(limits: LimitConfig | null): LimitDraft {
   return draft;
 }
 
-export type DraftResult = { limits: LimitConfig } | { problem: string };
+export type DraftResult = { limits: LimitConfigBase } | { problem: string };
 
 /**
  * Turns the typed matrix into what the route accepts, or names the first field
@@ -156,11 +190,95 @@ export function draftToLimits(draft: LimitDraft): DraftResult {
 
   // A dimension with nothing in it is omitted outright: unlimited has one
   // spelling, and an empty object inside the matrix would be a second.
-  const limits: LimitConfig = {
+  const limits: LimitConfigBase = {
     ...(Object.keys(requests).length > 0 ? { requests } : {}),
     ...(Object.keys(tokens).length > 0 ? { tokens } : {}),
     ...(Object.keys(spend).length > 0 ? { spend } : {}),
     ...(concurrency === undefined ? {} : { concurrency }),
   };
   return { limits };
+}
+
+/**
+ * The schema's own bounds on overrides, mirrored so a field is named first.
+ *
+ * Copies, because the console may not import `@omni/ratelimit`; pinned to the
+ * originals by `apps/gateway/test/routes/modelOverrideBoundsMirror.test.ts`.
+ */
+export const MAX_MODEL_OVERRIDES = 64;
+export const MAX_MODEL_NAME_LENGTH = 256;
+
+/**
+ * One per-model override being edited. `id` is the row's identity while the
+ * dialog is open, so renaming a model does not remount its fields. `stored` is
+ * the name the row was read back with, null for a row added here.
+ */
+export type OverrideDraft = {
+  id: string;
+  model: string;
+  stored: string | null;
+  slots: LimitDraft;
+};
+
+/**
+ * The stored overrides as editable rows, in the order the matrix holds them.
+ * Walked as own entries; nothing here looks a model up by name.
+ */
+export function overridesFrom(limits: LimitConfig | null): OverrideDraft[] {
+  if (limits === null) return [];
+  return Object.entries(limits.models ?? {}).map(([model, override], index) => ({
+    id: `stored-${index}`,
+    model,
+    stored: model,
+    slots: draftFrom(override),
+  }));
+}
+
+export type OverridesResult = { models: Record<string, LimitConfigBase> } | { problem: string };
+
+/**
+ * The rows as the route's `models` member, or the first problem with one.
+ *
+ * Mirrors the schema's rules so the message names the row: a model is named,
+ * once, within the length the schema allows; an override sets at least one
+ * limit, because an empty one reads as a ceiling that is not there — removing
+ * the row is how an override goes away. An empty `models` is returned as such
+ * and the caller leaves the member out.
+ *
+ * Names are never trimmed. A model is matched exactly, so a trim would rename
+ * an override behind the operator's back; a name *typed* with surrounding
+ * spaces is refused instead, while a stored one goes back exactly as it came.
+ */
+export function overridesToModels(overrides: readonly OverrideDraft[]): OverridesResult {
+  if (overrides.length > MAX_MODEL_OVERRIDES) {
+    return { problem: `A key can override at most ${MAX_MODEL_OVERRIDES} models.` };
+  }
+  const entries: Array<[string, LimitConfigBase]> = [];
+  const seen = new Set<string>();
+  for (const override of overrides) {
+    const model = override.model;
+    if (model.trim().length === 0) return { problem: "Each per-model override needs a model." };
+    if (model !== model.trim() && model !== override.stored) {
+      return {
+        problem: `"${model}" has spaces around it, and model names are matched exactly. Remove them.`,
+      };
+    }
+    if (model.length > MAX_MODEL_NAME_LENGTH) {
+      return { problem: `A model name is at most ${MAX_MODEL_NAME_LENGTH} characters.` };
+    }
+    if (model === "__proto__") return { problem: '"__proto__" cannot be a model name.' };
+    if (seen.has(model)) return { problem: `${model} is overridden twice; keep one row.` };
+    seen.add(model);
+
+    const result = draftToLimits(override.slots);
+    if ("problem" in result) return { problem: `${model}: ${result.problem}` };
+    if (Object.keys(result.limits).length === 0) {
+      return {
+        problem: `The override for ${model} sets no limit. Set one, or remove the override.`,
+      };
+    }
+    entries.push([model, result.limits]);
+  }
+  // `fromEntries` defines own properties, so no name reaches a prototype setter.
+  return { models: Object.fromEntries(entries) };
 }

@@ -10,7 +10,7 @@ import type { RtkFilterId } from "@omni/rtk/catalog";
  * this keeps that the one import it needs rather than a second permitted path.
  */
 export type { PonytailMode } from "@omni/ponytail/catalog";
-export type { Dimension, LimitConfig, Window } from "@omni/ratelimit/catalog";
+export type { Dimension, LimitConfig, LimitConfigBase, Window } from "@omni/ratelimit/catalog";
 
 export type BreakerState = "closed" | "open" | "halfOpen";
 export type AuthType = "oauth" | "apiKey";
@@ -1326,8 +1326,22 @@ export interface UsageRepo {
    * measurements, and including them adds one placeholder per in-flight request
    * to every long-window count — invisibly, and increasingly under load, which
    * is exactly when the limit matters.
+   *
+   * `requestedModel` narrows to one model's rows, for a key's per-model
+   * override. `usage_rollup` has no model column, so a narrowed read takes the
+   * whole window from `request_logs`, seeking one key's one model through
+   * `idx_request_logs_key_model_at`. Its cost is therefore linear in that
+   * model's own rows inside the window — no longer in the key's, but not flat
+   * the way the rollup read is.
+   *
+   * Who asks, and where, so nobody mistakes this for an offline read: the
+   * limiter's seed (`sumBuckets`) runs on the request path, for the first
+   * request after a restart or once a subject's buckets lapse; and the key
+   * readings in `@omni/control` call this once per configured window of every
+   * override — `1m` included — on every `/api/keys` and `/api/client/summary`
+   * fetch.
    */
-  sumSince(apiKeyId: string, sinceMs: number): Promise<UsageSums>;
+  sumSince(apiKeyId: string, sinceMs: number, requestedModel?: string): Promise<UsageSums>;
   /**
    * The same sums, one row per `grainMs`-wide bucket since `sinceMs`, keyed by
    * bucket start. What seeds the limiter's shared counters after a restart.
@@ -1336,11 +1350,16 @@ export interface UsageRepo {
    * at any finer grain it groups `request_logs`, which is one key's rows over
    * the window — a seed-time cost, paid once per key per process, never on
    * the request path.
+   *
+   * `requestedModel` narrows as `sumSince`'s does, and for the same reason
+   * reads `request_logs` at every grain, the hour included: a weekly seed of a
+   * busy model is that model's week of rows, paid on the request that seeds it.
    */
   sumBuckets(
     apiKeyId: string,
     sinceMs: number,
     grainMs: number,
+    requestedModel?: string,
   ): Promise<Array<[bucketStart: number, sums: UsageSums]>>;
   /**
    * Recomputes the hourly rollup from `request_logs`, whole.
@@ -1376,8 +1395,11 @@ export interface UsageRepo {
    * same reason `sumSince` excludes them: a request admitted a moment ago is
    * not a measurement, and letting one answer here would report that the window
    * frees nothing for a whole window.
+   *
+   * `requestedModel` narrows to one model's rows, for a refusal a per-model
+   * override issued: that window frees when *its* oldest row ages out.
    */
-  oldestSince(apiKeyId: string, sinceMs: number): Promise<number | null>;
+  oldestSince(apiKeyId: string, sinceMs: number, requestedModel?: string): Promise<number | null>;
   /**
    * Drops rows older than an instant, and the hourly buckets that summarized
    * them: a counter that outlives its rows reports history the log no longer

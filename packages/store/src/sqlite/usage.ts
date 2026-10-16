@@ -254,6 +254,38 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_filters = excluded.rtk_filters
   WHERE request_logs.state = 'pending'`;
 
+/**
+ * The per-model long-window reads, one key's one model inside a window.
+ *
+ * Exported for one reader: the plan test in `migrations.test.ts` EXPLAINs these
+ * very strings, so an edit that keeps their results and loses the seek — a
+ * `+requested_model`, a cast — fails there instead of shipping a scan. A copy
+ * of the SQL in the test would go on passing. Each must seek
+ * `idx_request_logs_key_model_at` (migration 18); `state = 'done'` for the
+ * reason `sumSince` gives.
+ */
+export const NARROWED_SQL = {
+  /** `(apiKeyId, requestedModel, sinceMs)` */
+  sumSince: `SELECT COUNT(*) AS requests,
+                    COALESCE(SUM(input_tokens + output_tokens
+                                 + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                    COALESCE(SUM(cost_usd), 0) AS cost_usd
+               FROM request_logs
+              WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?`,
+  /** `(grainMs, grainMs, apiKeyId, requestedModel, fromMs)` */
+  sumBuckets: `SELECT (at / ?) * ? AS bucket, COUNT(*) AS requests,
+                    COALESCE(SUM(input_tokens + output_tokens
+                                 + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                    COALESCE(SUM(cost_usd), 0) AS cost_usd
+               FROM request_logs
+              WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?
+              GROUP BY bucket`,
+  /** `(apiKeyId, requestedModel, sinceMs)` */
+  oldestSince: `SELECT MIN(at) AS at
+                   FROM request_logs
+                  WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?`,
+} as const;
+
 export function createUsageRepo(
   db: Database,
   nodeId: string,
@@ -418,7 +450,20 @@ export function createUsageRepo(
       return rows.map(toLog);
     },
 
-    async sumSince(apiKeyId: string, sinceMs: number) {
+    async sumSince(apiKeyId: string, sinceMs: number, requestedModel?: string) {
+      // One model's rows have no rollup to read, so the whole window comes from
+      // the log, seeking one key's one model through
+      // `idx_request_logs_key_model_at`; `state = 'done'` for the reason below.
+      if (requestedModel !== undefined) {
+        const row = db
+          .query<SumRow, [string, string, number]>(NARROWED_SQL.sumSince)
+          .get(apiKeyId, requestedModel, sinceMs);
+        return {
+          requests: row?.requests ?? 0,
+          tokens: row?.tokens ?? 0,
+          costUsd: row?.cost_usd ?? 0,
+        };
+      }
       // Two reads, and neither grows with how long the install has been running.
       //
       // `sinceMs` lands inside an hour rather than on one, so the bucket holding
@@ -464,8 +509,21 @@ export function createUsageRepo(
       };
     },
 
-    async sumBuckets(apiKeyId, sinceMs, grainMs) {
+    async sumBuckets(apiKeyId, sinceMs, grainMs, requestedModel) {
       type BucketRow = SumRow & { bucket: number };
+      // Narrowed to one model, every grain groups the log: the rollup has no
+      // model column. The hour grain floors `since` to its bucket so the first
+      // bucket is whole, exactly as the rollup's own `hour >= ?` does.
+      if (requestedModel !== undefined) {
+        const from = grainMs === HOUR_MS ? hourOf(sinceMs) * HOUR_MS : sinceMs;
+        const narrowed = db
+          .query<BucketRow, [number, number, string, string, number]>(NARROWED_SQL.sumBuckets)
+          .all(grainMs, grainMs, apiKeyId, requestedModel, from);
+        return narrowed.map((row) => [
+          row.bucket,
+          { requests: row.requests, tokens: row.tokens, costUsd: row.cost_usd },
+        ]);
+      }
       const rows =
         grainMs === HOUR_MS
           ? db
@@ -503,18 +561,23 @@ export function createUsageRepo(
       return auditRollup(db);
     },
 
-    async oldestSince(apiKeyId: string, sinceMs: number) {
+    async oldestSince(apiKeyId: string, sinceMs: number, requestedModel?: string) {
       // `state = 'done'` for the same reason `sumSince` carries it: a pending
       // row is a placeholder rather than a measurement, and one written a
       // moment ago would answer that this window frees nothing for a whole
       // window — the exact overstatement this query exists to replace.
-      const row = db
-        .query<OldestRow, [string, number]>(
-          `SELECT MIN(at) AS at
-             FROM request_logs
-            WHERE api_key_id = ? AND state = 'done' AND at >= ?`,
-        )
-        .get(apiKeyId, sinceMs);
+      const row =
+        requestedModel === undefined
+          ? db
+              .query<OldestRow, [string, number]>(
+                `SELECT MIN(at) AS at
+                   FROM request_logs
+                  WHERE api_key_id = ? AND state = 'done' AND at >= ?`,
+              )
+              .get(apiKeyId, sinceMs)
+          : db
+              .query<OldestRow, [string, string, number]>(NARROWED_SQL.oldestSince)
+              .get(apiKeyId, requestedModel, sinceMs);
       // `MIN` over no rows is a row holding null, not an absent row. Both mean
       // the same thing here: the key has nothing retained inside the window, so
       // there is no instant to report and the caller keeps its own.

@@ -70,7 +70,14 @@ const spendWindows = z
   })
   .strict();
 
-export const limitConfigSchema = z
+/**
+ * One scope's sparse matrix: the key-wide limits, or one model's override.
+ *
+ * Named apart from `LimitConfig` so the pure evaluator can take this and
+ * nothing wider — handed a whole config, it would be handed a `models` member
+ * it silently ignores.
+ */
+export const limitConfigBaseSchema = z
   .object({
     requests: countWindows.optional(),
     tokens: countWindows.optional(),
@@ -85,6 +92,61 @@ export const limitConfigSchema = z
   })
   .strict();
 
+/** The matrix of one scope. See `LimitConfig` for what absent and null mean. */
+export type LimitConfigBase = z.infer<typeof limitConfigBaseSchema>;
+
+/** How many models one key may override. A key is configured by hand. */
+export const MAX_MODEL_OVERRIDES = 64;
+
+/** The longest model name an override may carry, matched exactly. */
+export const MAX_MODEL_NAME_LENGTH = 256;
+
+/** Whether a scope sets any ceiling at all, rather than only nulls and empties. */
+function setsAnyLimit(scope: LimitConfigBase): boolean {
+  if (scope.concurrency !== undefined && scope.concurrency !== null) return true;
+  for (const dimension of ["requests", "tokens", "spend"] as const) {
+    const windows: Partial<Record<Window, number | null | undefined>> | undefined =
+      scope[dimension];
+    if (windows === undefined) continue;
+    for (const window of WINDOWS) {
+      const limit = windows[window];
+      if (limit !== undefined && limit !== null) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * One model's override: the key-wide shape, minus `models`, and never empty.
+ *
+ * An override is removed by omitting it. An empty one — `{}`, or nothing but
+ * nulls — would sit in the console as a row that reads like a ceiling and
+ * limits nothing, so it is refused at write rather than stored as a husk.
+ */
+const modelOverrideSchema = limitConfigBaseSchema.refine(setsAnyLimit, {
+  message: "a model override must set at least one limit; omit the model to remove it",
+});
+
+export const limitConfigSchema = limitConfigBaseSchema
+  .extend({
+    /**
+     * Per-model overrides, keyed by the requested model exactly as the
+     * allowlist sees it. They stack with the key-wide limits — a request for
+     * one of these models must pass both — so no override can lift a key past
+     * its own key-wide ceiling.
+     *
+     * Not a dimension: `DIMENSIONS` and `WINDOWS` are unchanged, and an older
+     * build's strict parse refuses a row carrying this, which fails closed.
+     */
+    models: z
+      .record(z.string().min(1).max(MAX_MODEL_NAME_LENGTH), modelOverrideSchema)
+      .refine((models) => Object.keys(models).length <= MAX_MODEL_OVERRIDES, {
+        message: `at most ${MAX_MODEL_OVERRIDES} model overrides per key`,
+      })
+      .optional(),
+  })
+  .strict();
+
 /**
  * The sparse matrix of limits on one key.
  *
@@ -93,6 +155,20 @@ export const limitConfigSchema = z
  * to: there is no "inherit" for an absent key to have meant.
  */
 export type LimitConfig = z.infer<typeof limitConfigSchema>;
+
+/**
+ * The override one model carries, or undefined where it has none.
+ *
+ * The single lookup, and every consumer goes through it. zod's record yields a
+ * plain object, so a bare `limits.models?.[model]` answers
+ * `Object.prototype.constructor` for a model named `constructor` — a function
+ * where a matrix was expected, read as a ceiling by whoever indexed it.
+ */
+export function modelOverride(limits: LimitConfig, model: string): LimitConfigBase | undefined {
+  const models = limits.models;
+  if (models === undefined || !Object.hasOwn(models, model)) return undefined;
+  return models[model];
+}
 
 /**
  * `.strict()` rejects an unknown key — except this one.

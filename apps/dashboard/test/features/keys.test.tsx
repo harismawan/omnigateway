@@ -337,8 +337,8 @@ describe("KeysBoard", () => {
           apiKey({
             limits: { requests: { "1m": 60 }, tokens: { "1w": 1_000_000 } },
             limitUsage: [
-              { dimension: "requests", window: "1m", limit: 60, used: 6 },
-              { dimension: "tokens", window: "1w", limit: 1_000_000, used: 900_000 },
+              { dimension: "requests", window: "1m", limit: 60, used: 6, model: null },
+              { dimension: "tokens", window: "1w", limit: 1_000_000, used: 900_000, model: null },
             ],
           }),
         ],
@@ -369,8 +369,8 @@ describe("KeysBoard", () => {
           apiKey({
             limits: { requests: { "1m": 60 }, tokens: { "1w": 1_000 } },
             limitUsage: [
-              { dimension: "requests", window: "1m", limit: 60, used: 66 },
-              { dimension: "tokens", window: "1w", limit: 1_000, used: 5_000 },
+              { dimension: "requests", window: "1m", limit: 60, used: 66, model: null },
+              { dimension: "tokens", window: "1w", limit: 1_000, used: 5_000, model: null },
             ],
           }),
         ],
@@ -392,8 +392,8 @@ describe("KeysBoard", () => {
           apiKey({
             limits: { requests: { "1m": 60 }, concurrency: 8 },
             limitUsage: [
-              { dimension: "requests", window: "1m", limit: 60, used: 45 },
-              { dimension: "concurrency", window: null, limit: 8, used: null },
+              { dimension: "requests", window: "1m", limit: 60, used: 45, model: null },
+              { dimension: "concurrency", window: null, limit: 8, used: null, model: null },
             ],
           }),
         ],
@@ -447,6 +447,276 @@ describe("KeysBoard", () => {
       // Cleared, not merged: the whole matrix is sent, so a blank field is how
       // a ceiling is removed.
       expect(put?.init?.body).toBe(JSON.stringify({ limits: { requests: { "1m": 90 } } }));
+    });
+  });
+
+  /**
+   * An override nearer exhaustion than any key-wide ceiling is the one the cell
+   * carries, and it says which model it belongs to: "Requests per minute 20"
+   * alone would read as the whole key's ceiling.
+   */
+  test("the cell names the model when an override is nearest exhaustion", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, models: { opus: { requests: { "1m": 20 } } } },
+            limitUsage: [
+              { dimension: "requests", window: "1m", limit: 60, used: 30, model: null },
+              { dimension: "requests", window: "1m", limit: 20, used: 18, model: "opus" },
+            ],
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const row = (await screen.findByText("laptop")).closest("tr");
+    if (row === null) throw new Error("the key has no row");
+    expect(within(row).getByText("2 limits")).toBeTruthy();
+    expect(within(row).getByText("Requests per minute for opus 20, 90% used")).toBeTruthy();
+  });
+
+  test("the matrix groups an override's readings under its model", async () => {
+    const user = userEvent.setup();
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, models: { opus: { requests: { "1m": 20 } } } },
+            limitUsage: [
+              { dimension: "requests", window: "1m", limit: 60, used: 30, model: null },
+              { dimension: "requests", window: "1m", limit: 20, used: 18, model: "opus" },
+            ],
+          }),
+        ],
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Show limits for laptop" }));
+
+    const keyWide = await screen.findByRole("group", { name: "Every model" });
+    const opus = screen.getByRole("group", { name: "opus" });
+    expect(
+      within(keyWide).getByRole("meter", { name: "laptop, Requests per minute, 50% used" }),
+    ).toBeTruthy();
+    expect(
+      within(opus).getByRole("meter", { name: "laptop, opus, Requests per minute, 90% used" }),
+    ).toBeTruthy();
+    expect(within(keyWide).getAllByRole("meter")).toHaveLength(1);
+  });
+
+  test("a key with no overrides draws no model headings", async () => {
+    const user = userEvent.setup();
+    stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey({ limits: { requests: { "1m": 60 } } })] }),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Show limits for laptop" }));
+    await screen.findByRole("meter");
+    expect(screen.queryByRole("group", { name: "Every model" })).toBeNull();
+  });
+
+  /**
+   * The round trip the section exists for: an existing override is shown and
+   * edited, a new one is added, and the matrix goes back whole with the key-wide
+   * limits untouched beside them.
+   */
+  test("per-model overrides are edited, added, and sent whole with the key's limits", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            limits: { requests: { "1m": 60 }, models: { opus: { requests: { "1m": 20 } } } },
+          }),
+        ],
+      }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    const opus = within(dialog).getByRole("group", { name: "Override for opus" });
+    const opusMinute = within(opus).getByLabelText("Requests per minute");
+    expect((opusMinute as HTMLInputElement).value).toBe("20");
+    await user.clear(opusMinute);
+    await user.type(opusMinute, "10");
+
+    await user.click(within(dialog).getByRole("button", { name: "Add model override" }));
+    const added = within(dialog).getByRole("group", { name: "Override for a new model" });
+    await user.type(within(added).getByLabelText("Model"), "llama3:8b");
+    const named = within(dialog).getByRole("group", { name: "Override for llama3:8b" });
+    await user.type(within(named).getByLabelText("Concurrent"), "2");
+
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(
+        JSON.stringify({
+          limits: {
+            requests: { "1m": 60 },
+            models: { opus: { requests: { "1m": 10 } }, "llama3:8b": { concurrency: 2 } },
+          },
+        }),
+      );
+    });
+  });
+
+  test("removing the last override sends the matrix without `models`", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({ limits: { requests: { "1m": 60 }, models: { opus: { concurrency: 1 } } } }),
+        ],
+      }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Remove override for opus" }));
+    expect(within(dialog).queryByRole("group", { name: "Override for opus" })).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(JSON.stringify({ limits: { requests: { "1m": 60 } } }));
+    });
+  });
+
+  test("an override with no model, no limit, or a model twice is refused before it is sent", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [apiKey({ limits: { models: { opus: { concurrency: 1 } } } })],
+      }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    const save = within(dialog).getByRole("button", { name: "Save limits" });
+
+    await user.click(within(dialog).getByRole("button", { name: "Add model override" }));
+    await user.click(save);
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("needs a model");
+
+    const added = within(dialog).getByRole("group", { name: "Override for a new model" });
+    await user.type(within(added).getByLabelText("Model"), "deep");
+    await user.click(save);
+    expect((await within(dialog).findByRole("alert")).textContent).toContain(
+      "The override for deep sets no limit",
+    );
+
+    const deep = within(dialog).getByRole("group", { name: "Override for deep" });
+    await user.clear(within(deep).getByLabelText("Model"));
+    await user.type(within(deep).getByLabelText("Model"), "opus");
+    await user.click(save);
+    expect((await within(dialog).findByRole("alert")).textContent).toContain(
+      "opus is overridden twice",
+    );
+
+    const second = within(dialog).getAllByRole("group", { name: "Override for opus" })[1];
+    if (second === undefined) throw new Error("expected the second opus override");
+    await user.clear(within(second).getByLabelText("Model"));
+    await user.type(within(second).getByLabelText("Model"), "deep");
+    await user.type(within(second).getByLabelText("Requests per minute"), "1.5");
+    await user.click(save);
+    expect((await within(dialog).findByRole("alert")).textContent).toContain(
+      "deep: Requests per minute must be a whole number",
+    );
+    expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+  });
+
+  /**
+   * A model name is matched exactly, so a name typed with a stray space would
+   * be an override that never applies. It is refused rather than trimmed: a
+   * trim would silently rename the override the operator sees.
+   */
+  test("a typed model name with surrounding spaces is refused, not trimmed", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey({ limits: {} })] }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Add model override" }));
+    const added = within(dialog).getByRole("group", { name: "Override for a new model" });
+    await user.type(within(added).getByLabelText("Model"), "deep ");
+    await user.type(within(added).getByLabelText("Concurrent"), "2");
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("spaces around it");
+    expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+  });
+
+  /**
+   * The other half of not trimming: a stored name the API accepted with a space
+   * in it goes back exactly as it came, so an unrelated edit neither renames it
+   * nor becomes unsavable over it.
+   */
+  test("a stored override keeps its exact name through an unrelated edit", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({ limits: { requests: { "1m": 60 }, models: { " opus": { concurrency: 1 } } } }),
+        ],
+      }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    const perMinute = within(dialog).getAllByLabelText("Requests per minute")[0];
+    if (perMinute === undefined) throw new Error("no key-wide field");
+    await user.clear(perMinute);
+    await user.type(perMinute, "90");
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(
+        JSON.stringify({
+          limits: { requests: { "1m": 90 }, models: { " opus": { concurrency: 1 } } },
+        }),
+      );
+    });
+  });
+
+  /**
+   * An override on a model the key cannot call is harmless and stays savable,
+   * so it is a hint rather than an error: refusing it would make unrelated edits
+   * unsavable the day a model is renamed.
+   */
+  test("an override the allowlist excludes is hinted, and still saved", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({
+            modelAllowlist: ["fast"],
+            limits: { models: { opus: { concurrency: 1 }, fast: { concurrency: 2 } } },
+          }),
+        ],
+      }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+
+    const opus = within(dialog).getByRole("group", { name: "Override for opus" });
+    expect(within(opus).getByText(/not in this key's allowed models/)).toBeTruthy();
+    const fast = within(dialog).getByRole("group", { name: "Override for fast" });
+    expect(within(fast).queryByText(/not in this key's allowed models/)).toBeNull();
+
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(true);
     });
   });
 

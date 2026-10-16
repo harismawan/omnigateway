@@ -49,7 +49,9 @@ anthropic-ratelimit-requests-reset: 2026-08-19T14:32:07Z   x-ratelimit-reset-req
 `requests-remaining` counts the request being answered; `tokens-remaining` does
 not and cannot — the response is still being written when the header goes out.
 Where a key has several windows on one dimension, the headers report the one
-**nearest exhaustion**, not the reassuring ones. `spend` and `concurrency`
+**nearest exhaustion**, not the reassuring ones — and where the key holds the
+model you named to a stricter override, that override's windows compete too, so
+the header names whichever ceiling will deny first. `spend` and `concurrency`
 render on neither dialect, because no vendor defines a header for them. A
 refusal is `429` with `Retry-After` in seconds, computed from the oldest request
 still inside the window that refused you.

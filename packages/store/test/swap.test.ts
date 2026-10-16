@@ -170,7 +170,9 @@ test("reopen with no swap leaves the store usable, and close stays idempotent", 
  */
 test("no repo forwarder drops an argument the source hands it", async () => {
   const src = await Bun.file(new URL("../src/sqlite/store.ts", import.meta.url)).text();
-  const forwarder = /^ {6}(\w+): \(([^)]*)\) => handle\.(\w+)\.(\w+)\(([^)]*)\)/gm;
+  // `\s+` after the arrow, because a forwarder too long for one line breaks
+  // there, and a pattern that stopped at a single space read those as absent.
+  const forwarder = /^ {6}(\w+): \(([^)]*)\) =>\s+handle\.(\w+)\.(\w+)\(([^)]*)\)/gm;
   const count = (s: string): number => (s.trim() === "" ? 0 : s.split(",").length);
 
   const dropped: string[] = [];
@@ -227,6 +229,44 @@ test("a usage repo captured before reopen still scopes to one key after it", asy
       "after-mine",
       "after-theirs",
     ]);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The long-window reads a model override is enforced from, through a repo
+ * captured before the swap.
+ *
+ * Each takes its model as an optional trailing argument, which is exactly the
+ * shape a forwarder can drop without a type error: the narrowed read would then
+ * answer for the whole key, and a model ceiling would trip on traffic to every
+ * other model.
+ */
+test("a usage repo captured before reopen still narrows to one model after it", async () => {
+  const { store, root } = await tempStore();
+  const replacement = join(root, "replacement.sqlite");
+  try {
+    const usage = store.usage;
+    const now = Date.now();
+    const other = await createStore({
+      path: replacement,
+      encryptionKey: await deriveKey(SECRET),
+    });
+    await other.usage.append({ ...logRow("opus", now - 2_000, "k1"), requestedModel: "opus" });
+    await other.usage.append(logRow("fast", now - 3_000, "k1"));
+    other.close();
+
+    await swapIn(store, replacement);
+
+    const since = now - 60_000;
+    expect((await usage.sumSince("k1", since, "opus")).requests).toBe(1);
+    expect((await usage.sumSince("k1", since)).requests).toBe(2);
+    const buckets = await usage.sumBuckets("k1", since, 60_000, "opus");
+    expect(buckets.reduce((total, [, sums]) => total + sums.requests, 0)).toBe(1);
+    expect(await usage.oldestSince("k1", since, "opus")).toBe(now - 2_000);
+    expect(await usage.oldestSince("k1", since)).toBe(now - 3_000);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

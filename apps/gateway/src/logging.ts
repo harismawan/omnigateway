@@ -255,7 +255,12 @@ export type BodyWriter = (log: RequestLog) => Promise<void>;
  * about a store and a logger, and so the site below can be read without going
  * and finding out what a rate limiter does.
  */
-export type UsageDebit = (keyId: string, usage: { tokens: number; costUsd: number }) => void;
+export type UsageDebit = (
+  keyId: string,
+  /** The requested model, so a model override's subject is charged beside the key's. */
+  requestedModel: string,
+  usage: { tokens: number; costUsd: number },
+) => void;
 
 /**
  * Persists a finished request log, completing the pending row if one was
@@ -322,7 +327,7 @@ export async function finishLog(
   // All four token classes are disjoint — `Usage.inputTokens` is uncached
   // input — so summing them double-counts none.
   if (keyId !== null && debit !== undefined) {
-    debit(keyId, {
+    debit(keyId, log.requestedModel, {
       tokens: log.inputTokens + log.outputTokens + log.cacheReadTokens + log.cacheWriteTokens,
       costUsd: log.costUsd,
     });

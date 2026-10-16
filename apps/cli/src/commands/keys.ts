@@ -9,7 +9,7 @@ import {
 } from "@omni/control";
 // The gateway's own "may this key be used now", so the listing's label and the
 // answer at `/v1` cannot drift apart.
-import { keyUsable, type LimitConfig } from "@omni/store";
+import { keyUsable, type LimitConfig, type LimitConfigBase } from "@omni/store";
 import { boolFlag, listFlag, requirePositional, stringFlag, UsageError } from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { CliError } from "../context.ts";
@@ -21,6 +21,15 @@ import { emit, fields, formatTime, formatUsd, note, paint, table } from "../outp
  */
 const WINDOWED = new Set(["requests", "tokens", "spend"]);
 
+/** The one dimension written without a window. */
+const GAUGE = "concurrency";
+
+/**
+ * The outer key holding per-model overrides. Not a dimension: `--limit` refuses
+ * it, so the only way in is `--model-limit`, which knows what goes under it.
+ */
+const MODELS = "models";
+
 /**
  * A `limits` object built structurally from the flags, for the control schema to
  * judge.
@@ -30,7 +39,35 @@ const WINDOWED = new Set(["requests", "tokens", "spend"]);
  * that are free to disagree. This parse only refuses shapes the schema could
  * never see — a pair with no `=`, a value that is not a number.
  */
-type LooseLimits = Record<string, Record<string, number> | number>;
+type LooseScope = Record<string, Record<string, number> | number>;
+
+/**
+ * The key-wide scope and every model's override, held apart until they are
+ * sent. Apart because `models` is not a dimension, and a scope built by the
+ * structural parser must never be able to write one by accident.
+ *
+ * `models` is null-prototype: its keys are operator-chosen model names, and a
+ * plain object answers `constructor` and `toString` as if they were overrides.
+ */
+type LooseLimits = { scope: LooseScope; models: Record<string, LooseScope> };
+
+function emptyLimits(): LooseLimits {
+  return { scope: {}, models: Object.create(null) as Record<string, LooseScope> };
+}
+
+/** What the control schema is handed: the scope, plus `models` only when non-empty. */
+function toWire(limits: LooseLimits): Record<string, unknown> {
+  const models = Object.keys(limits.models);
+  if (models.length === 0) return { ...limits.scope };
+  // A plain object for the wire, built by assignment from names `rejectProto`
+  // has already refused `__proto__` among.
+  const out: Record<string, LooseScope> = {};
+  for (const model of models) {
+    const scope = limits.models[model];
+    if (scope !== undefined) out[model] = scope;
+  }
+  return { ...limits.scope, [MODELS]: out };
+}
 
 /**
  * The one name this parser refuses itself rather than deferring to the schema.
@@ -64,9 +101,9 @@ function rejectProto(flag: string, name: string): void {
 function parseLimitFlags(
   entries: readonly string[],
   flag: string,
-  into: LooseLimits = {},
-): LooseLimits {
-  const limits: LooseLimits = into;
+  into: LooseScope = {},
+): LooseScope {
+  const limits: LooseScope = into;
   for (const entry of entries) {
     const equals = entry.indexOf("=");
     if (equals <= 0) {
@@ -87,6 +124,7 @@ function parseLimitFlags(
         throw new UsageError(`${flag} ${pair} needs a window, e.g. ${flag} ${pair}:1m=60`);
       }
       rejectProto(flag, pair);
+      rejectModels(flag, pair);
       limits[pair] = value;
       continue;
     }
@@ -98,12 +136,118 @@ function parseLimitFlags(
     }
     rejectProto(flag, dimension);
     rejectProto(flag, window);
-    const existing = limits[dimension];
-    const windows = typeof existing === "object" ? existing : {};
-    windows[window] = value;
-    limits[dimension] = windows;
+    rejectModels(flag, dimension);
+    setSlot(limits, dimension, window, value);
   }
   return limits;
+}
+
+/** `models` is not a dimension; refused here so a scope can never carry it. */
+function rejectModels(flag: string, name: string): void {
+  if (name === MODELS) {
+    throw new UsageError(`${flag} cannot name "${MODELS}"; per-model limits use --model-limit`);
+  }
+}
+
+function setSlot(scope: LooseScope, dimension: string, window: string, value: number): void {
+  const existing = scope[dimension];
+  const windows = typeof existing === "object" ? existing : {};
+  windows[window] = value;
+  scope[dimension] = windows;
+}
+
+/**
+ * Splits `<model>:<dimension>:<window>` or `<model>:concurrency` from the right.
+ *
+ * Anchored on the right because the vocabulary is closed and model names are
+ * not: `llama3:8b`, `openai/gpt-4o` and `claude-opus-4@20250514` all carry
+ * characters a left-anchored split would read as structure. The last segment
+ * is the window, or the bare gauge; the one before it is the dimension; all
+ * that is left is the model. Which dimension and window names exist stays the
+ * schema's question, as it is for `--limit`.
+ */
+function splitModelSlot(
+  spec: string,
+  flag: string,
+  shape: string,
+): { model: string; dimension: string; window: string | null } {
+  const malformed = () => new UsageError(`${flag} must be ${shape}, got "${spec}"`);
+  const last = spec.lastIndexOf(":");
+  if (last < 0) throw malformed();
+  const tail = spec.slice(last + 1);
+  if (tail === GAUGE) {
+    const model = spec.slice(0, last);
+    if (model.length === 0) throw malformed();
+    rejectProto(flag, model);
+    return { model, dimension: GAUGE, window: null };
+  }
+  if (WINDOWED.has(tail)) {
+    throw new UsageError(`${flag} ${spec} needs a window, e.g. ${flag} ${spec}:1m`);
+  }
+  const head = spec.slice(0, last);
+  const second = head.lastIndexOf(":");
+  if (second < 0) throw malformed();
+  const model = head.slice(0, second);
+  const dimension = head.slice(second + 1);
+  if (model.length === 0 || dimension.length === 0 || tail.length === 0) throw malformed();
+  rejectProto(flag, model);
+  rejectProto(flag, dimension);
+  rejectProto(flag, tail);
+  return { model, dimension, window: tail };
+}
+
+const MODEL_LIMIT_SHAPE = "model:dimension:window=value or model:concurrency=value";
+
+/** `--model-limit`, written into one model's override, creating it if absent. */
+function parseModelLimitFlags(entries: readonly string[], into: LooseLimits): void {
+  const flag = "--model-limit";
+  for (const entry of entries) {
+    const equals = entry.lastIndexOf("=");
+    if (equals <= 0) throw new UsageError(`${flag} must be ${MODEL_LIMIT_SHAPE}, got "${entry}"`);
+    const spec = entry.slice(0, equals);
+    const raw = entry.slice(equals + 1);
+    const value = Number(raw);
+    if (raw.trim().length === 0 || !Number.isFinite(value)) {
+      throw new UsageError(`${flag} ${spec} must be a number, got "${raw}"`);
+    }
+    const { model, dimension, window } = splitModelSlot(spec, flag, MODEL_LIMIT_SHAPE);
+    const scope = into.models[model] ?? {};
+    if (window === null) scope[dimension] = value;
+    else setSlot(scope, dimension, window, value);
+    into.models[model] = scope;
+  }
+}
+
+/**
+ * `--unset-model-limit`, removing one slot and refusing one that is not there,
+ * for the reason `applyUnsetFlags` does. The last slot going takes the override
+ * with it: the schema refuses an empty one, and an override is removed by being
+ * absent.
+ */
+function applyModelUnsetFlags(limits: LooseLimits, entries: readonly string[]): void {
+  const flag = "--unset-model-limit";
+  for (const entry of entries) {
+    if (entry.includes("=")) {
+      throw new UsageError(`${flag} names a limit to remove, not a value, got "${entry}"`);
+    }
+    const { model, dimension, window } = splitModelSlot(
+      entry,
+      flag,
+      "model:dimension:window or model:concurrency",
+    );
+    const scope = limits.models[model];
+    const missing = () => new UsageError(`this key has no ${entry} limit`);
+    if (scope === undefined || !Object.hasOwn(scope, dimension)) throw missing();
+    if (window === null) {
+      delete scope[dimension];
+    } else {
+      const windows = scope[dimension];
+      if (typeof windows !== "object" || !Object.hasOwn(windows, window)) throw missing();
+      delete windows[window];
+      if (Object.keys(windows).length === 0) delete scope[dimension];
+    }
+    if (Object.keys(scope).length === 0) delete limits.models[model];
+  }
 }
 
 /**
@@ -114,7 +258,17 @@ function parseLimitFlags(
  * write back a shape that says nothing the first does not.
  */
 function toLoose(limits: LimitConfig): LooseLimits {
-  const loose: LooseLimits = {};
+  const loose = emptyLimits();
+  loose.scope = toLooseScope(limits);
+  for (const [model, override] of Object.entries(limits.models ?? {})) {
+    const scope = toLooseScope(override);
+    if (Object.keys(scope).length > 0) loose.models[model] = scope;
+  }
+  return loose;
+}
+
+function toLooseScope(limits: LimitConfigBase): LooseScope {
+  const loose: LooseScope = {};
   for (const dimension of ["requests", "tokens", "spend"] as const) {
     const windows = limits[dimension];
     if (windows === undefined) continue;
@@ -139,7 +293,7 @@ function toLoose(limits: LimitConfig): LooseLimits {
  * that a script clearing a limit twice fails the second time, which is a loud
  * break rather than a silent one.
  */
-function applyUnsetFlags(limits: LooseLimits, entries: readonly string[]): void {
+function applyUnsetFlags(limits: LooseScope, entries: readonly string[]): void {
   for (const entry of entries) {
     if (entry.includes("=")) {
       throw new UsageError(`--unset names a limit to remove, not a value, got "${entry}"`);
@@ -187,6 +341,8 @@ function limitRow(reading: LimitReading): string[] {
   const money = reading.dimension === "spend";
   const amount = (value: number): string => (money ? formatUsd(value) : String(value));
   return [
+    // "key" for the key-wide limits, which every model shares.
+    reading.model ?? "key",
     reading.dimension,
     reading.window ?? "—",
     amount(reading.limit),
@@ -200,19 +356,29 @@ function limitRow(reading: LimitReading): string[] {
  * what is shown can be pasted back. The full matrix is one key's business.
  */
 function summarizeLimits(limits: LimitConfig): string {
+  const parts = summarizeScope(limits, "");
+  // Overrides in `--model-limit`'s syntax, which is the key-wide one prefixed
+  // with the model.
+  for (const [model, override] of Object.entries(limits.models ?? {})) {
+    parts.push(...summarizeScope(override, `${model}:`));
+  }
+  return parts.length === 0 ? "—" : parts.join(" ");
+}
+
+function summarizeScope(limits: LimitConfigBase, prefix: string): string[] {
   const parts: string[] = [];
   for (const dimension of ["requests", "tokens", "spend"] as const) {
     const windows = limits[dimension];
     if (windows === undefined) continue;
     for (const [window, value] of Object.entries(windows)) {
       if (value === null || value === undefined) continue;
-      parts.push(`${dimension}:${window}=${value}`);
+      parts.push(`${prefix}${dimension}:${window}=${value}`);
     }
   }
   if (limits.concurrency !== undefined && limits.concurrency !== null) {
-    parts.push(`concurrency=${limits.concurrency}`);
+    parts.push(`${prefix}concurrency=${limits.concurrency}`);
   }
-  return parts.length === 0 ? "—" : parts.join(" ");
+  return parts;
 }
 
 /**
@@ -310,18 +476,22 @@ export const keysList: Command = {
 
 export const keysCreate: Command = {
   usage:
-    "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--expires <when>] [--no-bodies]",
+    "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--model-limit <model>:<d>:<w>=N ...] [--expires <when>] [--no-bodies]",
   summary: "Mint a gateway API key, printed once",
   options: {
     label: { type: "string" },
     allow: { type: "string", multiple: true },
     limit: { type: "string", multiple: true },
+    "model-limit": { type: "string", multiple: true },
     expires: { type: "string" },
     "no-bodies": { type: "boolean" },
   },
   async run(args, { ctx, writer }) {
     const allow = listFlag(args.values, "allow");
     const expires = stringFlag(args.values, "expires");
+    const limits = emptyLimits();
+    parseLimitFlags(listFlag(args.values, "limit") ?? [], "--limit", limits.scope);
+    parseModelLimitFlags(listFlag(args.values, "model-limit") ?? [], limits);
     const created = await createKey(await ctx.store(), {
       ...(stringFlag(args.values, "label") === undefined
         ? {}
@@ -332,7 +502,7 @@ export const keysCreate: Command = {
       // `--rate-limit N` is gone rather than aliased: one syntax for limits, and
       // a script still passing it fails on an unknown flag with a one-line fix
       // instead of quietly taking a deprecated path.
-      limits: parseLimitFlags(listFlag(args.values, "limit") ?? [], "--limit"),
+      limits: toWire(limits),
       // Creation only, matching the console and the store: a key handed to a
       // client on the promise that its payloads are never retained must not
       // become capturable later by an edit the client cannot see. Reissue
@@ -352,16 +522,27 @@ export const keysCreate: Command = {
 };
 
 export const keysLimits: Command = {
-  usage: "keys limits <id> [--set <d>:<w>=N ...] [--unset <d>:<w> ...]",
+  usage:
+    "keys limits <id> [--set <d>:<w>=N ...] [--unset <d>:<w> ...] [--model-limit <model>:<d>:<w>=N ...] [--unset-model-limit <model>:<d>[:<w>] ...]",
   summary: "Show or edit one key's limits, with what has been used against them",
   options: {
     set: { type: "string", multiple: true },
     unset: { type: "string", multiple: true },
+    "model-limit": { type: "string", multiple: true },
+    "unset-model-limit": { type: "string", multiple: true },
   },
   async run(args, { ctx, writer }) {
     const id = requirePositional(args, 0, "key id");
-    const sets = listFlag(args.values, "set") ?? [];
-    const unsets = listFlag(args.values, "unset") ?? [];
+    // Each pair of flags is one edit, so the model ones join the key-wide ones
+    // in every rule below: an unreadable matrix refuses an unset of either.
+    const sets = [
+      ...(listFlag(args.values, "set") ?? []),
+      ...(listFlag(args.values, "model-limit") ?? []),
+    ];
+    const unsets = [
+      ...(listFlag(args.values, "unset") ?? []),
+      ...(listFlag(args.values, "unset-model-limit") ?? []),
+    ];
 
     const store = await ctx.store();
     const existing = (await listKeys(store)).find((entry) => entry.id === id);
@@ -407,10 +588,12 @@ export const keysLimits: Command = {
         );
       }
 
-      const next = existing.limits === null ? {} : toLoose(existing.limits);
-      applyUnsetFlags(next, unsets);
-      parseLimitFlags(sets, "--set", next);
-      key = await setKeyLimits(store, id, { limits: next });
+      const next = existing.limits === null ? emptyLimits() : toLoose(existing.limits);
+      applyUnsetFlags(next.scope, listFlag(args.values, "unset") ?? []);
+      applyModelUnsetFlags(next, listFlag(args.values, "unset-model-limit") ?? []);
+      parseLimitFlags(listFlag(args.values, "set") ?? [], "--set", next.scope);
+      parseModelLimitFlags(listFlag(args.values, "model-limit") ?? [], next);
+      key = await setKeyLimits(store, id, { limits: toWire(next) });
     }
 
     emit(ctx, writer, replaced ? { ...key, limitsReplaced: true } : key, () => {
@@ -427,6 +610,7 @@ export const keysLimits: Command = {
       }
       return `${head}\n\n${table(
         [
+          { header: "SCOPE" },
           { header: "DIMENSION" },
           { header: "WINDOW" },
           { header: "LIMIT", align: "right" },

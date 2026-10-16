@@ -45,23 +45,23 @@ const PATH: Record<Surface, string> = {
 };
 
 /** One finished request already on the key's ledger, inside every window. */
-type Seeded = { at: number; tokens?: number };
+type Seeded = { at: number; tokens?: number; model?: string };
 
 async function harness(limits: LimitConfig, seeded: Seeded[] = []) {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
-  await store.config.putModel(
-    virtualModel({
-      id: "fast",
-      targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
-    }),
-  );
+  for (const id of ["fast", "slow"]) {
+    await store.config.putModel(
+      virtualModel({ id, targets: [target({ provider: "anthropic", model: "claude-opus-4" })] }),
+    );
+  }
   const { raw, key } = await seedApiKey(store, { limits });
   for (const [index, row] of seeded.entries()) {
     await store.usage.append(
       requestLog({
         id: `seed_${index}`,
         apiKeyId: key.id,
+        requestedModel: row.model ?? "fast",
         at: row.at,
         inputTokens: row.tokens ?? 0,
         outputTokens: 0,
@@ -459,4 +459,89 @@ test("Bearer and x-api-key reach the same refusal", async () => {
   expect(second.status).toBe(429);
   expect(second.headers.get("retry-after")).toBe(first.headers.get("retry-after"));
   expect(limitHeaders(second)).toEqual(limitHeaders(first));
+});
+
+/**
+ * A model override that is nearer exhaustion than the key-wide limit names the
+ * headers, in each surface's dialect, on both response kinds — and the key-wide
+ * figure comes back for a model the key does not override.
+ *
+ * Three `fast` rows and one `slow` row: the override reads 3 of 10, the key
+ * 4 of 2000, so a header taken from the wrong scope cannot pass.
+ */
+const MIXED: Seeded[] = [...THREE, { at: NOW - HOUR, model: "slow" }];
+const OVERRIDDEN: LimitConfig = {
+  requests: { "5h": 2000 },
+  models: { fast: { requests: { "5h": 10 } } },
+};
+
+test("a model override nearer exhaustion names the headers on both surfaces", async () => {
+  for (const stream of [false, true]) {
+    const anthropic = await harness(OVERRIDDEN, MIXED);
+    const first = await anthropic.call("anthropic", { stream });
+    expect(first.status).toBe(200);
+    expect(limitHeaders(first)).toEqual({
+      "anthropic-ratelimit-requests-limit": "10",
+      "anthropic-ratelimit-requests-remaining": "6",
+      "anthropic-ratelimit-requests-reset": "2026-08-18T14:32:07Z",
+    });
+    await first.text();
+    const other = await anthropic.call("anthropic", { stream, model: "slow" });
+    expect(other.headers.get("anthropic-ratelimit-requests-limit")).toBe("2000");
+    expect(other.headers.get("anthropic-ratelimit-requests-remaining")).toBe("1994");
+    await other.text();
+    anthropic.store.close();
+
+    const openai = await harness(OVERRIDDEN, MIXED);
+    const second = await openai.call("openai", { stream });
+    expect(second.status).toBe(200);
+    expect(limitHeaders(second)).toEqual({
+      "x-ratelimit-limit-requests": "10",
+      "x-ratelimit-remaining-requests": "6",
+      "x-ratelimit-reset-requests": "5h0m0s",
+    });
+    await second.text();
+    openai.store.close();
+  }
+});
+
+/**
+ * The override refuses, and its `Retry-After` is read from the model's own
+ * oldest row: the key's oldest row is another model's, four and a half hours
+ * back, which would say thirty minutes where the truth is three hours.
+ */
+test("a model override's 429 carries its own reset, on both surfaces", async () => {
+  const seeded: Seeded[] = [
+    { at: NOW - 4.5 * HOUR, model: "slow" },
+    { at: NOW - 2 * HOUR },
+    { at: NOW - MINUTE },
+  ];
+  const limits: LimitConfig = {
+    requests: { "5h": 2000 },
+    models: { fast: { requests: { "5h": 2 } } },
+  };
+
+  const anthropic = await harness(limits, seeded);
+  const first = await anthropic.call("anthropic");
+  expect(first.status).toBe(429);
+  expect(first.headers.get("retry-after")).toBe("10800");
+  expect(limitHeaders(first)).toEqual({
+    "anthropic-ratelimit-requests-limit": "2",
+    "anthropic-ratelimit-requests-remaining": "0",
+    "anthropic-ratelimit-requests-reset": "2026-08-18T12:32:07Z",
+  });
+  // The key-wide ceiling still serves another model.
+  expect((await anthropic.call("anthropic", { model: "slow" })).status).toBe(200);
+  anthropic.store.close();
+
+  const openai = await harness(limits, seeded);
+  const second = await openai.call("openai", { stream: true });
+  expect(second.status).toBe(429);
+  expect(second.headers.get("retry-after")).toBe("10800");
+  expect(limitHeaders(second)).toEqual({
+    "x-ratelimit-limit-requests": "2",
+    "x-ratelimit-remaining-requests": "0",
+    "x-ratelimit-reset-requests": "3h0m0s",
+  });
+  openai.store.close();
 });

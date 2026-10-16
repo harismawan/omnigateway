@@ -41,6 +41,7 @@ import { Section } from "../../ui/Section.tsx";
 import { Controls, Segment } from "../../ui/Segment.tsx";
 import { Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
+import { groupReadings } from "../keys/limits.ts";
 import { LogFilterBar } from "../logs/LogFilterBar.tsx";
 import { RequestDetail, RequestTable, useCurrentTime } from "../logs/RequestTable.tsx";
 import { chartSpanOf, WindowChart } from "../quota/WindowChart.tsx";
@@ -65,10 +66,13 @@ const LIMIT_WINDOW_LABEL: Readonly<Record<string, string>> = {
 };
 
 function LimitRow({ reading }: { reading: LimitReading }) {
-  const label =
+  const slot =
     reading.window === null
       ? "concurrent requests"
       : `${reading.dimension} ${LIMIT_WINDOW_LABEL[reading.window] ?? reading.window}`;
+  // An override's row sits under its model's heading, but its meter is read
+  // aloud without that heading, so the label carries the model too.
+  const label = reading.model === null ? slot : `${slot} for ${reading.model}`;
   const show = reading.dimension === "spend" ? formatUsd : formatCount;
   // A ceiling of zero admits nothing, so it is full rather than undefined.
   const fraction =
@@ -76,7 +80,7 @@ function LimitRow({ reading }: { reading: LimitReading }) {
 
   return (
     <Tr>
-      <Td>{label}</Td>
+      <Td>{slot}</Td>
       <Td $align="right" $mono>
         {/*
           Null is not zero. `concurrency` is a gauge held in the gateway process
@@ -270,6 +274,8 @@ export function ClientBoard() {
   const quota = useClientQuota(60_000);
 
   const headroom = quota.data ?? [];
+  const limitGroups = groupReadings(summary.data?.limitUsage ?? []);
+  const overridden = limitGroups.some((group) => group.model !== null);
   /**
    * Providers, each holding its accounts, each holding its windows.
    *
@@ -491,11 +497,24 @@ export function ClientBoard() {
               </tr>
             </thead>
             <tbody>
-              {(summary.data?.limitUsage ?? []).map((reading) => (
-                <LimitRow
-                  key={`${reading.dimension}:${reading.window ?? "gauge"}`}
-                  reading={reading}
-                />
+              {limitGroups.map((group) => (
+                <Fragment key={group.model ?? ""}>
+                  {/* Headings only once a model is overridden: a key with one
+                      scope has nothing to tell apart. */}
+                  {overridden ? (
+                    <Tr>
+                      <Th scope="rowgroup" colSpan={4}>
+                        {group.model ?? "Every model"}
+                      </Th>
+                    </Tr>
+                  ) : null}
+                  {group.readings.map((reading) => (
+                    <LimitRow
+                      key={`${reading.dimension}:${reading.window ?? "gauge"}`}
+                      reading={reading}
+                    />
+                  ))}
+                </Fragment>
               ))}
             </tbody>
           </Table>

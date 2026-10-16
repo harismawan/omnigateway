@@ -285,6 +285,99 @@ forEachStore((backend) => {
     expect(await s.usage.sumBuckets("nope", 0, 60_000)).toEqual([]);
   });
 
+  /**
+   * The per-model reads behind a key's model overrides.
+   *
+   * Two models on one key in the same buckets, plus another key on the model
+   * under test and pending rows on it: each is a row a filter that dropped one
+   * of its conditions would count.
+   */
+  async function twoModels(s: Awaited<ReturnType<typeof backend.fresh>>, hour: number) {
+    await s.usage.append(logRow({ id: "o1", at: hour + 10, requestedModel: "opus" }));
+    await s.usage.append(
+      logRow({ id: "o2", at: hour + 60_000 + 10, requestedModel: "opus", costUsd: 0.5 }),
+    );
+    await s.usage.append(logRow({ id: "o3", at: hour + HOUR_MS + 10, requestedModel: "opus" }));
+    await s.usage.append(logRow({ id: "f1", at: hour + 5, requestedModel: "fast" }));
+    await s.usage.append(logRow({ id: "f2", at: hour + HOUR_MS + 5, requestedModel: "fast" }));
+    await s.usage.append(
+      logRow({ id: "x1", at: hour + 10, requestedModel: "opus", apiKeyId: "k2" }),
+    );
+    await s.usage.begin(
+      logRow({ id: "p1", at: hour + 15, requestedModel: "opus", state: "pending" }),
+    );
+    await s.usage.begin(
+      logRow({ id: "p2", at: hour + HOUR_MS + 1, requestedModel: "opus", state: "pending" }),
+    );
+  }
+
+  test("sumSince narrows to one requested model, excluding pending and other keys", async () => {
+    const s = await backend.fresh();
+    const hour = Math.floor(T / HOUR_MS) * HOUR_MS;
+    await twoModels(s, hour);
+
+    expect(await s.usage.sumSince("k1", hour, "opus")).toEqual({
+      requests: 3,
+      tokens: 54,
+      costUsd: 0.502,
+    });
+    // Sliding inside the boundary hour, so the edge read is the one narrowed.
+    expect(await s.usage.sumSince("k1", hour + 11, "opus")).toEqual({
+      requests: 2,
+      tokens: 36,
+      costUsd: 0.501,
+    });
+    expect((await s.usage.sumSince("k1", hour, "fast")).requests).toBe(2);
+    expect((await s.usage.sumSince("k2", hour, "opus")).requests).toBe(1);
+    expect((await s.usage.sumSince("k1", hour, "nope")).requests).toBe(0);
+    // Unnarrowed is still the whole key.
+    expect((await s.usage.sumSince("k1", hour)).requests).toBe(5);
+  });
+
+  test("sumBuckets narrows to one requested model at the hour grain and finer", async () => {
+    const s = await backend.fresh();
+    const hour = Math.floor(T / HOUR_MS) * HOUR_MS;
+    await twoModels(s, hour);
+
+    const hours = await s.usage.sumBuckets("k1", hour, HOUR_MS, "opus");
+    expect(hours.sort((x, y) => x[0] - y[0])).toEqual([
+      [hour, { requests: 2, tokens: 36, costUsd: 0.501 }],
+      [hour + HOUR_MS, { requests: 1, tokens: 18, costUsd: 0.001 }],
+    ]);
+    const minutes = await s.usage.sumBuckets("k1", hour, 60_000, "opus");
+    expect(minutes.sort((x, y) => x[0] - y[0])).toEqual([
+      [hour, { requests: 1, tokens: 18, costUsd: 0.001 }],
+      [hour + 60_000, { requests: 1, tokens: 18, costUsd: 0.5 }],
+      [hour + HOUR_MS, { requests: 1, tokens: 18, costUsd: 0.001 }],
+    ]);
+    // The hour grain counts the whole bucket holding `since`, as the rollup
+    // does unnarrowed: `o3` sits before `since` in that hour and still counts.
+    expect(await s.usage.sumBuckets("k1", hour + HOUR_MS + 11, HOUR_MS, "opus")).toEqual([
+      [hour + HOUR_MS, { requests: 1, tokens: 18, costUsd: 0.001 }],
+    ]);
+    expect(await s.usage.sumBuckets("k1", hour + HOUR_MS + 11, HOUR_MS)).toEqual([
+      [hour + HOUR_MS, { requests: 2, tokens: 36, costUsd: 0.002 }],
+    ]);
+    expect(await s.usage.sumBuckets("k1", hour, HOUR_MS, "nope")).toEqual([]);
+    expect(await s.usage.sumBuckets("k2", hour, 60_000, "fast")).toEqual([]);
+    // Unnarrowed still sums both models into one bucket per hour.
+    const whole = await s.usage.sumBuckets("k1", hour, HOUR_MS);
+    expect(whole.sort((x, y) => x[0] - y[0]).map(([, sums]) => sums.requests)).toEqual([3, 2]);
+  });
+
+  test("oldestSince narrows to one requested model", async () => {
+    const s = await backend.fresh();
+    const hour = Math.floor(T / HOUR_MS) * HOUR_MS;
+    await twoModels(s, hour);
+    // `f1` at +5 is older, and the pending `p1` sits between.
+    expect(await s.usage.oldestSince("k1", hour, "opus")).toBe(hour + 10);
+    expect(await s.usage.oldestSince("k1", hour)).toBe(hour + 5);
+    expect(await s.usage.oldestSince("k1", hour + 11, "opus")).toBe(hour + 60_000 + 10);
+    expect(await s.usage.oldestSince("k1", hour + 6, "fast")).toBe(hour + HOUR_MS + 5);
+    expect(await s.usage.oldestSince("k2", hour + 11, "opus")).toBeNull();
+    expect(await s.usage.oldestSince("k1", hour, "nope")).toBeNull();
+  });
+
   test("the rollup is rebuilt from the rows, audited against them, and pruned with them", async () => {
     const s = await backend.fresh();
     const hour = Math.floor(T / HOUR_MS) * HOUR_MS;

@@ -45,7 +45,7 @@ const BODY = { model: "fast", max_tokens: 100, messages: [{ role: "user", conten
 
 async function fleet(
   limits: LimitConfig,
-  coords: () => [Coord, Coord] = shared,
+  coords: Coords = shared,
   openStore: () => Promise<Store> = memoryStore,
 ) {
   const store = await openStore();
@@ -57,7 +57,7 @@ async function fleet(
     }),
   );
   const { raw } = await seedApiKey(store, { limits, modelAllowlist: null });
-  const [coordA, coordB] = coords();
+  const [coordA, coordB] = await coords();
 
   let n = 0;
   const replica = (coord: Coord) =>
@@ -87,17 +87,16 @@ async function fleet(
   return { store, a: replica(coordA), b: replica(coordB), call };
 }
 
+/** Both replicas' coordinators, ready to claim against once this settles. */
+type Coords = () => [Coord, Coord] | Promise<[Coord, Coord]>;
+
 /** One in-memory coordinator handed to both replicas. */
 function shared(): [Coord, Coord] {
   const coord = memoryCoord();
   return [coord, coord];
 }
 
-function suite(
-  name: string,
-  coords: () => [Coord, Coord],
-  openStore: () => Promise<Store> = memoryStore,
-) {
+function suite(name: string, coords: Coords, openStore: () => Promise<Store> = memoryStore) {
   describe(name, () => {
     test("a concurrency ceiling holds across replicas", async () => {
       const { store, a, b, call } = await fleet({ concurrency: 1 }, coords, openStore);
@@ -142,10 +141,20 @@ suite("two replicas over one memory coord", shared);
  * what two pods actually hold. Skipped without a Redis to hand; CI names one.
  */
 const url = process.env.OMNI_TEST_REDIS_URL;
-const twoRedis = (): [Coord, Coord] => {
+const twoRedis = async (): Promise<[Coord, Coord]> => {
   const db = `${(url ?? "").replace(/\/\d+$/, "")}/14`;
   const admin = new RedisClient(db);
-  void admin.send("FLUSHDB", []).finally(() => admin.close());
+  // Awaited. Sent and left to land whenever, the flush raced the suite's own
+  // first claims: landing after them it erased the ring stamps the ceiling is
+  // counted from, and a per-minute ceiling of two admitted a third request —
+  // observed once under a full-suite run, reproduced every time by delaying
+  // the flush 60ms. A flake shaped exactly like the bug this file exists to
+  // catch is a guard that teaches people to rerun it.
+  try {
+    await admin.send("FLUSHDB", []);
+  } finally {
+    admin.close();
+  }
   return [redisCoord({ url: db }), redisCoord({ url: db })];
 };
 if (url !== undefined) suite("two replicas over two redis coords", twoRedis);
