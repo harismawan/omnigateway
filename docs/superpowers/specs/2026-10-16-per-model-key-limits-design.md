@@ -186,7 +186,9 @@ Headers keep each vendor's dialect and report the scope that will deny first. On
 the limiter corrects **every** violated long window first — `oldestSince` per violated window, asked
 of that subject's own rows, passing the model for an override — and only then chooses last-to-clear
 over the corrected resets. The corrected instant moves into that subject's headroom before the
-scopes are combined, so the headers name the same instant as the `Retry-After`.
+scopes are combined, and the refused dimension's header is then the violated entry itself — not
+whichever entry headroom-by-proportion picked — so the headers name the same instant as the
+`Retry-After`.
 `RateLimitExceeded` is unchanged.
 
 ### Logs, metrics, failure
@@ -298,3 +300,16 @@ spec, and what review found after it:
 - **Other pins review asked for**: `count_tokens` consuming after the allowlist, an override whose
   ceiling sits in a later dimension than an all-null one, and the `model` field on both limiter
   store-fault warnings.
+
+Re-review of the fixes above found three more:
+
+- **Headers could still disagree with `Retry-After`.** Headroom is chosen per dimension by
+  proportion, the violation by latest reset; two full entries tie. Probe: key-wide `requests 1m: 1`
+  filled by another model, `opus` override `requests 5h: 2` with its oldest row 2h old —
+  `Retry-After` 10,799s, but the `requests` header named the key-wide minute (59s). Reachable inside
+  one scope on the original path too (a full minute ties a full week). On refusal the refused
+  dimension now reports the violated entry.
+- **Plan tests EXPLAINed copies of the SQL**, so `+requested_model = ?` (SQLite) and
+  `(requested_model || '') = $4` (Postgres) kept results, lost the seek, and passed. The narrowed
+  statements are exported as `NARROWED_SQL` and the plan tests EXPLAIN those strings.
+- **One reset read per subject and window** on a refusal was unpinned; now pinned.
