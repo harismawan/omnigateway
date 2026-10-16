@@ -277,7 +277,7 @@ export const openaiOAuthFlow: PkcePluginFlow = {
     return { authorizeUrl: url.toString(), pending: { verifier, challenge, state, redirectUri } };
   },
 
-  async *exchange({ code, pending, fail, now }) {
+  async *exchange({ code, pending, providerData, fail, now }) {
     const [rawCode, pastedState] = code.split("#");
     if (pastedState !== undefined && pastedState !== pending.state) {
       throw fail("AUTH", "authorization state mismatch");
@@ -293,7 +293,9 @@ export const openaiOAuthFlow: PkcePluginFlow = {
       fail,
     );
 
-    return toResult(token, null, now, null, {});
+    // A reconnect hands back the stored row, so the installation id and id
+    // salt survive it; the account id still comes from the new token only.
+    return toResult(token, null, now, null, providerData ?? {});
   },
 
   async *refresh({ refreshToken, providerData, fail, now }) {

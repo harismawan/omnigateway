@@ -204,7 +204,17 @@ export type ResetRedeemed = { windowsReset: number | null };
 type PluginFlowBase = {
   readonly supportsManualPaste: boolean;
   start(input: { redirectUri: string } & AuthHelpers): AuthStep<AuthorizeStart>;
-  exchange(input: { code: string; pending: PendingFlow } & AuthHelpers): AuthStep<FlowResult>;
+  /**
+   * `providerData` is present on a reconnect only: the credential's stored
+   * state, for a flow that carries forward what it minted at first connect.
+   */
+  exchange(
+    input: {
+      code: string;
+      pending: PendingFlow;
+      providerData?: Record<string, unknown>;
+    } & AuthHelpers,
+  ): AuthStep<FlowResult>;
   refresh(
     input: { refreshToken: string; providerData: Record<string, unknown> } & AuthHelpers,
   ): AuthStep<FlowResult>;

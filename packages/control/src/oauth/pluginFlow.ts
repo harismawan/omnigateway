@@ -420,8 +420,10 @@ export function oauthAdapter(
     supportsManualPaste: flow.supportsManualPaste,
     start: (opts: { redirectUri: string }, deps: OAuthDeps) =>
       runStep(id, "start", flow.start({ ...opts, ...helpers(deps) }), deps, origins),
-    exchange: (input: { code: string; pending: PendingFlow }, deps: OAuthDeps) =>
-      runStep(id, "exchange", flow.exchange({ ...input, ...helpers(deps) }), deps, origins),
+    exchange: (
+      input: { code: string; pending: PendingFlow; providerData?: Record<string, unknown> },
+      deps: OAuthDeps,
+    ) => runStep(id, "exchange", flow.exchange({ ...input, ...helpers(deps) }), deps, origins),
     refresh: (refreshToken: string, deps: OAuthDeps, providerData: Record<string, unknown>) =>
       runStep(
         id,

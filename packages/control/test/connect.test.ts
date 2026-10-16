@@ -3,7 +3,7 @@ import { createConnectFlows, type FlowResult, type OAuthProvider } from "@omni/c
 import { GatewayError } from "@omni/ir";
 import type { HttpClient, HttpRequest } from "@omni/providers";
 import { memoryStore } from "@omni/testkit";
-import { kiloOAuth } from "./oauth/builtins.ts";
+import { kiloOAuth, openaiOAuth } from "./oauth/builtins.ts";
 
 const RESULT: FlowResult = {
   secrets: {
@@ -163,6 +163,107 @@ test("a reconnect updates the existing credential in place", async () => {
   // And no duplicate row was created:
   const all = await store.credentials.list();
   expect(all.length).toBe(1);
+});
+
+test("a reconnect hands the exchange the stored provider data; a new connect hands none", async () => {
+  // Generic: control knows nothing of what the provider keeps there. A flow
+  // that minted per-credential state at connect (OpenAI's installation id and
+  // id salt) needs it back on reconnect, or reconnecting re-mints it.
+  const seen: unknown[] = [];
+  const provider: OAuthProvider = {
+    id: "grok",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: ({ redirectUri }) => ({
+      authorizeUrl: "https://auth.x.ai/oauth2/auth",
+      pending: { verifier: "v", challenge: "c", state: "the-state", redirectUri },
+    }),
+    exchange: async (input) => {
+      seen.push("providerData" in input ? input.providerData : "absent");
+      return RESULT;
+    },
+    refresh: async () => RESULT,
+  };
+  const store = await memoryStore();
+  await store.credentials.create({
+    id: "cred-1",
+    provider: "grok",
+    label: "grok",
+    authType: "oauth",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: { accountId: "acct_old", kept: "yes" },
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: "a",
+    refreshToken: "r",
+    apiKey: null,
+    idToken: null,
+  });
+  const flows = createConnectFlows({
+    store,
+    providers: { grok: provider },
+    http: noHttp,
+    now: () => 0,
+  });
+  const callback = "http://127.0.0.1:56121/callback?code=auth-code&state=the-state";
+
+  const again = await flows.start("grok", "grok", "cred-1");
+  await flows.finish(again.flowId, callback);
+  const fresh = await flows.start("grok", "another");
+  await flows.finish(fresh.flowId, callback);
+
+  expect(seen).toEqual([{ accountId: "acct_old", kept: "yes" }, "absent"]);
+});
+
+test("reconnecting an OpenAI credential keeps its installation id and id salt", async () => {
+  const stored = {
+    accountId: "acct_1",
+    installationId: "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+    idSalt: "ab".repeat(32),
+  };
+  const store = await memoryStore();
+  await store.credentials.create({
+    id: "cred-openai",
+    provider: "openai",
+    label: "openai",
+    authType: "oauth",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: stored,
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: "a",
+    refreshToken: "r",
+    apiKey: null,
+    idToken: null,
+  });
+  const tokenHttp: HttpClient = async () => ({
+    status: 200,
+    headers: new Headers({ "content-type": "application/json" }),
+    body: null,
+    text: async () => JSON.stringify({ access_token: "new", expires_in: 60 }),
+  });
+  const flows = createConnectFlows({
+    store,
+    providers: { openai: openaiOAuth },
+    http: tokenHttp,
+    now: () => 0,
+  });
+
+  const start = await flows.start("openai", "openai", "cred-openai");
+  const state = new URL(start.authorizeUrl).searchParams.get("state");
+  await flows.finish(start.flowId, `auth-code#${state}`);
+
+  const after = await store.credentials.get("cred-openai");
+  expect(after?.providerData.installationId).toBe(stored.installationId);
+  expect(after?.providerData.idSalt).toBe(stored.idSalt);
 });
 
 test("start refuses an invalid or mismatched credential id for reconnect", async () => {
