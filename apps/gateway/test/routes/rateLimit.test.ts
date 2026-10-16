@@ -3,7 +3,7 @@ import { memoryCoord } from "@omni/coord";
 import type { StreamEvent } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
-import { limitConfigBaseSchema } from "@omni/ratelimit/catalog";
+import { parseLimitConfig } from "@omni/ratelimit/catalog";
 import {
   captureLogger,
   memoryStore,
@@ -13,6 +13,7 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
+import { z } from "zod";
 import { ApiKeyRateLimiter, modelSubjectId } from "../../src/auth/rateLimit.ts";
 import { type ProxyDeps, proxyRoutes } from "../../src/routes/proxy.ts";
 
@@ -604,16 +605,78 @@ test("count_tokens is charged a model override's requests, and only its requests
 });
 
 /**
- * The rollback story the spec chose: nesting overrides in `limits` fails
- * closed. A build without this feature parses the stored row with what is now
- * `limitConfigBaseSchema` — the previous `limitConfigSchema`, byte for byte —
- * and its `.strict()` refuses `models`, so `authenticateApiKey` answers
- * `INTERNAL` for that key instead of serving it unlimited.
+ * `consume` runs after the allowlist, so a count for a model the key may not
+ * call is refused without spending the key's request ceiling. Charged first,
+ * the refused count would keep its stamp and the next, allowed one would 429.
  */
-test("a row carrying overrides is refused by the previous schema shape", () => {
-  const stored = JSON.parse('{"requests":{"1m":60},"models":{"opus":{"concurrency":1}}}');
-  expect(limitConfigBaseSchema.safeParse(stored).success).toBe(false);
-  expect(limitConfigBaseSchema.safeParse({ requests: { "1m": 60 } }).success).toBe(true);
+test("count_tokens for a disallowed model spends nothing", async () => {
+  const { store, call } = await harness({
+    limits: { requests: { "1m": 1 } },
+    modelAllowlist: ["fast"],
+  });
+  const count = (model: string) => call({ ...BODY, model }, {}, "/v1/messages/count_tokens");
+  expect((await count("slow")).status).toBe(401);
+  expect((await count("fast")).status).toBe(200);
+  expect((await count("fast")).status).toBe(429);
+  store.close();
+});
+
+/**
+ * The rollback story the spec chose: nesting overrides in `limits` fails
+ * closed on a build that predates them.
+ *
+ * `PREVIOUS_SCHEMA` is a frozen copy of `limitConfigSchema` as `main` shipped it
+ * before `models` existed (`packages/ratelimit/src/catalog.ts`, which
+ * `parseLimitConfig` ran after its `__proto__` walk). It is deliberately a copy,
+ * not an import: an import would follow the current code and prove only that
+ * today's base schema refuses `models`, which says nothing about the build an
+ * operator rolls back to. Edit it only to match a released build, never the
+ * working tree.
+ *
+ * What this proves is the first half — the older parse throws on a stored row
+ * carrying `models` and accepts one that does not. The second half, that a
+ * throwing parse makes `authenticateApiKey` answer `INTERNAL` rather than serve
+ * the key unlimited, is pinned in `test/auth/apiKey.test.ts` ("a key whose
+ * stored limits cannot be read is refused, not served unlimited").
+ */
+const previousCount = z.number().int().positive().nullable();
+const PREVIOUS_SCHEMA = z
+  .object({
+    requests: z
+      .object({
+        "1m": previousCount.optional(),
+        "5h": previousCount.optional(),
+        "1w": previousCount.optional(),
+      })
+      .strict()
+      .optional(),
+    tokens: z
+      .object({
+        "1m": previousCount.optional(),
+        "5h": previousCount.optional(),
+        "1w": previousCount.optional(),
+      })
+      .strict()
+      .optional(),
+    spend: z
+      .object({
+        "5h": z.number().positive().nullable().optional(),
+        "1w": z.number().positive().nullable().optional(),
+      })
+      .strict()
+      .optional(),
+    concurrency: previousCount.optional(),
+  })
+  .strict();
+
+test("a row carrying overrides is refused by the build that predates them", () => {
+  const withOverrides = JSON.parse('{"requests":{"1m":60},"models":{"opus":{"concurrency":1}}}');
+  expect(PREVIOUS_SCHEMA.safeParse(withOverrides).success).toBe(false);
+  // Only the overrides are what it refuses: the same row without them parses,
+  // so a key with none is unaffected by the rollback.
+  expect(PREVIOUS_SCHEMA.safeParse({ requests: { "1m": 60 }, concurrency: 8 }).success).toBe(true);
+  // And this build writes exactly that row, so the refusal is reachable.
+  expect(parseLimitConfig(withOverrides)).toEqual(withOverrides);
 });
 
 test("debits a finished request's tokens and cost exactly once", async () => {

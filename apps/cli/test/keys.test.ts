@@ -839,3 +839,33 @@ test("keys list and keys limits show model overrides in the flag's own syntax", 
   ) as LimitsOutput;
   expect(json.limitUsage.map((reading) => reading.model)).toEqual([null, "llama3:8b"]);
 });
+
+test("--model-limit keeps a model named for a prototype member, or carrying `=`", async () => {
+  const root = makeRoot();
+  const created = await cli(
+    [
+      "keys",
+      "create",
+      "--label",
+      "odd",
+      "--model-limit",
+      "constructor:requests:1m=5",
+      "--model-limit",
+      "toString:concurrency=1",
+      "--model-limit",
+      "tier=gold:tokens:1w=100",
+      "--json",
+    ],
+    { root },
+  );
+  expect(created.code).toBe(0);
+  expect(await limitsOf(root, "odd")).toEqual({
+    models: {
+      constructor: { requests: { "1m": 5 } },
+      toString: { concurrency: 1 },
+      "tier=gold": { tokens: { "1w": 100 } },
+    },
+  });
+  // Nothing leaked onto the prototype a plain object would have handed back.
+  expect(Object.hasOwn(Object, "requests")).toBe(false);
+});

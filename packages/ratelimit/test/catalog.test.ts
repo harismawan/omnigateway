@@ -179,3 +179,12 @@ test("modelOverride answers own members only", () => {
   const odd = parseLimitConfig({ models: { constructor: { concurrency: 3 } } });
   expect(modelOverride(odd, "constructor")).toEqual({ concurrency: 3 });
 });
+
+test("an override is non-empty when any dimension sets a ceiling, not only the first", () => {
+  // `requests` is present and all null; the ceiling is in a later dimension.
+  const override = { requests: { "1m": null }, tokens: { "1w": 5 } };
+  expect(parseLimitConfig({ models: { opus: override } }).models?.opus).toEqual(override);
+  expect(
+    parseLimitConfig({ models: { opus: { requests: {}, spend: { "5h": 1 } } } }).models?.opus,
+  ).toEqual({ requests: {}, spend: { "5h": 1 } });
+});

@@ -908,3 +908,44 @@ test("every violated long window is corrected, not only the reported one", async
   expect(refused.headroom.requests?.resetAt).toBe(T0 + 3 * HOUR);
   store.close();
 });
+
+/**
+ * A store fault on a model's subject names the model, on the existing `model`
+ * field: without it the line says a key's counters were unreadable and leaves
+ * the operator to guess which of its scopes stopped enforcing.
+ */
+test("a failing read for a model's subject is logged with the model", async () => {
+  const HOUR = 3_600_000;
+  const { store, keyId, limiter, logger, limits, at } = await harness({
+    models: { opus: { tokens: { "5h": 1 }, requests: { "5h": 1 } } },
+  });
+  await seedRow(store, keyId, T0 - HOUR, {}, "opus");
+  store.usage.sumBuckets = async () => {
+    throw new Error("database is locked");
+  };
+  at(T0);
+  (await limiter.admit(keyId, limits, "opus", "req_test")).release();
+  expect(logger.records).toContainEqual(
+    expect.objectContaining({
+      msg: "rate limit counters unavailable",
+      fields: expect.objectContaining({ apiKeyId: keyId, model: "opus" }),
+    }),
+  );
+  store.close();
+
+  // And the reset read on the refusal path, which logs the same way.
+  const refusing = await harness({ models: { opus: { requests: { "5h": 1 } } } });
+  await seedRow(refusing.store, refusing.keyId, T0 - HOUR, {}, "opus");
+  refusing.store.usage.oldestSince = async () => {
+    throw new Error("database is locked");
+  };
+  refusing.at(T0);
+  await denied(() => refusing.limiter.admit(refusing.keyId, refusing.limits, "opus", "req_test"));
+  expect(refusing.logger.records).toContainEqual(
+    expect.objectContaining({
+      msg: "rate limit reset unavailable",
+      fields: expect.objectContaining({ apiKeyId: refusing.keyId, model: "opus" }),
+    }),
+  );
+  refusing.store.close();
+});
