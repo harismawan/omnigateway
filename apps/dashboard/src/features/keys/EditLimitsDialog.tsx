@@ -148,13 +148,13 @@ export function EditLimitsDialog({ apiKey, onOpenChange }: EditLimitsDialogProps
             stacks with the limits above: a request for that model must pass both.
           </Legend>
           {overrides.map((row) => {
-            const model = row.model.trim();
-            const name = model.length === 0 ? "a new model" : model;
+            const model = row.model;
+            const name = model.trim().length === 0 ? "a new model" : model;
             // A hint, not an error: an override the key cannot reach is
             // harmless, and refusing it would make unrelated edits unsavable
             // the day a model is renamed.
             const unreachable =
-              model.length > 0 &&
+              model.trim().length > 0 &&
               apiKey?.modelAllowlist !== null &&
               apiKey?.modelAllowlist !== undefined &&
               !apiKey.modelAllowlist.includes(model);
@@ -204,7 +204,7 @@ export function EditLimitsDialog({ apiKey, onOpenChange }: EditLimitsDialogProps
               onClick={() => {
                 setOverrides((rows) => [
                   ...rows,
-                  { id: `added-${added}`, model: "", slots: draftFrom({}) },
+                  { id: `added-${added}`, model: "", stored: null, slots: draftFrom({}) },
                 ]);
                 setAdded((count) => count + 1);
               }}

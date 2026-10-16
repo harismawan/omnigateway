@@ -632,6 +632,62 @@ describe("KeysBoard", () => {
   });
 
   /**
+   * A model name is matched exactly, so a name typed with a stray space would
+   * be an override that never applies. It is refused rather than trimmed: a
+   * trim would silently rename the override the operator sees.
+   */
+  test("a typed model name with surrounding spaces is refused, not trimmed", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey({ limits: {} })] }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Add model override" }));
+    const added = within(dialog).getByRole("group", { name: "Override for a new model" });
+    await user.type(within(added).getByLabelText("Model"), "deep ");
+    await user.type(within(added).getByLabelText("Concurrent"), "2");
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("spaces around it");
+    expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+  });
+
+  /**
+   * The other half of not trimming: a stored name the API accepted with a space
+   * in it goes back exactly as it came, so an unrelated edit neither renames it
+   * nor becomes unsavable over it.
+   */
+  test("a stored override keeps its exact name through an unrelated edit", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({ limits: { requests: { "1m": 60 }, models: { " opus": { concurrency: 1 } } } }),
+        ],
+      }),
+      "PUT /api/keys/key-1/limits": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit limits for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    const perMinute = within(dialog).getAllByLabelText("Requests per minute")[0];
+    if (perMinute === undefined) throw new Error("no key-wide field");
+    await user.clear(perMinute);
+    await user.type(perMinute, "90");
+    await user.click(within(dialog).getByRole("button", { name: "Save limits" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(
+        JSON.stringify({
+          limits: { requests: { "1m": 90 }, models: { " opus": { concurrency: 1 } } },
+        }),
+      );
+    });
+  });
+
+  /**
    * An override on a model the key cannot call is harmless and stays savable,
    * so it is a hint rather than an error: refusing it would make unrelated edits
    * unsavable the day a model is renamed.

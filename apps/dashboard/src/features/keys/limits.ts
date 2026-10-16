@@ -199,15 +199,26 @@ export function draftToLimits(draft: LimitDraft): DraftResult {
   return { limits };
 }
 
-/** The schema's own bounds on overrides, mirrored so a field is named first. */
-const MAX_MODEL_OVERRIDES = 64;
-const MAX_MODEL_NAME_LENGTH = 256;
+/**
+ * The schema's own bounds on overrides, mirrored so a field is named first.
+ *
+ * Copies, because the console may not import `@omni/ratelimit`; pinned to the
+ * originals by `apps/gateway/test/routes/modelOverrideBoundsMirror.test.ts`.
+ */
+export const MAX_MODEL_OVERRIDES = 64;
+export const MAX_MODEL_NAME_LENGTH = 256;
 
 /**
  * One per-model override being edited. `id` is the row's identity while the
- * dialog is open, so renaming a model does not remount its fields.
+ * dialog is open, so renaming a model does not remount its fields. `stored` is
+ * the name the row was read back with, null for a row added here.
  */
-export type OverrideDraft = { id: string; model: string; slots: LimitDraft };
+export type OverrideDraft = {
+  id: string;
+  model: string;
+  stored: string | null;
+  slots: LimitDraft;
+};
 
 /**
  * The stored overrides as editable rows, in the order the matrix holds them.
@@ -218,6 +229,7 @@ export function overridesFrom(limits: LimitConfig | null): OverrideDraft[] {
   return Object.entries(limits.models ?? {}).map(([model, override], index) => ({
     id: `stored-${index}`,
     model,
+    stored: model,
     slots: draftFrom(override),
   }));
 }
@@ -232,6 +244,10 @@ export type OverridesResult = { models: Record<string, LimitConfigBase> } | { pr
  * limit, because an empty one reads as a ceiling that is not there — removing
  * the row is how an override goes away. An empty `models` is returned as such
  * and the caller leaves the member out.
+ *
+ * Names are never trimmed. A model is matched exactly, so a trim would rename
+ * an override behind the operator's back; a name *typed* with surrounding
+ * spaces is refused instead, while a stored one goes back exactly as it came.
  */
 export function overridesToModels(overrides: readonly OverrideDraft[]): OverridesResult {
   if (overrides.length > MAX_MODEL_OVERRIDES) {
@@ -240,8 +256,13 @@ export function overridesToModels(overrides: readonly OverrideDraft[]): Override
   const entries: Array<[string, LimitConfigBase]> = [];
   const seen = new Set<string>();
   for (const override of overrides) {
-    const model = override.model.trim();
-    if (model.length === 0) return { problem: "Each per-model override needs a model." };
+    const model = override.model;
+    if (model.trim().length === 0) return { problem: "Each per-model override needs a model." };
+    if (model !== model.trim() && model !== override.stored) {
+      return {
+        problem: `"${model}" has spaces around it, and model names are matched exactly. Remove them.`,
+      };
+    }
     if (model.length > MAX_MODEL_NAME_LENGTH) {
       return { problem: `A model name is at most ${MAX_MODEL_NAME_LENGTH} characters.` };
     }
