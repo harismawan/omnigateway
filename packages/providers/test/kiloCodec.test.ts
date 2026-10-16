@@ -589,7 +589,8 @@ test("a codec's body encoding reaches the transport, and only a known one", asyn
         (e: unknown) => e,
       );
 
-  expect(await send({ request: { ...wire, bodyEncoding: "zstd" } })).toBeNull();
+  const zstd = { ...wire, headers: [["Content-Encoding", "zstd"]], bodyEncoding: "zstd" };
+  expect(await send({ request: zstd })).toBeNull();
   expect(sent[0]?.bodyEncoding).toBe("zstd");
   expect(await send({ request: wire })).toBeNull();
   expect(sent[1] !== undefined && "bodyEncoding" in sent[1]).toBe(false);
@@ -601,6 +602,35 @@ test("a codec's body encoding reaches the transport, and only a known one", asyn
     const failure = await send({ request: { ...wire, bodyEncoding } });
     expect(failure).toMatchObject({ code: "UPSTREAM", provider: "kilo" });
     expect((failure as Error).message).toContain("did not return a usable request");
+  }
+
+  // The marker and the header must agree. Compressed bytes under no header, or
+  // plain JSON labelled zstd, are both a request the upstream cannot read; and
+  // the length is the transport's to count, after compression.
+  for (const headers of [
+    [],
+    [["content-encoding", "gzip"]],
+    [
+      ["content-encoding", "zstd"],
+      ["content-encoding", "zstd"],
+    ],
+    [
+      ["content-encoding", "zstd"],
+      ["content-length", "2"],
+    ],
+  ]) {
+    const failure = await send({ request: { ...wire, headers, bodyEncoding: "zstd" } });
+    expect([headers, (failure as Error | null)?.message]).toEqual([
+      headers,
+      expect.stringContaining("did not return a usable request"),
+    ]);
+  }
+  for (const headers of [[["content-encoding", "zstd"]], [["Content-Length", "2"]]]) {
+    const failure = await send({ request: { ...wire, headers } });
+    expect([headers, (failure as Error | null)?.message]).toEqual([
+      headers,
+      expect.stringContaining("did not return a usable request"),
+    ]);
   }
   expect(sent).toHaveLength(2);
 });

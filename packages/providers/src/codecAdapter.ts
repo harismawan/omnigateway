@@ -42,6 +42,26 @@ function codecFailure(id: ProviderId, hook: string, what: string): GatewayError 
  * coerced: `String(someObject)` produces `[object Object]`, which is a value
  * that looks like data and explains nothing.
  */
+/**
+ * Whether a request's framing headers match what the transport will send.
+ *
+ * `content-length` is the transport's alone: it counts the bytes after any
+ * encoding, so a codec's own figure is wrong exactly when an encoding applies.
+ * `content-encoding` must be present once, saying `zstd`, when the body is
+ * marked for zstd, and absent otherwise — compressed bytes under no header, or
+ * plain JSON under one, are each a body the upstream cannot read.
+ */
+function framingAgrees(
+  headers: readonly (readonly [string, string])[],
+  bodyEncoding: unknown,
+): boolean {
+  const named = (name: string) => headers.filter(([n]) => n.toLowerCase() === name);
+  if (named("content-length").length > 0) return false;
+  const encodings = named("content-encoding");
+  if (bodyEncoding === undefined) return encodings.length === 0;
+  return encodings.length === 1 && encodings[0]?.[1].trim().toLowerCase() === bodyEncoding;
+}
+
 function boundedDegradations(entries: readonly string[] | undefined): string[] {
   if (!Array.isArray(entries)) return [];
   return entries
@@ -296,7 +316,8 @@ export function codecAdapter(
             pair.length === 2 &&
             typeof pair[0] === "string" &&
             typeof pair[1] === "string",
-        )
+        ) ||
+        !framingAgrees(request.headers, request.bodyEncoding)
       ) {
         throw codecFailure(id, "buildRequest", "did not return a usable request");
       }
