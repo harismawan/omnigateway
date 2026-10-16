@@ -472,7 +472,14 @@ test("each reasoning mode maps to the effort Codex would send", () => {
   });
   const between = sent({ mode: "betweenTools" }, "gpt-6-sol");
   expect(between.reasoning).toEqual({ effort: "low", context: "all_turns" });
-  expect(between.degradations).toContain("openai:reasoning-between-tools-as-off");
+  // This leg sends an effort, not `off`, so it says so; the API-key leg keeps
+  // the older string, and rows carrying either stay readable.
+  expect(between.degradations).toContain("openai:reasoning-between-tools-as-lowest");
+  expect(between.degradations).not.toContain("openai:reasoning-between-tools-as-off");
+  expect(sent({ mode: "off" }).degradations).toContain("openai:reasoning-off-as-lowest");
+  expect(sent({ mode: "adaptive", effort: "high" }).degradations).not.toContain(
+    "openai:reasoning-off-as-lowest",
+  );
 
   // A token budget has no effort spelling: catalog default, loss recorded.
   const budget = sent({ mode: "budget", budgetTokens: 4000 }, "gpt-6-sol");
@@ -487,6 +494,35 @@ test("the catalog was read from the release the version header claims", () => {
   // out. The fixture names the release it was captured from, too.
   expect(header(build(FOLLOW_UP), "version")).toBe(CODEX_CATALOG_RELEASE);
   expect(FIXTURE.headerValues.version).toBe(CODEX_CATALOG_RELEASE);
+});
+
+test("a client effort outside Codex's ladder never reaches the metadata header", () => {
+  // The client's bag value still goes in the body — the upstream refuses it
+  // there, as it would for Codex — but the header carries only a ladder value.
+  for (const effort of ["x\r\nx-injected: yes", "e".repeat(5000), "LOW", "", "über"]) {
+    const built = build({
+      ...FOLLOW_UP,
+      vendor: { openai: { prompt_cache_key: THREAD, reasoning: { effort } } },
+    });
+    expect([effort, metadataOf(built).reasoning_effort]).toEqual([effort, "low"]);
+    expect(header(built, "x-codex-turn-metadata")).not.toContain("x-injected");
+  }
+  const ultra = build({
+    ...FOLLOW_UP,
+    vendor: { openai: { prompt_cache_key: THREAD, reasoning: { effort: "ultra" } } },
+  });
+  expect(metadataOf(ultra).reasoning_effort).toBe("ultra");
+});
+
+test("turn metadata is ASCII-only JSON, whatever the model id holds", () => {
+  for (const model of ["gpt-é", "gpt-\u{1F600}", "gpt\u007f"]) {
+    const built = build(FOLLOW_UP, { model });
+    const value = header(built, "x-codex-turn-metadata") ?? "";
+    expect([model, /^[\x20-\x7e]+$/.test(value)]).toEqual([model, true]);
+    expect(metadataOf(built).model).toBe(model);
+    // The routing hint has no escape, so an id it cannot carry leaves it out.
+    expect(header(built, "x-codex-routing-hint")).toBeUndefined();
+  }
 });
 
 test("model-specific metadata comes from the Codex catalog", () => {

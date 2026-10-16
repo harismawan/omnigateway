@@ -33,6 +33,27 @@ export type CodexModel = {
 
 export const CODEX_CATALOG_RELEASE = "0.163.0";
 
+/**
+ * The named members of Codex 0.163.0's `ReasoningEffort` (`openai_models.rs`).
+ * The turn-metadata header carries an effort only from this set: a client's
+ * bag value is free text, and the header is no place for it.
+ */
+const CODEX_EFFORTS: ReadonlySet<string> = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "persistent",
+]);
+
+export function isCodexEffort(value: unknown): value is string {
+  return typeof value === "string" && CODEX_EFFORTS.has(value);
+}
+
 const entry = (
   defaultEffort: string,
   nodeReplAutoReviewRequired: boolean,

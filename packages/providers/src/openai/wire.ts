@@ -2,7 +2,7 @@ import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { moveToResponsesText } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 import { responsesFiles, withFileText } from "../toolResultFiles.ts";
-import { codexModel } from "./codexCatalog.ts";
+import { codexModel, isCodexEffort } from "./codexCatalog.ts";
 import { isUuid, threadIdFrom } from "./codexIdentity.ts";
 import { type CodexTurn, codexTurn, toLiteInput } from "./codexLite.ts";
 
@@ -454,8 +454,16 @@ export function toResponsesWire(
   if (opts.oauth) {
     body.parallel_tool_calls = !lite && codexModel(model).supportsParallelToolCalls;
   }
-  if (req.reasoning?.mode === "betweenTools")
-    degradations.push("openai:reasoning-between-tools-as-off");
+  // The OAuth leg sends the lowest effort rather than none, so it says so; the
+  // older string stays the API-key leg's, and rows carrying either stay
+  // readable — degradations are forensic text, never parsed.
+  if (req.reasoning?.mode === "betweenTools") {
+    note(
+      opts.oauth
+        ? "openai:reasoning-between-tools-as-lowest"
+        : "openai:reasoning-between-tools-as-off",
+    );
+  }
   if (opts.oauth) {
     body.reasoning = codexReasoning(req, model, note);
   } else if (
@@ -526,14 +534,15 @@ export function toResponsesWire(
     startedAt: opts.startedAt,
   });
   body.input = built.input;
-  // The effort actually sent, after the client's bag had its say.
+  // The effort actually sent, after the client's bag had its say — when it is
+  // one Codex could send. A bag value is free text bound for a header.
   const sent = body.reasoning?.effort;
   const codex = codexTurn({
     threadId: key,
     turnId: built.turnId,
     installationSeed: opts.accountId ?? seed,
     model,
-    effort: typeof sent === "string" ? sent : codexModel(model).defaultEffort,
+    effort: isCodexEffort(sent) ? sent : codexModel(model).defaultEffort,
     startedAt: built.startedAt,
   });
   body.client_metadata = codex.clientMetadata;
