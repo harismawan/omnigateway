@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { zstdDecompressSync } from "node:zlib";
 import { createLogger } from "@omni/ir";
 import { CONNECT_ATTEMPT_TIMEOUT_MS, nodeHttpClient } from "../src/http-client.ts";
@@ -294,6 +295,61 @@ test("a zstd-marked request goes out compressed, counted in compressed bytes", a
   expect(Buffer.from(zstdDecompressSync(sent)).toString("utf8")).toBe(body);
   // The transport adds no header of its own; the codec placed this one.
   expect(head.match(/content-encoding/gi)).toHaveLength(1);
+  s.stop();
+});
+
+/**
+ * A deterministic, varied body: varied enough that zstd levels 3 and 4 produce
+ * different bytes, which a repetitive body does not.
+ */
+function syntheticBody(): string {
+  const words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+  const more = ["golf", "hotel", "india", "juliet", "kilo", "lima"];
+  const all = [...words, ...more];
+  let seed = 7;
+  const next = (): number => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed;
+  };
+  return JSON.stringify({
+    model: "gpt-6-astra",
+    input: Array.from({ length: 400 }, (_, i) => ({
+      type: "message",
+      role: i % 2 ? "assistant" : "user",
+      text: Array.from({ length: 12 }, () => `${all[next() % all.length]}${next() % 97}`).join(" "),
+    })),
+  });
+}
+
+test("the zstd frame is the one Codex writes: streamed, no content size, 2 MiB window, level 3", async () => {
+  // Codex compresses with `zstd::stream::encode_all(…, 3)`, which never pledges a
+  // size: no frame content size, not single-segment, and the level's own 2^21
+  // window. A one-shot compress knows the size and writes a different header.
+  // Recompressing four real Codex 0.163.0 bodies this way reproduced them byte
+  // for byte (spec History); those captures carry machine-specific data, so the
+  // pin here is the header plus a golden over a synthetic body.
+  const s = wholeRequestServer();
+  const http = nodeHttpClient();
+  const body = syntheticBody();
+  await http({
+    provider: "openai",
+    url: s.url,
+    method: "POST",
+    headers: [["content-encoding", "zstd"]],
+    body,
+    bodyEncoding: "zstd",
+    signal: AbortSignal.timeout(5000),
+  });
+  const { body: sent } = await s.request();
+  expect(sent.subarray(0, 4).toString("hex")).toBe("28b52ffd");
+  // Frame header descriptor: no content size, not single-segment, no checksum.
+  expect(sent[4]).toBe(0x00);
+  // Window descriptor: exponent 11, mantissa 0 — windowLog 21.
+  expect(sent[5]).toBe(0x58);
+  // Level 3, and only level 3: levels 2 and 4 produce 10979 and 10683 bytes.
+  expect(Buffer.byteLength(body)).toBe(54_168);
+  expect(sent.byteLength).toBe(10_676);
+  expect(createHash("sha256").update(sent).digest("hex").slice(0, 16)).toBe("125037a51a82d95b");
   s.stop();
 });
 
