@@ -344,7 +344,7 @@ describe("client board uses the shared primitives", () => {
       "GET /api/client/summary": () =>
         apiKey({
           limits: { requests: { "1m": 100 } },
-          limitUsage: [{ dimension: "requests", window: "1m", limit: 100, used: 25 }],
+          limitUsage: [{ dimension: "requests", window: "1m", limit: 100, used: 25, model: null }],
         }),
     });
     renderWithProviders(<ClientBoard />);
@@ -353,6 +353,29 @@ describe("client board uses the shared primitives", () => {
     expect(meter.getAttribute("aria-valuenow")).toBe("25");
     expect(meter.getAttribute("aria-valuemin")).toBe("0");
     expect(meter.getAttribute("aria-valuemax")).toBe("100");
+  });
+
+  test("a key's model overrides are grouped under their model", async () => {
+    stub({
+      "GET /api/client/summary": () =>
+        apiKey({
+          limits: { requests: { "1m": 100 }, models: { opus: { requests: { "1m": 10 } } } },
+          limitUsage: [
+            { dimension: "requests", window: "1m", limit: 100, used: 25, model: null },
+            { dimension: "requests", window: "1m", limit: 10, used: 9, model: "opus" },
+          ],
+        }),
+    });
+    renderWithProviders(<ClientBoard />);
+
+    const heading = await screen.findByRole("rowheader", { name: "opus" });
+    expect(screen.getByRole("rowheader", { name: "Every model" })).toBeTruthy();
+    const meter = screen.getByRole("meter", { name: /requests per minute for opus/i });
+    expect(meter.getAttribute("aria-valuenow")).toBe("90");
+    // The override's row sits under its own heading, after the key-wide one.
+    const rows = [...(heading.closest("tbody")?.querySelectorAll("tr") ?? [])];
+    const at = rows.indexOf(heading.closest("tr") as HTMLTableRowElement);
+    expect(rows[at + 1]?.contains(meter)).toBe(true);
   });
 
   test("provider headroom carries a meter naming its provider and window", async () => {
@@ -382,7 +405,7 @@ describe("client board uses the shared primitives", () => {
       "GET /api/client/summary": () =>
         apiKey({
           limits: { requests: { "1m": 0 } },
-          limitUsage: [{ dimension: "requests", window: "1m", limit: 0, used: 0 }],
+          limitUsage: [{ dimension: "requests", window: "1m", limit: 0, used: 0, model: null }],
         }),
     });
     renderWithProviders(<ClientBoard />);
@@ -407,7 +430,7 @@ test("usage past the ceiling reads the same to a screen reader as it looks", asy
     "GET /api/client/summary": () =>
       apiKey({
         limits: { requests: { "1m": 100 } },
-        limitUsage: [{ dimension: "requests", window: "1m", limit: 100, used: 150 }],
+        limitUsage: [{ dimension: "requests", window: "1m", limit: 100, used: 150, model: null }],
       }),
   });
   renderWithProviders(<ClientBoard />);

@@ -24,7 +24,7 @@ import { EditLimitsDialog } from "./EditLimitsDialog.tsx";
 import { EditModelsDialog } from "./EditModelsDialog.tsx";
 import { keyState } from "./expiry.ts";
 import { LimitMatrix } from "./LimitMatrix.tsx";
-import { describeSlot, formatLimitValue, fractionOf, nearestExhaustion } from "./limits.ts";
+import { describeReading, formatLimitValue, fractionOf, nearestExhaustion } from "./limits.ts";
 import { MintKeyDialog } from "./MintKeyDialog.tsx";
 
 const Allow = styled(Row)`
@@ -68,7 +68,7 @@ const Summary = styled.div`
 function describeNearest(nearest: LimitReading | null): string {
   if (nearest === null) return "usage not counted here";
   const share = fractionOf(nearest);
-  const name = describeSlot({ dimension: nearest.dimension, window: nearest.window });
+  const name = describeReading(nearest);
   const ceiling = formatLimitValue(nearest.dimension, nearest.limit);
   return `${name} ${ceiling}, ${share === null ? "—" : Math.round(share * 100)}% used`;
 }

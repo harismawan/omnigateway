@@ -12,6 +12,7 @@ import type {
   Dimension,
   DisabledReason,
   LimitConfig,
+  LimitConfigBase,
   PonytailMode,
   QuotaSample,
   QuotaWindow,
@@ -47,6 +48,7 @@ export type {
   DisabledReason,
   ErrorCode,
   LimitConfig,
+  LimitConfigBase,
   PonytailMode,
   ProviderId,
   QuotaSample,
@@ -392,6 +394,12 @@ export type LimitReading = {
    * alone. Zero would claim the gauge is empty; null says nobody asked it.
    */
   used: number | null;
+  /**
+   * The model a per-model override applies to, or null for the key-wide
+   * limits every model shares. An override's `used` is that model's own
+   * traffic on the key.
+   */
+  model: string | null;
 };
 
 export type KeysResponse = { keys: ApiKeySummary[] };
