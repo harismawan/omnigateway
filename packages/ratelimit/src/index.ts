@@ -1,10 +1,19 @@
-import { type Dimension, type LimitConfig, WINDOW_MS, WINDOWS, type Window } from "./catalog.ts";
+import {
+  type Dimension,
+  type LimitConfigBase,
+  WINDOW_MS,
+  WINDOWS,
+  type Window,
+} from "./catalog.ts";
 
 export {
   DIMENSIONS,
   type Dimension,
   type LimitConfig,
+  type LimitConfigBase,
+  limitConfigBaseSchema,
   limitConfigSchema,
+  modelOverride,
   parseLimitConfig,
   WINDOW_MS,
   WINDOWS,
@@ -114,7 +123,11 @@ function lastToClear(violations: readonly Violation[]): Violation | null {
  * lands the key exactly on its ceiling is therefore allowed and the next one is
  * refused, which is the behaviour the fixed-window limiter this replaces had.
  */
-export function evaluate(config: LimitConfig, counters: CounterSnapshot, now: number): Decision {
+export function evaluate(
+  config: LimitConfigBase,
+  counters: CounterSnapshot,
+  now: number,
+): Decision {
   const violations: Violation[] = [];
   const headroom: HeadroomByDimension = {};
 
@@ -167,6 +180,37 @@ export function evaluate(config: LimitConfig, counters: CounterSnapshot, now: nu
   }
 
   const violation = lastToClear(violations);
+  return { allowed: violation === null, violation, headroom };
+}
+
+/**
+ * Joins the key-wide decision with a model override's into the one a request
+ * is answered with.
+ *
+ * The two stack, so a request is allowed only where both allow it. Of two
+ * violations the one clearing last is reported, by the same rule `evaluate`
+ * applies inside a scope: a `Retry-After` from the earlier one sends the client
+ * back while the other scope still refuses it. Per dimension, the headroom is
+ * whichever entry is nearer exhaustion by proportion, again `evaluate`'s rule
+ * across windows — the header has to name the scope that will deny first.
+ * Ties keep the key-wide entry, so the answer does not depend on which scope
+ * the caller happened to pass second.
+ */
+export function combine(key: Decision, model: Decision): Decision {
+  const violations: Violation[] = [];
+  if (key.violation !== null) violations.push(key.violation);
+  if (model.violation !== null) violations.push(model.violation);
+  const violation = lastToClear(violations);
+
+  const headroom: HeadroomByDimension = { ...key.headroom };
+  for (const dimension of WINDOWED) {
+    const candidate = model.headroom[dimension];
+    if (candidate === undefined) continue;
+    const current = headroom[dimension];
+    if (current === undefined || candidate.used / candidate.limit > current.used / current.limit) {
+      headroom[dimension] = candidate;
+    }
+  }
   return { allowed: violation === null, violation, headroom };
 }
 
