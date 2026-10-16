@@ -4,6 +4,7 @@ import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { HeaderPair } from "../types.ts";
 import { codexModel } from "./codexCatalog.ts";
+import { codexSecretsFrom } from "./codexIdentity.ts";
 import { decodeResponses } from "./decode.ts";
 import { openaiBodyOrder, openaiProfile } from "./profile.ts";
 import { toResponsesWire } from "./wire.ts";
@@ -40,11 +41,15 @@ export const openaiCodec: ProviderCodec = {
   buildRequest(input: CodecInput): CodecRequest {
     const oauth = input.credentials.accessToken !== null;
     const accountId = input.credentials.providerData.accountId;
+    // The per-credential installation id and id salt, minted by the OAuth flow.
+    const secrets = oauth ? codexSecretsFrom(input.credentials.providerData) : {};
     const { body, degradations, cacheKey, codex } = toResponsesWire(input.request, input.model, {
       oauth,
       requestId: input.requestId,
       startedAt: input.requestStartedAt,
       accountId: typeof accountId === "string" ? accountId : undefined,
+      installationId: secrets.installationId,
+      idSalt: secrets.idSalt,
     });
 
     const protocol: HeaderPair[] = [];

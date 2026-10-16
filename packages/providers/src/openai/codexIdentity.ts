@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 /**
  * The identifiers Codex mints, derived instead of minted.
@@ -105,6 +105,53 @@ export function threadInstant(threadId: string, now: number): number {
   if (version === "7" && Number.isFinite(ts) && ts <= now) return ts;
   const digest = sha256(`thread:${threadId}`);
   return WINDOW_END_MS - WINDOW_MS + (digest.readUIntBE(0, 6) % WINDOW_MS);
+}
+
+const ID_SALT = /^[0-9a-f]{64}$/;
+
+/**
+ * The two per-credential values the fingerprint keeps in `providerData`.
+ *
+ * `installationId` is what Codex keeps in `$CODEX_HOME/installation_id`: a
+ * random UUIDv4 minted once. `idSalt` keys every id this module derives, so
+ * none of them can be recomputed from what the request itself carries —
+ * unkeyed, a `turn_id` was a hash of the `thread_id` beside it, and the
+ * installation id a hash of the account id in the next header. Minted at
+ * connect by the OpenAI OAuth flow and backfilled by its refresh; a credential
+ * that has neither yet falls back to the unkeyed derivation until then.
+ */
+export type CodexSecrets = { installationId?: string; idSalt?: string };
+
+/** The stored values that are well-formed; anything else reads as absent. */
+export function codexSecretsFrom(providerData: Record<string, unknown>): CodexSecrets {
+  const { installationId, idSalt } = providerData;
+  return {
+    ...(typeof installationId === "string" && isUuid(installationId) ? { installationId } : {}),
+    ...(typeof idSalt === "string" && ID_SALT.test(idSalt) ? { idSalt } : {}),
+  };
+}
+
+/**
+ * The stored values, with any missing or malformed one minted afresh.
+ *
+ * Web Crypto rather than `node:crypto`'s generators: this module is in the
+ * package root's browser bundle, and `crypto.randomUUID`/`getRandomValues`
+ * are the globals both runtimes share.
+ */
+export function ensureCodexSecrets(providerData: Record<string, unknown>): Required<CodexSecrets> {
+  const stored = codexSecretsFrom(providerData);
+  const salt = (): string =>
+    Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(32))).toString("hex");
+  return {
+    installationId: stored.installationId ?? globalThis.crypto.randomUUID(),
+    idSalt: stored.idSalt ?? salt(),
+  };
+}
+
+/** `seed` keyed with the credential's salt, when it has one; unchanged otherwise. */
+export function keyed(salt: string | undefined, seed: string): string {
+  if (salt === undefined) return seed;
+  return createHmac("sha256", salt).update(seed).digest("hex");
 }
 
 /**

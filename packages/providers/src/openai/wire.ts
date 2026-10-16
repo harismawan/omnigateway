@@ -3,7 +3,7 @@ import { moveToResponsesText } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
 import { responsesFiles, withFileText } from "../toolResultFiles.ts";
 import { codexModel, isCodexEffort } from "./codexCatalog.ts";
-import { isUuid, threadIdFrom } from "./codexIdentity.ts";
+import { isUuid, keyed, threadIdFrom } from "./codexIdentity.ts";
 import { type CodexTurn, codexTurn, toLiteInput } from "./codexLite.ts";
 
 export type ResponsesBody = {
@@ -69,18 +69,25 @@ function suppliedKey(req: ChatRequest): string | undefined {
  * `prompt_cache_key`, client `session_id`, `conversationId`, fallback.
  *
  * Returns the key and the string it was derived from: the OAuth leg hashes the
- * latter into the installation id when the credential names no account.
+ * latter into the installation id when the credential has no stored one and
+ * names no account.
+ *
+ * With the credential's id salt (OAuth only), a derived key is keyed with it:
+ * the fallback seed is the instructions and opening item, which the request
+ * itself carries, so an unkeyed digest of it is recomputable upstream. A
+ * supplied UUID still passes through — it is the client's own thread.
  */
 function cacheKey(
   req: ChatRequest,
   instructions: string,
   firstInput: unknown,
+  salt: string | undefined,
 ): { key: string; seed: string } {
   const supplied = suppliedKey(req);
   if (supplied !== undefined) {
     if (isUuid(supplied)) return { key: supplied, seed: supplied };
     const seed = JSON.stringify({ key: supplied });
-    return { key: threadIdFrom(seed), seed };
+    return { key: threadIdFrom(keyed(salt, seed)), seed };
   }
   const seed =
     req.conversationId !== undefined && req.conversationId.length > 0
@@ -96,7 +103,7 @@ function cacheKey(
         // remaining collision between two of them costs nothing; what matters
         // is that the term stops vanishing without a trace.
         JSON.stringify({ instructions, firstInput: firstInput ?? null });
-  return { key: threadIdFrom(seed), seed };
+  return { key: threadIdFrom(keyed(salt, seed)), seed };
 }
 
 /**
@@ -163,6 +170,13 @@ export type WireOptions = {
   startedAt?: number | undefined;
   /** The ChatGPT account the credential bills, which the installation id hashes. */
   accountId?: string | undefined;
+  /**
+   * The credential's stored installation id and id salt (`codexSecretsFrom`).
+   * OAuth leg only; absent until the credential's first refresh after they
+   * were introduced, when the unkeyed derivation stands in.
+   */
+  installationId?: string | undefined;
+  idSalt?: string | undefined;
 };
 
 /**
@@ -493,7 +507,8 @@ export function toResponsesWire(
     }
   }
 
-  const { key, seed } = cacheKey(req, instructions ?? "", input[0]);
+  const salt = opts.oauth ? opts.idSalt : undefined;
+  const { key, seed } = cacheKey(req, instructions ?? "", input[0], salt);
 
   if (opts.oauth) {
     // Codex's defaults for every request, which a client's own bag values
@@ -532,6 +547,7 @@ export function toResponsesWire(
     instructions,
     requestId: opts.requestId,
     startedAt: opts.startedAt,
+    idSalt: salt,
   });
   body.input = built.input;
   // The effort actually sent, after the client's bag had its say — when it is
@@ -540,7 +556,9 @@ export function toResponsesWire(
   const codex = codexTurn({
     threadId: key,
     turnId: built.turnId,
+    installationId: opts.installationId,
     installationSeed: opts.accountId ?? seed,
+    idSalt: salt,
     model,
     effort: isCodexEffort(sent) ? sent : codexModel(model).defaultEffort,
     startedAt: built.startedAt,

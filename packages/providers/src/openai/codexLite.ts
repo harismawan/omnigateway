@@ -1,5 +1,12 @@
 import { codexModel } from "./codexCatalog.ts";
-import { prefixNamespace, threadInstant, uuidV4From, uuidV5, uuidV7From } from "./codexIdentity.ts";
+import {
+  keyed,
+  prefixNamespace,
+  threadInstant,
+  uuidV4From,
+  uuidV5,
+  uuidV7From,
+} from "./codexIdentity.ts";
 import { OPENAI_SANDBOX } from "./profile.ts";
 
 /**
@@ -40,6 +47,8 @@ export type LiteInput = {
   requestId: string | undefined;
   /** When the request started, epoch ms. */
   startedAt: number | undefined;
+  /** The credential's id salt, which keys every id derived here. */
+  idSalt: string | undefined;
 };
 
 export type LiteResult = {
@@ -57,10 +66,11 @@ const PASSTHROUGH = "internal_chat_message_metadata_passthrough";
 /**
  * A turn's id: the same for every request that includes that turn, so a
  * tool-loop follow-up shares its turn's id as Codex's does, and a past turn
- * keeps the id it had when it was current.
+ * keeps the id it had when it was current. Keyed with the credential's salt,
+ * so it cannot be recomputed from the thread id sent beside it.
  */
-function turnId(threadId: string, index: number, threadAt: number): string {
-  return uuidV7From(`${threadId}:turn:${index}`, threadAt + index);
+function turnId(threadId: string, index: number, threadAt: number, salt?: string): string {
+  return uuidV7From(keyed(salt, `${threadId}:turn:${index}`), threadAt + index);
 }
 
 /**
@@ -89,6 +99,7 @@ export function toLiteInput(args: LiteInput): LiteResult {
   const threadAt = threadInstant(threadId, args.startedAt ?? Number.POSITIVE_INFINITY);
   const startedAt = args.startedAt ?? threadAt;
   const historySeed = args.requestId ?? threadId;
+  const salt = args.idSalt;
   const namespace = prefixNamespace(threadId);
 
   const prefix: Item[] = [];
@@ -119,9 +130,9 @@ export function toLiteInput(args: LiteInput): LiteResult {
   const history = args.input.map((raw, index) => {
     const item = raw as Item;
     turn = args.turnOf.get(item) ?? turn;
-    const turn_id = turnId(threadId, turn, threadAt);
+    const turn_id = turnId(threadId, turn, threadAt, salt);
     const fresh = (prefixName: string) =>
-      `${prefixName}_${uuidV7From(`${historySeed}:item:${index}`, startedAt)}`;
+      `${prefixName}_${uuidV7From(keyed(salt, `${historySeed}:item:${index}`), startedAt)}`;
     // Fractional seconds, as Codex writes it; a microsecond apart per item so
     // the order reads monotonic.
     const create_time = (startedAt * 1000 + index) / 1_000_000;
@@ -190,7 +201,7 @@ export function toLiteInput(args: LiteInput): LiteResult {
 
   return {
     input: [...prefix, ...history],
-    turnId: turnId(threadId, turn, threadAt),
+    turnId: turnId(threadId, turn, threadAt, salt),
     startedAt,
   };
 }
@@ -200,8 +211,10 @@ export function toLiteInput(args: LiteInput): LiteResult {
  * Codex writes this one ASCII-only for the same reason.
  */
 function asciiJson(value: unknown): string {
+  // `JSON.stringify` already escapes below 0x20; this takes DEL and everything
+  // above, one UTF-16 unit at a time, so a surrogate pair becomes two escapes.
   return JSON.stringify(value).replace(
-    /[\u007f-￿]/g,
+    /[^\x20-\x7e]/g,
     (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
 }
@@ -220,15 +233,22 @@ export type CodexTurn = {
 export function codexTurn(args: {
   threadId: string;
   turnId: string;
-  /** What the installation id hashes: the account, else the thread's seed. */
+  /** The credential's stored installation id, once it has one. */
+  installationId: string | undefined;
+  /**
+   * What the installation id hashes until then: the account, else the
+   * thread's seed. Recomputable from the request, which is why it is only the
+   * fallback for a credential not yet refreshed since the stored value began.
+   */
   installationSeed: string;
+  idSalt: string | undefined;
   model: string;
   effort: string;
   startedAt: number;
 }): CodexTurn {
   const { threadId, turnId: turn } = args;
   const windowId = `${threadId}:0`;
-  const installationId = uuidV4From(`installation:${args.installationSeed}`);
+  const installationId = args.installationId ?? uuidV4From(`installation:${args.installationSeed}`);
   const threadAt = threadInstant(threadId, args.startedAt);
   const catalog = codexModel(args.model);
   const turnMetadata = asciiJson({
@@ -239,7 +259,7 @@ export function codexTurn(args: {
     turn_id: turn,
     window_id: windowId,
     window_number: 0,
-    context_window_id: uuidV7From(`${threadId}:context-window`, threadAt),
+    context_window_id: uuidV7From(keyed(args.idSalt, `${threadId}:context-window`), threadAt),
     request_kind: "turn",
     history_initialization: "new",
     root_turn_id: turn,

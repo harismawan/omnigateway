@@ -353,6 +353,100 @@ test("installation id hashes the account, never forwards it, and is shared by it
   expect(bare.installation_id).not.toBe(THREAD);
 });
 
+const INSTALLATION = "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+const SALT_A = "ab".repeat(32);
+const SALT_B = "cd".repeat(32);
+const keyedCreds = (extra: Record<string, unknown>, accountId: string | null = "acct-9") => ({
+  ...oauthCreds(accountId),
+  providerData: { ...(accountId === null ? {} : { accountId }), ...extra },
+});
+
+test("a stored installation id is the one reported, for every conversation", () => {
+  // The fix for a credential with no account id too: an installation id that
+  // was a hash of the thread changed with every conversation, which no machine
+  // does.
+  const credentials = keyedCreds({ installationId: INSTALLATION, idSalt: SALT_A }, null);
+  const first = build(FOLLOW_UP, { credentials });
+  const other = build(
+    { ...FOLLOW_UP, vendor: { openai: { prompt_cache_key: "another-conversation" } } },
+    { credentials },
+  );
+  for (const built of [first, other]) {
+    expect(metadataOf(built).installation_id).toBe(INSTALLATION);
+    expect(
+      (bodyOf(built).client_metadata as Record<string, string>)["x-codex-installation-id"],
+    ).toBe(INSTALLATION);
+  }
+});
+
+test("with a stored salt, no derived id can be recomputed from the request", () => {
+  // Unkeyed, a turn id was a hash of the thread id sent beside it. Keyed, the
+  // same request under two salts shares no derived id, and neither matches the
+  // unkeyed derivation.
+  const ids = (built: CodecRequest) => {
+    const metadata = metadataOf(built);
+    return [
+      metadata.turn_id,
+      metadata.context_window_id,
+      ...inputOf(built)
+        .slice(2)
+        .map((item) => item.id),
+    ];
+  };
+  const unkeyed = ids(build(FOLLOW_UP));
+  const a = ids(build(FOLLOW_UP, { credentials: keyedCreds({ idSalt: SALT_A }) }));
+  const b = ids(build(FOLLOW_UP, { credentials: keyedCreds({ idSalt: SALT_B }) }));
+  for (let i = 0; i < unkeyed.length; i++) {
+    if (unkeyed[i] === undefined) continue;
+    expect([i, a[i] === unkeyed[i], a[i] === b[i]]).toEqual([i, false, false]);
+  }
+  // Still stable for one credential, which is what turn grouping needs.
+  expect(ids(build(FOLLOW_UP, { credentials: keyedCreds({ idSalt: SALT_A }) }))).toEqual(a);
+  // The prefix ids are Codex's own UUIDv5 over the thread and payload, which
+  // Codex does not key either.
+  const prefix = (built: CodecRequest) =>
+    inputOf(built)
+      .slice(0, 2)
+      .map((item) => item.id);
+  expect(prefix(build(FOLLOW_UP, { credentials: keyedCreds({ idSalt: SALT_A }) }))).toEqual(
+    prefix(build(FOLLOW_UP)),
+  );
+});
+
+test("with a stored salt, a derived thread id is keyed too; a supplied one is not", () => {
+  const derived = { ...FOLLOW_UP, vendor: {} };
+  const plain = bodyOf(build(derived)).prompt_cache_key;
+  const a = bodyOf(build(derived, { credentials: keyedCreds({ idSalt: SALT_A }) }));
+  const b = bodyOf(build(derived, { credentials: keyedCreds({ idSalt: SALT_B }) }));
+  expect(a.prompt_cache_key).not.toBe(plain);
+  expect(a.prompt_cache_key).not.toBe(b.prompt_cache_key);
+  expect(a.prompt_cache_key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7/);
+  // A conversation keeps its key across turns under one salt.
+  const longer = {
+    ...derived,
+    messages: [
+      ...derived.messages,
+      { role: "assistant" as const, content: [{ type: "text" as const, text: "hi" }] },
+      { role: "user" as const, content: [{ type: "text" as const, text: "again" }] },
+    ],
+  };
+  expect(
+    bodyOf(build(longer, { credentials: keyedCreds({ idSalt: SALT_A }) })).prompt_cache_key,
+  ).toBe(a.prompt_cache_key);
+  // A Codex client's own thread passes through whatever the salt.
+  expect(
+    bodyOf(build(FOLLOW_UP, { credentials: keyedCreds({ idSalt: SALT_A }) })).prompt_cache_key,
+  ).toBe(THREAD);
+});
+
+test("a malformed stored value reads as absent: the unkeyed derivation stands", () => {
+  const plain = build(FOLLOW_UP);
+  const malformed = build(FOLLOW_UP, {
+    credentials: keyedCreds({ installationId: "nope", idSalt: "short" }),
+  });
+  expect(malformed.request).toEqual(plain.request);
+});
+
 test("decoding follows the client's include, not the one this leg sends by default", () => {
   const silent = build(FOLLOW_UP);
   expect(bodyOf(silent).include).toEqual(["reasoning.encrypted_content"]);
