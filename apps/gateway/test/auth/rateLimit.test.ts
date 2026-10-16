@@ -949,3 +949,82 @@ test("a failing read for a model's subject is logged with the model", async () =
   );
   refusing.store.close();
 });
+
+/**
+ * The re-review's probe: the header for the refused dimension names the window
+ * that refused, so it says the same instant as the `Retry-After` beside it.
+ *
+ * Both entries for `requests` are exactly full — the key-wide minute 1/1, the
+ * model's five hours 2/2 — so headroom by proportion ties to the key-wide
+ * minute, while the violation clearing last is the model's window, three hours
+ * out. The header said 59 seconds beside a `Retry-After` of three hours.
+ */
+test("a refusal's header for the refused dimension names the refusing window", async () => {
+  const HOUR = 3_600_000;
+  const { store, keyId, limiter, limits, at } = await harness({
+    requests: { "1m": 1 },
+    models: { opus: { requests: { "5h": 2 } } },
+  });
+  await seedRow(store, keyId, T0 - 2 * HOUR, {}, "opus");
+  await seedRow(store, keyId, T0 - HOUR, {}, "opus");
+  at(T0);
+  (await limiter.admit(keyId, limits, "fast", "req_test")).release();
+  at(T0 + 1_000);
+  const refused = await denied(() => limiter.admit(keyId, limits, "opus", "req_test"));
+  if (!(refused instanceof RateLimitExceeded)) throw refused;
+  expect(refused.retryAfterMs).toBe(3 * HOUR - 1_000);
+  expect(refused.headroom.requests).toEqual({
+    window: "5h",
+    limit: 2,
+    used: 2,
+    remaining: 0,
+    resetAt: T0 + 3 * HOUR,
+  });
+  store.close();
+});
+
+/** The same split inside one scope: a full minute ties a full week. */
+test("within one scope too, the refused dimension's header is the refusing window", async () => {
+  const DAY = 86_400_000;
+  const { store, keyId, limiter, limits, at, complete } = await harness({
+    requests: { "1m": 1, "1w": 2 },
+  });
+  await seedRow(store, keyId, T0 - 3 * DAY, {});
+  at(T0);
+  (await limiter.admit(keyId, limits, "fast", "req_test")).release();
+  await complete();
+  at(T0 + 1_000);
+  const refused = await denied(() => limiter.admit(keyId, limits, "fast", "req_test"));
+  if (!(refused instanceof RateLimitExceeded)) throw refused;
+  expect(refused.retryAfterMs).toBe(4 * DAY - 1_000);
+  expect(refused.headroom.requests?.window).toBe("1w");
+  expect(refused.headroom.requests?.resetAt).toBe(T0 + 4 * DAY);
+  store.close();
+});
+
+/**
+ * A refusal reads each violated window's reset once per subject, however many
+ * dimensions it refused on: two violations sharing `5h` are one row, and one
+ * `oldestSince`, not two.
+ */
+test("a refusal reads one reset per subject and window, not per violation", async () => {
+  const HOUR = 3_600_000;
+  const { store, keyId, limiter, limits, at } = await harness({
+    requests: { "5h": 1 },
+    tokens: { "5h": 1 },
+    models: { opus: { requests: { "5h": 1 }, spend: { "5h": 0.5 } } },
+  });
+  await seedRow(store, keyId, T0 - HOUR, { tokens: 10, costUsd: 1 }, "opus");
+  const reads: Array<string | null> = [];
+  const real = store.usage.oldestSince.bind(store.usage);
+  store.usage.oldestSince = async (id, since, model) => {
+    reads.push(model ?? null);
+    return await real(id, since, model);
+  };
+  at(T0);
+  const refused = await denied(() => limiter.admit(keyId, limits, "opus", "req_test"));
+  expect(refused.retryAfterMs).toBe(4 * HOUR);
+  // Four violations, two subjects, one window: two reads.
+  expect(reads.sort()).toEqual(["opus", null].sort());
+  store.close();
+});

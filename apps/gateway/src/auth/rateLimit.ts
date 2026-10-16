@@ -9,6 +9,7 @@ import {
   type HeadroomByDimension,
   lastToClear,
   retryAfterMs,
+  type Violation,
   type WindowCounter,
 } from "@omni/ratelimit";
 import {
@@ -606,7 +607,7 @@ export class ApiKeyRateLimiter {
     } catch {
       // Observability cannot turn a refusal into a different failure.
     }
-    throw new RateLimitExceeded(retryAfterMs(violation, now), decision.headroom);
+    throw new RateLimitExceeded(retryAfterMs(violation, now), refusedHeadroom(decision, violation));
   }
 
   /**
@@ -614,7 +615,9 @@ export class ApiKeyRateLimiter {
    *
    * The reads this design makes on the refusal path and nowhere else: one per
    * violated window of the subject, asked of that subject's own rows. Its
-   * headers move with it, so a 429 names the same instant as its `Retry-After`.
+   * headroom moves with it; `refusedHeadroom` then makes the refused
+   * dimension's header the refusing window itself, which is what makes a 429
+   * name the same instant as its `Retry-After`.
    */
   private async correct(
     subject: Subject,
@@ -852,6 +855,33 @@ function withReset(
       corrected[dimension] = { ...entry, resetAt };
   }
   return corrected;
+}
+
+/**
+ * A refusal's headroom, with the refused dimension reporting the window that
+ * refused.
+ *
+ * Headroom is chosen per dimension by proportion and the violation by latest
+ * reset, and the two disagree whenever entries tie: a full key-wide minute and
+ * a full five-hour override are both 100%, so the header named the minute's
+ * reset beside a `Retry-After` of hours. Within one scope a full minute and a
+ * full week split the same way. On a refusal the header for that dimension is
+ * the violated entry itself, so both name one instant. `concurrency` has no
+ * header to replace.
+ */
+function refusedHeadroom(decision: Decision, violation: Violation): HeadroomByDimension {
+  const window = violation.window;
+  if (window === null || violation.dimension === "concurrency") return decision.headroom;
+  return {
+    ...decision.headroom,
+    [violation.dimension]: {
+      window,
+      limit: violation.limit,
+      used: violation.used,
+      remaining: Math.max(0, violation.limit - violation.used),
+      resetAt: violation.resetAt,
+    },
+  };
 }
 
 /** The subjects' decisions as one, key-wide first, which is `combine`'s tie order. */
