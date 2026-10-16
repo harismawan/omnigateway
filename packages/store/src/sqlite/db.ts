@@ -16,6 +16,7 @@ import keyExpiry014 from "./migrations/014_key_expiry.sql" with { type: "text" }
 import logKeyset015 from "./migrations/015_log_keyset.sql" with { type: "text" };
 import logFilterIndexes016 from "./migrations/016_log_filter_indexes.sql" with { type: "text" };
 import logTextSearch017 from "./migrations/017_log_text_search.sql" with { type: "text" };
+import modelWindowIndex018 from "./migrations/018_model_window_index.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -58,6 +59,9 @@ const MIGRATIONS: ReadonlyArray<{
   // Index-only. The typed filters match substrings, which no per-column index can
   // seek, so those columns move into the keyset index the scan already walks.
   { id: 17, sql: logTextSearch017 },
+  // Index-only. A model override's long windows are read from the log, and
+  // this lets that read seek one key's one model instead of filtering per row.
+  { id: 18, sql: modelWindowIndex018 },
 ];
 
 /**

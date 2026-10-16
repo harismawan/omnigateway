@@ -1329,10 +1329,17 @@ export interface UsageRepo {
    *
    * `requestedModel` narrows to one model's rows, for a key's per-model
    * override. `usage_rollup` has no model column, so a narrowed read takes the
-   * whole window from `request_logs` within this one key's rows
-   * (`idx_request_logs_key_at` bounds the scan to the key and the window). It
-   * is asked only for a key with a long-window override, and only by readers
-   * off the request path: a seed, and the admin readings.
+   * whole window from `request_logs`, seeking one key's one model through
+   * `idx_request_logs_key_model_at`. Its cost is therefore linear in that
+   * model's own rows inside the window — no longer in the key's, but not flat
+   * the way the rollup read is.
+   *
+   * Who asks, and where, so nobody mistakes this for an offline read: the
+   * limiter's seed (`sumBuckets`) runs on the request path, for the first
+   * request after a restart or once a subject's buckets lapse; and the key
+   * readings in `@omni/control` call this once per configured window of every
+   * override — `1m` included — on every `/api/keys` and `/api/client/summary`
+   * fetch.
    */
   sumSince(apiKeyId: string, sinceMs: number, requestedModel?: string): Promise<UsageSums>;
   /**
@@ -1345,7 +1352,8 @@ export interface UsageRepo {
    * the request path.
    *
    * `requestedModel` narrows as `sumSince`'s does, and for the same reason
-   * reads `request_logs` at every grain, the hour included.
+   * reads `request_logs` at every grain, the hour included: a weekly seed of a
+   * busy model is that model's week of rows, paid on the request that seeds it.
    */
   sumBuckets(
     apiKeyId: string,

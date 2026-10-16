@@ -1,0 +1,33 @@
+-- An index for the per-model long-window reads behind a key's model overrides:
+-- `usage.sumSince`, `sumBuckets` and `oldestSince` narrowed to one requested
+-- model. `usage_rollup` has no model column, so those reads come from the log,
+-- and without this they walk `idx_request_logs_key_at` across the key's whole
+-- window and reject every other model's row one at a time. `bun:sqlite` is
+-- synchronous, so that walk is the event loop — and the console's key listing
+-- repeats it once per override per window on every fetch.
+--
+-- Key, then model, then time: one seek lands on one key's one model, and the
+-- window is a range from there. Measured at 500,000 rows in one key's week, a
+-- fifth of them the overridden model and a hundred rows of a rare one:
+--
+--   read                          without index    with index
+--   sumSince 1w, rare model             45.9ms         0.03ms
+--   sumSince 1w, 100k-row model         56.1ms         38.1ms
+--   sumBuckets 1w hour, rare            46.1ms         0.07ms
+--   sumBuckets 1w hour, 100k-row        76.8ms         58.9ms
+--   oldestSince 1w, rare                0.57ms         0.00ms
+--
+-- So the read stops costing the key's traffic and starts costing the model's
+-- own, which is still linear: a model that carries most of a key's traffic pays
+-- most of what it did before. That remaining cost is the design's, stated in
+-- `ARCHITECTURE.md#rate-limiting`, not something this index claims to remove.
+--
+-- Not partial on `state = 'done'`, and not covering, both measured. Partial
+-- bought nothing (37.4ms against 38.1ms) and, once `ANALYZE` had run, the
+-- planner moved the key-wide edge read onto it as a skip-scan over every model —
+-- a plan that degrades with the number of models a key calls. Covering the four
+-- token columns and cost cut the heavy case to 9.0ms, for an index nearly three
+-- times as wide written on every completed request, and took the same key-wide
+-- plan. This shape leaves every key-wide read on `idx_request_logs_key_at`,
+-- which `migrations.test.ts` asserts beside the narrowed plans.
+CREATE INDEX idx_request_logs_key_model_at ON request_logs (api_key_id, requested_model, at);

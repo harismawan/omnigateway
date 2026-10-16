@@ -1,0 +1,22 @@
+-- The per-model long-window reads behind a key's model overrides, on this
+-- backend: `usage.sumSince`, `sumBuckets` and `oldestSince` narrowed to one
+-- requested model, read from the log because `usage_rollup` has no model
+-- column. The SQLite copy is `018_model_window_index.sql`, same shape.
+--
+-- Without it the planner has no prefix to seek and the narrowed sums plan as a
+-- parallel sequential scan of the table. Measured at 500,000 rows in one key's
+-- week, a fifth of them the overridden model and a hundred rows of a rare one:
+--
+--   read                          without index    with index
+--   sumSince 1w, rare model             22.6ms         0.22ms
+--   sumSince 1w, 100k-row model         27.1ms         29.4ms
+--   sumBuckets 1w hour, rare            78.2ms         0.26ms
+--   sumBuckets 1w hour, 100k-row        89.4ms         55.5ms
+--   oldestSince 1w, rare                0.58ms         0.11ms
+--
+-- The heavy-model sum is a bitmap heap scan over that model's rows and does not
+-- beat the sequential scan it replaces: the cost is linear in the model's own
+-- traffic on either plan, and this index removes the part that was linear in
+-- everyone else's. 15MB at 500,000 rows, against 19MB for the key/time index.
+-- Neither partial nor covering, for the reasons the SQLite file records.
+CREATE INDEX idx_request_logs_key_model_at ON request_logs (api_key_id, requested_model, at);

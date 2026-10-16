@@ -86,7 +86,7 @@ test("openDb applies migrations and records them", () => {
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
   expect(applied.map((row) => row.id)).toEqual([
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
   ]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
@@ -354,11 +354,56 @@ test("migration 8 gives request_bodies its time index and no cascade", () => {
   db.close();
 });
 
+/**
+ * The per-model long-window reads behind a key's model overrides, and the index
+ * migration 18 adds for them.
+ *
+ * Without it each narrowed read walks `idx_request_logs_key_at` across the whole
+ * key's window and rejects other models' rows one by one — 46ms for a model with
+ * a hundred rows in a 500,000-row week. With it the read is one seek and the cost
+ * is the model's own rows. The SQL below is the store's own narrowed SQL, and
+ * the key-wide edge read is asserted beside it, because a wider index that
+ * stole the key-wide plan would be a regression this test exists to catch.
+ */
+test("migration 18 indexes one key's one model by time, and the narrowed reads pick it", () => {
+  const db = openDb(":memory:");
+  const columns = db
+    .query<{ seqno: number; name: string }, []>("PRAGMA index_info(idx_request_logs_key_model_at)")
+    .all()
+    .map((row) => row.name);
+  expect(columns).toEqual(["api_key_id", "requested_model", "at"]);
+
+  const planOf = (sql: string, args: Array<string | number>): string =>
+    db
+      .query<{ detail: string }, Array<string | number>>(`EXPLAIN QUERY PLAN ${sql}`)
+      .all(...args)
+      .map((row) => row.detail)
+      .join(" ");
+  const narrowed = "api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?";
+  for (const sql of [
+    `SELECT COUNT(*), SUM(cost_usd) FROM request_logs WHERE ${narrowed}`,
+    `SELECT (at / 3600000) * 3600000 AS bucket, COUNT(*) FROM request_logs
+      WHERE ${narrowed} GROUP BY bucket`,
+    `SELECT MIN(at) AS at FROM request_logs WHERE ${narrowed}`,
+  ]) {
+    expect(planOf(sql, ["k1", "opus", 0])).toContain(
+      "idx_request_logs_key_model_at (api_key_id=? AND requested_model=? AND at>?)",
+    );
+  }
+  expect(
+    planOf(
+      "SELECT COUNT(*) FROM request_logs WHERE api_key_id = ? AND state = 'done' AND at >= ? AND at < ?",
+      ["k1", 0, 1],
+    ),
+  ).toContain("idx_request_logs_key_at");
+  db.close();
+});
+
 test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(17);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(18);
   db.close();
 });
 
