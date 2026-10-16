@@ -227,11 +227,16 @@ export function createConnectFlows(deps: ConnectDeps) {
     if (flow.credentialId !== undefined && existing === null) {
       throw new GatewayError("BAD_REQUEST", "credential not found");
     }
+    // Only the same provider's state: `start` checked the provider, but the row
+    // is read again here, and one provider's salt or device identity is never
+    // another's to see.
+    const prior =
+      existing !== null && existing.provider === flow.provider ? existing.providerData : undefined;
     const result = await provider.exchange(
       {
         code,
         pending: flow.pending,
-        ...(existing === null ? {} : { providerData: existing.providerData }),
+        ...(prior === undefined ? {} : { providerData: prior }),
       },
       { http: deps.http, now: deps.now },
     );

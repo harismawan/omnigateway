@@ -219,6 +219,61 @@ test("a reconnect hands the exchange the stored provider data; a new connect han
   expect(seen).toEqual([{ accountId: "acct_old", kept: "yes" }, "absent"]);
 });
 
+test("a reconnect hands no provider data across providers", async () => {
+  // Start refuses a reconnect to another provider's credential, but the row is
+  // read again at finish, and by then the id may name something else. One
+  // provider's stored state — a salt, a device identity — is never handed to
+  // another's flow.
+  const seen: unknown[] = [];
+  const provider: OAuthProvider = {
+    id: "grok",
+    kind: "pkce",
+    supportsManualPaste: true,
+    start: ({ redirectUri }) => ({
+      authorizeUrl: "https://auth.x.ai/oauth2/auth",
+      pending: { verifier: "v", challenge: "c", state: "the-state", redirectUri },
+    }),
+    exchange: async (input) => {
+      seen.push("providerData" in input ? input.providerData : "absent");
+      return RESULT;
+    },
+    refresh: async () => RESULT,
+  };
+  const row = (providerId: "grok" | "openai", providerData: Record<string, unknown>) => ({
+    id: "cred-1",
+    provider: providerId,
+    label: "cred",
+    authType: "oauth" as const,
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData,
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: "a",
+    refreshToken: "r",
+    apiKey: null,
+    idToken: null,
+  });
+  const store = await memoryStore();
+  await store.credentials.create(row("grok", { accountId: "acct_grok" }));
+  const flows = createConnectFlows({
+    store,
+    providers: { grok: provider },
+    http: noHttp,
+    now: () => 0,
+  });
+
+  const start = await flows.start("grok", "cred", "cred-1");
+  await store.credentials.remove("cred-1");
+  await store.credentials.create(row("openai", { idSalt: "ab".repeat(32) }));
+  await flows.finish(start.flowId, "http://127.0.0.1:56121/callback?code=c&state=the-state");
+
+  expect(seen).toEqual(["absent"]);
+});
+
 test("reconnecting an OpenAI credential keeps its installation id and id salt", async () => {
   const stored = {
     accountId: "acct_1",
