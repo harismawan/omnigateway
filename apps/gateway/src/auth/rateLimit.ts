@@ -347,8 +347,11 @@ export class ApiKeyRateLimiter {
         // they set one. `requestId` stays what it was, a log correlation key.
         const holder = configured(subject.limits.concurrency) ? crypto.randomUUID() : undefined;
         // In sequence, each before anything is judged. `Coord` makes every
-        // claim visible the instant it is made, so two subjects claimed one
-        // after the other are as safe as one.
+        // claim visible the instant it is made, so a burst cannot admit past
+        // either subject's ceiling. The cost is that a claim is provisional and
+        // visible: this request's key-wide claim counts against a concurrent
+        // request for another model until a model refusal rolls it back —
+        // over-counting for one evaluation, the direction the limiter permits.
         claims.push(await this.claim(subject.id, now, true, holder));
       }
       const decision = await this.judge(subjects, claims, (scope) => scope, now, requestId);
