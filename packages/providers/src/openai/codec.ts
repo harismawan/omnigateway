@@ -3,6 +3,7 @@ import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
 import type { HeaderPair } from "../types.ts";
+import { codexModel } from "./codexCatalog.ts";
 import { decodeResponses } from "./decode.ts";
 import { openaiBodyOrder, openaiProfile } from "./profile.ts";
 import { toResponsesWire } from "./wire.ts";
@@ -51,8 +52,11 @@ export const openaiCodec: ProviderCodec = {
       protocol.push(
         ["x-codex-window-id", codex.windowId],
         ["x-codex-turn-metadata", codex.turnMetadata],
-        ["x-openai-internal-codex-responses-lite", "true"],
       );
+      // `add_responses_lite_header`: only for a lite model.
+      if (codexModel(input.model).lite) {
+        protocol.push(["x-openai-internal-codex-responses-lite", "true"]);
+      }
       const hint = routingHint(input.model, body.service_tier);
       if (hint !== undefined) protocol.push(["x-codex-routing-hint", hint]);
     }

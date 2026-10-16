@@ -496,6 +496,84 @@ test("model-specific metadata comes from the Codex catalog", () => {
   );
 });
 
+/**
+ * Every row of Codex 0.163.0's bundled `models.json`, as this leg sends it:
+ * lite or not, verbosity, the default effort, and the two `node_repl_*` flags.
+ * Read off the catalog by hand, so a row edited in the table fails here.
+ */
+const CATALOG_0163: [string, boolean, string, string, boolean][] = [
+  ["gpt-6-astra", true, "low", "low", true],
+  ["gpt-6.1-sol", true, "low", "low", true],
+  ["gpt-6-sol", true, "low", "medium", true],
+  ["gpt-6-luna", true, "low", "medium", false],
+  ["gpt-5.6-sol", true, "low", "low", false],
+  ["gpt-5.6-terra", true, "low", "medium", false],
+  ["gpt-5.6-luna", true, "low", "medium", false],
+  ["gpt-daybreak-blue-latest", true, "low", "low", false],
+  ["gpt-daybreak-red-latest", true, "high", "medium", false],
+  ["gpt-5.5", false, "low", "medium", false],
+  ["codex-auto-review", true, "low", "medium", false],
+];
+
+test("every catalog row reaches the wire with its own values", () => {
+  for (const [model, lite, verbosity, effort, review] of CATALOG_0163) {
+    const built = build(FOLLOW_UP, { model });
+    const body = bodyOf(built);
+    const metadata = metadataOf(built);
+    expect([model, header(built, "x-openai-internal-codex-responses-lite")]).toEqual([
+      model,
+      lite ? "true" : undefined,
+    ]);
+    expect([model, body.text]).toEqual([model, { verbosity }]);
+    expect([model, (body.reasoning as { effort: string }).effort]).toEqual([model, effort]);
+    expect([model, metadata.node_repl_auto_review_required]).toEqual([model, review]);
+    expect([model, metadata.node_repl_disabled]).toEqual([model, false]);
+  }
+});
+
+test("a non-lite model gets Codex's non-lite shape", () => {
+  // `gpt-5.5` is the catalog's one non-lite model. Codex 0.163 then sends its
+  // tools flat in the body, keeps base instructions in `input` (the
+  // `instructions` field is gone in this release), leaves `parallel_tool_calls`
+  // to the model's support, and omits `reasoning.context`.
+  const built = build(FOLLOW_UP, { model: "gpt-5.5" });
+  const body = bodyOf(built);
+  expect(Object.keys(body)).toEqual([
+    "model",
+    "stream",
+    "input",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "reasoning",
+    "store",
+    "include",
+    "prompt_cache_key",
+    "text",
+    "client_metadata",
+  ]);
+  expect(body.tools).toEqual([
+    {
+      type: "function",
+      name: "wait",
+      description: "Waits.",
+      strict: false,
+      parameters: WAIT_TOOL.inputSchema,
+    },
+  ]);
+  expect(body.parallel_tool_calls).toBe(true);
+  expect(body.reasoning).toEqual({ effort: "medium" });
+  const input = inputOf(built);
+  expect(input[0]).toMatchObject({
+    type: "message",
+    role: "developer",
+    id: "msg_8d0d7cab-7b2b-5e76-8ff1-9484d537c418",
+  });
+  expect(input.some((item) => item.type === "additional_tools")).toBe(false);
+  expect(header(built, "x-openai-internal-codex-responses-lite")).toBeUndefined();
+  expect(header(built, "x-codex-routing-hint")).toBe("model=gpt-5.5");
+});
+
 test("a client tool choice is kept; absent, the leg sends Codex's auto", () => {
   expect(bodyOf(build(FOLLOW_UP)).tool_choice).toBe("auto");
   expect(bodyOf(build({ ...FOLLOW_UP, toolChoice: { type: "any" } })).tool_choice).toBe("required");

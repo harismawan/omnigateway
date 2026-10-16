@@ -422,17 +422,20 @@ export function toResponsesWire(
     // no function schema to send, and the router never routes one here.
     const custom = req.tools.filter((t) => t.kind === "portable");
     if (custom.length !== req.tools.length) note("openai:anthropic-tool-dropped");
-    if (lite) {
-      // Codex's `ResponsesTool` for a function, `strict` included. They go in
-      // one `functions` namespace inside `additional_tools`; the backend
-      // returns calls from it with no `namespace`, so the decoder is unchanged.
-      liteTools = custom.map((t) => ({
+    if (opts.oauth) {
+      // Codex's `ResponsesTool` for a function, `strict` included. Lite puts
+      // them in one `functions` namespace inside `additional_tools` — the
+      // backend returns calls from it with no `namespace`, so the decoder is
+      // unchanged — and non-lite sends the same objects flat in `tools`.
+      const tools = custom.map((t) => ({
         type: "function",
         name: t.name,
         description: t.description,
         strict: false,
         parameters: t.inputSchema,
       }));
+      if (lite) liteTools = tools;
+      else body.tools = tools;
     } else {
       body.tools = custom.map((t) => ({
         type: "function",
@@ -444,10 +447,13 @@ export function toResponsesWire(
   }
   if (req.toolChoice !== undefined) body.tool_choice = encodeToolChoice(req.toolChoice);
   else if (opts.oauth) body.tool_choice = "auto";
-  // Codex sends `false` whenever the model is lite. Behaviour-changing — one
-  // tool call per turn for every client on this leg — and the operator's
-  // decision: exact over behaviour-preserving (spec, Decided).
-  if (lite) body.parallel_tool_calls = false;
+  // Codex sends `prompt.parallel_tool_calls && !use_responses_lite`: `false`
+  // whenever the model is lite. Behaviour-changing — one tool call per turn for
+  // every client on this leg — and the operator's decision: exact over
+  // behaviour-preserving (spec, Decided). Non-lite follows the model's support.
+  if (opts.oauth) {
+    body.parallel_tool_calls = !lite && codexModel(model).supportsParallelToolCalls;
+  }
   if (req.reasoning?.mode === "betweenTools")
     degradations.push("openai:reasoning-between-tools-as-off");
   if (opts.oauth) {

@@ -5,11 +5,14 @@ import { OPENAI_SANDBOX } from "./profile.ts";
 /**
  * Codex 0.163's "responses-lite" request shape, for the OAuth leg.
  *
- * Every GPT model in Codex's catalog sets `use_responses_lite`, and with it the
- * client sends no `instructions` and no `tools`: both ride inside `input` as
- * prefix items, and every history item carries an id and the passthrough
- * metadata Codex stamps. This module turns the Responses items `wire.ts` built
- * into that shape, and builds the per-turn metadata that goes beside it.
+ * Every model in Codex's 0.163.0 catalog but `gpt-5.5` sets
+ * `use_responses_lite`, and with it the client sends no `instructions` and no
+ * `tools`: both ride inside `input` as prefix items. Non-lite keeps its tools in
+ * the body but still sends base instructions here — 0.163 removed the
+ * `instructions` field — and in both shapes every history item carries an id
+ * and the passthrough metadata Codex stamps. This module turns the Responses
+ * items `wire.ts` built into that shape, and builds the per-turn metadata that
+ * goes beside it.
  *
  * Measured against the live backend before it was built (spec History): the
  * shape returns tool calls with no `namespace`, accepts fabricated item ids
