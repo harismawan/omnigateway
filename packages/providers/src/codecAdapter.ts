@@ -45,21 +45,40 @@ function codecFailure(id: ProviderId, hook: string, what: string): GatewayError 
 /**
  * Whether a request's framing headers match what the transport will send.
  *
- * `content-length` is the transport's alone: it counts the bytes after any
- * encoding, so a codec's own figure is wrong exactly when an encoding applies.
- * `content-encoding` must be present once, saying `zstd`, when the body is
- * marked for zstd, and absent otherwise — compressed bytes under no header, or
- * plain JSON under one, are each a body the upstream cannot read.
+ * Marked for zstd: exactly one `content-encoding: zstd`, and no length of the
+ * codec's own — the transport counts the bytes after compression, so any
+ * figure the codec computed from the JSON is wrong by construction.
+ *
+ * Unmarked, the rules are the ones a codec written before the marker existed
+ * already met, so no plugin-API generation bump was needed: its own
+ * `content-length` is accepted once, in any casing, when it is the body's UTF-8
+ * byte length (the transport then writes no second one), and
+ * `content-encoding: identity` once is accepted as the no-op it is. A length
+ * that is not the body's, two of either header, or any real encoding the
+ * transport did not apply is refused — each is a body the upstream would
+ * misread.
  */
 function framingAgrees(
   headers: readonly (readonly [string, string])[],
+  body: string,
   bodyEncoding: unknown,
 ): boolean {
   const named = (name: string) => headers.filter(([n]) => n.toLowerCase() === name);
-  if (named("content-length").length > 0) return false;
+  const lengths = named("content-length");
   const encodings = named("content-encoding");
-  if (bodyEncoding === undefined) return encodings.length === 0;
-  return encodings.length === 1 && encodings[0]?.[1].trim().toLowerCase() === bodyEncoding;
+  if (bodyEncoding !== undefined) {
+    return (
+      lengths.length === 0 &&
+      encodings.length === 1 &&
+      encodings[0]?.[1].trim().toLowerCase() === bodyEncoding
+    );
+  }
+  if (lengths.length > 1 || encodings.length > 1) return false;
+  const length = lengths[0]?.[1];
+  const bytes = new TextEncoder().encode(body).byteLength;
+  if (length !== undefined && length !== String(bytes)) return false;
+  const encoding = encodings[0]?.[1];
+  return encoding === undefined || encoding.trim().toLowerCase() === "identity";
 }
 
 function boundedDegradations(entries: readonly string[] | undefined): string[] {
@@ -317,7 +336,7 @@ export function codecAdapter(
             typeof pair[0] === "string" &&
             typeof pair[1] === "string",
         ) ||
-        !framingAgrees(request.headers, request.bodyEncoding)
+        !framingAgrees(request.headers, request.body, request.bodyEncoding)
       ) {
         throw codecFailure(id, "buildRequest", "did not return a usable request");
       }

@@ -625,14 +625,65 @@ test("a codec's body encoding reaches the transport, and only a known one", asyn
       expect.stringContaining("did not return a usable request"),
     ]);
   }
-  for (const headers of [[["content-encoding", "zstd"]], [["Content-Length", "2"]]]) {
+  // Unmarked: what a plugin codec written before the marker existed may send,
+  // and the plugin-API generation did not move, so it must keep working. Its
+  // own length is accepted when it is the body's UTF-8 byte length, in any
+  // casing; `identity` is accepted as the no-op it is.
+  const unicode = { ...wire, body: '{"a":"é"}' };
+  for (const [request, length] of [
+    [wire, "2"],
+    [unicode, "10"],
+  ] as const) {
+    for (const name of ["content-length", "Content-Length", "CONTENT-LENGTH"]) {
+      const headers = [[name, length]];
+      expect([name, await send({ request: { ...request, headers } })]).toEqual([name, null]);
+    }
+  }
+  expect(
+    await send({ request: { ...wire, headers: [["Content-Encoding", "identity"]] } }),
+  ).toBeNull();
+  expect(
+    await send({
+      request: {
+        ...wire,
+        headers: [
+          ["content-encoding", "identity"],
+          ["content-length", "2"],
+        ],
+      },
+    }),
+  ).toBeNull();
+  const accepted = sent.length;
+
+  // Still refused unmarked: a length that is not the body's (the server would
+  // wait for bytes never sent, or read the next request as this one's tail),
+  // two lengths, and any real encoding the transport did not apply.
+  for (const headers of [
+    [["content-encoding", "zstd"]],
+    [["content-encoding", "gzip"]],
+    [["Content-Length", "3"]],
+    [["content-length", "9"]],
+    [["content-length", " 2"]],
+    [["content-length", "2.0"]],
+    [
+      ["content-length", "2"],
+      ["Content-Length", "2"],
+    ],
+    [
+      ["content-encoding", "identity"],
+      ["content-encoding", "identity"],
+    ],
+  ]) {
     const failure = await send({ request: { ...wire, headers } });
     expect([headers, (failure as Error | null)?.message]).toEqual([
       headers,
       expect.stringContaining("did not return a usable request"),
     ]);
   }
-  expect(sent).toHaveLength(2);
+  // The length check counts bytes, not UTF-16 units: "é" is one unit, two bytes.
+  const failure = await send({ request: { ...unicode, headers: [["content-length", "9"]] } });
+  expect((failure as Error | null)?.message).toContain("did not return a usable request");
+  expect(sent).toHaveLength(accepted);
 });
 
 test("a codec that throws fails over instead of ending the request", async () => {

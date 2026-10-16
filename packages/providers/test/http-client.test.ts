@@ -410,6 +410,27 @@ test("a body past 256 KiB is still one write: Codex's frame at that size too", a
   expect(createHash("sha256").update(out).digest("hex").slice(0, 16)).toBe(BIG_ZSTD_SHA);
 });
 
+test("a request carrying its own length goes out with exactly that one", async () => {
+  // A plugin codec may set its own (correct) length; the transport must not add
+  // a second, which a server reads as a malformed or smuggled request.
+  for (const name of ["content-length", "Content-Length"]) {
+    const s = wholeRequestServer();
+    const body = '{"a":"é"}';
+    await nodeHttpClient()({
+      provider: "openai",
+      url: s.url,
+      method: "POST",
+      headers: [[name, String(Buffer.byteLength(body))]],
+      body,
+      signal: AbortSignal.timeout(5000),
+    });
+    const { head, body: sent } = await s.request();
+    expect([name, head.match(/\r\ncontent-length:/gi)?.length]).toEqual([name, 1]);
+    expect(sent.toString("utf8")).toBe(body);
+    s.stop();
+  }
+});
+
 test("an unmarked request goes out as the bytes it was given", async () => {
   const s = wholeRequestServer();
   const http = nodeHttpClient();
