@@ -475,9 +475,10 @@ needs rather than reading a clock, so a failover or retry rebuilds the same byte
 
 A request may set `bodyEncoding: "zstd"` beside `body`. `body` stays the JSON
 string — it is what body capture records — and the host's transport compresses it
-and writes `content-length` in compressed bytes. Put the `content-encoding: zstd`
-header in your own header list; any other `bodyEncoding` value is refused as an
-unusable request.
+and writes `content-length` in compressed bytes. Put exactly one
+`content-encoding: zstd` header in your own header list. Any other `bodyEncoding`
+value, a marker without that header, a `content-encoding` header without the
+marker, or a `content-length` of your own is refused as an unusable request.
 
 ### 6.1 Authorizing it
 
