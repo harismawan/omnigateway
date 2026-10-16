@@ -427,6 +427,34 @@ test("fails over to the next credential before the commit point", async () => {
   store.close();
 });
 
+test("every attempt is handed the instant the request started, not its own", async () => {
+  // A codec stamps this into the request (Codex turn metadata), so two attempts
+  // of one request must see one value. The clock advances on every read here,
+  // which is what makes an attempt-local `now` distinguishable from the start.
+  const store = await seeded(2);
+  const seen: (number | undefined)[] = [];
+  const adapter: ProviderAdapter = {
+    id: "anthropic",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(r) {
+      seen.push(r.requestStartedAt);
+      if (seen.length === 1) throw new GatewayError("UPSTREAM", "first fails");
+      return { events: textStream("recovered"), degradations: [] };
+    },
+  };
+  let clock = 1_000_000;
+  const outcome = await dispatch(
+    req,
+    { ...deps(store, adapter), now: () => clock++ },
+    new AbortController().signal,
+    "req_test",
+  );
+  await drain(outcome.events);
+
+  expect(seen).toEqual([1_000_000, 1_000_000]);
+  store.close();
+});
+
 test("a failover trace has sibling attempts and the failed attempt's code", async () => {
   const store = await seeded(2);
   const trace = createTrace({ startedAt: 1_000_000, traceparent: null });

@@ -1,5 +1,5 @@
 import type { ChatRequest, ErrorCode, GatewayError, StreamEvent } from "@omni/ir";
-import type { AdapterCredentials, HeaderPair } from "./types.ts";
+import type { AdapterCredentials, BodyEncoding, HeaderPair } from "./types.ts";
 
 /**
  * What a provider supplies, with every side effect left to the host.
@@ -121,6 +121,16 @@ export type CodecInput = {
    */
   maxOutputTokens?: number | undefined;
   /**
+   * When the gateway accepted this request, in epoch milliseconds, when the
+   * host has that instant.
+   *
+   * For a codec whose upstream expects a timestamp in the request — Codex's turn
+   * metadata does. Handed in rather than read off a clock so the codec stays a
+   * function of its input: every attempt of one request (failover, the AUTH
+   * refresh retry) builds the same bytes. Absent outside dispatch.
+   */
+  requestStartedAt?: number | undefined;
+  /**
    * Builds a classified error, using the **host's** `GatewayError`.
    *
    * A codec must reach for this rather than `new GatewayError(…)`, and the
@@ -204,6 +214,12 @@ export type CodecHttpRequest = {
   method: string;
   headers: readonly HeaderPair[];
   body: string;
+  /**
+   * An encoding for the transport to apply to `body`; see `HttpRequest`. The
+   * codec still returns the JSON string, which is what body capture records,
+   * and places the `content-encoding` header itself.
+   */
+  bodyEncoding?: BodyEncoding;
 };
 
 export type CodecDecodeInput = {

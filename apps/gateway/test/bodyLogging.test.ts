@@ -833,6 +833,41 @@ function fixedRequest(): HttpRequest {
   };
 }
 
+test("captures a zstd-encoded request as the JSON it was before compression", async () => {
+  // The OpenAI OAuth leg asks the transport to compress. Capture sits above the
+  // transport, so the artifact records the JSON the codec built — readable, and
+  // never the binary the socket carries.
+  const collector = createBodyCollector({ captureStreamChunks: false });
+  const seen: HttpRequest[] = [];
+  const http = collector.wrap(async (req) => {
+    seen.push(req);
+    return bodyOf(["data: [DONE]\n\n"], req.signal);
+  });
+  const adapter = ADAPTERS.openai;
+  if (adapter === undefined) throw new Error("openai adapter missing");
+  const result = await adapter.send({
+    request: {
+      model: "pool",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      stream: true,
+    },
+    model: "gpt-6-astra",
+    credentials: { accessToken: "oa-tok", apiKey: null, providerData: { accountId: "acct" } },
+    http,
+    signal: new AbortController().signal,
+  });
+  for await (const _ of result.events) {
+    // drained
+  }
+  await collector.settle();
+
+  expect(seen[0]?.bodyEncoding).toBe("zstd");
+  const captured = collector.attempts()[0]?.request;
+  expect(typeof captured).toBe("object");
+  expect(captured).toEqual(JSON.parse(seen[0]?.body ?? "null"));
+  expect(captured).toMatchObject({ model: "gpt-6-astra", stream: true });
+});
+
 test("delivers the adapter the same bytes with capture on and off", async () => {
   const source = (): HttpClient => async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal);
 

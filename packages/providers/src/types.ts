@@ -3,6 +3,9 @@ import type { ChatRequest, ProviderId, StreamEvent } from "@omni/ir";
 /** One header, name casing preserved exactly as it goes on the wire. */
 export type HeaderPair = readonly [name: string, value: string];
 
+/** A request-body encoding the transport applies. Codex's backend reads zstd. */
+export type BodyEncoding = "zstd";
+
 /**
  * An upstream request with everything already decided.
  *
@@ -17,6 +20,16 @@ export type HttpRequest = {
   method: string;
   headers: readonly HeaderPair[];
   body: string;
+  /**
+   * How the transport encodes `body` on the wire. Absent means as given.
+   *
+   * A transport concern rather than a body the codec pre-compresses, because
+   * `body` is also what body capture records: compressing above it would put
+   * binary into an artifact that is meant to be readable JSON. The header that
+   * declares the encoding is the codec's, placed in its profile's order; the
+   * transport compresses and counts `content-length` in compressed bytes.
+   */
+  bodyEncoding?: BodyEncoding;
   signal: AbortSignal;
   /** Gateway correlation for an optional local timing callback. Never sent on the wire. */
   requestId?: string;
@@ -68,6 +81,8 @@ export type AdapterRequest = {
   autoCache?: boolean;
   /** The target's saved output ceiling, when the operator set one. See `CodecInput`. */
   maxOutputTokens?: number;
+  /** When dispatch accepted the request, epoch ms. See `CodecInput`. */
+  requestStartedAt?: number;
 };
 
 export type AdapterResult = {

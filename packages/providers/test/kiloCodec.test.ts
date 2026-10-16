@@ -547,6 +547,145 @@ test("every value the bridge forwards actually arrives", async () => {
   expect(events[0]).toMatchObject({ model: JSON.stringify({ alias: "Session" }) });
 });
 
+test("the request's start instant reaches the codec, and is absent when the host has none", async () => {
+  // OpenAI's Codex fingerprint stamps turn metadata from it. Derived from the
+  // request rather than read off a clock inside the codec, so every attempt of
+  // one request — failover, AUTH retry — builds the same bytes.
+  const { seen, adapter } = recording();
+  const send = (extra: { requestStartedAt?: number }) =>
+    adapter.send({
+      request,
+      model: "m",
+      credentials: credentials(),
+      http: ok,
+      signal: new AbortController().signal,
+      ...extra,
+    });
+  await send({ requestStartedAt: 1_792_140_063_816 });
+  await send({});
+
+  expect(seen[0]?.requestStartedAt).toBe(1_792_140_063_816);
+  expect(seen[1] !== undefined && "requestStartedAt" in seen[1]).toBe(false);
+});
+
+test("a codec's body encoding reaches the transport, and only a known one", async () => {
+  const sent: HttpRequest[] = [];
+  const capture = async (r: HttpRequest): Promise<HttpResponse> => {
+    sent.push(r);
+    return ok();
+  };
+  const wire = { url: "https://x.test", method: "POST", headers: [], body: "{}" };
+  const send = (built: unknown) =>
+    recording({ buildRequest: () => built as never })
+      .adapter.send({
+        request,
+        model: "m",
+        credentials: credentials(),
+        http: capture,
+        signal: new AbortController().signal,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+  const zstd = { ...wire, headers: [["Content-Encoding", "zstd"]], bodyEncoding: "zstd" };
+  expect(await send({ request: zstd })).toBeNull();
+  expect(sent[0]?.bodyEncoding).toBe("zstd");
+  expect(await send({ request: wire })).toBeNull();
+  expect(sent[1] !== undefined && "bodyEncoding" in sent[1]).toBe(false);
+
+  // An encoding the transport does not implement would go out as plain bytes
+  // under a header claiming otherwise: refused before the transport, like any
+  // other unusable request.
+  for (const bodyEncoding of ["gzip", "", 1, null]) {
+    const failure = await send({ request: { ...wire, bodyEncoding } });
+    expect(failure).toMatchObject({ code: "UPSTREAM", provider: "kilo" });
+    expect((failure as Error).message).toContain("did not return a usable request");
+  }
+
+  // The marker and the header must agree. Compressed bytes under no header, or
+  // plain JSON labelled zstd, are both a request the upstream cannot read; and
+  // the length is the transport's to count, after compression.
+  for (const headers of [
+    [],
+    [["content-encoding", "gzip"]],
+    [
+      ["content-encoding", "zstd"],
+      ["content-encoding", "zstd"],
+    ],
+    [
+      ["content-encoding", "zstd"],
+      ["content-length", "2"],
+    ],
+  ]) {
+    const failure = await send({ request: { ...wire, headers, bodyEncoding: "zstd" } });
+    expect([headers, (failure as Error | null)?.message]).toEqual([
+      headers,
+      expect.stringContaining("did not return a usable request"),
+    ]);
+  }
+  // Unmarked: what a plugin codec written before the marker existed may send,
+  // and the plugin-API generation did not move, so it must keep working. Its
+  // own length is accepted when it is the body's UTF-8 byte length, in any
+  // casing; `identity` is accepted as the no-op it is.
+  const unicode = { ...wire, body: '{"a":"é"}' };
+  for (const [request, length] of [
+    [wire, "2"],
+    [unicode, "10"],
+  ] as const) {
+    for (const name of ["content-length", "Content-Length", "CONTENT-LENGTH"]) {
+      const headers = [[name, length]];
+      expect([name, await send({ request: { ...request, headers } })]).toEqual([name, null]);
+    }
+  }
+  expect(
+    await send({ request: { ...wire, headers: [["Content-Encoding", "identity"]] } }),
+  ).toBeNull();
+  expect(
+    await send({
+      request: {
+        ...wire,
+        headers: [
+          ["content-encoding", "identity"],
+          ["content-length", "2"],
+        ],
+      },
+    }),
+  ).toBeNull();
+  const accepted = sent.length;
+
+  // Still refused unmarked: a length that is not the body's (the server would
+  // wait for bytes never sent, or read the next request as this one's tail),
+  // two lengths, and any real encoding the transport did not apply.
+  for (const headers of [
+    [["content-encoding", "zstd"]],
+    [["content-encoding", "gzip"]],
+    [["Content-Length", "3"]],
+    [["content-length", "9"]],
+    [["content-length", " 2"]],
+    [["content-length", "2.0"]],
+    [
+      ["content-length", "2"],
+      ["Content-Length", "2"],
+    ],
+    [
+      ["content-encoding", "identity"],
+      ["content-encoding", "identity"],
+    ],
+  ]) {
+    const failure = await send({ request: { ...wire, headers } });
+    expect([headers, (failure as Error | null)?.message]).toEqual([
+      headers,
+      expect.stringContaining("did not return a usable request"),
+    ]);
+  }
+  // The length check counts bytes, not UTF-16 units: "é" is one unit, two bytes.
+  const failure = await send({ request: { ...unicode, headers: [["content-length", "9"]] } });
+  expect((failure as Error | null)?.message).toContain("did not return a usable request");
+  expect(sent).toHaveLength(accepted);
+});
+
 test("a codec that throws fails over instead of ending the request", async () => {
   // `RETRYABLE.INTERNAL` is false, so an unguarded plugin `TypeError` ended the
   // request after one attempt with a 500 while the rest of the pool sat unused.

@@ -20,7 +20,8 @@ import {
   usageReadable,
   windowFrom,
 } from "../oauthUsage.ts";
-import { openaiProfile } from "./profile.ts";
+import { ensureCodexSecrets } from "./codexIdentity.ts";
+import { OPENAI_ORIGINATOR, openaiProfile } from "./profile.ts";
 
 /** Public client ID of the Codex CLI. See the note at the head of Task 20. */
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -140,7 +141,9 @@ function toResult(
   token: TokenResponse,
   fallbackRefresh: string | null,
   now: () => number,
-  fallbackAccountId: string | null = null,
+  fallbackAccountId: string | null,
+  /** The credential's stored data: empty at connect, the stored row on refresh. */
+  prior: Record<string, unknown>,
 ): FlowResult {
   const claims = decodeClaims(token.idToken);
   return {
@@ -154,8 +157,15 @@ function toResult(
     },
     expiresAt: token.expiresIn === null ? null : now() + token.expiresIn * 1000,
     accountEmail: claims.email,
-    // Consumed by the OpenAI adapter as the chatgpt-account-id header (Task 10).
-    providerData: { accountId: claims.accountId ?? fallbackAccountId },
+    // `accountId` is the chatgpt-account-id header. The other two are the Codex
+    // fingerprint's per-credential installation id and id salt: minted at
+    // connect, kept on every refresh, and minted on the first refresh of a
+    // credential connected before they existed — the refresher merges this
+    // over the stored row, which is what backfills it.
+    providerData: {
+      accountId: claims.accountId ?? fallbackAccountId,
+      ...ensureCodexSecrets(prior),
+    },
   };
 }
 
@@ -259,13 +269,15 @@ export const openaiOAuthFlow: PkcePluginFlow = {
     url.searchParams.set("id_token_add_organizations", "true");
     url.searchParams.set("codex_cli_simplified_flow", "true");
     url.searchParams.set("state", state);
-    url.searchParams.set("originator", "codex_cli_rs");
+    // The profile's originator, not a second literal: Codex's login reads the
+    // process originator, which the TUI's app-server sets before any login.
+    url.searchParams.set("originator", OPENAI_ORIGINATOR);
     url.searchParams.set("prompt", "login");
 
     return { authorizeUrl: url.toString(), pending: { verifier, challenge, state, redirectUri } };
   },
 
-  async *exchange({ code, pending, fail, now }) {
+  async *exchange({ code, pending, providerData, fail, now }) {
     const [rawCode, pastedState] = code.split("#");
     if (pastedState !== undefined && pastedState !== pending.state) {
       throw fail("AUTH", "authorization state mismatch");
@@ -281,7 +293,9 @@ export const openaiOAuthFlow: PkcePluginFlow = {
       fail,
     );
 
-    return toResult(token, null, now);
+    // A reconnect hands back the stored row, so the installation id and id
+    // salt survive it; the account id still comes from the new token only.
+    return toResult(token, null, now, null, providerData ?? {});
   },
 
   async *refresh({ refreshToken, providerData, fail, now }) {
@@ -289,7 +303,13 @@ export const openaiOAuthFlow: PkcePluginFlow = {
       { grant_type: "refresh_token", refresh_token: refreshToken, scope: SCOPES },
       fail,
     );
-    return toResult(token, refreshToken, now, accountIdFromProviderData(providerData));
+    return toResult(
+      token,
+      refreshToken,
+      now,
+      accountIdFromProviderData(providerData),
+      providerData,
+    );
   },
 
   async *usage({ secrets, providerData, now }) {

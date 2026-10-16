@@ -53,8 +53,11 @@ const creds = (over: Partial<AdapterCredentials> = {}): AdapterCredentials => ({
  * the instructions and the opening item. Written out rather than recomputed in
  * the test: a test that derives it the way the encoder does agrees with any
  * encoder, including one that has started keying on something that moves.
+ *
+ * A UUIDv7 since the Codex 0.163.0 fingerprint: the key is Codex's thread id,
+ * and every leg takes the one profile's form.
  */
-const KEY = "af75e45150ba5505736d80ccdd119119";
+const KEY = "019b86b5-42c0-7505-b36d-80ccdd119119";
 
 const BODY =
   '{"model":"gpt-5-codex","stream":true,"input":[{"type":"message","role":"user",' +
@@ -84,23 +87,39 @@ test("an OAuth credential goes to the Codex host, naming its billing account", a
   expect(sent.provider).toBe("openai");
   expect(sent.method).toBe("POST");
   expect(sent.url).toBe("https://chatgpt.com/backend-api/codex/responses");
-  expect(sent.body).toBe(BODY);
+  // The Codex shape itself is pinned against the capture in
+  // `openaiCodexFingerprint.test.ts`; here only that this leg wears it.
+  expect(sent.bodyEncoding).toBe("zstd");
+  expect(JSON.parse(sent.body)).toMatchObject({
+    model: "gpt-5-codex",
+    stream: true,
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+    store: false,
+    prompt_cache_key: KEY,
+  });
   expect(sent.headers.map(([name]) => name)).toEqual([
     "version",
     "x-codex-beta-features",
-    "originator",
+    "x-codex-window-id",
+    "x-codex-turn-metadata",
+    "x-openai-internal-codex-responses-lite",
+    "x-codex-routing-hint",
     "x-client-request-id",
     "session-id",
     "thread-id",
     "accept",
+    "content-encoding",
     "content-type",
     "authorization",
     "chatgpt-account-id",
+    "originator",
     "user-agent",
+    "host",
   ]);
   expect(sent.headers).toContainEqual(["authorization", "Bearer oa-tok"]);
   expect(sent.headers).toContainEqual(["chatgpt-account-id", "acct-9"]);
-  expect(sent.headers).toContainEqual(["originator", "codex_cli_rs"]);
+  expect(sent.headers).toContainEqual(["originator", "codex-tui"]);
   // Header and body carry one value. They are derived at different layers —
   // the encoder returns the key, the codec places the header — so the two can
   // drift apart, and a backend handed two names for one session caches under
@@ -123,7 +142,24 @@ test("an API key goes to the public host, with no account header at all", async 
   const sent = await sentFor(creds({ apiKey: "sk-oa" }));
 
   expect(sent.url).toBe("https://api.openai.com/v1/responses");
+  // Today's standard Responses body, uncompressed; only the key's form moved.
   expect(sent.body).toBe(BODY);
+  expect(sent.bodyEncoding).toBeUndefined();
+  // Today's header set, in the shared profile's order and values. None of the
+  // Codex-backend-only headers reach the public API.
+  expect(sent.headers.map(([name]) => name)).toEqual([
+    "version",
+    "x-codex-beta-features",
+    "x-client-request-id",
+    "session-id",
+    "thread-id",
+    "accept",
+    "content-type",
+    "authorization",
+    "originator",
+    "user-agent",
+  ]);
+  expect(sent.headers).toContainEqual(["version", "0.163.0"]);
   expect(sent.headers).toContainEqual(["authorization", "Bearer sk-oa"]);
   expect(sent.headers.some(([name]) => name === "chatgpt-account-id")).toBe(false);
   expect(sent.headers).toContainEqual(["session-id", KEY]);

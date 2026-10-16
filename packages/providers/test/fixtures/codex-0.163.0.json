@@ -1,0 +1,174 @@
+{
+  "source": "Codex 0.163.0, Responses over HTTPS, captured 2026-10-16 by scripts/codex-capture. Hand-sanitized: ids and timestamps replaced with placeholders, Codex's own prompt items and tool inventory removed, no paths, no installation id. Two captures: headerNames, headerValues, turnMetadata, bodyKeys, body and clientMetadata come from the interactive TUI's main turn (originator codex-tui); followUpInput comes from a `codex exec` run (originator codex_exec, turn_trigger exec, sandbox_mode read-only), the request after one tool call, because only exec was driven through a tool loop. Item shapes do not depend on the entry point; the exec-only header and metadata values are not in this file.",
+  "headerNames": [
+    "version",
+    "x-codex-beta-features",
+    "x-codex-window-id",
+    "x-codex-turn-metadata",
+    "x-openai-internal-codex-responses-lite",
+    "x-codex-routing-hint",
+    "x-client-request-id",
+    "session-id",
+    "thread-id",
+    "accept",
+    "content-encoding",
+    "content-type",
+    "authorization",
+    "chatgpt-account-id",
+    "originator",
+    "user-agent",
+    "host",
+    "content-length"
+  ],
+  "headerValues": {
+    "version": "0.163.0",
+    "x-codex-beta-features": "remote_compaction_v2",
+    "x-openai-internal-codex-responses-lite": "true",
+    "accept": "text/event-stream",
+    "content-encoding": "zstd",
+    "content-type": "application/json",
+    "originator": "codex-tui"
+  },
+  "turnMetadata": {
+    "installation_id": "<installation>",
+    "session_id": "<thread>",
+    "thread_id": "<thread>",
+    "agent_name": "/root",
+    "turn_id": "<turn>",
+    "window_id": "<thread>:0",
+    "window_number": 0,
+    "context_window_id": "<context-window>",
+    "request_kind": "turn",
+    "history_initialization": "new",
+    "root_turn_id": "<turn>",
+    "thread_source": "user",
+    "turn_trigger": "user",
+    "sandbox": "<sandbox>",
+    "sandbox_mode": "workspace-write",
+    "auto_review_enabled": false,
+    "node_repl_auto_review_required": true,
+    "node_repl_disabled": false,
+    "turn_started_at_unix_ms": 0,
+    "analytics_enabled": false,
+    "model": "gpt-6-astra",
+    "reasoning_effort": "low"
+  },
+  "bodyKeys": [
+    "model",
+    "stream",
+    "input",
+    "tool_choice",
+    "parallel_tool_calls",
+    "reasoning",
+    "store",
+    "include",
+    "prompt_cache_key",
+    "text",
+    "client_metadata"
+  ],
+  "body": {
+    "model": "gpt-6-astra",
+    "stream": true,
+    "tool_choice": "auto",
+    "parallel_tool_calls": false,
+    "reasoning": { "effort": "low", "context": "all_turns" },
+    "store": false,
+    "include": ["reasoning.encrypted_content"],
+    "prompt_cache_key": "<thread>",
+    "text": { "verbosity": "low" }
+  },
+  "clientMetadata": {
+    "guardian_credits_requested": "true",
+    "mcp_attribution": "{\"status\":\"none\"}",
+    "root_turn_id": "<turn>",
+    "session_id": "<thread>",
+    "thread_id": "<thread>",
+    "turn_id": "<turn>",
+    "x-codex-installation-id": "<installation>",
+    "x-codex-turn-metadata": "<the x-codex-turn-metadata header, verbatim>",
+    "x-codex-window-id": "<thread>:0"
+  },
+  "followUpInput": [
+    {
+      "type": "additional_tools",
+      "id": "at_<uuid>",
+      "role": "developer",
+      "tools": [
+        {
+          "type": "namespace",
+          "name": "functions",
+          "description": "",
+          "tools": [
+            {
+              "type": "function",
+              "name": "wait",
+              "description": "<description>",
+              "strict": false,
+              "parameters": {
+                "type": "object",
+                "properties": { "cell_id": { "type": "string" } },
+                "required": ["cell_id"],
+                "additionalProperties": false
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "id": "msg_<uuid>",
+      "role": "developer",
+      "content": [{ "type": "input_text", "text": "<base instructions>" }],
+      "internal_chat_message_metadata_passthrough": {
+        "content_item_kinds": ["model.base_instructions"]
+      }
+    },
+    {
+      "type": "message",
+      "id": "msg_<uuid>",
+      "role": "user",
+      "content": [{ "type": "input_text", "text": "wait a moment then say hi" }],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "<turn>",
+        "create_time": 0,
+        "content_item_kinds": ["user.text"]
+      }
+    },
+    {
+      "type": "reasoning",
+      "id": "rs_<id>",
+      "summary": [],
+      "encrypted_content": "<opaque>",
+      "internal_chat_message_metadata_passthrough": { "turn_id": "<turn>" }
+    },
+    {
+      "type": "message",
+      "status": "completed",
+      "id": "msg_<id>",
+      "role": "assistant",
+      "content": [{ "type": "output_text", "text": "Waiting briefly.", "annotations": [] }],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "<turn>",
+        "content_item_kinds": ["unknown"]
+      }
+    },
+    {
+      "type": "function_call",
+      "status": "completed",
+      "id": "fc_<id>",
+      "name": "sleep",
+      "namespace": "clock",
+      "arguments": "{\"duration_ms\":1}",
+      "call_id": "call_<id>",
+      "internal_chat_message_metadata_passthrough": { "turn_id": "<turn>" }
+    },
+    {
+      "type": "function_call_output",
+      "id": "fco_<uuid>",
+      "call_id": "call_<id>",
+      "output": "Sleep completed.",
+      "internal_chat_message_metadata_passthrough": { "turn_id": "<turn>", "create_time": 0 }
+    }
+  ]
+}

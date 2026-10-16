@@ -42,6 +42,45 @@ function codecFailure(id: ProviderId, hook: string, what: string): GatewayError 
  * coerced: `String(someObject)` produces `[object Object]`, which is a value
  * that looks like data and explains nothing.
  */
+/**
+ * Whether a request's framing headers match what the transport will send.
+ *
+ * Marked for zstd: exactly one `content-encoding: zstd`, and no length of the
+ * codec's own — the transport counts the bytes after compression, so any
+ * figure the codec computed from the JSON is wrong by construction.
+ *
+ * Unmarked, the rules are the ones a codec written before the marker existed
+ * already met, so no plugin-API generation bump was needed: its own
+ * `content-length` is accepted once, in any casing, when it is the body's UTF-8
+ * byte length (the transport then writes no second one), and
+ * `content-encoding: identity` once is accepted as the no-op it is. A length
+ * that is not the body's, two of either header, or any real encoding the
+ * transport did not apply is refused — each is a body the upstream would
+ * misread.
+ */
+function framingAgrees(
+  headers: readonly (readonly [string, string])[],
+  body: string,
+  bodyEncoding: unknown,
+): boolean {
+  const named = (name: string) => headers.filter(([n]) => n.toLowerCase() === name);
+  const lengths = named("content-length");
+  const encodings = named("content-encoding");
+  if (bodyEncoding !== undefined) {
+    return (
+      lengths.length === 0 &&
+      encodings.length === 1 &&
+      encodings[0]?.[1].trim().toLowerCase() === bodyEncoding
+    );
+  }
+  if (lengths.length > 1 || encodings.length > 1) return false;
+  const length = lengths[0]?.[1];
+  const bytes = new TextEncoder().encode(body).byteLength;
+  if (length !== undefined && length !== String(bytes)) return false;
+  const encoding = encodings[0]?.[1];
+  return encoding === undefined || encoding.trim().toLowerCase() === "identity";
+}
+
 function boundedDegradations(entries: readonly string[] | undefined): string[] {
   if (!Array.isArray(entries)) return [];
   return entries
@@ -233,6 +272,7 @@ export function codecAdapter(
           ...(req.requestId === undefined ? {} : { requestId: req.requestId }),
           ...(req.autoCache === undefined ? {} : { autoCacheEnabled: req.autoCache }),
           ...(req.maxOutputTokens === undefined ? {} : { maxOutputTokens: req.maxOutputTokens }),
+          ...(req.requestStartedAt === undefined ? {} : { requestStartedAt: req.requestStartedAt }),
         }),
       );
       // **Copied first, then only the copy is read — checks included.**
@@ -255,15 +295,20 @@ export function codecAdapter(
         method: string;
         headers: readonly (readonly [string, string])[];
         body: string;
+        bodyEncoding: unknown;
       }>;
       const request = {
         url: described.url,
         method: described.method,
         headers: Array.isArray(described.headers) ? [...described.headers] : described.headers,
         body: described.body,
+        bodyEncoding: described.bodyEncoding,
       };
       if (
         typeof request.body !== "string" ||
+        // An encoding the transport does not implement would send plain bytes
+        // under a `content-encoding` header claiming otherwise.
+        (request.bodyEncoding !== undefined && request.bodyEncoding !== "zstd") ||
         !isSendableUrl(request.url) ||
         !isHttpMethod(request.method) ||
         !Array.isArray(request.headers) ||
@@ -290,7 +335,8 @@ export function codecAdapter(
             pair.length === 2 &&
             typeof pair[0] === "string" &&
             typeof pair[1] === "string",
-        )
+        ) ||
+        !framingAgrees(request.headers, request.body, request.bodyEncoding)
       ) {
         throw codecFailure(id, "buildRequest", "did not return a usable request");
       }
@@ -301,6 +347,7 @@ export function codecAdapter(
         method: request.method,
         headers: request.headers,
         body: request.body,
+        ...(request.bodyEncoding === "zstd" ? { bodyEncoding: request.bodyEncoding } : {}),
       };
 
       // Checked on the copy, before the transport. A plugin's manifest is the

@@ -62,8 +62,18 @@ type OAuthProviderBase = {
    */
   start(opts: { redirectUri: string }, deps: OAuthDeps): AuthorizeStart | Promise<AuthorizeStart>;
 
-  /** PKCE: exchange an authorization code. Device: poll once for a token. */
-  exchange(input: { code: string; pending: PendingFlow }, deps: OAuthDeps): Promise<FlowResult>;
+  /**
+   * PKCE: exchange an authorization code. Device: poll once for a token.
+   *
+   * `providerData` is present on a **reconnect** only: the stored state of the
+   * credential being reconnected, so a flow can carry forward what it minted at
+   * first connect. The result's `providerData` replaces the stored row whole, so
+   * a flow that ignores this field drops whatever it does not return.
+   */
+  exchange(
+    input: { code: string; pending: PendingFlow; providerData?: Record<string, unknown> },
+    deps: OAuthDeps,
+  ): Promise<FlowResult>;
 
   /**
    * `providerData` is the credential's stored state. Kimi needs it to reuse the

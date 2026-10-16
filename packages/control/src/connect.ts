@@ -219,16 +219,31 @@ export function createConnectFlows(deps: ConnectDeps) {
     const provider = deps.providers[flow.provider];
     if (provider === undefined)
       throw new GatewayError("BAD_REQUEST", "provider does not support OAuth");
+    // Read before the exchange, so a reconnect can hand the flow the state it
+    // minted at first connect; the result's `providerData` then replaces the
+    // stored row whole, as it always has. What a flow keeps is its own call.
+    const existing =
+      flow.credentialId === undefined ? null : await deps.store.credentials.get(flow.credentialId);
+    if (flow.credentialId !== undefined && existing === null) {
+      throw new GatewayError("BAD_REQUEST", "credential not found");
+    }
+    // Only the same provider's state: `start` checked the provider, but the row
+    // is read again here, and one provider's salt or device identity is never
+    // another's to see.
+    const prior =
+      existing !== null && existing.provider === flow.provider ? existing.providerData : undefined;
     const result = await provider.exchange(
-      { code, pending: flow.pending },
+      {
+        code,
+        pending: flow.pending,
+        ...(prior === undefined ? {} : { providerData: prior }),
+      },
       { http: deps.http, now: deps.now },
     );
 
     // Reconnecting an existing credential updates token material in place and
     // re-enables it, preserving the credential id that model pins point at.
     if (flow.credentialId !== undefined) {
-      const existing = await deps.store.credentials.get(flow.credentialId);
-      if (existing === null) throw new GatewayError("BAD_REQUEST", "credential not found");
       await deps.store.credentials.updateSecrets(
         flow.credentialId,
         result.secrets,

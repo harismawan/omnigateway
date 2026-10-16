@@ -86,7 +86,7 @@ not retained as a fallback.
 ### Profile values
 
 Originally captured from OmniRoute, which derives them from mitmproxy traces of the real
-binaries; OpenAI now follows Codex source as noted below. `${...}` marks an environment-substitutable value.
+binaries; OpenAI now follows a local capture of Codex itself as noted below. `${...}` marks an environment-substitutable value.
 
 **Anthropic** — `open-sse/services/claudeCodeCompatible.ts`,
 `src/shared/constants/claudeCodeClient.ts`:
@@ -105,24 +105,35 @@ binaries; OpenAI now follows Codex source as noted below. `${...}` marks an envi
 | `X-Stainless-Retry-Count` | `0` |
 | `X-Stainless-Timeout` | request timeout in whole seconds |
 
-**OpenAI** — Codex `rust-v0.159.2`, HTTP Responses path, default root thread:
+**OpenAI** — Codex `rust-v0.163.0` interactive TUI, HTTP Responses path, default
+root thread, in wire order. Captured from the real client, not read off source:
+[Codex 0.163.0 fingerprint](2026-10-16-codex-0163-fingerprint-design.md), which also
+covers the body (responses-lite shape, per-turn metadata) and the bump procedure.
 
 | Header | Value |
 | --- | --- |
-| `version` | `${0.159.2}` |
+| `version` | `${0.163.0}` |
 | `x-codex-beta-features` | `remote_compaction_v2` |
-| `originator` | `${codex_cli_rs}` |
-| `x-client-request-id` | body `prompt_cache_key` |
+| `x-codex-window-id` | OAuth only: `<thread>:0` |
+| `x-codex-turn-metadata` | OAuth only: per-turn JSON, repeated in body `client_metadata` |
+| `x-openai-internal-codex-responses-lite` | OAuth only: `true` |
+| `x-codex-routing-hint` | OAuth only: `model=<model>`, `;tier=<tier>` when the request names one |
+| `x-client-request-id` | body `prompt_cache_key` (the thread id, a UUIDv7) |
 | `session-id` | body `prompt_cache_key` |
 | `thread-id` | body `prompt_cache_key` |
 | `accept` | `text/event-stream` |
+| `content-encoding` | OAuth only: `zstd` (the transport compresses) |
 | `content-type` | `application/json` |
 | `authorization` | credential bearer token |
 | `chatgpt-account-id` | OAuth account only |
-| `user-agent` | `${codex_cli_rs}/${0.159.2} (${Windows 10.0.26200}; ${x86_64}) ${WindowsTerminal}` |
+| `originator` | `${codex-tui}` |
+| `user-agent` | `${codex-tui}/${0.163.0} (${Windows 10.0.26200}; ${x86_64}) ${WindowsTerminal} (${codex-tui}; ${0.163.0})` |
+| `host` | OAuth only: `chatgpt.com` |
 
-The originator override also supplies the User-Agent prefix unless `OMNI_UA_OPENAI`
-replaces the whole value. Session headers are sent on both credential legs.
+The originator override also supplies the User-Agent prefix and client suffix, and
+the OAuth authorize URL's `originator` query, unless `OMNI_UA_OPENAI` replaces the
+whole UA. Session headers are sent on both credential legs; the OAuth-only rows
+are the Codex backend's and never reach `api.openai.com`.
 
 **Kimi** — `open-sse/config/providers/registry/kimi/coding/runtime.ts`:
 
@@ -145,9 +156,12 @@ Anthropic's order array is taken from OmniRoute's `CLI_FINGERPRINTS`, which
 documents it as a mitmproxy capture of the real binary. Anthropic's order is Title-Case Stainless keys alphabetically, then
 lowercase Anthropic keys alphabetically, then transport headers.
 
-OpenAI follows the Codex HTTP insertion order shown above, with `host` first
-(standing in for HTTP/2 `:authority`) and transport-added `accept-encoding` and
-`content-length` last. Names are lowercase, as hyper emits them.
+OpenAI follows the order captured from Codex 0.163.0 and shown above: `host` and
+`content-length` last, as hyper writes them on HTTP/1.1 (an earlier version put
+`host` first, standing in for HTTP/2 `:authority`). The OAuth leg sets `host`
+itself to pin that position; `content-length` is the transport's and lands last.
+Names are lowercase, as hyper emits them — except `Content-Length`, whose casing
+the shared transport writes for every provider.
 
 OmniRoute has **no captured fingerprint for Kimi**. Its order array is our own
 construction — protocol headers, then identity headers, then transport — and is
@@ -251,9 +265,13 @@ Field orders, from `CLI_FINGERPRINTS`:
 - **Anthropic** — `model`, `messages`, `system`, `tools`, `tool_choice`,
   `metadata`, `max_tokens`, `temperature`, `thinking`, `context_management`,
   `output_config`, `stream`.
-- **OpenAI** — `model`, `stream`, `input`, `instructions`, `store`, `reasoning`,
-  `prompt_cache_key`, `tools`, `tool_choice`, `include`, `service_tier`,
-  `client_metadata`, `parallel_tool_calls`, `metadata`.
+- **OpenAI** — Codex 0.163.0's `ResponsesApiRequest` declaration order:
+  `model`, `stream`, `service_tier`, `input`, `instructions`, `tools`,
+  `tool_choice`, `parallel_tool_calls`, `reasoning`, `store`, `stream_options`,
+  `include`, `prompt_cache_key`, `text`, `client_metadata`, `access_programs`,
+  `metadata`. Codex no longer has `instructions`; it stays after `input` for the
+  API-key leg, which still sends one. The OAuth leg sends neither `instructions`
+  nor `tools` (both ride inside `input`).
 - **Kimi** — no captured fingerprint. Ours: `model`, `messages`, `tools`,
   `tool_choice`, `max_tokens`, `temperature`, `stream`. Marked as
   non-capture-derived in a comment, same as its header order.
@@ -355,8 +373,8 @@ OMNI_ANTHROPIC_STAINLESS_ARCH=              # blank = derive from host
 OMNI_ORDER_ANTHROPIC=                       # comma-separated; blank = built-in order
 
 OMNI_UA_OPENAI=
-OMNI_OPENAI_CLI_VERSION=0.159.2
-OMNI_OPENAI_ORIGINATOR=codex_cli_rs
+OMNI_OPENAI_CLI_VERSION=0.163.0
+OMNI_OPENAI_ORIGINATOR=codex-tui
 OMNI_OPENAI_UA_PLATFORM=Windows 10.0.26200
 OMNI_OPENAI_UA_ARCH=x86_64
 OMNI_OPENAI_UA_TERMINAL=WindowsTerminal
@@ -453,8 +471,16 @@ On 2026-09-30 the OpenAI profile, previously copied from OmniRoute's
 lowercase names, `x-codex-beta-features: remote_compaction_v2`, and `OpenAI-Beta`
 dropped (Codex sends it on WebSocket only). The `session_id` header became
 `session-id`, alongside `thread-id` and `x-client-request-id`, sent on both hosts.
-Not implemented: window-id, turn-metadata, turn-state, client_metadata, zstd,
-or WebSocket transport.
+Not implemented at the time: window-id, turn-metadata, turn-state, client_metadata,
+zstd, or WebSocket transport.
+
+On 2026-10-16 the profile moved to Codex `rust-v0.163.0`, matched against a local
+capture of the real TUI rather than source: originator `codex-tui`, the UA's client
+suffix, window-id, turn-metadata, the responses-lite header, the routing hint,
+client_metadata and zstd are now sent on the OAuth leg, and the cache key became a
+UUIDv7 thread id on both legs. Still not implemented: turn-state and WebSocket
+transport. Details and measurements:
+[Codex 0.163.0 fingerprint](2026-10-16-codex-0163-fingerprint-design.md).
 
 The rename was then measured live the same day against the Codex backend
 (`chatgpt.com/backend-api/codex/responses`, one ChatGPT OAuth account,

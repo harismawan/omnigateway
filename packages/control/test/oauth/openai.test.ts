@@ -31,13 +31,18 @@ function stubHttp(status: number, body: unknown): HttpClient & { last: () => Htt
 
 const pending = { verifier: "v", challenge: "c", state: "s", redirectUri: "http://localhost/cb" };
 
+// The token requests wear the shared OpenAI profile, so they move with it: the
+// 0.163.0 TUI identity, and the originator header after the protocol headers.
 const OPENAI_TOKEN_HEADERS = [
-  ["version", "0.159.2"],
+  ["version", "0.163.0"],
   ["x-codex-beta-features", "remote_compaction_v2"],
-  ["originator", "codex_cli_rs"],
   ["Accept", "application/json"],
   ["Content-Type", "application/x-www-form-urlencoded"],
-  ["user-agent", "codex_cli_rs/0.159.2 (Windows 10.0.26200; x86_64) WindowsTerminal"],
+  ["originator", "codex-tui"],
+  [
+    "user-agent",
+    "codex-tui/0.163.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.163.0)",
+  ],
 ] as const;
 
 /** OpenAI's endpoints are compiled in, so `start` must not reach the network. */
@@ -56,7 +61,9 @@ test("builds an authorize url against the openai auth host", async () => {
   expect(url.searchParams.get("scope")).toContain("openid");
   expect(url.searchParams.get("id_token_add_organizations")).toBe("true");
   expect(url.searchParams.get("codex_cli_simplified_flow")).toBe("true");
-  expect(url.searchParams.get("originator")).toBe("codex_cli_rs");
+  // The TUI's login runs in its app-server after `initialize` has set the
+  // process originator, so the authorize URL names `codex-tui` too.
+  expect(url.searchParams.get("originator")).toBe("codex-tui");
   expect(url.searchParams.get("prompt")).toBe("login");
 });
 
@@ -235,6 +242,70 @@ test("refresh keeps the prior account id when no id token is returned", async ()
     { accountId: "acct_123" },
   );
   expect(result.providerData.accountId).toBe("acct_123");
+});
+
+/**
+ * The per-credential secret the Codex fingerprint keys its ids with, and the
+ * installation id it reports. Both are minted at connect, stored beside the
+ * account id, and must survive every refresh — or every conversation's ids and
+ * the "machine" the credential claims to be would move at each token rotation.
+ */
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SALT = /^[0-9a-f]{64}$/;
+
+test("connect mints a random installation id and id salt per credential", async () => {
+  const exchange = () =>
+    openaiOAuth.exchange(
+      { code: "auth-code", pending },
+      { http: stubHttp(200, { access_token: "test-token-1", expires_in: 60 }), now: () => NOW },
+    );
+  const one = await exchange();
+  const two = await exchange();
+  expect(one.providerData.installationId).toMatch(UUID_V4);
+  expect(one.providerData.idSalt).toMatch(SALT);
+  expect(two.providerData.installationId).not.toBe(one.providerData.installationId);
+  expect(two.providerData.idSalt).not.toBe(one.providerData.idSalt);
+});
+
+test("refresh keeps the stored installation id and salt", async () => {
+  const stored = {
+    accountId: "acct_123",
+    installationId: "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+    idSalt: "ab".repeat(32),
+  };
+  const result = await openaiOAuth.refresh(
+    "test-token-2",
+    { http: stubHttp(200, { access_token: "test-token-3", expires_in: 60 }), now: () => NOW },
+    stored,
+  );
+  expect(result.providerData).toEqual(stored);
+});
+
+test("refresh backfills a credential connected before either value existed", async () => {
+  // The refresher merges what this returns over the stored providerData, so a
+  // credential gains both on its next refresh.
+  const result = await openaiOAuth.refresh(
+    "test-token-2",
+    { http: stubHttp(200, { access_token: "test-token-3", expires_in: 60 }), now: () => NOW },
+    { accountId: "acct_123" },
+  );
+  expect(result.providerData.installationId).toMatch(UUID_V4);
+  expect(result.providerData.idSalt).toMatch(SALT);
+});
+
+test("refresh replaces a malformed stored value rather than keeping it", async () => {
+  for (const bad of [
+    { installationId: "not-a-uuid", idSalt: "short" },
+    { installationId: 42, idSalt: null },
+  ]) {
+    const result = await openaiOAuth.refresh(
+      "test-token-2",
+      { http: stubHttp(200, { access_token: "test-token-3", expires_in: 60 }), now: () => NOW },
+      { accountId: "acct_123", ...bad },
+    );
+    expect(result.providerData.installationId).toMatch(UUID_V4);
+    expect(result.providerData.idSalt).toMatch(SALT);
+  }
 });
 
 test.each(["", "   "])("refresh discards a blank prior account id", async (accountId) => {
