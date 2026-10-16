@@ -233,6 +233,7 @@ export function codecAdapter(
           ...(req.requestId === undefined ? {} : { requestId: req.requestId }),
           ...(req.autoCache === undefined ? {} : { autoCacheEnabled: req.autoCache }),
           ...(req.maxOutputTokens === undefined ? {} : { maxOutputTokens: req.maxOutputTokens }),
+          ...(req.requestStartedAt === undefined ? {} : { requestStartedAt: req.requestStartedAt }),
         }),
       );
       // **Copied first, then only the copy is read — checks included.**
@@ -255,15 +256,20 @@ export function codecAdapter(
         method: string;
         headers: readonly (readonly [string, string])[];
         body: string;
+        bodyEncoding: unknown;
       }>;
       const request = {
         url: described.url,
         method: described.method,
         headers: Array.isArray(described.headers) ? [...described.headers] : described.headers,
         body: described.body,
+        bodyEncoding: described.bodyEncoding,
       };
       if (
         typeof request.body !== "string" ||
+        // An encoding the transport does not implement would send plain bytes
+        // under a `content-encoding` header claiming otherwise.
+        (request.bodyEncoding !== undefined && request.bodyEncoding !== "zstd") ||
         !isSendableUrl(request.url) ||
         !isHttpMethod(request.method) ||
         !Array.isArray(request.headers) ||
@@ -301,6 +307,7 @@ export function codecAdapter(
         method: request.method,
         headers: request.headers,
         body: request.body,
+        ...(request.bodyEncoding === "zstd" ? { bodyEncoding: request.bodyEncoding } : {}),
       };
 
       // Checked on the copy, before the transport. A plugin's manifest is the

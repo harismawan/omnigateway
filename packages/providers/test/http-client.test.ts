@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { zstdDecompressSync } from "node:zlib";
 import { createLogger } from "@omni/ir";
 import { CONNECT_ATTEMPT_TIMEOUT_MS, nodeHttpClient } from "../src/http-client.ts";
 
@@ -220,4 +221,96 @@ test("aborts an in-flight request", async () => {
 test("gives a connect attempt longer than one TCP retransmit before abandoning it", () => {
   const LINUX_INITIAL_RTO_MS = 1000;
   expect(CONNECT_ATTEMPT_TIMEOUT_MS).toBeGreaterThan(LINUX_INITIAL_RTO_MS);
+});
+
+/** Collects the whole request — head and every body byte — off the socket. */
+function wholeRequestServer(): {
+  url: string;
+  request: () => Promise<{ head: string; body: Buffer }>;
+  stop: () => void;
+} {
+  let resolveRequest: (v: { head: string; body: Buffer }) => void;
+  const done = new Promise<{ head: string; body: Buffer }>((r) => {
+    resolveRequest = r;
+  });
+  let received = Buffer.alloc(0);
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, data) {
+        received = Buffer.concat([received, Buffer.from(data)]);
+        const end = received.indexOf("\r\n\r\n");
+        if (end === -1) return;
+        const head = received.subarray(0, end).toString("latin1");
+        const length = Number(/\r\ncontent-length: (\d+)/i.exec(head)?.[1] ?? "0");
+        const body = received.subarray(end + 4);
+        if (body.byteLength < length) return;
+        resolveRequest({ head, body });
+        socket.write(
+          "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+            "Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+        );
+        socket.end();
+      },
+      open() {},
+      close() {},
+      error() {},
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}/backend-api/codex/responses`,
+    request: () => done,
+    stop: () => server.stop(true),
+  };
+}
+
+const contentLength = (head: string): number =>
+  Number(/\r\ncontent-length: (\d+)/i.exec(head)?.[1]);
+
+test("a zstd-marked request goes out compressed, counted in compressed bytes", async () => {
+  // The codec hands the transport JSON and a marker; compression happens here,
+  // below body capture, so the artifact stays readable JSON while the wire
+  // carries what Codex sends. `content-length` must count the compressed bytes:
+  // the JSON's own length would have the server wait for bytes never sent.
+  const s = wholeRequestServer();
+  const http = nodeHttpClient();
+  const body = JSON.stringify({ model: "m", input: "x".repeat(5000), stream: true });
+  await http({
+    provider: "openai",
+    url: s.url,
+    method: "POST",
+    headers: [
+      ["content-encoding", "zstd"],
+      ["content-type", "application/json"],
+    ],
+    body,
+    bodyEncoding: "zstd",
+    signal: AbortSignal.timeout(5000),
+  });
+  const { head, body: sent } = await s.request();
+  expect(contentLength(head)).toBe(sent.byteLength);
+  expect(sent.byteLength).toBeLessThan(Buffer.byteLength(body));
+  expect(Buffer.from(zstdDecompressSync(sent)).toString("utf8")).toBe(body);
+  // The transport adds no header of its own; the codec placed this one.
+  expect(head.match(/content-encoding/gi)).toHaveLength(1);
+  s.stop();
+});
+
+test("an unmarked request goes out as the bytes it was given", async () => {
+  const s = wholeRequestServer();
+  const http = nodeHttpClient();
+  const body = JSON.stringify({ model: "m", input: "x".repeat(5000) });
+  await http({
+    provider: "openai",
+    url: s.url,
+    method: "POST",
+    headers: [["content-type", "application/json"]],
+    body,
+    signal: AbortSignal.timeout(5000),
+  });
+  const { head, body: sent } = await s.request();
+  expect(sent.toString("utf8")).toBe(body);
+  expect(contentLength(head)).toBe(Buffer.byteLength(body));
+  s.stop();
 });

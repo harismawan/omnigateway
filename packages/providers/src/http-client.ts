@@ -1,6 +1,7 @@
 import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
+import { constants as zlibConstants, zstdCompressSync } from "node:zlib";
 import { type Logger, noopLogger } from "@omni/ir";
 import type { HttpClient, HttpRequest, HttpResponse } from "./types.ts";
 
@@ -88,7 +89,7 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
         });
       };
       const send = url.protocol === "https:" ? httpsRequest : httpRequest;
-      const bodyBytes = Buffer.from(req.body, "utf8");
+      const bodyBytes = encodeBody(req);
       // A plain object preserves insertion order for string keys, and node
       // writes it in that order without re-casing. Content-Length is set
       // explicitly so node does not chunk and does not append its own headers
@@ -153,6 +154,20 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
       if (bodyBytes.byteLength > 0) outgoing.write(bodyBytes);
       outgoing.end();
     });
+}
+
+/**
+ * The bytes that go on the wire for `req.body`.
+ *
+ * zstd at level 3, which is the level Codex's own client compresses at
+ * (`codex-rs/http-client/src/request.rs`, `encode_all(…, 3)`). The level shapes
+ * the bytes, not the decoded body, so it is matched rather than left to a
+ * library default that could move under a runtime upgrade.
+ */
+function encodeBody(req: HttpRequest): Buffer {
+  const raw = Buffer.from(req.body, "utf8");
+  if (req.bodyEncoding !== "zstd") return raw;
+  return zstdCompressSync(raw, { params: { [zlibConstants.ZSTD_c_compressionLevel]: 3 } });
 }
 
 function hasHeader(req: HttpRequest, lowerName: string): boolean {

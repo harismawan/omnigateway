@@ -32,6 +32,8 @@ export async function attempt(opts: {
   secrets?: CredentialSecrets;
   logger?: Logger;
   requestId?: string;
+  /** When dispatch accepted the request; one value across all of its attempts. */
+  requestStartedAt?: number;
   /** Operator policy: may an adapter add a cache breakpoint the client omitted. */
   autoCache?: boolean;
 }): Promise<AttemptResult> {
@@ -73,6 +75,7 @@ export async function attempt(opts: {
     signal,
     ...(opts.requestId === undefined ? {} : { requestId: opts.requestId }),
     ...(opts.autoCache === undefined ? {} : { autoCache: opts.autoCache }),
+    ...(opts.requestStartedAt === undefined ? {} : { requestStartedAt: opts.requestStartedAt }),
     ...(candidate.target.maxOutputTokens === undefined
       ? {}
       : { maxOutputTokens: candidate.target.maxOutputTokens }),

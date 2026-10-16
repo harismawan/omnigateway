@@ -547,6 +547,64 @@ test("every value the bridge forwards actually arrives", async () => {
   expect(events[0]).toMatchObject({ model: JSON.stringify({ alias: "Session" }) });
 });
 
+test("the request's start instant reaches the codec, and is absent when the host has none", async () => {
+  // OpenAI's Codex fingerprint stamps turn metadata from it. Derived from the
+  // request rather than read off a clock inside the codec, so every attempt of
+  // one request — failover, AUTH retry — builds the same bytes.
+  const { seen, adapter } = recording();
+  const send = (extra: { requestStartedAt?: number }) =>
+    adapter.send({
+      request,
+      model: "m",
+      credentials: credentials(),
+      http: ok,
+      signal: new AbortController().signal,
+      ...extra,
+    });
+  await send({ requestStartedAt: 1_792_140_063_816 });
+  await send({});
+
+  expect(seen[0]?.requestStartedAt).toBe(1_792_140_063_816);
+  expect(seen[1] !== undefined && "requestStartedAt" in seen[1]).toBe(false);
+});
+
+test("a codec's body encoding reaches the transport, and only a known one", async () => {
+  const sent: HttpRequest[] = [];
+  const capture = async (r: HttpRequest): Promise<HttpResponse> => {
+    sent.push(r);
+    return ok();
+  };
+  const wire = { url: "https://x.test", method: "POST", headers: [], body: "{}" };
+  const send = (built: unknown) =>
+    recording({ buildRequest: () => built as never })
+      .adapter.send({
+        request,
+        model: "m",
+        credentials: credentials(),
+        http: capture,
+        signal: new AbortController().signal,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+  expect(await send({ request: { ...wire, bodyEncoding: "zstd" } })).toBeNull();
+  expect(sent[0]?.bodyEncoding).toBe("zstd");
+  expect(await send({ request: wire })).toBeNull();
+  expect(sent[1] !== undefined && "bodyEncoding" in sent[1]).toBe(false);
+
+  // An encoding the transport does not implement would go out as plain bytes
+  // under a header claiming otherwise: refused before the transport, like any
+  // other unusable request.
+  for (const bodyEncoding of ["gzip", "", 1, null]) {
+    const failure = await send({ request: { ...wire, bodyEncoding } });
+    expect(failure).toMatchObject({ code: "UPSTREAM", provider: "kilo" });
+    expect((failure as Error).message).toContain("did not return a usable request");
+  }
+  expect(sent).toHaveLength(2);
+});
+
 test("a codec that throws fails over instead of ending the request", async () => {
   // `RETRYABLE.INTERNAL` is false, so an unguarded plugin `TypeError` ended the
   // request after one attempt with a 500 while the rest of the pool sat unused.
