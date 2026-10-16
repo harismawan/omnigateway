@@ -529,6 +529,12 @@ const oauth = {
 };
 ```
 
+On a **reconnect** of an existing credential, `exchange` also receives
+`input.providerData`: what that credential has stored. The `providerData` you
+return replaces the stored row whole, so carry forward anything you minted at
+first connect and want to keep — a device identity, a per-credential secret.
+It is absent on a first connect.
+
 **Each step is a generator that describes requests rather than making them**, the
 same inversion the codec uses. You are not handed an HTTP client, so an honest
 flow cannot reach the network by accident, and an operator can read from your

@@ -330,8 +330,18 @@ What the builder decided for each point above, and for the gaps found while buil
   closes the no-account case, whose installation id changed per conversation. Costs: the derived
   thread id changes once at a credential's backfilling refresh (one cache reset), and two
   credentials on one account now present two installations and two keys for one conversation.
-  `providerData` is stored unencrypted and shown to the admin console, like Kimi's device id; the
-  salt guards against recomputation upstream, not against an operator.
+  **Reconnect** (second review): `connect.ts` replaced `providerData` whole with the exchange's
+  result, so reconnecting re-minted both values. The exchange now receives the reconnected
+  credential's stored `providerData` as an optional field control does not interpret
+  (`OAuthProvider.exchange`, `PluginFlowBase.exchange`), and the OpenAI flow keeps valid values
+  from it. Remaining cost: none for ids; a reconnect that logs in to a different ChatGPT account
+  keeps the old installation id and salt, which reads as one machine switching accounts. The
+  refresher's merge order (refreshed value over stored) is what lets a refresh repair a malformed
+  stored value; it is pinned in `refresh.test.ts`.
+  `providerData` is stored unencrypted. `GET /api/credentials` returns it to every reader — the
+  admin **and** the read-only viewer (`requireReader`) — and it travels in database snapshots,
+  like Kimi's device id. The salt guards against recomputation upstream, not against anyone who
+  can read the console or a snapshot.
 - **`sandbox`** (builder's call): `windows_elevated` for a Windows profile. `sandbox_tags.rs` maps
   `WindowsSandboxSelection::Elevated` to that label (a fourth value beside the three named
   above); the TUI's first-run setup recommends the elevated sandbox and managed requirements
@@ -354,6 +364,10 @@ What the builder decided for each point above, and for the gaps found while buil
   per UTF-16 unit; both pinned.
 - **Framing** (review fix). `codecAdapter` refuses a codec that sets its own `content-length`, a
   zstd marker without exactly one `content-encoding: zstd`, or a `content-encoding` with no marker.
+  This tightens the plugin codec contract: a plugin codec that set its own `Content-Length` or a
+  `content-encoding: identity` is now refused. The repository keeps no changelog — GitHub releases
+  are cut with `gh release create --generate-notes` from PR titles — so the plugin-facing note
+  lives in `docs/writing-a-plugin.md` §6 and belongs in the PR description.
 - **`tool_choice`** (builder's call): a client's tool choice is encoded as today; absent, the OAuth
   leg sends Codex's `"auto"`. Overriding a client's forced choice would change behaviour the
   design did not ask to change.
@@ -394,9 +408,6 @@ Recorded, not fixed.
   (default features include `http2`) over rustls, so it very likely speaks HTTP/2 to
   `chatgpt.com`, and its TLS ClientHello differs from Bun's. **Operator decision, 2026-10-16:**
   this is a known gap, not follow-up work; no transport change.
-- **Large bodies.** `encode_all` feeds zstd in `ZSTD_CStreamInSize` (~128 KiB) chunks; the gateway
-  writes the body once. Byte identity was verified on bodies up to ~74 KB; a body past ~128 KiB
-  may differ in block layout. Nothing that size was captured.
 - **Fixture provenance.** `test/fixtures/codex-0.163.0.json` combines two captures: headers, turn
   metadata and body keys from the TUI's main turn (`codex-tui`), and `followUpInput` from a
   `codex exec` follow-up (`codex_exec`, `turn_trigger: exec`, `sandbox_mode: read-only`), the only
@@ -478,3 +489,13 @@ request bodies (TUI title request and main turn, exec first request and follow-u
 `bodyEncoding: "zstd"`; all four came out byte-identical to what Codex sent. The captures carry a
 local installation id and paths, so they are not committed; `http-client.test.ts` pins the frame
 header (no content size, windowLog 21) and a level-3 golden over a synthetic body instead.
+
+**Large-body zstd**, measured 2026-10-16 to settle a claim. An earlier version of this spec said
+`encode_all` feeds zstd in `ZSTD_CStreamInSize` (~128 KiB) chunks, so a large body might differ
+in block layout; a review read `encode_all` as one `write_all`. Codex 0.163.0 (`codex exec`,
+`gpt-6-astra`) was run once through the local capture harness with a 307 KB prompt on stdin. Its
+`/responses` request was 383,101 bytes of JSON, sent as 82,668 zstd bytes. Recompressed through
+`nodeHttpClient` (one write), the result was byte-identical. The chunking claim was wrong; the
+gap is closed. Segmentation does matter to the bytes — the 406 KB synthetic body in
+`http-client.test.ts` compresses to 67,060 bytes in one write and 67,069 in 128 KiB writes — so
+the test pins the one-write golden.
