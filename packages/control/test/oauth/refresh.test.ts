@@ -121,6 +121,46 @@ test("merges returned provider data without dropping existing keys", async () =>
   expect(reloaded.providerData).toEqual({ deviceId: "dev-1", accountId: "acct_1" });
 });
 
+test("a refreshed value replaces the stored one: the OpenAI flow's repair is what persists", async () => {
+  // The merge order is the whole point. OpenAI's refresh repairs a malformed
+  // stored installation id or id salt by minting new ones; with the stored row
+  // spread last, the malformed values would win and the repair never land.
+  const store = await memoryStore();
+  await seedCredential(store, {
+    id: "c1",
+    provider: "openai",
+    expiresAt: NOW - 1,
+    providerData: { accountId: "acct_1", installationId: "not-a-uuid", idSalt: "short", kept: 1 },
+    accessToken: "test-token-1",
+    refreshToken: "test-token-2",
+  });
+  const view = (await store.credentials.get("c1")) as CredentialView;
+  const tokenHttp = async () => ({
+    status: 200,
+    headers: new Headers({ "content-type": "application/json" }),
+    body: null,
+    text: async () => JSON.stringify({ access_token: "test-token-3", expires_in: 60 }),
+  });
+  const openai = OAUTH_PROVIDERS.openai;
+  if (openai === undefined) throw new Error("openai flow not seeded");
+  const refresh = createRefresher({
+    store,
+    providers: { openai },
+    http: tokenHttp,
+    now: () => NOW,
+  });
+  await refresh(view);
+
+  const reloaded = (await store.credentials.get("c1")) as CredentialView;
+  expect(reloaded.providerData.installationId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  expect(reloaded.providerData.idSalt).toMatch(/^[0-9a-f]{64}$/);
+  // Keys the flow does not return survive, as before.
+  expect(reloaded.providerData.kept).toBe(1);
+  expect(reloaded.providerData.accountId).toBe("acct_1");
+});
+
 test("collapses concurrent refreshes of the same credential into one call", async () => {
   const { store, view } = await seed();
   let calls = 0;

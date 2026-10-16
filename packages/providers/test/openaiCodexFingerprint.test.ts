@@ -439,6 +439,20 @@ test("with a stored salt, a derived thread id is keyed too; a supplied one is no
   ).toBe(THREAD);
 });
 
+test("with a stored salt, a supplied key that is not a UUID is keyed too", () => {
+  // The client sent this key in the request, so its unkeyed digest is as
+  // recomputable as the fallback's.
+  const supplied = { ...FOLLOW_UP, vendor: { openai: { prompt_cache_key: "client-session-7" } } };
+  const plain = bodyOf(build(supplied)).prompt_cache_key;
+  const a = bodyOf(build(supplied, { credentials: keyedCreds({ idSalt: SALT_A }) }));
+  const b = bodyOf(build(supplied, { credentials: keyedCreds({ idSalt: SALT_B }) }));
+  expect(a.prompt_cache_key).not.toBe(plain);
+  expect(a.prompt_cache_key).not.toBe(b.prompt_cache_key);
+  expect(
+    bodyOf(build(supplied, { credentials: keyedCreds({ idSalt: SALT_A }) })).prompt_cache_key,
+  ).toBe(a.prompt_cache_key);
+});
+
 test("a malformed stored value reads as absent: the unkeyed derivation stands", () => {
   const plain = build(FOLLOW_UP);
   const malformed = build(FOLLOW_UP, {
