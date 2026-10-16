@@ -171,10 +171,10 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
  * not single-segment, and carries level 3's own 2^21 window. A one-shot
  * compress (`Bun.zstdCompressSync`, `zlib.zstdCompressSync`) knows the size,
  * shrinks the window to fit it and writes a different header — the first
- * version did that. Streamed in one write, four real Codex 0.163.0 bodies
- * recompressed byte for byte. Codex reads its body in `ZSTD_CStreamInSize`
- * chunks, so a body past ~128 KiB may differ in block layout; nothing that size
- * was captured.
+ * version did that. Streamed in one write, five real Codex 0.163.0 bodies
+ * recompressed byte for byte, from 34 KB of JSON to 383 KB — past the
+ * `ZSTD_CStreamInSize` (~128 KiB) chunking an earlier note guessed would
+ * change the block layout. It does not; `encode_all` is one `write_all`.
  *
  * A namespace import, read at call time: the leaf-subpath probe bundles this
  * package's root for the browser, whose `node:zlib` has no zstd export, and a
@@ -183,9 +183,26 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
 function encodeBody(req: HttpRequest): Promise<Buffer> {
   const raw = Buffer.from(req.body, "utf8");
   if (req.bodyEncoding !== "zstd") return Promise.resolve(raw);
+  return zstdEncode(raw);
+}
+
+type ZstdOptions = { params: Record<number, number> };
+
+/**
+ * Compresses `raw` as one write to a zstd stream, at level 3 stated rather than
+ * defaulted. `create` is the stream factory, a parameter so a test can see the
+ * options and hand in a stream that fails: a stream error must reject the
+ * request's promise, never escape as an uncaught throw.
+ */
+export function zstdEncode(
+  raw: Buffer,
+  create: (options: ZstdOptions) => NodeJS.ReadWriteStream = (options) =>
+    zlib.createZstdCompress(options),
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const level = zlib.constants.ZSTD_c_compressionLevel;
-    const stream = zlib.createZstdCompress({ params: { [level]: 3 } });
+    // Read here, not at module scope: the browser bundle's `node:zlib` has no
+    // zstd constants, and the package root must still import there.
+    const stream = create({ params: { [zlib.constants.ZSTD_c_compressionLevel]: 3 } });
     const chunks: Buffer[] = [];
     stream.on("data", (chunk: Buffer) => chunks.push(chunk));
     stream.on("end", () => resolve(Buffer.concat(chunks)));

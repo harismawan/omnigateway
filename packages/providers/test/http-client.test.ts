@@ -1,8 +1,18 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { zstdDecompressSync } from "node:zlib";
+import { Transform } from "node:stream";
+import { createZstdCompress, constants as zlibConstants, zstdDecompressSync } from "node:zlib";
 import { createLogger } from "@omni/ir";
-import { CONNECT_ATTEMPT_TIMEOUT_MS, nodeHttpClient } from "../src/http-client.ts";
+import { CONNECT_ATTEMPT_TIMEOUT_MS, nodeHttpClient, zstdEncode } from "../src/http-client.ts";
+
+/**
+ * Golden for the >256 KiB synthetic body, from the one-write encoder that
+ * reproduced a real 383 KB Codex body byte for byte. The same body written in
+ * 128 KiB chunks comes out at 67,069 bytes, so this pins the segmentation too.
+ */
+const BIG_JSON_BYTES = 406_108;
+const BIG_ZSTD_BYTES = 67_060;
+const BIG_ZSTD_SHA = "e8ea96b8df64181c";
 
 /** Captures the literal request head, byte for byte, off the socket. */
 function rawServer(): {
@@ -302,7 +312,7 @@ test("a zstd-marked request goes out compressed, counted in compressed bytes", a
  * A deterministic, varied body: varied enough that zstd levels 3 and 4 produce
  * different bytes, which a repetitive body does not.
  */
-function syntheticBody(): string {
+function syntheticBody(items = 400): string {
   const words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
   const more = ["golf", "hotel", "india", "juliet", "kilo", "lima"];
   const all = [...words, ...more];
@@ -313,7 +323,7 @@ function syntheticBody(): string {
   };
   return JSON.stringify({
     model: "gpt-6-astra",
-    input: Array.from({ length: 400 }, (_, i) => ({
+    input: Array.from({ length: items }, (_, i) => ({
       type: "message",
       role: i % 2 ? "assistant" : "user",
       text: Array.from({ length: 12 }, () => `${all[next() % all.length]}${next() % 97}`).join(" "),
@@ -351,6 +361,53 @@ test("the zstd frame is the one Codex writes: streamed, no content size, 2 MiB w
   expect(sent.byteLength).toBe(10_676);
   expect(createHash("sha256").update(sent).digest("hex").slice(0, 16)).toBe("125037a51a82d95b");
   s.stop();
+});
+
+test("the zstd stream is built at level 3 by name, not by library default", async () => {
+  // zstd's own default is also 3, so a stream built with no params reproduces
+  // the golden above and only this assertion notices the level went implicit.
+  const seen: unknown[] = [];
+  const out = await zstdEncode(Buffer.from(syntheticBody()), (options) => {
+    seen.push(options);
+    return createZstdCompress(options);
+  });
+  expect(seen).toEqual([{ params: { [zlibConstants.ZSTD_c_compressionLevel]: 3 } }]);
+  expect(out.byteLength).toBe(10_676);
+});
+
+test("a zstd stream that fails rejects the request instead of throwing uncaught", async () => {
+  // Fails on the first chunk, which is where a real encoder error surfaces. The
+  // no-op listener is the test's own: without it, an encoder that forgot its
+  // handler throws the error uncaught and wedges the whole test process rather
+  // than failing this test. With it, such an encoder leaves the promise
+  // pending, and the race below says so in a second.
+  const failing = () => {
+    const stream = new Transform({
+      transform(_chunk, _encoding, callback) {
+        callback(new Error("forced zstd failure"));
+      },
+    });
+    stream.on("error", () => {});
+    return stream;
+  };
+  const unsettled = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error("zstdEncode never settled")), 1_000).unref();
+  });
+  await expect(Promise.race([zstdEncode(Buffer.from("{}"), failing), unsettled])).rejects.toThrow(
+    "forced zstd failure",
+  );
+});
+
+test("a body past 256 KiB is still one write: Codex's frame at that size too", async () => {
+  // Measured against a real 383 KB Codex 0.163.0 request (spec History): one
+  // write reproduced it byte for byte, so the transport must not segment it.
+  const big = Buffer.from(syntheticBody(3_000));
+  expect(big.byteLength).toBeGreaterThan(256 * 1024);
+  const out = await zstdEncode(big);
+  expect(out.subarray(0, 6).toString("hex")).toBe("28b52ffd0058");
+  expect(Buffer.from(zstdDecompressSync(out)).equals(big)).toBe(true);
+  expect([big.byteLength, out.byteLength]).toEqual([BIG_JSON_BYTES, BIG_ZSTD_BYTES]);
+  expect(createHash("sha256").update(out).digest("hex").slice(0, 16)).toBe(BIG_ZSTD_SHA);
 });
 
 test("an unmarked request goes out as the bytes it was given", async () => {
