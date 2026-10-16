@@ -10,7 +10,7 @@ import type { RtkFilterId } from "@omni/rtk/catalog";
  * this keeps that the one import it needs rather than a second permitted path.
  */
 export type { PonytailMode } from "@omni/ponytail/catalog";
-export type { Dimension, LimitConfig, Window } from "@omni/ratelimit/catalog";
+export type { Dimension, LimitConfig, LimitConfigBase, Window } from "@omni/ratelimit/catalog";
 
 export type BreakerState = "closed" | "open" | "halfOpen";
 export type AuthType = "oauth" | "apiKey";
