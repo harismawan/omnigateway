@@ -15,6 +15,7 @@ import { resolve } from "node:path";
 import { type ChatRequest, GatewayError, type Message } from "@omni/ir";
 import type { CodecInput, CodecRequest } from "../src/codec.ts";
 import { openaiCodec } from "../src/openai/codec.ts";
+import { CODEX_CATALOG_RELEASE } from "../src/openai/codexCatalog.ts";
 import { uuidV5 } from "../src/openai/codexIdentity.ts";
 import type { AdapterCredentials } from "../src/types.ts";
 
@@ -478,6 +479,14 @@ test("each reasoning mode maps to the effort Codex would send", () => {
   expect(budget.reasoning).toEqual({ effort: "medium", context: "all_turns" });
   expect(budget.degradations).toContain("openai:reasoning-budget-dropped");
   expect(budget.effort).toBe("medium");
+});
+
+test("the catalog was read from the release the version header claims", () => {
+  // Version and shape move together or not at all: a bump that changes the
+  // header and keeps an older catalog is the half-fingerprint the design rules
+  // out. The fixture names the release it was captured from, too.
+  expect(header(build(FOLLOW_UP), "version")).toBe(CODEX_CATALOG_RELEASE);
+  expect(FIXTURE.headerValues.version).toBe(CODEX_CATALOG_RELEASE);
 });
 
 test("model-specific metadata comes from the Codex catalog", () => {
