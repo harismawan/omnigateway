@@ -101,8 +101,9 @@ function bucketKey(subject: string, window: LongWindow): string {
  * What one model override's ring, gauge and buckets are keyed by.
  *
  * `encodeURIComponent` takes `/` and `:` out of the model part, so no model
- * name can spell another subject's key — `k1/m/a/m/b` is not reachable — and
- * `lim:<subject>:<window>` keeps exactly one reading.
+ * name can spell another subject's key — a model named `a/m/b` is
+ * `k1/m/a%2Fm%2Fb`, never a second `/m/` — and `lim:<subject>:<window>` keeps
+ * exactly one reading.
  */
 export function modelSubjectId(keyId: string, model: string): string {
   return `${keyId}/m/${encodeURIComponent(model)}`;
@@ -135,8 +136,7 @@ function keyWide(limits: LimitConfig): LimitConfigBase {
  *
  * A key-wide scope that limits nothing is left out, so it claims nothing: a
  * key whose only limit is one model's override allocates nothing for any other
- * model.
- * Key-wide first is also the order `combine` breaks ties in.
+ * model. Key-wide first is also the order `combine` breaks ties in.
  */
 function subjectsOf(keyId: string, limits: LimitConfig, model: string): Subject[] {
   const subjects: Subject[] = [];
