@@ -820,3 +820,91 @@ test("count_tokens claims nothing for a scope with no requests ceiling", async (
   expect(counting.claims).toEqual([modelSubjectId(keyId, "opus")]);
   store.close();
 });
+
+/**
+ * The review's probe: the reset is corrected for every scope that refused
+ * before the one clearing last is chosen.
+ *
+ * The key-wide `1m` ceiling is filled by another model and frees in 59 seconds.
+ * The model's `5h` override is full too, and its oldest row ages out in five
+ * seconds — but before correction it reports the window's far end, five hours
+ * out, so it was the one chosen as clearing last, and then corrected to five
+ * seconds. The client came back at five seconds into a key-wide refusal with
+ * 54 seconds still to run.
+ */
+test("a refusal by both scopes waits for the one that truly clears last", async () => {
+  const HOUR = 3_600_000;
+  const { store, keyId, limiter, limits, at } = await harness({
+    requests: { "1m": 1 },
+    models: { opus: { requests: { "5h": 1 } } },
+  });
+  await seedRow(store, keyId, T0 - 5 * HOUR + 5_000, {}, "opus");
+
+  at(T0);
+  (await limiter.admit(keyId, limits, "fast", "req_test")).release();
+  at(T0 + 1_000);
+  const refused = await denied(() => limiter.admit(keyId, limits, "opus", "req_test"));
+  if (!(refused instanceof RateLimitExceeded)) throw refused;
+  expect(refused.retryAfterMs).toBe(59_000);
+  // The header names the same instant as the `Retry-After` beside it.
+  expect(refused.headroom.requests?.resetAt).toBe(T0 + 60_000);
+
+  // And the other way round: the model's exact reset is the later one.
+  at(T0 + 1_000);
+  const later = await harness({
+    requests: { "1m": 1 },
+    models: { opus: { requests: { "5h": 1 } } },
+  });
+  await seedRow(later.store, later.keyId, T0 - 4 * HOUR, {}, "opus");
+  later.at(T0);
+  (await later.limiter.admit(later.keyId, later.limits, "fast", "req_test")).release();
+  later.at(T0 + 1_000);
+  const modelLater = await denied(() =>
+    later.limiter.admit(later.keyId, later.limits, "opus", "req_test"),
+  );
+  expect(modelLater.retryAfterMs).toBe(HOUR - 1_000);
+  later.store.close();
+  store.close();
+});
+
+/**
+ * Inside one scope too: a weekly window reported at its far end must not be
+ * picked over a minute window when its oldest row frees it sooner.
+ */
+test("a refusal by two windows of one scope waits for the one that truly clears last", async () => {
+  const WEEK = 7 * 24 * 3_600_000;
+  const second = await harness({ requests: { "1m": 1, "1w": 2 } });
+  await seedRow(second.store, second.keyId, T0 - WEEK + 10_000, {});
+  second.at(T0);
+  (await second.limiter.admit(second.keyId, second.limits, "fast", "req_test")).release();
+  await second.complete();
+  second.at(T0 + 1_000);
+  const refused = await denied(() =>
+    second.limiter.admit(second.keyId, second.limits, "fast", "req_test"),
+  );
+  // Week frees in 9s, the minute in 59s: the minute is what clears last.
+  expect(refused.retryAfterMs).toBe(59_000);
+  second.store.close();
+});
+
+/**
+ * Two long windows of one scope, both refusing. Each is corrected, not only the
+ * one an overstated figure made look last: the week is reported first (its far
+ * end is a week out) and frees in ten seconds, while the five-hour window,
+ * left uncorrected, would claim five hours where its oldest row says three.
+ */
+test("every violated long window is corrected, not only the reported one", async () => {
+  const HOUR = 3_600_000;
+  const WEEK = 7 * 24 * HOUR;
+  const { store, keyId, limiter, limits, at } = await harness({
+    requests: { "5h": 1, "1w": 2 },
+  });
+  await seedRow(store, keyId, T0 - WEEK + 10_000, {});
+  await seedRow(store, keyId, T0 - 2 * HOUR, {});
+  at(T0);
+  const refused = await denied(() => limiter.admit(keyId, limits, "fast", "req_test"));
+  if (!(refused instanceof RateLimitExceeded)) throw refused;
+  expect(refused.retryAfterMs).toBe(3 * HOUR);
+  expect(refused.headroom.requests?.resetAt).toBe(T0 + 3 * HOUR);
+  store.close();
+});

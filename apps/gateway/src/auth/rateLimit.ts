@@ -7,6 +7,7 @@ import {
   type DimensionCounters,
   evaluate,
   type HeadroomByDimension,
+  lastToClear,
   retryAfterMs,
   type WindowCounter,
 } from "@omni/ratelimit";
@@ -470,10 +471,8 @@ export class ApiKeyRateLimiter {
       const counters = await this.counters(subject, limits, claim, now, requestId);
       decisions.push(evaluate(limits, counters, now));
     }
-    const [first, ...rest] = decisions;
-    if (first === undefined) return { allowed: true, violation: null, headroom: {} };
-    const decision = rest.reduce(combine, first);
-    await this.refuse(subjects, decisions, decision, now, requestId);
+    const decision = combineAll(decisions);
+    if (decision.violation !== null) await this.refuse(subjects, decisions, now, requestId);
     return decision;
   }
 
@@ -568,35 +567,33 @@ export class ApiKeyRateLimiter {
     return this.coord.gauge.read(subject);
   }
 
+  /**
+   * Refuses a request one of its subjects refused, with a wait that is true.
+   *
+   * Every violated long window has its reset corrected first — in every subject,
+   * not only the one an overstated figure made look last — and only then is the
+   * one clearing last chosen. Chosen the other way round, a `5h` window reported
+   * at its far end beat a `1m` refusal that had 59 seconds to run, was then
+   * corrected to the five seconds its oldest row actually had left, and the
+   * client was sent back into the minute ceiling 54 seconds early.
+   */
   private async refuse(
     subjects: readonly Subject[],
     decisions: readonly Decision[],
-    decision: Decision,
     now: number,
     requestId: string | undefined,
-  ): Promise<void> {
-    const violation = decision.violation;
-    if (violation === null) return;
-    // `combine` hands back one of the subjects' own violations, so identity
-    // names the subject that refused — and that subject's rows are the ones
-    // whose ageing out frees the window.
-    const index = decisions.findIndex((candidate) => candidate.violation === violation);
-    const subject = subjects[index];
-    const scope = decisions[index];
-    if (subject === undefined || scope === undefined) {
-      throw new Error("rate limit violation from no subject");
+  ): Promise<never> {
+    const corrected: Decision[] = [];
+    for (const [index, scope] of decisions.entries()) {
+      const subject = subjects[index];
+      if (subject === undefined) throw new Error("rate limit decision from no subject");
+      corrected.push(await this.correct(subject, scope, now, requestId));
     }
-
-    // The one read this design makes on the refusal path and nowhere else. Null
-    // for a violation with no window, which is why the correction below is
-    // guarded on the window rather than on the instant.
-    const window = violation.window;
-    const exact = await this.exactReset(subject, window, now, requestId);
-    const resolved = exact === null ? violation : { ...violation, resetAt: exact };
-    const headroom =
-      exact === null || window === null
-        ? decision.headroom
-        : withReset(decision.headroom, window, exact, scope.headroom);
+    const decision = combineAll(corrected);
+    const violation = decision.violation;
+    // Unreachable: the caller refuses only a decision with a violation, and
+    // correcting a reset never removes one.
+    if (violation === null) throw new Error("rate limit refusal with no violation");
 
     // A denied request keeps nothing: its caller rolls back the ring stamp and
     // the gauge slot the check claimed before it ran, so a key hammering its own
@@ -606,7 +603,37 @@ export class ApiKeyRateLimiter {
     } catch {
       // Observability cannot turn a refusal into a different failure.
     }
-    throw new RateLimitExceeded(retryAfterMs(resolved, now), headroom);
+    throw new RateLimitExceeded(retryAfterMs(violation, now), decision.headroom);
+  }
+
+  /**
+   * One subject's decision with each violated long window's true reset.
+   *
+   * The reads this design makes on the refusal path and nowhere else: one per
+   * violated window of the subject, asked of that subject's own rows. Its
+   * headers move with it, so a 429 names the same instant as its `Retry-After`.
+   */
+  private async correct(
+    subject: Subject,
+    scope: Decision,
+    now: number,
+    requestId: string | undefined,
+  ): Promise<Decision> {
+    if (scope.violations.length === 0) return scope;
+    const exact = new Map<Window, number>();
+    for (const violation of scope.violations) {
+      const window = violation.window;
+      if (window === null || exact.has(window)) continue;
+      const reset = await this.exactReset(subject, window, now, requestId);
+      if (reset !== null) exact.set(window, reset);
+    }
+    const violations = scope.violations.map((violation) => {
+      const reset = violation.window === null ? undefined : exact.get(violation.window);
+      return reset === undefined ? violation : { ...violation, resetAt: reset };
+    });
+    let headroom = scope.headroom;
+    for (const [window, reset] of exact) headroom = withReset(headroom, window, reset);
+    return { ...scope, violation: lastToClear(violations), violations, headroom };
   }
 
   /**
@@ -806,22 +833,27 @@ function requestsOnly(limits: LimitConfigBase): LimitConfigBase {
  * the next is worse than either figure alone: the client obeys whichever its
  * SDK happens to read.
  *
- * Only entries the refusing subject reported — `source` is its headroom, and
- * `combine` passes entries through unchanged — because the instant was read
- * from that subject's rows. The other scope's window of the same name frees
- * when *its* oldest row ages out, which this read says nothing about.
+ * Applied to one subject's headroom before the subjects are combined, because
+ * the instant was read from that subject's rows: the other scope's window of
+ * the same name frees when *its* oldest row ages out.
  */
 function withReset(
   headroom: HeadroomByDimension,
   window: Window,
   resetAt: number,
-  source: HeadroomByDimension,
 ): HeadroomByDimension {
   const corrected: HeadroomByDimension = { ...headroom };
   for (const dimension of ["requests", "tokens", "spend"] as const) {
     const entry = corrected[dimension];
-    if (entry !== undefined && entry.window === window && entry === source[dimension])
+    if (entry !== undefined && entry.window === window)
       corrected[dimension] = { ...entry, resetAt };
   }
   return corrected;
+}
+
+/** The subjects' decisions as one, key-wide first, which is `combine`'s tie order. */
+function combineAll(decisions: readonly Decision[]): Decision {
+  const [first, ...rest] = decisions;
+  if (first === undefined) return { allowed: true, violation: null, violations: [], headroom: {} };
+  return rest.reduce(combine, first);
 }

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { CounterSnapshot } from "../src/index.ts";
-import { combine, evaluate, retryAfterMs } from "../src/index.ts";
+import { combine, evaluate, lastToClear, retryAfterMs } from "../src/index.ts";
 
 const NOW = 1_000_000;
 
@@ -274,4 +274,40 @@ test("combine keeps the key-wide headroom when both scopes are equally near", ()
   // answer about which entry wins, so the rule is "strictly nearer replaces".
   const combined = combine(keyWide(5, NOW + 1), modelScope(2, NOW + 2));
   expect(combined.headroom.requests?.window).toBe("1m");
+});
+
+test("a decision carries every violation, not only the one reported", () => {
+  const decision = evaluate(
+    { requests: { "1m": 1, "1w": 1 }, concurrency: 1 },
+    {
+      requests: { "1m": { used: 1, resetAt: NOW + 1 }, "1w": { used: 1, resetAt: NOW + 2 } },
+      concurrency: 1,
+    },
+    NOW,
+  );
+  expect(decision.violations.map((v) => `${v.dimension}:${v.window}`).sort()).toEqual(
+    ["concurrency:null", "requests:1m", "requests:1w"].sort(),
+  );
+  expect(decision.violation?.window).toBe("1w");
+  expect(evaluate({ requests: { "1m": 5 } }, {}, NOW).violations).toEqual([]);
+});
+
+test("combine carries both scopes' violations", () => {
+  const combined = combine(keyWide(10, NOW + 30_000), modelScope(4, NOW + 90_000));
+  expect(combined.violations.map((v) => v.window).sort()).toEqual(["1m", "5h"]);
+  expect(combine(keyWide(1, NOW), modelScope(4, NOW + 90_000)).violations).toHaveLength(1);
+  expect(combine(keyWide(10, NOW), modelScope(1, NOW)).violations).toHaveLength(1);
+});
+
+test("lastToClear picks the latest reset, then the larger overshoot", () => {
+  const at = (resetAt: number, used: number) => ({
+    dimension: "requests" as const,
+    window: "1m" as const,
+    limit: 10,
+    used,
+    resetAt,
+  });
+  expect(lastToClear([at(5, 10), at(9, 10), at(7, 10)])?.resetAt).toBe(9);
+  expect(lastToClear([at(9, 10), at(9, 30)])?.used).toBe(30);
+  expect(lastToClear([])).toBeNull();
 });

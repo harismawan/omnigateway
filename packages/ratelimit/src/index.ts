@@ -75,7 +75,17 @@ export type HeadroomByDimension = Partial<Record<Dimension, Headroom>>;
 
 export type Decision = {
   allowed: boolean;
+  /** The violation reported: of `violations`, the one clearing last. */
   violation: Violation | null;
+  /**
+   * Every limit the request trips, unordered.
+   *
+   * Kept beside the one reported because a caller that can correct a reset —
+   * the gateway reads a long window's true one from the store — has to choose
+   * last-to-clear again over the corrected figures. A choice made on the
+   * overstated ones can name a window that, corrected, frees first.
+   */
+  violations: readonly Violation[];
   headroom: HeadroomByDimension;
 };
 
@@ -99,7 +109,7 @@ type WindowLimits = Partial<Record<Window, number | null | undefined>>;
  * fall to the larger overshoot and then to the order the limits were walked in,
  * so the answer is stable rather than dependent on object key order.
  */
-function lastToClear(violations: readonly Violation[]): Violation | null {
+export function lastToClear(violations: readonly Violation[]): Violation | null {
   let chosen: Violation | null = null;
   for (const candidate of violations) {
     if (chosen === null || candidate.resetAt > chosen.resetAt) {
@@ -180,7 +190,7 @@ export function evaluate(
   }
 
   const violation = lastToClear(violations);
-  return { allowed: violation === null, violation, headroom };
+  return { allowed: violation === null, violation, violations, headroom };
 }
 
 /**
@@ -197,9 +207,7 @@ export function evaluate(
  * the caller happened to pass second.
  */
 export function combine(key: Decision, model: Decision): Decision {
-  const violations: Violation[] = [];
-  if (key.violation !== null) violations.push(key.violation);
-  if (model.violation !== null) violations.push(model.violation);
+  const violations = [...key.violations, ...model.violations];
   const violation = lastToClear(violations);
 
   const headroom: HeadroomByDimension = { ...key.headroom };
@@ -211,7 +219,7 @@ export function combine(key: Decision, model: Decision): Decision {
       headroom[dimension] = candidate;
     }
   }
-  return { allowed: violation === null, violation, headroom };
+  return { allowed: violation === null, violation, violations, headroom };
 }
 
 /** How long a client should wait, never negative and zero for no violation. */
