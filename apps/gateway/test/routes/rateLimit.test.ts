@@ -3,6 +3,7 @@ import { memoryCoord } from "@omni/coord";
 import type { StreamEvent } from "@omni/ir";
 import type { HttpClient } from "@omni/providers";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
+import { limitConfigBaseSchema } from "@omni/ratelimit/catalog";
 import {
   captureLogger,
   memoryStore,
@@ -12,7 +13,7 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
-import { ApiKeyRateLimiter } from "../../src/auth/rateLimit.ts";
+import { ApiKeyRateLimiter, modelSubjectId } from "../../src/auth/rateLimit.ts";
 import { type ProxyDeps, proxyRoutes } from "../../src/routes/proxy.ts";
 
 const NOW = 1_000_000;
@@ -43,12 +44,11 @@ type HarnessOptions = {
 async function harness(options: HarnessOptions = {}) {
   const store = await memoryStore();
   await seedCredential(store, { id: "c1", provider: "anthropic" });
-  await store.config.putModel(
-    virtualModel({
-      id: "fast",
-      targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
-    }),
-  );
+  for (const id of ["fast", "slow"]) {
+    await store.config.putModel(
+      virtualModel({ id, targets: [target({ provider: "anthropic", model: "claude-opus-4" })] }),
+    );
+  }
   const { raw, key } = await seedApiKey(store, {
     limits: options.limits ?? { concurrency: 4 },
     modelAllowlist: options.modelAllowlist ?? null,
@@ -56,11 +56,11 @@ async function harness(options: HarnessOptions = {}) {
   const logger = captureLogger();
   const now = options.now ?? (() => NOW);
   const rateLimiter = new ApiKeyRateLimiter({ store, now, logger });
-  const debits: Array<{ keyId: string; tokens: number; costUsd: number }> = [];
+  const debits: Array<{ keyId: string; model: string; tokens: number; costUsd: number }> = [];
   const debit = rateLimiter.debit.bind(rateLimiter);
-  rateLimiter.debit = (keyId, usage) => {
-    debits.push({ keyId, tokens: usage.tokens, costUsd: usage.costUsd });
-    debit(keyId, usage);
+  rateLimiter.debit = (keyId, model, usage) => {
+    debits.push({ keyId, model, tokens: usage.tokens, costUsd: usage.costUsd });
+    debit(keyId, model, usage);
   };
 
   let n = 0;
@@ -79,9 +79,9 @@ async function harness(options: HarnessOptions = {}) {
     ...options.overrides,
   });
 
-  const call = (body: unknown, init: RequestInit = {}) =>
+  const call = (body: unknown, init: RequestInit = {}, path = "/v1/messages") =>
     app.handle(
-      new Request("http://localhost/v1/messages", {
+      new Request(`http://localhost${path}`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
         body: JSON.stringify(body),
@@ -164,7 +164,7 @@ test("a request outliving the slot ttl keeps its concurrency slot", async () => 
   });
   const limits: LimitConfig = { concurrency: 1 };
 
-  const admission = await limiter.admit(key.id, limits, "req-long");
+  const admission = await limiter.admit(key.id, limits, "fast", "req-long");
   expect(await limiter.inFlight(key.id)).toBe(1);
 
   // The renewal fires every `RENEW_INTERVAL_MS` — a third of the TTL — so it
@@ -184,7 +184,7 @@ test("a request outliving the slot ttl keeps its concurrency slot", async () => 
   expect(clock - NOW).toBeGreaterThan(TTL * 3);
 
   // A rival is still refused, which is the promise `concurrency` makes.
-  await expect(limiter.admit(key.id, limits, "req-rival")).rejects.toThrow();
+  await expect(limiter.admit(key.id, limits, "fast", "req-rival")).rejects.toThrow();
   expect(await limiter.inFlight(key.id)).toBe(1);
 
   // And the long request's own release still frees exactly its slot.
@@ -241,7 +241,7 @@ test("admit runs an unrefed renewal timer, and the release clears it", async () 
       logger: captureLogger(),
       coord: memoryCoord({ now }),
     });
-    const admission = await limiter.admit(key.id, { concurrency: 1 }, "req-1");
+    const admission = await limiter.admit(key.id, { concurrency: 1 }, "fast", "req-1");
     expect(started).toHaveLength(1);
     expect(started[0]?.ms).toBe(100_000);
     expect(started[0]?.unrefed).toBe(true);
@@ -268,7 +268,7 @@ test("admit runs an unrefed renewal timer, and the release clears it", async () 
     expect(cleared).toBe(1);
 
     // A key with no concurrency ceiling starts no timer at all.
-    await (await limiter.admit(key.id, { requests: { "1m": 5 } }, "req-2")).release();
+    await (await limiter.admit(key.id, { requests: { "1m": 5 } }, "fast", "req-2")).release();
     expect(started).toHaveLength(1);
   } finally {
     globalThis.setInterval = realSet;
@@ -313,7 +313,7 @@ test("renewal stops at the cap, so an abandoned slot lapses instead of leaking f
       coord: memoryCoord({ now }),
     });
     // Admitted and then abandoned: nothing ever calls `release`.
-    await limiter.admit(key.id, { concurrency: 1 }, "abandoned");
+    await limiter.admit(key.id, { concurrency: 1 }, "fast", "abandoned");
     expect(await limiter.inFlight(key.id)).toBe(1);
 
     const DAY = 86_400_000;
@@ -361,14 +361,14 @@ test("one requestId reused across admissions still holds one slot each", async (
   const limits: LimitConfig = { concurrency: 3 };
 
   // Same id every time, which is what a buggy caller or a retry looks like.
-  const first = await limiter.admit(key.id, limits, "same-id");
-  const second = await limiter.admit(key.id, limits, "same-id");
+  const first = await limiter.admit(key.id, limits, "fast", "same-id");
+  const second = await limiter.admit(key.id, limits, "fast", "same-id");
   expect(await limiter.inFlight(key.id)).toBe(2);
 
-  const third = await limiter.admit(key.id, limits, "same-id");
+  const third = await limiter.admit(key.id, limits, "fast", "same-id");
   expect(await limiter.inFlight(key.id)).toBe(3);
   // The ceiling still bites at three.
-  await expect(limiter.admit(key.id, limits, "same-id")).rejects.toThrow();
+  await expect(limiter.admit(key.id, limits, "fast", "same-id")).rejects.toThrow();
 
   // Each release frees exactly one, so the count walks down rather than
   // collapsing to zero on the first.
@@ -516,12 +516,112 @@ test("count_tokens is refused once the key's requests ceiling is reached", async
   store.close();
 });
 
+/**
+ * A model override enforced end to end, on both surfaces and both response
+ * kinds: the overridden model is refused at its own ceiling while another model
+ * on the same key is served, and the refusal held nothing of the key-wide
+ * claim it took alongside.
+ */
+const OPENAI_BODY = { model: "fast", messages: [{ role: "user", content: "hi" }] };
+
+test("a model override refuses its model and serves the key's others, on every surface", async () => {
+  for (const [path, body] of [
+    ["/v1/messages", BODY],
+    ["/v1/chat/completions", OPENAI_BODY],
+    ["/v1/responses", { model: "fast", input: "hi" }],
+  ] as const) {
+    for (const stream of [false, true]) {
+      const { store, call, rateLimiter, keyId } = await harness({
+        limits: { concurrency: 8, models: { fast: { concurrency: 1 } } },
+      });
+      const held = await call({ ...body, stream: true }, {}, path);
+      expect(held.status).toBe(200);
+      expect(await rateLimiter.inFlight(modelSubjectId(keyId, "fast"))).toBe(1);
+
+      const refused = await call({ ...body, stream }, {}, path);
+      expect(refused.status).toBe(429);
+      await refused.text();
+      // The refusal took a key-wide slot alongside its model claim, and gave
+      // back both.
+      expect(await rateLimiter.inFlight(keyId)).toBe(1);
+
+      const other = await call({ ...body, model: "slow", stream }, {}, path);
+      expect(other.status).toBe(200);
+      await other.text();
+
+      await held.text();
+      expect(await rateLimiter.inFlight(keyId)).toBe(0);
+      expect(await rateLimiter.inFlight(modelSubjectId(keyId, "fast"))).toBe(0);
+      store.close();
+    }
+  }
+});
+
+test("a model refusal is logged with the model, on the existing field", async () => {
+  const { store, call, logger } = await harness({
+    limits: { models: { fast: { requests: { "1m": 1 } } } },
+  });
+  expect((await call(BODY)).status).toBe(200);
+  expect((await call(BODY)).status).toBe(429);
+  const rejected = logger.records.filter((record) => record.msg === "rate limit rejected");
+  expect(rejected).toHaveLength(1);
+  expect(rejected[0]?.fields).toMatchObject({ model: "fast", code: "RATE_LIMIT" });
+  store.close();
+});
+
+/**
+ * Admission runs after the body is parsed and the model allowed, because it
+ * needs the model. So a key already over its ceiling is told the more specific
+ * thing about a disallowed model or a malformed body — and is charged nothing
+ * for either.
+ */
+test("a key over its ceiling is refused a disallowed model or a bad body first", async () => {
+  const { store, call, rateLimiter, keyId } = await harness({
+    limits: { requests: { "1m": 1 } },
+    modelAllowlist: ["fast"],
+  });
+  expect((await call(BODY)).status).toBe(200);
+  expect((await call({ ...BODY, model: "slow" })).status).toBe(401);
+  expect((await call({ messages: "not a list" })).status).toBe(400);
+  expect((await call(BODY)).status).toBe(429);
+  expect(await rateLimiter.inFlight(keyId)).toBe(0);
+  store.close();
+});
+
+test("count_tokens is charged a model override's requests, and only its requests", async () => {
+  const { store, call } = await harness({
+    limits: { models: { fast: { requests: { "1m": 2 }, concurrency: 1 } } },
+  });
+  const count = (model: string) => call({ ...BODY, model }, {}, "/v1/messages/count_tokens");
+  expect((await count("fast")).status).toBe(200);
+  expect((await count("fast")).status).toBe(200);
+  const refused = await count("fast");
+  expect(refused.status).toBe(429);
+  expect(refused.headers.get("retry-after")).toBe("60");
+  // Another model on the key has no ceiling at all.
+  expect((await count("slow")).status).toBe(200);
+  store.close();
+});
+
+/**
+ * The rollback story the spec chose: nesting overrides in `limits` fails
+ * closed. A build without this feature parses the stored row with what is now
+ * `limitConfigBaseSchema` — the previous `limitConfigSchema`, byte for byte —
+ * and its `.strict()` refuses `models`, so `authenticateApiKey` answers
+ * `INTERNAL` for that key instead of serving it unlimited.
+ */
+test("a row carrying overrides is refused by the previous schema shape", () => {
+  const stored = JSON.parse('{"requests":{"1m":60},"models":{"opus":{"concurrency":1}}}');
+  expect(limitConfigBaseSchema.safeParse(stored).success).toBe(false);
+  expect(limitConfigBaseSchema.safeParse({ requests: { "1m": 60 } }).success).toBe(true);
+});
+
 test("debits a finished request's tokens and cost exactly once", async () => {
   const { store, call, debits, keyId } = await harness();
   const response = await call(BODY);
   await response.text();
 
-  expect(debits).toEqual([{ keyId, tokens: 20, costUsd: 0.00036375 }]);
+  expect(debits).toEqual([{ keyId, model: "fast", tokens: 20, costUsd: 0.00036375 }]);
   store.close();
 });
 
@@ -531,7 +631,7 @@ test("debits a streamed request once, after the stream drains", async () => {
   expect(debits).toEqual([]);
 
   await response.text();
-  expect(debits).toEqual([{ keyId, tokens: 20, costUsd: 0.00036375 }]);
+  expect(debits).toEqual([{ keyId, model: "fast", tokens: 20, costUsd: 0.00036375 }]);
   store.close();
 });
 
@@ -569,7 +669,7 @@ test("does not debit twice when a request fails after its row was completed", as
   await response.text().catch(() => undefined);
 
   expect(response.status).toBe(500);
-  expect(debits).toEqual([{ keyId, tokens: 20, costUsd: 0.00036375 }]);
+  expect(debits).toEqual([{ keyId, model: "fast", tokens: 20, costUsd: 0.00036375 }]);
   store.close();
 });
 

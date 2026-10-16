@@ -2,6 +2,7 @@ import { type Coord, type Counts, LockUnavailable, memoryCoord } from "@omni/coo
 import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import {
   type CounterSnapshot,
+  combine,
   type Decision,
   type DimensionCounters,
   evaluate,
@@ -9,7 +10,14 @@ import {
   retryAfterMs,
   type WindowCounter,
 } from "@omni/ratelimit";
-import { type Dimension, type LimitConfig, WINDOW_MS, type Window } from "@omni/ratelimit/catalog";
+import {
+  type Dimension,
+  type LimitConfig,
+  type LimitConfigBase,
+  modelOverride,
+  WINDOW_MS,
+  type Window,
+} from "@omni/ratelimit/catalog";
 import type { Store } from "@omni/store";
 
 /**
@@ -84,9 +92,62 @@ const RENEW_INTERVAL_MS = 100_000;
  */
 const MAX_RENEWED_MS = 86_400_000;
 
-/** Where a key's long-window buckets live: `lim:<keyId>:<window>`. */
-function bucketKey(keyId: string, window: LongWindow): string {
-  return `lim:${keyId}:${window}`;
+/** Where a subject's long-window buckets live: `lim:<subject>:<window>`. */
+function bucketKey(subject: string, window: LongWindow): string {
+  return `lim:${subject}:${window}`;
+}
+
+/**
+ * What one model override's ring, gauge and buckets are keyed by.
+ *
+ * `encodeURIComponent` takes `/` and `:` out of the model part, so no model
+ * name can spell another subject's key — `k1/m/a/m/b` is not reachable — and
+ * `lim:<subject>:<window>` keeps exactly one reading.
+ */
+export function modelSubjectId(keyId: string, model: string): string {
+  return `${keyId}/m/${encodeURIComponent(model)}`;
+}
+
+/**
+ * One set of counters a request is judged against: the key-wide limits, keyed
+ * by the key's id, or one model override's, keyed by `modelSubjectId`.
+ *
+ * `keyId` and `model` are what the store is asked about when the subject's
+ * long windows are seeded or a refusal's reset is read; `id` is what the
+ * coordinator is asked about.
+ */
+type Subject = {
+  id: string;
+  keyId: string;
+  /** Undefined for the key-wide subject, whose store reads span every model. */
+  model: string | undefined;
+  limits: LimitConfigBase;
+};
+
+/** The key-wide matrix, without the overrides `evaluate` must never be handed. */
+function keyWide(limits: LimitConfig): LimitConfigBase {
+  const { models: _models, ...base } = limits;
+  return base;
+}
+
+/**
+ * Every subject a request for `model` is judged against, key-wide first.
+ *
+ * A key-wide scope that limits nothing is left out, so it claims nothing: a
+ * key whose only limit is one model's override allocates nothing for any other
+ * model.
+ * Key-wide first is also the order `combine` breaks ties in.
+ */
+function subjectsOf(keyId: string, limits: LimitConfig, model: string): Subject[] {
+  const subjects: Subject[] = [];
+  const base = keyWide(limits);
+  if (anyLimit(base)) subjects.push({ id: keyId, keyId, model: undefined, limits: base });
+  const override = modelOverride(limits, model);
+  // No `anyLimit` here: the schema refuses an override that limits nothing.
+  if (override !== undefined) {
+    subjects.push({ id: modelSubjectId(keyId, model), keyId, model, limits: override });
+  }
+  return subjects;
 }
 
 /**
@@ -123,6 +184,8 @@ export type Admission = {
  * state that now counts itself.
  */
 type Claim = {
+  /** The subject the claim was taken against, and therefore where it is given back. */
+  subject: string;
   /** The ring stamp that was recorded, and therefore the one to give back. */
   stamp: number;
   /** Whether the gauge was raised. `consume` claims a ring slot and nothing else. */
@@ -169,7 +232,7 @@ function configured(limit: number | null | undefined): limit is number {
 }
 
 /** Whether any `requests` window is limited. */
-function anyRequestLimit(limits: LimitConfig): boolean {
+function anyRequestLimit(limits: LimitConfigBase): boolean {
   for (const window of ["1m", "5h", "1w"] as const) {
     if (configured(limits.requests?.[window])) return true;
   }
@@ -177,7 +240,7 @@ function anyRequestLimit(limits: LimitConfig): boolean {
 }
 
 /** Whether anything at all is limited, so an unlimited key can allocate nothing. */
-function anyLimit(limits: LimitConfig): boolean {
+function anyLimit(limits: LimitConfigBase): boolean {
   if (configured(limits.concurrency) || anyRequestLimit(limits)) return true;
   for (const window of ["1m", "5h", "1w"] as const) {
     if (configured(limits.tokens?.[window])) return true;
@@ -186,7 +249,7 @@ function anyLimit(limits: LimitConfig): boolean {
 }
 
 /** Whether any long window is configured, so a store read is worth issuing. */
-function anyLongLimit(limits: LimitConfig): boolean {
+function anyLongLimit(limits: LimitConfigBase): boolean {
   for (const window of LONG_WINDOWS) {
     if (configured(limits.requests?.[window])) return true;
     if (configured(limits.tokens?.[window])) return true;
@@ -213,11 +276,12 @@ function anyLongLimit(limits: LimitConfig): boolean {
  */
 export class ApiKeyRateLimiter {
   /**
-   * The limits last seen at admission, so a debit knows whether a long window
-   * is configured at all. ponytail: never pruned; bounded by the keys an
-   * operator has minted, which is dozens.
+   * The limits last seen at admission, per subject, so a debit knows whether a
+   * long window is configured at all — key-wide and for the request's model
+   * apart. ponytail: never pruned; bounded by the keys and overrides an
+   * operator has configured, which is dozens.
    */
-  private readonly limits = new Map<string, LimitConfig>();
+  private readonly limits = new Map<string, LimitConfigBase>();
   private readonly coord: Coord;
   private readonly store: Store;
   private readonly now: () => number;
@@ -245,34 +309,55 @@ export class ApiKeyRateLimiter {
    * holder as readily as a dead one and no request deadline bounds it by
    * default. The release stops the renewal; renewal itself stops at
    * `MAX_RENEWED_MS`.
+   *
+   * `model` is the requested model, after `[1m]` normalization. Where the key
+   * overrides it, this one admission claims both subjects, judges both, and on
+   * any refusal or failure gives back both: two admissions would leave a
+   * request refused by its model ceiling holding a key-wide stamp and slot.
+   * Such an admission may hold two slots; its release frees both and its
+   * renew renews both.
    */
-  async admit(keyId: string, limits: LimitConfig, requestId?: string): Promise<Admission> {
+  async admit(
+    keyId: string,
+    limits: LimitConfig,
+    model: string,
+    requestId?: string,
+  ): Promise<Admission> {
+    const subjects = subjectsOf(keyId, limits, model);
     // An unlimited key allocates nothing, so an install that sets no limits
     // pays no memory for the mechanism — and renders no headers, because there
     // is no ceiling to report a distance from.
-    if (!anyLimit(limits)) return { release: () => {}, renew: async () => {}, headroom: {} };
+    if (subjects.length === 0) return { release: () => {}, renew: async () => {}, headroom: {} };
 
     const now = this.now();
-    this.limits.set(keyId, limits);
-    // The limiter owns this name; it is deliberately NOT `requestId`.
-    //
-    // A named slot is idempotent by design — re-acquiring one name moves its
-    // expiry instead of adding a slot — so the name has to be unique per
-    // *admission*, and a caller-supplied id cannot be trusted to be. Two
-    // concurrent requests sharing one id would hold a single slot between
-    // them, and the ceiling would admit past itself: a limit that under-counts
-    // is worse than no limit, because the operator believes they set one.
-    // `requestId` stays what it was, a log correlation key.
-    const holder = configured(limits.concurrency) ? crypto.randomUUID() : undefined;
-    const claim = await this.claim(keyId, now, true, holder);
-
+    const claims: Claim[] = [];
     let admitted = false;
     try {
-      const counters = await this.counters(keyId, limits, claim, now, requestId);
-      const decision = evaluate(limits, counters, now);
-      await this.refuse(keyId, decision, now, requestId);
+      for (const subject of subjects) {
+        this.limits.set(subject.id, subject.limits);
+        // The limiter owns this name; it is deliberately NOT `requestId`.
+        //
+        // A named slot is idempotent by design — re-acquiring one name moves
+        // its expiry instead of adding a slot — so the name has to be unique
+        // per *admission*, and a caller-supplied id cannot be trusted to be.
+        // Two concurrent requests sharing one id would hold a single slot
+        // between them, and the ceiling would admit past itself: a limit that
+        // under-counts is worse than no limit, because the operator believes
+        // they set one. `requestId` stays what it was, a log correlation key.
+        const holder = configured(subject.limits.concurrency) ? crypto.randomUUID() : undefined;
+        // In sequence, each before anything is judged. `Coord` makes every
+        // claim visible the instant it is made, so two subjects claimed one
+        // after the other are as safe as one.
+        claims.push(await this.claim(subject.id, now, true, holder));
+      }
+      const decision = await this.judge(subjects, claims, (scope) => scope, now, requestId);
       admitted = true;
 
+      // Only the slots judged against a ceiling are renewed: a subject without
+      // `concurrency` raised an anonymous slot nothing counts.
+      const held = claims.flatMap((claim) =>
+        claim.holder === undefined ? [] : [{ subject: claim.subject, holder: claim.holder }],
+      );
       let released = false;
       // Renewal is bounded, because an unbounded one turns a leak that used to
       // heal into one that never does.
@@ -288,13 +373,14 @@ export class ApiKeyRateLimiter {
       // than after five minutes.
       const renewUntil = now + MAX_RENEWED_MS;
       const renew = async () => {
-        if (released || holder === undefined) return;
-        await this.coord.gauge.renew(keyId, holder, GAUGE_TTL_MS);
+        if (released) return;
+        for (const slot of held)
+          await this.coord.gauge.renew(slot.subject, slot.holder, GAUGE_TTL_MS);
       };
       // Nothing to renew for a key without a concurrency ceiling: its gauge
-      // slot is not judged against anything.
+      // slot is not judged against anything. One timer for every held slot.
       const renewal =
-        holder === undefined
+        held.length === 0
           ? null
           : setInterval(() => {
               if (this.now() >= renewUntil) {
@@ -311,15 +397,16 @@ export class ApiKeyRateLimiter {
         if (released) return;
         released = true;
         if (renewal !== null) clearInterval(renewal);
-        void this.coord.gauge.release(keyId, holder);
+        for (const claim of claims) void this.coord.gauge.release(claim.subject, claim.holder);
       };
       return { release, renew, headroom: decision.headroom };
     } finally {
       // Where the claim stops being provisional. An admitted request keeps it
-      // until its release; anything else — a refusal, or a failure while judging
-      // — gives every part of it back, because a leak here locks the key out
-      // for `MAX_RENEWED_MS` and says nothing while it does.
-      if (!admitted) await this.rollback(keyId, claim);
+      // until its release; anything else — a refusal, a failure while judging,
+      // or a failure claiming a later subject — gives back every part of every
+      // subject's claim, because a leak here locks the key out for
+      // `MAX_RENEWED_MS` and says nothing while it does.
+      if (!admitted) for (const claim of claims) await this.rollback(claim);
     }
   }
 
@@ -329,24 +416,65 @@ export class ApiKeyRateLimiter {
    * It performs no dispatch, so it consumes no upstream tokens and costs
    * nothing; charging it against a token budget would bill an operator for an
    * estimate this process computed itself. It holds nothing open either, so it
-   * neither raises the concurrency gauge nor is judged against it.
+   * neither raises the concurrency gauge nor is judged against it. A model
+   * override's `requests` applies here as the key-wide one does, and its
+   * other dimensions do not.
    */
-  async consume(keyId: string, limits: LimitConfig, requestId?: string): Promise<void> {
-    const requests = limits.requests;
-    if (requests === undefined || !anyRequestLimit(limits)) return;
+  async consume(
+    keyId: string,
+    limits: LimitConfig,
+    model: string,
+    requestId?: string,
+  ): Promise<void> {
+    const subjects = subjectsOf(keyId, limits, model).filter((subject) =>
+      anyRequestLimit(subject.limits),
+    );
+    if (subjects.length === 0) return;
 
     const now = this.now();
-    this.limits.set(keyId, limits);
-    const claim = await this.claim(keyId, now, false);
-
+    const claims: Claim[] = [];
     let consumed = false;
     try {
-      const counters = await this.counters(keyId, { requests }, claim, now, requestId);
-      await this.refuse(keyId, evaluate({ requests }, counters, now), now, requestId);
+      for (const subject of subjects) {
+        this.limits.set(subject.id, subject.limits);
+        claims.push(await this.claim(subject.id, now, false));
+      }
+      await this.judge(subjects, claims, requestsOnly, now, requestId);
       consumed = true;
     } finally {
-      if (!consumed) await this.rollback(keyId, claim);
+      if (!consumed) for (const claim of claims) await this.rollback(claim);
     }
+  }
+
+  /**
+   * Judges every subject against its own counters, and refuses if any refuses.
+   *
+   * Each subject is evaluated alone and the decisions are combined, so the
+   * `Retry-After` names the scope that clears last and each header the scope
+   * nearest exhaustion. `scope` narrows what is judged — `consume` passes only
+   * `requests`.
+   */
+  private async judge(
+    subjects: readonly Subject[],
+    claims: readonly Claim[],
+    scope: (limits: LimitConfigBase) => LimitConfigBase,
+    now: number,
+    requestId: string | undefined,
+  ): Promise<Decision> {
+    const decisions: Decision[] = [];
+    for (const [index, subject] of subjects.entries()) {
+      const claim = claims[index];
+      // One claim per subject, pushed in the same order: unreachable.
+      if (claim === undefined) throw new Error("rate limit claim missing for a subject");
+      const limits = scope(subject.limits);
+      const counters = await this.counters(subject, limits, claim, now, requestId);
+      decisions.push(evaluate(limits, counters, now));
+    }
+    const [first, ...rest] = decisions;
+    if (first === undefined) return { allowed: true, violation: null, headroom: {} };
+    const decision = rest.reduce(combine, first);
+    await this.refuse(subjects, decisions, decision, now, requestId);
+    return decision;
   }
 
   /**
@@ -361,18 +489,37 @@ export class ApiKeyRateLimiter {
    * burst. `Coord` promises each claim is visible the instant the call is
    * made, so the `await`s here yield after the record, never before it.
    */
-  private async claim(keyId: string, now: number, gauge: boolean, holder?: string): Promise<Claim> {
-    const ring = await this.coord.window.claim(keyId, WINDOW_MS["1m"], now);
-    const concurrency = gauge
-      ? await this.coord.gauge.acquire(keyId, GAUGE_TTL_MS, holder)
-      : await this.coord.gauge.read(keyId);
-    return { stamp: ring.stamp, gauge, holder, before: { requests: ring.before, concurrency } };
+  private async claim(
+    subject: string,
+    now: number,
+    gauge: boolean,
+    holder?: string,
+  ): Promise<Claim> {
+    const ring = await this.coord.window.claim(subject, WINDOW_MS["1m"], now);
+    let concurrency: number;
+    try {
+      concurrency = gauge
+        ? await this.coord.gauge.acquire(subject, GAUGE_TTL_MS, holder)
+        : await this.coord.gauge.read(subject);
+    } catch (error) {
+      // The ring stamp is already recorded and the caller has no claim to give
+      // back yet, so this is the only place that can return it.
+      await this.coord.window.rollback(subject, ring.stamp);
+      throw error;
+    }
+    return {
+      subject,
+      stamp: ring.stamp,
+      gauge,
+      holder,
+      before: { requests: ring.before, concurrency },
+    };
   }
 
   /** Gives back every part of a claim, for a request that will not be served. */
-  private async rollback(keyId: string, claim: Claim): Promise<void> {
-    await this.coord.window.rollback(keyId, claim.stamp);
-    if (claim.gauge) await this.coord.gauge.release(keyId, claim.holder);
+  private async rollback(claim: Claim): Promise<void> {
+    await this.coord.window.rollback(claim.subject, claim.stamp);
+    if (claim.gauge) await this.coord.gauge.release(claim.subject, claim.holder);
   }
 
   /**
@@ -387,16 +534,24 @@ export class ApiKeyRateLimiter {
    * counts finished rows only, and the buckets must agree with what a seed
    * would read.
    */
-  debit(keyId: string, usage: { tokens: number; costUsd: number }): void {
-    const limits = this.limits.get(keyId);
-    // A key this process never admitted has nothing to add to: its row is
-    // written, and whoever seeds the key next counts it.
+  debit(keyId: string, requestedModel: string, usage: { tokens: number; costUsd: number }): void {
+    const delta = { requests: 1, tokens: usage.tokens, costUsd: usage.costUsd };
+    this.debitSubject(keyId, delta);
+    // The model's subject only where this process admitted it under an
+    // override; for any other model there is no entry and nothing is added.
+    this.debitSubject(modelSubjectId(keyId, requestedModel), delta);
+  }
+
+  private debitSubject(subject: string, delta: Counts): void {
+    const limits = this.limits.get(subject);
+    // A subject this process never admitted has nothing to add to: its row is
+    // written, and whoever seeds the subject next counts it. Asked before the
+    // clock is, so a key with no long window reads it no extra time.
     if (limits === undefined || !anyLongLimit(limits)) return;
     const now = this.now();
-    const delta = { requests: 1, tokens: usage.tokens, costUsd: usage.costUsd };
     for (const window of LONG_WINDOWS) {
       void this.coord.buckets.add(
-        bucketKey(keyId, window),
+        bucketKey(subject, window),
         GRAIN_MS[window],
         WINDOW_MS[window],
         now,
@@ -405,30 +560,43 @@ export class ApiKeyRateLimiter {
     }
   }
 
-  /** In-flight requests for one key. Zero for a key holding nothing. */
-  inFlight(keyId: string): Promise<number> {
-    return this.coord.gauge.read(keyId);
+  /**
+   * In-flight requests for one subject: a key's id, or `modelSubjectId` for
+   * one model's override. Zero for a subject holding nothing.
+   */
+  inFlight(subject: string): Promise<number> {
+    return this.coord.gauge.read(subject);
   }
 
   private async refuse(
-    keyId: string,
+    subjects: readonly Subject[],
+    decisions: readonly Decision[],
     decision: Decision,
     now: number,
     requestId: string | undefined,
   ): Promise<void> {
     const violation = decision.violation;
     if (violation === null) return;
+    // `combine` hands back one of the subjects' own violations, so identity
+    // names the subject that refused — and that subject's rows are the ones
+    // whose ageing out frees the window.
+    const index = decisions.findIndex((candidate) => candidate.violation === violation);
+    const subject = subjects[index];
+    const scope = decisions[index];
+    if (subject === undefined || scope === undefined) {
+      throw new Error("rate limit violation from no subject");
+    }
 
     // The one read this design makes on the refusal path and nowhere else. Null
     // for a violation with no window, which is why the correction below is
     // guarded on the window rather than on the instant.
     const window = violation.window;
-    const exact = await this.exactReset(keyId, window, now, requestId);
+    const exact = await this.exactReset(subject, window, now, requestId);
     const resolved = exact === null ? violation : { ...violation, resetAt: exact };
     const headroom =
       exact === null || window === null
         ? decision.headroom
-        : withReset(decision.headroom, window, exact);
+        : withReset(decision.headroom, window, exact, scope.headroom);
 
     // A denied request keeps nothing: its caller rolls back the ring stamp and
     // the gauge slot the check claimed before it ran, so a key hammering its own
@@ -463,7 +631,7 @@ export class ApiKeyRateLimiter {
    *   could not be computed must not turn a 429 into a 500.
    */
   private async exactReset(
-    keyId: string,
+    subject: Subject,
     window: Window | null,
     now: number,
     requestId: string | undefined,
@@ -471,7 +639,7 @@ export class ApiKeyRateLimiter {
     if (window === null || window === "1m") return null;
     const length = WINDOW_MS[window];
     try {
-      const oldest = await this.store.usage.oldestSince(keyId, now - length);
+      const oldest = await this.store.usage.oldestSince(subject.keyId, now - length, subject.model);
       if (oldest === null) return null;
       // No clamp to `now`. `oldestSince` was asked for rows at or after
       // `now - length`, so `oldest + length >= now` by construction, and `now`
@@ -483,7 +651,8 @@ export class ApiKeyRateLimiter {
     } catch (error) {
       this.logger.warn("rate limit reset unavailable", {
         ...(requestId === undefined ? {} : { requestId }),
-        apiKeyId: keyId,
+        apiKeyId: subject.keyId,
+        ...(subject.model === undefined ? {} : { model: subject.model }),
         // The message only, for the same reason the counter read logs only the
         // message: a store failure must not drag a row's contents into stdout.
         reason: describeError(error, "unknown"),
@@ -504,8 +673,8 @@ export class ApiKeyRateLimiter {
    * `requests` debits on completion, so this request is not in it either.
    */
   private async counters(
-    keyId: string,
-    limits: LimitConfig,
+    subject: Subject,
+    limits: LimitConfigBase,
     claim: Claim,
     now: number,
     requestId: string | undefined,
@@ -514,7 +683,7 @@ export class ApiKeyRateLimiter {
     const snapshot: CounterSnapshot = { requests, concurrency: claim.before.concurrency };
     if (!anyLongLimit(limits)) return snapshot;
 
-    const counts = await this.longCounts(keyId, now, requestId);
+    const counts = await this.longCounts(subject, now, requestId);
     if (counts === null) return snapshot;
 
     const tokens: DimensionCounters = {};
@@ -555,23 +724,24 @@ export class ApiKeyRateLimiter {
    * stall a request; on a cluster it can, and bounding it is open work.
    */
   private async longCounts(
-    keyId: string,
+    subject: Subject,
     now: number,
     requestId: string | undefined,
   ): Promise<Record<LongWindow, Counts> | null> {
     const out = {} as Record<LongWindow, Counts>;
     for (const window of LONG_WINDOWS) {
-      const key = bucketKey(keyId, window);
+      const key = bucketKey(subject.id, window);
       const grain = GRAIN_MS[window];
       const length = WINDOW_MS[window];
       let sum = await this.coord.buckets.sum(key, grain, length, now);
       if (sum === null) {
         try {
-          sum = await this.seed(keyId, window, now);
+          sum = await this.seed(subject, window, now);
         } catch (error) {
           this.logger.warn("rate limit counters unavailable", {
             ...(requestId === undefined ? {} : { requestId }),
-            apiKeyId: keyId,
+            apiKeyId: subject.keyId,
+            ...(subject.model === undefined ? {} : { model: subject.model }),
             // The message only. A store failure must not drag a row's
             // contents, let alone a key, into stdout.
             reason: describeError(error, "unknown"),
@@ -593,14 +763,20 @@ export class ApiKeyRateLimiter {
    * anyway — two seeds install the same picture, and the alternative is a
    * request refused over a coordination fault.
    */
-  private async seed(keyId: string, window: LongWindow, now: number): Promise<Counts> {
-    const key = bucketKey(keyId, window);
+  private async seed(subject: Subject, window: LongWindow, now: number): Promise<Counts> {
+    const key = bucketKey(subject.id, window);
     const grain = GRAIN_MS[window];
     const length = WINDOW_MS[window];
     const install = async (): Promise<Counts> => {
       const already = await this.coord.buckets.sum(key, grain, length, now);
       if (already !== null) return already;
-      const rows = await this.store.usage.sumBuckets(keyId, now - length, grain);
+      // A model's subject seeds from that model's rows alone.
+      const rows = await this.store.usage.sumBuckets(
+        subject.keyId,
+        now - length,
+        grain,
+        subject.model,
+      );
       await this.coord.buckets.seed(key, grain, length, now, rows);
       return (await this.coord.buckets.sum(key, grain, length, now)) ?? zero();
     };
@@ -617,6 +793,11 @@ function zero(): Counts {
   return { requests: 0, tokens: 0, costUsd: 0 };
 }
 
+/** What `count_tokens` is judged against: `requests`, and nothing else. */
+function requestsOnly(limits: LimitConfigBase): LimitConfigBase {
+  return limits.requests === undefined ? {} : { requests: limits.requests };
+}
+
 /**
  * Rewrites the reset of every reported dimension sitting on one window.
  *
@@ -624,16 +805,22 @@ function zero(): Counts {
  * them. A response that says "wait an hour" in one field and "wait a week" in
  * the next is worse than either figure alone: the client obeys whichever its
  * SDK happens to read.
+ *
+ * Only entries the refusing subject reported — `source` is its headroom, and
+ * `combine` passes entries through unchanged — because the instant was read
+ * from that subject's rows. The other scope's window of the same name frees
+ * when *its* oldest row ages out, which this read says nothing about.
  */
 function withReset(
   headroom: HeadroomByDimension,
   window: Window,
   resetAt: number,
+  source: HeadroomByDimension,
 ): HeadroomByDimension {
   const corrected: HeadroomByDimension = { ...headroom };
   for (const dimension of ["requests", "tokens", "spend"] as const) {
     const entry = corrected[dimension];
-    if (entry !== undefined && entry.window === window)
+    if (entry !== undefined && entry.window === window && entry === source[dimension])
       corrected[dimension] = { ...entry, resetAt };
   }
   return corrected;

@@ -481,8 +481,8 @@ async function handle(
   // it reports the window untouched.
   const limitHeaders = (): Record<string, string> =>
     rateLimitHeaders(surface, release === null ? headroom : afterThisRequest(headroom), startedAt);
-  const debit: UsageDebit = (id, usage) => {
-    rateLimiter.debit(id, usage);
+  const debit: UsageDebit = (id, model, usage) => {
+    rateLimiter.debit(id, model, usage);
   };
 
   try {
@@ -508,25 +508,6 @@ async function handle(
       throw error;
     }
     keyId = key.id;
-    try {
-      const admitted = await rateLimiter.admit(key.id, key.limits, requestId);
-      release = admitted.release;
-      headroom = admitted.headroom;
-    } catch (error) {
-      // The refusal knows what the client is up against, and it is the only
-      // thing that does — nothing downstream re-evaluates the limits.
-      if (error instanceof RateLimitExceeded) headroom = error.headroom;
-      if (error instanceof GatewayError && error.code === "RATE_LIMIT") {
-        deps.logger.warn("rate limit rejected", {
-          requestId,
-          surface,
-          apiKeyId: key.id,
-          code: error.code,
-          retryAfterMs: error.retryAfterMs,
-        });
-      }
-      throw error;
-    }
 
     const captured = await bodyCollectorFor(deps, key);
     collector = captured;
@@ -601,6 +582,32 @@ async function handle(
     }
 
     requestedModel = chatRequest.model;
+    // After the parse and the allowlist rather than before, because a model
+    // override is judged against the model the request names. One admission
+    // claims the key-wide subject and the model's together and gives both back
+    // on a refusal, so nothing a refused request claimed outlives it. The cost
+    // is accepted: a key over its ceiling sending a malformed body or a
+    // disallowed model is told that, more specifically, instead of 429.
+    try {
+      const admitted = await rateLimiter.admit(key.id, key.limits, requestedModel, requestId);
+      release = admitted.release;
+      headroom = admitted.headroom;
+    } catch (error) {
+      // The refusal knows what the client is up against, and it is the only
+      // thing that does — nothing downstream re-evaluates the limits.
+      if (error instanceof RateLimitExceeded) headroom = error.headroom;
+      if (error instanceof GatewayError && error.code === "RATE_LIMIT") {
+        deps.logger.warn("rate limit rejected", {
+          requestId,
+          surface,
+          apiKeyId: key.id,
+          model: requestedModel,
+          code: error.code,
+          retryAfterMs: error.retryAfterMs,
+        });
+      }
+      throw error;
+    }
     let began = false;
     const dispatched = await dispatch(
       chatRequest,
@@ -919,11 +926,6 @@ export function proxyRoutes(deps: ProxyDeps) {
             deps.now(),
             logger,
           );
-          // Minted even though this route writes no row. `consume` logs the
-          // fail-open path when a long-window store read times out, and that
-          // line is the only record this request leaves anywhere — without an
-          // id it names no request and joins to nothing.
-          await rateLimiter.consume(key.id, key.limits, deps.requestId());
           const body: unknown = await request.json();
           const chatRequest = parseAnthropicRequest(body, request.headers);
           if (key.modelAllowlist !== null && !key.modelAllowlist.includes(chatRequest.model)) {
@@ -932,6 +934,14 @@ export function proxyRoutes(deps: ProxyDeps) {
               `model "${safeToken(chatRequest.model)}" is not allowed for this API key`,
             );
           }
+          // After the allowlist, for the reason inference admits there: a
+          // model override's `requests` applies to this route too.
+          //
+          // Minted even though this route writes no row. `consume` logs the
+          // fail-open path when a long-window store read times out, and that
+          // line is the only record this request leaves anywhere — without an
+          // id it names no request and joins to nothing.
+          await rateLimiter.consume(key.id, key.limits, chatRequest.model, deps.requestId());
           // Counted against the request the gateway will actually send. This
           // route never dispatches, so it is the one place the ruleset has to
           // be added by hand — a count that omitted it would under-report by
