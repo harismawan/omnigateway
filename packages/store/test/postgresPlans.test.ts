@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { SQL } from "bun";
 import { deriveKey } from "../src/encryption.ts";
 import { createPostgresStore } from "../src/postgres/store.ts";
+import { NARROWED_SQL } from "../src/postgres/usage.ts";
 
 /**
  * Which index the Postgres planner opens for the per-model long-window reads.
@@ -36,15 +37,16 @@ if (url === undefined || url === "") {
       expect(index?.indexdef).toContain("(api_key_id, requested_model, at)");
 
       await sql.unsafe("SET enable_seqscan = off");
-      const narrowed = "api_key_id = $1 AND requested_model = $2 AND state = 'done' AND at >= $3";
-      for (const query of [
-        `SELECT COUNT(*), SUM(cost_usd) FROM request_logs WHERE ${narrowed}`,
-        `SELECT (at / 3600000) * 3600000 AS bucket, COUNT(*) FROM request_logs
-          WHERE ${narrowed} GROUP BY 1`,
-        `SELECT MIN(at) AS at FROM request_logs WHERE ${narrowed}`,
-      ]) {
+      // The store's own statements, not copies: a copy keeps passing when the
+      // real query is edited into one the index cannot serve — e.g.
+      // `(requested_model || '') = $4` returns the same rows and is no seek.
+      for (const [query, args] of [
+        [NARROWED_SQL.sumSince, ["k1", "opus", 0]],
+        [NARROWED_SQL.sumBuckets, [60_000, 60_000, "k1", "opus", 0]],
+        [NARROWED_SQL.oldestSince, ["k1", "opus", 0]],
+      ] as const) {
         const plan = (
-          await sql.unsafe<Array<{ "QUERY PLAN": string }>>(`EXPLAIN ${query}`, ["k1", "opus", 0])
+          await sql.unsafe<Array<{ "QUERY PLAN": string }>>(`EXPLAIN ${query}`, [...args])
         )
           .map((row) => row["QUERY PLAN"])
           .join("\n");

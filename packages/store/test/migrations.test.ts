@@ -21,6 +21,7 @@ import nodes012 from "../src/sqlite/migrations/012_nodes.sql" with { type: "text
 import healthMeasurements013 from "../src/sqlite/migrations/013_health_measurements.sql" with {
   type: "text",
 };
+import { NARROWED_SQL } from "../src/sqlite/usage.ts";
 
 type TableRow = { name: string };
 
@@ -379,17 +380,13 @@ test("migration 18 indexes one key's one model by time, and the narrowed reads p
       .all(...args)
       .map((row) => row.detail)
       .join(" ");
-  const narrowed = "api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?";
-  for (const sql of [
-    `SELECT COUNT(*), SUM(cost_usd) FROM request_logs WHERE ${narrowed}`,
-    `SELECT (at / 3600000) * 3600000 AS bucket, COUNT(*) FROM request_logs
-      WHERE ${narrowed} GROUP BY bucket`,
-    `SELECT MIN(at) AS at FROM request_logs WHERE ${narrowed}`,
-  ]) {
-    expect(planOf(sql, ["k1", "opus", 0])).toContain(
-      "idx_request_logs_key_model_at (api_key_id=? AND requested_model=? AND at>?)",
-    );
-  }
+  // The store's own statements, not copies: a copy keeps passing when the real
+  // query is edited into one the index cannot serve (`+requested_model = ?`
+  // returns the same rows and plans as a filter off the key/time index).
+  const seek = "idx_request_logs_key_model_at (api_key_id=? AND requested_model=? AND at>?)";
+  expect(planOf(NARROWED_SQL.sumSince, ["k1", "opus", 0])).toContain(seek);
+  expect(planOf(NARROWED_SQL.sumBuckets, [60_000, 60_000, "k1", "opus", 0])).toContain(seek);
+  expect(planOf(NARROWED_SQL.oldestSince, ["k1", "opus", 0])).toContain(seek);
   expect(
     planOf(
       "SELECT COUNT(*) FROM request_logs WHERE api_key_id = ? AND state = 'done' AND at >= ? AND at < ?",

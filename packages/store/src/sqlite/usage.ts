@@ -254,6 +254,38 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_filters = excluded.rtk_filters
   WHERE request_logs.state = 'pending'`;
 
+/**
+ * The per-model long-window reads, one key's one model inside a window.
+ *
+ * Exported for one reader: the plan test in `migrations.test.ts` EXPLAINs these
+ * very strings, so an edit that keeps their results and loses the seek — a
+ * `+requested_model`, a cast — fails there instead of shipping a scan. A copy
+ * of the SQL in the test would go on passing. Each must seek
+ * `idx_request_logs_key_model_at` (migration 18); `state = 'done'` for the
+ * reason `sumSince` gives.
+ */
+export const NARROWED_SQL = {
+  /** `(apiKeyId, requestedModel, sinceMs)` */
+  sumSince: `SELECT COUNT(*) AS requests,
+                    COALESCE(SUM(input_tokens + output_tokens
+                                 + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                    COALESCE(SUM(cost_usd), 0) AS cost_usd
+               FROM request_logs
+              WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?`,
+  /** `(grainMs, grainMs, apiKeyId, requestedModel, fromMs)` */
+  sumBuckets: `SELECT (at / ?) * ? AS bucket, COUNT(*) AS requests,
+                    COALESCE(SUM(input_tokens + output_tokens
+                                 + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                    COALESCE(SUM(cost_usd), 0) AS cost_usd
+               FROM request_logs
+              WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?
+              GROUP BY bucket`,
+  /** `(apiKeyId, requestedModel, sinceMs)` */
+  oldestSince: `SELECT MIN(at) AS at
+                   FROM request_logs
+                  WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?`,
+} as const;
+
 export function createUsageRepo(
   db: Database,
   nodeId: string,
@@ -420,18 +452,11 @@ export function createUsageRepo(
 
     async sumSince(apiKeyId: string, sinceMs: number, requestedModel?: string) {
       // One model's rows have no rollup to read, so the whole window comes from
-      // the log. Still one key's rows inside the window, through
-      // `idx_request_logs_key_at`, and `state = 'done'` for the reason below.
+      // the log, seeking one key's one model through
+      // `idx_request_logs_key_model_at`; `state = 'done'` for the reason below.
       if (requestedModel !== undefined) {
         const row = db
-          .query<SumRow, [string, string, number]>(
-            `SELECT COUNT(*) AS requests,
-                    COALESCE(SUM(input_tokens + output_tokens
-                                 + cache_read_tokens + cache_write_tokens), 0) AS tokens,
-                    COALESCE(SUM(cost_usd), 0) AS cost_usd
-               FROM request_logs
-              WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?`,
-          )
+          .query<SumRow, [string, string, number]>(NARROWED_SQL.sumSince)
           .get(apiKeyId, requestedModel, sinceMs);
         return {
           requests: row?.requests ?? 0,
@@ -492,15 +517,7 @@ export function createUsageRepo(
       if (requestedModel !== undefined) {
         const from = grainMs === HOUR_MS ? hourOf(sinceMs) * HOUR_MS : sinceMs;
         const narrowed = db
-          .query<BucketRow, [number, number, string, string, number]>(
-            `SELECT (at / ?) * ? AS bucket, COUNT(*) AS requests,
-                    COALESCE(SUM(input_tokens + output_tokens
-                                 + cache_read_tokens + cache_write_tokens), 0) AS tokens,
-                    COALESCE(SUM(cost_usd), 0) AS cost_usd
-               FROM request_logs
-              WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?
-              GROUP BY bucket`,
-          )
+          .query<BucketRow, [number, number, string, string, number]>(NARROWED_SQL.sumBuckets)
           .all(grainMs, grainMs, apiKeyId, requestedModel, from);
         return narrowed.map((row) => [
           row.bucket,
@@ -559,11 +576,7 @@ export function createUsageRepo(
               )
               .get(apiKeyId, sinceMs)
           : db
-              .query<OldestRow, [string, string, number]>(
-                `SELECT MIN(at) AS at
-                   FROM request_logs
-                  WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?`,
-              )
+              .query<OldestRow, [string, string, number]>(NARROWED_SQL.oldestSince)
               .get(apiKeyId, requestedModel, sinceMs);
       // `MIN` over no rows is a row holding null, not an absent row. Both mean
       // the same thing here: the key has nothing retained inside the window, so
