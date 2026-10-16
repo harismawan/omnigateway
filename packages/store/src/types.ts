@@ -1326,8 +1326,15 @@ export interface UsageRepo {
    * measurements, and including them adds one placeholder per in-flight request
    * to every long-window count — invisibly, and increasingly under load, which
    * is exactly when the limit matters.
+   *
+   * `requestedModel` narrows to one model's rows, for a key's per-model
+   * override. `usage_rollup` has no model column, so a narrowed read takes the
+   * whole window from `request_logs` within this one key's rows
+   * (`idx_request_logs_key_at` bounds the scan to the key and the window). It
+   * is asked only for a key with a long-window override, and only by readers
+   * off the request path: a seed, and the admin readings.
    */
-  sumSince(apiKeyId: string, sinceMs: number): Promise<UsageSums>;
+  sumSince(apiKeyId: string, sinceMs: number, requestedModel?: string): Promise<UsageSums>;
   /**
    * The same sums, one row per `grainMs`-wide bucket since `sinceMs`, keyed by
    * bucket start. What seeds the limiter's shared counters after a restart.
@@ -1336,11 +1343,15 @@ export interface UsageRepo {
    * at any finer grain it groups `request_logs`, which is one key's rows over
    * the window — a seed-time cost, paid once per key per process, never on
    * the request path.
+   *
+   * `requestedModel` narrows as `sumSince`'s does, and for the same reason
+   * reads `request_logs` at every grain, the hour included.
    */
   sumBuckets(
     apiKeyId: string,
     sinceMs: number,
     grainMs: number,
+    requestedModel?: string,
   ): Promise<Array<[bucketStart: number, sums: UsageSums]>>;
   /**
    * Recomputes the hourly rollup from `request_logs`, whole.
@@ -1376,8 +1387,11 @@ export interface UsageRepo {
    * same reason `sumSince` excludes them: a request admitted a moment ago is
    * not a measurement, and letting one answer here would report that the window
    * frees nothing for a whole window.
+   *
+   * `requestedModel` narrows to one model's rows, for a refusal a per-model
+   * override issued: that window frees when *its* oldest row ages out.
    */
-  oldestSince(apiKeyId: string, sinceMs: number): Promise<number | null>;
+  oldestSince(apiKeyId: string, sinceMs: number, requestedModel?: string): Promise<number | null>;
   /**
    * Drops rows older than an instant, and the hourly buckets that summarized
    * them: a counter that outlives its rows reports history the log no longer

@@ -179,10 +179,14 @@ export async function createStore(opts: {
       lastUsedByCredential: (credentialId) => handle.usage.lastUsedByCredential(credentialId),
       scan: (cursor, limit) => handle.usage.scan(cursor, limit),
       aggregate: (q) => handle.usage.aggregate(q),
-      sumSince: (apiKeyId, sinceMs) => handle.usage.sumSince(apiKeyId, sinceMs),
-      sumBuckets: (apiKeyId, sinceMs, grainMs) =>
-        handle.usage.sumBuckets(apiKeyId, sinceMs, grainMs),
-      oldestSince: (apiKeyId, sinceMs) => handle.usage.oldestSince(apiKeyId, sinceMs),
+      // Every argument, the optional model included: dropped here, a model
+      // override's window would silently read the whole key's traffic.
+      sumSince: (apiKeyId, sinceMs, requestedModel) =>
+        handle.usage.sumSince(apiKeyId, sinceMs, requestedModel),
+      sumBuckets: (apiKeyId, sinceMs, grainMs, requestedModel) =>
+        handle.usage.sumBuckets(apiKeyId, sinceMs, grainMs, requestedModel),
+      oldestSince: (apiKeyId, sinceMs, requestedModel) =>
+        handle.usage.oldestSince(apiKeyId, sinceMs, requestedModel),
       rebuildRollup: () => handle.usage.rebuildRollup(),
       auditRollup: () => handle.usage.auditRollup(),
       prune: (olderThan) => handle.usage.prune(olderThan),

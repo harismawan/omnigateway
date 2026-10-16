@@ -72,6 +72,28 @@ forEachStore((backend) => {
     expect(await s.keys.get("k2")).toBeNull();
   });
 
+  test("per-model overrides round-trip, and an empty one is refused at write", async () => {
+    const s = await backend.fresh();
+    const withModels: LimitConfig = {
+      requests: { "1m": 600 },
+      models: {
+        opus: { requests: { "1m": 20 }, spend: { "5h": 5 }, concurrency: 2 },
+        "llama3:8b": { tokens: { "1w": 2_000_000 } },
+      },
+    };
+    await s.keys.create(await key("k1", { limits: withModels }));
+    expect((await s.keys.get("k1"))?.limits).toEqual(withModels);
+    expect((await s.keys.list())[0]?.limits).toEqual(withModels);
+
+    await expect(
+      s.keys.setLimits("k1", { models: { opus: {} } } as unknown as LimitConfig),
+    ).rejects.toThrow();
+    expect((await s.keys.get("k1"))?.limits).toEqual(withModels);
+    // Removing every override is writing the matrix without them.
+    await s.keys.setLimits("k1", { requests: { "1m": 600 } });
+    expect((await s.keys.get("k1"))?.limits).toEqual({ requests: { "1m": 600 } });
+  });
+
   test("expiry round-trips, defaults to never, and is replaced whole", async () => {
     const s = await backend.fresh();
     // A key minted without one never expires, which is what every key that
