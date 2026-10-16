@@ -865,6 +865,57 @@ test("a known event the decoder ignores does not end the stream", async () => {
   }
 });
 
+test("ignores response.metadata between the last item and the completion", async () => {
+  // Measured 2026-10-16 on the Codex backend: every turn carries this event,
+  // after `output_item.done` and before `response.completed`. Outside the set,
+  // each one failed a finished turn as UPSTREAM and tripped the breaker.
+  const events = await collect(
+    decodeResponses(
+      msgs(
+        {
+          event: "response.created",
+          data: JSON.stringify({ response: { id: "resp_1", model: "gpt-6-astra" } }),
+        },
+        {
+          event: "response.output_item.added",
+          data: JSON.stringify({
+            output_index: 0,
+            item: { type: "function_call", call_id: "call_1", name: "Read" },
+          }),
+        },
+        {
+          event: "response.function_call_arguments.delta",
+          data: JSON.stringify({ output_index: 0, delta: "{}" }),
+        },
+        {
+          event: "response.output_item.done",
+          data: JSON.stringify({ output_index: 0, item: { type: "function_call" } }),
+        },
+        {
+          event: "response.metadata",
+          data: JSON.stringify({
+            type: "response.metadata",
+            sequence_number: 40,
+            response_id: "resp_1",
+            metadata: {
+              openai_chatgpt_moderation_metadata: { prompt: { omnimod: { outputs: [] } } },
+            },
+          }),
+        },
+        {
+          event: "response.completed",
+          data: JSON.stringify({ response: { status: "completed", usage: {} } }),
+        },
+      ),
+    ),
+  );
+
+  expect(events.some((e) => e.type === "error")).toBe(false);
+  expect(events.at(-1)).toMatchObject({ type: "end", stopReason: "toolUse" });
+  // Moderation metadata is the backend's, not the client's: nothing of it leaves.
+  expect(JSON.stringify(events)).not.toContain("omnimod");
+});
+
 test("accepts the [DONE] sentinel instead of reading it as an unknown event", async () => {
   const events = await collect(
     decodeResponses(

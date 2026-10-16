@@ -58,6 +58,9 @@ const KNOWN_EVENTS: ReadonlySet<string> = new Set([
   "response.reasoning_text.done",
   "response.function_call_arguments.delta",
   "response.function_call_arguments.done",
+  // Backend moderation metadata, sent before `response.completed` on every
+  // Codex turn since 2026-10-16. Nothing in it is the client's.
+  "response.metadata",
   "response.completed",
   "response.incomplete",
   "response.failed",
