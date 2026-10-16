@@ -501,6 +501,9 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   `apps/gateway/test/routes/providerIdMirror.test.ts`.
 - `admit`/`consume` claim ring stamp and gauge **synchronously**, before any `await`, roll back
   on refusal — ceiling of 3 once admitted 10 parallel requests.
+- Per-model overrides (`limits.models`): `modelOverride` in `@omni/ratelimit/catalog` is the
+  only lookup; one admission claims key-wide **and** model subject (`modelSubjectId`), rolls back
+  both. Pins: `apps/gateway/test/auth/rateLimit.test.ts`, `packages/ratelimit/test/catalog.test.ts`.
 - Refuse at auth, degrade at list. Unparseable `limits` read back as `null`, distinct from `{}`;
   `authenticateApiKey` turn it into `INTERNAL` — not `AUTH`. `keys.list()` must never throw over
   such row. Nothing may collapse that `null` into `{}`.
