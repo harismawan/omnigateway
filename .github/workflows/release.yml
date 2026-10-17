@@ -21,29 +21,38 @@ permissions:
   id-token: write
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  # Everything in `publish` is unrecoverable — a bad version cannot be
+  # unpublished after 72 hours — so the whole suite runs first. On the
+  # self-hosted runner, in a container, like every job here but `publish`.
+  verify:
+    runs-on: [self-hosted, linux, x64]
+
+    # Exact version. `bun.lock` is lockfileVersion 2, which needs Bun 1.4;
+    # this previously tracked `canary` because 1.4 was unreleased and a 1.3.x
+    # pin silently downgrades the lockfile instead of failing. 1.4.0 went
+    # stable 2026-08-20, so the reason for `canary` is gone: a release built
+    # by "whatever Bun existed at tag time" is not reproducible from the tag.
+    #
+    # Must stay on the same version as `ci.yml` and as `publish` below. Bump
+    # all three together, or releases ship from a toolchain the test suite
+    # never ran on.
+    container:
+      image: oven/bun:1.4.3
 
     steps:
+      # The Bun image has no git; see `ci.yml`.
+      - name: Install git
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+
       - uses: actions/checkout@v5
 
-      # Exact version. `bun.lock` is lockfileVersion 2, which needs Bun 1.4;
-      # this previously tracked `canary` because 1.4 was unreleased and a 1.3.x
-      # pin silently downgrades the lockfile instead of failing. 1.4.0 went
-      # stable 2026-08-20, so the reason for `canary` is gone: a release built
-      # by "whatever Bun existed at tag time" is not reproducible from the tag.
-      #
-      # Must stay on the same version as `ci.yml`. Bump both together, or
-      # releases ship from a toolchain the test suite never ran on.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.3
+      # Root in the container, runner user on the host workspace; see `ci.yml`.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install
         run: bun install --frozen-lockfile
 
-      # Everything below the publish step is unrecoverable — a bad version
-      # cannot be unpublished after 72 hours — so the whole suite runs first.
       - name: Test
         run: bun run test:all
 
@@ -52,6 +61,24 @@ jobs:
 
       - name: Lint
         run: bun run lint
+
+  # GitHub-hosted, and it cannot move. npm refuses both trusted publishing and
+  # provenance from a self-hosted runner, so on the runner every other job uses
+  # the OIDC exchange below fails and nothing ships.
+  publish:
+    runs-on: ubuntu-latest
+    needs: verify
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Same pin as `verify`.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - name: Install
+        run: bun install --frozen-lockfile
 
       - name: Build the dashboard
         run: bun run build:dashboard
@@ -151,7 +178,12 @@ jobs:
   # npm publish for the same reason the release is: an image is what Argo CD
   # deploys, and a tag whose npm publish failed should not also be running.
   image:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
+    # The Docker CLI with buildx, driving the runner host's daemon: the runner
+    # mounts /var/run/docker.sock into every job container itself. Declaring
+    # that mount again under `volumes:` fails the job with a duplicate mount.
+    container:
+      image: docker:28-cli
     needs: publish
     steps:
       - uses: actions/checkout@v5
@@ -189,12 +221,19 @@ jobs:
   # open, merge. Zero approvals are required and no checks are, so the merge
   # goes through on the same token. `pull-requests: write` is for the open.
   promote:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
+    # Debian with git. `gh` is not in the image, so it comes from the distro
+    # below; trixie's is recent enough for `pr create` and `pr merge`.
+    container:
+      image: buildpack-deps:trixie-scm
     needs: image
     permissions:
       contents: write
       pull-requests: write
     steps:
+      - name: Install gh
+        run: apt-get update && apt-get install -y --no-install-recommends gh
+
       - uses: actions/checkout@v5
         with:
           ref: main
@@ -203,6 +242,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Root in the container, runner user on the host workspace: git
+          # refuses the checkout as dubious ownership without this, and
+          # actions/checkout's own exemption ended with its step.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           VERSION="${GITHUB_REF_NAME#v}"
           BRANCH="gitops/promote-${VERSION}"
           sed -i "s/newTag: .*/newTag: ${VERSION}/" k8s/kustomization.yaml
