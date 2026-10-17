@@ -125,16 +125,25 @@ describe("ConsoleBoard", () => {
       configurable: true,
       get: () => 500,
     });
-    stubConsole({ source: "file", path: "/var/log/omni.log", lines: LINES });
-    renderWithProviders(<ConsoleBoard />);
+    try {
+      stubConsole({ source: "file", path: "/var/log/omni.log", lines: LINES });
+      renderWithProviders(<ConsoleBoard />);
 
-    const terminal = await screen.findByTestId("console-terminal");
-    await act(async () => {});
+      const terminal = await screen.findByTestId("console-terminal");
+      await act(async () => {});
 
-    expect(getComputedStyle(terminal).overflowY).toBe("auto");
-    expect(terminal.scrollTop).toBe(500);
-    if (scrollHeight !== undefined) {
-      Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeight);
+      expect(getComputedStyle(terminal).overflowY).toBe("auto");
+      expect(terminal.scrollTop).toBe(500);
+    } finally {
+      // happy-dom defines `scrollHeight` on `Element.prototype`, so there is
+      // normally no own descriptor to put back and deleting is the restore.
+      // Left in place, every later file in this process reads 500, and
+      // LogsBoard's scroll-to-load never fires — which file order decides.
+      if (scrollHeight === undefined) {
+        Reflect.deleteProperty(HTMLElement.prototype, "scrollHeight");
+      } else {
+        Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeight);
+      }
     }
   });
 
