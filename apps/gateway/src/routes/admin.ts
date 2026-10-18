@@ -671,6 +671,8 @@ export function adminRoutes(deps: AdminDeps) {
             splitBy: query.splitBy,
             since: query.since,
             until: query.until,
+            credentialId: query.credentialId,
+            apiKeyId: query.apiKeyId,
           }),
         };
       })

@@ -24,6 +24,8 @@ export const usage: Command = {
     split: { type: "string" },
     since: { type: "string" },
     until: { type: "string" },
+    account: { type: "string" },
+    key: { type: "string" },
   },
   async run(args, { ctx, writer }) {
     const until = instant(stringFlag(args.values, "until"), ctx.now());
@@ -37,6 +39,8 @@ export const usage: Command = {
         splitBy: stringFlag(args.values, "split"),
         since,
         until,
+        credentialId: stringFlag(args.values, "account"),
+        apiKeyId: stringFlag(args.values, "key"),
       },
     );
 

@@ -47,7 +47,34 @@ describe("query hooks", () => {
       null,
       1_000,
       2_000,
+      null,
+      null,
     ]);
+  });
+
+  test("useUsage sends the account filter and keys on it", async () => {
+    const stub = createFetchStub({ "GET /api/usage": () => ({ rows: [] }) });
+    const query = { groupBy: "hour", since: 1_000, credentialId: "c2" } as const;
+    const { result } = renderHook(() => useUsage(query, false), { wrapper: queryWrapper() });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(stub.calls[0]?.url).toBe("/api/usage?groupBy=hour&since=1000&credentialId=c2");
+    // Two accounts must never share a cached answer.
+    expect(queryKeys.usage(query)).not.toEqual(queryKeys.usage({ ...query, credentialId: "c1" }));
+  });
+
+  test("useUsage sends the key filter and keys on it", async () => {
+    const stub = createFetchStub({ "GET /api/usage": () => ({ rows: [] }) });
+    const query = { groupBy: "hour", since: 1_000, apiKeyId: "k2" } as const;
+    const { result } = renderHook(() => useUsage(query, false), { wrapper: queryWrapper() });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(stub.calls[0]?.url).toBe("/api/usage?groupBy=hour&since=1000&apiKeyId=k2");
+    expect(queryKeys.usage(query)).not.toEqual(queryKeys.usage({ ...query, apiKeyId: "k1" }));
+    // Distinct slots: the same id as an account and as a key are different reads.
+    expect(queryKeys.usage({ groupBy: "hour", since: 1_000, credentialId: "x" })).not.toEqual(
+      queryKeys.usage({ groupBy: "hour", since: 1_000, apiKeyId: "x" }),
+    );
   });
 });
 

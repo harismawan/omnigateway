@@ -200,6 +200,123 @@ test("the operator may still group by credential", async () => {
   store.close();
 });
 
+/**
+ * The account filter is `groupBy=credential` asked one id at a time: rows for a
+ * guessed id, none for another, says which accounts served the caller. Both
+ * the id that served it and one that did not are refused, so the refusal
+ * itself carries nothing.
+ */
+test("a narrowed scope cannot filter by account, served or not", async () => {
+  const { store, mine } = await seeded();
+  const client = scopeOf({ kind: "client", apiKeyId: mine.key.id });
+
+  for (const credentialId of ["c1", "c9"]) {
+    for (const grain of ["raw", "daily"] as const) {
+      await expect(
+        queryUsage(deps(store), { groupBy: "model", grain, credentialId }, client),
+      ).rejects.toThrow("not available on this surface");
+    }
+  }
+  store.close();
+});
+
+test("the operator filters by account, and the filter narrows the rows", async () => {
+  const { store, theirs } = await seeded();
+  await store.usage.append(
+    requestLog({
+      id: "o1",
+      at: NOW - 100,
+      apiKeyId: theirs.key.id,
+      credentialId: "c2",
+      costUsd: 7,
+    }),
+  );
+
+  for (const principal of [{ kind: "admin" } as const, { kind: "viewer" } as const]) {
+    const buckets = await queryUsage(
+      deps(store),
+      { groupBy: "apiKey", credentialId: "c2" },
+      scopeOf(principal),
+    );
+    expect(buckets.map((b) => [b.key, b.requests, b.costUsd])).toEqual([[theirs.key.id, 1, 7]]);
+  }
+  // A malformed id is a bad request, never a silently ignored filter.
+  await expect(queryUsage(deps(store), { groupBy: "model", credentialId: "a b" })).rejects.toThrow(
+    "credentialId",
+  );
+  store.close();
+});
+
+/**
+ * Refused, not overridden: a client naming another key and getting its own rows
+ * back would read them as that key's. Its own id is refused too, so the answer
+ * says nothing about which ids exist.
+ */
+test("a narrowed scope cannot filter by key, its own or another's", async () => {
+  const { store, mine, theirs } = await seeded();
+  const client = scopeOf({ kind: "client", apiKeyId: mine.key.id });
+
+  for (const apiKeyId of [mine.key.id, theirs.key.id]) {
+    for (const grain of ["raw", "daily"] as const) {
+      await expect(
+        queryUsage(deps(store), { groupBy: "model", grain, apiKeyId }, client),
+      ).rejects.toThrow("not available on this surface");
+    }
+  }
+  store.close();
+});
+
+test("the operator filters by key, alone and beside the account filter", async () => {
+  const { store, mine, theirs } = await seeded();
+  await store.usage.append(
+    requestLog({
+      id: "o1",
+      at: NOW - 100,
+      apiKeyId: theirs.key.id,
+      credentialId: "c2",
+      costUsd: 7,
+    }),
+  );
+
+  for (const principal of [{ kind: "admin" } as const, { kind: "viewer" } as const]) {
+    const one = await queryUsage(
+      deps(store),
+      { groupBy: "apiKey", apiKeyId: mine.key.id },
+      scopeOf(principal),
+    );
+    expect(one.map((b) => [b.key, b.requests])).toEqual([[mine.key.id, 2]]);
+    const both = await queryUsage(
+      deps(store),
+      { groupBy: "credential", apiKeyId: theirs.key.id, credentialId: "c1" },
+      scopeOf(principal),
+    );
+    expect(both.map((b) => [b.key, b.requests, b.costUsd])).toEqual([["c1", 1, 100]]);
+  }
+  await expect(queryUsage(deps(store), { groupBy: "model", apiKeyId: "a b" })).rejects.toThrow(
+    "apiKeyId",
+  );
+  store.close();
+});
+
+/**
+ * `?credentialId=` is what an emptied form field produces. Read as absent it
+ * would answer for the whole installation under a header naming one account.
+ */
+test("an empty or blank filter is refused, never read as absent", async () => {
+  const { store } = await seeded();
+  for (const value of ["", "   "]) {
+    for (const grain of ["raw", "daily"] as const) {
+      await expect(
+        queryUsage(deps(store), { groupBy: "model", grain, credentialId: value }),
+      ).rejects.toThrow("credentialId");
+      await expect(
+        queryUsage(deps(store), { groupBy: "model", grain, apiKeyId: value }),
+      ).rejects.toThrow("apiKeyId");
+    }
+  }
+  store.close();
+});
+
 test("the dimensions a client may still ask for keep working", async () => {
   const { store, mine } = await seeded();
   const client = scopeOf({ kind: "client", apiKeyId: mine.key.id });

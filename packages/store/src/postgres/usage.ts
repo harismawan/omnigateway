@@ -541,8 +541,16 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
       // A WHERE, so it constrains the rows before grouping and therefore applies
       // to every dimension — `groupBy: "apiKey"` under a scope reports the one
       // key rather than announcing that others exist.
-      const scope = q.apiKeyId;
-      const bindings: unknown[] = scope === undefined ? [since, until] : [since, until, scope];
+      const bindings: unknown[] = [since, until];
+      let filters = "";
+      if (q.apiKeyId !== undefined) {
+        bindings.push(q.apiKeyId);
+        filters += ` AND api_key_id = $${bindings.length}`;
+      }
+      if (q.credentialId !== undefined) {
+        bindings.push(q.credentialId);
+        filters += ` AND credential_id = $${bindings.length}`;
+      }
 
       const rows = await sql.unsafe<Rows<Agg>>(
         `SELECT ${key} AS key,
@@ -556,7 +564,7 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
                 COALESCE(SUM(${daily ? "rtk_applied_requests" : "CASE WHEN rtk_applied THEN 1 ELSE 0 END"}), 0) AS rtk_applied_requests,
                 COALESCE(SUM(cost_usd), 0) AS cost_usd
            FROM ${daily ? "usage_daily" : "request_logs"}
-          WHERE ${daily ? "" : "state = 'done' AND "}${timeColumn} >= $1 AND ${timeColumn} <= $2${scope === undefined ? "" : " AND api_key_id = $3"}
+          WHERE ${daily ? "" : "state = 'done' AND "}${timeColumn} >= $1 AND ${timeColumn} <= $2${filters}
           GROUP BY 1${split === null ? "" : ", 2"}
           ORDER BY requests DESC`,
         bindings,

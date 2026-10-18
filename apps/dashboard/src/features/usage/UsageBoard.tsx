@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import styled from "styled-components";
 import {
   useCredentials,
   useDayOffsetMinutes,
@@ -10,7 +11,8 @@ import type { ProviderId, UsageDimension } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount, formatUsd } from "../../lib/format.ts";
 import { useLive } from "../../session/live.tsx";
-import { Grid, Stack } from "../../ui/primitives.ts";
+import { Select } from "../../ui/Field.tsx";
+import { Grid, Row, Stack } from "../../ui/primitives.ts";
 import { Section } from "../../ui/Section.tsx";
 import { Controls, Segment } from "../../ui/Segment.tsx";
 import { ActivityGrid } from "./ActivityGrid.tsx";
@@ -43,17 +45,25 @@ const MODEL_SCOPES = [
 
 type ModelScope = (typeof MODEL_SCOPES)[number]["id"];
 
+const Picker = styled(Select)`
+  width: auto;
+`;
+
 /**
  * The usage deck: a year of activity at the top, then the selected window
  * broken down by provider, model, key, and token class. Every panel reads the
  * same window, so two panels can always be compared without re-reading their
- * headers.
+ * headers — and the same account and key, when picked, for the same reason.
  */
 export function UsageBoard() {
   const { cadence } = useLive();
   const [rangeId, setRangeId] = useState<RangeId>("24h");
   const [metricId, setMetricId] = useState<MetricId>("tokens");
   const [scope, setScope] = useState<ModelScope>("model");
+  const [pickedAccount, setPickedAccount] = useState<string | undefined>(undefined);
+  const [pickedKey, setPickedKey] = useState<string | undefined>(undefined);
+  const credentials = useCredentials();
+  const keys = useKeys();
 
   const range = rangeOf(rangeId);
   const metric = metricOf(metricId);
@@ -79,7 +89,24 @@ export function UsageBoard() {
     [dayOffset],
   );
 
-  const common = { since, grain: range.grain } as const;
+  // An account or key removed while picked has no option left to show it, so
+  // the control would read "All" over a filtered page. Forget the pick, not
+  // just hide it: a hidden one would come back on its own if the id reappeared.
+  const account = credentials.data?.find((entry) => entry.id === pickedAccount);
+  const key = keys.data?.find((entry) => entry.id === pickedKey);
+  if (pickedAccount !== undefined && credentials.data !== undefined && account === undefined) {
+    setPickedAccount(undefined);
+  }
+  if (pickedKey !== undefined && keys.data !== undefined && key === undefined) {
+    setPickedKey(undefined);
+  }
+  const filter = {
+    ...(account === undefined ? {} : { credentialId: account.id }),
+    ...(key === undefined ? {} : { apiKeyId: key.id }),
+  };
+  const narrowedTo = `${key === undefined ? "" : ` for ${key.label}`}${account === undefined ? "" : ` on ${account.label}`}`;
+
+  const common = { since, grain: range.grain, ...filter } as const;
   const series = useUsage({ ...common, groupBy: range.by }, cadence(60_000, "res:usage"));
   const providers = useUsage(
     { ...common, groupBy: range.by, splitBy: "provider" },
@@ -97,12 +124,10 @@ export function UsageBoard() {
   const accounts = useUsage({ ...common, groupBy: "credential" }, cadence(60_000, "res:usage"));
   // A year of squares changes slowly; polling it at the panel cadence is waste.
   const activity = useUsage(
-    { since: activitySince, grain: "daily", groupBy: "day" },
+    { since: activitySince, grain: "daily", groupBy: "day", ...filter },
     cadence(300_000, "res:usage"),
   );
 
-  const keys = useKeys();
-  const credentials = useCredentials();
   const virtualModels = useModels();
   // Which provider an upstream model is served by, taken from the targets the
   // operator configured. A model no longer routed anywhere falls through to the
@@ -143,23 +168,49 @@ export function UsageBoard() {
         summary={
           series.isLoading
             ? "Reading usage…"
-            : `${formatCount(totals.requests)} requests and ${formatUsd(totals.costUsd)} over the last ${range.label}.`
+            : `${formatCount(totals.requests)} requests and ${formatUsd(totals.costUsd)} over the last ${range.label}${narrowedTo}.`
         }
         actions={
-          <Controls>
-            {RANGES.map((entry) => (
-              <Segment
-                key={entry.id}
-                type="button"
-                $size="sm"
-                $on={entry.id === rangeId}
-                aria-pressed={entry.id === rangeId}
-                onClick={() => setRangeId(entry.id)}
-              >
-                {entry.id}
-              </Segment>
-            ))}
-          </Controls>
+          <Row $wrap>
+            <Picker
+              aria-label="Account"
+              value={account?.id ?? ""}
+              onChange={(event) => setPickedAccount(event.target.value || undefined)}
+            >
+              <option value="">All accounts</option>
+              {(credentials.data ?? []).map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.label}
+                </option>
+              ))}
+            </Picker>
+            <Picker
+              aria-label="Gateway key"
+              value={key?.id ?? ""}
+              onChange={(event) => setPickedKey(event.target.value || undefined)}
+            >
+              <option value="">All keys</option>
+              {(keys.data ?? []).map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.label}
+                </option>
+              ))}
+            </Picker>
+            <Controls>
+              {RANGES.map((entry) => (
+                <Segment
+                  key={entry.id}
+                  type="button"
+                  $size="sm"
+                  $on={entry.id === rangeId}
+                  aria-pressed={entry.id === rangeId}
+                  onClick={() => setRangeId(entry.id)}
+                >
+                  {entry.id}
+                </Segment>
+              ))}
+            </Controls>
+          </Row>
         }
       />
       <SummaryDeck

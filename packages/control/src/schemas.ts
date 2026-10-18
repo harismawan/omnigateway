@@ -437,12 +437,16 @@ export const quotaRefreshSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("all") }).strict(),
 ]);
 
-const accountIdSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(64)
-  .regex(/^[A-Za-z0-9_-]+$/, "credentialId must be an account id");
+const opaqueIdSchema = (message: string) =>
+  z
+    .string()
+    .trim()
+    .min(1, message)
+    .max(64, message)
+    .regex(/^[A-Za-z0-9_-]+$/, message);
+
+export const accountIdSchema = opaqueIdSchema("credentialId must be an account id");
+export const keyIdSchema = opaqueIdSchema("apiKeyId must be a key id");
 
 export const redeemResetSchema = z
   .object({

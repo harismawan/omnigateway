@@ -1202,6 +1202,15 @@ export type UsageQuery = {
    * its primary key, and `request_logs` has `idx_request_logs_key_at`.
    */
   apiKeyId?: string;
+  /**
+   * Restricts every bucket to one provider account. A filter in the same sense
+   * as `apiKeyId`, and composes with it. Operator infrastructure: only the
+   * unscoped console surface may set it.
+   *
+   * Served without a scan on raw logs by `idx_request_logs_cred`; the rollup
+   * reads it as a primary-key column after `day` and `provider`.
+   */
+  credentialId?: string;
 };
 
 export type UsageBucket = {
