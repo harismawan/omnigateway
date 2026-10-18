@@ -195,6 +195,43 @@ forEachStore((backend) => {
     expect(rawPartial.reduce((n, b) => n + b.requests, 0)).toBe(1);
   });
 
+  test("aggregate filters by account at both grains and composes with the key filter", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "a", at: noon(0), apiKeyId: "k1", credentialId: "c1" }));
+    await s.usage.append(logRow({ id: "b", at: noon(0), apiKeyId: "k2", credentialId: "c2" }));
+    await s.usage.append(logRow({ id: "c", at: noon(1), apiKeyId: "k1", credentialId: "c2" }));
+    await s.usage.append(logRow({ id: "d", at: noon(1), apiKeyId: "k1", credentialId: null }));
+
+    for (const grain of ["raw", "daily"] as const) {
+      const one = await s.usage.aggregate({
+        since: 0,
+        grain,
+        groupBy: "apiKey",
+        splitBy: "credential",
+        credentialId: "c2",
+      });
+      expect(one.map((b) => [b.key, b.split, b.requests]).sort()).toEqual([
+        ["k1", "c2", 1],
+        ["k2", "c2", 1],
+      ]);
+      const both = await s.usage.aggregate({
+        since: 0,
+        grain,
+        groupBy: "credential",
+        apiKeyId: "k1",
+        credentialId: "c2",
+      });
+      expect(both.map((b) => [b.key, b.requests])).toEqual([["c2", 1]]);
+      const none = await s.usage.aggregate({
+        since: 0,
+        grain,
+        groupBy: "model",
+        credentialId: "c9",
+      });
+      expect(none).toEqual([]);
+    }
+  });
+
   test("the daily rollup outlives the rows and prunes on its own horizon", async () => {
     const s = await backend.fresh();
     await s.usage.append(logRow({ id: "a", at: noon(0) }));

@@ -767,6 +767,34 @@ test("usage reports an empty window rather than failing", async () => {
   expect(JSON.parse(result.out)).toEqual({ rows: [] });
 });
 
+test("usage narrows to one account with --account", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(requestLog({ id: "r1", at: 1_234, credentialId: "c1" }));
+  await store.usage.append(requestLog({ id: "r2", at: 1_235, credentialId: "c2" }));
+  store.close();
+
+  const result = await cli(["usage", "--by", "credential", "--account", "c2", "--json"], { root });
+
+  expect(result.code).toBe(0);
+  const body = JSON.parse(result.out) as { rows: Array<{ key: string; requests: number }> };
+  expect(body.rows.map((row) => [row.key, row.requests])).toEqual([["c2", 1]]);
+});
+
+test("usage narrows to one gateway key with --key", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(requestLog({ id: "r1", at: 1_234, apiKeyId: "k1" }));
+  await store.usage.append(requestLog({ id: "r2", at: 1_235, apiKeyId: "k2" }));
+  store.close();
+
+  const result = await cli(["usage", "--by", "apiKey", "--key", "k2", "--json"], { root });
+
+  expect(result.code).toBe(0);
+  const body = JSON.parse(result.out) as { rows: Array<{ key: string; requests: number }> };
+  expect(body.rows.map((row) => [row.key, row.requests])).toEqual([["k2", 1]]);
+});
+
 test("a grain that cannot answer the question is refused", async () => {
   const root = await installation();
   const result = await cli(["usage", "--grain", "daily", "--by", "hour"], { root });

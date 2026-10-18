@@ -2,8 +2,10 @@ import { GatewayError } from "@omni/ir";
 import type { RequestLog, Store, UsageBucket } from "@omni/store";
 import { ALL, readsNothing, type Scope, scopeKey } from "./principal.ts";
 import {
+  accountIdSchema,
   dimensionSchema,
   grainSchema,
+  keyIdSchema,
   optionalNumber,
   parseOrThrow,
   requireDimension,
@@ -19,6 +21,10 @@ export type UsageQueryInput = {
   splitBy?: string | undefined;
   since?: string | number | undefined;
   until?: string | number | undefined;
+  /** Narrows every bucket to one provider account. Unscoped callers only. */
+  credentialId?: string | undefined;
+  /** Narrows every bucket to one gateway key. Unscoped callers only. */
+  apiKeyId?: string | undefined;
 };
 
 /**
@@ -63,18 +69,36 @@ export async function queryUsage(
         throw new GatewayError("BAD_REQUEST", "this dimension is not available on this surface");
       }
     }
+    // The account filter is the same question asked as a yes/no: rows or no
+    // rows for a guessed id says whether that account served the caller.
+    //
+    // A key filter is refused rather than overridden by the scope: a narrowed
+    // caller naming another key and getting its own rows back reads them as
+    // that key's.
+    if (input.credentialId !== undefined || input.apiKeyId !== undefined) {
+      throw new GatewayError("BAD_REQUEST", "this filter is not available on this surface");
+    }
   }
+  const credentialId =
+    input.credentialId === undefined
+      ? undefined
+      : parseOrThrow(accountIdSchema, input.credentialId);
+  const keyFilter =
+    input.apiKeyId === undefined ? undefined : parseOrThrow(keyIdSchema, input.apiKeyId);
 
   // Before the store, because `scopeKey` collapses `all` and `none` to the same
   // `undefined` and one of them means every row.
   if (readsNothing(scope)) return [];
 
-  const apiKeyId = scopeKey(scope);
+  // The caller's key only where the scope is unnarrowed; elsewhere the scope's
+  // own key, so nothing from the URL can stand in for the session's.
+  const apiKeyId = scope.kind === "all" ? keyFilter : scopeKey(scope);
   return deps.store.usage.aggregate({
     grain,
     groupBy,
     ...(splitBy === undefined ? {} : { splitBy }),
     ...(apiKeyId === undefined ? {} : { apiKeyId }),
+    ...(credentialId === undefined ? {} : { credentialId }),
     since: optionalNumber(input.since, 0),
     until: optionalNumber(input.until, deps.now()),
   });

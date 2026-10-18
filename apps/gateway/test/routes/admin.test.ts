@@ -831,6 +831,34 @@ test("usage aggregates by the requested dimension", async () => {
   });
 });
 
+test("usage narrows to one account when the query names it", async () => {
+  const { call, store } = await harness();
+  await store.usage.append(requestLog({ id: "r1", at: NOW, credentialId: "c1", outputTokens: 5 }));
+  await store.usage.append(requestLog({ id: "r2", at: NOW, credentialId: "c2", outputTokens: 9 }));
+
+  for (const grain of ["raw", "daily"]) {
+    const body = (await (
+      await call("GET", `/api/usage?grain=${grain}&groupBy=model&credentialId=c2&since=0`)
+    ).json()) as { rows: Array<{ requests: number; outputTokens: number }> };
+    expect(body.rows.map((row) => [row.requests, row.outputTokens])).toEqual([[1, 9]]);
+  }
+  expect((await call("GET", "/api/usage?groupBy=model&credentialId=a;b")).status).toBe(400);
+});
+
+test("usage narrows to one gateway key when the query names it", async () => {
+  const { call, store } = await harness();
+  await store.usage.append(requestLog({ id: "r1", at: NOW, apiKeyId: "k1", outputTokens: 5 }));
+  await store.usage.append(requestLog({ id: "r2", at: NOW, apiKeyId: "k2", outputTokens: 9 }));
+
+  for (const grain of ["raw", "daily"]) {
+    const body = (await (
+      await call("GET", `/api/usage?grain=${grain}&groupBy=model&apiKeyId=k2&since=0`)
+    ).json()) as { rows: Array<{ requests: number; outputTokens: number }> };
+    expect(body.rows.map((row) => [row.requests, row.outputTokens])).toEqual([[1, 9]]);
+  }
+  expect((await call("GET", "/api/usage?groupBy=model&apiKeyId=a;b")).status).toBe(400);
+});
+
 test("usage rejects an unknown groupBy rather than passing it to sql", async () => {
   const { call } = await harness();
   expect((await call("GET", "/api/usage?groupBy=1;DROP+TABLE+usage")).status).toBe(400);
