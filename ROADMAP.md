@@ -130,7 +130,11 @@ These require demonstrated operator demand and an architectural design before im
 2. **Target tags and residency policy** — constrain target eligibility by region, environment,
    hosting class, or retention policy before routing and failover.
 3. **Deterministic policy pipeline** — ordered pre-dispatch inspect, block, redact, or annotate
-   hooks. Start with credential patterns and operator-defined regular expressions, not classifiers.
+   hooks for *content*: credential patterns, company identifiers, operator-defined regular
+   expressions. Still unbuilt, and still deterministic. Rules about a key's *purpose* — "work
+   only", which no pattern can state — shipped separately as per-key usage policies judged by a
+   classifier model ([design](docs/superpowers/specs/2026-10-18-key-guardrails-design.md)); that
+   feature forecloses nothing here and should not absorb it.
 4. **Exact-response caching** — isolated by key or project, explicitly bypassable, and invalidated
    across replicas. Semantic caching remains out of scope until exact caching proves valuable.
 5. **Mock provider and sanitized replay** — reproduce translation, retry, timeout, failover, and

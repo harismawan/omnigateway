@@ -516,7 +516,7 @@ test("creating an api key returns the raw value exactly once", async () => {
 });
 
 /**
- * Limits are one of the three parts of a key that are editable after minting.
+ * Limits are one of the four parts of a key that are editable after minting.
  *
  * `bodyLoggingOptOut` has no route like this on purpose: it is a promise to
  * whoever holds the key. A limit is the operator's own ceiling on their own

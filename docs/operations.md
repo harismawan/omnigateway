@@ -109,6 +109,55 @@ now"; `--never`, or a date further ahead, brings it back. Expired keys stay
 listed with a state of their own in `omni keys list` and on the console's Keys
 screen, so a client that stopped working can be found rather than guessed at.
 
+## Usage policies
+
+A key can carry a plain-language policy naming what it may be used for; a key
+without one is never judged and nothing below applies to it. Requests from a key
+with a policy are judged by the classifier named in `guardrailModel` (a virtual
+model id or `provider/model`) before routing:
+
+```bash
+omni settings set guardrailModel anthropic/claude-haiku-4
+omni settings set guardrailTimeoutMs 10000        # 1..60000, default 10000
+omni keys guardrail <id>                          # show
+omni keys guardrail <id> --policy "Work only."    # or --policy-file <path>
+omni keys guardrail <id> --clear
+omni settings set guardrailModel null             # unset: every judged key is refused
+```
+
+What the classifier sees: the request's system prompt (capped at 8,000
+characters) and the last user message that carries no tool result (capped at
+16,000), each cut to its head and tail around a marker when longer; tool results,
+images, files and earlier turns never. A cut is recorded
+as `guardrail:truncated`. Only a reply of exactly `ALLOW` admits the request.
+
+| Outcome | Code | Status | Row degradation |
+|---|---|---|---|
+| allowed | — | as served | `guardrail:allowed` |
+| denied | `CONTENT_FILTER` | 400 | `guardrail:denied` |
+| timeout, error, unreadable reply | `UPSTREAM` | 502 | `guardrail:unavailable` |
+| policy but no `guardrailModel` | `INTERNAL` | 500 | `guardrail:unconfigured` |
+
+Streaming requests get the same codes as an in-stream error on a 200. Because
+providers also produce `CONTENT_FILTER` and `UPSTREAM`, the degradation is what
+identifies a guardrail outcome in the logs; the rejection line on stdout carries
+the fixed message, never the policy, the judged text, or the classifier's reply.
+
+Each classifier call is its own request row under the same key, tagged
+`guardrail:classifier`, with `requested_model` the classifier. It counts toward
+the key's tokens and spend (and the classifier model's own override, if the key
+has one — never the parent model's) and toward the `5h`/`1w` request windows,
+which count rows; not the `1m` window, which counts admissions. That over-counts,
+which is the direction limits may err. A refused request still counts as one: the
+check runs after admission. Verdicts are cached per process for an hour, keyed on
+key, policy, classifier and judged text, so an agent's tool turns on one human
+message cost one call; a cached verdict writes no classifier row. Editing the
+policy or the classifier misses the cache naturally. Failures are never cached.
+
+A guardrail, not a security boundary: it does not stop prompt injection aimed at
+the classifier, a request split across turns, or one hidden in tool results or
+images. Rolling back to a build without usage policies serves every key unjudged.
+
 ## Metrics and traces
 
 Both observability surfaces are off until configured. Set `OMNI_METRICS_TOKEN` to register

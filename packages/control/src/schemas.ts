@@ -251,8 +251,9 @@ export const keyCreateSchema = z
   .strict();
 
 /**
- * One of the three parts of a key that may be edited after it is minted — the
- * matrix here, the model allowlist and the expiry in the two schemas below.
+ * One of the four parts of a key that may be edited after it is minted — the
+ * matrix here, the model allowlist, the expiry and the usage policy in the
+ * schemas below.
  *
  * Sent whole rather than as a patch: `limits` is one JSON document, `{}` is a
  * meaningful value, and a partial body would have to distinguish "leave this

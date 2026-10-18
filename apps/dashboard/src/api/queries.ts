@@ -1120,7 +1120,7 @@ export function useCreateKey(): UseMutationResult<MintedKey, Error, KeyCreateInp
 /**
  * Replaces one key's limits.
  *
- * One of three fields editable after minting — the allowlist via
+ * One of four fields editable after minting — the allowlist via
  * `useSetKeyModels`, the expiry via `useSetKeyExpiry` and the usage policy via
  * `useSetKeyGuardrail` are the others.
  * `bodyLoggingOptOut` has no mutation like this on purpose: it is a promise to
