@@ -1,4 +1,4 @@
-import type { ChatRequest, CollectedResponse } from "@omni/ir";
+import type { ChatRequest, CollectedResponse, StopReason } from "@omni/ir";
 import type { JudgedText } from "./extract.ts";
 
 /**
@@ -106,6 +106,24 @@ export function classifierRequest(model: string, policy: string, judged: JudgedT
 export type Verdict = "allow" | "deny";
 
 /**
+ * Whether a reply that stopped this way is a finished answer, and so one a
+ * verdict may be read from. Exhaustive on purpose: a stop reason added to
+ * `@omni/ir` fails typecheck here until someone decides which side it is on.
+ *
+ * An `ALLOW` cut off at the token ceiling, stopped by the backend's own filter,
+ * or paused mid-turn is an answer the model had not finished giving — it may
+ * have been on its way to "ALLOW, but…" — so it is unreadable, never an allow.
+ */
+const FINISHED: Readonly<Record<StopReason, boolean>> = {
+  endTurn: true,
+  stopSequence: true,
+  maxTokens: false,
+  toolUse: false,
+  contentFilter: false,
+  pauseTurn: false,
+};
+
+/**
  * Reads the classifier's answer. `null` is an unreadable reply.
  *
  * **Anything that is not an unambiguous allow is not an allow.** One word, case
@@ -113,9 +131,11 @@ export type Verdict = "allow" | "deny";
  * nothing else. "ALLOW, but…", "**ALLOW**", "I would allow this" and an empty
  * reply are all unreadable, and an unreadable reply refuses the request just as
  * a deny does (with a different code, so an operator can tell broken from
- * forbidden). Thinking blocks are never read: the verdict is the visible text.
+ * forbidden). Thinking blocks are never read: the verdict is the visible text,
+ * and only off a reply that finished — see `FINISHED`.
  */
 export function parseVerdict(response: CollectedResponse): Verdict | null {
+  if (!FINISHED[response.stopReason]) return null;
   const text = response.content
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
     .join("");

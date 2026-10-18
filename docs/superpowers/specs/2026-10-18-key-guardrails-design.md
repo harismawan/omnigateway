@@ -160,7 +160,12 @@ so the code alone does not identify a guardrail outcome. The parent row also car
 degradations on a row that today's terminal catch builds without them.
 
 Stdout: `reportRejection` already logs refusals. Add nothing to `LogFields` unless an existing key
-cannot carry it; **never** log the policy text, the judged text, or the classifier's reply.
+cannot carry it; **never** log the policy text, the judged text, or the classifier's reply. The
+guardrail's own `usage policy check failed` warning carries a fixed reason and the error code only,
+at every level: a thrown error's message never reaches it, not even through `reasonField`, which
+passes any `GatewayError` naming no provider and so cannot tell whose words the message holds.
+What dispatch itself prints at debug for the classifier call is the gateway-wide debug policy,
+unchanged.
 
 ### What is judged
 
@@ -217,6 +222,11 @@ settings.
   allow is not an allow.** There is no IR-level `responseFormat`; structured output lives in the
   per-dialect vendor bags, which `responseFormat.ts` translates across providers. A bare-word reply
   parsed strictly is the simpler acceptable choice.
+- **A verdict is read only off a finished reply.** The collected stop reason must be `endTurn` or
+  `stopSequence`; `maxTokens`, `contentFilter`, `toolUse`, `pauseTurn` make the reply unreadable
+  whatever its text — an `ALLOW` cut off at the ceiling may have been on its way to "ALLOW, but…".
+  Unreadable refuses as `UPSTREAM` and is not cached. `FINISHED` in `guardrail/classifier.ts` is a
+  `Record<StopReason, boolean>`, so a new stop reason fails typecheck until it is placed.
 - Called through `dispatch()` directly, with its own request id, the client's `AbortSignal`
   composed with `guardrailTimeoutMs`, and the parent request untouched.
 - **No request transforms on the classifier call:** no ponytail injection, no RTK. Dispatch needs an
@@ -306,6 +316,8 @@ present, and still no credential identity on them.
   - classifier request carries no ponytail ruleset and no RTK rewrite with both enabled;
   - accounting: classifier row exists under the key, debits spend; cache hit writes none;
   - cache key includes policy and model (edit either → new call); failures not cached;
+  - an `ALLOW` ending in `maxTokens` or `contentFilter` refuses, dispatches nothing, is not cached;
+  - a provider-less thrown `GatewayError`'s message reaches no log line, at info or debug;
   - client cancellation during judging is not logged as `UPSTREAM`;
   - key without policy makes zero classifier calls.
 - Mutation-test the verdict parser: every non-allow reply must refuse.

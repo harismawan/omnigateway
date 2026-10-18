@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { CollectedResponse, ContentBlock } from "@omni/ir";
+import type { CollectedResponse, ContentBlock, StopReason } from "@omni/ir";
 import {
   CLASSIFIER_INSTRUCTION,
   classifierRequest,
@@ -62,6 +62,28 @@ test("anything that is not an unambiguous allow is not an allow", () => {
     });
   }
 });
+
+/**
+ * A verdict is read only off an answer the model finished. Every member of the
+ * union is listed, so a stop reason added to `@omni/ir` fails typecheck here
+ * until someone decides which side of the line it falls on.
+ */
+const FINISHED: Record<StopReason, boolean> = {
+  endTurn: true,
+  stopSequence: true,
+  maxTokens: false,
+  toolUse: false,
+  contentFilter: false,
+  pauseTurn: false,
+};
+
+for (const [stopReason, finished] of Object.entries(FINISHED) as Array<[StopReason, boolean]>) {
+  test(`a verdict ending in ${stopReason} is ${finished ? "read" : "unreadable"}`, () => {
+    const stopped = (t: string): CollectedResponse => ({ ...text(t), stopReason });
+    expect(parseVerdict(stopped("ALLOW"))).toBe(finished ? "allow" : null);
+    expect(parseVerdict(stopped("DENY"))).toBe(finished ? "deny" : null);
+  });
+}
 
 test("thinking is never read; the verdict is the visible text", () => {
   expect(parseVerdict(reply({ type: "thinking", text: "ALLOW" }))).toBeNull();

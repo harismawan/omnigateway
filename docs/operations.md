@@ -136,7 +136,9 @@ only when it alone is longer, and older messages are cut, then dropped, oldest
 first. Long texts are cut to head and tail around a marker. Tool results, images,
 files, assistant replies and mid-conversation system turns are never sent. Any
 cut or drop is recorded as `guardrail:truncated`. Only a reply of exactly
-`ALLOW` admits the request.
+`ALLOW` that the model finished (stop reason end of turn or stop sequence)
+admits the request; one cut off at the token ceiling or stopped by the
+backend's filter is unreadable, whatever it says.
 
 | Outcome | Code | Status | Row degradation |
 |---|---|---|---|
@@ -149,6 +151,8 @@ Streaming requests get the same codes as an in-stream error on a 200. Because
 providers also produce `CONTENT_FILTER` and `UPSTREAM`, the degradation is what
 identifies a guardrail outcome in the logs; the rejection line on stdout carries
 the fixed message, never the policy, the judged text, or the classifier's reply.
+A failed check also logs `usage policy check failed` with the error code and a
+fixed reason, never the failure's own message.
 
 Each classifier call is its own request row under the same key, tagged
 `guardrail:classifier`, with `requested_model` the classifier. It counts toward

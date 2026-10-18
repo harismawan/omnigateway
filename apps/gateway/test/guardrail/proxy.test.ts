@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ErrorCode, GatewayError } from "@omni/ir";
+import { type ErrorCode, GatewayError, type StreamEvent } from "@omni/ir";
 import type { RequestLog } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { health, memoryStore, seedCredential, target, virtualModel } from "@omni/testkit";
@@ -26,6 +26,7 @@ import {
   type Harness,
   SURFACES,
   type Surface,
+  textEvents,
   transport,
 } from "./harness.ts";
 
@@ -591,8 +592,7 @@ test("a classifier dispatch that throws before a status is set records 500 INTER
 /**
  * A failure thrown out of the classifier's dispatch can carry text the gateway
  * did not write — an upstream's error body, a store's row. The warning names
- * the failure by code and a fixed reason; a provider-bearing message passes
- * only through the same `reasonField` gate as every rejection line.
+ * the failure by code and a fixed reason, never by the thrown message.
  */
 for (const [name, thrown] of [
   [
@@ -615,6 +615,35 @@ for (const [name, thrown] of [
     expect(warned?.fields).toMatchObject({ requestId: "req_1", model: "judge" });
     expect(typeof warned?.fields.reason).toBe("string");
     for (const line of h.logger.lines) expect(line).not.toContain("LEAKED-UPSTREAM-TEXT");
+    h.store.close();
+  });
+}
+
+/**
+ * A `GatewayError` naming no provider passes `reasonField` at every level, and
+ * nothing promises its message is this gateway's own words — a store or a
+ * dependency may have written it. The guardrail's warning names a thrown
+ * failure by its code and a fixed reason alone, at info and at debug.
+ */
+for (const level of ["info", "debug"] as const) {
+  test(`a provider-less thrown error's message never reaches the check-failed warning (${level})`, async () => {
+    const h = await guardrailHarness({ logLevel: level });
+    await h.store.credentials.updateHealth("c-judge", "gpt-judge", () =>
+      health({ credentialId: "c-judge", model: "gpt-judge", consecutiveFailures: 1 }),
+    );
+    h.store.credentials.updateHealth = async () => {
+      throw new GatewayError("INTERNAL", "row said: SECRET-MARKER");
+    };
+    expect((await h.call("anthropic")).status).toBe(502);
+    const warned = h.logger.records.filter((e) => e.msg === "usage policy check failed");
+    expect(warned).toHaveLength(1);
+    expect(warned[0]?.fields).toEqual({
+      requestId: "req_1",
+      model: "judge",
+      code: "INTERNAL",
+      reason: "classifier call failed",
+    });
+    for (const line of h.logger.lines) expect(line).not.toContain("SECRET-MARKER");
     h.store.close();
   });
 }
@@ -864,6 +893,43 @@ test("a timeout that fires before the classifier is routed is still recorded as 
   expect(classifier?.errorCode).toBe("TIMEOUT");
   h.store.close();
 });
+
+/**
+ * An `ALLOW` the model did not finish is not an allow. A reply cut off at its
+ * token ceiling or stopped by the backend's own filter may have been on its way
+ * to something else, so it refuses as unreadable, and is never cached: the
+ * identical request that follows asks the classifier again.
+ */
+for (const stopReason of ["maxTokens", "contentFilter"] as const) {
+  for (const stream of [false, true]) {
+    test(`an ALLOW ending in ${stopReason} refuses, uncached (${stream ? "streaming" : "non-streaming"})`, async () => {
+      const truncated = textEvents("ALLOW", "gpt-judge").map(
+        (event): StreamEvent => (event.type === "end" ? { ...event, stopReason } : event),
+      );
+      const h = await guardrailHarness({ classifier: { kind: "events", events: truncated } });
+      const res = await h.call("anthropic", { stream });
+      const text = await res.text();
+      if (stream) {
+        expect(res.status).toBe(200);
+        expect(streamError("anthropic", text)).toEqual(
+          expectedStreamError("anthropic", "UPSTREAM", UNAVAILABLE_MESSAGE),
+        );
+      } else {
+        expect(res.status).toBe(502);
+        expect(JSON.parse(text)).toEqual(errorBody("anthropic", "UPSTREAM", UNAVAILABLE_MESSAGE));
+      }
+      expect(h.targetCalls).toHaveLength(0);
+      expect((await rowOf(h, "req_1"))?.degradations).toContain("guardrail:unavailable");
+
+      // Not cached: the same request asks again, and a finished ALLOW serves it.
+      h.setClassifier(ALLOW);
+      await (await h.call("anthropic", { stream })).text();
+      expect(h.judgeCalls).toHaveLength(2);
+      expect(h.targetCalls).toHaveLength(1);
+      h.store.close();
+    });
+  }
+}
 
 test("failures are never cached: the next turn asks again and may succeed", async () => {
   for (const failure of [

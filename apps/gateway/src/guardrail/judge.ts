@@ -17,7 +17,6 @@ import {
   newCompletedRequestLog,
   newPendingRequestLog,
   type PluginEmit,
-  reasonField,
   reportRejection,
   routeLog,
   type UsageDebit,
@@ -69,6 +68,10 @@ export type GuardrailOutcome =
  */
 const refusal = (code: ErrorCode, message: string): GatewayError =>
   new GatewayError(code, message, { gatewayAuthored: true });
+
+/** What a thrown failure is filed as: its own code, or `INTERNAL` for anything else. */
+const thrownCode = (error: unknown): ErrorCode =>
+  error instanceof GatewayError ? error.code : "INTERNAL";
 
 type ClassifierResult =
   | { kind: "verdict"; verdict: Verdict }
@@ -175,8 +178,7 @@ async function callClassifier(
   } else if (timedOut) {
     if (log.status === 0 || log.errorCode === "interrupted") assign(504, "TIMEOUT");
   } else if (thrown !== null && log.status === 0) {
-    const code =
-      thrown.error instanceof GatewayError ? thrown.error.code : ("INTERNAL" as ErrorCode);
+    const code = thrownCode(thrown.error);
     assign(HTTP_STATUS[code], code);
   }
   await finishLog(
@@ -195,16 +197,12 @@ async function callClassifier(
   if (cancelled) return { kind: "cancelled" };
   if (timedOut) return { kind: "failed", reason: "classifier timed out" };
   if (thrown !== null) {
-    // What dispatch throws can carry text this gateway did not write — an
-    // upstream's body, a store's row — so a provider-bearing message passes
-    // the same gate as every rejection line, and anything else is named by
-    // code alone.
-    const { error } = thrown;
-    if (!(error instanceof GatewayError)) {
-      return { kind: "failed", reason: "classifier call failed", code: "INTERNAL" };
-    }
-    const { reason = "classifier call failed" } = reasonField(error, deps.logger);
-    return { kind: "failed", reason, code: error.code };
+    // Named by code alone, at every log level. What dispatch throws can carry
+    // text this gateway did not write — an upstream's body, a store's row — and
+    // a `GatewayError` naming no provider says nothing about whose words its
+    // message is, so `reasonField` would print it. Dispatch's own debug lines
+    // are the gateway-wide policy for upstream reasons; this warning adds none.
+    return { kind: "failed", reason: "classifier call failed", code: thrownCode(thrown.error) };
   }
   if (failure !== undefined)
     return { kind: "failed", reason: `classifier ${failure.code}`, code: failure.code };
