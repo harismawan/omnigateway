@@ -631,7 +631,35 @@ export type ApiKey = {
    * happens to be looking.
    */
   expiresAt: number | null;
+  /**
+   * What this key may be used *for*, in the operator's own words, or `null`
+   * when it carries no guardrail.
+   *
+   * Free text judged by a classifier model before every inference request the
+   * key makes (`apps/gateway/src/guardrail/`). `null` is the only spelling of
+   * "no guardrail": the control schema refuses an empty or whitespace-only
+   * policy rather than coercing it, and every key minted before the column
+   * existed reads back as `null` — no backfill.
+   *
+   * A guardrail, not a security boundary: it stops ordinary misuse, not a
+   * client deliberately steering the classifier. And an older build ignores the
+   * column entirely, so a rollback stops judging — fails open — which the
+   * operator notes in README accept.
+   */
+  guardrailPolicy: string | null;
 };
+
+/**
+ * The longest usage policy a key may carry, in characters after trimming.
+ *
+ * Here rather than in `@omni/control` so the console — which may import
+ * `@omni/store/types` and nothing of control — counts against the same number
+ * the write schema enforces.
+ */
+export const GUARDRAIL_POLICY_MAX_CHARS = 4_000;
+
+/** The ceiling on `Settings.guardrailTimeoutMs`. A classifier slower than this is not one. */
+export const GUARDRAIL_TIMEOUT_MAX_MS = 60_000;
 
 /**
  * Whether this key may still be used at this instant.
@@ -824,6 +852,27 @@ export type Settings = {
   snapshotKeepLatest: number;
   /** How long a snapshot outside the keep-latest window is kept. */
   snapshotMaxAgeDays: number;
+  /**
+   * The model that judges requests from keys carrying a usage policy, or
+   * `null` when none is configured.
+   *
+   * Spelled as `resolveModel` accepts it — a configured virtual model id or
+   * `provider/model` — and deliberately not checked for existence at write
+   * time, the same exemption a dangling pin has: a missing model surfaces as a
+   * failed check, which refuses the request, and in `omni doctor`. While this is
+   * `null`, a key that carries a policy is refused outright (fail closed), and
+   * a key without one is never judged at all.
+   *
+   * A malformed stored value reads as `null`, which for a key with a policy is
+   * a refusal rather than an unjudged request.
+   */
+  guardrailModel: string | null;
+  /**
+   * How long one classifier call may take before the request it judges is
+   * refused, in milliseconds. A positive integer at most
+   * `GUARDRAIL_TIMEOUT_MAX_MS`; a malformed stored value reads as the default.
+   */
+  guardrailTimeoutMs: number;
 };
 
 export interface CredentialRepo {
@@ -1050,8 +1099,9 @@ export interface KeyRepo {
   /**
    * Replaces one key's limit matrix, whole.
    *
-   * One of three fields editable after minting — the allowlist via
-   * `setModelAllowlist` and the expiry via `setExpiry` are the others — and
+   * One of four fields editable after minting — the allowlist via
+   * `setModelAllowlist`, the expiry via `setExpiry` and the usage policy via
+   * `setGuardrailPolicy` are the others — and
    * deliberately so:
    * `bodyLoggingOptOut` is a promise to whoever holds the key, while a limit is
    * the operator's own ceiling on their own installation. A weekly spend cap
@@ -1085,6 +1135,14 @@ export interface KeyRepo {
    * deliberately not one.
    */
   setExpiry(id: string, expiresAt: number | null): Promise<void>;
+  /**
+   * Replaces one key's usage policy, whole. `null` removes the guardrail.
+   *
+   * The fourth field editable after minting. No guard on the text here: the
+   * control schema trims and bounds it, and any string round-trips through a
+   * TEXT column.
+   */
+  setGuardrailPolicy(id: string, policy: string | null): Promise<void>;
   revoke(id: string): Promise<void>;
 }
 
@@ -1675,4 +1733,31 @@ export const DEFAULT_SETTINGS: Settings = {
   bodyLoggingCaptureStreamChunks: false,
   snapshotKeepLatest: 5,
   snapshotMaxAgeDays: 30,
+  guardrailModel: null,
+  guardrailTimeoutMs: 10_000,
 };
+
+/**
+ * How a stored settings row's two guardrail fields read back, whatever they hold.
+ *
+ * One copy for both backends' `getSettings`. The model name reads as `null`
+ * unless it is a non-empty string — for a key carrying a policy that is a
+ * refusal, never an unjudged request — and the timeout as the default unless it
+ * is an integer inside `1..GUARDRAIL_TIMEOUT_MAX_MS`.
+ */
+export function readGuardrailSettings(
+  stored: Partial<Record<"guardrailModel" | "guardrailTimeoutMs", unknown>>,
+): Pick<Settings, "guardrailModel" | "guardrailTimeoutMs"> {
+  const model = stored.guardrailModel;
+  const timeout = stored.guardrailTimeoutMs;
+  return {
+    guardrailModel: typeof model === "string" && model.trim() !== "" ? model : null,
+    guardrailTimeoutMs:
+      typeof timeout === "number" &&
+      Number.isInteger(timeout) &&
+      timeout >= 1 &&
+      timeout <= GUARDRAIL_TIMEOUT_MAX_MS
+        ? timeout
+        : DEFAULT_SETTINGS.guardrailTimeoutMs,
+  };
+}

@@ -66,6 +66,7 @@ function key(id: string): ApiKeyInput {
     limits: {},
     bodyLoggingOptOut: false,
     expiresAt: null,
+    guardrailPolicy: null,
   };
 }
 

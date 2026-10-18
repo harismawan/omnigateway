@@ -15,6 +15,7 @@ type Row = {
   created_at: string;
   revoked_at: string | null;
   expires_at: string | null;
+  guardrail_policy: string | null;
 };
 
 /**
@@ -55,6 +56,8 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   // which is "never expires".
   revokedAt: numOrNull(r.revoked_at),
   expiresAt: numOrNull(r.expires_at),
+  // Null is "no guardrail", which every row written before migration 7 holds.
+  guardrailPolicy: r.guardrail_policy,
 });
 
 export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
@@ -80,8 +83,9 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       const now = Date.now();
       await sql.unsafe(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
-                               body_logging_opt_out, created_at, revoked_at, expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9)`,
+                               body_logging_opt_out, created_at, revoked_at, expires_at,
+                               guardrail_policy)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10)`,
         [
           input.id,
           input.label,
@@ -95,6 +99,7 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           input.bodyLoggingOptOut,
           now,
           input.expiresAt,
+          input.guardrailPolicy,
         ],
       );
       return { ...input, createdAt: now, revokedAt: null };
@@ -104,8 +109,9 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       if (row.limits === null) throw new Error(`api key ${row.id} has unreadable limits`);
       await sql.unsafe(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
-                               body_logging_opt_out, created_at, revoked_at, expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+                               body_logging_opt_out, created_at, revoked_at, expires_at,
+                               guardrail_policy)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
         [
           row.id,
           row.label,
@@ -119,6 +125,9 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           // Carried like the dates beside it. A restore that dropped this would
           // hand back a key outliving the expiry its operator set.
           row.expiresAt,
+          // Likewise: a restore that dropped the policy would hand back a key
+          // freed of the purpose its operator restricted it to.
+          row.guardrailPolicy,
         ],
       );
     },
@@ -150,6 +159,12 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       // would put a rule in the repo that the control schema deliberately does
       // not have.
       await sql.unsafe("UPDATE api_keys SET expires_at = $1 WHERE id = $2", [expiresAt, id]);
+    },
+
+    async setGuardrailPolicy(id: string, policy: string | null) {
+      // No guard on the text: the control schema trims and bounds it, and any
+      // string round-trips through a TEXT column.
+      await sql.unsafe("UPDATE api_keys SET guardrail_policy = $1 WHERE id = $2", [policy, id]);
     },
 
     async revoke(id: string) {

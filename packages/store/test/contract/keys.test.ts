@@ -20,6 +20,7 @@ async function key(id: string, overrides: Partial<ApiKeyInput> = {}): Promise<Ap
     limits: {},
     bodyLoggingOptOut: false,
     expiresAt: null,
+    guardrailPolicy: null,
     ...overrides,
   };
 }
@@ -113,6 +114,28 @@ forEachStore((backend) => {
     expect((await s.keys.get("k2"))?.expiresAt).toBe(1_700_000_000_000);
   });
 
+  test("a usage policy round-trips, defaults to none, and is replaced whole", async () => {
+    const s = await backend.fresh();
+    // Minted without one, as every key that predates the column was: no
+    // guardrail, so the request path never consults a classifier for it.
+    await s.keys.create(await key("k1"));
+    expect((await s.keys.get("k1"))?.guardrailPolicy).toBeNull();
+
+    await s.keys.create(await key("k2", { guardrailPolicy: "Work only." }));
+    expect((await s.keys.get("k2"))?.guardrailPolicy).toBe("Work only.");
+    expect((await s.keys.list()).find((k) => k.id === "k2")?.guardrailPolicy).toBe("Work only.");
+
+    await s.keys.setGuardrailPolicy("k1", "Only software engineering.\nRefuse roleplay.");
+    expect((await s.keys.get("k1"))?.guardrailPolicy).toBe(
+      "Only software engineering.\nRefuse roleplay.",
+    );
+    // Cleared by writing null, the only spelling of "no guardrail".
+    await s.keys.setGuardrailPolicy("k1", null);
+    expect((await s.keys.get("k1"))?.guardrailPolicy).toBeNull();
+    // The other key is untouched: the write names one row.
+    expect((await s.keys.get("k2"))?.guardrailPolicy).toBe("Work only.");
+  });
+
   test("setModelAllowlist keeps null and [] distinct", async () => {
     const s = await backend.fresh();
     await s.keys.create(await key("k1", { modelAllowlist: ["a", "b"] }));
@@ -139,6 +162,7 @@ forEachStore((backend) => {
       createdAt: 1_600_000_000_000,
       revokedAt: 1_600_000_100_000,
       expiresAt: 1_600_000_200_000,
+      guardrailPolicy: "Office work only.",
     });
     const row = await s.keys.get("k_imported");
     expect(row?.createdAt).toBe(1_600_000_000_000);
@@ -146,6 +170,9 @@ forEachStore((backend) => {
     // A restore that dropped this would hand back a key that outlives the
     // expiry its operator set, which is the one direction that fails open.
     expect(row?.expiresAt).toBe(1_600_000_200_000);
+    // Carried like the expiry: a restore that dropped it would hand back a key
+    // freed of the purpose its operator restricted it to.
+    expect(row?.guardrailPolicy).toBe("Office work only.");
     expect(row?.limits).toEqual({ concurrency: 2 });
     expect(row?.bodyLoggingOptOut).toBe(true);
     await expect(
@@ -160,6 +187,7 @@ forEachStore((backend) => {
         createdAt: 1,
         revokedAt: null,
         expiresAt: null,
+        guardrailPolicy: null,
       }),
     ).rejects.toThrow("unreadable limits");
   });

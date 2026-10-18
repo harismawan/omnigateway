@@ -594,6 +594,52 @@ test("an expiry edit that names no field, or a nonsense one, is refused rather t
   expect((await store.keys.list())[0]?.expiresAt).toBe(1_900_000_000_000);
 });
 
+/**
+ * The fourth editable field: what the key may be used for.
+ *
+ * Written whole, `null` clears it, and an absent or empty policy is refused —
+ * "no guardrail" has exactly one spelling, and `{}` must not withdraw one.
+ */
+test("a key's usage policy is editable behind admin auth, clearable, and never defaulted", async () => {
+  const { call, store } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {
+    id: string;
+  };
+  expect((await store.keys.list())[0]?.guardrailPolicy).toBeNull();
+
+  const body = { policy: "Only software engineering." };
+  expect((await call("PUT", `/api/keys/${created.id}/guardrail`, body, false)).status).toBe(401);
+
+  const saved = await call("PUT", `/api/keys/${created.id}/guardrail`, body);
+  expect(saved.status).toBe(200);
+  expect(((await saved.json()) as { guardrailPolicy: string | null }).guardrailPolicy).toBe(
+    "Only software engineering.",
+  );
+  expect((await store.keys.list())[0]?.guardrailPolicy).toBe("Only software engineering.");
+
+  for (const refused of [
+    {},
+    { policy: "" },
+    { policy: "   " },
+    { policy: 1 },
+    { policy: null, x: 1 },
+  ]) {
+    expect((await call("PUT", `/api/keys/${created.id}/guardrail`, refused)).status).toBe(400);
+  }
+  expect((await store.keys.list())[0]?.guardrailPolicy).toBe("Only software engineering.");
+
+  expect((await call("PUT", `/api/keys/${created.id}/guardrail`, { policy: null })).status).toBe(
+    200,
+  );
+  expect((await store.keys.list())[0]?.guardrailPolicy).toBeNull();
+
+  // Settable at mint time too.
+  const minted = (await (
+    await call("POST", "/api/keys", { label: "staff", guardrailPolicy: "Work only." })
+  ).json()) as { id: string };
+  expect((await store.keys.get(minted.id))?.guardrailPolicy).toBe("Work only.");
+});
+
 test("a malformed limit matrix is refused rather than stored", async () => {
   const { call, store } = await harness();
   const created = (await (
@@ -1771,6 +1817,13 @@ const MUTATIONS: ReadonlyArray<{
     method: "PUT",
     path: "/api/keys/:key/expiry",
     body: { expiresAt: 1_900_000_000_000 },
+    topics: ["res:keys"],
+  },
+  {
+    route: "/api/keys/:id/guardrail",
+    method: "PUT",
+    path: "/api/keys/:key/guardrail",
+    body: { policy: "Work only." },
     topics: ["res:keys"],
   },
   {

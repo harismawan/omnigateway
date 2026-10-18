@@ -39,6 +39,7 @@ type Row = {
   created_at: number;
   revoked_at: number | null;
   expires_at: number | null;
+  guardrail_policy: string | null;
 };
 
 /**
@@ -83,6 +84,8 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   // Null is "never expires", which is what every row written before migration
   // 14 holds and what a key minted without one holds today.
   expiresAt: r.expires_at,
+  // Null is "no guardrail", which every row written before migration 19 holds.
+  guardrailPolicy: r.guardrail_policy,
 });
 
 export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRepo {
@@ -111,8 +114,9 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       const now = Date.now();
       db.run(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
-                               body_logging_opt_out, created_at, revoked_at, expires_at)
-         VALUES (?,?,?,?,?,?,?,?,NULL,?)`,
+                               body_logging_opt_out, created_at, revoked_at, expires_at,
+                               guardrail_policy)
+         VALUES (?,?,?,?,?,?,?,?,NULL,?,?)`,
         [
           input.id,
           input.label,
@@ -126,6 +130,7 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
           input.bodyLoggingOptOut ? 1 : 0,
           now,
           input.expiresAt,
+          input.guardrailPolicy,
         ],
       );
       return { ...input, createdAt: now, revokedAt: null };
@@ -135,8 +140,9 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       if (row.limits === null) throw new Error(`api key ${row.id} has unreadable limits`);
       db.run(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
-                               body_logging_opt_out, created_at, revoked_at, expires_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+                               body_logging_opt_out, created_at, revoked_at, expires_at,
+                               guardrail_policy)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
         [
           row.id,
           row.label,
@@ -150,6 +156,9 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
           // Carried like the dates beside it. A restore that dropped this would
           // hand back a key outliving the expiry its operator set.
           row.expiresAt,
+          // Likewise: a restore that dropped the policy would hand back a key
+          // freed of the purpose its operator restricted it to.
+          row.guardrailPolicy,
         ],
       );
     },
@@ -181,6 +190,12 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       // meaning "expire it now" — refusing it here would put a rule in the repo
       // that the control schema deliberately does not have.
       db.run("UPDATE api_keys SET expires_at = ? WHERE id = ?", [expiresAt, id]);
+    },
+
+    async setGuardrailPolicy(id: string, policy: string | null) {
+      // No guard on the text: the control schema trims and bounds it, and any
+      // string round-trips through a TEXT column.
+      db.run("UPDATE api_keys SET guardrail_policy = ? WHERE id = ?", [policy, id]);
     },
 
     async revoke(id: string) {

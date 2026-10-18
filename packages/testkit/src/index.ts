@@ -228,6 +228,8 @@ export async function seedApiKey(
     bodyLoggingOptOut: false,
     /** Never expires, which is what a key says when nobody sets a deadline. */
     expiresAt: null,
+    /** No usage policy, so the request path never consults a classifier. */
+    guardrailPolicy: null,
     ...overrides,
   });
   return { raw, key };

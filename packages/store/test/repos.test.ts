@@ -168,6 +168,7 @@ test("api key body logging opt-out defaults off and round-trips", async () => {
     limits: {},
     bodyLoggingOptOut: false,
     expiresAt: null,
+    guardrailPolicy: null,
   });
   await s.keys.create({
     id: "k2",
@@ -178,6 +179,7 @@ test("api key body logging opt-out defaults off and round-trips", async () => {
     limits: {},
     bodyLoggingOptOut: true,
     expiresAt: null,
+    guardrailPolicy: null,
   });
 
   expect((await s.keys.findByHash(plain))?.bodyLoggingOptOut).toBe(false);
@@ -270,6 +272,7 @@ test("api keys are found by hash and never store the raw value", async () => {
     limits: { requests: { "1m": 60 } },
     bodyLoggingOptOut: false,
     expiresAt: null,
+    guardrailPolicy: null,
   });
 
   const found = await s.keys.findByHash(hash);
@@ -291,6 +294,7 @@ test("revoked keys are still listed but marked revoked", async () => {
     limits: {},
     bodyLoggingOptOut: false,
     expiresAt: null,
+    guardrailPolicy: null,
   });
   await s.keys.revoke("k1");
   const found = await s.keys.findByHash(hash);
@@ -402,6 +406,7 @@ test("api key limits round-trip the sparse matrix", async () => {
     },
     bodyLoggingOptOut: false,
     expiresAt: null,
+    guardrailPolicy: null,
   });
 
   expect((await s.keys.findByHash(hash))?.limits).toEqual({
@@ -470,6 +475,7 @@ test("a limits shape the schema refuses is never written", async () => {
       limits: { requests: { "2m": 60 } } as unknown as LimitConfig,
       bodyLoggingOptOut: false,
       expiresAt: null,
+      guardrailPolicy: null,
     }),
   ).rejects.toThrow();
   expect(await s.keys.list()).toHaveLength(0);
@@ -497,6 +503,7 @@ test("a limits shape the schema refuses is never written by an edit either", asy
     limits: { requests: { "1m": 60 } },
     bodyLoggingOptOut: false,
     expiresAt: null,
+    guardrailPolicy: null,
   });
 
   await expect(
@@ -527,6 +534,7 @@ test("setModelAllowlist replaces the column whole and keeps null and [] distinct
     limits: {},
     bodyLoggingOptOut: false,
     expiresAt: null,
+    guardrailPolicy: null,
   });
 
   await s.keys.setModelAllowlist("k1", ["fast", "smart"]);

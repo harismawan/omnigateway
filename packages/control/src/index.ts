@@ -104,6 +104,7 @@ export {
   readOwnKey,
   revokeKey,
   setKeyExpiry,
+  setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
 } from "./keys.ts";

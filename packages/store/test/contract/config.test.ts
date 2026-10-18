@@ -64,6 +64,37 @@ forEachStore((backend) => {
     expect((await s.config.getSettings()).bodyRetentionDays).toBe(7);
   });
 
+  test("guardrail settings default unconfigured and read malformed values safely", async () => {
+    const s = await backend.fresh();
+    expect((await s.config.getSettings()).guardrailModel).toBeNull();
+    expect((await s.config.getSettings()).guardrailTimeoutMs).toBe(10_000);
+
+    await s.config.putSettings({
+      guardrailModel: "anthropic/claude-haiku-4",
+      guardrailTimeoutMs: 5,
+    });
+    expect((await s.config.getSettings()).guardrailModel).toBe("anthropic/claude-haiku-4");
+    expect((await s.config.getSettings()).guardrailTimeoutMs).toBe(5);
+
+    // A model that is not a non-empty string reads as unconfigured — which, for
+    // a key carrying a policy, refuses rather than serving the request unjudged.
+    for (const malformed of ["", "   ", 7, true, ["x"]]) {
+      await s.config.putSettings({ guardrailModel: malformed } as unknown as {
+        guardrailModel: string;
+      });
+      expect((await s.config.getSettings()).guardrailModel).toBeNull();
+    }
+    // A timeout outside 1..60_000 or not an integer reads as the default.
+    for (const malformed of [0, -1, 1.5, 60_001, "5000", null]) {
+      await s.config.putSettings({ guardrailTimeoutMs: malformed } as unknown as {
+        guardrailTimeoutMs: number;
+      });
+      expect((await s.config.getSettings()).guardrailTimeoutMs).toBe(10_000);
+    }
+    await s.config.putSettings({ guardrailTimeoutMs: 60_000 });
+    expect((await s.config.getSettings()).guardrailTimeoutMs).toBe(60_000);
+  });
+
   test("virtual models round-trip nested targets, replace on put, and remove", async () => {
     const s = await backend.fresh();
     const model: VirtualModel = {

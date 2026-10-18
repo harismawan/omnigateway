@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { DEFAULT_SETTINGS } from "@omni/store";
+import { DEFAULT_SETTINGS, GUARDRAIL_POLICY_MAX_CHARS } from "@omni/store";
 import { isProviderId } from "../src/connect.ts";
 import {
   keyCreateSchema,
   keyExpirySchema,
+  keyGuardrailSchema,
   modelSchema,
   providerIdSchema,
   settingsSchema,
@@ -226,4 +227,37 @@ test("settings accept the four ponytail modes and reject anything else", () => {
 
   expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, ponytailMode: "FULL" })).toThrow();
   expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, ponytailMode: "" })).toThrow();
+});
+
+/**
+ * The usage policy is written whole, and "no guardrail" has exactly one
+ * spelling. Absent is not `null`, and whitespace is not `null` either: a caller
+ * who sent nothing visible meant something it did not say.
+ */
+test("the guardrail edit schema refuses absent, empty, and over-length policies", () => {
+  expect(keyGuardrailSchema.parse({ policy: null }).policy).toBeNull();
+  expect(keyGuardrailSchema.parse({ policy: "  Work only.  " }).policy).toBe("Work only.");
+  expect(() => keyGuardrailSchema.parse({})).toThrow();
+  expect(() => keyGuardrailSchema.parse({ policy: "" })).toThrow();
+  expect(() => keyGuardrailSchema.parse({ policy: " \n\t " })).toThrow();
+  expect(() => keyGuardrailSchema.parse({ policy: 7 })).toThrow();
+  expect(() => keyGuardrailSchema.parse({ policy: "x", extra: true })).toThrow();
+
+  const max = "p".repeat(GUARDRAIL_POLICY_MAX_CHARS);
+  expect(keyGuardrailSchema.parse({ policy: max }).policy).toBe(max);
+  // The cap is on the trimmed text, so padding does not count against it…
+  expect(keyGuardrailSchema.parse({ policy: `  ${max}  ` }).policy).toBe(max);
+  // …and one character past it is refused.
+  expect(() => keyGuardrailSchema.parse({ policy: `${max}p` })).toThrow();
+});
+
+test("a key minted without a policy has none, and one minted with a policy keeps it", () => {
+  expect(keyCreateSchema.parse({}).guardrailPolicy).toBeNull();
+  expect(keyCreateSchema.parse({ guardrailPolicy: " Work only. " }).guardrailPolicy).toBe(
+    "Work only.",
+  );
+  expect(() => keyCreateSchema.parse({ guardrailPolicy: "   " })).toThrow();
+  expect(() =>
+    keyCreateSchema.parse({ guardrailPolicy: "p".repeat(GUARDRAIL_POLICY_MAX_CHARS + 1) }),
+  ).toThrow();
 });

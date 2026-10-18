@@ -17,6 +17,7 @@ import logKeyset015 from "./migrations/015_log_keyset.sql" with { type: "text" }
 import logFilterIndexes016 from "./migrations/016_log_filter_indexes.sql" with { type: "text" };
 import logTextSearch017 from "./migrations/017_log_text_search.sql" with { type: "text" };
 import modelWindowIndex018 from "./migrations/018_model_window_index.sql" with { type: "text" };
+import keyGuardrail019 from "./migrations/019_key_guardrail.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -62,6 +63,9 @@ const MIGRATIONS: ReadonlyArray<{
   // Index-only. A model override's long windows are read from the log, and
   // this lets that read seek one key's one model instead of filtering per row.
   { id: 18, sql: modelWindowIndex018 },
+  // No `after`, for the reason 14 has none: a key minted before the column
+  // existed carries no usage policy, and inventing one would refuse its client.
+  { id: 19, sql: keyGuardrail019 },
 ];
 
 /**
