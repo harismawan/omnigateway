@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { KeysBoard } from "../../src/features/keys/KeysBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { apiKey, model } from "../helpers/fixtures.ts";
+import { apiKey, model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 
 const minted = {
@@ -908,5 +908,98 @@ describe("KeysBoard", () => {
     expect(
       await screen.findByText("No keys exist, so nothing can call this gateway yet."),
     ).toBeTruthy();
+  });
+});
+
+describe("usage policy", () => {
+  test("a policy is written, sent whole, and the board says the key is judged", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+      "GET /api/settings": () => ({
+        settings: { ...settings, guardrailModel: "judge" },
+        bodyLoggingAllowed: false,
+      }),
+      "PUT /api/keys/key-1/guardrail": () => apiKey({ guardrailPolicy: "Work only." }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit usage policy for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    // The threat model, said once and plainly.
+    expect(within(dialog).getByText(/not a security boundary/)).toBeTruthy();
+    // No policy yet, so there is nothing to remove.
+    expect(within(dialog).queryByRole("button", { name: "Remove policy" })).toBeNull();
+
+    const field = within(dialog).getByLabelText("Policy");
+    await user.type(field, "Work only.");
+    expect(within(dialog).getByText("10 / 4000")).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Save policy" }));
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.url).toBe("/api/keys/key-1/guardrail");
+      expect(put?.init?.body).toBe(JSON.stringify({ policy: "Work only." }));
+    });
+  });
+
+  test("an empty policy is not sent; removing one is its own action and sends null", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey({ guardrailPolicy: "Work only." })] }),
+      "PUT /api/keys/key-1/guardrail": () => apiKey(),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    // The row says the key is judged, without printing the text.
+    expect(await screen.findByText("judged")).toBeTruthy();
+
+    await user.click(await screen.findByRole("button", { name: "Edit usage policy for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    const field = within(dialog).getByLabelText("Policy") as HTMLTextAreaElement;
+    expect(field.value).toBe("Work only.");
+
+    await user.clear(field);
+    await user.type(field, "   ");
+    await user.click(within(dialog).getByRole("button", { name: "Save policy" }));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("Remove policy");
+    expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+
+    await user.click(within(dialog).getByRole("button", { name: "Remove policy" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.init?.body).toBe(JSON.stringify({ policy: null }));
+    });
+  });
+
+  test("an over-long policy is refused before it is sent", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({ "GET /api/keys": () => ({ keys: [apiKey()] }) });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit usage policy for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    const field = within(dialog).getByLabelText("Policy");
+    await user.click(field);
+    await user.paste("p".repeat(4001));
+    expect(within(dialog).getByText("4001 / 4000")).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Save policy" }));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("4000");
+    expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+  });
+
+  test("the dialog warns when no classifier is set, and only then", async () => {
+    const user = userEvent.setup();
+    stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+      "GET /api/settings": () => ({ settings, bodyLoggingAllowed: false }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit usage policy for laptop" }));
+    const dialog = await screen.findByRole("dialog");
+    expect((await within(dialog).findByRole("status")).textContent).toContain(
+      "No classifier model is set",
+    );
   });
 });

@@ -33,6 +33,31 @@ export const Input = styled.input`
 `;
 
 /**
+ * A multi-line text field, for prose rather than identifiers: the sans face and
+ * a resize handle, otherwise dressed like `Input`.
+ */
+export const Textarea = styled.textarea`
+  ${control}
+  min-height: 120px;
+  padding: 6px 8px;
+  resize: vertical;
+  background: ${({ theme }) => theme.color.panelSunk};
+  border: 1px solid ${({ theme }) => theme.color.ruleStrong};
+  color: ${({ theme }) => theme.color.ink};
+  font-family: ${({ theme }) => theme.font.sans};
+  font-size: 12px;
+  line-height: 1.5;
+
+  &:hover:not(:disabled) {
+    border-color: ${({ theme }) => theme.color.accent};
+  }
+
+  &:disabled {
+    opacity: 0.5;
+  }
+`;
+
+/**
  * A native select. Radix's is prettier, but this is a dense operator console:
  * native gives keyboard type-ahead and the platform's own scrolling for free,
  * and it stays usable when a model has thirty targets. The platform arrow sits

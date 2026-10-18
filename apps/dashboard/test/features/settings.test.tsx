@@ -322,4 +322,60 @@ describe("SettingsBoard", () => {
       expect(body.ponytailMode).toBe("ultra");
     });
   });
+  test("the classifier model and timeout load, save, and clear to null", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({
+      "GET /api/settings": () => ({
+        settings: { ...settings, guardrailModel: "judge", guardrailTimeoutMs: 8_000 },
+        bodyLoggingAllowed: false,
+      }),
+      "GET /api/models": () => ({ models: [] }),
+      "PUT /api/settings": () => ({ ok: true }),
+    });
+    renderWithProviders(<SettingsBoard />);
+
+    const model = (await screen.findByLabelText("Classifier model")) as HTMLInputElement;
+    await waitFor(() => expect(model.value).toBe("judge"));
+    const timeout = screen.getByLabelText("Check timeout") as HTMLInputElement;
+    expect(timeout.value).toBe("8000");
+
+    await user.clear(model);
+    await user.type(model, "anthropic/claude-haiku-4");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body))).toMatchObject({
+        guardrailModel: "anthropic/claude-haiku-4",
+        guardrailTimeoutMs: 8_000,
+      });
+    });
+
+    // Blank is how the classifier is unset: sent as null, never omitted, which
+    // would keep the stored model.
+    await user.clear(model);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const puts = stub.calls.filter((call) => call.init?.method === "PUT");
+      const body = JSON.parse(String(puts.at(-1)?.init?.body)) as Record<string, unknown>;
+      expect(puts).toHaveLength(2);
+      expect(Object.hasOwn(body, "guardrailModel")).toBe(true);
+      expect(body.guardrailModel).toBeNull();
+    });
+  });
+
+  test("a check timeout outside 1..60000 is refused before saving", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "GET /api/models": () => ({ models: [] }) });
+    renderWithProviders(<SettingsBoard />);
+    const field = await screen.findByLabelText("Check timeout");
+    for (const value of ["0", "60001", "1.5"]) {
+      await user.clear(field);
+      await user.type(field, value);
+      await user.click(screen.getByRole("button", { name: "Save changes" }));
+      expect((await screen.findByRole("alert")).textContent).toContain(
+        "Usage policy check timeout",
+      );
+      expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+    }
+  });
 });

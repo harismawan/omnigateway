@@ -36,6 +36,7 @@ import type {
   DryRunResult,
   KeyCreateInput,
   KeyExpiryInput,
+  KeyGuardrailInput,
   KeyLimitsInput,
   KeyModelsInput,
   KeysResponse,
@@ -1120,7 +1121,8 @@ export function useCreateKey(): UseMutationResult<MintedKey, Error, KeyCreateInp
  * Replaces one key's limits.
  *
  * One of three fields editable after minting — the allowlist via
- * `useSetKeyModels` and the expiry via `useSetKeyExpiry` are the others.
+ * `useSetKeyModels`, the expiry via `useSetKeyExpiry` and the usage policy via
+ * `useSetKeyGuardrail` are the others.
  * `bodyLoggingOptOut` has no mutation like this on purpose: it is a promise to
  * whoever holds the key, while a limit is the operator's own ceiling on their
  * own installation.
@@ -1176,6 +1178,24 @@ export function useSetKeyExpiry(): UseMutationResult<
   const client = useQueryClient();
   return useMutation({
     mutationFn: ({ id, expiresAt }) => put<ApiKeySummary>(`/api/keys/${id}/expiry`, { expiresAt }),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
+  });
+}
+
+/**
+ * Replaces one key's usage policy, or removes it with `null`.
+ *
+ * The fourth field editable after minting. Sent whole and never omitted, for
+ * the reason the expiry is: an absent field is a `BAD_REQUEST` at the route.
+ */
+export function useSetKeyGuardrail(): UseMutationResult<
+  ApiKeySummary,
+  Error,
+  { id: string } & KeyGuardrailInput
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, policy }) => put<ApiKeySummary>(`/api/keys/${id}/guardrail`, { policy }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
   });
 }
