@@ -157,9 +157,10 @@ fixed reason, never the failure's own message.
 Each classifier call is its own request row under the same key, tagged
 `guardrail:classifier`, with `requested_model` the classifier. It counts toward
 the key's tokens and spend (and the classifier model's own override, if the key
-has one — never the parent model's) and toward the `5h`/`1w` request windows,
-which count rows; not the `1m` window, which counts admissions. That over-counts,
-which is the direction limits may err. A refused request still counts as one: the
+has one — never the parent model's, and on every replica sharing that override's
+counters, though the call is never admitted itself) and toward the `5h`/`1w`
+request windows, which count rows; not the `1m` window, which counts admissions.
+That over-counts, which is the direction limits may err. A refused request still counts as one: the
 check runs after admission. Verdicts are cached per process for an hour, keyed on
 key, policy, classifier, system text and every judged message in order, so an
 agent's tool turns on one human message cost one call; a cached verdict writes no

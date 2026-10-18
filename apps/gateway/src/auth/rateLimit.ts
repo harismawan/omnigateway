@@ -540,9 +540,27 @@ export class ApiKeyRateLimiter {
   debit(keyId: string, requestedModel: string, usage: { tokens: number; costUsd: number }): void {
     const delta = { requests: 1, tokens: usage.tokens, costUsd: usage.costUsd };
     this.debitSubject(keyId, delta);
-    // The model's subject only where this process admitted it under an
-    // override; for any other model there is no entry and nothing is added.
+    // The model's subject only where this process admitted it, or recorded it
+    // with `recordOverride`, under an override; for any other model there is
+    // no entry and nothing is added.
     this.debitSubject(modelSubjectId(keyId, requestedModel), delta);
+  }
+
+  /**
+   * Records a model override's limits for a completion this process will debit
+   * without having admitted it: the guardrail's classifier call, which rides
+   * its parent's admission. Claims nothing — no ring stamp, no gauge slot.
+   *
+   * Without it `debit` skips the override's subject, and in a cluster that is
+   * an under-count: another replica that seeded the subject's shared buckets
+   * does not re-read the store while they live, so the tokens it never saw
+   * debited are never counted. Synchronous, so a debit that follows it cannot
+   * be reordered before it. The key-wide subject is not touched; the parent's
+   * admission already recorded it.
+   */
+  recordOverride(keyId: string, limits: LimitConfig, model: string): void {
+    const override = modelOverride(limits, model);
+    if (override !== undefined) this.limits.set(modelSubjectId(keyId, model), override);
   }
 
   private debitSubject(subject: string, delta: Counts): void {

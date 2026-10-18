@@ -667,7 +667,13 @@ async function handle(
                   policy,
                   request: chatRequest,
                   signal: request.signal,
-                  debit,
+                  // The classifier call is never admitted, so its model's
+                  // override is recorded here or its debit would be skipped —
+                  // an under-count on any replica sharing that subject's buckets.
+                  debit: (id, model, usage) => {
+                    rateLimiter.recordOverride(id, key.limits, model);
+                    debit(id, model, usage);
+                  },
                   parentRequestId: requestId,
                 },
               ),

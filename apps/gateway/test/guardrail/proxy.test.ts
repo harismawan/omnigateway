@@ -2,10 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { memoryCoord } from "@omni/coord";
 import { type ErrorCode, GatewayError, type StreamEvent } from "@omni/ir";
+import type { LimitConfig } from "@omni/ratelimit/catalog";
 import type { RequestLog } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
 import { health, memoryStore, seedCredential, target, virtualModel } from "@omni/testkit";
+import { ApiKeyRateLimiter, modelSubjectId, RateLimitExceeded } from "../../src/auth/rateLimit.ts";
 import { createRoutingSnapshotCache } from "../../src/dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "../../src/egress/anthropic.ts";
 import { openaiErrorBody } from "../../src/egress/openai.ts";
@@ -766,6 +769,39 @@ test("the classifier row is charged to the key and debits tokens and spend", asy
   // The usage totals see it as its own request.
   const usage = await h.store.usage.recent(50, h.keyId);
   expect(usage.map((row) => row.id).sort()).toEqual(["req_1", "req_2"]);
+  h.store.close();
+});
+
+/**
+ * The classifier call is never admitted, so this replica never recorded the
+ * classifier model's override at admission — yet another replica may have
+ * seeded that subject's shared buckets and will not re-read the store while
+ * they live. The classifier's tokens must land there, or that replica
+ * under-counts the override for as long as its buckets last.
+ */
+test("the classifier's tokens reach its model override's buckets on a replica that seeded them", async () => {
+  const store = await memoryStore();
+  const coord = memoryCoord();
+  const now = () => 1_000_000;
+  const replicaA = new ApiKeyRateLimiter({ store, now, coord });
+  const h = await guardrailHarness({ store, deps: { rateLimiter: replicaA } });
+  const limits: LimitConfig = { models: { judge: { tokens: { "5h": 40 } } } };
+  await h.store.keys.setLimits(h.keyId, limits);
+
+  const replicaB = new ApiKeyRateLimiter({ store, now, coord });
+  (await replicaB.admit(h.keyId, limits, "judge", "req_b")).release();
+
+  expect((await h.call("anthropic")).status).toBe(200);
+  expect((await rowOf(h, "req_2"))?.requestedModel).toBe("judge");
+  // 41 classifier tokens against a ceiling of 40, seen without a store read.
+  let refused: unknown = null;
+  try {
+    await replicaB.admit(h.keyId, limits, "judge", "req_b");
+  } catch (error) {
+    refused = error;
+  }
+  expect(refused instanceof RateLimitExceeded && refused.headroom.tokens?.used).toBe(41);
+  expect(await replicaA.inFlight(modelSubjectId(h.keyId, "judge"))).toBe(0);
   h.store.close();
 });
 

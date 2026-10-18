@@ -88,7 +88,8 @@ type ClassifierResult =
  *   capturing decorator, whatever the body-logging settings say.
  * - **No admission**: it rides the parent's. The row it writes is still seen by
  *   the long windows and debited for tokens and spend through `finishLog`,
- *   against the classifier model's override where the key has one.
+ *   against the classifier model's override where the key has one — which the
+ *   route's `debit` records first (`recordOverride`), since no admission did.
  *
  * The timeout and the client's own signal are composed into one, so a client
  * that hangs up stops the classifier too; the two are told apart afterwards by

@@ -242,7 +242,12 @@ The classifier call writes its own `request_logs` row under the same API key (`b
 `rateLimiter.admit`; it rides the parent's admission. Precisely what it counts toward:
 
 - **Tokens and spend:** key-wide, and the classifier model's per-model subject if the key has an
-  override for it (that is what `requested_model` names). Never the parent model's override.
+  override for it (that is what `requested_model` names). Never the parent model's override. The
+  limiter debits only subjects whose limits it recorded, and records them at admission, which the
+  classifier never has; so the classifier's debit first calls `recordOverride`, recording that
+  model's override (through `modelOverride`) without claiming a ring stamp or gauge slot. Skipping
+  it under-counts: another replica that seeded the subject's shared buckets never re-reads the
+  store while they live. The key-wide subject needs no record; the parent's admission made it.
 - **Requests:** the long windows (`5h`, `1w`) see the extra row, because they count rows; the `1m`
   ring does not, because it is stamped only at admission. This asymmetry over-counts, which is the
   direction the limiter permits; it never under-counts. Do not add a ring claim to remove it.
@@ -314,7 +319,8 @@ present, and still no credential identity on them.
     the total cap cuts and drops oldest first and flags `guardrail:truncated`; a window change that
     alters the judged set makes a new call;
   - classifier request carries no ponytail ruleset and no RTK rewrite with both enabled;
-  - accounting: classifier row exists under the key, debits spend; cache hit writes none;
+  - accounting: classifier row exists under the key, debits spend; cache hit writes none; a
+    replica that seeded the classifier model's override sees the tokens another replica debited;
   - cache key includes policy and model (edit either → new call); failures not cached;
   - an `ALLOW` ending in `maxTokens` or `contentFilter` refuses, dispatches nothing, is not cached;
   - a provider-less thrown `GatewayError`'s message reaches no log line, at info or debug;
