@@ -1,4 +1,5 @@
 import type { ChatRequest, ContentBlock } from "@omni/ir";
+import { GUARDRAIL_HISTORY_TURNS_MAX } from "@omni/store/types";
 
 /**
  * How much of the request-level system text the classifier is shown.
@@ -73,7 +74,8 @@ function humanWrote(message: ChatRequest["messages"][number]): boolean {
 
 /**
  * The text a usage policy is judged against: the request-level system prompt,
- * and the last `turns` messages a human wrote, oldest first.
+ * and the last `turns` messages a human wrote, oldest first. `turns` is clamped
+ * to `1..GUARDRAIL_HISTORY_TURNS_MAX`; anything not an integer judges one.
  *
  * Walking backwards, tool turns are skipped and never sent (`humanWrote`). That
  * keeps the judged text stable across an agent's tool turns, which is what lets
@@ -93,10 +95,14 @@ function humanWrote(message: ChatRequest["messages"][number]): boolean {
  * about empty text and decides.
  */
 export function judgedText(request: ChatRequest, turns: number): JudgedText {
+  // Settings coercion already keeps `turns` in range; this does not rely on it.
+  // A window of zero would judge an empty request, which a classifier may allow.
+  const window =
+    !Number.isInteger(turns) || turns < 1 ? 1 : Math.min(turns, GUARDRAIL_HISTORY_TURNS_MAX);
   const system = capText(textOf(request.system ?? []), SYSTEM_CAP);
   // Newest first while walking; reversed once at the end.
   const found: string[] = [];
-  for (let i = request.messages.length - 1; i >= 0 && found.length < turns; i--) {
+  for (let i = request.messages.length - 1; i >= 0 && found.length < window; i--) {
     const message = request.messages[i];
     if (message !== undefined && humanWrote(message)) found.push(textOf(message.content));
   }

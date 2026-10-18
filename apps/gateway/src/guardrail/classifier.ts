@@ -46,19 +46,23 @@ export const CLASSIFIER_MAX_TOKENS = 1_024;
 const SECTIONS = ["policy", "system_prompt", "earlier_messages", "message", "request"] as const;
 
 /**
- * A closing tag for any of the sections, in any case and with whitespace
- * anywhere inside it: a model reading tags does not match them exactly, so
- * `</REQUEST>` and `</ request >` close a section as well as `</request>`.
+ * The `<` that starts any opening or closing tag of any section, in any case,
+ * with whitespace or slashes before the name and anything after it. A model
+ * reading tags does not match them exactly, so `</ REQUEST x>`, `<request/>`
+ * and an unterminated `</request` all read as section boundaries. No word
+ * boundary after the name and no closing `>` required: `<requests>` is fenced
+ * too, a superset rather than a guess at how loosely a model reads.
  */
-const CLOSING_TAG = new RegExp(`<\\/(\\s*(?:${SECTIONS.join("|")})\\s*)>`, "gi");
+const SECTION_TAG = new RegExp(`<(?=[\\s/]*(?:${SECTIONS.join("|")}))`, "gi");
 
 /**
- * Keeps data from closing its own section early. Only the sections' closing tags
- * are touched, so code or markup in a request otherwise reaches the classifier
- * exactly as written.
+ * Keeps data from opening or closing a section of its own: a backslash after
+ * the `<` of every section tag, so `</request>` reads `<\/request>` and
+ * `<request>` reads `<\request>`. Every other `<` is untouched, so code or
+ * markup in a request otherwise reaches the classifier exactly as written.
  */
 function fence(text: string): string {
-  return text.replace(CLOSING_TAG, "<\\/$1>");
+  return text.replace(SECTION_TAG, "<\\");
 }
 
 /**

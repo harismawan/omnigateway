@@ -324,6 +324,29 @@ test("the last N human messages are judged oldest first, tool turns between them
   });
 });
 
+/**
+ * Settings coercion keeps the window inside `1..10`, but a window of zero
+ * would judge an empty request — which a classifier is likely to allow — so
+ * `judgedText` does not trust its caller: anything that is not an integer of at
+ * least one (infinity included) judges the last human message, and anything
+ * over the ceiling judges ten.
+ */
+test("a window outside 1..10 is clamped, never judging nothing", () => {
+  const request = req({
+    messages: Array.from({ length: 12 }, (_, i) => [user(`h${i + 1}`), reply(`a${i + 1}`)]).flat(),
+  });
+  for (const turns of [0, -2, Number.NaN, 0.5, 2.5, Infinity, -Infinity]) {
+    expect({ turns, judged: judgedText(request, turns) }).toEqual({
+      turns,
+      judged: { system: "", human: ["h12"], truncated: false },
+    });
+  }
+  const ten = Array.from({ length: 10 }, (_, i) => `h${i + 3}`);
+  for (const turns of [11, 1_000]) {
+    expect({ turns, human: judgedText(request, turns).human }).toEqual({ turns, human: ten });
+  }
+});
+
 test("fewer human messages than N sends what exists, flagging nothing", () => {
   expect(judgedText(req({ messages: [user("only ask")] }), 3)).toEqual({
     system: "",
@@ -394,6 +417,29 @@ test("the human cap is a total; the oldest gives way first and the newest keeps 
   // small enough to fit the room left: context with a hole in it misleads.
   const gap = judgedText(req({ messages: ["tiny", m("A", 500), newest].map(user) }), 3);
   expect(gap).toEqual({ system: "", human: [newest], truncated: true });
+
+  // The boundary itself: room of exactly the marker's length holds the marker
+  // and nothing of the message, so the message is dropped; one character more
+  // keeps a one-character head before the marker.
+  const older = `H${"x".repeat(498)}T`;
+  const atMarker = m("C", HUMAN_CAP - TRUNCATION_MARKER.length);
+  expect(judgedText(req({ messages: [older, atMarker].map(user) }), 3)).toEqual({
+    system: "",
+    human: [atMarker],
+    truncated: true,
+  });
+  const pastMarker = m("C", HUMAN_CAP - TRUNCATION_MARKER.length - 1);
+  expect(judgedText(req({ messages: [older, pastMarker].map(user) }), 3)).toEqual({
+    system: "",
+    human: [`H${TRUNCATION_MARKER}`, pastMarker],
+    truncated: true,
+  });
+  const twoPast = m("C", HUMAN_CAP - TRUNCATION_MARKER.length - 2);
+  expect(judgedText(req({ messages: [older, twoPast].map(user) }), 3)).toEqual({
+    system: "",
+    human: [`H${TRUNCATION_MARKER}T`, twoPast],
+    truncated: true,
+  });
 
   // A newest message over the cap alone is cut head plus tail, and is all there is.
   const huge = [m("A", 100), `NEW<${"y".repeat(HUMAN_CAP)}>NEW`];

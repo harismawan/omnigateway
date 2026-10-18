@@ -35,12 +35,12 @@ Settled during brainstorming:
 - **Fail closed.** If the classifier times out, errors, or returns something unreadable, the request
   is refused.
 - **What is judged: the request-level system prompt plus the last N human-authored messages.**
-  `guardrailHistoryTurns`, default 3, 1..10; 1 is the original single-message design. Tool turns are
-  skipped and never sent; the newest message is the one judged, the earlier ones its context, so a
-  bland follow-up ("continue") after a forbidden ask is judged as that ask. Splitting an ask over
-  more messages than the window is still an accepted gap (see Threat model). *Amended 2026-10-18,
-  operator-approved: the original decision judged one message and accepted the split-across-turns
-  gap outright.*
+  `guardrailHistoryTurns`, default 3, 1..10; 1 judges one message, as the original design did. Tool
+  turns are skipped and never sent; the newest message is the one judged, the earlier ones its
+  context, so a bland follow-up ("continue") after a forbidden ask is judged as that ask. Splitting
+  an ask over more messages than the window is still an accepted gap (see Threat model). *Amended
+  2026-10-18, operator-approved: the original decision judged one message and accepted the
+  split-across-turns gap outright.*
 - **The refusal message is fixed and gateway-authored.** The classifier's own words never reach the
   client — they are model-authored free text and may restate the policy.
 - **The key holder can read their key's policy** on the client dashboard (`/client`).
@@ -183,10 +183,11 @@ Assistant replies and mid-conversation system turns are never sent either.
 
 The classifier body carries `<policy>`, `<system_prompt>`, then — only when there is more than one
 human message — `<earlier_messages>` holding each older one in a numbered `<message n="…">`, then
-`<request>` holding the newest. With one message the body is exactly the original three sections.
-Every section's closing tag is fenced in any case or spacing, the new two included. The instruction
-says to judge `<request>` in the light of the earlier messages; the ALLOW/DENY contract and the
-fail-closed rules are unchanged.
+`<request>` holding the newest. With one message the body has the same structure as the original
+three sections; fencing (below) covers every section name and both tag forms regardless of N, so
+data holding a section tag the original left alone (an opening tag, `</message>`) is not
+byte-identical to it even at N=1. The instruction says to judge `<request>` in the light of the
+earlier messages; the ALLOW/DENY contract and the fail-closed rules are unchanged.
 
 If neither yields any text (e.g. an image-only first message with no system prompt), the request is
 judged on an empty string — the classifier decides, there is no special case.
@@ -207,9 +208,11 @@ settings.
 
 - Built as a fresh `ChatRequest`: a gateway-authored instruction (vendored constant, not
   operator-editable) that frames the operator policy and the judged text as clearly delimited data,
-  and asks for a verdict. Data cannot close its own section: a closing section tag in any case or
-  spacing (`</REQUEST>`, `</ request >`) is escaped. Non-streaming in effect (drain and `collect`), small `maxTokens`,
-  deterministic sampling where the target supports it.
+  and asks for a verdict. Data cannot open or close a section: every opening or closing tag of any
+  section, in any case, with any whitespace, attributes, or self-closing slash (`</REQUEST>`,
+  `</request x>`, `<request/>`, `<message n="9">`), and any name merely starting with a section's,
+  gets a backslash after its `<` (`<\/request>`, `<\request>`). Non-streaming in effect (drain and
+  `collect`), small `maxTokens`, deterministic sampling where the target supports it.
 - The verdict format is the builder's call, with one rule: **anything that is not an unambiguous
   allow is not an allow.** There is no IR-level `responseFormat`; structured output lives in the
   per-dialect vendor bags, which `responseFormat.ts` translates across providers. A bare-word reply
