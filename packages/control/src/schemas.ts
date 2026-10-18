@@ -3,7 +3,11 @@ import { PONYTAIL_MODES } from "@omni/ponytail/catalog";
 import { PROVIDER_ID_PATTERN } from "@omni/providers/descriptors";
 import { limitConfigSchema } from "@omni/ratelimit/catalog";
 import type { UsageDimension, UsageGrain } from "@omni/store";
-import { GUARDRAIL_POLICY_MAX_CHARS, GUARDRAIL_TIMEOUT_MAX_MS } from "@omni/store/types";
+import {
+  GUARDRAIL_HISTORY_TURNS_MAX,
+  GUARDRAIL_POLICY_MAX_CHARS,
+  GUARDRAIL_TIMEOUT_MAX_MS,
+} from "@omni/store/types";
 import { z } from "zod";
 
 /**
@@ -392,6 +396,8 @@ export const settingsSchema = z.object({
   guardrailModel: z.string().trim().min(1).max(256).nullable().optional(),
   /** How long one classifier call may take. Optional for the same reason. */
   guardrailTimeoutMs: z.number().int().min(1).max(GUARDRAIL_TIMEOUT_MAX_MS).optional(),
+  /** How many recent human messages the classifier judges. Optional for the same reason. */
+  guardrailHistoryTurns: z.number().int().min(1).max(GUARDRAIL_HISTORY_TURNS_MAX).optional(),
 });
 
 /** Only these credential fields are operator-editable. Secrets are not. */

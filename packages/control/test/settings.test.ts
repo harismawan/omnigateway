@@ -93,3 +93,23 @@ test("the guardrail settings refuse an empty model and an out-of-range timeout",
     guardrailModel: "fast",
   });
 });
+
+test("the history window is an integer in 1..10, and a save that omits it keeps it", async () => {
+  for (const guardrailHistoryTurns of [0, -1, 11, 1.5, "3", null]) {
+    expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, guardrailHistoryTurns })).toThrow();
+  }
+  for (const guardrailHistoryTurns of [1, 10]) {
+    expect(settingsSchema.parse({ ...DEFAULT_SETTINGS, guardrailHistoryTurns })).toMatchObject({
+      guardrailHistoryTurns,
+    });
+  }
+
+  const store = await memoryStore();
+  expect(
+    (await putSettings(store, { ...DEFAULT_SETTINGS, guardrailHistoryTurns: 7 }))
+      .guardrailHistoryTurns,
+  ).toBe(7);
+  const { guardrailHistoryTurns: _turns, ...old } = DEFAULT_SETTINGS;
+  expect((await putSettings(store, old)).guardrailHistoryTurns).toBe(7);
+  store.close();
+});

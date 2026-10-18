@@ -1,4 +1,4 @@
-import { GUARDRAIL_TIMEOUT_MAX_MS } from "@omni/store/types";
+import { GUARDRAIL_HISTORY_TURNS_MAX, GUARDRAIL_TIMEOUT_MAX_MS } from "@omni/store/types";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import styled from "styled-components";
 import {
@@ -61,6 +61,7 @@ type LimitKey = Exclude<
   | "bodyLoggingCaptureStreamChunks"
   | "guardrailModel"
   | "guardrailTimeoutMs"
+  | "guardrailHistoryTurns"
 >;
 
 const LIMITS: ReadonlyArray<{
@@ -285,6 +286,7 @@ type Draft = Record<string, string> & {
   bodyLoggingCaptureStreamChunks?: string;
   guardrailModel?: string;
   guardrailTimeoutMs?: string;
+  guardrailHistoryTurns?: string;
 };
 
 function toDraft(settings: Settings): Draft {
@@ -299,6 +301,7 @@ function toDraft(settings: Settings): Draft {
   // Blank is how "no classifier" is typed, and how it reads back.
   draft.guardrailModel = settings.guardrailModel ?? "";
   draft.guardrailTimeoutMs = String(settings.guardrailTimeoutMs);
+  draft.guardrailHistoryTurns = String(settings.guardrailHistoryTurns);
   return draft;
 }
 
@@ -349,6 +352,19 @@ function parseDraft(
       problem: `Usage policy check timeout must be a whole number from 1 to ${GUARDRAIL_TIMEOUT_MAX_MS}.`,
     };
   }
+  const turnsRaw = (draft.guardrailHistoryTurns ?? "").trim();
+  const guardrailHistoryTurns = Number(turnsRaw);
+  if (
+    turnsRaw.length === 0 ||
+    !Number.isInteger(guardrailHistoryTurns) ||
+    guardrailHistoryTurns < 1 ||
+    guardrailHistoryTurns > GUARDRAIL_HISTORY_TURNS_MAX
+  ) {
+    return {
+      ok: false,
+      problem: `Messages judged must be a whole number from 1 to ${GUARDRAIL_HISTORY_TURNS_MAX}.`,
+    };
+  }
   const guardrailModel = (draft.guardrailModel ?? "").trim();
 
   return {
@@ -376,6 +392,7 @@ function parseDraft(
       // the stored classifier, and clearing the field is how it is unset.
       guardrailModel: guardrailModel.length === 0 ? null : guardrailModel,
       guardrailTimeoutMs,
+      guardrailHistoryTurns,
     },
   };
 }
@@ -678,6 +695,29 @@ export function SettingsBoard() {
                           }
                         />
                         <Legend>ms</Legend>
+                      </Row>
+                    )}
+                  </Field>
+                </Cell>
+                <Cell>
+                  <Field
+                    label="Messages judged"
+                    hint="How many of the latest human messages are judged together. 1 is the last alone."
+                  >
+                    {(props) => (
+                      <Row $gap={2}>
+                        <Input
+                          {...props}
+                          type="number"
+                          min={1}
+                          max={GUARDRAIL_HISTORY_TURNS_MAX}
+                          step={1}
+                          value={draft.guardrailHistoryTurns ?? ""}
+                          onChange={(event) =>
+                            setDraft({ ...draft, guardrailHistoryTurns: event.target.value })
+                          }
+                        />
+                        <Legend>messages</Legend>
                       </Row>
                     )}
                   </Field>

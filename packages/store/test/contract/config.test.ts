@@ -93,6 +93,20 @@ forEachStore((backend) => {
     }
     await s.config.putSettings({ guardrailTimeoutMs: 60_000 });
     expect((await s.config.getSettings()).guardrailTimeoutMs).toBe(60_000);
+
+    // The history window defaults to three and reads anything outside 1..10,
+    // or not an integer, as the default.
+    expect((await s.config.getSettings()).guardrailHistoryTurns).toBe(3);
+    for (const turns of [1, 10, 7]) {
+      await s.config.putSettings({ guardrailHistoryTurns: turns });
+      expect((await s.config.getSettings()).guardrailHistoryTurns).toBe(turns);
+    }
+    for (const malformed of [0, -1, 11, 2.5, "5", null, true]) {
+      await s.config.putSettings({ guardrailHistoryTurns: malformed } as unknown as {
+        guardrailHistoryTurns: number;
+      });
+      expect((await s.config.getSettings()).guardrailHistoryTurns).toBe(3);
+    }
   });
 
   test("virtual models round-trip nested targets, replace on put, and remove", async () => {

@@ -328,6 +328,7 @@ export const settings: Settings = {
   snapshotMaxAgeDays: 30,
   guardrailModel: null,
   guardrailTimeoutMs: 10_000,
+  guardrailHistoryTurns: 3,
 };
 
 /**

@@ -662,6 +662,12 @@ export const GUARDRAIL_POLICY_MAX_CHARS = 4_000;
 export const GUARDRAIL_TIMEOUT_MAX_MS = 60_000;
 
 /**
+ * The ceiling on `Settings.guardrailHistoryTurns`. The human-text cap is a total
+ * across the window, so a wider one buys context, not a bigger classifier call.
+ */
+export const GUARDRAIL_HISTORY_TURNS_MAX = 10;
+
+/**
  * Whether this key may still be used at this instant.
  *
  * The single copy of a two-clause question that used to be one clause asked in
@@ -873,6 +879,13 @@ export type Settings = {
    * `GUARDRAIL_TIMEOUT_MAX_MS`; a malformed stored value reads as the default.
    */
   guardrailTimeoutMs: number;
+  /**
+   * How many of the most recent human-written messages the classifier judges:
+   * the newest, plus up to this many minus one before it as context. An
+   * integer in `1..GUARDRAIL_HISTORY_TURNS_MAX`; 1 judges the last message
+   * alone. A malformed stored value reads as the default.
+   */
+  guardrailHistoryTurns: number;
 };
 
 export interface CredentialRepo {
@@ -1735,29 +1748,37 @@ export const DEFAULT_SETTINGS: Settings = {
   snapshotMaxAgeDays: 30,
   guardrailModel: null,
   guardrailTimeoutMs: 10_000,
+  guardrailHistoryTurns: 3,
 };
 
+/** Whether a stored value is an integer inside `1..max`. */
+const inRange = (value: unknown, max: number): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= max;
+
+type GuardrailSettingKey = "guardrailModel" | "guardrailTimeoutMs" | "guardrailHistoryTurns";
+
 /**
- * How a stored settings row's two guardrail fields read back, whatever they hold.
+ * How a stored settings row's guardrail fields read back, whatever they hold.
  *
  * One copy for both backends' `getSettings`. The model name reads as `null`
  * unless it is a non-empty string — for a key carrying a policy that is a
- * refusal, never an unjudged request — and the timeout as the default unless it
- * is an integer inside `1..GUARDRAIL_TIMEOUT_MAX_MS`.
+ * refusal, never an unjudged request — the timeout as the default unless it is
+ * an integer inside `1..GUARDRAIL_TIMEOUT_MAX_MS`, and the history window as
+ * the default unless it is an integer inside `1..GUARDRAIL_HISTORY_TURNS_MAX`.
  */
 export function readGuardrailSettings(
-  stored: Partial<Record<"guardrailModel" | "guardrailTimeoutMs", unknown>>,
-): Pick<Settings, "guardrailModel" | "guardrailTimeoutMs"> {
+  stored: Partial<Record<GuardrailSettingKey, unknown>>,
+): Pick<Settings, GuardrailSettingKey> {
   const model = stored.guardrailModel;
   const timeout = stored.guardrailTimeoutMs;
+  const turns = stored.guardrailHistoryTurns;
   return {
     guardrailModel: typeof model === "string" && model.trim() !== "" ? model : null,
-    guardrailTimeoutMs:
-      typeof timeout === "number" &&
-      Number.isInteger(timeout) &&
-      timeout >= 1 &&
-      timeout <= GUARDRAIL_TIMEOUT_MAX_MS
-        ? timeout
-        : DEFAULT_SETTINGS.guardrailTimeoutMs,
+    guardrailTimeoutMs: inRange(timeout, GUARDRAIL_TIMEOUT_MAX_MS)
+      ? timeout
+      : DEFAULT_SETTINGS.guardrailTimeoutMs,
+    guardrailHistoryTurns: inRange(turns, GUARDRAIL_HISTORY_TURNS_MAX)
+      ? turns
+      : DEFAULT_SETTINGS.guardrailHistoryTurns,
   };
 }

@@ -1823,6 +1823,18 @@ test("settings set names a classifier model and clears it again with null", asyn
   expect(await setting(root, "guardrailTimeoutMs")).toBe(5000);
 });
 
+test("settings set changes the guardrail history window and refuses one outside 1..10", async () => {
+  const root = await installation();
+
+  expect(await setting(root, "guardrailHistoryTurns")).toBe(3);
+  expect((await cli(["settings", "set", "guardrailHistoryTurns", "5"], { root })).code).toBe(0);
+  expect(await setting(root, "guardrailHistoryTurns")).toBe(5);
+  for (const bad of ["0", "11", "2.5"]) {
+    expect((await cli(["settings", "set", "guardrailHistoryTurns", bad], { root })).code).toBe(1);
+  }
+  expect(await setting(root, "guardrailHistoryTurns")).toBe(5);
+});
+
 test("settings set refuses a ponytail level that is not one of the four", async () => {
   const root = await installation();
 

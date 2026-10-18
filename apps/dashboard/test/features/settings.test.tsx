@@ -378,4 +378,51 @@ describe("SettingsBoard", () => {
       expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
     }
   });
+
+  test("the history window loads and saves as a number", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({
+      "GET /api/settings": () => ({
+        settings: { ...settings, guardrailHistoryTurns: 4 },
+        bodyLoggingAllowed: false,
+      }),
+      "GET /api/models": () => ({ models: [] }),
+      "PUT /api/settings": () => ({ ok: true }),
+    });
+    renderWithProviders(<SettingsBoard />);
+
+    const field = (await screen.findByLabelText("Messages judged")) as HTMLInputElement;
+    await waitFor(() => expect(field.value).toBe("4"));
+    await user.clear(field);
+    await user.type(field, "7");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body))).toMatchObject({ guardrailHistoryTurns: 7 });
+    });
+  });
+
+  test("a history window outside 1..10 is refused before saving", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "GET /api/models": () => ({ models: [] }) });
+    renderWithProviders(<SettingsBoard />);
+    const field = await screen.findByLabelText("Messages judged");
+    for (const value of ["0", "11", "2.5", ""]) {
+      await user.clear(field);
+      if (value !== "") await user.type(field, value);
+      await user.click(screen.getByRole("button", { name: "Save changes" }));
+      expect((await screen.findByRole("alert")).textContent).toContain(
+        "Messages judged must be a whole number from 1 to 10.",
+      );
+      expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+    }
+    // In range again, the save goes through.
+    await user.clear(field);
+    await user.type(field, "10");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body))).toMatchObject({ guardrailHistoryTurns: 10 });
+    });
+  });
 });
