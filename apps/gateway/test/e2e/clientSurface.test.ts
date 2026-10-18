@@ -8,7 +8,12 @@ import {
   virtualModel,
 } from "@omni/testkit";
 import { createApp } from "../../src/app.ts";
-import { ANTHROPIC_STREAM, createStubUpstream, type StubUpstream } from "./upstream.ts";
+import {
+  ANTHROPIC_STREAM,
+  createStubUpstream,
+  type StubResponse,
+  type StubUpstream,
+} from "./upstream.ts";
 
 const NOW = 1_000_000;
 
@@ -218,6 +223,7 @@ test("the summary carries the key's own model overrides, and nothing beside them
       "createdAt",
       "dayOffsetMinutes",
       "expiresAt",
+      "guardrailPolicy",
       "id",
       "label",
       "limitUsage",
@@ -227,6 +233,78 @@ test("the summary carries the key's own model overrides, and nothing beside them
       "revokedAt",
     ].sort(),
   );
+  store.close();
+});
+
+/** The same upstream turn, answering the classifier's question instead. */
+const VERDICT_ALLOW: StubResponse =
+  ANTHROPIC_STREAM.kind === "sse"
+    ? {
+        kind: "sse",
+        events: ANTHROPIC_STREAM.events.map((e) =>
+          e.event === "content_block_delta"
+            ? {
+                event: e.event,
+                data: {
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "text_delta", text: "ALLOW" },
+                },
+              }
+            : e,
+        ),
+      }
+    : ANTHROPIC_STREAM;
+
+/**
+ * A key holder reads their own usage policy, and sees the classifier calls they
+ * were charged for — model name and `guardrail:*` tags included, since hiding
+ * them would make their usage not add up — with no credential identity on any
+ * of it.
+ */
+test("the holder sees their policy and the classifier rows charged to them, and no account", async () => {
+  const { store, upstream, serve, api, login } = await harness();
+  await store.config.putSettings({ guardrailModel: "fast" });
+  const mine = await seedApiKey(store, { label: "mine", guardrailPolicy: "Work only." });
+  upstream.queue(VERDICT_ALLOW);
+  upstream.queue(ANTHROPIC_STREAM);
+
+  expect((await serve(mine.raw)).status).toBe(200);
+  // The classifier call and the real one, both on the operator's account.
+  expect(upstream.calls).toHaveLength(2);
+
+  const cookie = await login(mine.raw);
+  const summary = (await (await api("/api/client/summary", cookie)).json()) as {
+    guardrailPolicy: string | null;
+  };
+  expect(summary.guardrailPolicy).toBe("Work only.");
+
+  const logs = (await (await api("/api/client/logs", cookie)).json()) as {
+    logs: { id: string; requestedModel: string; degradations: string[] }[];
+  };
+  const byId = new Map(logs.logs.map((row) => [row.id, row]));
+  expect(byId.get("req_1")?.degradations).toContain("guardrail:allowed");
+  expect(byId.get("req_2")?.degradations).toContain("guardrail:classifier");
+  expect(byId.get("req_2")?.requestedModel).toBe("fast");
+
+  const buckets = (await (await api("/api/client/usage?groupBy=model", cookie)).json()) as {
+    key: string;
+    requests: number;
+  }[];
+  expect(buckets.reduce((sum, b) => sum + b.requests, 0)).toBe(2);
+
+  for (const path of [
+    "/api/client/logs",
+    "/api/client/usage?groupBy=model",
+    "/api/client/summary",
+  ]) {
+    const body = await (await api(path, cookie)).text();
+    expect({ path, hasCredential: body.includes("cred-OPERATOR-ACCOUNT") }).toEqual({
+      path,
+      hasCredential: false,
+    });
+    expect({ path, hasField: body.includes("credentialId") }).toEqual({ path, hasField: false });
+  }
   store.close();
 });
 

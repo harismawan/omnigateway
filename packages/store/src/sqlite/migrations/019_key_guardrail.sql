@@ -1,0 +1,15 @@
+-- An optional usage policy on a gateway API key: free text the operator wrote
+-- about what the key may be used for, judged by a classifier model before each
+-- inference request (`apps/gateway/src/guardrail/`).
+--
+-- Nullable, and NULL is the only spelling of "no guardrail". No backfill, for
+-- the reason migration 14 has none: every existing key was minted without a
+-- policy, and inventing one would start refusing its client on an upgrade the
+-- operator never connected to it.
+--
+-- Its own column rather than a member of `limits`. A policy is not a limit, and
+-- nesting it there would bind it to the `@omni/ratelimit/catalog` storage
+-- contract, which fails closed on any name it does not know. The cost is
+-- accepted and documented: a rollback to a build without this column ignores
+-- it and stops judging — the guardrail fails open across a downgrade.
+ALTER TABLE api_keys ADD COLUMN guardrail_policy TEXT;

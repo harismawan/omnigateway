@@ -4,6 +4,7 @@ import {
   ChevronRight,
   ListChecks,
   Plus,
+  ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
 import { Fragment, useState } from "react";
@@ -20,6 +21,7 @@ import { Legend, Row, Truncate } from "../../ui/primitives.ts";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { EditExpiryDialog } from "./EditExpiryDialog.tsx";
+import { EditGuardrailDialog } from "./EditGuardrailDialog.tsx";
 import { EditLimitsDialog } from "./EditLimitsDialog.tsx";
 import { EditModelsDialog } from "./EditModelsDialog.tsx";
 import { keyState } from "./expiry.ts";
@@ -80,6 +82,7 @@ export function KeysBoard() {
   const [editing, setEditing] = useState<ApiKeySummary | null>(null);
   const [editingModels, setEditingModels] = useState<ApiKeySummary | null>(null);
   const [editingExpiry, setEditingExpiry] = useState<ApiKeySummary | null>(null);
+  const [editingPolicy, setEditingPolicy] = useState<ApiKeySummary | null>(null);
   const [opened, setOpened] = useState<string | null>(null);
   const [doomed, setDoomed] = useState<ApiKeySummary | null>(null);
 
@@ -139,6 +142,7 @@ export function KeysBoard() {
                   <Th $align="right">Limits</Th>
                   <Th $align="right">Created</Th>
                   <Th>Body capture</Th>
+                  <Th>Usage policy</Th>
                   <Th>Status</Th>
                   <Th />
                 </tr>
@@ -204,6 +208,16 @@ export function KeysBoard() {
                               holds it — so it is listed rather than left in the
                               database for an auditor to find. */}
                           {key.bodyLoggingOptOut ? <Chip>no bodies</Chip> : <Legend>—</Legend>}
+                        </Td>
+                        <Td>
+                          {/* Whether requests are judged, not the text: a
+                              policy can run to thousands of characters and is
+                              read in its own dialog. */}
+                          {key.guardrailPolicy === null ? (
+                            <Legend>—</Legend>
+                          ) : (
+                            <Chip title={key.guardrailPolicy}>judged</Chip>
+                          )}
                         </Td>
                         <Td>
                           {/* Three chips, not two. An expired key is refused at
@@ -282,6 +296,16 @@ export function KeysBoard() {
                                 >
                                   <CalendarClock />
                                 </IconButton>
+                                <IconButton
+                                  type="button"
+                                  $variant="ghost"
+                                  $size="sm"
+                                  aria-label={`Edit usage policy for ${key.label}`}
+                                  title={`Edit usage policy for ${key.label}`}
+                                  onClick={() => setEditingPolicy(key)}
+                                >
+                                  <ShieldCheck />
+                                </IconButton>
                                 <Button
                                   type="button"
                                   $variant="danger"
@@ -297,7 +321,7 @@ export function KeysBoard() {
                       </Tr>
                       {open ? (
                         <Tr>
-                          <Td colSpan={8}>
+                          <Td colSpan={9}>
                             <LimitMatrix label={key.label} readings={key.limitUsage} />
                           </Td>
                         </Tr>
@@ -340,6 +364,15 @@ export function KeysBoard() {
         apiKey={editingExpiry}
         onOpenChange={(next) => {
           if (!next) setEditingExpiry(null);
+        }}
+      />
+
+      {/* Keyed by the row, same reason as the dialogs above. */}
+      <EditGuardrailDialog
+        key={editingPolicy?.id ?? "none"}
+        apiKey={editingPolicy}
+        onOpenChange={(next) => {
+          if (!next) setEditingPolicy(null);
         }}
       />
 

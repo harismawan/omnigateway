@@ -6,7 +6,15 @@ import { join } from "node:path";
 import { GatewayError } from "@omni/ir";
 import { createStore, deriveKey } from "@omni/store";
 import { memoryStore, requestLog, seedApiKey } from "@omni/testkit";
-import { listKeys, setKeyExpiry, setKeyLimits, setKeyModels } from "../src/keys.ts";
+import {
+  createKey,
+  listKeys,
+  readOwnKey,
+  setKeyExpiry,
+  setKeyGuardrail,
+  setKeyLimits,
+  setKeyModels,
+} from "../src/keys.ts";
 
 /**
  * Limits are editable after creation; `bodyLoggingOptOut` is not.
@@ -312,5 +320,47 @@ test("limits with model overrides are written whole, and an empty override is re
     setKeyLimits(store, key.id, { limits: { models: { opus: { models: {} } } } }),
   ).rejects.toBeInstanceOf(GatewayError);
   expect((await store.keys.get(key.id))?.limits).toEqual(limits);
+  store.close();
+});
+
+test("a usage policy is set, replaced, and cleared through the store", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store);
+  expect((await readOwnKey(store, key.id)).guardrailPolicy).toBeNull();
+
+  const set = await setKeyGuardrail(store, key.id, { policy: "  Work only.  " });
+  expect(set.guardrailPolicy).toBe("Work only.");
+  expect((await store.keys.get(key.id))?.guardrailPolicy).toBe("Work only.");
+  // The holder's own summary carries it, as the listing does.
+  expect((await readOwnKey(store, key.id)).guardrailPolicy).toBe("Work only.");
+  expect((await listKeys(store))[0]?.guardrailPolicy).toBe("Work only.");
+
+  const cleared = await setKeyGuardrail(store, key.id, { policy: null });
+  expect(cleared.guardrailPolicy).toBeNull();
+  expect((await store.keys.get(key.id))?.guardrailPolicy).toBeNull();
+
+  // Absent is refused rather than read as either value, and nothing is written.
+  await setKeyGuardrail(store, key.id, { policy: "Kept." });
+  await expect(setKeyGuardrail(store, key.id, {})).rejects.toThrow();
+  await expect(setKeyGuardrail(store, key.id, { policy: "  " })).rejects.toThrow();
+  expect((await store.keys.get(key.id))?.guardrailPolicy).toBe("Kept.");
+  store.close();
+});
+
+test("setting a usage policy on an unknown key id is refused rather than matching no row", async () => {
+  const store = await memoryStore();
+  await seedApiKey(store);
+  await expect(setKeyGuardrail(store, "not-a-key", { policy: null })).rejects.toThrow(
+    "no such api key",
+  );
+  store.close();
+});
+
+test("a key can be minted with a usage policy", async () => {
+  const store = await memoryStore();
+  const created = await createKey(store, { label: "staff", guardrailPolicy: "Work only." });
+  expect((await store.keys.get(created.id))?.guardrailPolicy).toBe("Work only.");
+  const plain = await createKey(store, { label: "plain" });
+  expect((await store.keys.get(plain.id))?.guardrailPolicy).toBeNull();
   store.close();
 });

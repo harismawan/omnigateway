@@ -15,6 +15,7 @@ function key(overrides: Partial<ApiKey> = {}): ApiKey {
     createdAt: 0,
     revokedAt: null,
     expiresAt: null,
+    guardrailPolicy: null,
     ...overrides,
   };
 }

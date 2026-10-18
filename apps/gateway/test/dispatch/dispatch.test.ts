@@ -273,6 +273,68 @@ test("compresses once from the dispatch snapshot and sends identical content on 
   store.close();
 });
 
+/**
+ * The one caller that opts out of the operator's request transforms is the
+ * guardrail classifier: its request is the gateway's own, and a ruleset or a
+ * compressed tool result changes what the classifier is asked. The option is
+ * the caller's statement, so both transforms are enabled here and the same
+ * request is dispatched twice — once with the default, once opted out.
+ */
+test("requestTransforms: false sends the request untouched with RTK and ponytail both on", async () => {
+  const store = await seeded(1);
+  await store.config.putSettings({ rtkEnabled: true, ponytailMode: "full" });
+  const received: ChatRequest[] = [];
+  const adapter = stubAdapter(() => textStream("ok"));
+  const originalSend = adapter.send.bind(adapter);
+  adapter.send = async (input) => {
+    received.push(input.request);
+    return originalSend(input);
+  };
+  const repeated = [
+    "bun test v1.4.0",
+    ...Array.from({ length: 600 }, () => "case passed"),
+    "600 pass",
+    "0 fail",
+    "Ran 600 tests across 20 files",
+  ].join("\n");
+  const input: ChatRequest = {
+    model: "fast",
+    stream: false,
+    system: [{ type: "text", text: "be brief" }],
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "toolUse", id: "t1", name: "bash", input: "bun test" }],
+      },
+      { role: "user", content: [{ type: "toolResult", toolUseId: "t1", content: repeated }] },
+    ],
+  };
+
+  const transformed = await dispatch(
+    input,
+    deps(store, adapter),
+    new AbortController().signal,
+    "a",
+  );
+  await drain(transformed.events);
+  const untouched = await dispatch(input, deps(store, adapter), new AbortController().signal, "b", {
+    requestTransforms: false,
+  });
+  await drain(untouched.events);
+
+  // The default really does transform this request, so the opt-out is measured
+  // against something rather than against a request neither transform touches.
+  expect(JSON.stringify(received[0]?.system)).toContain("You are a lazy senior developer.");
+  expect(transformed.log().rtkApplied).toBe(true);
+  expect(transformed.log().degradations).toContain("ponytail:full");
+
+  expect(received[1]).toEqual(input);
+  expect(untouched.log().rtkApplied).toBe(false);
+  expect(untouched.log().rtkFilters).toEqual([]);
+  expect(untouched.log().degradations.some((d) => d.startsWith("ponytail:"))).toBe(false);
+  store.close();
+});
+
 test("streams a successful response and logs it", async () => {
   const store = await seeded(1);
   const adapter = stubAdapter(() => textStream("hello"));

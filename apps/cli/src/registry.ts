@@ -25,6 +25,7 @@ import {
 import {
   keysCreate,
   keysExpiry,
+  keysGuardrail,
   keysLimits,
   keysList,
   keysModels,
@@ -109,6 +110,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "keys limits": keysLimits,
   "keys models": keysModels,
   "keys expiry": keysExpiry,
+  "keys guardrail": keysGuardrail,
   "keys revoke": keysRevoke,
 
   "plugin list": pluginList,

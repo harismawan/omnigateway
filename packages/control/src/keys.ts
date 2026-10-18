@@ -13,6 +13,7 @@ import { generateApiKey, hashApiKey } from "@omni/store";
 import {
   keyCreateSchema,
   keyExpirySchema,
+  keyGuardrailSchema,
   keyLimitsSchema,
   keyModelsSchema,
   parseOrThrow,
@@ -173,6 +174,10 @@ async function toSummary(store: Store, key: ApiKey, now: number): Promise<ApiKey
     // auth, degrade at list: an expired key that vanished from the board would
     // be a key that stopped working with nowhere to see why.
     expiresAt: key.expiresAt,
+    // On the holder's own summary as well as the operator's listing: a key
+    // whose requests are refused for a purpose its holder cannot read is a key
+    // they cannot use as intended. It is the operator's text, not a secret.
+    guardrailPolicy: key.guardrailPolicy,
   };
 }
 
@@ -235,6 +240,8 @@ export async function createKey(store: Store, input: unknown): Promise<CreatedKe
     // Null unless asked for, which is what every key minted before this field
     // existed carries and what the great majority should keep carrying.
     expiresAt: body.expiresAt,
+    // Null unless asked for: no guardrail, and no classifier call per request.
+    guardrailPolicy: body.guardrailPolicy,
   });
 
   return { id: created.id, label: created.label, prefix: created.prefix, key: raw };
@@ -318,6 +325,32 @@ export async function setKeyExpiry(
 
   await store.keys.setExpiry(id, body.expiresAt);
   return toSummary(store, { ...key, expiresAt: body.expiresAt }, now);
+}
+
+/**
+ * Replaces one key's usage policy and reports the key as it now stands.
+ *
+ * The fourth field editable after minting, written whole like the other three:
+ * the trimmed text, or `null` to remove the guardrail. An unknown id is refused
+ * before the write for the reason the others refuse one.
+ *
+ * Takes effect on the key's next request. Nothing needs invalidating: the
+ * gateway's verdict cache keys on the policy text itself, so an edited policy
+ * misses it.
+ */
+export async function setKeyGuardrail(
+  store: Store,
+  id: string,
+  input: unknown,
+  now: number = Date.now(),
+): Promise<ApiKeySummary> {
+  const body = parseOrThrow(keyGuardrailSchema, input);
+
+  const key = await store.keys.get(id);
+  if (key === null) throw new GatewayError("BAD_REQUEST", "no such api key");
+
+  await store.keys.setGuardrailPolicy(id, body.policy);
+  return toSummary(store, { ...key, guardrailPolicy: body.policy }, now);
 }
 
 export async function revokeKey(store: Store, id: string): Promise<void> {

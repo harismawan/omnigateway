@@ -3,6 +3,11 @@ import { PONYTAIL_MODES } from "@omni/ponytail/catalog";
 import { PROVIDER_ID_PATTERN } from "@omni/providers/descriptors";
 import { limitConfigSchema } from "@omni/ratelimit/catalog";
 import type { UsageDimension, UsageGrain } from "@omni/store";
+import {
+  GUARDRAIL_HISTORY_TURNS_MAX,
+  GUARDRAIL_POLICY_MAX_CHARS,
+  GUARDRAIL_TIMEOUT_MAX_MS,
+} from "@omni/store/types";
 import { z } from "zod";
 
 /**
@@ -194,6 +199,15 @@ export const modelSchema = z.object({
  */
 const MAX_INSTANT = 8_640_000_000_000_000;
 
+/**
+ * A key's usage policy: what it may be used for, in the operator's own words.
+ *
+ * Trimmed, then 1..`GUARDRAIL_POLICY_MAX_CHARS` characters. Empty after the
+ * trim is refused rather than coerced to `null`: "no guardrail" is spelled
+ * `null`, and a caller who sent whitespace meant something it did not say.
+ */
+const guardrailPolicySchema = z.string().trim().min(1).max(GUARDRAIL_POLICY_MAX_CHARS);
+
 export const keyCreateSchema = z
   .object({
     label: z.string().min(1).default("api key"),
@@ -231,12 +245,19 @@ export const keyCreateSchema = z
      * Bounded by `MAX_INSTANT` for the reason given there.
      */
     expiresAt: z.number().int().positive().max(MAX_INSTANT).nullable().default(null),
+    /**
+     * What the key may be used for, judged per request by the classifier model.
+     * `null` — the default — is no guardrail, which is what every key minted
+     * before this field existed carries.
+     */
+    guardrailPolicy: guardrailPolicySchema.nullable().default(null),
   })
   .strict();
 
 /**
- * One of the three parts of a key that may be edited after it is minted — the
- * matrix here, the model allowlist and the expiry in the two schemas below.
+ * One of the four parts of a key that may be edited after it is minted — the
+ * matrix here, the model allowlist, the expiry and the usage policy in the
+ * schemas below.
  *
  * Sent whole rather than as a patch: `limits` is one JSON document, `{}` is a
  * meaningful value, and a partial body would have to distinguish "leave this
@@ -289,6 +310,16 @@ export const keyModelsSchema = z
 export const keyExpirySchema = z
   .object({ expiresAt: z.number().int().positive().max(MAX_INSTANT).nullable() })
   .strict();
+
+/**
+ * The fourth part of a key that may be edited after it is minted: its usage
+ * policy, or `null` to remove the guardrail.
+ *
+ * Deliberately not defaulted, exactly as `keyExpirySchema` is not: `null` (no
+ * guardrail) and an absent field are different facts, and a body of `{}`
+ * silently withdrawing an operator's restriction is the failure this refuses.
+ */
+export const keyGuardrailSchema = z.object({ policy: guardrailPolicySchema.nullable() }).strict();
 
 /**
  * How many database snapshots to keep, and for how long.
@@ -353,6 +384,20 @@ export const settingsSchema = z.object({
    */
   snapshotKeepLatest: retentionSchema.shape.keepLatest.optional(),
   snapshotMaxAgeDays: retentionSchema.shape.maxAgeDays.optional(),
+  /**
+   * The classifier that judges keys carrying a usage policy, or `null`.
+   *
+   * Not checked for existence, the exemption a dangling pin has: a model that
+   * does not resolve surfaces as a failed check — a refusal — and in
+   * `omni doctor`. Optional for the reason retention is: a save from a client
+   * that has never heard of the field keeps the stored value rather than
+   * clearing it.
+   */
+  guardrailModel: z.string().trim().min(1).max(256).nullable().optional(),
+  /** How long one classifier call may take. Optional for the same reason. */
+  guardrailTimeoutMs: z.number().int().min(1).max(GUARDRAIL_TIMEOUT_MAX_MS).optional(),
+  /** How many recent human messages the classifier judges. Optional for the same reason. */
+  guardrailHistoryTurns: z.number().int().min(1).max(GUARDRAIL_HISTORY_TURNS_MAX).optional(),
 });
 
 /** Only these credential fields are operator-editable. Secrets are not. */

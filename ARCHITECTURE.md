@@ -130,6 +130,10 @@ sequenceDiagram
   Route->>In: validate + translate
   In-->>Route: ChatRequest (provider-neutral IR)
   Route->>Route: model allowlist,<br/>after alias normalization
+  opt key carries a usage policy
+    Route->>Disp: classifier request (own id, own row,<br/>no RTK, no ponytail, no capture)
+    Disp-->>Route: ALLOW, or the request is refused
+  end
   Route->>Disp: dispatch(request, signal)
   Disp->>RTK: filter tool results (off by default)
   RTK-->>Disp: rewritten request + savings report
@@ -148,6 +152,8 @@ sequenceDiagram
 ```
 
 Two details diagram flattens. Credentials decrypt at step 13, not sooner — ranking ten candidates costs zero decryptions. Log row opens before first attempt, closes exactly once — client hanging up mid-stream recorded as such, not success.
+
+**Usage policies** (`apps/gateway/src/guardrail/`). A key carrying one has each inference request judged before the real dispatch, after admission — so the check runs inside the key's concurrency slot and a refused request still counts. Judging is the first step of the event sequence the surface encoder consumes (`judgeFirst`), not a step before it: a streaming route sends its head at once and its keepalives cover the classifier, and a refusal arrives as an in-stream `error` like every other pre-commit failure; the non-streaming path drains the same sequence into a status. The parent row is still completed exactly once, carrying `guardrail:allowed|denied|unavailable|unconfigured`. The classifier itself is an ordinary `dispatch` with its own request id and `request_logs` row under the same key (`guardrail:classifier`), debited through `finishLog` like any request (its debit first calls `recordOverride`, so the classifier model's override is charged on every replica though no admission recorded it), with `requestTransforms: false` and the bare transport, so neither RTK, ponytail nor body capture touches it. It rides the parent's admission and claims no `1m` ring slot. Fails closed: only a bare `ALLOW` reply the model finished (`endTurn`/`stopSequence`) is an allow. What is judged is the system prompt plus the last `guardrailHistoryTurns` human-written messages (tool turns skipped), oldest first, the newest as the request and the rest as context, under one shared human-text cap the newest spends first (`guardrail/extract.ts`). Verdicts are cached per process (bounded LRU, one hour) keyed on key, policy, model and the truncated judged texts as a structured array; failures never are. Design: [per-key guardrails](docs/superpowers/specs/2026-10-18-key-guardrails-design.md).
 
 `GET /v1/models` answered from routing snapshot, no provider call. `POST /v1/messages/count_tokens` estimated locally — deliberately writes no usage row. It reads the routing snapshot too, and applies the ponytail injection by hand before estimating: it never dispatches, so a count that skipped it would under-report by the whole ruleset on every call while the real request paid for it. No degradation is recorded there, because there is no row to record it on.
 

@@ -22,7 +22,7 @@ import {
   createFrameSink,
   type FrameSink,
 } from "../bodyCapture.ts";
-import { type DispatchDeps, dispatch } from "../dispatch/index.ts";
+import { type DispatchDeps, type DispatchOutcome, dispatch } from "../dispatch/index.ts";
 import { createLoadRegistry } from "../dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "../dispatch/snapshotCache.ts";
 import {
@@ -44,6 +44,8 @@ import {
   responsesResponse,
   responsesStream,
 } from "../egress/responses.ts";
+import { VerdictCache } from "../guardrail/cache.ts";
+import { judge, judgeFirst } from "../guardrail/judge.ts";
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
 import { customToolNames, parseResponsesRequest } from "../ingress/responses.ts";
@@ -117,6 +119,8 @@ type ResolvedProxyDeps = DispatchDeps &
   > & {
     keepaliveMs: number;
     logger: Logger;
+    /** One per process, like the limiter: a verdict is reused across requests. */
+    guardrailCache: VerdictCache;
   };
 
 type Surface = "anthropic" | "openai" | "responses";
@@ -609,39 +613,79 @@ async function handle(
       throw error;
     }
     let began = false;
-    const dispatched = await dispatch(
-      chatRequest,
-      {
-        ...deps,
-        // Per request, and only when this request is captured. `HttpClient` is
-        // a single function type, so capture is a decorator over it: dispatch
-        // and every adapter go on calling the transport they were handed, the
-        // rule that all outbound provider HTTP goes through `HttpClient` holds,
-        // and `nodeHttpClient` never learns this exists. The collector's
-        // lifetime is this handler's — there is no registry keyed by request id
-        // to leak or to look a request up in.
-        ...(captured === null ? {} : { http: captured.wrap(deps.http) }),
-        trace,
-        async onRoute(target) {
-          if (began) {
-            await routeLog(deps.store, requestId, target, deps.logger, deps.broadcaster);
-            return;
-          }
-          began = true;
-          const log = newPendingRequestLog({
-            id: requestId,
-            at: startedAt,
-            requestedModel,
-            resolvedProvider: target.provider,
-            resolvedModel: target.model,
-            credentialId: target.credentialId,
-          });
-          await beginLog(deps.store, log, keyId, deps.logger, deps.broadcaster);
+    const run = (): Promise<DispatchOutcome> =>
+      dispatch(
+        chatRequest,
+        {
+          ...deps,
+          // Per request, and only when this request is captured. `HttpClient` is
+          // a single function type, so capture is a decorator over it: dispatch
+          // and every adapter go on calling the transport they were handed, the
+          // rule that all outbound provider HTTP goes through `HttpClient` holds,
+          // and `nodeHttpClient` never learns this exists. The collector's
+          // lifetime is this handler's — there is no registry keyed by request id
+          // to leak or to look a request up in.
+          ...(captured === null ? {} : { http: captured.wrap(deps.http) }),
+          trace,
+          async onRoute(target) {
+            if (began) {
+              await routeLog(deps.store, requestId, target, deps.logger, deps.broadcaster);
+              return;
+            }
+            began = true;
+            const log = newPendingRequestLog({
+              id: requestId,
+              at: startedAt,
+              requestedModel,
+              resolvedProvider: target.provider,
+              resolvedModel: target.model,
+              credentialId: target.credentialId,
+            });
+            await beginLog(deps.store, log, keyId, deps.logger, deps.broadcaster);
+          },
         },
-      },
-      request.signal,
-      requestId,
-    );
+        request.signal,
+        requestId,
+      );
+    // After admission, so the check runs inside the key's concurrency slot and a
+    // refused request still counts as one — refusals are not a free probe. A key
+    // with no policy takes exactly the path it took before guardrails existed:
+    // no classifier call, and dispatch awaited before the head.
+    const policy = key.guardrailPolicy;
+    const dispatched =
+      policy === null
+        ? await run()
+        : judgeFirst({
+            judge: () =>
+              judge(
+                {
+                  ...deps,
+                  cache: deps.guardrailCache,
+                },
+                {
+                  apiKeyId: key.id,
+                  policy,
+                  request: chatRequest,
+                  signal: request.signal,
+                  // The classifier call is never admitted, so its model's
+                  // override is recorded here or its debit would be skipped —
+                  // an under-count on any replica sharing that subject's buckets.
+                  debit: (id, model, usage) => {
+                    rateLimiter.recordOverride(id, key.limits, model);
+                    debit(id, model, usage);
+                  },
+                  parentRequestId: requestId,
+                },
+              ),
+            dispatch: run,
+            signal: request.signal,
+            requestId,
+            startedAt,
+            requestedModel,
+            now: deps.now,
+            logger: deps.logger,
+            surface,
+          });
     outcome = dispatched;
     const log = async (cancelled = false, failure?: unknown): Promise<void> => {
       const completed = dispatched.log();
@@ -864,6 +908,7 @@ export function proxyRoutes(deps: ProxyDeps) {
     // gateway were idle.
     loadRegistry: deps.loadRegistry ?? createLoadRegistry(coord),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
+    guardrailCache: new VerdictCache(),
   };
   return (
     new Elysia()

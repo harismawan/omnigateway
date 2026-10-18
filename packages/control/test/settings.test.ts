@@ -57,3 +57,59 @@ test("body retention accepts positive whole days up to the existing retention ce
 test("a retention field that is present is still validated", () => {
   expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, snapshotKeepLatest: 0 })).toThrow();
 });
+
+test("the guardrail settings save, clear, and survive a save that omits them", async () => {
+  const store = await memoryStore();
+  const saved = await putSettings(store, {
+    ...DEFAULT_SETTINGS,
+    guardrailModel: "anthropic/claude-haiku-4",
+    guardrailTimeoutMs: 5_000,
+  });
+  expect(saved.guardrailModel).toBe("anthropic/claude-haiku-4");
+  expect(saved.guardrailTimeoutMs).toBe(5_000);
+
+  // A save from a client that never heard of the fields keeps them.
+  const { guardrailModel: _model, guardrailTimeoutMs: _timeout, ...old } = DEFAULT_SETTINGS;
+  const kept = await putSettings(store, old);
+  expect(kept.guardrailModel).toBe("anthropic/claude-haiku-4");
+  expect(kept.guardrailTimeoutMs).toBe(5_000);
+
+  // `null` is how the classifier is unset, distinct from omitting the field.
+  expect((await putSettings(store, { ...old, guardrailModel: null })).guardrailModel).toBeNull();
+  store.close();
+});
+
+test("the guardrail settings refuse an empty model and an out-of-range timeout", () => {
+  for (const guardrailModel of ["", "   ", 7]) {
+    expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, guardrailModel })).toThrow();
+  }
+  for (const guardrailTimeoutMs of [0, -1, 1.5, 60_001, "10000"]) {
+    expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, guardrailTimeoutMs })).toThrow();
+  }
+  expect(settingsSchema.parse({ ...DEFAULT_SETTINGS, guardrailTimeoutMs: 60_000 })).toMatchObject({
+    guardrailTimeoutMs: 60_000,
+  });
+  expect(settingsSchema.parse({ ...DEFAULT_SETTINGS, guardrailModel: " fast " })).toMatchObject({
+    guardrailModel: "fast",
+  });
+});
+
+test("the history window is an integer in 1..10, and a save that omits it keeps it", async () => {
+  for (const guardrailHistoryTurns of [0, -1, 11, 1.5, "3", null]) {
+    expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, guardrailHistoryTurns })).toThrow();
+  }
+  for (const guardrailHistoryTurns of [1, 10]) {
+    expect(settingsSchema.parse({ ...DEFAULT_SETTINGS, guardrailHistoryTurns })).toMatchObject({
+      guardrailHistoryTurns,
+    });
+  }
+
+  const store = await memoryStore();
+  expect(
+    (await putSettings(store, { ...DEFAULT_SETTINGS, guardrailHistoryTurns: 7 }))
+      .guardrailHistoryTurns,
+  ).toBe(7);
+  const { guardrailHistoryTurns: _turns, ...old } = DEFAULT_SETTINGS;
+  expect((await putSettings(store, old)).guardrailHistoryTurns).toBe(7);
+  store.close();
+});

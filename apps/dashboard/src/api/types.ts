@@ -435,6 +435,13 @@ export type KeyModelsInput = { modelAllowlist: string[] | null };
  */
 export type KeyExpiryInput = { expiresAt: number | null };
 
+/**
+ * What the key may be used for, sent whole. `null` removes the guardrail; an
+ * empty string is refused by the route rather than read as `null`, and so is an
+ * absent field.
+ */
+export type KeyGuardrailInput = { policy: string | null };
+
 export type KeyCreateInput = {
   label: string;
   /** Null means every configured model; an empty array means none. */

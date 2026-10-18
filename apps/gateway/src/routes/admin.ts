@@ -36,6 +36,7 @@ import {
   removeModel,
   revokeKey,
   setKeyExpiry,
+  setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
   setupFiles,
@@ -481,8 +482,8 @@ export function adminRoutes(deps: AdminDeps) {
       })
 
       /**
-       * One of the three fields on a key that are editable after minting — this
-       * one, the allowlist below, and the expiry after it.
+       * One of the four fields on a key that are editable after minting — this
+       * one, the allowlist below, the expiry, and the usage policy after it.
        *
        * `bodyLoggingOptOut` has no route like this on purpose: it is a promise
        * to whoever holds the key. A limit is the operator's own ceiling on
@@ -529,6 +530,19 @@ export function adminRoutes(deps: AdminDeps) {
       .put("/api/keys/:id/expiry", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         const key = await setKeyExpiry(deps.store, params.id, await readJson(request));
+        changed("res:keys");
+        return key;
+      })
+
+      /**
+       * The fourth: what the key may be used for, judged by the classifier on
+       * every inference request it makes. `{"policy": null}` removes the
+       * guardrail; an absent field is a `BAD_REQUEST`, for the reason the
+       * expiry's is — `{}` must not silently withdraw a restriction.
+       */
+      .put("/api/keys/:id/guardrail", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        const key = await setKeyGuardrail(deps.store, params.id, await readJson(request));
         changed("res:keys");
         return key;
       })

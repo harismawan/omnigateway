@@ -179,6 +179,8 @@ export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
     revokedAt: null,
     /** Never, which is what a key says when nobody set a deadline on it. */
     expiresAt: null,
+    /** No usage policy, so the key's requests are never judged. */
+    guardrailPolicy: null,
     ...patch,
   };
 }
@@ -324,6 +326,9 @@ export const settings: Settings = {
   bodyLoggingCaptureStreamChunks: false,
   snapshotKeepLatest: 5,
   snapshotMaxAgeDays: 30,
+  guardrailModel: null,
+  guardrailTimeoutMs: 10_000,
+  guardrailHistoryTurns: 3,
 };
 
 /**

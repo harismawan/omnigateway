@@ -87,6 +87,28 @@ describe("client board", () => {
     expect(screen.getByText("Every model this gateway serves.")).toBeTruthy();
   });
 
+  /** The holder reads their own key's usage policy, as written, and cannot edit it. */
+  test("a key's usage policy is shown read-only, and absent when there is none", async () => {
+    stub({
+      "GET /api/client/summary": () =>
+        apiKey({ guardrailPolicy: "Only software engineering.\nRefuse roleplay." }),
+    });
+    const first = renderWithProviders(<ClientBoard />, {
+      client: makeQueryClient({ catalog: false }),
+    });
+
+    expect(await screen.findByText("Usage policy")).toBeTruthy();
+    expect(screen.getByText(/Only software engineering\.\s+Refuse roleplay\./)).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: /policy/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /policy/i })).toBeNull();
+    first.unmount();
+
+    stub();
+    renderWithProviders(<ClientBoard />, { client: makeQueryClient({ catalog: false }) });
+    expect(await screen.findByText("Every model this gateway serves.")).toBeTruthy();
+    expect(screen.queryByText("Usage policy")).toBeNull();
+  });
+
   /** `null` and `[]` are opposite facts and must not render alike. */
   test("an empty allowlist reads as no models, not as every model", async () => {
     stub({ "GET /api/client/summary": () => apiKey({ modelAllowlist: [] }) });

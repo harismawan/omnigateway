@@ -423,6 +423,52 @@ test("a long window is exact across limiters sharing a coord", async () => {
   a.store.close();
 });
 
+/**
+ * A completion this replica never admitted — the guardrail's classifier call
+ * rides its parent's admission — still lands in a model subject another
+ * replica seeded, once its override is recorded. Without the record the debit
+ * is skipped, and B, whose buckets will not be re-read while they live, never
+ * counts those tokens: an under-count.
+ */
+test("a recorded override takes a debit this replica never admitted, claiming nothing", async () => {
+  const coord = memoryCoord();
+  const limits: LimitConfig = {
+    tokens: { "5h": 10_000 },
+    models: { judge: { tokens: { "5h": 40 }, concurrency: 5 } },
+  };
+  const a = await harness(limits, coord);
+  const b = new ApiKeyRateLimiter({ store: a.store, now: () => T0, coord });
+  const subject = modelSubjectId(a.keyId, "judge");
+  a.at(T0);
+  // B seeds the classifier model's subject; A admits only the parent's model.
+  (await b.admit(a.keyId, limits, "judge", "req_b")).release();
+  (await a.admit("fast"))();
+
+  a.limiter.recordOverride(a.keyId, limits, "judge");
+  // Records, never claims: no gauge slot for a request that was not admitted.
+  expect(await a.limiter.inFlight(subject)).toBe(0);
+  await a.complete({ tokens: 41 }, "judge");
+
+  const refused = await denied(() => b.admit(a.keyId, limits, "judge", "req_b"));
+  expect(refused instanceof RateLimitExceeded && refused.headroom.tokens?.used).toBe(41);
+  expect(await b.inFlight(subject)).toBe(0);
+  a.store.close();
+});
+
+test("recording a model with no override records nothing for it", async () => {
+  const coord = memoryCoord();
+  const limits: LimitConfig = { models: { judge: { tokens: { "5h": 40 } } } };
+  const a = await harness(limits, coord);
+  const b = new ApiKeyRateLimiter({ store: a.store, now: () => T0, coord });
+  a.at(T0);
+  (await b.admit(a.keyId, limits, "judge", "req_b")).release();
+  // Another model's record must not open the judge subject to debits.
+  a.limiter.recordOverride(a.keyId, limits, "fast");
+  await a.complete({ tokens: 41 }, "judge");
+  (await b.admit(a.keyId, limits, "judge", "req_b")).release();
+  a.store.close();
+});
+
 test("count_tokens consumes requests and never tokens, spend, or a concurrency slot", async () => {
   const limits: LimitConfig = {
     requests: { "1m": 2 },

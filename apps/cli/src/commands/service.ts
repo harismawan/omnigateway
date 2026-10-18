@@ -1,5 +1,13 @@
 import { existsSync } from "node:fs";
-import { listPlugins, orphanPluginTables, type PluginSummary, pluginsDir } from "@omni/control";
+import {
+  type GuardrailReadiness,
+  guardrailReadiness,
+  listPlugins,
+  orphanPluginTables,
+  type PluginSummary,
+  pluginsDir,
+} from "@omni/control";
+import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { resolvePin } from "@omni/store";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
@@ -308,6 +316,63 @@ async function danglingCredentials(
   }
 }
 
+/**
+ * Whether keys carrying a usage policy can be judged at all.
+ *
+ * Every request from such a key is refused while the classifier model is unset
+ * or names nothing routing resolves — fail closed, by design — and neither state
+ * is refused at write time, so this is where an operator hears of it before a
+ * client does.
+ *
+ * Asked of the built-in registry only, so `doctor` runs nobody's plugin code.
+ * A classifier the built-ins cannot resolve on an installation that has
+ * plugins may be a plugin provider's model, so that case is reported as
+ * unverified rather than as broken. Same null-versus-empty rule as the checks
+ * above.
+ */
+async function guardrailState(ctx: Context): Promise<GuardrailReadiness | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    return await guardrailReadiness(await ctx.store(), PROVIDER_DESCRIPTORS);
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
+}
+
+/** One line for `doctor`: quiet when nothing needs judging, loud when nothing can judge. */
+function guardrailLine(
+  ctx: Context,
+  readiness: GuardrailReadiness | null,
+  plugins: readonly PluginSummary[],
+): string {
+  if (readiness === null) return paint(ctx, "dim", "not checked");
+  const { keysWithPolicy: n, model, problem } = readiness;
+  if (n === 0) return paint(ctx, "dim", "no key carries one");
+  const keys = `${n} key${n === 1 ? "" : "s"}`;
+  if (problem === "unconfigured") {
+    return paint(
+      ctx,
+      "yellow",
+      `${keys} carry a policy and no classifier is set (guardrailModel); their requests are refused`,
+    );
+  }
+  if (problem === "unresolved") {
+    return plugins.length > 0
+      ? paint(
+          ctx,
+          "yellow",
+          `${keys} carry a policy; classifier "${model}" is not a built-in model (plugin providers not checked)`,
+        )
+      : paint(
+          ctx,
+          "yellow",
+          `${keys} carry a policy and classifier "${model}" does not resolve; their requests are refused`,
+        );
+  }
+  return state(ctx, true, `${keys}, judged by ${model}`);
+}
+
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -325,6 +390,7 @@ export const doctor: Command = {
     const pins = await danglingPins(ctx);
     const uninstalled = await missingProviders(ctx, plugins);
     const strandedKeys = await danglingCredentials(ctx, plugins);
+    const guardrail = await guardrailState(ctx);
 
     const checks = {
       // First field, and named in the JSON as well as on stdout: the JSON form
@@ -353,6 +419,7 @@ export const doctor: Command = {
       danglingPins: pins,
       missingProviders: uninstalled,
       danglingCredentials: strandedKeys,
+      guardrail,
       // Repeated from stderr on purpose: `doctor` is the command an operator
       // runs to find out why the paths above are what they are, and `--json`
       // is read by scripts that never see stderr.
@@ -435,6 +502,7 @@ ${fields([
           // remove the account, and both need to know which.
           paint(ctx, "yellow", `${strandedKeys.length}: ${strandedKeys.join(", ")}`),
   ],
+  ["usage policies", guardrailLine(ctx, guardrail, plugins)],
   ...checks.warnings.map(
     (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],
   ),

@@ -1,5 +1,5 @@
 import { getSettings, putSettings } from "@omni/control";
-import type { Settings } from "@omni/store";
+import { DEFAULT_SETTINGS, type Settings } from "@omni/store";
 import { requirePositional, UsageError } from "../args.ts";
 import type { Command } from "../command.ts";
 import { emit, fields } from "../output.ts";
@@ -99,9 +99,29 @@ function asString(path: string, raw: string): string {
   return value;
 }
 
+/**
+ * A string, or `null` spelled as the literal `null`.
+ *
+ * For the settings whose default is `null` — today `guardrailModel` — which is
+ * how the parse knows them: the stored value alone cannot say, because once set
+ * it is an ordinary string. `null` is the same spelling the settings API uses,
+ * so the CLI has no word of its own for "unset".
+ */
+function asNullableString(path: string, raw: string): string | null {
+  return raw.trim() === "null" ? null : asString(path, raw);
+}
+
+/** Whether this top-level setting is one whose absence is spelled `null`. */
+function nullable(head: string): boolean {
+  return (
+    has(DEFAULT_SETTINGS, head) &&
+    (DEFAULT_SETTINGS as unknown as Record<string, unknown>)[head] === null
+  );
+}
+
 export const settingsSet: Command = {
   usage: "settings set <path> <value>",
-  summary: "Change one setting, e.g. weights.cost 0.4 or rtkEnabled true",
+  summary: "Change one setting, e.g. weights.cost 0.4, rtkEnabled true, or guardrailModel null",
   async run(args, { ctx, writer }) {
     const path = requirePositional(args, 0, "setting path");
     const raw = requirePositional(args, 1, "value");
@@ -124,11 +144,13 @@ export const settingsSet: Command = {
     // of the one somebody remembered.
     const existing = currentValue(current, head, tail);
     const value =
-      typeof existing === "boolean"
-        ? asBoolean(path, raw)
-        : typeof existing === "string"
-          ? asString(path, raw)
-          : asNumber(path, raw);
+      tail === undefined && nullable(head)
+        ? asNullableString(path, raw)
+        : typeof existing === "boolean"
+          ? asBoolean(path, raw)
+          : typeof existing === "string"
+            ? asString(path, raw)
+            : asNumber(path, raw);
 
     // Validation lives in the settings schema, which the write goes through:
     // this only has to place the value, not judge it.

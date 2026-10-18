@@ -9,7 +9,7 @@ import type {
   Target,
   VirtualModel,
 } from "../types.ts";
-import { DEFAULT_SETTINGS } from "../types.ts";
+import { DEFAULT_SETTINGS, readGuardrailSettings } from "../types.ts";
 import type { Rows } from "./db.ts";
 
 const SETTINGS_KEY = "settings";
@@ -123,6 +123,9 @@ export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void
           bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
           bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
           weights: knownWeights(stored.weights),
+          // Malformed reads as unconfigured, which refuses a key carrying a
+          // policy rather than serving it unjudged. One copy for both backends.
+          ...readGuardrailSettings(stored),
         };
       } catch {
         return DEFAULT_SETTINGS;

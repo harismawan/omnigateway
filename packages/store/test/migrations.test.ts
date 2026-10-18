@@ -21,6 +21,17 @@ import nodes012 from "../src/sqlite/migrations/012_nodes.sql" with { type: "text
 import healthMeasurements013 from "../src/sqlite/migrations/013_health_measurements.sql" with {
   type: "text",
 };
+import keyExpiry014 from "../src/sqlite/migrations/014_key_expiry.sql" with { type: "text" };
+import logKeyset015 from "../src/sqlite/migrations/015_log_keyset.sql" with { type: "text" };
+import logFilterIndexes016 from "../src/sqlite/migrations/016_log_filter_indexes.sql" with {
+  type: "text",
+};
+import logTextSearch017 from "../src/sqlite/migrations/017_log_text_search.sql" with {
+  type: "text",
+};
+import modelWindowIndex018 from "../src/sqlite/migrations/018_model_window_index.sql" with {
+  type: "text",
+};
 import { NARROWED_SQL } from "../src/sqlite/usage.ts";
 
 type TableRow = { name: string };
@@ -40,6 +51,11 @@ const SQL_BY_ID = [
   pluginMigrations011,
   nodes012,
   healthMeasurements013,
+  keyExpiry014,
+  logKeyset015,
+  logFilterIndexes016,
+  logTextSearch017,
+  modelWindowIndex018,
 ];
 
 /**
@@ -87,7 +103,7 @@ test("openDb applies migrations and records them", () => {
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
   expect(applied.map((row) => row.id)).toEqual([
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
   ]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
@@ -116,6 +132,7 @@ test("openDb applies migrations and records them", () => {
   expect(keyColumns).toContain("body_logging_opt_out");
   expect(keyColumns).toContain("limits");
   expect(keyColumns).toContain("expires_at");
+  expect(keyColumns).toContain("guardrail_policy");
   // Anything still reading it breaks at compile time, which is the intent.
   expect(keyColumns).not.toContain("rate_limit_per_min");
   db.close();
@@ -242,6 +259,36 @@ test("migration 14 leaves every key that predates it with no expiry", async () =
 
   const key = await createKeyRepo(db).get("before");
   expect(key?.expiresAt).toBeNull();
+  db.close();
+});
+
+/**
+ * Migration 19 adds the usage-policy column and stops, as 14 did for expiry.
+ *
+ * A default policy invented for rows that predate the column would start
+ * refusing those keys' requests on an upgrade, so `null` must read back.
+ */
+test("migration 19 leaves every key that predates it with no usage policy", async () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  legacyDb(path, 19);
+
+  const legacy = new Database(path);
+  legacy.run(
+    `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
+                           body_logging_opt_out, created_at, revoked_at, expires_at)
+     VALUES ('before', 'b', 'sk-omni-aaaa', 'h1', NULL, '{}', 0, 0, NULL, NULL)`,
+  );
+  legacy.close();
+
+  const db = openDb(path);
+  const keyColumns = db
+    .query<{ name: string }, []>("PRAGMA table_info(api_keys)")
+    .all()
+    .map((row) => row.name);
+  expect(keyColumns).toContain("guardrail_policy");
+
+  const key = await createKeyRepo(db).get("before");
+  expect(key?.guardrailPolicy).toBeNull();
   db.close();
 });
 
@@ -400,7 +447,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(18);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(19);
   db.close();
 });
 

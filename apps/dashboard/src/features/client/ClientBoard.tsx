@@ -134,6 +134,16 @@ function verdictsOf(row: AccountQuota): QuotaVerdicts {
   };
 }
 
+/** The operator's policy text, as written: line breaks kept, long words wrapped. */
+const Policy = styled.p`
+  font-size: 12px;
+  line-height: 1.5;
+  color: ${({ theme }) => theme.color.ink};
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 80ch;
+`;
+
 const QuotaStack = styled.div`
   display: flex;
   flex-direction: column;
@@ -396,6 +406,19 @@ export function ClientBoard() {
                   <Mono key={model}>{model}</Mono>
                 ))}
               </Row>
+            )}
+            {/* The holder's own restriction, read-only. A request refused for a
+                purpose the holder cannot read is one they cannot avoid
+                repeating; the operator's text is not a secret from them. */}
+            {summary.data.guardrailPolicy === null ? null : (
+              <Stack $gap={1}>
+                <Legend>Usage policy</Legend>
+                <Policy>{summary.data.guardrailPolicy}</Policy>
+                <Muted>
+                  Each request is checked against this before it is served, and the check is billed
+                  to this key. Requests outside it are refused.
+                </Muted>
+              </Stack>
             )}
           </Stack>
         )}

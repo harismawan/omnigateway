@@ -1,6 +1,12 @@
+import { GUARDRAIL_HISTORY_TURNS_MAX, GUARDRAIL_TIMEOUT_MAX_MS } from "@omni/store/types";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import styled from "styled-components";
-import { useBodyLoggingAllowed, useSaveSettings, useSettings } from "../../api/queries.ts";
+import {
+  useBodyLoggingAllowed,
+  useModels,
+  useSaveSettings,
+  useSettings,
+} from "../../api/queries.ts";
 import type { PonytailMode, Settings } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { Button } from "../../ui/Button.tsx";
@@ -53,6 +59,9 @@ type LimitKey = Exclude<
   | "ponytailMode"
   | "bodyLoggingEnabled"
   | "bodyLoggingCaptureStreamChunks"
+  | "guardrailModel"
+  | "guardrailTimeoutMs"
+  | "guardrailHistoryTurns"
 >;
 
 const LIMITS: ReadonlyArray<{
@@ -275,6 +284,9 @@ type Draft = Record<string, string> & {
   ponytailMode?: string;
   bodyLoggingEnabled?: string;
   bodyLoggingCaptureStreamChunks?: string;
+  guardrailModel?: string;
+  guardrailTimeoutMs?: string;
+  guardrailHistoryTurns?: string;
 };
 
 function toDraft(settings: Settings): Draft {
@@ -286,6 +298,10 @@ function toDraft(settings: Settings): Draft {
   draft.ponytailMode = settings.ponytailMode;
   draft.bodyLoggingEnabled = String(settings.bodyLoggingEnabled);
   draft.bodyLoggingCaptureStreamChunks = String(settings.bodyLoggingCaptureStreamChunks);
+  // Blank is how "no classifier" is typed, and how it reads back.
+  draft.guardrailModel = settings.guardrailModel ?? "";
+  draft.guardrailTimeoutMs = String(settings.guardrailTimeoutMs);
+  draft.guardrailHistoryTurns = String(settings.guardrailHistoryTurns);
   return draft;
 }
 
@@ -323,6 +339,34 @@ function parseDraft(
     return { ok: false, problem: "Attempts per request cannot exceed 10." };
   }
 
+  const timeoutRaw = (draft.guardrailTimeoutMs ?? "").trim();
+  const guardrailTimeoutMs = Number(timeoutRaw);
+  if (
+    timeoutRaw.length === 0 ||
+    !Number.isInteger(guardrailTimeoutMs) ||
+    guardrailTimeoutMs < 1 ||
+    guardrailTimeoutMs > GUARDRAIL_TIMEOUT_MAX_MS
+  ) {
+    return {
+      ok: false,
+      problem: `Usage policy check timeout must be a whole number from 1 to ${GUARDRAIL_TIMEOUT_MAX_MS}.`,
+    };
+  }
+  const turnsRaw = (draft.guardrailHistoryTurns ?? "").trim();
+  const guardrailHistoryTurns = Number(turnsRaw);
+  if (
+    turnsRaw.length === 0 ||
+    !Number.isInteger(guardrailHistoryTurns) ||
+    guardrailHistoryTurns < 1 ||
+    guardrailHistoryTurns > GUARDRAIL_HISTORY_TURNS_MAX
+  ) {
+    return {
+      ok: false,
+      problem: `Messages judged must be a whole number from 1 to ${GUARDRAIL_HISTORY_TURNS_MAX}.`,
+    };
+  }
+  const guardrailModel = (draft.guardrailModel ?? "").trim();
+
   return {
     ok: true,
     settings: {
@@ -344,6 +388,11 @@ function parseDraft(
           : "off",
       bodyLoggingEnabled: draft.bodyLoggingEnabled === "true",
       bodyLoggingCaptureStreamChunks: draft.bodyLoggingCaptureStreamChunks === "true",
+      // Sent as `null` rather than omitted when blank: omitting it would keep
+      // the stored classifier, and clearing the field is how it is unset.
+      guardrailModel: guardrailModel.length === 0 ? null : guardrailModel,
+      guardrailTimeoutMs,
+      guardrailHistoryTurns,
     },
   };
 }
@@ -360,6 +409,10 @@ export function SettingsBoard() {
   // from here. Without it the toggle below saves fine and records nothing, which
   // is the one outcome this screen must never let an operator walk into quietly.
   const bodyLoggingAllowed = useBodyLoggingAllowed();
+  // The classifier picker's suggestions: the same source the allowlist editor
+  // reads. Free text is still accepted, for `provider/model`.
+  const models = useModels();
+  const modelListId = useId();
   const save = useSaveSettings();
   const [draft, setDraft] = useState<Draft>({});
   const [problem, setProblem] = useState<string | null>(null);
@@ -587,6 +640,91 @@ export function SettingsBoard() {
               </Stack>
             </Module>
           </Grid>
+
+          <Module legend="Usage policies" meta="per-key guardrails">
+            <Stack $gap={2}>
+              <Blurb>
+                Keys carrying a usage policy have each request judged by this model first. While it
+                is blank, every request from such a key is refused. A guardrail against ordinary
+                misuse, not a security boundary.
+              </Blurb>
+              <Weights>
+                <Cell>
+                  <Field
+                    label="Classifier model"
+                    hint="A configured model, or provider/model. Blank means none."
+                  >
+                    {(props) => (
+                      <>
+                        <Input
+                          {...props}
+                          type="text"
+                          list={modelListId}
+                          placeholder="none"
+                          spellCheck={false}
+                          value={draft.guardrailModel ?? ""}
+                          onChange={(event) =>
+                            setDraft({ ...draft, guardrailModel: event.target.value })
+                          }
+                        />
+                        <datalist id={modelListId}>
+                          {(models.data ?? []).map((model) => (
+                            <option key={model.id} value={model.id} />
+                          ))}
+                        </datalist>
+                      </>
+                    )}
+                  </Field>
+                </Cell>
+                <Cell>
+                  <Field
+                    label="Check timeout"
+                    hint="A slower check refuses the request it was judging."
+                  >
+                    {(props) => (
+                      <Row $gap={2}>
+                        <Input
+                          {...props}
+                          type="number"
+                          min={1}
+                          max={GUARDRAIL_TIMEOUT_MAX_MS}
+                          step={1000}
+                          value={draft.guardrailTimeoutMs ?? ""}
+                          onChange={(event) =>
+                            setDraft({ ...draft, guardrailTimeoutMs: event.target.value })
+                          }
+                        />
+                        <Legend>ms</Legend>
+                      </Row>
+                    )}
+                  </Field>
+                </Cell>
+                <Cell>
+                  <Field
+                    label="Messages judged"
+                    hint="How many of the latest human messages are judged together. 1 is the last alone."
+                  >
+                    {(props) => (
+                      <Row $gap={2}>
+                        <Input
+                          {...props}
+                          type="number"
+                          min={1}
+                          max={GUARDRAIL_HISTORY_TURNS_MAX}
+                          step={1}
+                          value={draft.guardrailHistoryTurns ?? ""}
+                          onChange={(event) =>
+                            setDraft({ ...draft, guardrailHistoryTurns: event.target.value })
+                          }
+                        />
+                        <Legend>messages</Legend>
+                      </Row>
+                    )}
+                  </Field>
+                </Cell>
+              </Weights>
+            </Stack>
+          </Module>
 
           {problem === null ? null : <Problem role="alert">{problem}</Problem>}
           {saved && problem === null ? <Saved role="status">Settings saved.</Saved> : null}
