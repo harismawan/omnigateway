@@ -284,6 +284,143 @@ describe("UsageBoard", () => {
     });
   });
 
+  test("picking an account narrows every panel to it, and all accounts widens them back", async () => {
+    const user = userEvent.setup();
+    const stub = createFetchStub({
+      "GET /api/usage": ({ url }) =>
+        url.includes("credentialId=cred-2") && !url.includes("groupBy=day")
+          ? { rows: [usageBucket({ key: THIS_HOUR, requests: 3, errors: 0, costUsd: 0.25 })] }
+          : rowsFor(url),
+      "GET /api/credentials": () => ({
+        credentials: [credential(), credential({ id: "cred-2", label: "claude-spare" })],
+      }),
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+      "GET /api/models": () => ({ models: [model()] }),
+    });
+    renderWithProviders(<UsageBoard />);
+    await screen.findByText("10 requests and $0.50 over the last 24 hours.");
+    await screen.findByRole("option", { name: "claude-spare" });
+
+    const before = stub.calls.length;
+    await user.selectOptions(screen.getByRole("combobox", { name: "Account" }), "cred-2");
+
+    expect(
+      await screen.findByText("3 requests and $0.25 over the last 24 hours on claude-spare."),
+    ).toBeTruthy();
+    // Every read after the pick carries the filter — the year grid included —
+    // so no panel answers for the whole installation beside one that does not.
+    await waitFor(() => {
+      const after = stub.calls.slice(before).filter((call) => call.url.startsWith("/api/usage"));
+      expect(after.filter((call) => call.url.includes("groupBy=day")).length).toBe(1);
+      expect(after.length).toBe(7);
+      expect(after.every((call) => call.url.includes("credentialId=cred-2"))).toBe(true);
+    });
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Account" }), "");
+    expect(await screen.findByText("10 requests and $0.50 over the last 24 hours.")).toBeTruthy();
+  });
+
+  test("picking a key narrows every panel to it, and composes with the account", async () => {
+    const user = userEvent.setup();
+    const stub = createFetchStub({
+      "GET /api/usage": ({ url }) =>
+        url.includes("apiKeyId=key-2") && !url.includes("groupBy=day")
+          ? { rows: [usageBucket({ key: THIS_HOUR, requests: 4, errors: 0, costUsd: 0.75 })] }
+          : rowsFor(url),
+      "GET /api/credentials": () => ({ credentials: [credential()] }),
+      "GET /api/keys": () => ({ keys: [apiKey(), apiKey({ id: "key-2", label: "ci-runner" })] }),
+      "GET /api/models": () => ({ models: [model()] }),
+    });
+    renderWithProviders(<UsageBoard />);
+    await screen.findByText("10 requests and $0.50 over the last 24 hours.");
+    await screen.findByRole("option", { name: "ci-runner" });
+
+    const before = stub.calls.length;
+    await user.selectOptions(screen.getByRole("combobox", { name: "Gateway key" }), "key-2");
+
+    expect(
+      await screen.findByText("4 requests and $0.75 over the last 24 hours for ci-runner."),
+    ).toBeTruthy();
+    await waitFor(() => {
+      const after = stub.calls.slice(before).filter((call) => call.url.startsWith("/api/usage"));
+      expect(after.filter((call) => call.url.includes("groupBy=day")).length).toBe(1);
+      expect(after.length).toBe(7);
+      expect(after.every((call) => call.url.includes("apiKeyId=key-2"))).toBe(true);
+    });
+
+    // Both at once: each read carries both filters, and the summary names both.
+    const mid = stub.calls.length;
+    await user.selectOptions(screen.getByRole("combobox", { name: "Account" }), "cred-1");
+    expect(
+      await screen.findByText(
+        "4 requests and $0.75 over the last 24 hours for ci-runner on claude-main.",
+      ),
+    ).toBeTruthy();
+    await waitFor(() => {
+      const after = stub.calls.slice(mid).filter((call) => call.url.startsWith("/api/usage"));
+      expect(after.length).toBe(7);
+      expect(
+        after.every(
+          (call) => call.url.includes("apiKeyId=key-2") && call.url.includes("credentialId=cred-1"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  test("a key or account removed while picked stops filtering the page", async () => {
+    const user = userEvent.setup();
+    let keys = [apiKey(), apiKey({ id: "key-2", label: "ci-runner" })];
+    let credentials = [credential(), credential({ id: "cred-2", label: "claude-spare" })];
+    const stub = createFetchStub({
+      "GET /api/usage": ({ url }) => rowsFor(url),
+      "GET /api/credentials": () => ({ credentials }),
+      "GET /api/keys": () => ({ keys }),
+      "GET /api/models": () => ({ models: [model()] }),
+    });
+    const { client } = renderWithProviders(<UsageBoard />);
+    await screen.findByRole("option", { name: "ci-runner" });
+    await screen.findByRole("option", { name: "claude-spare" });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Gateway key" }), "key-2");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Account" }), "cred-2");
+    await screen.findByText(/for ci-runner on claude-spare\.$/);
+
+    keys = [apiKey()];
+    credentials = [credential()];
+    const before = stub.calls.length;
+    await client.invalidateQueries({ queryKey: ["keys"] });
+    await client.invalidateQueries({ queryKey: ["credentials"] });
+
+    // The controls read "All", so the page must be the whole installation again.
+    expect(await screen.findByText("10 requests and $0.50 over the last 24 hours.")).toBeTruthy();
+    expect((screen.getByRole("combobox", { name: "Gateway key" }) as HTMLSelectElement).value).toBe(
+      "",
+    );
+    expect((screen.getByRole("combobox", { name: "Account" }) as HTMLSelectElement).value).toBe("");
+    const after = stub.calls.slice(before).filter((call) => call.url.startsWith("/api/usage"));
+    expect(after.length).toBeGreaterThan(0);
+    expect(after.some((call) => /apiKeyId|credentialId/.test(call.url))).toBe(false);
+
+    // The pick is forgotten, not hidden: the same ids coming back must not
+    // quietly narrow the page again without anyone choosing them.
+    keys = [apiKey(), apiKey({ id: "key-2", label: "ci-runner" })];
+    credentials = [credential(), credential({ id: "cred-2", label: "claude-spare" })];
+    await client.invalidateQueries({ queryKey: ["keys"] });
+    await client.invalidateQueries({ queryKey: ["credentials"] });
+    await screen.findByRole("option", { name: "ci-runner" });
+    await screen.findByRole("option", { name: "claude-spare" });
+    const back = stub.calls.length;
+    await client.invalidateQueries({ queryKey: ["usage"] });
+    await waitFor(() =>
+      expect(
+        stub.calls.slice(back).filter((call) => call.url.startsWith("/api/usage")).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(stub.calls.slice(back).some((call) => /apiKeyId|credentialId/.test(call.url))).toBe(
+      false,
+    );
+    expect(screen.getByText("10 requests and $0.50 over the last 24 hours.")).toBeTruthy();
+  });
+
   test("names providers and shows their share of the window", async () => {
     stubUsage();
     renderWithProviders(<UsageBoard />);
@@ -378,9 +515,12 @@ describe("UsageBoard", () => {
     stubUsage();
     renderWithProviders(<UsageBoard />);
 
-    expect(await screen.findByText("laptop")).toBeTruthy();
+    // The pickers name both too; the panels' rows are the ones asserted.
+    const outsidePickers = (label: string) =>
+      screen.getAllByText(label).filter((node) => node.closest("select") === null);
+    await waitFor(() => expect(outsidePickers("laptop")).toHaveLength(1));
     expect(screen.getByText("Unattributed")).toBeTruthy();
-    expect(screen.getByText("claude-main")).toBeTruthy();
+    expect(outsidePickers("claude-main")).toHaveLength(1);
     expect(screen.getByText("cred-gone")).toBeTruthy();
   });
 

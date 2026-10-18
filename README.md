@@ -295,7 +295,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni logs export` | matching request metadata as CSV or JSONL on stdout; `--since` and `--until` required |
 | `omni bodies <request-id>` | captured bodies for one request; withheld unless you pass `--full` |
 | `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
-| `omni usage` | spend and tokens, by provider, model, key, or day |
+| `omni usage` | spend and tokens, by provider, model, key, or day; `--account <id>` and `--key <id>` narrow to one account or gateway key |
 | `omni quota` | provider quota per window: use, burn rate, and when it runs out |
 | `omni quota refresh <id> \| --all` | read provider quota now, without waiting for the next poll |
 | `omni quota resets <id>` / `omni quota reset <id>` | list / spend a banked Codex or Claude quota reset (irreversible) |

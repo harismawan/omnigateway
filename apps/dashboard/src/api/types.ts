@@ -536,6 +536,10 @@ export type UsageQuery = {
   grain?: UsageGrain;
   since: number;
   until?: number;
+  /** One provider account. The console's `/api/usage` only; the client surface refuses it. */
+  credentialId?: string;
+  /** One gateway key. The console's `/api/usage` only; the client surface refuses it. */
+  apiKeyId?: string;
 };
 
 export type UsageResponse = { rows: UsageBucket[] };

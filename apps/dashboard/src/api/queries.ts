@@ -134,6 +134,8 @@ export const queryKeys = {
       query.splitBy ?? null,
       query.since,
       query.until ?? null,
+      query.credentialId ?? null,
+      query.apiKeyId ?? null,
     ] as const,
   quotaHistory: (query: QuotaHistoryQuery) =>
     ["quota-history", query.credentialId, query.since, query.until ?? null] as const,
@@ -421,6 +423,8 @@ export function useUsage(
             ...(query.grain === undefined ? {} : { grain: query.grain }),
             ...(query.splitBy === undefined ? {} : { splitBy: query.splitBy }),
             ...(query.until === undefined ? {} : { until: query.until }),
+            ...(query.credentialId === undefined ? {} : { credentialId: query.credentialId }),
+            ...(query.apiKeyId === undefined ? {} : { apiKeyId: query.apiKeyId }),
           }),
           signal,
         )
