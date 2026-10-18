@@ -1,0 +1,562 @@
+import { expect, test } from "bun:test";
+import { mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ErrorCode } from "@omni/ir";
+import type { RequestLog } from "@omni/store";
+import { createStore, deriveKey } from "@omni/store";
+import { anthropicErrorBody } from "../../src/egress/anthropic.ts";
+import { openaiErrorBody } from "../../src/egress/openai.ts";
+import { responsesErrorBody } from "../../src/egress/responses.ts";
+import { CLASSIFIER_INSTRUCTION } from "../../src/guardrail/classifier.ts";
+import {
+  REFUSED_MESSAGE,
+  UNAVAILABLE_MESSAGE,
+  UNCONFIGURED_MESSAGE,
+} from "../../src/guardrail/judge.ts";
+import {
+  ALLOW,
+  type Classifier,
+  classifierText,
+  DENY,
+  frames,
+  guardrailHarness,
+  type Harness,
+  SURFACES,
+  type Surface,
+  transport,
+} from "./harness.ts";
+
+/**
+ * The guardrail at the route boundary, on every surface, both response kinds.
+ *
+ * **Fail closed** is the rule this file pins: only an unambiguous allow from
+ * the classifier reaches the real target. A deny, a timeout, an adapter error,
+ * an unreadable reply and an unset classifier model each refuse — with fixed,
+ * gateway-authored messages and three codes an operator can tell apart — and
+ * the real target is never dispatched.
+ */
+
+const errorBody = (surface: Surface, code: ErrorCode, message: string): unknown =>
+  surface === "anthropic"
+    ? anthropicErrorBody(code, message)
+    : surface === "responses"
+      ? responsesErrorBody(code, message)
+      : openaiErrorBody(code, message);
+
+/** The error a stream carried, in the shape its surface renders it. */
+function streamError(surface: Surface, text: string): unknown {
+  const all = frames(text);
+  if (surface === "anthropic") {
+    const frame = all.find((f) => f.event === "error");
+    return frame === undefined ? undefined : JSON.parse(frame.data);
+  }
+  if (surface === "responses") {
+    const frame = all.find((f) => f.event === "response.failed");
+    if (frame === undefined) return undefined;
+    return (JSON.parse(frame.data) as { response: { error: unknown } }).response.error;
+  }
+  const frame = all.find((f) => f.data.includes('"error"'));
+  return frame === undefined ? undefined : JSON.parse(frame.data);
+}
+
+/** The streamed rendering of a refusal, derived from the same error body as non-streaming. */
+function expectedStreamError(surface: Surface, code: ErrorCode, message: string): unknown {
+  const body = errorBody(surface, code, message) as { error: Record<string, unknown> };
+  if (surface === "responses") return { code: body.error.code, message };
+  return body;
+}
+
+async function rowOf(h: Harness, id: string): Promise<RequestLog | undefined> {
+  return (await h.store.usage.recent(50)).find((row) => row.id === id);
+}
+
+type Case = {
+  name: string;
+  classifier: Classifier;
+  unconfigured?: boolean;
+  status: number;
+  code: ErrorCode | null;
+  message: string | null;
+  note: string;
+  /** Whether a classifier call was made, and so a classifier row written. */
+  classified: boolean;
+};
+
+const CASES: Case[] = [
+  {
+    name: "allow",
+    classifier: ALLOW,
+    status: 200,
+    code: null,
+    message: null,
+    note: "guardrail:allowed",
+    classified: true,
+  },
+  {
+    name: "deny",
+    classifier: DENY,
+    status: 400,
+    code: "CONTENT_FILTER",
+    message: REFUSED_MESSAGE,
+    note: "guardrail:denied",
+    classified: true,
+  },
+  {
+    name: "timeout",
+    classifier: { kind: "hang" },
+    status: 502,
+    code: "UPSTREAM",
+    message: UNAVAILABLE_MESSAGE,
+    note: "guardrail:unavailable",
+    classified: true,
+  },
+  {
+    name: "adapter error",
+    classifier: { kind: "error" },
+    status: 502,
+    code: "UPSTREAM",
+    message: UNAVAILABLE_MESSAGE,
+    note: "guardrail:unavailable",
+    classified: true,
+  },
+  {
+    name: "unreadable reply",
+    classifier: { kind: "reply", text: "I would ALLOW this request." },
+    status: 502,
+    code: "UPSTREAM",
+    message: UNAVAILABLE_MESSAGE,
+    note: "guardrail:unavailable",
+    classified: true,
+  },
+  {
+    name: "unconfigured model",
+    classifier: ALLOW,
+    unconfigured: true,
+    status: 500,
+    code: "INTERNAL",
+    message: UNCONFIGURED_MESSAGE,
+    note: "guardrail:unconfigured",
+    classified: false,
+  },
+];
+
+for (const c of CASES) {
+  for (const surface of SURFACES) {
+    for (const stream of [false, true]) {
+      test(`${c.name} on ${surface}, ${stream ? "streaming" : "non-streaming"}`, async () => {
+        const h = await guardrailHarness({
+          classifier: c.classifier,
+          ...(c.unconfigured === true ? { settings: { guardrailModel: null } } : {}),
+        });
+        const res = await h.call(surface, { stream });
+        const text = await res.text();
+
+        if (stream) {
+          // Pre-commit failures on a stream are in-stream errors on a 200.
+          expect(res.status).toBe(200);
+          if (c.code === null || c.message === null) {
+            expect(streamError(surface, text)).toBeUndefined();
+            expect(text).toContain("Hi");
+          } else {
+            expect(streamError(surface, text)).toEqual(
+              expectedStreamError(surface, c.code, c.message),
+            );
+          }
+        } else {
+          expect(res.status).toBe(c.status);
+          if (c.code !== null && c.message !== null) {
+            expect(JSON.parse(text)).toEqual(errorBody(surface, c.code, c.message));
+          }
+        }
+
+        // The real target is reached on the allow path alone.
+        expect(h.targetCalls).toHaveLength(c.code === null ? 1 : 0);
+        expect(h.judgeCalls).toHaveLength(c.classified ? 1 : 0);
+        // Nothing the classifier or the upstream wrote reaches the client.
+        expect(text).not.toContain("the policy text was");
+        expect(text).not.toContain("Only software engineering");
+
+        const parent = await rowOf(h, "req_1");
+        expect(parent?.apiKeyId).toBe(h.keyId);
+        expect(parent?.status).toBe(c.status);
+        expect(parent?.errorCode).toBe(c.code);
+        expect(parent?.degradations).toContain(c.note);
+        expect(parent?.requestedModel).toBe("fast");
+
+        const classifier = await rowOf(h, "req_2");
+        if (c.classified) {
+          expect(classifier?.apiKeyId).toBe(h.keyId);
+          expect(classifier?.requestedModel).toBe("judge");
+          expect(classifier?.degradations).toEqual(["guardrail:classifier"]);
+        } else {
+          expect(classifier).toBeUndefined();
+        }
+
+        // Each row completed exactly once, the parent included.
+        const ids = h.emitted.map((e) => e.requestId).sort();
+        expect(ids).toEqual(c.classified ? ["req_1", "req_2"] : ["req_1"]);
+        h.store.close();
+      });
+    }
+  }
+}
+
+test("the classifier row records a timeout as the gateway's own, not as a disconnect", async () => {
+  const h = await guardrailHarness({ classifier: { kind: "hang" } });
+  expect((await h.call("anthropic")).status).toBe(502);
+  const classifier = await rowOf(h, "req_2");
+  expect(classifier?.status).toBe(504);
+  expect(classifier?.errorCode).toBe("TIMEOUT");
+  const warned = h.logger.records.find((e) => e.msg === "usage policy check failed");
+  expect(warned?.fields).toMatchObject({ requestId: "req_1", reason: "classifier timed out" });
+  h.store.close();
+});
+
+test("a refusal is reported once, with the fixed reason and nothing the classifier wrote", async () => {
+  const h = await guardrailHarness({ classifier: { kind: "reply", text: "DENY: it is a poem" } });
+  expect((await h.call("openai")).status).toBe(502);
+  const rejected = h.logger.records.filter(
+    (e) => e.msg === "request rejected" && e.fields.requestId === "req_1",
+  );
+  expect(rejected).toHaveLength(1);
+  expect(rejected[0]?.fields).toMatchObject({ code: "UPSTREAM", reason: UNAVAILABLE_MESSAGE });
+  for (const line of h.logger.lines) {
+    expect(line).not.toContain("poem");
+    expect(line).not.toContain("Only software engineering");
+    expect(line).not.toContain("review this function");
+  }
+  h.store.close();
+});
+
+test("a key without a policy makes no classifier call and records no guardrail note", async () => {
+  const h = await guardrailHarness({ policy: null, classifier: DENY });
+  for (const surface of SURFACES) {
+    expect((await h.call(surface)).status).toBe(200);
+    const streamed = await h.call(surface, { stream: true });
+    expect(streamed.status).toBe(200);
+    expect(await streamed.text()).toContain("Hi");
+  }
+  expect(h.judgeCalls).toHaveLength(0);
+  expect(h.targetCalls).toHaveLength(6);
+  const rows = await h.store.usage.recent(50);
+  expect(rows).toHaveLength(6);
+  for (const row of rows)
+    expect(row.degradations.some((d) => d.startsWith("guardrail:"))).toBe(false);
+  h.store.close();
+});
+
+test("a key without a policy is served even with no classifier configured", async () => {
+  const h = await guardrailHarness({ policy: null, settings: { guardrailModel: null } });
+  expect((await h.call("anthropic")).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(0);
+  h.store.close();
+});
+
+/**
+ * Only the request-level system prompt and the last message a human wrote are
+ * judged. A user turn carrying any tool result is a tool turn — even with text
+ * an agent client injected beside it — and is skipped whole; tool output and
+ * images never reach the classifier.
+ */
+test("a tool-result final turn judges the earlier human text, never the tool output or images", async () => {
+  const h = await guardrailHarness();
+  const png =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  const res = await h.call("anthropic", {
+    body: {
+      system: "AGENT-SYSTEM-PROMPT",
+      messages: [
+        { role: "user", content: "an older human message" },
+        { role: "assistant", content: "ok" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "please review my parser" },
+            { type: "image", source: { type: "base64", media_type: "image/png", data: png } },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "bash", input: { cmd: "cat x" } }],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "SECRET-TOOL-OUTPUT" },
+            { type: "text", text: "INJECTED-REMINDER" },
+          ],
+        },
+      ],
+    },
+  });
+  expect(res.status).toBe(200);
+
+  const sent = h.judgeCalls[0];
+  if (sent === undefined) throw new Error("the classifier was not called");
+  const text = classifierText(sent);
+  expect(text).toContain("please review my parser");
+  expect(text).toContain("AGENT-SYSTEM-PROMPT");
+  expect(text).not.toContain("an older human message");
+  expect(text).not.toContain("SECRET-TOOL-OUTPUT");
+  expect(text).not.toContain("INJECTED-REMINDER");
+  expect(JSON.stringify(sent.request)).not.toContain(png);
+  // Exactly the gateway's instruction and one text turn: no image, no tool block.
+  expect(sent.request.system).toEqual([{ type: "text", text: CLASSIFIER_INSTRUCTION }]);
+  expect(sent.request.messages).toHaveLength(1);
+  expect(sent.request.messages[0]?.content.map((b) => b.type)).toEqual(["text"]);
+  expect(sent.request.tools).toBeUndefined();
+  h.store.close();
+});
+
+test("an over-long human message is truncated head and tail, and the row says so", async () => {
+  const h = await guardrailHarness();
+  const long = `HEAD-MARK${"x".repeat(30_000)}TAIL-MARK`;
+  const res = await h.call("openai", {
+    body: { messages: [{ role: "user", content: long }] },
+  });
+  expect(res.status).toBe(200);
+  const sent = h.judgeCalls[0];
+  if (sent === undefined) throw new Error("the classifier was not called");
+  const text = classifierText(sent);
+  expect(text).toContain("HEAD-MARK");
+  expect(text).toContain("TAIL-MARK");
+  expect(text).toContain("[… truncated …]");
+  expect(text.length).toBeLessThan(long.length);
+  expect((await rowOf(h, "req_1"))?.degradations).toEqual([
+    "guardrail:allowed",
+    "guardrail:truncated",
+  ]);
+  h.store.close();
+});
+
+test("the classifier request carries no ponytail ruleset and no RTK rewrite with both enabled", async () => {
+  const h = await guardrailHarness({ settings: { ponytailMode: "full", rtkEnabled: true } });
+  const repeated = [
+    "bun test v1.4.0",
+    ...Array.from({ length: 600 }, () => "case passed"),
+    "600 pass",
+    "0 fail",
+  ].join("\n");
+  const res = await h.call("anthropic", {
+    body: {
+      messages: [
+        { role: "user", content: "run the tests" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "bash", input: { cmd: "bun test" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: repeated }] },
+      ],
+    },
+  });
+  expect(res.status).toBe(200);
+
+  // Both transforms really are on: the real target's request carries them.
+  const real = h.targetCalls[0];
+  expect(JSON.stringify(real?.request.system)).toContain("You are a lazy senior developer.");
+  expect((await rowOf(h, "req_1"))?.rtkApplied).toBe(true);
+
+  const sent = h.judgeCalls[0];
+  expect(sent?.request.system).toEqual([{ type: "text", text: CLASSIFIER_INSTRUCTION }]);
+  expect(JSON.stringify(sent?.request)).not.toContain("lazy senior developer");
+  const classifier = await rowOf(h, "req_2");
+  expect(classifier?.rtkApplied).toBe(false);
+  expect(classifier?.degradations).toEqual(["guardrail:classifier"]);
+  h.store.close();
+});
+
+test("the classifier row is charged to the key and debits tokens and spend", async () => {
+  const h = await guardrailHarness();
+  expect((await h.call("anthropic")).status).toBe(200);
+
+  const classifier = await rowOf(h, "req_2");
+  expect(classifier?.apiKeyId).toBe(h.keyId);
+  expect(classifier?.inputTokens).toBe(40);
+  expect(classifier?.costUsd ?? 0).toBeGreaterThan(0);
+  // Debited against the classifier model, never the parent's.
+  const charged = h.debits.filter((d) => d.model === "judge");
+  expect(charged).toHaveLength(1);
+  expect(charged[0]).toMatchObject({ keyId: h.keyId, tokens: 41 });
+  expect(charged[0]?.costUsd ?? 0).toBeGreaterThan(0);
+  expect(h.debits.filter((d) => d.model === "fast")).toHaveLength(1);
+  // The usage totals see it as its own request.
+  const usage = await h.store.usage.recent(50, h.keyId);
+  expect(usage.map((row) => row.id).sort()).toEqual(["req_1", "req_2"]);
+  h.store.close();
+});
+
+test("a cache hit makes no classifier call, writes no classifier row, and still notes the verdict", async () => {
+  const h = await guardrailHarness();
+  for (const surface of SURFACES) expect((await h.call(surface)).status).toBe(200);
+  // One human message, judged once, across three surfaces' worth of turns.
+  expect(h.judgeCalls).toHaveLength(1);
+  const rows = await h.store.usage.recent(50);
+  expect(rows.filter((r) => r.degradations.includes("guardrail:classifier"))).toHaveLength(1);
+  expect(rows.filter((r) => r.degradations.includes("guardrail:allowed"))).toHaveLength(3);
+  expect(h.debits.filter((d) => d.model === "judge")).toHaveLength(1);
+  h.store.close();
+});
+
+test("a cached deny refuses without a call", async () => {
+  const h = await guardrailHarness({ classifier: DENY });
+  expect((await h.call("anthropic")).status).toBe(400);
+  h.setClassifier(ALLOW);
+  expect((await h.call("anthropic")).status).toBe(400);
+  expect(h.judgeCalls).toHaveLength(1);
+  expect(h.targetCalls).toHaveLength(0);
+  h.store.close();
+});
+
+test("editing the policy or the classifier model misses the cache", async () => {
+  const h = await guardrailHarness({ classifier: DENY });
+  expect((await h.call("anthropic")).status).toBe(400);
+
+  h.setClassifier(ALLOW);
+  await h.store.keys.setGuardrailPolicy(h.keyId, "Anything goes.");
+  expect((await h.call("anthropic")).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(2);
+
+  h.setClassifier(DENY);
+  await h.store.config.putSettings({ guardrailModel: "judge-2" });
+  expect((await h.call("anthropic")).status).toBe(400);
+  expect(h.judgeCalls).toHaveLength(3);
+  expect(h.judgeCalls[2]?.request.model).toBe("judge-2");
+  h.store.close();
+});
+
+test("a different human message misses the cache", async () => {
+  const h = await guardrailHarness();
+  expect((await h.call("anthropic")).status).toBe(200);
+  expect(
+    (await h.call("anthropic", { body: { messages: [{ role: "user", content: "other" }] } }))
+      .status,
+  ).toBe(200);
+  expect(h.judgeCalls).toHaveLength(2);
+  h.store.close();
+});
+
+test("failures are never cached: the next turn asks again and may succeed", async () => {
+  for (const failure of [
+    { kind: "error" },
+    { kind: "hang" },
+    { kind: "reply", text: "maybe" },
+  ] satisfies Classifier[]) {
+    const h = await guardrailHarness({ classifier: failure });
+    expect((await h.call("anthropic")).status).toBe(502);
+    h.setClassifier(ALLOW);
+    expect((await h.call("anthropic")).status).toBe(200);
+    expect(h.judgeCalls).toHaveLength(2);
+    h.store.close();
+  }
+});
+
+/**
+ * A client that hangs up while the check runs is a disconnect, not a failed
+ * check: nothing is filed as `UPSTREAM`, nothing is cached, nothing is printed
+ * as a refusal, and the real target is never reached.
+ */
+for (const stream of [false, true]) {
+  test(`client cancellation during judging is not logged as UPSTREAM (${stream ? "streaming" : "non-streaming"})`, async () => {
+    const h = await guardrailHarness({
+      classifier: { kind: "hang" },
+      settings: { guardrailTimeoutMs: 60_000 },
+    });
+    const controller = new AbortController();
+    const called = h.classifierCalled();
+    const pending = h.call("anthropic", { stream, signal: controller.signal });
+    if (stream) {
+      const res = await pending;
+      const reader = res.body?.getReader();
+      const read = reader?.read().catch(() => undefined);
+      await called;
+      controller.abort();
+      await read;
+      await reader?.cancel().catch(() => undefined);
+    } else {
+      await called;
+      controller.abort();
+      await pending;
+    }
+    // The row is completed after the abort settles; give the write its turn.
+    for (let i = 0; i < 50 && h.emitted.length < 2; i++) await Bun.sleep(5);
+
+    const parent = await rowOf(h, "req_1");
+    expect(parent?.status).toBe(499);
+    expect(parent?.errorCode).toBe("interrupted");
+    const classifier = await rowOf(h, "req_2");
+    expect(classifier?.status).toBe(499);
+    expect(classifier?.errorCode).toBe("interrupted");
+    expect(h.targetCalls).toHaveLength(0);
+    expect(h.logger.records.some((e) => e.msg === "usage policy check failed")).toBe(false);
+    expect(h.logger.records.some((e) => e.msg === "request rejected")).toBe(false);
+    h.store.close();
+  });
+}
+
+test("a refused request still counts against the key: judging runs after admission", async () => {
+  const h = await guardrailHarness({ classifier: DENY });
+  await h.store.keys.setLimits(h.keyId, { requests: { "1m": 1 } });
+  expect((await h.call("anthropic")).status).toBe(400);
+  // The refusal consumed the minute's only request, so the next one is a 429
+  // and the classifier is not asked again.
+  expect(
+    (await h.call("anthropic", { body: { messages: [{ role: "user", content: "b" }] } })).status,
+  ).toBe(429);
+  expect(h.judgeCalls).toHaveLength(1);
+  h.store.close();
+});
+
+/**
+ * Judging is the first step of the stream, not a step before its head: the
+ * head goes out at once and keepalives cover the classifier's latency, so a
+ * client that abandons a silent connection never sees one.
+ */
+test("a streaming request sends its head first and keeps alive while the classifier runs", async () => {
+  const h = await guardrailHarness({
+    classifier: { kind: "hang" },
+    settings: { guardrailTimeoutMs: 80 },
+    deps: { keepaliveMs: 10 },
+  });
+  const res = await h.call("responses", { stream: true });
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/event-stream");
+  const text = await res.text();
+  const keepalive = text.indexOf(": keepalive");
+  expect(keepalive).toBeGreaterThanOrEqual(0);
+  expect(keepalive).toBeLessThan(text.indexOf("response.failed"));
+  expect(streamError("responses", text)).toEqual(
+    expectedStreamError("responses", "UPSTREAM", UNAVAILABLE_MESSAGE),
+  );
+  h.store.close();
+});
+
+/**
+ * Body capture applies to the request the client sent and never to the
+ * classifier's: the classifier is handed the bare transport, not the parent's
+ * capturing decorator, whatever the settings say.
+ */
+test("the classifier call is never captured, with body logging fully on", async () => {
+  const root = join(tmpdir(), `omni-guardrail-bodies-${crypto.randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const store = await createStore({
+    path: join(root, "omnigateway.db"),
+    encryptionKey: await deriveKey("test-encryption-key-0123456789"),
+  });
+  try {
+    const h = await guardrailHarness({
+      store,
+      settings: { bodyLoggingEnabled: true, bodyLoggingCaptureStreamChunks: true },
+      deps: { bodyLoggingAllowed: true },
+    });
+    expect((await h.call("anthropic")).status).toBe(200);
+    expect(h.targetCalls[0]?.http).not.toBe(transport);
+    expect(h.judgeCalls[0]?.http).toBe(transport);
+    for (let i = 0; i < 100 && (await store.bodies.get("req_1")) === null; i++) await Bun.sleep(5);
+    expect(await store.bodies.get("req_1")).not.toBeNull();
+    expect(await store.bodies.get("req_2")).toBeNull();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

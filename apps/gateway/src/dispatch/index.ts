@@ -105,12 +105,33 @@ export type DispatchOutcome = {
   log: () => RequestLog;
 };
 
+/**
+ * Per-call choices a caller makes about this one dispatch, as opposed to the
+ * installation's own wiring in `DispatchDeps`.
+ */
+export type DispatchOptions = {
+  /**
+   * Whether the operator's request transforms — RTK and the ponytail ruleset —
+   * run on this request. Defaults to `true`.
+   *
+   * `false` for exactly one caller: the guardrail classifier
+   * (`guardrail/judge.ts`), whose request is the gateway's own and must reach
+   * the classifier as written — a ruleset appended to its instruction changes
+   * the verdict and bills the key for text it never sent. Stated by the caller
+   * rather than inferred from the request, because nothing about a request says
+   * who built it.
+   */
+  requestTransforms?: boolean;
+};
+
 export async function dispatch(
   request: ChatRequest,
   deps: DispatchDeps,
   signal: AbortSignal,
   requestId: string,
+  options: DispatchOptions = {},
 ): Promise<DispatchOutcome> {
+  const transforms = options.requestTransforms !== false;
   const logger = deps.logger ?? noopLogger;
   const startedAt = deps.now();
   const snapshot = await deps.snapshots.get(startedAt);
@@ -271,13 +292,15 @@ export async function dispatch(
   let model: VirtualModel;
   try {
     checkCancellation();
-    const transformed = transformRequest(request, { enabled: snapshot.settings.rtkEnabled });
+    const transformed = transformRequest(request, {
+      enabled: transforms && snapshot.settings.rtkEnabled,
+    });
     // Both transforms run once here, ahead of routing, so every attempt of a
     // failover sends the same bytes. Their order is not load-bearing — RTK
     // rewrites tool results and ponytail appends to the system prompt — and is
     // fixed only so the recorded degradations read the same way every time.
     const lazy = injectPonytail(transformed.request, {
-      mode: snapshot.settings.ponytailMode,
+      mode: transforms ? snapshot.settings.ponytailMode : "off",
     });
     dispatchRequest = lazy.request;
     noteDegradations(ponytailNotes(lazy.report));
