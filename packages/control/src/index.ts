@@ -95,6 +95,7 @@ export {
   vacuum,
 } from "./database.ts";
 export { type DryRunCandidate, type DryRunResult, dryRun } from "./dryRun.ts";
+export { type GuardrailReadiness, guardrailReadiness } from "./guardrail.ts";
 export {
   type ApiKeySummary,
   type CreatedKey,

@@ -869,3 +869,71 @@ test("--model-limit keeps a model named for a prototype member, or carrying `=`"
   // Nothing leaked onto the prototype a plain object would have handed back.
   expect(Object.hasOwn(Object, "requests")).toBe(false);
 });
+
+type PolicyOutput = { id: string; label: string; guardrailPolicy: string | null };
+
+async function policyOf(root: string, id: string): Promise<string | null | undefined> {
+  const listed = await cli(["keys", "list", "--json"], { root });
+  return (JSON.parse(listed.out) as { keys: PolicyOutput[] }).keys.find((k) => k.id === id)
+    ?.guardrailPolicy;
+}
+
+test("keys guardrail shows, sets from text or a file, clears, and takes one spelling", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "staff", "--json"], { root });
+  const id = await idOf(root, "staff");
+
+  const shown = await cli(["keys", "guardrail", id], { root });
+  expect(shown.code).toBe(0);
+  expect(shown.out).toContain("policy: none");
+
+  const set = await cli(["keys", "guardrail", id, "--policy", "  Work only.  "], { root });
+  expect(set.code).toBe(0);
+  expect(set.out).toContain("Work only.");
+  expect(await policyOf(root, id)).toBe("Work only.");
+
+  const file = join(root, "policy.txt");
+  await Bun.write(file, 'Only software engineering.\nRefuse "roleplay".\n');
+  expect((await cli(["keys", "guardrail", id, "--policy-file", file], { root })).code).toBe(0);
+  expect(await policyOf(root, id)).toBe('Only software engineering.\nRefuse "roleplay".');
+
+  // An empty policy is refused, not read as --clear, and nothing is written.
+  const blank = await cli(["keys", "guardrail", id, "--policy", "   "], { root });
+  expect(blank.code).not.toBe(0);
+  expect(await policyOf(root, id)).toBe('Only software engineering.\nRefuse "roleplay".');
+
+  const both = await cli(["keys", "guardrail", id, "--policy", "x", "--clear"], { root });
+  expect(both.code).not.toBe(0);
+  expect(both.err).toContain("--clear");
+
+  const unreadable = await cli(["keys", "guardrail", id, "--policy-file", join(root, "nope")], {
+    root,
+  });
+  expect(unreadable.code).not.toBe(0);
+  expect(unreadable.err).toContain("could not read");
+
+  const cleared = await cli(["keys", "guardrail", id, "--clear", "--json"], { root });
+  expect(cleared.code).toBe(0);
+  expect(await policyOf(root, id)).toBeNull();
+
+  const missing = await cli(["keys", "guardrail", "not-a-key", "--clear"], { root });
+  expect(missing.code).not.toBe(0);
+  expect(missing.err).toContain("not-a-key");
+});
+
+test("keys create takes a policy, and keys list says whether a key has one, not what", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "staff", "--policy", "SECRET-POLICY-TEXT", "--json"], {
+    root,
+  });
+  await cli(["keys", "create", "--label", "plain", "--json"], { root });
+  expect(await policyOf(root, await idOf(root, "staff"))).toBe("SECRET-POLICY-TEXT");
+  expect(await policyOf(root, await idOf(root, "plain"))).toBeNull();
+
+  const table = await cli(["keys", "list"], { root });
+  expect(table.out).toContain("POLICY");
+  expect(table.out).not.toContain("SECRET-POLICY-TEXT");
+  const rows = table.out.split("\n");
+  expect(rows.find((row) => row.includes("staff"))).toMatch(/\byes\b/);
+  expect(rows.find((row) => row.includes("plain"))).toMatch(/\bno\b/);
+});

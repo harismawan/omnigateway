@@ -4,6 +4,7 @@ import {
   listKeys,
   revokeKey,
   setKeyExpiry,
+  setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
 } from "@omni/control";
@@ -434,6 +435,7 @@ export const keysList: Command = {
           { header: "MODELS" },
           { header: "LIMITS" },
           { header: "BODY CAPTURE" },
+          { header: "POLICY" },
           { header: "STATE" },
           { header: "EXPIRES" },
           { header: "CREATED" },
@@ -459,6 +461,9 @@ export const keysList: Command = {
           // "captured": it means this key defers to the installation's setting,
           // which is off unless someone turned it on.
           key.bodyLoggingOptOut ? "no bodies" : "—",
+          // Whether requests are judged, not what against: the text can run to
+          // thousands of characters and belongs to `keys guardrail <id>`.
+          key.guardrailPolicy === null ? "no" : "yes",
           // Three states, because an expired key is refused at `/v1` while
           // looking untouched here otherwise — a key that stopped working with
           // nothing on the board saying why is the failure this column exists
@@ -476,7 +481,7 @@ export const keysList: Command = {
 
 export const keysCreate: Command = {
   usage:
-    "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--model-limit <model>:<d>:<w>=N ...] [--expires <when>] [--no-bodies]",
+    "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--model-limit <model>:<d>:<w>=N ...] [--expires <when>] [--policy <text>] [--no-bodies]",
   summary: "Mint a gateway API key, printed once",
   options: {
     label: { type: "string" },
@@ -484,10 +489,12 @@ export const keysCreate: Command = {
     limit: { type: "string", multiple: true },
     "model-limit": { type: "string", multiple: true },
     expires: { type: "string" },
+    policy: { type: "string" },
     "no-bodies": { type: "boolean" },
   },
   async run(args, { ctx, writer }) {
     const allow = listFlag(args.values, "allow");
+    const policy = stringFlag(args.values, "policy");
     const expires = stringFlag(args.values, "expires");
     const limits = emptyLimits();
     parseLimitFlags(listFlag(args.values, "limit") ?? [], "--limit", limits.scope);
@@ -512,6 +519,8 @@ export const keysCreate: Command = {
       // existed carries. Editable afterwards with `keys expiry`, unlike the
       // opt-out above.
       expiresAt: expires === undefined ? null : parseWhen("--expires", expires),
+      // Absent means no guardrail. Editable afterwards with `keys guardrail`.
+      guardrailPolicy: policy ?? null,
     });
 
     emit(ctx, writer, created, () => {
@@ -670,6 +679,67 @@ export const keysExpiry: Command = {
       return `${head}\nexpires: ${formatTime(key.expiresAt)}${
         verdict === "expired" ? ` ${paint(ctx, "red", "(expired)")}` : ""
       }`;
+    });
+  },
+};
+
+/**
+ * The fourth editable field: what the key may be used for.
+ *
+ * Same shape as `keys expiry`: show when asked nothing, replace whole when given
+ * something, one spelling per invocation. `--policy-file` exists because a
+ * policy is prose, and prose with quotes and newlines is miserable to pass as
+ * one shell argument. The text is trimmed and bounded by the control schema,
+ * which refuses an empty policy rather than reading it as `--clear`.
+ */
+export const keysGuardrail: Command = {
+  usage: "keys guardrail <id> [--policy <text> | --policy-file <path> | --clear]",
+  summary: "Show or replace one key's usage policy",
+  options: {
+    policy: { type: "string" },
+    "policy-file": { type: "string" },
+    clear: { type: "boolean" },
+  },
+  async run(args, { ctx, writer }) {
+    const id = requirePositional(args, 0, "key id");
+    const text = stringFlag(args.values, "policy");
+    const file = stringFlag(args.values, "policy-file");
+    const clear = boolFlag(args.values, "clear");
+    const given = [text !== undefined, file !== undefined, clear].filter(Boolean).length;
+    if (given > 1) {
+      throw new UsageError("pass one of --policy, --policy-file or --clear");
+    }
+
+    const store = await ctx.store();
+    const existing = (await listKeys(store)).find((entry) => entry.id === id);
+    if (existing === undefined) throw new CliError(`no api key "${id}"`);
+
+    let key = existing;
+    if (given === 1) {
+      const policy = clear
+        ? null
+        : file !== undefined
+          ? await Bun.file(file)
+              .text()
+              .catch(() => {
+                throw new CliError(`could not read ${file}`);
+              })
+          : (text as string);
+      key = await setKeyGuardrail(store, id, { policy });
+    }
+
+    emit(ctx, writer, key, () => {
+      const head = fields([
+        ["id", key.id],
+        ["label", key.label],
+        ["prefix", `${key.prefix}…`],
+      ]);
+      if (key.guardrailPolicy === null)
+        return `${head}
+policy: none; requests are not judged`;
+      return `${head}
+policy:
+${key.guardrailPolicy}`;
     });
   },
 };

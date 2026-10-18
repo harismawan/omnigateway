@@ -879,6 +879,39 @@ test("doctor reports a target pinned to an account that is gone", async () => {
   expect(checks.danglingPins).toEqual(["billed/claude-opus-5 → removed-account"]);
 });
 
+/**
+ * A key carrying a usage policy is refused on every request while the classifier
+ * is unset or does not resolve — fail closed — and neither is refused at write
+ * time, so `doctor` is where the operator hears of it.
+ */
+test("doctor warns when keys carry a policy and nothing can judge them", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  type Checks = {
+    guardrail: { keysWithPolicy: number; model: string | null; problem: string | null };
+  };
+  const doctor = async (): Promise<Checks["guardrail"]> =>
+    (JSON.parse((await cli(["doctor", "--json"], { root, service })).out) as Checks).guardrail;
+
+  // No key carries a policy: nothing needs a classifier, so nothing is wrong.
+  expect(await doctor()).toEqual({ keysWithPolicy: 0, model: null, problem: null });
+
+  await cli(["keys", "create", "--label", "staff", "--policy", "Work only.", "--json"], { root });
+  expect(await doctor()).toEqual({ keysWithPolicy: 1, model: null, problem: "unconfigured" });
+  expect((await cli(["doctor"], { root, service })).out).toContain("their requests are refused");
+
+  await cli(["settings", "set", "guardrailModel", "no-such-model"], { root });
+  expect((await doctor()).problem).toBe("unresolved");
+
+  // A built-in provider's model resolves without any virtual model configured.
+  await cli(["settings", "set", "guardrailModel", "anthropic/claude-haiku-4"], { root });
+  expect(await doctor()).toEqual({
+    keysWithPolicy: 1,
+    model: "anthropic/claude-haiku-4",
+    problem: null,
+  });
+});
+
 test("doctor reports a pin the router cannot resolve, model by model", async () => {
   const root = await installation();
   const service = fakeService({ root });
@@ -1770,6 +1803,24 @@ test("settings set writes a string setting the type-driven parse could not reach
 
   expect(result.code).toBe(0);
   expect(await setting(root, "ponytailMode")).toBe("ultra");
+});
+
+test("settings set names a classifier model and clears it again with null", async () => {
+  const root = await installation();
+
+  expect(
+    (await cli(["settings", "set", "guardrailModel", "anthropic/claude-haiku-4"], { root })).code,
+  ).toBe(0);
+  expect(await setting(root, "guardrailModel")).toBe("anthropic/claude-haiku-4");
+  expect((await cli(["settings", "set", "guardrailTimeoutMs", "5000"], { root })).code).toBe(0);
+  expect(await setting(root, "guardrailTimeoutMs")).toBe(5000);
+
+  expect((await cli(["settings", "set", "guardrailModel", "null"], { root })).code).toBe(0);
+  expect(await setting(root, "guardrailModel")).toBeNull();
+  // Blank is a typo rather than an unset, and an out-of-range timeout is refused.
+  expect((await cli(["settings", "set", "guardrailModel", " "], { root })).code).toBe(2);
+  expect((await cli(["settings", "set", "guardrailTimeoutMs", "60001"], { root })).code).toBe(1);
+  expect(await setting(root, "guardrailTimeoutMs")).toBe(5000);
 });
 
 test("settings set refuses a ponytail level that is not one of the four", async () => {
