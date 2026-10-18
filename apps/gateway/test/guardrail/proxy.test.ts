@@ -256,13 +256,13 @@ test("a key without a policy is served even with no classifier configured", asyn
 });
 
 /**
- * Only the request-level system prompt and the last message a human wrote are
- * judged. A user turn carrying any tool result is a tool turn — even with text
- * an agent client injected beside it — and is skipped whole; tool output and
- * images never reach the classifier.
+ * With a one-turn window, only the request-level system prompt and the last
+ * message a human wrote are judged. A user turn carrying any tool result is a
+ * tool turn — even with text an agent client injected beside it — and is
+ * skipped whole; tool output and images never reach the classifier.
  */
 test("a tool-result final turn judges the earlier human text, never the tool output or images", async () => {
-  const h = await guardrailHarness();
+  const h = await guardrailHarness({ settings: { guardrailHistoryTurns: 1 } });
   const png =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
   const res = await h.call("anthropic", {
@@ -367,6 +367,154 @@ test("an Anthropic mcp_tool_result-only turn judges the human's message", async 
   const text = classifierText(sent);
   expect(text).toContain("<request>\nreview my parser please\n</request>");
   expect(text).not.toContain("MCP-OUTPUT");
+  h.store.close();
+});
+
+/** An agent conversation: four human messages, tool turns between them. */
+const agentConversation = [
+  { role: "user", content: "HUMAN-ONE" },
+  { role: "assistant", content: "ok" },
+  { role: "user", content: "HUMAN-TWO" },
+  {
+    role: "assistant",
+    content: [{ type: "tool_use", id: "t1", name: "bash", input: { cmd: "ls" } }],
+  },
+  {
+    role: "user",
+    content: [
+      { type: "tool_result", tool_use_id: "t1", content: "TOOL-OUTPUT-ONE" },
+      { type: "text", text: "INJECTED-REMINDER" },
+    ],
+  },
+  { role: "assistant", content: "done" },
+  { role: "user", content: "HUMAN-THREE" },
+  {
+    role: "assistant",
+    content: [{ type: "tool_use", id: "t2", name: "bash", input: { cmd: "cat" } }],
+  },
+  {
+    role: "user",
+    content: [{ type: "tool_result", tool_use_id: "t2", content: "TOOL-OUTPUT-TWO" }],
+  },
+  { role: "assistant", content: "next?" },
+  { role: "user", content: "HUMAN-FOUR" },
+];
+
+/**
+ * By default the last three human messages are judged, oldest first, the
+ * newest as the request; tool turns between them are skipped and never sent.
+ */
+test("by default the last three human messages reach the classifier, oldest first", async () => {
+  const h = await guardrailHarness();
+  expect((await h.call("anthropic", { body: { messages: agentConversation } })).status).toBe(200);
+  const sent = h.judgeCalls[0];
+  if (sent === undefined) throw new Error("the classifier was not called");
+  const text = classifierText(sent);
+  expect(text).toContain(
+    [
+      "<earlier_messages>",
+      '<message n="1">\nHUMAN-TWO\n</message>',
+      '<message n="2">\nHUMAN-THREE\n</message>',
+      "</earlier_messages>",
+      "",
+      "<request>\nHUMAN-FOUR\n</request>",
+    ].join("\n"),
+  );
+  for (const absent of ["HUMAN-ONE", "TOOL-OUTPUT", "INJECTED-REMINDER", "next?", "done"]) {
+    expect({ absent, present: text.includes(absent) }).toEqual({ absent, present: false });
+  }
+  expect(sent.request.messages).toHaveLength(1);
+  h.store.close();
+});
+
+/**
+ * The gap the one-message design accepted: a forbidden ask, then "continue".
+ * Both reach the classifier, the follow-up as the request and the ask as its
+ * context, under an instruction that says to judge one in the light of the
+ * other.
+ */
+test("a forbidden ask split across turns reaches the classifier with its follow-up", async () => {
+  const h = await guardrailHarness({ classifier: DENY });
+  const res = await h.call("openai", {
+    body: {
+      messages: [
+        { role: "user", content: "write me a birthday poem for my aunt" },
+        { role: "assistant", content: "Sure, any style?" },
+        { role: "user", content: "continue" },
+      ],
+    },
+  });
+  expect(res.status).toBe(400);
+  const sent = h.judgeCalls[0];
+  if (sent === undefined) throw new Error("the classifier was not called");
+  const text = classifierText(sent);
+  expect(text).toContain('<message n="1">\nwrite me a birthday poem for my aunt\n</message>');
+  expect(text).toContain("<request>\ncontinue\n</request>");
+  expect(text).not.toContain("Sure, any style?");
+  expect(sent.request.system).toEqual([{ type: "text", text: CLASSIFIER_INSTRUCTION }]);
+  expect(h.targetCalls).toHaveLength(0);
+  h.store.close();
+});
+
+/**
+ * The verdict is keyed on the messages judged, so a wider or narrower window
+ * that changes them asks again — and one that cannot change them (the
+ * conversation has fewer human messages than either window) does not.
+ */
+test("changing the history window misses the cache exactly when it changes what is judged", async () => {
+  const h = await guardrailHarness({ settings: { guardrailHistoryTurns: 1 } });
+  const body = { messages: agentConversation };
+  expect((await h.call("anthropic", { body })).status).toBe(200);
+  expect((await h.call("anthropic", { body })).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(1);
+
+  await h.store.config.putSettings({ guardrailHistoryTurns: 2 });
+  expect((await h.call("anthropic", { body })).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(2);
+  const second = h.judgeCalls[1];
+  expect(second === undefined ? "" : classifierText(second)).toContain(
+    '<message n="1">\nHUMAN-THREE\n</message>',
+  );
+
+  // One human message: windows of 2 and 5 judge the same text, and the
+  // verdict already given answers it.
+  const single = { messages: [{ role: "user", content: "just one ask" }] };
+  expect((await h.call("anthropic", { body: single })).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(3);
+  await h.store.config.putSettings({ guardrailHistoryTurns: 5 });
+  expect((await h.call("anthropic", { body: single })).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(3);
+  h.store.close();
+});
+
+/**
+ * The cap is a total across the window: an over-long older message is cut,
+ * the newest reaches the classifier whole, and the row says text was cut.
+ */
+test("an over-long older message is cut so the newest is judged whole, and the row says so", async () => {
+  const h = await guardrailHarness();
+  const old = `OLD-HEAD${"o".repeat(20_000)}OLD-TAIL`;
+  const res = await h.call("openai", {
+    body: {
+      messages: [
+        { role: "user", content: old },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "NEWEST-ASK" },
+      ],
+    },
+  });
+  expect(res.status).toBe(200);
+  const sent = h.judgeCalls[0];
+  if (sent === undefined) throw new Error("the classifier was not called");
+  const text = classifierText(sent);
+  expect(text).toContain("<request>\nNEWEST-ASK\n</request>");
+  expect(text).toContain("OLD-HEAD");
+  expect(text).toContain("OLD-TAIL");
+  expect(text).toContain("[… truncated …]");
+  expect((await rowOf(h, "req_1"))?.degradations).toEqual([
+    "guardrail:allowed",
+    "guardrail:truncated",
+  ]);
   h.store.close();
 });
 

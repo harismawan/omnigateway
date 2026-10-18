@@ -6,20 +6,41 @@ const parts = {
   policy: "Work only.",
   model: "judge",
   system: "sys",
-  human: "ask",
+  human: ["earlier", "ask"],
 };
 
 test("the key changes with every part, and does not concatenate ambiguously", () => {
   const base = verdictKey(parts);
-  for (const field of ["apiKeyId", "policy", "model", "system", "human"] as const) {
+  for (const field of ["apiKeyId", "policy", "model", "system"] as const) {
     expect(verdictKey({ ...parts, [field]: `${parts[field]}!` })).not.toBe(base);
   }
-  expect(verdictKey({ ...parts, system: "ab", human: "c" })).not.toBe(
-    verdictKey({ ...parts, system: "a", human: "bc" }),
+  expect(verdictKey({ ...parts, human: ["earlier", "ask!"] })).not.toBe(base);
+  expect(verdictKey({ ...parts, human: ["earlier!", "ask"] })).not.toBe(base);
+  expect(verdictKey({ ...parts, system: "ab", human: ["c"] })).not.toBe(
+    verdictKey({ ...parts, system: "a", human: ["bc"] }),
   );
   expect(verdictKey({ ...parts })).toBe(base);
   // The key holds no request text.
   expect(base).toMatch(/^[0-9a-f]{64}$/);
+});
+
+/**
+ * Every judged message is part of the key, in order, and the boundaries
+ * between them are part of it too: a key over the messages concatenated —
+ * with any separator a message could itself contain — answers one split of
+ * the text with another's verdict.
+ */
+test("the judged messages are keyed in order, and their boundaries are unambiguous", () => {
+  const key = (human: string[]): string => verdictKey({ ...parts, human });
+  expect(key(["ab", "c"])).not.toBe(key(["a", "bc"]));
+  expect(key(["a", "b"])).not.toBe(key(["b", "a"]));
+  expect(key(["a\n\nb"])).not.toBe(key(["a", "b"]));
+  expect(key(["a,b"])).not.toBe(key(["a", "b"]));
+  expect(key(['a","b'])).not.toBe(key(["a", "b"]));
+  expect(key(["ask"])).not.toBe(key(["", "ask"]));
+  expect(key(["ask"])).not.toBe(key(["earlier", "ask"]));
+  expect(key([])).not.toBe(key([""]));
+  expect(key(["ab", "c"])).toBe(key(["ab", "c"]));
 });
 
 test("a verdict lives for the TTL and no longer", () => {

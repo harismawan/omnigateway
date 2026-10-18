@@ -242,7 +242,7 @@ export async function judge(
     };
   }
 
-  const judged = judgedText(input.request);
+  const judged = judgedText(input.request, settings.guardrailHistoryTurns);
   const notes = (what: string): string[] =>
     judged.truncated ? [`guardrail:${what}`, "guardrail:truncated"] : [`guardrail:${what}`];
   const decided = (verdict: Verdict): GuardrailOutcome =>

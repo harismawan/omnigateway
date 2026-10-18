@@ -16,15 +16,18 @@ export type VerdictKeyParts = {
   apiKeyId: string;
   policy: string;
   model: string;
-  /** Both halves *after* truncation, which is the text the classifier saw. */
+  /** All of it *after* truncation, which is the text the classifier saw. */
   system: string;
-  human: string;
+  /** Every judged human message, oldest first, as `JudgedText.human` holds them. */
+  human: readonly string[];
 };
 
 /**
- * One digest over every part, length-delimited by JSON so no two different
- * tuples can concatenate to the same input. Editing the policy or the
- * classifier model therefore misses naturally, and nothing ever needs
+ * One digest over every part, structured by JSON — the messages as an array,
+ * never joined — so no two different tuples, and no two splits of the same
+ * text into messages, can serialise to the same input. Editing the policy, the
+ * classifier model, or the history-turn setting where it changes which
+ * messages are judged therefore misses naturally, and nothing ever needs
  * invalidating. Hashed so the cache holds no request text.
  */
 export function verdictKey(parts: VerdictKeyParts): string {
@@ -36,7 +39,7 @@ export function verdictKey(parts: VerdictKeyParts): string {
 /**
  * Process-local, bounded LRU of classifier verdicts.
  *
- * An agent client re-sends the same last human message on every tool turn —
+ * An agent client re-sends the same human messages on every tool turn —
  * dozens of times — and without this each of those turns pays a classifier call.
  * Holds allow **and** deny; never a failure, because a failure retried on the
  * next turn may succeed. Process-local is acceptable in a cluster: a miss costs
