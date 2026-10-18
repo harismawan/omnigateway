@@ -1,4 +1,4 @@
-import { GatewayError, type StreamEvent } from "@omni/ir";
+import { GatewayError, type LogLevel, type StreamEvent } from "@omni/ir";
 import type { AdapterRequest, AdapterResult, HttpClient, ProviderAdapter } from "@omni/providers";
 import type { Settings, Store } from "@omni/store";
 import {
@@ -103,6 +103,8 @@ export async function guardrailHarness(
     settings?: Partial<Settings>;
     deps?: Partial<ProxyDeps>;
     store?: Store;
+    /** The captured logger's level. Debug by default, which prints provider-bearing reasons. */
+    logLevel?: LogLevel;
   } = {},
 ): Promise<Harness> {
   const store = opts.store ?? (await memoryStore());
@@ -162,7 +164,7 @@ export async function guardrailHarness(
     },
   };
 
-  const logger = captureLogger();
+  const logger = captureLogger(opts.logLevel);
   const emitted: RequestCompleted[] = [];
   const debits: Harness["debits"] = [];
   const limiter = new ApiKeyRateLimiter({ store, now: () => 1_000_000, logger });

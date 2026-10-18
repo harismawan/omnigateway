@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ErrorCode } from "@omni/ir";
+import { type ErrorCode, GatewayError } from "@omni/ir";
 import type { RequestLog } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
-import { health, memoryStore } from "@omni/testkit";
+import { health, memoryStore, seedCredential, target, virtualModel } from "@omni/testkit";
 import { createRoutingSnapshotCache } from "../../src/dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "../../src/egress/anthropic.ts";
 import { openaiErrorBody } from "../../src/egress/openai.ts";
@@ -310,6 +310,210 @@ test("a tool-result final turn judges the earlier human text, never the tool out
   expect(sent.request.tools).toBeUndefined();
   h.store.close();
 });
+
+/**
+ * Codex's shell turn: `local_shell_call_output` becomes a user turn holding a
+ * single native block, no text and no tool result. The walk goes past it to
+ * what the human wrote; stopping there judged "" — and cached the verdict.
+ */
+test("a Responses local shell output turn judges the human's message, not an empty string", async () => {
+  const h = await guardrailHarness();
+  await h.call("responses", {
+    body: {
+      input: [
+        { type: "message", role: "user", content: "review my parser please" },
+        {
+          type: "local_shell_call",
+          id: "ls_1",
+          call_id: "c1",
+          status: "completed",
+          action: { type: "exec", command: ["cat", "parser.ts"] },
+        },
+        { type: "local_shell_call_output", id: "lso_1", call_id: "c1", output: "SHELL-OUTPUT" },
+      ],
+    },
+  });
+  const sent = h.judgeCalls[0];
+  if (sent === undefined) throw new Error("the classifier was not called");
+  const text = classifierText(sent);
+  expect(text).toContain("<request>\nreview my parser please\n</request>");
+  expect(text).not.toContain("SHELL-OUTPUT");
+  h.store.close();
+});
+
+/**
+ * The Anthropic surface's own native tool output, `mcp_tool_result`, is legal
+ * in a user turn and arrives there alone the same way.
+ */
+test("an Anthropic mcp_tool_result-only turn judges the human's message", async () => {
+  const h = await guardrailHarness();
+  await h.call("anthropic", {
+    body: {
+      messages: [
+        { role: "user", content: "review my parser please" },
+        {
+          role: "assistant",
+          content: [{ type: "mcp_tool_use", id: "m1", name: "read", server_name: "fs", input: {} }],
+        },
+        {
+          role: "user",
+          content: [{ type: "mcp_tool_result", tool_use_id: "m1", content: "MCP-OUTPUT" }],
+        },
+      ],
+    },
+  });
+  const sent = h.judgeCalls[0];
+  if (sent === undefined) throw new Error("the classifier was not called");
+  const text = classifierText(sent);
+  expect(text).toContain("<request>\nreview my parser please\n</request>");
+  expect(text).not.toContain("MCP-OUTPUT");
+  h.store.close();
+});
+
+test("the same human message under a different system prompt misses the cache", async () => {
+  const h = await guardrailHarness();
+  for (const system of ["SYSTEM-A", "SYSTEM-B"])
+    expect((await h.call("anthropic", { body: { system } })).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(2);
+  const second = h.judgeCalls[1];
+  expect(second === undefined ? "" : classifierText(second)).toContain("SYSTEM-B");
+  h.store.close();
+});
+
+/**
+ * The timeout is the gateway's own timer, and a check that finished must clear
+ * it: left armed, every judged request holds a timer for the whole timeout and
+ * aborts a signal nothing reads any more. Watched through the timer functions
+ * themselves, keyed on a timeout value nothing else in the path uses, so the
+ * assertion does not depend on how long anything takes.
+ */
+test("a classifier call that finishes leaves no timeout timer armed", async () => {
+  const TIMEOUT_MS = 43_219;
+  const h = await guardrailHarness({ settings: { guardrailTimeoutMs: TIMEOUT_MS } });
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const armed = new Set<unknown>();
+  const created: unknown[] = [];
+  globalThis.setTimeout = ((handler: () => void, ms?: number) => {
+    const timer = realSet(handler, ms);
+    if (ms === TIMEOUT_MS) {
+      armed.add(timer);
+      created.push(timer);
+    }
+    return timer;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer?: Parameters<typeof clearTimeout>[0]) => {
+    armed.delete(timer);
+    realClear(timer);
+  }) as typeof clearTimeout;
+  try {
+    expect((await h.call("anthropic")).status).toBe(200);
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+  }
+  expect(h.judgeCalls).toHaveLength(1);
+  // The judge armed exactly one, and cleared it.
+  expect(created).toHaveLength(1);
+  expect(armed.size).toBe(0);
+  h.store.close();
+});
+
+/**
+ * A classifier model whose provider has no adapter makes dispatch throw
+ * `INTERNAL` before anything assigns the row a status. The classifier row still
+ * completes with that failure, never as a status-0 row.
+ */
+test("a classifier dispatch that throws before a status is set records 500 INTERNAL", async () => {
+  const h = await guardrailHarness();
+  await seedCredential(h.store, { id: "c-orphan", provider: "grok" });
+  await h.store.config.putModel(
+    virtualModel({ id: "judge-orphan", targets: [target({ provider: "grok", model: "grok-4" })] }),
+  );
+  await h.store.config.putSettings({ guardrailModel: "judge-orphan" });
+  expect((await h.call("anthropic")).status).toBe(502);
+  expect(h.targetCalls).toHaveLength(0);
+  const classifier = await rowOf(h, "req_2");
+  expect(classifier?.status).toBe(500);
+  expect(classifier?.errorCode).toBe("INTERNAL");
+  expect(classifier?.degradations).toEqual(["guardrail:classifier"]);
+  h.store.close();
+});
+
+/**
+ * A failure thrown out of the classifier's dispatch can carry text the gateway
+ * did not write — an upstream's error body, a store's row. The warning names
+ * the failure by code and a fixed reason; a provider-bearing message passes
+ * only through the same `reasonField` gate as every rejection line.
+ */
+for (const [name, thrown] of [
+  [
+    "a provider-bearing error",
+    new GatewayError("UPSTREAM", "upstream said: LEAKED-UPSTREAM-TEXT", { provider: "openai" }),
+  ],
+  ["a plain error", new Error("LEAKED-UPSTREAM-TEXT")],
+] as const) {
+  test(`the check-failed warning carries no upstream text from ${name}`, async () => {
+    // At the default level: debug prints provider-bearing reasons by design.
+    const h = await guardrailHarness({ logLevel: "info" });
+    await h.store.credentials.updateHealth("c-judge", "gpt-judge", () =>
+      health({ credentialId: "c-judge", model: "gpt-judge", consecutiveFailures: 1 }),
+    );
+    h.store.credentials.updateHealth = async () => {
+      throw thrown;
+    };
+    expect((await h.call("anthropic")).status).toBe(502);
+    const warned = h.logger.records.find((e) => e.msg === "usage policy check failed");
+    expect(warned?.fields).toMatchObject({ requestId: "req_1", model: "judge" });
+    expect(typeof warned?.fields.reason).toBe("string");
+    for (const line of h.logger.lines) expect(line).not.toContain("LEAKED-UPSTREAM-TEXT");
+    h.store.close();
+  });
+}
+
+/**
+ * The judge itself failing — here the settings read it starts with — refuses
+ * the request the way a failed check does, and the row says which guardrail
+ * outcome it was rather than carrying no guardrail note at all.
+ */
+for (const stream of [false, true]) {
+  test(`a judge that throws refuses as unavailable (${stream ? "streaming" : "non-streaming"})`, async () => {
+    const store = await memoryStore();
+    const real = createRoutingSnapshotCache(store);
+    let reads = 0;
+    const h = await guardrailHarness({
+      store,
+      deps: {
+        snapshots: {
+          get: async (now) => {
+            reads++;
+            if (reads === 1) throw new Error("LEAKED-STORE-TEXT");
+            return real.get(now);
+          },
+        },
+      },
+    });
+    const res = await h.call("anthropic", { stream });
+    const text = await res.text();
+    if (stream) {
+      expect(res.status).toBe(200);
+      expect(streamError("anthropic", text)).toEqual(
+        expectedStreamError("anthropic", "UPSTREAM", UNAVAILABLE_MESSAGE),
+      );
+    } else {
+      expect(res.status).toBe(502);
+      expect(JSON.parse(text)).toEqual(errorBody("anthropic", "UPSTREAM", UNAVAILABLE_MESSAGE));
+    }
+    expect(h.judgeCalls).toHaveLength(0);
+    expect(h.targetCalls).toHaveLength(0);
+    const parent = await rowOf(h, "req_1");
+    expect(parent?.status).toBe(502);
+    expect(parent?.errorCode).toBe("UPSTREAM");
+    expect(parent?.degradations).toEqual(["guardrail:unavailable"]);
+    for (const line of h.logger.lines) expect(line).not.toContain("LEAKED-STORE-TEXT");
+    h.store.close();
+  });
+}
 
 test("an over-long human message is truncated head and tail, and the row says so", async () => {
   const h = await guardrailHarness();

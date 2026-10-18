@@ -1,7 +1,6 @@
 import {
   type ChatRequest,
   collect,
-  describeError,
   type ErrorCode,
   GatewayError,
   HTTP_STATUS,
@@ -18,6 +17,7 @@ import {
   newCompletedRequestLog,
   newPendingRequestLog,
   type PluginEmit,
+  reasonField,
   reportRejection,
   routeLog,
   type UsageDebit,
@@ -72,7 +72,7 @@ const refusal = (code: ErrorCode, message: string): GatewayError =>
 
 type ClassifierResult =
   | { kind: "verdict"; verdict: Verdict }
-  | { kind: "failed"; reason: string }
+  | { kind: "failed"; reason: string; code?: ErrorCode }
   | { kind: "cancelled" };
 
 /**
@@ -194,9 +194,20 @@ async function callClassifier(
 
   if (cancelled) return { kind: "cancelled" };
   if (timedOut) return { kind: "failed", reason: "classifier timed out" };
-  if (thrown !== null)
-    return { kind: "failed", reason: describeError(thrown.error, "classifier call failed") };
-  if (failure !== undefined) return { kind: "failed", reason: `classifier ${failure.code}` };
+  if (thrown !== null) {
+    // What dispatch throws can carry text this gateway did not write — an
+    // upstream's body, a store's row — so a provider-bearing message passes
+    // the same gate as every rejection line, and anything else is named by
+    // code alone.
+    const { error } = thrown;
+    if (!(error instanceof GatewayError)) {
+      return { kind: "failed", reason: "classifier call failed", code: "INTERNAL" };
+    }
+    const { reason = "classifier call failed" } = reasonField(error, deps.logger);
+    return { kind: "failed", reason, code: error.code };
+  }
+  if (failure !== undefined)
+    return { kind: "failed", reason: `classifier ${failure.code}`, code: failure.code };
   const verdict = parseVerdict(collect(events));
   if (verdict === null) return { kind: "failed", reason: "classifier reply unreadable" };
   return { kind: "verdict", verdict };
@@ -268,6 +279,7 @@ export async function judge(
     const fields: LogFields = {
       requestId: input.parentRequestId,
       model,
+      ...(result.code === undefined ? {} : { code: result.code }),
       reason: result.reason,
     };
     deps.logger.warn("usage policy check failed", fields);
@@ -321,8 +333,31 @@ export function judgeFirst(opts: {
     return log;
   };
 
+  /**
+   * The judge failing in itself — a settings read that throws — is a check that
+   * could not run, and refuses exactly as one that timed out does: the parent
+   * row still says which guardrail outcome it was. Its message stays off
+   * stdout; it is a store's or a dependency's, never this gateway's.
+   */
+  async function judged(): Promise<GuardrailOutcome> {
+    try {
+      return await opts.judge();
+    } catch {
+      if (opts.signal.aborted) return { kind: "cancelled" };
+      opts.logger.warn("usage policy check failed", {
+        requestId: opts.requestId,
+        reason: "usage policy check threw",
+      });
+      return {
+        kind: "refused",
+        error: refusal("UPSTREAM", UNAVAILABLE_MESSAGE),
+        notes: ["guardrail:unavailable"],
+      };
+    }
+  }
+
   async function* events(): AsyncGenerator<StreamEvent, void, undefined> {
-    const outcome = await opts.judge();
+    const outcome = await judged();
     if (outcome.kind === "cancelled") throw opts.signal.reason;
     notes = outcome.notes;
     if (outcome.kind === "refused") {

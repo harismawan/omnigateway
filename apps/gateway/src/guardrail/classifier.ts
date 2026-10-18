@@ -39,14 +39,19 @@ export const CLASSIFIER_MAX_TOKENS = 1_024;
 const SECTIONS = ["policy", "system_prompt", "request"] as const;
 
 /**
+ * A closing tag for any of the three sections, in any case and with whitespace
+ * anywhere inside it: a model reading tags does not match them exactly, so
+ * `</REQUEST>` and `</ request >` close a section as well as `</request>`.
+ */
+const CLOSING_TAG = new RegExp(`<\\/(\\s*(?:${SECTIONS.join("|")})\\s*)>`, "gi");
+
+/**
  * Keeps data from closing its own section early. Only the three closing tags
  * are touched, so code or markup in a request otherwise reaches the classifier
  * exactly as written.
  */
 function fence(text: string): string {
-  let out = text;
-  for (const tag of SECTIONS) out = out.replaceAll(`</${tag}>`, `<\\/${tag}>`);
-  return out;
+  return text.replace(CLOSING_TAG, "<\\/$1>");
 }
 
 /**

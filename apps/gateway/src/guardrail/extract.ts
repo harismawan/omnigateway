@@ -47,9 +47,14 @@ function textOf(blocks: readonly ContentBlock[]): string {
  * and the last thing a human wrote.
  *
  * "Last thing a human wrote" is the last `user` message that carries **no**
- * tool-result block, walking backwards. A user message holding any tool result
- * is a tool turn even when the client added text beside it — agent clients
- * inject reminders there — so it is skipped whole. That keeps the judged text
+ * tool-result block and **at least one** text block, walking backwards. A user
+ * message holding any tool result is a tool turn even when the client added
+ * text beside it — agent clients inject reminders there — so it is skipped
+ * whole. So is one holding no text at all: tool output that is not a
+ * `toolResult` arrives that way (a Responses `local_shell_call_output` is a
+ * user turn with one native block), and stopping there judges an empty string.
+ * A native block *beside* text does not make a tool turn — a cited document
+ * with "summarise this" is the human's own ask. That keeps the judged text
  * stable across an agent's tool turns, which is what lets the verdict cache
  * answer them; and it keeps tool output, which the human did not write, out of
  * the classifier's input entirely.
@@ -68,6 +73,7 @@ export function judgedText(request: ChatRequest): JudgedText {
     const message = request.messages[i];
     if (message === undefined || message.role !== "user") continue;
     if (message.content.some((block) => block.type === "toolResult")) continue;
+    if (!message.content.some((block) => block.type === "text")) continue;
     human = textOf(message.content);
     break;
   }

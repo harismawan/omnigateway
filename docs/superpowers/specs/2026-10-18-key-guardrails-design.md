@@ -156,11 +156,16 @@ cannot carry it; **never** log the policy text, the judged text, or the classifi
 Extracted from the parsed `ChatRequest`, so one function serves all three surfaces:
 
 - the request-level `system` text;
-- the text blocks of the **last `user`-role message that contains no tool-result block**, walking
-  backwards. A user message carrying any tool result is a tool turn even when the client added text
-  beside it (agent clients inject reminders there), so it is skipped whole; this is what makes the
-  judged text stable across an agent's tool turns and the verdict cache effective. Tool-result
-  content, images, files, and `providerNative` blocks are never sent to the classifier.
+- the text blocks of the **last `user`-role message that contains no tool-result block and at least
+  one text block**, walking backwards. A user message carrying any tool result is a tool turn even
+  when the client added text beside it (agent clients inject reminders there), so it is skipped
+  whole; this is what makes the judged text stable across an agent's tool turns and the verdict
+  cache effective. A user message with no text block is skipped too: tool output that is not a
+  tool result arrives that way (a Responses `local_shell_call_output` and an Anthropic
+  `mcp_tool_result` are user turns holding only a `providerNative` block), and stopping there
+  judged an empty string. A native block *beside* text (a cited document with "summarise this")
+  does not make a tool turn. Tool-result content, images, files, and `providerNative` blocks are
+  never sent to the classifier.
 
 If neither yields any text (e.g. an image-only first message with no system prompt), the request is
 judged on an empty string — the classifier decides, there is no special case.
@@ -176,7 +181,8 @@ constants, not settings.
 
 - Built as a fresh `ChatRequest`: a gateway-authored instruction (vendored constant, not
   operator-editable) that frames the operator policy and the judged text as clearly delimited data,
-  and asks for a verdict. Non-streaming in effect (drain and `collect`), small `maxTokens`,
+  and asks for a verdict. Data cannot close its own section: a closing section tag in any case or
+  spacing (`</REQUEST>`, `</ request >`) is escaped. Non-streaming in effect (drain and `collect`), small `maxTokens`,
   deterministic sampling where the target supports it.
 - The verdict format is the builder's call, with one rule: **anything that is not an unambiguous
   allow is not an allow.** There is no IR-level `responseFormat`; structured output lives in the
@@ -290,7 +296,7 @@ IR; whether the verdict cache lives in `apps/gateway/src/` beside the rate limit
 - Verdict cache (process-local, 1h, allow+deny, keyed on policy+model+text).
 - Classifier calls count toward tokens, spend, and long-window requests; not the `1m` ring.
 - Streaming requests judge inside the stream, so refusals there are in-stream errors on a 200.
-- "Human message" = last user message with no tool-result block.
+- "Human message" = last user message with no tool-result block and at least one text block.
 - System text capped at 8,000 characters, human text at 16,000, truncated head+tail.
 - Key holders see classifier rows in their own logs and usage.
 - `guardrailTimeoutMs` default 10s.

@@ -65,6 +65,71 @@ test("a user turn carrying any tool result is skipped whole, text beside it incl
   expect(judged.human).toBe("the human ask");
 });
 
+/**
+ * Tool output that is not a `toolResult` — a Responses `local_shell_call_output`
+ * arrives as a user turn holding one native block — is a tool turn too. A walk
+ * that stopped there judged an empty string on every Codex shell turn. A user
+ * turn holding no text block at all says nothing a human wrote, so the walk
+ * goes past it, an image-only turn included.
+ */
+test("a user turn holding no text block is skipped, so native tool output is never judged", () => {
+  const judged = judgedText(
+    req({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "review my parser please" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "providerNative", provider: "openai", blockType: "local_shell_call", data: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "providerNative",
+              provider: "openai",
+              blockType: "local_shell_call_output",
+              data: { output: "SHELL-OUTPUT" },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "image", mediaType: "image/png", data: "x" }] },
+      ],
+    }),
+  );
+  expect(judged.human).toBe("review my parser please");
+});
+
+/**
+ * A native block beside text a human wrote does not make the turn a tool turn:
+ * "summarise this" with a cited document attached is the human's own ask, and
+ * skipping it would judge an older, already-allowed message in its place.
+ */
+test("a user turn with text beside a native block is judged on its text", () => {
+  const judged = judgedText(
+    req({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "an older ask" }] },
+        { role: "assistant", content: [{ type: "text", text: "ok" }] },
+        {
+          role: "user",
+          content: [
+            {
+              type: "providerNative",
+              provider: "anthropic",
+              blockType: "document",
+              data: { citations: { enabled: true } },
+            },
+            { type: "text", text: "summarise this" },
+          ],
+        },
+      ],
+    }),
+  );
+  expect(judged.human).toBe("summarise this");
+});
+
 test("images, files, thinking and native blocks are never judged, only text blocks", () => {
   const judged = judgedText(
     req({
