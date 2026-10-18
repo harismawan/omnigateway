@@ -213,24 +213,27 @@ omni keys guardrail <id> --policy-file policy.txt
 omni keys guardrail <id> --clear
 ```
 
-The classifier sees the request's system prompt and the last message a human
-wrote — never tool results, images, or earlier turns — and only a plain `ALLOW`
-lets the request through. A deny is refused as `CONTENT_FILTER` (400); a
+The classifier sees the request's system prompt and the last few messages a human
+wrote (`guardrailHistoryTurns`, default 3, 1..10), oldest first, and judges the
+newest in their light — so "continue" after a forbidden ask is judged as that
+ask. It never sees tool results, images, or assistant replies, and only a plain
+`ALLOW` lets the request through. A deny is refused as `CONTENT_FILTER` (400); a
 classifier that times out (`guardrailTimeoutMs`, default 10s), errors, or answers
 anything else refuses as `UPSTREAM` (502), and a key with a policy while
 `guardrailModel` is unset refuses as `INTERNAL` (500): **it fails closed**.
 Streaming requests receive the same refusals as in-stream errors. The refusal
 messages are fixed; the classifier's words never reach the client. Each check is
 its own request row under the key, tagged `guardrail:classifier` and charged to
-it, and verdicts are cached for an hour per key, policy, model and text, so an
-agent's tool turns on one human message are judged once. The key holder sees
+it, and verdicts are cached for an hour per key, policy, model and judged text,
+so an agent's tool turns on one human message are judged once. The key holder sees
 the policy and those rows on their client dashboard. A key without a policy is
 never judged and pays nothing. `omni doctor` warns when keys carry a policy and
 nothing can judge them.
 
 **This is a guardrail, not a security boundary.** It stops ordinary misuse, not a
-client set on getting past it — by talking the classifier round, splitting a
-request across turns, or hiding it in tool results or images. **Rolling back** to
+client set on getting past it — by talking the classifier round, spreading a
+request over more messages than the window holds, leaving it out of the history
+it sends, or hiding it in tool results or images. **Rolling back** to
 a build without usage policies ignores them: every key's requests are served
 unjudged until you upgrade again.
 

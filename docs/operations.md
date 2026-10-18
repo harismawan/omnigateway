@@ -119,6 +119,7 @@ model id or `provider/model`) before routing:
 ```bash
 omni settings set guardrailModel anthropic/claude-haiku-4
 omni settings set guardrailTimeoutMs 10000        # 1..60000, default 10000
+omni settings set guardrailHistoryTurns 3         # human messages judged, 1..10, default 3
 omni keys guardrail <id>                          # show
 omni keys guardrail <id> --policy "Work only."    # or --policy-file <path>
 omni keys guardrail <id> --clear
@@ -126,10 +127,16 @@ omni settings set guardrailModel null             # unset: every judged key is r
 ```
 
 What the classifier sees: the request's system prompt (capped at 8,000
-characters) and the last user message that carries no tool result (capped at
-16,000), each cut to its head and tail around a marker when longer; tool results,
-images, files and earlier turns never. A cut is recorded
-as `guardrail:truncated`. Only a reply of exactly `ALLOW` admits the request.
+characters) and the last `guardrailHistoryTurns` user messages a human wrote —
+those carrying no tool result and at least one text block — oldest first, the
+newest marked as the request being judged and the rest as its context. Fewer
+are sent when fewer exist; `1` judges the last message alone. The 16,000-character
+human cap is a **total** across them, and the newest spends it first: it is cut
+only when it alone is longer, and older messages are cut, then dropped, oldest
+first. Long texts are cut to head and tail around a marker. Tool results, images,
+files, assistant replies and mid-conversation system turns are never sent. Any
+cut or drop is recorded as `guardrail:truncated`. Only a reply of exactly
+`ALLOW` admits the request.
 
 | Outcome | Code | Status | Row degradation |
 |---|---|---|---|
@@ -150,13 +157,16 @@ has one — never the parent model's) and toward the `5h`/`1w` request windows,
 which count rows; not the `1m` window, which counts admissions. That over-counts,
 which is the direction limits may err. A refused request still counts as one: the
 check runs after admission. Verdicts are cached per process for an hour, keyed on
-key, policy, classifier and judged text, so an agent's tool turns on one human
-message cost one call; a cached verdict writes no classifier row. Editing the
-policy or the classifier misses the cache naturally. Failures are never cached.
+key, policy, classifier, system text and every judged message in order, so an
+agent's tool turns on one human message cost one call; a cached verdict writes no
+classifier row. Editing the policy, the classifier, or a `guardrailHistoryTurns`
+change that alters which messages are judged misses the cache naturally. Failures
+are never cached.
 
 A guardrail, not a security boundary: it does not stop prompt injection aimed at
-the classifier, a request split across turns, or one hidden in tool results or
-images. Rolling back to a build without usage policies serves every key unjudged.
+the classifier, a request spread over more messages than the window, a client
+that leaves the forbidden ask out of the history it sends, or one hidden in tool
+results or images. Rolling back to a build without usage policies serves every key unjudged.
 
 ## Metrics and traces
 
