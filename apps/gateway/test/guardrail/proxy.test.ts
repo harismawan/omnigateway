@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type { ErrorCode } from "@omni/ir";
 import type { RequestLog } from "@omni/store";
 import { createStore, deriveKey } from "@omni/store";
+import { health, memoryStore } from "@omni/testkit";
+import { createRoutingSnapshotCache } from "../../src/dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "../../src/egress/anthropic.ts";
 import { openaiErrorBody } from "../../src/egress/openai.ts";
 import { responsesErrorBody } from "../../src/egress/responses.ts";
@@ -433,6 +435,81 @@ test("a different human message misses the cache", async () => {
       .status,
   ).toBe(200);
   expect(h.judgeCalls).toHaveLength(2);
+  h.store.close();
+});
+
+/**
+ * A reply that said ALLOW and then failed is a failed check, not an allow: the
+ * stream's own error outranks whatever text arrived before it.
+ */
+test("an ALLOW followed by an upstream error mid-stream refuses", async () => {
+  const h = await guardrailHarness({
+    classifier: {
+      kind: "events",
+      events: [
+        { type: "start", id: "u", model: "gpt-judge" },
+        { type: "blockStart", index: 0, block: { type: "text" } },
+        { type: "blockDelta", index: 0, delta: { type: "text", text: "ALLOW" } },
+        { type: "error", code: "UPSTREAM", message: "stream reset", retryable: true },
+      ],
+    },
+  });
+  expect((await h.call("anthropic")).status).toBe(502);
+  expect(h.targetCalls).toHaveLength(0);
+  expect((await rowOf(h, "req_1"))?.degradations).toContain("guardrail:unavailable");
+  h.store.close();
+});
+
+/**
+ * Dispatch can also fail by throwing rather than by yielding an error — here a
+ * health write that dies after the classifier has already streamed its ALLOW.
+ * The thrown failure outranks the text, exactly as an error event does.
+ */
+test("an ALLOW followed by a thrown dispatch failure refuses", async () => {
+  const h = await guardrailHarness();
+  // A recorded failure, so the classifier's success has a health row to reset…
+  await h.store.credentials.updateHealth("c-judge", "gpt-judge", () =>
+    health({ credentialId: "c-judge", model: "gpt-judge", consecutiveFailures: 1 }),
+  );
+  // …and the write that would reset it fails.
+  h.store.credentials.updateHealth = async () => {
+    throw new Error("disk full");
+  };
+  expect((await h.call("anthropic")).status).toBe(502);
+  expect(h.judgeCalls).toHaveLength(1);
+  expect(h.targetCalls).toHaveLength(0);
+  h.store.close();
+});
+
+/**
+ * A timeout that fires before the classifier is even routed reaches dispatch as
+ * an already-aborted signal, which dispatch files as a disconnect. The row says
+ * what happened instead: the gateway's own deadline.
+ */
+test("a timeout that fires before the classifier is routed is still recorded as TIMEOUT", async () => {
+  const store = await memoryStore();
+  const real = createRoutingSnapshotCache(store);
+  let reads = 0;
+  const h = await guardrailHarness({
+    store,
+    settings: { guardrailTimeoutMs: 5 },
+    deps: {
+      snapshots: {
+        // The judge's own read is first; the classifier dispatch's is second,
+        // and is held past the timeout.
+        get: async (now) => {
+          reads++;
+          if (reads === 2) await Bun.sleep(40);
+          return real.get(now);
+        },
+      },
+    },
+  });
+  expect((await h.call("anthropic")).status).toBe(502);
+  expect(h.judgeCalls).toHaveLength(0);
+  const classifier = await rowOf(h, "req_2");
+  expect(classifier?.status).toBe(504);
+  expect(classifier?.errorCode).toBe("TIMEOUT");
   h.store.close();
 });
 

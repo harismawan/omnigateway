@@ -43,7 +43,11 @@ async function* replay(
 }
 
 /** What the stub classifier does with the call it receives. */
-export type Classifier = { kind: "reply"; text: string } | { kind: "error" } | { kind: "hang" };
+export type Classifier =
+  | { kind: "reply"; text: string }
+  | { kind: "events"; events: StreamEvent[] }
+  | { kind: "error" }
+  | { kind: "hang" };
 
 export const ALLOW: Classifier = { kind: "reply", text: "ALLOW" };
 export const DENY: Classifier = { kind: "reply", text: "DENY" };
@@ -152,6 +156,8 @@ export async function guardrailHarness(
         });
       }
       if (behaviour.kind === "hang") return hang(request.signal);
+      if (behaviour.kind === "events")
+        return { events: replay(behaviour.events), degradations: [] };
       return { events: replay(textEvents(behaviour.text, "gpt-judge")), degradations: [] };
     },
   };
