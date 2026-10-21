@@ -1,4 +1,4 @@
-FROM oven/bun:1.4-alpine AS base
+FROM oven/bun:1.4.3-alpine AS base
 WORKDIR /app
 
 # Manifests first: this layer is cached until a dependency actually changes,
@@ -38,34 +38,17 @@ COPY apps/dashboard apps/dashboard
 # The build's own `typecheck` step reaches the repository's `scripts/` for two
 # import-boundary tests, which do not ship; CI typechecks, the image compiles.
 RUN cd apps/dashboard && bun run generate:routes && bunx vite build && bun run build:shared
+COPY scripts/build-binary.ts scripts/build-binary.ts
+RUN bun run build:binary
 
-# Runtime: the gateway's production dependencies, its source, the built console.
-FROM base AS runner
-COPY tsconfig.base.json ./
-COPY --from=build /app/packages packages
-COPY --from=build /app/apps/gateway apps/gateway
-# `--filter` scopes the install to the gateway: a plain root `--production`
-# installs every workspace's production dependencies, and the console's are
-# production ones, so lucide-react, recharts, react-dom and @reduxjs/toolkit
-# landed in the runtime image -- ~115MB to serve a `dist/` that was already
-# built. The name, not the path: `--filter=./apps/gateway` matches nothing here
-# and installs a tree without elysia in it.
-#
-# The install has to come after those COPYs, which costs the dependency layer
-# its cache. `--filter` resolves into per-workspace `node_modules` symlinks, and
-# `COPY --from=build /app/apps/gateway` writes that directory -- installing
-# first means the build stage's own tree lands on top and the gateway boots
-# without elysia. The `find` clears those copied trees for the same reason.
-#
-# Dropping the cache is the other half: bun fills ~/.bun/install with every
-# tarball it unpacked, which is a build input that would otherwise ship. It has
-# to go in this RUN -- a later layer cannot shrink an earlier one.
-RUN find packages apps -maxdepth 2 -name node_modules -type d -exec rm -rf {} + \
- && bun install --frozen-lockfile --production --filter=@omni/gateway \
- && rm -rf /root/.bun/install
-# `dashboardDir()` looks here second, after `apps/gateway/src/public`; the
-# path is the one a checkout would have, so no OMNI_STATIC_DIR is needed.
-COPY --from=build /app/apps/dashboard/dist apps/dashboard/dist
+# Runtime: only the standalone gateway and built console, no separate Bun or npm tree.
+FROM alpine:3.22 AS runner
+WORKDIR /app
+RUN apk add --no-cache ca-certificates libgcc libstdc++ \
+ && addgroup -g 1000 bun \
+ && adduser -D -u 1000 -G bun bun
+COPY --from=build /app/dist/omnigateway /app/omnigateway
+COPY --from=build /app/apps/dashboard/dist /app/public
 
 # Plugins are read from `$OMNI_ROOT/plugins` at boot. On one node that is the
 # data volume, so `omni plugin install` against it survives a restart; in a
@@ -75,15 +58,14 @@ COPY --from=build /app/apps/dashboard/dist apps/dashboard/dist
 RUN mkdir -p /data/plugins && chown -R bun:bun /data
 USER bun
 
-# The tag, handed in by the release workflow: the image runs source, not the
-# npm bundle, so nothing substituted a version and the console would print
-# `0.0.0-dev` for every deployed release.
+# The tag is handed in by the release workflow, independently of compilation.
 ARG OMNI_VERSION=0.0.0-dev
 ENV OMNI_VERSION=$OMNI_VERSION
 ENV OMNI_HOST=0.0.0.0 \
     OMNI_PORT=9000 \
     OMNI_ROOT=/data \
-    OMNI_DB_PATH=/data/omnigateway.db
+    OMNI_DB_PATH=/data/omnigateway.db \
+    OMNI_STATIC_DIR=/app/public
 
 # Single-node: credentials outlive the container. Without this, `docker rm`
 # deletes them. Cluster mode (OMNI_DATABASE_URL set) writes nothing here and
@@ -95,9 +77,9 @@ EXPOSE 9000
 # answers `ok` before the store is asked anything, which is what a liveness
 # probe should read.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-  CMD ["bun", "-e", "fetch('http://127.0.0.1:9000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+  CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health"]
 
 # OMNI_ENCRYPTION_KEY is deliberately not set. The gateway refuses to boot
 # without it, which is the intended behaviour: baking a key into an image
 # would mean every deployment of it shares one.
-CMD ["bun", "apps/gateway/src/index.ts"]
+CMD ["/app/omnigateway"]
