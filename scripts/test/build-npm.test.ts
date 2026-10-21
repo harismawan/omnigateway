@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { RUNTIME_DEPENDENCIES, releaseVersion, runtimeDependencies } from "../build-npm.ts";
 
 test("a release tag becomes the published version", () => {
@@ -69,6 +69,33 @@ function bundleCli(outfile: string, version: string): Bun.SyncSubprocess {
   `;
   return Bun.spawnSync(["bun", "-e", script], { cwd: root });
 }
+
+test("npm bundles are compact executable JavaScript", () => {
+  const dir = mkdtempSync(join(tmpdir(), "omni-minify-"));
+  dirs.push(dir);
+  const entry = join(dir, "entry.ts");
+  const outfile = join(dir, "bundle.js");
+  writeFileSync(
+    entry,
+    `// OMNI_MINIFY_FIXTURE_COMMENT\nconst descriptiveMessage = "portable JavaScript";\nconsole.log(descriptiveMessage);\n`,
+  );
+  const build = Bun.spawnSync(
+    [
+      "bun",
+      "-e",
+      `const { bundle } = await import(${JSON.stringify(join(root, "scripts/build-npm.ts"))});
+       await bundle(${JSON.stringify(relative(root, entry))}, ${JSON.stringify(outfile)}, "1.2.3");`,
+    ],
+    { cwd: root },
+  );
+  expect(build.exitCode === 0 ? "" : build.stderr.toString()).toBe("");
+  const output = readFileSync(outfile, "utf8");
+  expect(output).not.toContain("OMNI_MINIFY_FIXTURE_COMMENT");
+  expect(output.trim().split("\n").length).toBeLessThanOrEqual(2);
+  const run = Bun.spawnSync(["bun", "--no-install", outfile], { cwd: dir });
+  expect(run.exitCode).toBe(0);
+  expect(run.stdout.toString().trim()).toBe("portable JavaScript");
+});
 
 /**
  * The bundled artifact runs with zero external runtime dependencies.

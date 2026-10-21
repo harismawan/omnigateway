@@ -21,7 +21,8 @@
     "typecheck:core": "bun check --no-pretty -p tsconfig.json",
     "typecheck:dashboard": "bun run --cwd apps/dashboard typecheck",
     "typecheck": "bun run typecheck:core && bun run typecheck:dashboard",
-    "build:npm": "bun scripts/build-npm.ts"
+    "build:npm": "bun scripts/build-npm.ts",
+    "build:binary": "bun scripts/build-binary.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",

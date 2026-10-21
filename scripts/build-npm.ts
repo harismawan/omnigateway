@@ -73,9 +73,11 @@ export async function bundle(entry: string, outfile: string, version: string): P
   // No `outdir`: the artifact is written by hand so the two bundles can land
   // at the exact paths the CLI expects to find each other at.
   const result = await Bun.build({
+    root,
     entrypoints: [join(root, entry)],
     target: "bun",
     format: "esm",
+    minify: true,
     external: EXTERNAL,
     // The one moment the source and the tag are both known.
     //

@@ -2,8 +2,8 @@
  * The gateway's own version, mirroring `apps/cli/src/version.ts`.
  *
  * Substituted by `scripts/build-npm.ts` at bundle time — one tag, one `define`,
- * both bundles — so the npm build carries the number inline. The Docker image
- * runs the source, not a bundle, so it arrives there as `OMNI_VERSION`, set from
+ * both bundles — so the npm build carries the number inline. The Docker binary
+ * reads `OMNI_VERSION` at runtime, set from
  * the same tag by the release workflow. A checkout reports `-dev`, so the two
  * tell themselves apart rather than differing by a number nobody memorised.
  */
