@@ -8,7 +8,7 @@ import type {
   Target,
   VirtualModel,
 } from "../types.ts";
-import { DEFAULT_SETTINGS, readGuardrailSettings } from "../types.ts";
+import { DEFAULT_SETTINGS, readGuardrailSettings, readSmartRouterSettings } from "../types.ts";
 
 const SETTINGS_KEY = "settings";
 const ADMIN_HASH_KEY = "adminPasswordHash";
@@ -134,6 +134,9 @@ export function createConfigRepo(
           // Malformed reads as unconfigured, which refuses a key carrying a
           // policy rather than serving it unjudged. One copy for both backends.
           ...readGuardrailSettings(stored),
+          // Malformed reads as off and unset, so a bad row never routes a
+          // request anywhere. One copy for both backends.
+          ...readSmartRouterSettings(stored),
         };
       } catch {
         return DEFAULT_SETTINGS;

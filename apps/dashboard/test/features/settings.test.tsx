@@ -36,6 +36,36 @@ describe("SettingsBoard", () => {
     expect((screen.getByLabelText("Load") as HTMLInputElement).value).toBe("2");
   });
 
+  /** No control yet: a save must hand back the five smart-router values as loaded. */
+  test("saves the smart router settings unchanged from what was loaded", async () => {
+    const user = userEvent.setup();
+    const loaded = {
+      ...settings,
+      smartRouterEnabled: true,
+      smartRouterClassifierModel: "local-judge",
+      smartRouterLocalModel: "local-chat",
+      smartRouterPolicy: "Anything about Project Falcon.",
+      smartRouterTimeoutMs: 7_000,
+    };
+    const stub = stubSettings({
+      "GET /api/settings": () => ({ settings: loaded, bodyLoggingAllowed: false }),
+      "PUT /api/settings": () => ({ ok: true }),
+    });
+    renderWithProviders(<SettingsBoard />);
+    await screen.findByLabelText("Body retention");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body))).toMatchObject({
+        smartRouterEnabled: true,
+        smartRouterClassifierModel: "local-judge",
+        smartRouterLocalModel: "local-chat",
+        smartRouterPolicy: "Anything about Project Falcon.",
+        smartRouterTimeoutMs: 7_000,
+      });
+    });
+  });
+
   /** Bodies can expire sooner without shortening metadata history. */
   test("edits body retention independently of log retention", async () => {
     const user = userEvent.setup();

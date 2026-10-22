@@ -9,7 +9,8 @@ export async function getSettings(store: Store): Promise<Settings> {
  * Saves settings, and answers with what is stored rather than with what arrived.
  *
  * Every field the schema requires is replaced, so this is still a whole-object
- * save. Body retention and the three guardrail fields are optional for older
+ * save. Body retention, the three guardrail fields and the five smart-router
+ * fields are optional for older
  * clients, as is snapshot retention because the database panel owns it: a caller that omits either keeps the stored
  * policy, and the store's merge — not this function — decides what that means.
  */
@@ -21,6 +22,11 @@ export async function putSettings(store: Store, input: unknown): Promise<Setting
     guardrailModel,
     guardrailTimeoutMs,
     guardrailHistoryTurns,
+    smartRouterEnabled,
+    smartRouterClassifierModel,
+    smartRouterLocalModel,
+    smartRouterPolicy,
+    smartRouterTimeoutMs,
     ...rest
   } = parseOrThrow(settingsSchema, input);
   // Spread rather than assigned, because `exactOptionalPropertyTypes` draws the
@@ -34,6 +40,11 @@ export async function putSettings(store: Store, input: unknown): Promise<Setting
     ...(guardrailModel === undefined ? {} : { guardrailModel }),
     ...(guardrailTimeoutMs === undefined ? {} : { guardrailTimeoutMs }),
     ...(guardrailHistoryTurns === undefined ? {} : { guardrailHistoryTurns }),
+    ...(smartRouterEnabled === undefined ? {} : { smartRouterEnabled }),
+    ...(smartRouterClassifierModel === undefined ? {} : { smartRouterClassifierModel }),
+    ...(smartRouterLocalModel === undefined ? {} : { smartRouterLocalModel }),
+    ...(smartRouterPolicy === undefined ? {} : { smartRouterPolicy }),
+    ...(smartRouterTimeoutMs === undefined ? {} : { smartRouterTimeoutMs }),
   };
   return store.config.putSettings(patch);
 }

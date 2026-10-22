@@ -63,6 +63,11 @@ type LimitKey = Exclude<
   | "guardrailModel"
   | "guardrailTimeoutMs"
   | "guardrailHistoryTurns"
+  | "smartRouterEnabled"
+  | "smartRouterClassifierModel"
+  | "smartRouterLocalModel"
+  | "smartRouterPolicy"
+  | "smartRouterTimeoutMs"
 >;
 
 const LIMITS: ReadonlyArray<{
@@ -308,6 +313,7 @@ function toDraft(settings: Settings): Draft {
 
 function parseDraft(
   draft: Draft,
+  loaded: Settings,
 ): { ok: true; settings: Settings } | { ok: false; problem: string } {
   const weights = {} as Settings["weights"];
   for (const weight of WEIGHTS) {
@@ -394,6 +400,13 @@ function parseDraft(
       guardrailModel: guardrailModel.length === 0 ? null : guardrailModel,
       guardrailTimeoutMs,
       guardrailHistoryTurns,
+      // No control for these yet: carried through exactly as loaded, so a save
+      // from this screen neither resets nor drops them.
+      smartRouterEnabled: loaded.smartRouterEnabled,
+      smartRouterClassifierModel: loaded.smartRouterClassifierModel,
+      smartRouterLocalModel: loaded.smartRouterLocalModel,
+      smartRouterPolicy: loaded.smartRouterPolicy,
+      smartRouterTimeoutMs: loaded.smartRouterTimeoutMs,
     },
   };
 }
@@ -430,7 +443,8 @@ export function SettingsBoard() {
 
   const submit = () => {
     setSaved(false);
-    const parsed = parseDraft(draft);
+    if (settings.data === undefined) return;
+    const parsed = parseDraft(draft, settings.data);
     if (!parsed.ok) {
       setProblem(parsed.problem);
       return;

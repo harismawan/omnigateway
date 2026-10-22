@@ -1,3 +1,4 @@
+import { DEFAULT_SMART_ROUTER_POLICY } from "@omni/store/types";
 import type {
   AccountQuota,
   AccountQuotaSample,
@@ -331,6 +332,11 @@ export const settings: Settings = {
   guardrailModel: null,
   guardrailTimeoutMs: 10_000,
   guardrailHistoryTurns: 3,
+  smartRouterEnabled: false,
+  smartRouterClassifierModel: null,
+  smartRouterLocalModel: null,
+  smartRouterPolicy: DEFAULT_SMART_ROUTER_POLICY,
+  smartRouterTimeoutMs: 10_000,
 };
 
 /**
