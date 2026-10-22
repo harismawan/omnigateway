@@ -1071,34 +1071,65 @@ describe("confidential routing", () => {
     const chip = await screen.findByText("local-routed");
     expect(screen.getAllByText("local-routed")).toHaveLength(1);
     // Healthy: the tooltip says what the chip means and carries no warning.
-    await waitFor(() => expect(chip.getAttribute("title")).not.toContain("Not active"));
+    await waitFor(() =>
+      expect(chip.getAttribute("title")).not.toContain("Confidential routing is"),
+    );
     expect(chip.getAttribute("title")).toContain("local");
   });
 
-  test("the chip's tooltip warns when the feature is off or a model is unset", async () => {
-    const warned = async (loaded: typeof settings) => {
+  const OFF =
+    "Confidential routing is switched off in Settings; these keys' requests are not screened.";
+  const misconfigured = (reason: string) =>
+    `Confidential routing is misconfigured (${reason}); these keys' requests are refused.`;
+
+  test("the chip's tooltip leads with the notice's sentence when the feature is off or misconfigured", async () => {
+    const warned = async (
+      loaded: typeof settings,
+      models: { classifier: string; local: string } = { classifier: "ok", local: "ok" },
+    ) => {
       stubKeys({
         "GET /api/keys": () => ({ keys: [apiKey({ smartRouting: true })] }),
-        "GET /api/settings": () => ({ settings: loaded, bodyLoggingAllowed: false }),
+        "GET /api/settings": () => ({
+          settings: loaded,
+          bodyLoggingAllowed: false,
+          smartRouterModels: models,
+        }),
       });
       const view = renderWithProviders(<KeysBoard />);
       const chip = await screen.findByText("local-routed");
-      await waitFor(() => expect(chip.getAttribute("title")).toContain("Not active"));
+      await waitFor(() =>
+        expect(chip.getAttribute("title")).toStartWith("Confidential routing is"),
+      );
       const title = chip.getAttribute("title") ?? "";
       view.unmount();
       return title;
     };
 
-    expect(await warned({ ...configured, smartRouterEnabled: false })).toContain("switched off");
-    expect(await warned({ ...configured, smartRouterLocalModel: null })).toContain("not set");
-    expect(await warned({ ...configured, smartRouterClassifierModel: null })).toContain("not set");
+    expect(await warned({ ...configured, smartRouterEnabled: false })).toStartWith(OFF);
+    expect(await warned({ ...configured, smartRouterLocalModel: null })).toStartWith(
+      misconfigured("the local model is not set"),
+    );
+    expect(await warned({ ...configured, smartRouterClassifierModel: null })).toStartWith(
+      misconfigured("the classifier model is not set"),
+    );
+    expect(await warned(configured, { classifier: "notLocal", local: "ok" })).toStartWith(
+      misconfigured("the classifier model is not local-only"),
+    );
   });
 
-  test("a visible notice says so when a live key is flagged but the feature is inert", async () => {
-    const notice = async (loaded: typeof settings, keys: ReturnType<typeof apiKey>[]) => {
+  test("a visible notice says whether flagged keys' requests are unscreened or refused", async () => {
+    const notice = async (
+      loaded: typeof settings,
+      keys: ReturnType<typeof apiKey>[],
+      models?: { classifier: string; local: string },
+    ) => {
       stubKeys({
         "GET /api/keys": () => ({ keys }),
-        "GET /api/settings": () => ({ settings: loaded, bodyLoggingAllowed: false }),
+        "GET /api/settings": () => ({
+          settings: loaded,
+          bodyLoggingAllowed: false,
+          ...(models === undefined ? {} : { smartRouterModels: models }),
+        }),
       });
       const view = renderWithProviders(<KeysBoard />);
       await screen.findByText(keys[0]?.label ?? "");
@@ -1111,40 +1142,33 @@ describe("confidential routing", () => {
     };
     const flagged = [apiKey({ smartRouting: true })];
 
-    expect(await notice({ ...configured, smartRouterEnabled: false }, flagged)).toContain(
-      "switched off",
+    expect(await notice({ ...configured, smartRouterEnabled: false }, flagged)).toBe(OFF);
+    // An unset model refuses every flagged request; it never serves them unscreened.
+    expect(await notice({ ...configured, smartRouterLocalModel: null }, flagged)).toBe(
+      misconfigured("the local model is not set"),
     );
-    expect(await notice({ ...configured, smartRouterLocalModel: null }, flagged)).toContain(
-      "not set",
-    );
+    expect(
+      await notice(
+        { ...configured, smartRouterClassifierModel: null, smartRouterLocalModel: null },
+        flagged,
+      ),
+    ).toBe(misconfigured("the classifier model is not set and the local model is not set"));
     // A model that is set but cannot serve is reported by the gateway.
-    const reported = async (
-      models: { classifier: string; local: string },
-      loaded: typeof settings = configured,
-    ) => {
-      stubKeys({
-        "GET /api/keys": () => ({ keys: flagged }),
-        "GET /api/settings": () => ({
-          settings: loaded,
-          bodyLoggingAllowed: false,
-          smartRouterModels: models,
-        }),
-      });
-      const view = renderWithProviders(<KeysBoard />);
-      await screen.findByText("laptop");
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const found = screen.queryByRole("status")?.textContent ?? null;
-      view.unmount();
-      return found;
-    };
-    expect(await reported({ classifier: "unresolved", local: "ok" })).toContain(
-      "classifier model does not resolve",
+    expect(await notice(configured, flagged, { classifier: "unresolved", local: "ok" })).toBe(
+      misconfigured("the classifier model does not resolve"),
     );
-    expect(await reported({ classifier: "ok", local: "notLocal" })).toContain(
-      "local model is not local-only",
+    expect(await notice(configured, flagged, { classifier: "ok", local: "notLocal" })).toBe(
+      misconfigured("the local model is not local-only"),
     );
-    expect(await reported({ classifier: "ok", local: "ok" })).toBeNull();
+    // Switched off outranks a broken model: nothing is refused while off.
+    expect(
+      await notice({ ...configured, smartRouterEnabled: false }, flagged, {
+        classifier: "unresolved",
+        local: "notLocal",
+      }),
+    ).toBe(OFF);
     // Healthy, unflagged, or flagged only on a revoked key: nothing to say.
+    expect(await notice(configured, flagged, { classifier: "ok", local: "ok" })).toBeNull();
     expect(await notice(configured, flagged)).toBeNull();
     expect(await notice({ ...configured, smartRouterEnabled: false }, [apiKey()])).toBeNull();
     expect(

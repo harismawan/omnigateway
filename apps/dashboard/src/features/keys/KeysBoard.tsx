@@ -88,49 +88,54 @@ function describeNearest(nearest: LimitReading | null): string {
 }
 
 /**
- * Why a key's confidential-routing flag cannot act yet, or `null` when it can.
+ * What happens to a flagged key's requests when confidential routing cannot
+ * act, as one sentence, or `null` when it can.
  *
- * The flag is per key but two settings gate it: a key carrying it while the
- * feature is off, or either model unset, is refused or served unscreened
- * depending on the gate, and neither is what the operator who flipped the
- * switch expects. `undefined` settings (still loading, or failed) warn nothing:
- * absence of a reading is not evidence of a problem.
+ * Two different outcomes, and the operator must not confuse them: switched off,
+ * a flagged key is served exactly as an unflagged one (unscreened); switched on
+ * with either model unset, unresolvable or not local-only, every flagged
+ * request is **refused** — the gateway never falls back external. `undefined`
+ * settings (still loading, or failed) warn nothing, and an absent model status
+ * (an older gateway, or not yet loaded) counts as no problem: absence of a
+ * reading is not evidence of one.
  */
-function inertReason(
+function inertNotice(
   settings: Settings | undefined,
   models: SmartRouterModelStatus | null | undefined,
 ): string | null {
   if (settings === undefined) return null;
-  if (!settings.smartRouterEnabled) return "confidential routing is switched off in Settings";
-  if (settings.smartRouterClassifierModel === null || settings.smartRouterLocalModel === null) {
-    return "the classifier model or the local model is not set in Settings";
+  if (!settings.smartRouterEnabled) {
+    return "Confidential routing is switched off in Settings; these keys' requests are not screened.";
   }
-  // Set, but the gateway says it cannot serve. Absent (older gateway, or not
-  // yet loaded) is not evidence of a problem.
-  const broken = (
-    [
-      ["classifier", models?.classifier],
-      ["local", models?.local],
-    ] as const
-  ).flatMap(([name, state]) =>
-    state === "unresolved"
-      ? [`the ${name} model does not resolve`]
-      : state === "notLocal"
-        ? [`the ${name} model is not local-only`]
-        : [],
-  );
-  return broken.length === 0 ? null : broken.join(" and ");
+  const problem = (
+    name: string,
+    configured: string | null,
+    state: SmartRouterModelStatus["classifier"] | undefined,
+  ): string[] =>
+    configured === null
+      ? [`the ${name} model is not set`]
+      : state === "unresolved"
+        ? [`the ${name} model does not resolve`]
+        : state === "notLocal"
+          ? [`the ${name} model is not local-only`]
+          : [];
+  const reasons = [
+    ...problem("classifier", settings.smartRouterClassifierModel, models?.classifier),
+    ...problem("local", settings.smartRouterLocalModel, models?.local),
+  ];
+  if (reasons.length === 0) return null;
+  return `Confidential routing is misconfigured (${reasons.join(" and ")}); these keys' requests are refused.`;
 }
 
-/** What the "local-routed" chip says on hover, led by the warning when inert. */
+/** What the "local-routed" chip says on hover: the notice's sentence first, when there is one. */
 function describeLocalRouted(
   settings: Settings | undefined,
   models: SmartRouterModelStatus | null | undefined,
 ): string {
   const meaning =
     "Requests from this key are screened for confidential content and answered by the local model when any is found.";
-  const reason = inertReason(settings, models);
-  return reason === null ? meaning : `Not active: ${reason}. ${meaning}`;
+  const notice = inertNotice(settings, models);
+  return notice === null ? meaning : `${notice} ${meaning}`;
 }
 
 const Failed = styled.p`
@@ -165,7 +170,7 @@ export function KeysBoard() {
   const rows = keys.data ?? [];
   // Only live keys count: a revoked key's flag changes nothing it sends.
   const inert = rows.some((key) => key.revokedAt === null && key.smartRouting)
-    ? inertReason(settings.data, smartRouterModels.data)
+    ? inertNotice(settings.data, smartRouterModels.data)
     : null;
   // Only the *count* narrows. Every key stays in `rows` and keeps its row,
   // expired ones included: a key that stopped working and then disappeared from
@@ -193,12 +198,7 @@ export function KeysBoard() {
         }
       />
 
-      {inert === null ? null : (
-        <Inert role="status">
-          Some keys have confidential routing on, but it is not active: {inert}. Their requests are
-          not being screened.
-        </Inert>
-      )}
+      {inert === null ? null : <Inert role="status">{inert}</Inert>}
 
       {smartFailure === null ? null : <Failed role="alert">{smartFailure}</Failed>}
 
