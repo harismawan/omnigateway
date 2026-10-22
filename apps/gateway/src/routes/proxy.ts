@@ -1,5 +1,6 @@
 import { type Coord, memoryCoord } from "@omni/coord";
 import {
+  type ChatRequest,
   collect,
   describeError,
   type ErrorCode,
@@ -45,7 +46,13 @@ import {
   responsesStream,
 } from "../egress/responses.ts";
 import { VerdictCache } from "../guardrail/cache.ts";
-import { judge, judgeFirst } from "../guardrail/judge.ts";
+import {
+  guardrailScreen,
+  guardrailThrew,
+  judge,
+  type ScreenOutcome,
+  screenFirst,
+} from "../guardrail/judge.ts";
 import { parseAnthropicRequest } from "../ingress/anthropic.ts";
 import { parseOpenAIRequest } from "../ingress/openai.ts";
 import { customToolNames, parseResponsesRequest } from "../ingress/responses.ts";
@@ -61,6 +68,9 @@ import {
   routeLog,
   type UsageDebit,
 } from "../logging.ts";
+import type { ConfidentialityCache } from "../smartRouter/cache.ts";
+import { checkConfidentiality, smartRouterThrew } from "../smartRouter/check.ts";
+import { relabel } from "../smartRouter/relabel.ts";
 import type { Invalidator } from "../stream/broadcaster.ts";
 import type { Telemetry } from "../telemetry/index.ts";
 import type { TraceRecord } from "../telemetry/spans.ts";
@@ -121,6 +131,8 @@ type ResolvedProxyDeps = DispatchDeps &
     logger: Logger;
     /** One per process, like the limiter: a verdict is reused across requests. */
     guardrailCache: VerdictCache;
+    /** One per process too: a segment's verdict is the same for every key. */
+    smartRouterCache: ConfidentialityCache;
   };
 
 type Surface = "anthropic" | "openai" | "responses";
@@ -613,9 +625,11 @@ async function handle(
       throw error;
     }
     let began = false;
-    const run = (): Promise<DispatchOutcome> =>
+    // One dispatch closure for the request as sent and for a rerouted copy. The
+    // pending row it writes names `requestedModel` — the client's — either way.
+    const runWith = (dispatchRequest: ChatRequest): Promise<DispatchOutcome> =>
       dispatch(
-        chatRequest,
+        dispatchRequest,
         {
           ...deps,
           // Per request, and only when this request is captured. `HttpClient` is
@@ -647,37 +661,92 @@ async function handle(
         request.signal,
         requestId,
       );
-    // After admission, so the check runs inside the key's concurrency slot and a
-    // refused request still counts as one — refusals are not a free probe. A key
-    // with no policy takes exactly the path it took before guardrails existed:
-    // no classifier call, and dispatch awaited before the head.
+    const run = (): Promise<DispatchOutcome> => runWith(chatRequest);
+    // After admission, so the checks run inside the key's concurrency slot and
+    // a refused request still counts as one — refusals are not a free probe. A
+    // key with neither smart routing nor a policy takes exactly the path it took
+    // before either existed: no classifier call, and dispatch awaited before the
+    // head.
+    //
+    // Settings are read once, and only for a key carrying the flag, so a key
+    // without it makes no read it did not make before.
+    const settings = key.smartRouting ? (await deps.snapshots.get(deps.now())).settings : null;
+    const smartRouting = settings?.smartRouterEnabled === true;
     const policy = key.guardrailPolicy;
-    const dispatched =
-      policy === null
+    // The classifier calls are never admitted, so their model's override is
+    // recorded here or their debit would be skipped — an under-count on any
+    // replica sharing that subject's buckets.
+    const classifierDebit: UsageDebit = (id, model, usage) => {
+      rateLimiter.recordOverride(id, key.limits, model);
+      debit(id, model, usage);
+    };
+    /**
+     * Smart routing first, then the guardrail. **A request going local is never
+     * judged by `guardrailModel`**: its text was not shown to be public, so the
+     * guardrail asks the local classifier instead.
+     */
+    const screen = async (): Promise<ScreenOutcome> => {
+      let reroute: string | null = null;
+      let route: "local" | "external" | null = null;
+      let guardrailModel: string | null | undefined;
+      let notes: readonly string[] = [];
+      if (smartRouting) {
+        const decision = await checkConfidentiality(
+          { ...deps, cache: deps.guardrailCache },
+          {
+            apiKeyId: key.id,
+            request: chatRequest,
+            signal: request.signal,
+            debit: classifierDebit,
+            parentRequestId: requestId,
+          },
+        );
+        if (decision.kind === "refused" || decision.kind === "cancelled") return decision;
+        notes = decision.notes;
+        if (decision.kind === "external") {
+          route = "external";
+          guardrailModel = settings?.guardrailModel ?? null;
+        } else {
+          route = "local";
+          guardrailModel = settings?.smartRouterClassifierModel ?? null;
+          // Already local: dispatched as is, nothing to reroute.
+          reroute = decision.model === chatRequest.model ? null : decision.model;
+        }
+      }
+      if (policy !== null) {
+        const verdict = guardrailScreen(
+          await judge(
+            { ...deps, cache: deps.guardrailCache },
+            {
+              apiKeyId: key.id,
+              policy,
+              request: chatRequest,
+              signal: request.signal,
+              debit: classifierDebit,
+              parentRequestId: requestId,
+              ...(guardrailModel === undefined ? {} : { model: guardrailModel }),
+            },
+          ),
+        );
+        if (verdict.kind === "cancelled") return verdict;
+        notes = [...notes, ...verdict.notes];
+        if (verdict.kind === "refused") return { ...verdict, notes };
+      }
+      return { kind: "proceed", reroute, route, notes };
+    };
+    const dispatched: DispatchOutcome & { route?: () => "local" | "external" | null } =
+      !smartRouting && policy === null
         ? await run()
-        : judgeFirst({
-            judge: () =>
-              judge(
-                {
-                  ...deps,
-                  cache: deps.guardrailCache,
-                },
-                {
-                  apiKeyId: key.id,
-                  policy,
-                  request: chatRequest,
-                  signal: request.signal,
-                  // The classifier call is never admitted, so its model's
-                  // override is recorded here or its debit would be skipped —
-                  // an under-count on any replica sharing that subject's buckets.
-                  debit: (id, model, usage) => {
-                    rateLimiter.recordOverride(id, key.limits, model);
-                    debit(id, model, usage);
-                  },
-                  parentRequestId: requestId,
-                },
-              ),
-            dispatch: run,
+        : screenFirst({
+            screen,
+            dispatch: async (reroute) =>
+              reroute === null
+                ? await run()
+                : relabel(await runWith({ ...chatRequest, model: reroute }), {
+                    clientModel: chatRequest.model,
+                    localModel: reroute,
+                  }),
+            onThrow: smartRouting ? smartRouterThrew() : guardrailThrew(),
             signal: request.signal,
             requestId,
             startedAt,
@@ -824,10 +893,16 @@ async function handle(
 
     await log();
 
+    // Where a judged request went, on a response that has a head to say it in.
+    // A stream's head went out before judging, so it says it in the `model`
+    // instead (see `relabel`).
+    const route = dispatched.route?.() ?? null;
     return jsonResponse(
       responseBody,
       failure === undefined ? 200 : HTTP_STATUS[failure.code],
-      limitHeaders(),
+      failure === undefined && route !== null
+        ? { ...limitHeaders(), "x-omni-route": route }
+        : limitHeaders(),
     );
   } catch (error) {
     const gatewayError = asGatewayError(error);
@@ -909,6 +984,7 @@ export function proxyRoutes(deps: ProxyDeps) {
     loadRegistry: deps.loadRegistry ?? createLoadRegistry(coord),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
     guardrailCache: new VerdictCache(),
+    smartRouterCache: new VerdictCache(),
   };
   return (
     new Elysia()

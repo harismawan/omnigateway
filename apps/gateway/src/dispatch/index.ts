@@ -114,10 +114,11 @@ export type DispatchOptions = {
    * Whether the operator's request transforms — RTK and the ponytail ruleset —
    * run on this request. Defaults to `true`.
    *
-   * `false` for exactly one caller: the guardrail classifier
-   * (`guardrail/judge.ts`), whose request is the gateway's own and must reach
-   * the classifier as written — a ruleset appended to its instruction changes
-   * the verdict and bills the key for text it never sent. Stated by the caller
+   * `false` for exactly two callers: the guardrail classifier
+   * (`guardrail/judge.ts`) and the smart-router confidentiality classifier
+   * (`smartRouter/check.ts`), whose requests are the gateway's own and must
+   * reach the classifier as written — a ruleset appended to the instruction
+   * changes the verdict and bills the key for text it never sent. Stated by the caller
    * rather than inferred from the request, because nothing about a request says
    * who built it.
    */

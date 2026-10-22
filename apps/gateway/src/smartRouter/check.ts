@@ -11,7 +11,7 @@ import { localOnlyModel } from "@omni/router";
 import type { RequestLog } from "@omni/store";
 import { type DispatchDeps, type DispatchOutcome, dispatch } from "../dispatch/index.ts";
 import type { VerdictCache } from "../guardrail/cache.ts";
-import type { GuardrailDeps } from "../guardrail/judge.ts";
+import type { GuardrailDeps, ScreenThrew } from "../guardrail/judge.ts";
 import { finishLog, newCompletedRequestLog, type UsageDebit } from "../logging.ts";
 import { segmentKey } from "./cache.ts";
 import {
@@ -51,6 +51,18 @@ export type SmartRouterDeps = GuardrailDeps & {
 /** Fixed and gateway-authored: the classifier's own words never reach the client. */
 const refusal = (code: ErrorCode, message: string): GatewayError =>
   new GatewayError(code, message, { gatewayAuthored: true });
+
+/**
+ * What a screen that threw refuses with while smart routing is active: the
+ * check could not run, so nothing was shown to be public.
+ */
+export function smartRouterThrew(): ScreenThrew {
+  return {
+    error: refusal("UPSTREAM", UNAVAILABLE_MESSAGE),
+    notes: ["smart-router:unavailable"],
+    warning: "confidentiality check failed",
+  };
+}
 
 const thrownCode = (error: unknown): ErrorCode =>
   error instanceof GatewayError ? error.code : "INTERNAL";

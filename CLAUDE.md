@@ -531,7 +531,7 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - **Usage-policy guardrail fails closed**: only a bare `ALLOW` from the classifier admits; deny,
   timeout, error, unreadable reply, unset `guardrailModel` all refuse, fixed gateway-authored
   messages, classifier text never reaches client or stdout. Judged inside the event sequence
-  (`judgeFirst`), after admission; classifier dispatched with `requestTransforms: false`, bare
+  (`screenFirst`), after admission; classifier dispatched with `requestTransforms: false`, bare
   transport. Pin: `apps/gateway/test/guardrail/proxy.test.ts`; parser:
   `apps/gateway/test/guardrail/classifier.test.ts`.
 - Windows *slide*. `1m` exact ring in `apps/gateway`; longer windows are `usage.sumSince` —
