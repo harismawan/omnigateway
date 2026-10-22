@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { AgentSetup } from "../../src/features/settings/AgentSetup.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose } from "../helpers/select.ts";
 
 const CLAUDE_FILES = [
   {
@@ -58,9 +59,9 @@ describe("AgentSetup", () => {
     expect(screen.getByRole("combobox", { name: "Sonnet model" })).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Haiku model" })).toBeTruthy();
 
-    await user.selectOptions(defaultSelect, "opus");
-    await user.selectOptions(screen.getByRole("combobox", { name: "Fable model" }), "opus");
-    await user.selectOptions(screen.getByRole("combobox", { name: "Opus model" }), "opus");
+    await choose(user, defaultSelect, "opus");
+    await choose(user, screen.getByRole("combobox", { name: "Fable model" }), "opus");
+    await choose(user, screen.getByRole("combobox", { name: "Opus model" }), "opus");
 
     await waitFor(() => {
       expect(
@@ -80,7 +81,7 @@ describe("AgentSetup", () => {
     stub();
     renderWithProviders(<AgentSetup />);
 
-    await userEvent.selectOptions(await screen.findByLabelText("Default model"), "opus");
+    await choose(userEvent, await screen.findByLabelText("Default model"), "opus");
     await waitFor(() => {
       expect(screen.getByText(/ANTHROPIC_AUTH_TOKEN/)).toBeTruthy();
     });
@@ -131,16 +132,16 @@ describe("AgentSetup", () => {
     const fetch = stub();
     renderWithProviders(<AgentSetup />);
 
-    await user.selectOptions(await screen.findByLabelText("Default model"), "opus");
-    await user.selectOptions(screen.getByLabelText("Haiku model"), "haiku");
+    await choose(user, await screen.findByLabelText("Default model"), "opus");
+    await choose(user, screen.getByLabelText("Haiku model"), "haiku");
     await waitFor(() => {
       expect(screen.getByText("settings.json")).toBeTruthy();
     });
 
     await user.click(screen.getByRole("button", { name: "opencode" }));
-    expect(((await screen.findByLabelText("Default model")) as HTMLSelectElement).value).toBe("");
-    await user.selectOptions(screen.getByLabelText("Default model"), "haiku");
-    await user.selectOptions(screen.getByLabelText("Fable model"), "haiku");
+    expect(((await screen.findByLabelText("Default model")) as HTMLButtonElement).value).toBe("");
+    await choose(user, screen.getByLabelText("Default model"), "haiku");
+    await choose(user, screen.getByLabelText("Fable model"), "haiku");
 
     await waitFor(() => {
       expect(
@@ -155,10 +156,10 @@ describe("AgentSetup", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Claude Code" }));
-    expect(((await screen.findByLabelText("Default model")) as HTMLSelectElement).value).toBe(
+    expect(((await screen.findByLabelText("Default model")) as HTMLButtonElement).value).toBe(
       "opus",
     );
-    expect((screen.getByLabelText("Haiku model") as HTMLSelectElement).value).toBe("haiku");
+    expect((screen.getByLabelText("Haiku model") as HTMLButtonElement).value).toBe("haiku");
   });
 
   test("says so when there is nothing to point a client at", async () => {

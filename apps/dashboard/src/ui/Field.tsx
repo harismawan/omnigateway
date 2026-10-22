@@ -57,38 +57,6 @@ export const Textarea = styled.textarea`
   }
 `;
 
-/**
- * A native select. Radix's is prettier, but this is a dense operator console:
- * native gives keyboard type-ahead and the platform's own scrolling for free,
- * and it stays usable when a model has thirty targets. The platform arrow sits
- * flush against the border wherever the browser puts it, so it is replaced by
- * a drawn chevron inset to match the text padding.
- */
-export const Select = styled.select`
-  ${control}
-  appearance: none;
-  height: 30px;
-  padding: 0 26px 0 8px;
-  background-color: ${({ theme }) => theme.color.panelSunk};
-  background-image:
-    linear-gradient(45deg, transparent 50%, ${({ theme }) => theme.color.inkDim} 50%),
-    linear-gradient(135deg, ${({ theme }) => theme.color.inkDim} 50%, transparent 50%);
-  background-position:
-    calc(100% - 15px) 50%,
-    calc(100% - 10px) 50%;
-  background-size: 5px 5px;
-  background-repeat: no-repeat;
-  border: 1px solid ${({ theme }) => theme.color.ruleStrong};
-  color: ${({ theme }) => theme.color.ink};
-  font-family: ${({ theme }) => theme.font.mono};
-  font-size: 12px;
-  cursor: pointer;
-
-  &:hover:not(:disabled) {
-    border-color: ${({ theme }) => theme.color.accent};
-  }
-`;
-
 const Wrap = styled.div`
   display: flex;
   flex-direction: column;

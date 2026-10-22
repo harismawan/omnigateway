@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { ConsoleBoard } from "../../src/features/console/ConsoleBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose } from "../helpers/select.ts";
 
 const FIRST_LINE = {
   raw: "2026-08-09T04:12:03.114Z INFO  omnigateway listening  port=9000",
@@ -74,7 +75,7 @@ describe("ConsoleBoard", () => {
     expect(await screen.findByText(/This log is empty/)).toBeTruthy();
 
     stub.set("GET /api/console", () => ({ source: "file", path: "/var/log/omni.log", lines: [] }));
-    await userEvent.selectOptions(screen.getByLabelText("Which levels to show"), "error");
+    await choose(userEvent, screen.getByLabelText("Which levels to show"), "error");
 
     expect(await screen.findByText(/No line in this window is at that level/)).toBeTruthy();
   });
@@ -84,7 +85,7 @@ describe("ConsoleBoard", () => {
     renderWithProviders(<ConsoleBoard />);
     await screen.findByText(/omnigateway listening/);
 
-    await userEvent.selectOptions(screen.getByLabelText("Which levels to show"), "warn");
+    await choose(userEvent, screen.getByLabelText("Which levels to show"), "warn");
 
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url.includes("level=warn"))).toBe(true);
@@ -96,7 +97,7 @@ describe("ConsoleBoard", () => {
     renderWithProviders(<ConsoleBoard />);
     await screen.findByText(/omnigateway listening/);
 
-    await userEvent.selectOptions(screen.getByLabelText("How many lines to fetch"), "500");
+    await choose(userEvent, screen.getByLabelText("How many lines to fetch"), "500");
 
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url.includes("lines=500"))).toBe(true);
@@ -202,7 +203,7 @@ describe("ConsoleBoard source hint visibility", () => {
     await screen.findByText(/omnigateway listening/);
 
     stub.set("GET /api/console", () => ({ source: "file", path: "/var/log/omni.log", lines: [] }));
-    await userEvent.selectOptions(screen.getByLabelText("Which levels to show"), "error");
+    await choose(userEvent, screen.getByLabelText("Which levels to show"), "error");
 
     expect(await screen.findByText(/No line in this window is at that level/)).toBeTruthy();
     expect(screen.getByText("/var/log/omni.log")).toBeTruthy();
@@ -249,7 +250,7 @@ describe("ConsoleBoard source hint visibility", () => {
     });
     renderWithProviders(<ConsoleBoard />);
     const selector = await screen.findByLabelText("Which process to show");
-    await userEvent.selectOptions(selector, "bbbbbbbb-2");
+    await choose(userEvent, selector, "bbbbbbbb-2");
 
     expect(await screen.findByText(/This process is not capturing/)).toBeTruthy();
     expect(screen.queryByText(/No process in this fleet/)).toBeNull();
@@ -308,7 +309,7 @@ describe("ConsoleBoard source hint visibility", () => {
     expect(await screen.findByText(/\[aaaaaaaa\] .*omnigateway listening/)).toBeTruthy();
     expect(fleet.calls.some((call) => call.url.includes("node=all"))).toBe(true);
 
-    await userEvent.selectOptions(selector, "bbbbbbbb-2");
+    await choose(userEvent, selector, "bbbbbbbb-2");
     expect(await screen.findByText("/var/log/b.log")).toBeTruthy();
     expect(fleet.calls.some((call) => call.url.includes("node=bbbbbbbb-2"))).toBe(true);
   });

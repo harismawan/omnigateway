@@ -22,6 +22,7 @@ import { ModelsBoard } from "../../src/features/models/ModelsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { catalogFixture, credential, model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose, optionLabels, shownLabel, suggestionsOf } from "../helpers/select.ts";
 
 /**
  * The catalog these helpers are asked about.
@@ -546,11 +547,11 @@ describe("ModelsBoard", () => {
     renderWithProviders(<ModelsBoard />);
 
     await openEditor();
-    const provider = screen.getByLabelText("Provider") as HTMLSelectElement;
-    expect(within(provider).getByRole("option", { name: "OpenAI Compatible" })).toBeTruthy();
-    await user.selectOptions(provider, "custom");
-    expect(provider.selectedOptions[0]?.textContent).toBe("OpenAI Compatible");
-    await user.selectOptions(screen.getByLabelText("Endpoint"), "local-vllm");
+    const provider = screen.getByLabelText("Provider");
+    expect(await optionLabels(user, provider)).toContain("OpenAI Compatible");
+    await choose(user, provider, "custom");
+    expect(shownLabel(screen.getByLabelText("Provider"))).toBe("OpenAI Compatible");
+    await choose(user, screen.getByLabelText("Endpoint"), "local-vllm");
     await user.type(screen.getByLabelText("Provider model"), "local-model");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
@@ -579,13 +580,14 @@ describe("ModelsBoard", () => {
     renderWithProviders(<ModelsBoard />);
 
     await openEditor();
-    const account = (await screen.findByLabelText("Account")) as HTMLSelectElement;
+    const account = await screen.findByLabelText("Account");
     // Only this provider's accounts. Pinning an Anthropic target to a Kimi
     // account would be a pin the router can only report as missing.
-    expect(within(account).getByRole("option", { name: "billing@example.com" })).toBeTruthy();
-    expect(within(account).queryByRole("option", { name: "kimi@example.com" })).toBeNull();
+    const offered = await optionLabels(user, account);
+    expect(offered).toContain("billing@example.com");
+    expect(offered).not.toContain("kimi@example.com");
 
-    await user.selectOptions(account, "cred-b");
+    await choose(user, account, "cred-b");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
@@ -644,9 +646,9 @@ describe("ModelsBoard", () => {
     // to fall back to the first option it would read "Any account" — the
     // opposite of what the target does — and the note beside it would look
     // like it was describing something else.
-    const account = screen.getByLabelText("Account") as HTMLSelectElement;
+    const account = screen.getByLabelText<HTMLButtonElement>("Account");
     expect(account.value).toBe("cred-gone");
-    expect(account.selectedOptions[0]?.textContent).toBe("cred-gone (removed)");
+    expect(shownLabel(account)).toBe("cred-gone (removed)");
   });
 
   test("a pin can be removed again through the picker", async () => {
@@ -665,10 +667,10 @@ describe("ModelsBoard", () => {
     renderWithProviders(<ModelsBoard />);
 
     await openEditor();
-    const account = (await screen.findByLabelText("Account")) as HTMLSelectElement;
+    const account = (await screen.findByLabelText("Account")) as HTMLButtonElement;
     expect(account.value).toBe("cred-a");
 
-    await user.selectOptions(account, "");
+    await choose(user, account, "");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
@@ -726,17 +728,17 @@ describe("ModelsBoard", () => {
     renderWithProviders(<ModelsBoard />);
 
     await openEditor();
-    expect(((await screen.findByLabelText("Account")) as HTMLSelectElement).value).toBe(
+    expect(((await screen.findByLabelText("Account")) as HTMLButtonElement).value).toBe(
       "cred-local",
     );
 
-    await user.selectOptions(screen.getByLabelText("Endpoint"), "remote-vllm");
+    await choose(user, screen.getByLabelText("Endpoint"), "remote-vllm");
 
     // Re-queried: the select is rebuilt from the new draft, and the element
     // found above belongs to the render that has since been replaced. Carried
     // across, the pin would name an account on the endpoint the target just
     // left — one the router can only ever report as `pin:missing`.
-    expect((screen.getByLabelText("Account") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByLabelText("Account") as HTMLButtonElement).value).toBe("");
 
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => {
@@ -769,22 +771,19 @@ describe("ModelsBoard", () => {
         credentials: [credential({ id: "kilo-1", provider: "kilo", authType: "oauth" })],
       }),
     });
-    const { container } = renderWithProviders(<ModelsBoard />);
+    renderWithProviders(<ModelsBoard />);
 
     await openEditor();
     // Wait for the credentials query: the picker is unfiltered until it lands,
     // so asserting before it would pass against the wrong list.
-    await waitFor(() => {
-      const options = container.querySelectorAll("datalist option");
-      expect([...options].some((option) => option.getAttribute("value") === "claude-opus-5")).toBe(
-        true,
+    await waitFor(async () => {
+      expect(await suggestionsOf(user, screen.getByLabelText("Provider model"))).toContain(
+        "claude-opus-5",
       );
     });
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
-    const offered = [...container.querySelectorAll("datalist option")].map((option) =>
-      option.getAttribute("value"),
-    );
+    await choose(user, screen.getByLabelText("Provider"), "kilo");
+    const offered = await suggestionsOf(user, screen.getByLabelText("Provider model"));
     expect(offered).toContain("anthropic/claude-sonnet-5");
     expect(offered).not.toContain("kilo-auto/frontier");
     // No note yet: kilo's default model is served both ways, so the warning

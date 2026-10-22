@@ -1,11 +1,12 @@
-import { useId, useState } from "react";
+import { useState } from "react";
 import styled from "styled-components";
 import { useModels, useSetKeyLimits } from "../../api/queries.ts";
 import type { ApiKeySummary, LimitConfig } from "../../api/types.ts";
 import { Button } from "../../ui/Button.tsx";
-import { Field, Input } from "../../ui/Field.tsx";
+import { Field } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Legend, Row, Stack } from "../../ui/primitives.ts";
+import { Autocomplete } from "../../ui/Select.tsx";
 import { describeError } from "../../ui/States.tsx";
 import { LimitFields } from "./LimitFields.tsx";
 import {
@@ -71,8 +72,7 @@ export function EditLimitsDialog({ apiKey, onOpenChange }: EditLimitsDialogProps
   const [overrides, setOverrides] = useState(() => overridesFrom(apiKey?.limits ?? {}));
   const [added, setAdded] = useState(0);
   const [problem, setProblem] = useState<string | null>(null);
-  const suggestions = useId();
-  const configured = (models.data ?? []).map((entry) => entry.id);
+  const suggestions = (models.data ?? []).map((entry) => ({ value: entry.id, label: entry.id }));
 
   const update = (id: string, patch: Partial<OverrideDraft>) => {
     setOverrides((rows) => rows.map((row) => (row.id === id ? { ...row, ...patch } : row)));
@@ -163,13 +163,16 @@ export function EditLimitsDialog({ apiKey, onOpenChange }: EditLimitsDialogProps
                 <Row $gap={2} $align="flex-end">
                   <Field label="Model">
                     {(props) => (
-                      <Input
+                      // Free text, with what the installation serves offered as
+                      // you type: an override may name a model before it is
+                      // configured.
+                      <Autocomplete
                         {...props}
-                        list={suggestions}
                         disabled={save.isPending}
                         value={row.model}
                         placeholder="model name"
-                        onChange={(event) => update(row.id, { model: event.target.value })}
+                        suggestions={suggestions}
+                        onValueChange={(model) => update(row.id, { model })}
                       />
                     )}
                   </Field>
@@ -212,13 +215,6 @@ export function EditLimitsDialog({ apiKey, onOpenChange }: EditLimitsDialogProps
               Add model override
             </Button>
           </div>
-          {/* Free text, with what the installation serves offered as you type:
-              an override may name a model before it is configured. */}
-          <datalist id={suggestions}>
-            {configured.map((id) => (
-              <option key={id} value={id} />
-            ))}
-          </datalist>
         </Stack>
 
         {problem === null ? null : <Problem role="alert">{problem}</Problem>}

@@ -11,10 +11,10 @@ import type { ProviderId, UsageDimension } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount, formatUsd } from "../../lib/format.ts";
 import { useLive } from "../../session/live.tsx";
-import { Select } from "../../ui/Field.tsx";
 import { Grid, Row, Stack } from "../../ui/primitives.ts";
 import { Section } from "../../ui/Section.tsx";
 import { Controls, Segment } from "../../ui/Segment.tsx";
+import { Select } from "../../ui/Select.tsx";
 import { ActivityGrid } from "./ActivityGrid.tsx";
 import { KeyPanel } from "./KeyPanel.tsx";
 import { ModelTrafficPanel } from "./ModelTrafficPanel.tsx";
@@ -175,27 +175,24 @@ export function UsageBoard() {
             <Picker
               aria-label="Account"
               value={account?.id ?? ""}
-              onChange={(event) => setPickedAccount(event.target.value || undefined)}
-            >
-              <option value="">All accounts</option>
-              {(credentials.data ?? []).map((entry) => (
-                <option key={entry.id} value={entry.id}>
-                  {entry.label}
-                </option>
-              ))}
-            </Picker>
+              options={[
+                { value: "", label: "All accounts" },
+                ...(credentials.data ?? []).map((entry) => ({
+                  value: entry.id,
+                  label: entry.label,
+                })),
+              ]}
+              onValueChange={(next) => setPickedAccount(next || undefined)}
+            />
             <Picker
               aria-label="Gateway key"
               value={key?.id ?? ""}
-              onChange={(event) => setPickedKey(event.target.value || undefined)}
-            >
-              <option value="">All keys</option>
-              {(keys.data ?? []).map((entry) => (
-                <option key={entry.id} value={entry.id}>
-                  {entry.label}
-                </option>
-              ))}
-            </Picker>
+              options={[
+                { value: "", label: "All keys" },
+                ...(keys.data ?? []).map((entry) => ({ value: entry.id, label: entry.label })),
+              ]}
+              onValueChange={(next) => setPickedKey(next || undefined)}
+            />
             <Controls>
               {RANGES.map((entry) => (
                 <Segment

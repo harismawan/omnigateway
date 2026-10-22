@@ -10,10 +10,11 @@ import {
 import type { PonytailMode, Settings } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Field, Input, Select } from "../../ui/Field.tsx";
+import { Field, Input } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Grid, Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
+import { Autocomplete, Select } from "../../ui/Select.tsx";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { AccessPanel } from "./AccessPanel.tsx";
@@ -412,7 +413,6 @@ export function SettingsBoard() {
   // The classifier picker's suggestions: the same source the allowlist editor
   // reads. Free text is still accepted, for `provider/model`.
   const models = useModels();
-  const modelListId = useId();
   const save = useSaveSettings();
   const [draft, setDraft] = useState<Draft>({});
   const [problem, setProblem] = useState<string | null>(null);
@@ -578,14 +578,12 @@ export function SettingsBoard() {
                     <Select
                       {...props}
                       value={draft.ponytailMode ?? "off"}
-                      onChange={(event) => setDraft({ ...draft, ponytailMode: event.target.value })}
-                    >
-                      {Object.entries(PONYTAIL_LEVELS).map(([mode, label]) => (
-                        <option key={mode} value={mode}>
-                          {label}
-                        </option>
-                      ))}
-                    </Select>
+                      options={Object.entries(PONYTAIL_LEVELS).map(([mode, label]) => ({
+                        value: mode,
+                        label,
+                      }))}
+                      onValueChange={(next) => setDraft({ ...draft, ponytailMode: next })}
+                    />
                   )}
                 </ChoiceOption>
               </Options>
@@ -655,24 +653,16 @@ export function SettingsBoard() {
                     hint="A configured model, or provider/model. Blank means none."
                   >
                     {(props) => (
-                      <>
-                        <Input
-                          {...props}
-                          type="text"
-                          list={modelListId}
-                          placeholder="none"
-                          spellCheck={false}
-                          value={draft.guardrailModel ?? ""}
-                          onChange={(event) =>
-                            setDraft({ ...draft, guardrailModel: event.target.value })
-                          }
-                        />
-                        <datalist id={modelListId}>
-                          {(models.data ?? []).map((model) => (
-                            <option key={model.id} value={model.id} />
-                          ))}
-                        </datalist>
-                      </>
+                      <Autocomplete
+                        {...props}
+                        placeholder="none"
+                        value={draft.guardrailModel ?? ""}
+                        suggestions={(models.data ?? []).map((model) => ({
+                          value: model.id,
+                          label: model.id,
+                        }))}
+                        onValueChange={(next) => setDraft({ ...draft, guardrailModel: next })}
+                      />
                     )}
                   </Field>
                 </Cell>

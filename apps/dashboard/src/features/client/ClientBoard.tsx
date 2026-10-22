@@ -32,13 +32,13 @@ import {
 } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
 import { Button, IconButton } from "../../ui/Button.tsx";
-import { Select } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Legend, Mono, Muted, Row, ScrollX, Stack } from "../../ui/primitives.ts";
 import { Section } from "../../ui/Section.tsx";
 import { Controls, Segment } from "../../ui/Segment.tsx";
+import { Select } from "../../ui/Select.tsx";
 import { Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { groupReadings } from "../keys/limits.ts";
@@ -57,6 +57,10 @@ import { RANGES, type RangeId, rangeOf, startOfDay } from "../usage/shared.ts";
  * what "Load older" is for, so the default staying small costs nothing.
  */
 const LIMITS = [20, 50, 100, 250] as const;
+
+const Narrow = styled(Select)`
+  width: auto;
+`;
 
 /** The window a limit is counted over, spelled for a reader rather than a schema. */
 const LIMIT_WINDOW_LABEL: Readonly<Record<string, string>> = {
@@ -672,18 +676,15 @@ export function ClientBoard() {
             {/* No `operator`: the account and key controls are absent here,
                 and `/api/client/logs` refuses both parameters regardless. */}
             <LogFilterBar filters={filters} onChange={setFilters} />
-            <Select
+            <Narrow
               value={limit}
               aria-label="How many requests per page"
-              style={{ width: "auto" }}
-              onChange={(event) => setLimit(Number(event.target.value))}
-            >
-              {LIMITS.map((value) => (
-                <option key={value} value={value}>
-                  {value} per page
-                </option>
-              ))}
-            </Select>
+              options={LIMITS.map((value) => ({
+                value: String(value),
+                label: `${value} per page`,
+              }))}
+              onValueChange={(next) => setLimit(Number(next))}
+            />
           </Controls>
         }
         query={{

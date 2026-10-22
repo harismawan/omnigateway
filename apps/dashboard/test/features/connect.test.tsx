@@ -5,6 +5,7 @@ import { ConnectDialog } from "../../src/features/accounts/ConnectDialog.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { credential } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose } from "../helpers/select.ts";
 
 const pkceStart = {
   flowId: "flow-pkce",
@@ -52,7 +53,7 @@ describe("ConnectDialog", () => {
     const stub = createFetchStub({ "POST /api/connect/start": () => pkceStart });
     open();
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "openai");
+    await choose(user, screen.getByLabelText("Provider"), "openai");
     await user.click(screen.getByRole("button", { name: "Start authorization" }));
 
     await waitFor(() => {
@@ -87,7 +88,7 @@ describe("ConnectDialog", () => {
     createFetchStub({ "POST /api/connect/start": () => pkceStart });
     open();
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "openai");
+    await choose(user, screen.getByLabelText("Provider"), "openai");
     await user.click(screen.getByRole("button", { name: "Start authorization" }));
 
     expect(
@@ -112,7 +113,7 @@ describe("ConnectDialog", () => {
     });
     open(onConnected);
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "kimi");
+    await choose(user, screen.getByLabelText("Provider"), "kimi");
     await user.click(screen.getByRole("button", { name: "Start authorization" }));
 
     expect(await screen.findByText("WDJB-MJHT")).toBeTruthy();
@@ -143,7 +144,7 @@ describe("ConnectDialog", () => {
     });
     open(onConnected);
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
+    await choose(user, screen.getByLabelText("Provider"), "kilo");
     await user.click(screen.getByRole("button", { name: "Start authorization" }));
 
     expect(await screen.findByRole("link", { name: "Open Kilo" })).toBeTruthy();
@@ -161,7 +162,7 @@ describe("ConnectDialog", () => {
     const stub = createFetchStub({ "POST /api/connect/start": () => deviceStart });
     open();
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
+    await choose(user, screen.getByLabelText("Provider"), "kilo");
 
     // The choice is offered, and nothing about the default changed: a provider
     // that could always be authorized still authorizes on the first click.
@@ -183,8 +184,8 @@ describe("ConnectDialog", () => {
     });
     open(onConnected);
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
-    await user.selectOptions(screen.getByLabelText("How to connect"), "apiKey");
+    await choose(user, screen.getByLabelText("Provider"), "kilo");
+    await choose(user, screen.getByLabelText("How to connect"), "apiKey");
     await user.type(await screen.findByLabelText("API key"), "sk-kilo-1");
     await user.click(screen.getByRole("button", { name: "Add API key" }));
 
@@ -202,7 +203,7 @@ describe("ConnectDialog", () => {
     createFetchStub({});
     open();
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    await choose(user, screen.getByLabelText("Provider"), "custom");
 
     // One way in means no question to ask; the form is the only thing there.
     expect(screen.queryByLabelText("How to connect")).toBeNull();
@@ -215,13 +216,13 @@ describe("ConnectDialog", () => {
     createFetchStub({});
     open();
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    await choose(user, screen.getByLabelText("Provider"), "custom");
     expect(screen.getByLabelText("Server URL")).toBeTruthy();
 
     // A custom endpoint is reached by a URL the operator supplies. That is
     // custom's own metadata, not something every key-bearing provider grew.
-    await user.selectOptions(screen.getByLabelText("Provider"), "kimi");
-    await user.selectOptions(screen.getByLabelText("How to connect"), "apiKey");
+    await choose(user, screen.getByLabelText("Provider"), "kimi");
+    await choose(user, screen.getByLabelText("How to connect"), "apiKey");
     expect(await screen.findByLabelText("API key")).toBeTruthy();
     expect(screen.queryByLabelText("Server URL")).toBeNull();
     expect(screen.queryByLabelText("Endpoint ID")).toBeNull();
@@ -232,11 +233,11 @@ describe("ConnectDialog", () => {
     createFetchStub({ "POST /api/connect/start": () => pkceStart });
     open();
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "kilo");
-    await user.selectOptions(screen.getByLabelText("How to connect"), "apiKey");
+    await choose(user, screen.getByLabelText("Provider"), "kilo");
+    await choose(user, screen.getByLabelText("How to connect"), "apiKey");
     expect(await screen.findByLabelText("API key")).toBeTruthy();
 
-    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
+    await choose(user, screen.getByLabelText("Provider"), "anthropic");
 
     // Left as it was, the dialog would offer to store an API key under whatever
     // the operator picked next, including a provider that has no key path.

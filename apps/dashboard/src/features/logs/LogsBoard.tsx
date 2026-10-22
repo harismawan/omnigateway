@@ -16,10 +16,10 @@ import { formatCount } from "../../lib/format.ts";
 import { isError, isPending } from "../../lib/vitals.ts";
 import { useLive } from "../../session/live.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Select } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { FillModule, FillScroller } from "../../ui/Panel.tsx";
 import { Muted, Row } from "../../ui/primitives.ts";
+import { Select } from "../../ui/Select.tsx";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { BodyArtifact } from "./BodyArtifact.tsx";
 import { LogFilterBar } from "./LogFilterBar.tsx";
@@ -136,14 +136,12 @@ export function LogsBoard() {
             <Narrow
               value={limit}
               aria-label="How many requests per page"
-              onChange={(event) => setLimit(Number(event.target.value))}
-            >
-              {LIMITS.map((value) => (
-                <option key={value} value={value}>
-                  {value} per page
-                </option>
-              ))}
-            </Narrow>
+              options={LIMITS.map((value) => ({
+                value: String(value),
+                label: `${value} per page`,
+              }))}
+              onValueChange={(next) => setLimit(Number(next))}
+            />
             {/* Beside the filters rather than at the foot of the scroller: the
                 pause is entered by scrolling to the bottom, so the way out of
                 it must not be somewhere the operator has to scroll back to. */}

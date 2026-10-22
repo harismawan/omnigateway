@@ -10,9 +10,10 @@ import {
 import type { Strategy, VirtualModel } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Field, Input, Select } from "../../ui/Field.tsx";
+import { Field, Input } from "../../ui/Field.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Legend, Row, Spacer, Stack } from "../../ui/primitives.ts";
+import { Select } from "../../ui/Select.tsx";
 import { describeError } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import {
@@ -169,16 +170,9 @@ export function ModelEditor({ model, onSaved, onDeleted }: ModelEditorProps) {
               <Select
                 {...props}
                 value={draft.strategy}
-                onChange={(event) =>
-                  setDraft({ ...draft, strategy: event.target.value as Strategy })
-                }
-              >
-                {STRATEGIES.map((entry) => (
-                  <option key={entry.id} value={entry.id}>
-                    {entry.label}
-                  </option>
-                ))}
-              </Select>
+                options={STRATEGIES.map((entry) => ({ value: entry.id, label: entry.label }))}
+                onValueChange={(next) => setDraft({ ...draft, strategy: next as Strategy })}
+              />
             )}
           </Field>
           {strategy === undefined ? null : <Blurb>{strategy.blurb}</Blurb>}

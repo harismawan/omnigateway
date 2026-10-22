@@ -1,8 +1,9 @@
 import { X } from "lucide-react";
 import { Dialog } from "radix-ui";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import styled from "styled-components";
 import { IconButton } from "./Button.tsx";
+import { PopoverLayer } from "./layer.ts";
 import { Legend, Spacer } from "./primitives.ts";
 
 const Overlay = styled(Dialog.Overlay)`
@@ -77,11 +78,12 @@ export function Modal({
   width = "560px",
   children,
 }: ModalProps) {
+  const [layer, setLayer] = useState<HTMLDivElement | null>(null);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Overlay />
-        <Content $width={width}>
+        <Content ref={setLayer} $width={width}>
           <Head>
             <Dialog.Title asChild>
               <Legend as="h2">{title}</Legend>
@@ -95,7 +97,7 @@ export function Modal({
           </Head>
           <Scroll>
             {description === undefined ? null : <Description>{description}</Description>}
-            {children}
+            <PopoverLayer.Provider value={layer}>{children}</PopoverLayer.Provider>
           </Scroll>
           {footer === undefined ? null : <Foot>{footer}</Foot>}
         </Content>

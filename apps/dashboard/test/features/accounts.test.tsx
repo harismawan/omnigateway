@@ -24,6 +24,7 @@ import {
   settings,
 } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose, optionLabels, shownLabel } from "../helpers/select.ts";
 
 const credentials = [
   credential(),
@@ -320,12 +321,12 @@ describe("AccountsBoard", () => {
     await user.click(
       (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
     );
-    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
-    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLSelectElement;
-    await user.selectOptions(endpoint, "local-vllm");
+    await choose(user, screen.getByLabelText("Provider"), "custom");
+    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLButtonElement;
+    await choose(user, endpoint, "local-vllm");
 
     expect(endpoint.value).toBe("local-vllm");
-    expect(endpoint.selectedOptions[0]?.textContent).toBe("Local vLLM");
+    expect(shownLabel(endpoint)).toBe("Local vLLM");
     // Legacy rows carry no basePath, so the origin alone prefills.
     expect((screen.getByLabelText("Server URL") as HTMLInputElement).value).toBe(
       "http://localhost:8000",
@@ -356,9 +357,9 @@ describe("AccountsBoard", () => {
     await user.click(
       (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
     );
-    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
-    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLSelectElement;
-    await user.selectOptions(endpoint, "proxied-vllm");
+    await choose(user, screen.getByLabelText("Provider"), "custom");
+    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLButtonElement;
+    await choose(user, endpoint, "proxied-vllm");
 
     // The prefill rejoins the base path so resubmitting addresses the same
     // server instead of silently dropping onto the bare origin.
@@ -390,10 +391,10 @@ describe("AccountsBoard", () => {
     await user.click(
       (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
     );
-    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
-    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLSelectElement;
-    await user.selectOptions(endpoint, "local-vllm");
-    await user.selectOptions(endpoint, "");
+    await choose(user, screen.getByLabelText("Provider"), "custom");
+    const endpoint = screen.getByLabelText("Existing endpoint") as HTMLButtonElement;
+    await choose(user, endpoint, "local-vllm");
+    await choose(user, endpoint, "");
 
     expect(endpoint.value).toBe("");
     expect((screen.getByLabelText("Endpoint ID") as HTMLInputElement).value).toBe("");
@@ -409,15 +410,12 @@ describe("AccountsBoard", () => {
     await user.click(
       (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
     );
-    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    await choose(user, screen.getByLabelText("Provider"), "custom");
 
-    const protocol = screen.getByLabelText("Protocol") as HTMLSelectElement;
-    expect(
-      within(protocol).getByRole("option", { name: "Chat Completions (/v1/chat/completions)" }),
-    ).toBeTruthy();
-    expect(
-      within(protocol).getByRole("option", { name: "Responses (/v1/responses)" }),
-    ).toBeTruthy();
+    expect(await optionLabels(user, screen.getByLabelText("Protocol"))).toEqual([
+      "Chat Completions (/v1/chat/completions)",
+      "Responses (/v1/responses)",
+    ]);
   });
 
   test("creates an OpenAI-compatible credential and warns for HTTP", async () => {
@@ -428,13 +426,13 @@ describe("AccountsBoard", () => {
     await user.click(
       (await screen.findAllByRole("button", { name: "Connect an account" }))[0] as HTMLElement,
     );
-    await user.selectOptions(screen.getByLabelText("Provider"), "custom");
+    await choose(user, screen.getByLabelText("Provider"), "custom");
     await user.type(screen.getByLabelText("Endpoint ID"), "local-vllm");
     await user.type(screen.getByLabelText("Endpoint label"), "Local vLLM");
     // A base path must survive the form verbatim; servers behind a reverse
     // proxy live at a subpath.
     await user.type(screen.getByLabelText("Server URL"), "http://localhost:8000/api");
-    await user.selectOptions(screen.getByLabelText("Protocol"), "chat_completions");
+    await choose(user, screen.getByLabelText("Protocol"), "chat_completions");
     await user.type(screen.getByLabelText("API key"), "test-provider-key");
 
     expect(screen.getByText(/plaintext transport/i)).toBeTruthy();

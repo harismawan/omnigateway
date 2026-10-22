@@ -5,8 +5,9 @@ import { findProvider } from "../../api/queries.ts";
 import type { Credential, ProviderId } from "../../api/types.ts";
 import { providerColor } from "../../theme/tokens.ts";
 import { Button, IconButton } from "../../ui/Button.tsx";
-import { Input, NumberInput, Select } from "../../ui/Field.tsx";
+import { NumberInput } from "../../ui/Field.tsx";
 import { Legend, Row, Spacer, Stack } from "../../ui/primitives.ts";
+import { Autocomplete, Select } from "../../ui/Select.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import {
   type Catalog,
@@ -165,8 +166,24 @@ export function TargetEditor({
           <Select
             id={`${listId}-provider`}
             value={target.provider}
-            onChange={(event) => {
-              const provider = event.target.value as ProviderId;
+            options={[
+              ...catalog.map((provider) => ({ value: provider.id, label: provider.label })),
+              /*
+                A saved target outlives the catalog entry it names — a provider
+                can be removed from a build, or supplied by a plugin that is no
+                longer installed. Without this row the control would have no
+                option to show for it, and a target on a vanished provider read
+                as "Anthropic" when this was a native select; one keystroke
+                anywhere else saved it that way. The raw id, for the same reason
+                `AccountsBoard`'s `labelOf` shows it: an id the operator can act
+                on beats a label that is a lie.
+              */
+              ...(entry === undefined
+                ? [{ value: target.provider, label: `${target.provider} (not in the catalog)` }]
+                : []),
+            ]}
+            onValueChange={(chosen) => {
+              const provider = chosen as ProviderId;
               const next = findProvider(catalog, provider);
               // Swapping provider carries the model name over only if it is
               // still meaningful; otherwise fall back to that provider's default.
@@ -176,25 +193,7 @@ export function TargetEditor({
                 model: known ? target.model : (next?.defaultModel ?? ""),
               });
             }}
-          >
-            {catalog.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.label}
-              </option>
-            ))}
-            {/*
-              A saved target outlives the catalog entry it names — a provider
-              can be removed from a build, or supplied by a plugin that is no
-              longer installed. Without this option the `<Select>` falls back to
-              showing its first entry, so a target on a vanished provider reads
-              as "Anthropic" and one keystroke anywhere else saves it that way.
-              The raw id, for the same reason `AccountsBoard`'s `labelOf` shows
-              it: an id the operator can act on beats a label that is a lie.
-            */}
-            {entry === undefined ? (
-              <option value={target.provider}>{target.provider} (not in the catalog)</option>
-            ) : null}
-          </Select>
+          />
         </Cell>
 
         {target.provider === "custom" ? (
@@ -205,15 +204,12 @@ export function TargetEditor({
             <Select
               id={`${listId}-endpoint`}
               value={target.endpointId}
-              onChange={(event) => onChange(reEndpointDraft(target, event.target.value))}
-            >
-              <option value="">Choose endpoint</option>
-              {endpoints.map((endpoint) => (
-                <option key={endpoint.id} value={endpoint.id}>
-                  {endpoint.label}
-                </option>
-              ))}
-            </Select>
+              options={[
+                { value: "", label: "Choose endpoint" },
+                ...endpoints.map((endpoint) => ({ value: endpoint.id, label: endpoint.label })),
+              ]}
+              onValueChange={(next) => onChange(reEndpointDraft(target, next))}
+            />
           </Cell>
         ) : null}
 
@@ -221,20 +217,17 @@ export function TargetEditor({
           <Legend as="label" htmlFor={`${listId}-model`}>
             Provider model
           </Legend>
-          <Input
+          <Autocomplete
             id={`${listId}-model`}
-            list={`${listId}-catalog`}
             value={target.model}
             placeholder={entry?.defaultModel ?? ""}
-            onChange={(event) => retarget({ provider: target.provider, model: event.target.value })}
+            suggestions={choices.map((choice) => ({
+              value: choice.id,
+              label: choice.id,
+              detail: choice.label === choice.id ? undefined : choice.label,
+            }))}
+            onValueChange={(model) => retarget({ provider: target.provider, model })}
           />
-          <datalist id={`${listId}-catalog`}>
-            {choices.map((choice) => (
-              <option key={choice.id} value={choice.id}>
-                {choice.label}
-              </option>
-            ))}
-          </datalist>
           {unreachable === null ? null : <Unreachable role="note">{unreachable}</Unreachable>}
         </Cell>
 
@@ -273,23 +266,20 @@ export function TargetEditor({
           <Select
             id={`${listId}-account`}
             value={target.credentialId}
-            onChange={(event) => set("credentialId", event.target.value)}
-          >
-            <option value="">Any account</option>
-            {accounts.map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.label}
-              </option>
-            ))}
-            {/*
-              A pin outlives the account it names. Without this the select would
-              fall back to showing nothing selected, which reads as "any
-              account" — the opposite of what the target actually does.
-            */}
-            {danglingPin === null ? null : (
-              <option value={target.credentialId}>{target.credentialId} (removed)</option>
-            )}
-          </Select>
+            options={[
+              { value: "", label: "Any account" },
+              ...accounts.map((account) => ({ value: account.id, label: account.label })),
+              /*
+                A pin outlives the account it names. Without this row the control
+                would have nothing to show it as, which reads as "any account" —
+                the opposite of what the target actually does.
+              */
+              ...(danglingPin === null
+                ? []
+                : [{ value: target.credentialId, label: `${target.credentialId} (removed)` }]),
+            ]}
+            onValueChange={(next) => set("credentialId", next)}
+          />
           {danglingPin === null ? null : <Unreachable role="note">{danglingPin}</Unreachable>}
         </Cell>
       </Stack>

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
-import { renderHook, screen, waitFor, within } from "@testing-library/react";
+import { renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useProviderCatalog } from "../../src/api/queries.ts";
 import type { ProviderId, UsageBucket } from "../../src/api/types.ts";
 import { AccountsBoard } from "../../src/features/accounts/AccountsBoard.tsx";
@@ -19,6 +20,7 @@ import {
   wireCatalogFixture,
 } from "../helpers/fixtures.ts";
 import { queryWrapper, renderWithProviders } from "../helpers/render.tsx";
+import { optionLabels, shownLabel } from "../helpers/select.ts";
 
 /**
  * One rule, six places that have to obey it.
@@ -145,7 +147,7 @@ describe("every screen draws providers in that order", () => {
     ]);
   });
 
-  test("the target editor's provider picker lists them in catalog order", () => {
+  test("the target editor's provider picker lists them in catalog order", async () => {
     const catalog = catalogFixture();
     renderWithProviders(
       <TargetEditor
@@ -161,24 +163,14 @@ describe("every screen draws providers in that order", () => {
       />,
     );
 
-    const picker = screen.getByLabelText("Provider");
-    expect(
-      within(picker)
-        .getAllByRole("option")
-        .map((option) => option.textContent),
-    ).toEqual(DRAWN);
+    expect(await optionLabels(userEvent, screen.getByLabelText("Provider"))).toEqual(DRAWN);
   });
 
-  test("the connect dialog's provider picker lists them in catalog order", () => {
+  test("the connect dialog's provider picker lists them in catalog order", async () => {
     createFetchStub({});
     renderWithProviders(<ConnectDialog open onOpenChange={() => {}} onConnected={() => {}} />);
 
-    const picker = screen.getByLabelText("Provider");
-    expect(
-      within(picker)
-        .getAllByRole("option")
-        .map((option) => option.textContent),
-    ).toEqual(DRAWN);
+    expect(await optionLabels(userEvent, screen.getByLabelText("Provider"))).toEqual(DRAWN);
   });
 });
 
@@ -242,9 +234,9 @@ describe("a provider the catalog no longer names", () => {
       />,
     );
 
-    const picker = screen.getByLabelText<HTMLSelectElement>("Provider");
+    const picker = screen.getByLabelText<HTMLButtonElement>("Provider");
     expect(picker.value).toBe("anthropic");
-    expect(within(picker).getByText("anthropic (not in the catalog)")).toBeTruthy();
+    expect(shownLabel(picker)).toBe("anthropic (not in the catalog)");
   });
 });
 
@@ -280,7 +272,7 @@ describe("the default provider is the first the catalog lists", () => {
       client: clientWithout("anthropic"),
     });
 
-    const picker = screen.getByLabelText<HTMLSelectElement>("Provider");
+    const picker = screen.getByLabelText<HTMLButtonElement>("Provider");
     expect(picker.value).toBe("openai");
 
     screen.getByRole("button", { name: "Start authorization" }).click();
