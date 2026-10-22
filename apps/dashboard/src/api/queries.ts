@@ -39,6 +39,7 @@ import type {
   KeyGuardrailInput,
   KeyLimitsInput,
   KeyModelsInput,
+  KeySmartRoutingInput,
   KeysResponse,
   LifecycleCapability,
   LogFilters,
@@ -1200,6 +1201,26 @@ export function useSetKeyGuardrail(): UseMutationResult<
   const client = useQueryClient();
   return useMutation({
     mutationFn: ({ id, policy }) => put<ApiKeySummary>(`/api/keys/${id}/guardrail`, { policy }),
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
+  });
+}
+
+/**
+ * Turns confidential routing on or off for one key.
+ *
+ * Its own route rather than a field on the key's other edits, because it is a
+ * single switch saved the moment it moves. The global `smartRouterEnabled`
+ * setting still gates it.
+ */
+export function useSetKeySmartRouting(): UseMutationResult<
+  ApiKeySummary,
+  Error,
+  { id: string } & KeySmartRoutingInput
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, enabled }) =>
+      put<ApiKeySummary>(`/api/keys/${id}/smart-routing`, { enabled }),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.keys }),
   });
 }

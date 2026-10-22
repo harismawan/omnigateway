@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { DEFAULT_SMART_ROUTER_POLICY } from "@omni/store/types";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SettingsBoard } from "../../src/features/settings/SettingsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
-import { settings } from "../helpers/fixtures.ts";
+import { model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
-import { choose } from "../helpers/select.ts";
+import { choose, suggestionsOf } from "../helpers/select.ts";
 
 function stubSettings(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
@@ -36,23 +37,48 @@ describe("SettingsBoard", () => {
     expect((screen.getByLabelText("Load") as HTMLInputElement).value).toBe("2");
   });
 
-  /** No control yet: a save must hand back the five smart-router values as loaded. */
-  test("saves the smart router settings unchanged from what was loaded", async () => {
+  test("the confidential routing module loads, saves all five fields, and clears models to null", async () => {
     const user = userEvent.setup();
-    const loaded = {
-      ...settings,
-      smartRouterEnabled: true,
-      smartRouterClassifierModel: "local-judge",
-      smartRouterLocalModel: "local-chat",
-      smartRouterPolicy: "Anything about Project Falcon.",
-      smartRouterTimeoutMs: 7_000,
-    };
     const stub = stubSettings({
-      "GET /api/settings": () => ({ settings: loaded, bodyLoggingAllowed: false }),
+      "GET /api/settings": () => ({
+        settings: {
+          ...settings,
+          smartRouterEnabled: true,
+          smartRouterClassifierModel: "local-judge",
+          smartRouterLocalModel: "local-chat",
+          smartRouterPolicy: "Anything about Project Falcon.",
+          smartRouterTimeoutMs: 7_000,
+        },
+        bodyLoggingAllowed: false,
+      }),
+      "GET /api/models": () => ({ models: [] }),
       "PUT /api/settings": () => ({ ok: true }),
     });
     renderWithProviders(<SettingsBoard />);
-    await screen.findByLabelText("Body retention");
+
+    const toggle = await screen.findByRole("switch", { name: "Enable confidential routing" });
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+    const classifier = screen.getByLabelText("Confidential classifier model") as HTMLInputElement;
+    const local = screen.getByLabelText("Local model") as HTMLInputElement;
+    const policy = screen.getByLabelText("What counts as confidential") as HTMLTextAreaElement;
+    const timeout = screen.getByLabelText("Confidential check timeout") as HTMLInputElement;
+    expect(classifier.value).toBe("local-judge");
+    expect(local.value).toBe("local-chat");
+    expect(policy.value).toBe("Anything about Project Falcon.");
+    expect(timeout.value).toBe("7000");
+    expect(screen.getByText("30 / 4000")).toBeTruthy();
+    // The two things an operator must know before trusting it.
+    expect(
+      screen.getByText(
+        "Must be a virtual model whose targets are all custom (in-house) endpoints. Requests are refused otherwise.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /Reduces leaks of ordinary confidential content; it is not a security boundary\./,
+      ),
+    ).toBeTruthy();
+
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => {
       const put = stub.calls.find((call) => call.init?.method === "PUT");
@@ -62,6 +88,103 @@ describe("SettingsBoard", () => {
         smartRouterLocalModel: "local-chat",
         smartRouterPolicy: "Anything about Project Falcon.",
         smartRouterTimeoutMs: 7_000,
+      });
+    });
+
+    await user.click(toggle);
+    await user.clear(classifier);
+    await user.clear(local);
+    await user.clear(timeout);
+    await user.type(timeout, "9000");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const puts = stub.calls.filter((call) => call.init?.method === "PUT");
+      expect(puts).toHaveLength(2);
+      const body = JSON.parse(String(puts.at(-1)?.init?.body)) as Record<string, unknown>;
+      expect(body).toMatchObject({ smartRouterEnabled: false, smartRouterTimeoutMs: 9_000 });
+      // Blank is how a model is unset: sent as null, never omitted.
+      expect(body.smartRouterClassifierModel).toBeNull();
+      expect(body.smartRouterLocalModel).toBeNull();
+    });
+  });
+
+  test("the confidential models suggest the configured models", async () => {
+    const user = userEvent.setup();
+    stubSettings({
+      "GET /api/models": () => ({ models: [model({ id: "local-chat" }), model({ id: "fast" })] }),
+    });
+    renderWithProviders(<SettingsBoard />);
+    const local = await screen.findByLabelText("Local model");
+    await waitFor(async () => {
+      expect(await suggestionsOf(user, local)).toContain("local-chat");
+    });
+  });
+
+  test("a confidential check timeout outside 1..60000 is refused before saving", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "GET /api/models": () => ({ models: [] }) });
+    renderWithProviders(<SettingsBoard />);
+    const field = await screen.findByLabelText("Confidential check timeout");
+    for (const value of ["0", "60001", "1.5"]) {
+      await user.clear(field);
+      await user.type(field, value);
+      await user.click(screen.getByRole("button", { name: "Save changes" }));
+      expect((await screen.findByRole("alert")).textContent).toContain(
+        "Confidential routing timeout must be a whole number from 1 to 60000.",
+      );
+      expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+    }
+  });
+
+  test("an empty or over-long confidential policy is refused before saving", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({ "GET /api/models": () => ({ models: [] }) });
+    renderWithProviders(<SettingsBoard />);
+    const field = (await screen.findByLabelText(
+      "What counts as confidential",
+    )) as HTMLTextAreaElement;
+
+    await user.clear(field);
+    await user.type(field, "   ");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Reset to default");
+
+    await user.clear(field);
+    await user.click(field);
+    await user.paste("p".repeat(4001));
+    expect(screen.getByText("4001 / 4000")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("4000");
+    });
+    expect(stub.calls.some((call) => call.init?.method === "PUT")).toBe(false);
+  });
+
+  test("Reset to default restores the default policy and saves it", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({
+      "GET /api/settings": () => ({
+        settings: { ...settings, smartRouterPolicy: "Anything about Project Falcon." },
+        bodyLoggingAllowed: false,
+      }),
+      "GET /api/models": () => ({ models: [] }),
+      "PUT /api/settings": () => ({ ok: true }),
+    });
+    renderWithProviders(<SettingsBoard />);
+    const field = (await screen.findByLabelText(
+      "What counts as confidential",
+    )) as HTMLTextAreaElement;
+    await waitFor(() => expect(field.value).toBe("Anything about Project Falcon."));
+
+    await user.click(screen.getByRole("button", { name: "Reset to default" }));
+    expect(field.value).toBe(DEFAULT_SMART_ROUTER_POLICY);
+    expect(screen.getByText(`${DEFAULT_SMART_ROUTER_POLICY.length} / 4000`)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body))).toMatchObject({
+        smartRouterPolicy: DEFAULT_SMART_ROUTER_POLICY,
       });
     });
   });

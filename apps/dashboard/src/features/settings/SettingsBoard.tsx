@@ -1,4 +1,10 @@
-import { GUARDRAIL_HISTORY_TURNS_MAX, GUARDRAIL_TIMEOUT_MAX_MS } from "@omni/store/types";
+import {
+  DEFAULT_SMART_ROUTER_POLICY,
+  GUARDRAIL_HISTORY_TURNS_MAX,
+  GUARDRAIL_TIMEOUT_MAX_MS,
+  SMART_ROUTER_POLICY_MAX_CHARS,
+  SMART_ROUTER_TIMEOUT_MAX_MS,
+} from "@omni/store/types";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import styled from "styled-components";
 import {
@@ -10,7 +16,7 @@ import {
 import type { PonytailMode, Settings } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Field, Input } from "../../ui/Field.tsx";
+import { Field, Input, Textarea } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Grid, Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
@@ -267,6 +273,12 @@ const Saved = styled.p`
   color: ${({ theme }) => theme.color.ok};
 `;
 
+const PolicyCount = styled.span<{ $over: boolean }>`
+  font-size: 11px;
+  font-family: ${({ theme }) => theme.font.mono};
+  color: ${({ $over, theme }) => ($over ? theme.color.down : theme.color.inkDim)};
+`;
+
 /**
  * A control that is present but cannot act, and why.
  *
@@ -293,6 +305,11 @@ type Draft = Record<string, string> & {
   guardrailModel?: string;
   guardrailTimeoutMs?: string;
   guardrailHistoryTurns?: string;
+  smartRouterEnabled?: string;
+  smartRouterClassifierModel?: string;
+  smartRouterLocalModel?: string;
+  smartRouterPolicy?: string;
+  smartRouterTimeoutMs?: string;
 };
 
 function toDraft(settings: Settings): Draft {
@@ -308,12 +325,16 @@ function toDraft(settings: Settings): Draft {
   draft.guardrailModel = settings.guardrailModel ?? "";
   draft.guardrailTimeoutMs = String(settings.guardrailTimeoutMs);
   draft.guardrailHistoryTurns = String(settings.guardrailHistoryTurns);
+  draft.smartRouterEnabled = String(settings.smartRouterEnabled);
+  draft.smartRouterClassifierModel = settings.smartRouterClassifierModel ?? "";
+  draft.smartRouterLocalModel = settings.smartRouterLocalModel ?? "";
+  draft.smartRouterPolicy = settings.smartRouterPolicy;
+  draft.smartRouterTimeoutMs = String(settings.smartRouterTimeoutMs);
   return draft;
 }
 
 function parseDraft(
   draft: Draft,
-  loaded: Settings,
 ): { ok: true; settings: Settings } | { ok: false; problem: string } {
   const weights = {} as Settings["weights"];
   for (const weight of WEIGHTS) {
@@ -374,6 +395,38 @@ function parseDraft(
   }
   const guardrailModel = (draft.guardrailModel ?? "").trim();
 
+  const smartTimeoutRaw = (draft.smartRouterTimeoutMs ?? "").trim();
+  const smartRouterTimeoutMs = Number(smartTimeoutRaw);
+  if (
+    smartTimeoutRaw.length === 0 ||
+    !Number.isInteger(smartRouterTimeoutMs) ||
+    smartRouterTimeoutMs < 1 ||
+    smartRouterTimeoutMs > SMART_ROUTER_TIMEOUT_MAX_MS
+  ) {
+    return {
+      ok: false,
+      problem: `Confidential routing timeout must be a whole number from 1 to ${SMART_ROUTER_TIMEOUT_MAX_MS}.`,
+    };
+  }
+  // Counted as the gateway counts it: trimmed. An empty policy is not "use the
+  // default", it is refused, because the route refuses it and the button beside
+  // the field is the way back.
+  const smartRouterPolicy = (draft.smartRouterPolicy ?? "").trim();
+  if (smartRouterPolicy.length === 0) {
+    return {
+      ok: false,
+      problem: "Write what counts as confidential, or use Reset to default.",
+    };
+  }
+  if (smartRouterPolicy.length > SMART_ROUTER_POLICY_MAX_CHARS) {
+    return {
+      ok: false,
+      problem: `The confidential policy is at most ${SMART_ROUTER_POLICY_MAX_CHARS} characters.`,
+    };
+  }
+  const smartRouterClassifierModel = (draft.smartRouterClassifierModel ?? "").trim();
+  const smartRouterLocalModel = (draft.smartRouterLocalModel ?? "").trim();
+
   return {
     ok: true,
     settings: {
@@ -400,13 +453,13 @@ function parseDraft(
       guardrailModel: guardrailModel.length === 0 ? null : guardrailModel,
       guardrailTimeoutMs,
       guardrailHistoryTurns,
-      // No control for these yet: carried through exactly as loaded, so a save
-      // from this screen neither resets nor drops them.
-      smartRouterEnabled: loaded.smartRouterEnabled,
-      smartRouterClassifierModel: loaded.smartRouterClassifierModel,
-      smartRouterLocalModel: loaded.smartRouterLocalModel,
-      smartRouterPolicy: loaded.smartRouterPolicy,
-      smartRouterTimeoutMs: loaded.smartRouterTimeoutMs,
+      smartRouterEnabled: draft.smartRouterEnabled === "true",
+      // Null when blank, for the reason `guardrailModel` is.
+      smartRouterClassifierModel:
+        smartRouterClassifierModel.length === 0 ? null : smartRouterClassifierModel,
+      smartRouterLocalModel: smartRouterLocalModel.length === 0 ? null : smartRouterLocalModel,
+      smartRouterPolicy,
+      smartRouterTimeoutMs,
     },
   };
 }
@@ -441,10 +494,12 @@ export function SettingsBoard() {
     ...WEIGHTS.map((weight) => Math.abs(Number(draft[`w.${weight.id}`]) || 0)),
   );
 
+  const smartPolicyLength = (draft.smartRouterPolicy ?? "").trim().length;
+
   const submit = () => {
     setSaved(false);
     if (settings.data === undefined) return;
-    const parsed = parseDraft(draft, settings.data);
+    const parsed = parseDraft(draft);
     if (!parsed.ok) {
       setProblem(parsed.problem);
       return;
@@ -727,6 +782,130 @@ export function SettingsBoard() {
                   </Field>
                 </Cell>
               </Weights>
+            </Stack>
+          </Module>
+
+          <Module legend="Confidential routing" meta="per-key, local model">
+            <Stack $gap={3}>
+              <Blurb>
+                Keys with confidential routing on have each request screened by the classifier
+                model. Requests it judges confidential are answered by the local model instead of
+                the model asked for. Reduces leaks of ordinary confidential content; it is not a
+                security boundary.
+              </Blurb>
+              <Options>
+                <SwitchOption
+                  label="Enable confidential routing"
+                  checked={draft.smartRouterEnabled === "true"}
+                  onCheckedChange={(checked) =>
+                    setDraft({ ...draft, smartRouterEnabled: String(checked) })
+                  }
+                >
+                  Applies only to keys that have it switched on in Keys. While off, no request is
+                  screened or rerouted.
+                </SwitchOption>
+              </Options>
+              <Weights>
+                <Cell>
+                  <Field
+                    label="Confidential classifier model"
+                    hint="Judges each request. Blank means none."
+                  >
+                    {(props) => (
+                      <Autocomplete
+                        {...props}
+                        placeholder="none"
+                        value={draft.smartRouterClassifierModel ?? ""}
+                        suggestions={(models.data ?? []).map((model) => ({
+                          value: model.id,
+                          label: model.id,
+                        }))}
+                        onValueChange={(next) =>
+                          setDraft({ ...draft, smartRouterClassifierModel: next })
+                        }
+                      />
+                    )}
+                  </Field>
+                </Cell>
+                <Cell>
+                  <Field
+                    label="Local model"
+                    hint="Answers requests judged confidential. Blank means none."
+                  >
+                    {(props) => (
+                      <Autocomplete
+                        {...props}
+                        placeholder="none"
+                        value={draft.smartRouterLocalModel ?? ""}
+                        suggestions={(models.data ?? []).map((model) => ({
+                          value: model.id,
+                          label: model.id,
+                        }))}
+                        onValueChange={(next) =>
+                          setDraft({ ...draft, smartRouterLocalModel: next })
+                        }
+                      />
+                    )}
+                  </Field>
+                </Cell>
+                <Cell>
+                  <Field
+                    label="Confidential check timeout"
+                    hint="A slower check refuses the request it was screening."
+                  >
+                    {(props) => (
+                      <Row $gap={2}>
+                        <Input
+                          {...props}
+                          type="number"
+                          min={1}
+                          max={SMART_ROUTER_TIMEOUT_MAX_MS}
+                          step={1000}
+                          value={draft.smartRouterTimeoutMs ?? ""}
+                          onChange={(event) =>
+                            setDraft({ ...draft, smartRouterTimeoutMs: event.target.value })
+                          }
+                        />
+                        <Legend>ms</Legend>
+                      </Row>
+                    )}
+                  </Field>
+                </Cell>
+              </Weights>
+              <Blurb>
+                Must be a virtual model whose targets are all custom (in-house) endpoints. Requests
+                are refused otherwise.
+              </Blurb>
+              <Field
+                label="What counts as confidential"
+                hint="Plain language. The classifier reads this to decide which requests stay on local hardware."
+              >
+                {(props) => (
+                  <Textarea
+                    {...props}
+                    rows={6}
+                    value={draft.smartRouterPolicy ?? ""}
+                    onChange={(event) =>
+                      setDraft({ ...draft, smartRouterPolicy: event.target.value })
+                    }
+                  />
+                )}
+              </Field>
+              <Row $gap={2}>
+                <Button
+                  type="button"
+                  $size="sm"
+                  onClick={() =>
+                    setDraft({ ...draft, smartRouterPolicy: DEFAULT_SMART_ROUTER_POLICY })
+                  }
+                >
+                  Reset to default
+                </Button>
+                <Spacer />
+                <PolicyCount $over={smartPolicyLength > SMART_ROUTER_POLICY_MAX_CHARS}>
+                  {smartPolicyLength} / {SMART_ROUTER_POLICY_MAX_CHARS}
+                </PolicyCount>
+              </Row>
             </Stack>
           </Module>
 

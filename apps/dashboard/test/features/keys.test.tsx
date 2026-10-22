@@ -1003,3 +1003,94 @@ describe("usage policy", () => {
     );
   });
 });
+
+describe("confidential routing", () => {
+  const configured = {
+    ...settings,
+    smartRouterEnabled: true,
+    smartRouterClassifierModel: "local-judge",
+    smartRouterLocalModel: "local-chat",
+  };
+
+  test("the switch saves at once, sending the new state whole", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+      "PUT /api/keys/key-1/smart-routing": () => apiKey({ smartRouting: true }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const toggle = await screen.findByRole("switch", { name: "Confidential routing for laptop" });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await user.click(toggle);
+
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(put?.url).toBe("/api/keys/key-1/smart-routing");
+      expect(put?.init?.body).toBe(JSON.stringify({ enabled: true }));
+    });
+  });
+
+  test("a failed save is reported where the operator is looking", async () => {
+    const user = userEvent.setup();
+    stubKeys({
+      "GET /api/keys": () => ({ keys: [apiKey()] }),
+      "PUT /api/keys/key-1/smart-routing": () => ({
+        status: 500,
+        body: { error: { code: "INTERNAL", message: "store unavailable" } },
+      }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    await user.click(
+      await screen.findByRole("switch", { name: "Confidential routing for laptop" }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("laptop");
+    expect(alert.textContent).toContain("store unavailable");
+  });
+
+  test("a revoked key offers no switch", async () => {
+    stubKeys();
+    renderWithProviders(<KeysBoard />);
+    await screen.findByText("revoked");
+    // Two live keys, one revoked.
+    expect(screen.getAllByRole("switch")).toHaveLength(2);
+    expect(screen.queryByRole("switch", { name: "Confidential routing for retired" })).toBeNull();
+  });
+
+  test("a flagged key wears a local-routed chip, and a plain key does not", async () => {
+    stubKeys({
+      "GET /api/keys": () => ({
+        keys: [apiKey({ smartRouting: true }), apiKey({ id: "key-2", label: "ci" })],
+      }),
+      "GET /api/settings": () => ({ settings: configured, bodyLoggingAllowed: false }),
+    });
+    renderWithProviders(<KeysBoard />);
+
+    const chip = await screen.findByText("local-routed");
+    expect(screen.getAllByText("local-routed")).toHaveLength(1);
+    // Healthy: the tooltip says what the chip means and carries no warning.
+    await waitFor(() => expect(chip.getAttribute("title")).not.toContain("Not active"));
+    expect(chip.getAttribute("title")).toContain("local");
+  });
+
+  test("the chip's tooltip warns when the feature is off or a model is unset", async () => {
+    const warned = async (loaded: typeof settings) => {
+      stubKeys({
+        "GET /api/keys": () => ({ keys: [apiKey({ smartRouting: true })] }),
+        "GET /api/settings": () => ({ settings: loaded, bodyLoggingAllowed: false }),
+      });
+      const view = renderWithProviders(<KeysBoard />);
+      const chip = await screen.findByText("local-routed");
+      await waitFor(() => expect(chip.getAttribute("title")).toContain("Not active"));
+      const title = chip.getAttribute("title") ?? "";
+      view.unmount();
+      return title;
+    };
+
+    expect(await warned({ ...configured, smartRouterEnabled: false })).toContain("switched off");
+    expect(await warned({ ...configured, smartRouterLocalModel: null })).toContain("not set");
+    expect(await warned({ ...configured, smartRouterClassifierModel: null })).toContain("not set");
+  });
+});

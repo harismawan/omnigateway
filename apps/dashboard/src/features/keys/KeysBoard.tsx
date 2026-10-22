@@ -9,8 +9,8 @@ import {
 } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
-import { useKeys, useRevokeKey } from "../../api/queries.ts";
-import type { ApiKeySummary, LimitReading } from "../../api/types.ts";
+import { useKeys, useRevokeKey, useSetKeySmartRouting, useSettings } from "../../api/queries.ts";
+import type { ApiKeySummary, LimitReading, Settings } from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatDateTime } from "../../lib/format.ts";
@@ -18,8 +18,9 @@ import { Button, IconButton } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
 import { FillModule, FillScroller } from "../../ui/Panel.tsx";
 import { Legend, Row, Truncate } from "../../ui/primitives.ts";
-import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
+import { describeError, Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
+import { Toggle } from "../../ui/Toggle.tsx";
 import { EditExpiryDialog } from "./EditExpiryDialog.tsx";
 import { EditGuardrailDialog } from "./EditGuardrailDialog.tsx";
 import { EditLimitsDialog } from "./EditLimitsDialog.tsx";
@@ -75,9 +76,40 @@ function describeNearest(nearest: LimitReading | null): string {
   return `${name} ${ceiling}, ${share === null ? "—" : Math.round(share * 100)}% used`;
 }
 
+/**
+ * What the "local-routed" chip says on hover, warning when the flag cannot act.
+ *
+ * The flag is per key but two settings gate it: a key carrying it while the
+ * feature is off, or either model unset, is refused or served unscreened
+ * depending on the gate, and neither is what the operator who flipped the
+ * switch expects. `undefined` settings (still loading, or failed) warn nothing:
+ * absence of a reading is not evidence of a problem.
+ */
+function describeLocalRouted(settings: Settings | undefined): string {
+  const meaning =
+    "Requests from this key are screened for confidential content and answered by the local model when any is found.";
+  if (settings === undefined) return meaning;
+  if (!settings.smartRouterEnabled) {
+    return `Not active: confidential routing is switched off in Settings. ${meaning}`;
+  }
+  if (settings.smartRouterClassifierModel === null || settings.smartRouterLocalModel === null) {
+    return `Not active: the classifier model or the local model is not set in Settings. ${meaning}`;
+  }
+  return meaning;
+}
+
+const Failed = styled.p`
+  padding: 0 ${({ theme }) => theme.space(2)};
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.down};
+`;
+
 export function KeysBoard() {
   const keys = useKeys();
+  const settings = useSettings();
   const revoke = useRevokeKey();
+  const smartRouting = useSetKeySmartRouting();
+  const [smartFailure, setSmartFailure] = useState<string | null>(null);
   const [minting, setMinting] = useState(false);
   const [editing, setEditing] = useState<ApiKeySummary | null>(null);
   const [editingModels, setEditingModels] = useState<ApiKeySummary | null>(null);
@@ -114,6 +146,8 @@ export function KeysBoard() {
         }
       />
 
+      {smartFailure === null ? null : <Failed role="alert">{smartFailure}</Failed>}
+
       <FillModule legend="Issued keys" meta={`${rows.length}`} flush>
         {keys.isError ? (
           <Failure error={keys.error} onRetry={() => void keys.refetch()} />
@@ -142,7 +176,7 @@ export function KeysBoard() {
                   <Th $align="right">Limits</Th>
                   <Th $align="right">Created</Th>
                   <Th>Body capture</Th>
-                  <Th>Usage policy</Th>
+                  <Th>Checks</Th>
                   <Th>Status</Th>
                   <Th />
                 </tr>
@@ -213,10 +247,20 @@ export function KeysBoard() {
                           {/* Whether requests are judged, not the text: a
                               policy can run to thousands of characters and is
                               read in its own dialog. */}
-                          {key.guardrailPolicy === null ? (
+                          {key.guardrailPolicy === null && !key.smartRouting ? (
                             <Legend>—</Legend>
                           ) : (
-                            <Chip title={key.guardrailPolicy}>judged</Chip>
+                            <Allow>
+                              {key.guardrailPolicy === null ? null : (
+                                <Chip title={key.guardrailPolicy}>judged</Chip>
+                              )}
+                              {/* Warns in its tooltip when the flag cannot act
+                                  yet, so the operator hears it here and not
+                                  from a client. */}
+                              {key.smartRouting ? (
+                                <Chip title={describeLocalRouted(settings.data)}>local-routed</Chip>
+                              ) : null}
+                            </Allow>
                           )}
                         </Td>
                         <Td>
@@ -296,6 +340,27 @@ export function KeysBoard() {
                                 >
                                   <CalendarClock />
                                 </IconButton>
+                                {/* Saved the moment it moves, like no other
+                                    control on this row: it is one boolean with
+                                    nothing to compose, so a dialog would only
+                                    be a confirmation of a click. */}
+                                <Toggle
+                                  checked={key.smartRouting}
+                                  disabled={smartRouting.isPending}
+                                  label={`Confidential routing for ${key.label}`}
+                                  onCheckedChange={(enabled) => {
+                                    setSmartFailure(null);
+                                    smartRouting.mutate(
+                                      { id: key.id, enabled },
+                                      {
+                                        onError: (error) =>
+                                          setSmartFailure(
+                                            `Could not change confidential routing for "${key.label}": ${describeError(error)}`,
+                                          ),
+                                      },
+                                    );
+                                  }}
+                                />
                                 <IconButton
                                   type="button"
                                   $variant="ghost"

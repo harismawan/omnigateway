@@ -442,6 +442,9 @@ export type KeyExpiryInput = { expiresAt: number | null };
  */
 export type KeyGuardrailInput = { policy: string | null };
 
+/** Whether the key's requests are screened for confidential content, sent whole. */
+export type KeySmartRoutingInput = { enabled: boolean };
+
 export type KeyCreateInput = {
   label: string;
   /** Null means every configured model; an empty array means none. */
