@@ -178,6 +178,7 @@ async function toSummary(store: Store, key: ApiKey, now: number): Promise<ApiKey
     // whose requests are refused for a purpose its holder cannot read is a key
     // they cannot use as intended. It is the operator's text, not a secret.
     guardrailPolicy: key.guardrailPolicy,
+    smartRouting: key.smartRouting,
   };
 }
 
@@ -242,6 +243,8 @@ export async function createKey(store: Store, input: unknown): Promise<CreatedKe
     expiresAt: body.expiresAt,
     // Null unless asked for: no guardrail, and no classifier call per request.
     guardrailPolicy: body.guardrailPolicy,
+    // Off at mint; a schema option to mint it on arrives with the route.
+    smartRouting: false,
   });
 
   return { id: created.id, label: created.label, prefix: created.prefix, key: raw };

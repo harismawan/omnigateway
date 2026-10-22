@@ -231,6 +231,7 @@ test("the summary carries the key's own model overrides, and nothing beside them
       "modelAllowlist",
       "prefix",
       "revokedAt",
+      "smartRouting",
     ].sort(),
   );
   store.close();

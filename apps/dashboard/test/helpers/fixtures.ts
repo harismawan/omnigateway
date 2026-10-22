@@ -181,6 +181,8 @@ export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
     expiresAt: null,
     /** No usage policy, so the key's requests are never judged. */
     guardrailPolicy: null,
+    /** Never judged for confidential content. */
+    smartRouting: false,
     ...patch,
   };
 }

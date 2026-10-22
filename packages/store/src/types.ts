@@ -647,6 +647,19 @@ export type ApiKey = {
    * operator notes in README accept.
    */
   guardrailPolicy: string | null;
+  /**
+   * Whether this key's requests are judged for confidential content and, when
+   * they are, routed to the operator's local model (`Settings.smartRouterLocalModel`)
+   * instead of the model the client named. `false` is "never judged".
+   *
+   * Only consulted while the global `Settings.smartRouterEnabled` is on. Every
+   * key minted before the column existed reads back `false` — no backfill.
+   *
+   * An older build ignores the column entirely, so a rollback stops judging and
+   * sends everything to the external model the client asked for — **fails
+   * open** — which the operator notes in README accept, as for `guardrailPolicy`.
+   */
+  smartRouting: boolean;
 };
 
 /**
@@ -1112,10 +1125,10 @@ export interface KeyRepo {
   /**
    * Replaces one key's limit matrix, whole.
    *
-   * One of four fields editable after minting — the allowlist via
-   * `setModelAllowlist`, the expiry via `setExpiry` and the usage policy via
-   * `setGuardrailPolicy` are the others — and
-   * deliberately so:
+   * One of five fields editable after minting — the allowlist via
+   * `setModelAllowlist`, the expiry via `setExpiry`, the usage policy via
+   * `setGuardrailPolicy` and the routing flag via `setSmartRouting` are the
+   * others — and deliberately so:
    * `bodyLoggingOptOut` is a promise to whoever holds the key, while a limit is
    * the operator's own ceiling on their own installation. A weekly spend cap
    * that cannot be adjusted without minting a new key and redeploying every
@@ -1156,6 +1169,13 @@ export interface KeyRepo {
    * TEXT column.
    */
   setGuardrailPolicy(id: string, policy: string | null): Promise<void>;
+  /**
+   * Switches one key's smart routing on or off.
+   *
+   * The fifth field editable after minting. A boolean, so there is nothing to
+   * bound or trim; the global `smartRouterEnabled` setting still gates it.
+   */
+  setSmartRouting(id: string, enabled: boolean): Promise<void>;
   revoke(id: string): Promise<void>;
 }
 
