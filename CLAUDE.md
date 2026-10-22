@@ -107,7 +107,10 @@ focused changed-behavior tests and every check in `.github/workflows/ci.yml`.
 8. All outbound provider HTTP use `HttpClient`; no direct production `fetch`.
 9. `@omni/providers/catalog` and `/descriptors` must stay leaves: pure `packages/router` import
    `descriptors`; leaf property is what allow it. `packages/providers/test/leafSubpaths.test.ts`
-   pin both.
+    pin both.
+    Anthropic safeguard replies carry opaque terminal `vendor` metadata through
+    `collect()`; never fabricate verdicts or rewrite reviewed tool identities.
+    Pin: `apps/gateway/test/routes/autoModeSafeguards.test.ts`.
 10. Catalog pricing give defaults. Router price from saved targets; catalog edits hit new targets
     only.
 11. CLI administer local installs through `@omni/control`, never `/api/*`. Inject every side effect

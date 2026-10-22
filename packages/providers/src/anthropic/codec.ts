@@ -55,6 +55,9 @@ function cloakOf(state: unknown): ToolCloak | null {
 export const anthropicCodec: ProviderCodec = {
   buildRequest(input: CodecInput): CodecRequest {
     const oauth = input.credentials.accessToken !== null;
+    const safeguards = input.request.vendor?.anthropic?.safeguards;
+    const serverReview = Array.isArray(safeguards) && safeguards.length > 0;
+    const clientHeaders = input.request.providerHeaders?.anthropic ?? {};
 
     // Anthropic's first-party surface refuses some requests on the *names* of
     // the tools they carry, and answers with a billing placeholder that says
@@ -69,9 +72,10 @@ export const anthropicCodec: ProviderCodec = {
     // key on the real names. Rebuilding it per attempt from pristine IR is what
     // makes retries and failover idempotent, and it is also why the contract
     // requires `buildRequest` to be pure: the host may call it once per attempt.
-    const cloak = oauth ? buildToolCloak(input.request) : null;
+    const cloak = oauth && !serverReview ? buildToolCloak(input.request) : null;
     const { body, degradations } = toWire(input.request, input.model, {
       oauth,
+      preserveSystem: serverReview,
       cloak,
       autoCache: input.autoCacheEnabled === true,
       ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
@@ -89,16 +93,27 @@ export const anthropicCodec: ProviderCodec = {
     const firstText = firstUser?.content.find((b) => b.type === "text");
     const withSystem: Record<string, unknown> = {
       ...body,
-      system: applyAnthropicSystem(body.system ?? [], firstText?.text ?? ""),
+      ...(!serverReview
+        ? { system: applyAnthropicSystem(body.system ?? [], firstText?.text ?? "") }
+        : {}),
       stream: true,
     };
 
     const protocol: HeaderPair[] = [
       ["Content-Type", "application/json"],
-      ["anthropic-version", API_VERSION],
+      ["anthropic-version", clientHeaders["anthropic-version"] ?? API_VERSION],
       // Constant, because the request above always streams.
       ["Accept", "text/event-stream"],
     ];
+    for (const [name, value] of Object.entries(clientHeaders)) {
+      if (
+        name.startsWith("anthropic-") &&
+        name !== "anthropic-version" &&
+        name !== "anthropic-beta"
+      ) {
+        protocol.push([name, value]);
+      }
+    }
 
     // The client's own betas ride along: the fields they authorise are already
     // forwarded through `vendor`, and Anthropic rejects such a field outright
@@ -129,7 +144,19 @@ export const anthropicCodec: ProviderCodec = {
       throw input.fail("AUTH", "anthropic credential has no token");
     }
 
-    if (betas.size > 0) protocol.push(["anthropic-beta", [...betas].join(",")]);
+    if (betas.size > 0) {
+      const raw = clientHeaders["anthropic-beta"];
+      const original = raw
+        ?.split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const preserved = original?.every((value) => betas.has(value));
+      const added = [...betas].filter((value) => !original?.includes(value));
+      protocol.push([
+        "anthropic-beta",
+        preserved ? [raw, ...added].join(",") : [...betas].join(","),
+      ]);
+    }
 
     const headers = orderHeaders(
       mergeHeaders(anthropicProfile.headers, protocol),
@@ -143,7 +170,9 @@ export const anthropicCodec: ProviderCodec = {
         headers,
         // Order the fields, serialize, then swap the cch placeholder for a token
         // over those exact bytes. Substitution is length-preserving.
-        body: signAnthropicBody(JSON.stringify(orderFields(withSystem, anthropicBodyOrder))),
+        body: serverReview
+          ? JSON.stringify(orderFields(withSystem, anthropicBodyOrder))
+          : signAnthropicBody(JSON.stringify(orderFields(withSystem, anthropicBodyOrder))),
       },
       decodeState: { cloak },
       degradations: notes,

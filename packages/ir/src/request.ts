@@ -333,6 +333,8 @@ export type ChatRequest = {
   stream: boolean;
   reasoning?: ReasoningConfig;
   vendor?: Record<string, Record<string, unknown>>;
+  /** Provider protocol headers only; adapters retain ownership of authentication. */
+  providerHeaders?: Record<string, Record<string, string>>;
   /**
    * Beta feature names the client opted into, verbatim.
    *

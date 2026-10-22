@@ -594,6 +594,7 @@ export function toWire(
   model: string,
   opts: {
     oauth: boolean;
+    preserveSystem?: boolean;
     cloak?: ToolCloak | null;
     autoCache?: boolean;
     /** The target's saved output ceiling, when the operator set one. */
@@ -609,20 +610,36 @@ export function toWire(
   };
 
   const keptSystem = systemTextBlocks(req.system, "anthropic", note);
+  const originalSystem = req.vendor?.anthropic?.system;
   let system =
     req.system === undefined
       ? undefined
-      : keptSystem.map((b) => ({
-          type: "text" as const,
-          text: b.text,
-          ...wireCacheControl(b.cacheControl),
-        }));
+      : keptSystem.map((b, index) => {
+          const original = Array.isArray(originalSystem) ? originalSystem[index] : undefined;
+          // Preserve opaque client block fields, but take text and cache placement
+          // from the current IR: configured transforms may append rules or move
+          // a breakpoint after ingress captured the original representation.
+          const extras =
+            opts.preserveSystem === true && isRecord(original)
+              ? Object.fromEntries(
+                  Object.entries(original).filter(
+                    ([key]) => key !== "type" && key !== "text" && key !== "cache_control",
+                  ),
+                )
+              : {};
+          return {
+            ...extras,
+            type: "text" as const,
+            text: b.text,
+            ...wireCacheControl(b.cacheControl),
+          };
+        });
 
   // The OAuth token endpoint rejects requests whose first system block is not
   // this string. It is a functional requirement of the credential, not a
   // disguise: the User-Agent still identifies this gateway. Recorded as a
   // degradation so it is visible in the request log.
-  if (opts.oauth && system?.[0]?.text !== OAUTH_IDENTITY) {
+  if (opts.oauth && opts.preserveSystem !== true && system?.[0]?.text !== OAUTH_IDENTITY) {
     system = [{ type: "text" as const, text: OAUTH_IDENTITY }, ...(system ?? [])];
     note("anthropic:oauth-system-prefix");
   }
@@ -829,6 +846,16 @@ export function toWire(
     body,
     anthropicReasoningForm(model) === "budget" ? withoutEffort(vendor, note) : vendor,
   );
+  if (opts.preserveSystem === true && originalSystem !== undefined && system !== undefined) {
+    const unchangedString =
+      typeof originalSystem === "string" &&
+      system.length === 1 &&
+      system[0]?.text === originalSystem &&
+      system[0]?.cache_control === undefined;
+    // An unchanged string keeps its client spelling. Otherwise the current
+    // system blocks outrank the raw snapshot, including downstream additions.
+    if (!unchangedString) body.system = system;
+  }
   // Reported whenever the client's own field was discarded — which is the fact
   // it names — not only when nothing took its place. A translation surviving
   // in its stead does not make the discarded field un-discarded, and asking

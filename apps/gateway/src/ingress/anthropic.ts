@@ -715,13 +715,31 @@ export function parseAnthropicRequest(body: unknown, headers?: Headers): ChatReq
     parsed.thinking !== undefined && typeof rawThinking === "object" && rawThinking !== null
       ? extraFields(rawThinking as Record<string, unknown>, ["type", "display", "budget_tokens"])
       : undefined;
-  const extras = {
+  const extras: Record<string, unknown> = {
     ...extraFields(body as Record<string, unknown>, KNOWN),
     ...(thinkingExtras === undefined ? {} : { thinking: thinkingExtras }),
   };
   if (Object.keys(extras).length > 0) request.vendor = { anthropic: extras };
 
   if (named.betas.length > 0) request.betas = named.betas;
+
+  const protocolHeaders: Record<string, string> = {};
+  headers?.forEach((value, name) => {
+    if (name.startsWith("anthropic-")) protocolHeaders[name] = value;
+  });
+  if (Object.keys(protocolHeaders).length > 0) {
+    request.providerHeaders = { anthropic: protocolHeaders };
+  }
+
+  // The attribution block must stay first and unchanged for server review.
+  // Keep the client's representation (including unknown block fields) rather
+  // than rebuilding it from the portable system blocks.
+  if (Array.isArray(extras.safeguards) && extras.safeguards.length > 0) {
+    const raw = body as Record<string, unknown>;
+    if (Object.hasOwn(raw, "system")) {
+      request.vendor = { anthropic: { ...extras, system: raw.system } };
+    }
+  }
 
   return validateRequest(request);
 }

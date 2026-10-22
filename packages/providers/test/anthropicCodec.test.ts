@@ -112,6 +112,32 @@ const HEADER_NAMES = [
   "x-app",
 ] as const;
 
+test("safeguards preserve raw beta spelling and reject auth from protocol metadata", async () => {
+  const request = parseAnthropicRequest(
+    {
+      model: "pool",
+      messages: [{ role: "user", content: "hi" }],
+      safeguards: [{ type: "dangerous_tool_use", classifier_context: "opaque" }],
+    },
+    new Headers({ "anthropic-beta": "future-one,  future-two", "anthropic-version": "2023-06-01" }),
+  );
+  request.providerHeaders = {
+    anthropic: {
+      ...request.providerHeaders?.anthropic,
+      authorization: "Bearer client-secret",
+      "x-api-key": "client-secret",
+      "content-type": "text/plain",
+    },
+  };
+  const { sent } = await send(request, apiKey());
+  const headers = new Headers(sent.headers.map(([name, value]) => [name, value]));
+  expect(headers.get("anthropic-beta")).toBe("future-one,  future-two");
+  expect(headers.get("authorization")).toBeNull();
+  expect(headers.get("x-api-key")).toBe("sk-ant-key");
+  expect(headers.get("content-type")).toBe("application/json");
+  expect(JSON.parse(sent.body)).not.toHaveProperty("system");
+});
+
 test("an API key request is signed over exactly these bytes", async () => {
   const { sent, result } = await send(base, apiKey());
 
