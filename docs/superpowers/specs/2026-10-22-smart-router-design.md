@@ -204,7 +204,8 @@ every later turn. Judging only the last few messages would leak it. So:
   - the text of every `user` and `assistant` message;
   - **tool results' text content** *(operator decision)*;
   - tool-call arguments (`toolUse.input`, serialised) — a Write call can carry a secret just as a
-    tool result can; replayed thinking text; tool definitions' names and descriptions.
+    tool result can; replayed thinking text; tool definitions' names, descriptions, input
+    schemas, options and provider-tool wire fields (serialised); text-block citations (serialised).
     *(Designer's call: same leak path as tool results.)*
 
   Images, files and `providerNative` blocks are not judged (threat model). The guardrail's
