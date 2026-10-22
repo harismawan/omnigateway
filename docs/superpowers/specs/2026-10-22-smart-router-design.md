@@ -156,7 +156,11 @@ Public requests use `guardrailModel` as today. *(Designer's call.)*
   both the row and the debit subject.
 - **A request whose model already resolves local-only** (every target `custom`) is not judged: it
   is dispatched as is, tagged `smart-router:already-local`. Nothing can leak, so a classifier
-  outage must not refuse it. *(Designer's call.)*
+  outage must not refuse it. The configuration check (both models set and local-only) still runs
+  first, for every active request. *(Designer's call.)*
+- **Whenever the request goes local** (confidential, already-local, oversize), a guardrail check on
+  the same request uses `smartRouterClassifierModel`, never `guardrailModel` — the text was not
+  shown to be public. *(Designer's call, extends "Order with guardrails".)*
 - Capability mismatch (client sent tools/images the local model lacks) is handled by dispatch's
   existing capability filters → `NO_CANDIDATES`, i.e. refused, never sent external.
 
