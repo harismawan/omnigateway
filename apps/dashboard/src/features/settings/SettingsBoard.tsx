@@ -747,7 +747,7 @@ export function SettingsBoard() {
                           type="number"
                           min={1}
                           max={GUARDRAIL_TIMEOUT_MAX_MS}
-                          step={1000}
+                          step={1}
                           value={draft.guardrailTimeoutMs ?? ""}
                           onChange={(event) =>
                             setDraft({ ...draft, guardrailTimeoutMs: event.target.value })
@@ -860,7 +860,7 @@ export function SettingsBoard() {
                           type="number"
                           min={1}
                           max={SMART_ROUTER_TIMEOUT_MAX_MS}
-                          step={1000}
+                          step={1}
                           value={draft.smartRouterTimeoutMs ?? ""}
                           onChange={(event) =>
                             setDraft({ ...draft, smartRouterTimeoutMs: event.target.value })

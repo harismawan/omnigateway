@@ -77,7 +77,7 @@ function describeNearest(nearest: LimitReading | null): string {
 }
 
 /**
- * What the "local-routed" chip says on hover, warning when the flag cannot act.
+ * Why a key's confidential-routing flag cannot act yet, or `null` when it can.
  *
  * The flag is per key but two settings gate it: a key carrying it while the
  * feature is off, or either model unset, is refused or served unscreened
@@ -85,23 +85,34 @@ function describeNearest(nearest: LimitReading | null): string {
  * switch expects. `undefined` settings (still loading, or failed) warn nothing:
  * absence of a reading is not evidence of a problem.
  */
+function inertReason(settings: Settings | undefined): string | null {
+  if (settings === undefined) return null;
+  if (!settings.smartRouterEnabled) return "confidential routing is switched off in Settings";
+  if (settings.smartRouterClassifierModel === null || settings.smartRouterLocalModel === null) {
+    return "the classifier model or the local model is not set in Settings";
+  }
+  return null;
+}
+
+/** What the "local-routed" chip says on hover, led by the warning when inert. */
 function describeLocalRouted(settings: Settings | undefined): string {
   const meaning =
     "Requests from this key are screened for confidential content and answered by the local model when any is found.";
-  if (settings === undefined) return meaning;
-  if (!settings.smartRouterEnabled) {
-    return `Not active: confidential routing is switched off in Settings. ${meaning}`;
-  }
-  if (settings.smartRouterClassifierModel === null || settings.smartRouterLocalModel === null) {
-    return `Not active: the classifier model or the local model is not set in Settings. ${meaning}`;
-  }
-  return meaning;
+  const reason = inertReason(settings);
+  return reason === null ? meaning : `Not active: ${reason}. ${meaning}`;
 }
 
 const Failed = styled.p`
   padding: 0 ${({ theme }) => theme.space(2)};
   font-size: 12px;
   color: ${({ theme }) => theme.color.down};
+`;
+
+/** Visible, not a tooltip: warn, not down, since nothing has failed yet. */
+const Inert = styled.p`
+  padding: 0 ${({ theme }) => theme.space(2)};
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.warn};
 `;
 
 export function KeysBoard() {
@@ -120,6 +131,10 @@ export function KeysBoard() {
 
   const now = Date.now();
   const rows = keys.data ?? [];
+  // Only live keys count: a revoked key's flag changes nothing it sends.
+  const inert = rows.some((key) => key.revokedAt === null && key.smartRouting)
+    ? inertReason(settings.data)
+    : null;
   // Only the *count* narrows. Every key stays in `rows` and keeps its row,
   // expired ones included: a key that stopped working and then disappeared from
   // the board is the bug this feature would otherwise ship, and the row is
@@ -145,6 +160,13 @@ export function KeysBoard() {
           </Button>
         }
       />
+
+      {inert === null ? null : (
+        <Inert role="status">
+          Some keys have confidential routing on, but it is not active: {inert}. Their requests are
+          not being screened.
+        </Inert>
+      )}
 
       {smartFailure === null ? null : <Failed role="alert">{smartFailure}</Failed>}
 
@@ -405,7 +427,7 @@ export function KeysBoard() {
       {/* Keyed by the row, so opening a second key starts from that key's
           matrix rather than from whatever was typed into the last one. */}
       <EditLimitsDialog
-        key={editing?.id ?? "none"}
+        key={editing?.id ?? "limits-none"}
         apiKey={editing}
         onOpenChange={(next) => {
           if (!next) setEditing(null);
@@ -416,7 +438,7 @@ export function KeysBoard() {
           key starts from that key's allowlist rather than whatever was checked
           into the last one. */}
       <EditModelsDialog
-        key={editingModels?.id ?? "none"}
+        key={editingModels?.id ?? "models-none"}
         apiKey={editingModels}
         onOpenChange={(next) => {
           if (!next) setEditingModels(null);
@@ -425,7 +447,7 @@ export function KeysBoard() {
 
       {/* Keyed by the row, same reason as the two dialogs above. */}
       <EditExpiryDialog
-        key={editingExpiry?.id ?? "none"}
+        key={editingExpiry?.id ?? "expiry-none"}
         apiKey={editingExpiry}
         onOpenChange={(next) => {
           if (!next) setEditingExpiry(null);
@@ -434,7 +456,7 @@ export function KeysBoard() {
 
       {/* Keyed by the row, same reason as the dialogs above. */}
       <EditGuardrailDialog
-        key={editingPolicy?.id ?? "none"}
+        key={editingPolicy?.id ?? "policy-none"}
         apiKey={editingPolicy}
         onOpenChange={(next) => {
           if (!next) setEditingPolicy(null);

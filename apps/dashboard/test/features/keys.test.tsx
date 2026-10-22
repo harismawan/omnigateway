@@ -1093,4 +1093,37 @@ describe("confidential routing", () => {
     expect(await warned({ ...configured, smartRouterLocalModel: null })).toContain("not set");
     expect(await warned({ ...configured, smartRouterClassifierModel: null })).toContain("not set");
   });
+
+  test("a visible notice says so when a live key is flagged but the feature is inert", async () => {
+    const notice = async (loaded: typeof settings, keys: ReturnType<typeof apiKey>[]) => {
+      stubKeys({
+        "GET /api/keys": () => ({ keys }),
+        "GET /api/settings": () => ({ settings: loaded, bodyLoggingAllowed: false }),
+      });
+      const view = renderWithProviders(<KeysBoard />);
+      await screen.findByText(keys[0]?.label ?? "");
+      await waitFor(() => expect(screen.getAllByRole("button").length).toBeGreaterThan(0));
+      // Let the settings read land before concluding anything is absent.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const found = screen.queryByRole("status")?.textContent ?? null;
+      view.unmount();
+      return found;
+    };
+    const flagged = [apiKey({ smartRouting: true })];
+
+    expect(await notice({ ...configured, smartRouterEnabled: false }, flagged)).toContain(
+      "switched off",
+    );
+    expect(await notice({ ...configured, smartRouterLocalModel: null }, flagged)).toContain(
+      "not set",
+    );
+    // Healthy, unflagged, or flagged only on a revoked key: nothing to say.
+    expect(await notice(configured, flagged)).toBeNull();
+    expect(await notice({ ...configured, smartRouterEnabled: false }, [apiKey()])).toBeNull();
+    expect(
+      await notice({ ...configured, smartRouterEnabled: false }, [
+        apiKey({ smartRouting: true, revokedAt: 1 }),
+      ]),
+    ).toBeNull();
+  });
 });
