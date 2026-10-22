@@ -181,6 +181,79 @@ images. Tool output is judged, but it is attacker-reachable text in front of the
 classifier — a fetched page or a file can push the verdict either way, including
 into refusing legitimate work. Rolling back to a build without usage policies serves every key unjudged.
 
+## Confidential routing
+
+A key flagged for smart routing has its requests judged for confidential content
+by a local classifier; a request that carries any is served by a local model
+instead of the one asked for. A key without the flag is never judged and nothing
+below applies to it. It is active only when `smartRouterEnabled` is on **and** the
+key's flag is on:
+
+```bash
+omni settings set smartRouterClassifierModel local-judge   # virtual model, every target custom
+omni settings set smartRouterLocalModel local-llm          # virtual model, every target custom
+omni settings set smartRouterPolicy "Personal data, credentials, salaries."   # default: DEFAULT_SMART_ROUTER_POLICY
+omni settings set smartRouterTimeoutMs 10000               # per classifier call, 1..60000, default 10000
+omni settings set smartRouterEnabled true
+omni keys smart-routing <id> --on                          # or: omni keys create --smart-routing
+omni keys smart-routing <id> --off
+omni keys list                                             # SMART ROUTING column
+```
+
+Both models must be virtual models whose every target is the `custom` provider.
+Neither is refused at write time: the gateway checks at send time, through
+`DispatchOptions.localOnly`, for the rerouted request, every classifier call, a
+guardrail check on a locally routed request, and a request already on a local
+model. A model that was edited to include an external target is refused, not sent.
+`omni doctor` has a "smart routing" row: it warns when keys carry the flag while
+the switch is on and either model is unset, resolves to nothing, or is not
+local-only, and is quiet when no key uses it or the switch is off.
+
+What is judged: every text the request carries — system and mid-conversation
+system turns, user and assistant text, thinking, tool-call arguments, tool
+results, tool names, descriptions, input schemas, options and provider-tool wire,
+and citations. Images, files and provider-native blocks are not judged. The text
+is split into segments of up to 8,000 characters, packed from the start of the
+conversation so that earlier segments stay the same as it grows. Each segment is
+judged `PUBLIC` or `CONFIDENTIAL` by the classifier, at most four at a time, each
+under `smartRouterTimeoutMs`. The first `CONFIDENTIAL` stops the rest. More than
+64 uncached segments routes local without judging (`smart-router:oversize`).
+
+| Outcome | Result | Row tag |
+|---|---|---|
+| all public | the original model | `smart-router:public` |
+| confidential | `smartRouterLocalModel` | `smart-router:local` |
+| requested model already local-only | as requested, not judged | `smart-router:already-local` |
+| timeout, error, unreadable reply | `UPSTREAM` 502, "confidentiality check unavailable" | `smart-router:unavailable` |
+| a model unset, unresolved, or not local-only | `INTERNAL` 500, "confidential routing is not configured" | `smart-router:unconfigured` |
+
+Streaming requests get the same refusals as an in-stream error on a 200. A local
+model that fails surfaces dispatch's own error; **there is never a fallback to an
+external provider**. Because providers also produce `UPSTREAM` and `INTERNAL`, the
+tag identifies a smart-routing outcome in the logs. Tags combine with others on
+the row — `smart-router:local` with `smart-router:oversize`, or a `guardrail:*`
+tag beside either.
+
+Each classifier call is one `request_logs` row per check, under the same key,
+tagged `smart-router:classifier`, with `requested_model` the classifier. A check
+that judges several segments is still one row, its attempts being the number of
+calls. It is charged to the key as the guardrail classifier is. Verdicts are
+cached per process for one hour per classifier model, policy and segment, so a
+growing conversation costs only its new segments; a cached verdict writes no row,
+and failures are never cached. Editing the policy or the classifier misses the
+cache naturally.
+
+With a usage policy on the same key, smart routing runs first and the guardrail
+second. When the request goes local, the guardrail check uses
+`smartRouterClassifierModel`, never `guardrailModel`, so confidential text does
+not reach a possibly external classifier.
+
+A reduction in leaks, not a security boundary: it does not stop deliberate
+evasion (encoding, splitting content across messages, prompt injection aimed at
+the classifier), content in images and files, or a classifier miss. Rolling back
+to a build without it ignores the column and sends everything external — it fails
+open.
+
 ## Metrics and traces
 
 Both observability surfaces are off until configured. Set `OMNI_METRICS_TOKEN` to register

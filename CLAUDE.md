@@ -534,6 +534,9 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   (`screenFirst`), after admission; classifier dispatched with `requestTransforms: false`, bare
   transport. Pin: `apps/gateway/test/guardrail/proxy.test.ts`; parser:
   `apps/gateway/test/guardrail/classifier.test.ts`.
+- Smart routing never falls back external; fails closed. Pin:
+  `apps/gateway/test/smartRouter/proxy.test.ts`; parser:
+  `apps/gateway/test/smartRouter/classifier.test.ts`.
 - Windows *slide*. `1m` exact ring in `apps/gateway`; longer windows are `usage.sumSince` —
   which must filter `state = 'done'` — plus in-memory delta, cached 30s. Composition may over-count,
   must **never** under-count, so delta keep everything at or after read instant. Failed

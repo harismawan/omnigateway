@@ -242,6 +242,64 @@ reads. **Rolling back** to
 a build without usage policies ignores them: every key's requests are served
 unjudged until you upgrade again.
 
+A key can also be set to **route confidential requests to a local model**. A
+classifier running on your own infrastructure reads what the request carries; if
+anything in it is confidential, the request is served by a model you host instead
+of the one the client asked for. It is active only when the global switch
+`smartRouterEnabled` **and** the key's flag are both on:
+
+```bash
+omni settings set smartRouterClassifierModel local-judge   # a virtual model, every target a custom endpoint
+omni settings set smartRouterLocalModel local-llm          # same rule
+omni settings set smartRouterEnabled true
+omni keys smart-routing <id> --on                          # or: omni keys create --smart-routing
+omni keys smart-routing <id> --off
+```
+
+Both models must be configured virtual models whose every target is the `custom`
+provider, and the gateway re-checks that at the moment of each send, so a model
+edited later cannot quietly start pointing at an external provider. Anything
+else is refused, never routed externally. `smartRouterPolicy` says what
+"confidential" means (personal data, credentials, salaries and HR records,
+customer records, non-public financials, documents marked internal, by default;
+editable on the console's Settings screen, which can reset it) and
+`smartRouterTimeoutMs` bounds each classifier call (default 10s, 1..60000).
+
+Everything the request carries is judged — system and mid-conversation system
+turns, user and assistant text, thinking, tool-call arguments, tool results, tool
+names, descriptions and input schemas, and citations — not just the newest
+message, because a client resends the whole conversation. Images, files and
+provider-native blocks are not judged. The text is split into segments of up to
+8,000 characters, each judged `PUBLIC` or `CONFIDENTIAL` by the local classifier,
+at most four at a time. Verdicts are cached for an hour per classifier, policy
+and segment, so a conversation that grows is judged only on what is new; failures
+are not cached. A request with more than 64 segments still to judge goes local
+without being judged.
+
+| Outcome | Result | Row tag |
+| --- | --- | --- |
+| everything public | served by the model the client asked for | `smart-router:public` |
+| anything confidential | served by `smartRouterLocalModel` | `smart-router:local` |
+| asked for a local-only model already | served as asked, not judged | `smart-router:already-local` |
+| classifier timeout, error, or unreadable reply | refused, `UPSTREAM` (502) | `smart-router:unavailable` |
+| either model unset, unresolved, or not local-only | refused, `INTERNAL` (500) | `smart-router:unconfigured` |
+
+**It fails closed and never falls back to an external provider**: if the local
+model itself fails, the client gets that failure. Each check is its own request
+row under the key, tagged `smart-router:classifier` and charged to it. When a
+key also has a usage policy, smart routing runs first, and a request that goes
+local has its policy judged by the smart-router classifier, never by
+`guardrailModel`. `omni doctor` has a "smart routing" row, and the client
+dashboard shows "Confidential routing: on/off" for the key. The client-visible
+signals are in [docs/client-api.md](docs/client-api.md#confidential-routing).
+
+**This reduces leaks of ordinary confidential content; it is not a security
+boundary.** It does not stop deliberate evasion (encoding, splitting a secret
+across messages, prompt injection aimed at the classifier), confidential content
+inside images or files, or a classifier that simply misses. **Rolling back** to a
+build without it ignores the flag and sends every request to the external
+provider (it fails open) until you upgrade again.
+
 Now use it:
 
 ```bash
