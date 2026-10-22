@@ -1,5 +1,5 @@
 import type { ChatRequest, CollectedResponse } from "@omni/ir";
-import { CLASSIFIER_MAX_TOKENS, FINISHED, fenceFor } from "../guardrail/classifier.ts";
+import { CLASSIFIER_MAX_TOKENS, fenceFor, readWord } from "../guardrail/classifier.ts";
 
 /**
  * The gateway's own instruction to the confidentiality classifier. Vendored,
@@ -54,17 +54,13 @@ export type Confidentiality = "public" | "confidential";
  * refuses.
  *
  * **Only an unambiguous `PUBLIC` is public**, and only off a reply that
- * finished (see `FINISHED`). Normalised exactly as `parseVerdict` does: one
- * word, case aside, surrounding whitespace and a single trailing full stop
- * tolerated. "PUBLIC, but…", "**PUBLIC**", "NOT PUBLIC" and an empty reply are
- * all unreadable. Thinking blocks are never read.
+ * finished. The reading is `readWord`, the guardrail's own: one word, case
+ * aside, surrounding whitespace and a single trailing full stop tolerated.
+ * "PUBLIC, but…", "**PUBLIC**", "NOT PUBLIC" and an empty reply are all
+ * unreadable.
  */
 export function parseConfidentiality(response: CollectedResponse): Confidentiality | null {
-  if (!FINISHED[response.stopReason]) return null;
-  const text = response.content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("");
-  const word = text.trim().replace(/\.$/, "").toUpperCase();
+  const word = readWord(response);
   if (word === "PUBLIC") return "public";
   if (word === "CONFIDENTIAL") return "confidential";
   return null;

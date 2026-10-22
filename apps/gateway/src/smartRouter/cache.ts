@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import type { VerdictCache } from "../guardrail/cache.ts";
+import type { Confidentiality } from "./classifier.ts";
+
+/** The process-local cache of segment verdicts, keyed by `segmentKey`. */
+export type ConfidentialityCache = VerdictCache<Confidentiality>;
 
 /**
  * What a segment's verdict is keyed on: everything that, changed, could change

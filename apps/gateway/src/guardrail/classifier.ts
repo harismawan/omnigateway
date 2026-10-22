@@ -141,7 +141,7 @@ export type Verdict = "allow" | "deny";
  * or paused mid-turn is an answer the model had not finished giving — it may
  * have been on its way to "ALLOW, but…" — so it is unreadable, never an allow.
  */
-export const FINISHED: Readonly<Record<StopReason, boolean>> = {
+const FINISHED: Readonly<Record<StopReason, boolean>> = {
   endTurn: true,
   stopSequence: true,
   maxTokens: false,
@@ -149,6 +149,21 @@ export const FINISHED: Readonly<Record<StopReason, boolean>> = {
   contentFilter: false,
   pauseTurn: false,
 };
+
+/**
+ * The one-word reader behind every classifier verdict, shared so the fail-closed
+ * gate has a single copy. `null` when the reply did not finish (see `FINISHED`);
+ * otherwise the visible text — thinking blocks are never read — trimmed, with a
+ * single trailing full stop dropped, upper-cased. The caller maps the words it
+ * knows; anything else it gets back is unreadable.
+ */
+export function readWord(response: CollectedResponse): string | null {
+  if (!FINISHED[response.stopReason]) return null;
+  const text = response.content
+    .flatMap((block) => (block.type === "text" ? [block.text] : []))
+    .join("");
+  return text.trim().replace(/\.$/, "").toUpperCase();
+}
 
 /**
  * Reads the classifier's answer. `null` is an unreadable reply.
@@ -162,11 +177,7 @@ export const FINISHED: Readonly<Record<StopReason, boolean>> = {
  * and only off a reply that finished — see `FINISHED`.
  */
 export function parseVerdict(response: CollectedResponse): Verdict | null {
-  if (!FINISHED[response.stopReason]) return null;
-  const text = response.content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join("");
-  const word = text.trim().replace(/\.$/, "").toUpperCase();
+  const word = readWord(response);
   if (word === "ALLOW") return "allow";
   if (word === "DENY") return "deny";
   return null;
