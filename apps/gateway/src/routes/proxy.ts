@@ -750,15 +750,18 @@ async function handle(
         ? await run()
         : screenFirst({
             screen,
-            dispatch: async (reroute) =>
-              reroute === null
-                ? await run()
-                : // `localOnly`: re-checked on dispatch's own snapshot, so a
-                  // target added since the check cannot carry it out.
-                  relabel(await runWith({ ...chatRequest, model: reroute }, { localOnly: true }), {
-                    clientModel: chatRequest.model,
-                    localModel: reroute,
-                  }),
+            dispatch: async (reroute, route) => {
+              if (route !== "local") return await run();
+              // Every request screening sent local — confidential, oversize, or
+              // already local and so never classified — is re-checked as
+              // local-only on dispatch's own snapshot, so a target added since
+              // the check cannot carry it out.
+              if (reroute === null) return await runWith(chatRequest, { localOnly: true });
+              return relabel(
+                await runWith({ ...chatRequest, model: reroute }, { localOnly: true }),
+                { clientModel: chatRequest.model, localModel: reroute },
+              );
+            },
             onThrow: smartRouting ? smartRouterThrew() : guardrailThrew(),
             signal: request.signal,
             requestId,

@@ -377,7 +377,14 @@ export function guardrailThrew(): ScreenThrew {
  */
 export function screenFirst(opts: {
   screen: () => Promise<ScreenOutcome>;
-  dispatch: (reroute: string | null) => Promise<DispatchOutcome>;
+  /**
+   * Dispatches the request once screening proceeds: `reroute` is the model to
+   * send instead of the client's, `route` where screening decided it goes.
+   */
+  dispatch: (
+    reroute: string | null,
+    route: "local" | "external" | null,
+  ) => Promise<DispatchOutcome>;
   /** The refusal a screen that threw is answered with, by whichever check led. */
   onThrow: ScreenThrew;
   signal: AbortSignal;
@@ -438,7 +445,7 @@ export function screenFirst(opts: {
       };
       return;
     }
-    inner = await opts.dispatch(outcome.reroute);
+    inner = await opts.dispatch(outcome.reroute, outcome.route);
     route = outcome.route;
     yield* inner.events;
   }

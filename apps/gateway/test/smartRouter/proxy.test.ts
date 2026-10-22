@@ -733,3 +733,81 @@ test("the guardrail's local classifier call re-checks its model at send time", a
   ]);
   h.store.close();
 });
+
+/**
+ * An already-local request is dispatched unclassified, so it too is re-checked
+ * at send time: the check sees an all-`custom` `local-llm`, dispatch sees it
+ * with an external target, and refuses rather than send unjudged text out.
+ */
+for (const stream of [false, true]) {
+  test(`an already-local model that gained an external target after the check is refused (${stream ? "streaming" : "non-streaming"})`, async () => {
+    let reads = 0;
+    const h: Harness = await smartRouterHarness({
+      classifier: "hang",
+      deps: {
+        snapshots: {
+          get: async () => {
+            const snapshot = await buildSnapshot(h.store, 1_000_000);
+            // Reads 1 and 2 are the route's and the check's; dispatch's is third.
+            const mixed = snapshot.models.get("mixed");
+            if (++reads <= 2 || mixed === undefined) return snapshot;
+            const models = new Map(snapshot.models);
+            models.set("local-llm", { ...mixed, id: "local-llm" });
+            return { ...snapshot, models };
+          },
+        },
+      },
+    });
+    const res = await h.call("anthropic", {
+      stream,
+      body: { model: "local-llm", ...bodyWith("anthropic", SECRET) },
+    });
+    const text = await res.text();
+    if (stream) {
+      expect(res.status).toBe(200);
+      expect(streamError("anthropic", text)).toEqual(
+        expectedStreamError("anthropic", "INTERNAL", UNCONFIGURED_MESSAGE),
+      );
+    } else {
+      expect(res.status).toBe(500);
+      expect(JSON.parse(text)).toEqual(errorBody("anthropic", "INTERNAL", UNCONFIGURED_MESSAGE));
+      expect(res.headers.get("x-omni-route")).toBeNull();
+    }
+    expect(h.classifierCalls).toHaveLength(0);
+    expect(h.externalCalls).toHaveLength(0);
+    expect(h.localCalls).toHaveLength(0);
+    for (let i = 0; i < 50 && h.emitted.length < 1; i++) await Bun.sleep(5);
+    const parent = await rowOf(h, "req_1");
+    expect(parent?.errorCode).toBe("INTERNAL");
+    expect(parent?.degradations).toContain("smart-router:already-local");
+    h.store.close();
+  });
+}
+
+/** Guardrail only (no smart routing): a screen that throws keeps the guardrail's own warning. */
+test("a guardrail-only screen that throws warns with the usage policy reason", async () => {
+  let reads = 0;
+  const h: Harness = await smartRouterHarness({
+    smartRouting: false,
+    policy: "Only software engineering work.",
+    deps: {
+      snapshots: {
+        get: async () => {
+          // The flag is off, so the route makes no read; the first is judge's.
+          if (++reads === 1) throw new Error("LEAKED-STORE-TEXT");
+          return buildSnapshot(h.store, 1_000_000);
+        },
+      },
+    },
+  });
+  const res = await h.call("anthropic");
+  expect(res.status).toBe(502);
+  expect(h.externalCalls).toHaveLength(0);
+  expect((await rowOf(h, "req_1"))?.degradations).toEqual(["guardrail:unavailable"]);
+  const warned = h.logger.records.filter((e) => e.msg === "usage policy check failed");
+  expect(warned.map((e) => e.fields)).toEqual([
+    { requestId: "req_1", reason: "usage policy check threw" },
+  ]);
+  for (const line of h.logger.lines) expect(line).not.toContain("LEAKED-STORE-TEXT");
+  h.store.close();
+});
