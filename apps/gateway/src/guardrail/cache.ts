@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Verdict } from "./classifier.ts";
 
-/** How long a verdict is reused. An hour covers an agent's tool loop on one human message. */
+/**
+ * How long a verdict is reused. An hour covers a human message re-sent while
+ * the conversation waits; a tool turn changes the key (tool results are judged)
+ * and so asks again.
+ */
 export const VERDICT_TTL_MS = 3_600_000;
 
 /**
@@ -20,19 +24,30 @@ export type VerdictKeyParts = {
   system: string;
   /** Every judged human message, oldest first, as `JudgedText.human` holds them. */
   human: readonly string[];
+  /** Every judged tool result, oldest first, as `JudgedText.toolResults` holds them. */
+  toolResults: readonly string[];
 };
 
 /**
- * One digest over every part, structured by JSON — the messages as an array,
- * never joined — so no two different tuples, and no two splits of the same
- * text into messages, can serialise to the same input. Editing the policy, the
+ * One digest over every part, structured by JSON — the messages and the tool
+ * results each as an array, never joined — so no two different tuples, and no
+ * two splits of the same text into messages, can serialise to the same input. Editing the policy, the
  * classifier model, or the history-turn setting where it changes which
  * messages are judged therefore misses naturally, and nothing ever needs
  * invalidating. Hashed so the cache holds no request text.
  */
 export function verdictKey(parts: VerdictKeyParts): string {
   return createHash("sha256")
-    .update(JSON.stringify([parts.apiKeyId, parts.policy, parts.model, parts.system, parts.human]))
+    .update(
+      JSON.stringify([
+        parts.apiKeyId,
+        parts.policy,
+        parts.model,
+        parts.system,
+        parts.human,
+        parts.toolResults,
+      ]),
+    )
     .digest("hex");
 }
 

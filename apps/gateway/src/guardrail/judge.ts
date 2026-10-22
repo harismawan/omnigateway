@@ -259,6 +259,7 @@ export async function judge(
     model,
     system: judged.system,
     human: judged.human,
+    toolResults: judged.toolResults,
   });
   const cached = deps.cache.get(key, deps.now());
   // A hit writes no classifier row and costs nothing.
