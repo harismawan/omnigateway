@@ -6,6 +6,8 @@ import {
   orphanPluginTables,
   type PluginSummary,
   pluginsDir,
+  type SmartRouterReadiness,
+  smartRouterReadiness,
 } from "@omni/control";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { resolvePin } from "@omni/store";
@@ -373,6 +375,56 @@ function guardrailLine(
   return state(ctx, true, `${keys}, judged by ${model}`);
 }
 
+/**
+ * Whether keys flagged for smart routing can be served at all.
+ *
+ * Every request from such a key is refused while the feature is on and the
+ * classifier or local model is unset, resolves to nothing, or is not served
+ * solely by custom endpoints — fail closed, by design — and none of those is
+ * refused at write time. Built-in registry only, for the reason `guardrailState`
+ * gives; a plugin provider's model could never be local-only anyway.
+ */
+async function smartRouterState(ctx: Context): Promise<SmartRouterReadiness | null> {
+  if (ctx.configError !== null || !existsSync(ctx.databasePath)) return null;
+  try {
+    return await smartRouterReadiness(await ctx.store(), PROVIDER_DESCRIPTORS);
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
+}
+
+/**
+ * One line for `doctor`. Readiness cannot say which of the two models failed, so
+ * both settings are named.
+ */
+function smartRouterLine(ctx: Context, readiness: SmartRouterReadiness | null): string {
+  if (readiness === null) return paint(ctx, "dim", "not checked");
+  const { enabled, keysWithFlag: n, problem } = readiness;
+  if (n === 0) return paint(ctx, "dim", "no key uses it");
+  if (!enabled) return paint(ctx, "dim", "off (smartRouterEnabled)");
+  const keys = `${n} ${n === 1 ? "key uses" : "keys use"} smart routing`;
+  const models = "smartRouterClassifierModel/smartRouterLocalModel";
+  if (problem === "unconfigured") {
+    return paint(ctx, "yellow", `${keys} and ${models} is unset; their requests are refused`);
+  }
+  if (problem === "unresolved") {
+    return paint(
+      ctx,
+      "yellow",
+      `${keys} and ${models} does not resolve; their requests are refused`,
+    );
+  }
+  if (problem === "notLocal") {
+    return paint(
+      ctx,
+      "yellow",
+      `${keys} and ${models} is not a local-only model (every target must be a custom provider); their requests are refused`,
+    );
+  }
+  return state(ctx, true, `${n} key${n === 1 ? "" : "s"}, kept local by ${readiness.localModel}`);
+}
+
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -391,6 +443,7 @@ export const doctor: Command = {
     const uninstalled = await missingProviders(ctx, plugins);
     const strandedKeys = await danglingCredentials(ctx, plugins);
     const guardrail = await guardrailState(ctx);
+    const smartRouter = await smartRouterState(ctx);
 
     const checks = {
       // First field, and named in the JSON as well as on stdout: the JSON form
@@ -420,6 +473,7 @@ export const doctor: Command = {
       missingProviders: uninstalled,
       danglingCredentials: strandedKeys,
       guardrail,
+      smartRouter,
       // Repeated from stderr on purpose: `doctor` is the command an operator
       // runs to find out why the paths above are what they are, and `--json`
       // is read by scripts that never see stderr.
@@ -503,6 +557,7 @@ ${fields([
           paint(ctx, "yellow", `${strandedKeys.length}: ${strandedKeys.join(", ")}`),
   ],
   ["usage policies", guardrailLine(ctx, guardrail, plugins)],
+  ["smart routing", smartRouterLine(ctx, smartRouter)],
   ...checks.warnings.map(
     (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],
   ),
