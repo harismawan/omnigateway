@@ -1,4 +1,11 @@
-import type { ChatRequest, ContentBlock, Message, TextBlock, ToolDef } from "@omni/ir";
+import type {
+  ChatRequest,
+  ContentBlock,
+  Message,
+  ProviderNativeBlock,
+  TextBlock,
+  ToolDef,
+} from "@omni/ir";
 
 /** Longest text one classifier call is asked to judge. */
 export const SEGMENT_CHARS = 8_000;
@@ -28,6 +35,59 @@ function textOf(block: TextBlock): string {
   return joinNonEmpty([block.text, citations], "\n");
 }
 
+/**
+ * Keys of a native payload that never carry text a person wrote: opaque
+ * provider state, identifiers, discriminators and cache markers. Judging them
+ * would spend classifier tokens on noise.
+ */
+const OPAQUE_KEYS: ReadonlySet<string> = new Set([
+  "signature",
+  "encrypted_content",
+  "encrypted_index",
+  "id",
+  "tool_use_id",
+  "type",
+  "cache_control",
+  "media_type",
+]);
+
+const BASE64_FLOOR = 1_000;
+const BASE64 = /^[A-Za-z0-9+/=\r\n]+$/;
+
+/** A long run of the base64 alphabet alone: an encoded payload, not prose. */
+const isBase64Payload = (text: string): boolean => text.length > BASE64_FLOOR && BASE64.test(text);
+
+/**
+ * Every string in a native payload, depth first, minus `OPAQUE_KEYS`, a base64
+ * source's `data`, and obvious base64 payloads. Text a provider-owned block
+ * carries (a text document, a search result, an MCP result, a compaction, a
+ * shell output) is sent upstream like any other text, so it is judged.
+ */
+function nativeStrings(value: unknown, out: string[], seen: Set<object>): void {
+  if (typeof value === "string") {
+    if (value !== "" && !isBase64Payload(value)) out.push(value);
+    return;
+  }
+  if (value === null || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) nativeStrings(item, out, seen);
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  const base64Source = record.type === "base64";
+  for (const [key, item] of Object.entries(record)) {
+    if (OPAQUE_KEYS.has(key) || (base64Source && key === "data")) continue;
+    nativeStrings(item, out, seen);
+  }
+}
+
+function nativeText(block: ProviderNativeBlock): string {
+  const out: string[] = [];
+  nativeStrings(block.data, out, new Set());
+  return out.length === 0 ? "" : `[${block.blockType}]\n${out.join("\n")}`;
+}
+
 function blockText(block: ContentBlock): string {
   switch (block.type) {
     case "text":
@@ -38,12 +98,13 @@ function blockText(block: ContentBlock): string {
       const args = serialise(block.input);
       return args === "" ? `tool call ${block.name}` : `tool call ${block.name}: ${args}`;
     }
+    // A result's images and files are outside the threat model (spec, "What
+    // is judged"); its native parts carry text and are judged.
     case "toolResult":
-      return block.content;
-    // Images, tool-result images/files/native and provider-native payloads are
-    // outside the threat model (spec, "What is judged").
-    case "image":
+      return joinNonEmpty([block.content, ...(block.native ?? []).map(nativeText)], "\n");
     case "providerNative":
+      return nativeText(block);
+    case "image":
       return "";
   }
 }
@@ -52,9 +113,15 @@ const joinNonEmpty = (parts: string[], separator: string): string =>
   parts.filter((part) => part !== "").join(separator);
 
 function systemUnit(system: ContentBlock[] | undefined): string {
-  // Text and its citations only: an image or native block in `system` contributes nothing.
+  // Text with its citations, and native blocks' text; an image contributes nothing.
   return joinNonEmpty(
-    (system ?? []).map((block) => (block.type === "text" ? textOf(block) : "")),
+    (system ?? []).map((block) =>
+      block.type === "text"
+        ? textOf(block)
+        : block.type === "providerNative"
+          ? nativeText(block)
+          : "",
+    ),
     JOIN,
   );
 }
@@ -78,8 +145,15 @@ function toolText(tool: ToolDef): string {
   );
 }
 
-function toolsUnit(tools: ToolDef[] | undefined): string {
-  return joinNonEmpty((tools ?? []).map(toolText), JOIN);
+/**
+ * Tool definitions, then the vendor bag when it holds anything: pass-through
+ * fields such as `prediction.content` and structured-output schema
+ * descriptions are sent upstream too. Both are request-level and change rarely,
+ * so they share a run.
+ */
+function toolsUnit(tools: ToolDef[] | undefined, vendor: ChatRequest["vendor"]): string {
+  const bag = vendor !== undefined && Object.keys(vendor).length > 0 ? serialise(vendor) : "";
+  return joinNonEmpty([...(tools ?? []).map(toolText), bag], JOIN);
 }
 
 function messageUnit(message: Message): string {
@@ -128,7 +202,10 @@ function pack(units: string[]): string[] {
  * Every text the request would send an external provider, as segments of at
  * most `SEGMENT_CHARS`: system, then tool definitions, then the whole history.
  * Tool definitions are judged in full (name, description, input schema,
- * options, provider-tool wire) and a text block's citations ride with its text.
+ * options, provider-tool wire), the vendor bag rides with them, a text block's
+ * citations ride with its text, and native blocks and tool-result native parts
+ * contribute their strings (`nativeStrings`). Only images, files and base64
+ * payloads are left out.
  *
  * Nothing is truncated — text left out of a segment is text sent unjudged. The
  * system and tools runs are never packed with messages, and messages pack
@@ -139,7 +216,7 @@ function pack(units: string[]): string[] {
 export function segments(request: ChatRequest): string[] {
   return [
     ...slices(systemUnit(request.system)),
-    ...slices(toolsUnit(request.tools)),
+    ...slices(toolsUnit(request.tools, request.vendor)),
     ...pack(request.messages.map(messageUnit).filter((unit) => unit !== "")),
   ];
 }

@@ -212,7 +212,9 @@ local-only, and is quiet when no key uses it or the switch is off.
 What is judged: every text the request carries — system and mid-conversation
 system turns, user and assistant text, thinking, tool-call arguments, tool
 results, tool names, descriptions, input schemas, options and provider-tool wire,
-and citations. Images, files and provider-native blocks are not judged. The text
+citations, the string fields of provider-native blocks and tool-result native
+parts (not signatures, encrypted content, ids or base64), and the vendor bag.
+Only images, files and base64 payloads are not judged. The text
 is split into segments of up to 8,000 characters, packed from the start of the
 conversation so that earlier segments stay the same as it grows. Each segment is
 judged `PUBLIC` or `CONFIDENTIAL` by the classifier, at most four at a time, each

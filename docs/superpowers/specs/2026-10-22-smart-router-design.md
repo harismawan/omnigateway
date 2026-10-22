@@ -207,8 +207,18 @@ every later turn. Judging only the last few messages would leak it. So:
     tool result can; replayed thinking text; tool definitions' names, descriptions, input
     schemas, options and provider-tool wire fields (serialised); text-block citations (serialised).
     *(Designer's call: same leak path as tool results.)*
+  - text inside provider-native blocks and tool-result native parts — every string field of the
+    payload, prefixed with the block type (`[document]`), skipping `signature`,
+    `encrypted_content`, `encrypted_index`, `id`, `tool_use_id`, `type`, `cache_control`,
+    `media_type`, a base64 source's `data`, and any string over 1,000 characters made only of the
+    base64 alphabet. A text `document`, a `search_result`, an `mcp_tool_result`, a `compaction`, a
+    native `mid_conv_system` turn and a Responses `*_output` all carry plain text upstream;
+  - the vendor bag (`request.vendor`, serialised, with the tool definitions) when non-empty —
+    `prediction.content` and structured-output schema descriptions are sent upstream too.
+    *(Final-review fix: those paths reached the external provider unjudged.)*
 
-  Images, files and `providerNative` blocks are not judged (threat model). The guardrail's
+  Only images, files and base64 payloads are not judged (threat model). Judging too much costs
+  classifier tokens; judging too little leaks. The guardrail's
   `extract.ts` does not do this; smart routing needs its own extractor (sharing helpers where
   sensible).
 - **Per segment, not per request.** Each text is split into segments of at most 8,000 characters
@@ -313,7 +323,8 @@ generalised; CLI flag spelling; file layout (suggested `apps/gateway/src/smartRo
 - Confidentiality first; confidential requests' guardrail check uses the local classifier.
 - Whole history judged, per segment, cached, no truncation; oversize → local. (Tool results
   judged: operator's decision. Tool-call arguments, thinking, mid-conversation system turns, tool
-  definitions also judged: designer's.)
+  definitions also judged: designer's. Native-block text and the vendor bag also judged; only
+  images, files and base64 payloads are not.)
 - Notification: `x-omni-route` header on non-streaming; `model` rewritten to the configured local
   model id on rerouted responses (stream `start` event and collected body); log tag.
 - `smartRouterTimeoutMs` is per classifier call; no overall check deadline.

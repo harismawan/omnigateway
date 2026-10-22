@@ -358,6 +358,73 @@ for (const [where, body] of [
   });
 }
 
+/**
+ * Text inside Anthropic-native blocks is judged too. Such a block pins routing
+ * to Anthropic, which the local model is not, so the local leg has no candidate
+ * and the request is refused — never sent external.
+ */
+for (const [where, body] of [
+  [
+    "a tool result's search_result block",
+    {
+      messages: [
+        { role: "user", content: "search the wiki" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "search", input: { q: "db" } }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [
+                {
+                  type: "search_result",
+                  source: "https://wiki.example.com/db",
+                  title: "Database",
+                  content: [{ type: "text", text: SECRET }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+  [
+    "a text document block",
+    {
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "text", media_type: "text/plain", data: SECRET },
+              citations: { enabled: true },
+            },
+            { type: "text", text: "summarise this" },
+          ],
+        },
+      ],
+    },
+  ],
+] as const) {
+  test(`a secret only in ${where} is judged local and never sent external`, async () => {
+    const h = await smartRouterHarness();
+    const res = await h.call("anthropic", { body });
+    expect(res.status).toBe(503);
+    expect(h.classifierCalls.length).toBeGreaterThan(0);
+    expect(h.externalCalls).toHaveLength(0);
+    const parent = await rowOf(h, "req_1");
+    expect(parent?.degradations).toContain("smart-router:local");
+    expect(parent?.errorCode).toBe("NO_CANDIDATES");
+    h.store.close();
+  });
+}
+
 test("an identical second request is answered from the cache", async () => {
   const h = await smartRouterHarness();
   expect((await h.call("openai", { body: bodyWith("openai", SECRET) })).status).toBe(200);

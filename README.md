@@ -267,9 +267,11 @@ editable on the console's Settings screen, which can reset it) and
 
 Everything the request carries is judged — system and mid-conversation system
 turns, user and assistant text, thinking, tool-call arguments, tool results, tool
-names, descriptions and input schemas, and citations — not just the newest
-message, because a client resends the whole conversation. Images, files and
-provider-native blocks are not judged. The text is split into segments of up to
+names, descriptions and input schemas, citations, the text inside provider-native
+blocks (a text document, a search result, an MCP result, a shell output) and
+pass-through vendor fields — not just the newest message, because a client
+resends the whole conversation. Only images, files and base64 payloads are not
+judged. The text is split into segments of up to
 8,000 characters, each judged `PUBLIC` or `CONFIDENTIAL` by the local classifier,
 at most four at a time. Verdicts are cached for an hour per classifier, policy
 and segment, so a conversation that grows is judged only on what is new; failures

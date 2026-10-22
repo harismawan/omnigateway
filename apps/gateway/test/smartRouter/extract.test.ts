@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ChatRequest, Message } from "@omni/ir";
+import type { ChatRequest, ContentBlock, Message, ProviderNativeBlock } from "@omni/ir";
 import { SEGMENT_CHARS, segments } from "../../src/smartRouter/extract.ts";
 
 const req = (overrides: Partial<ChatRequest>): ChatRequest => ({
@@ -80,7 +80,7 @@ test("a tool call with no input is still judged by name and does not throw", () 
   expect(containing(out, "undefined")).toBe(false);
 });
 
-test("images, files and native blocks are not judged", () => {
+test("images and files are not judged", () => {
   const b64 = "BASE64-MARKER-AAAA";
   const out = segments(
     req({
@@ -89,16 +89,12 @@ test("images, files and native blocks are not judged", () => {
           role: "user",
           content: [
             { type: "image", mediaType: "image/png", data: b64 },
-            { type: "providerNative", provider: "anthropic", blockType: "x", data: { b: b64 } },
             {
               type: "toolResult",
               toolUseId: "t1",
               content: "visible",
               images: [{ type: "image", mediaType: "image/png", data: b64 }],
               files: [{ type: "file", mediaType: "application/pdf", data: b64 }],
-              native: [
-                { type: "providerNative", provider: "anthropic", blockType: "y", data: { b64 } },
-              ],
             },
           ],
         },
@@ -107,6 +103,159 @@ test("images, files and native blocks are not judged", () => {
   );
   expect(containing(out, "visible")).toBe(true);
   expect(containing(out, b64)).toBe(false);
+});
+
+const native = (
+  blockType: string,
+  data: Record<string, unknown>,
+  provider = "anthropic",
+): ProviderNativeBlock => ({ type: "providerNative", provider, blockType, data });
+
+const inMessage = (role: Message["role"], block: ContentBlock): string[] =>
+  segments(req({ messages: [{ role, content: [block] }] }));
+
+const inToolResult = (part: ProviderNativeBlock): string[] =>
+  inMessage("user", { type: "toolResult", toolUseId: "t1", content: "", native: [part] });
+
+test("a text document's source data is judged, prefixed with its block type", () => {
+  const doc = native("document", {
+    source: { type: "text", media_type: "text/plain", data: "MARK-doc-text" },
+    citations: { enabled: true },
+  });
+  const out = inMessage("user", doc);
+  expect(containing(out, "MARK-doc-text")).toBe(true);
+  expect(containing(out, "[document]")).toBe(true);
+});
+
+test("a content document's text parts are judged", () => {
+  const out = inToolResult(
+    native("document", {
+      source: { type: "content", content: [{ type: "text", text: "MARK-doc-content" }] },
+      context: "MARK-doc-context",
+    }),
+  );
+  expect(containing(out, "MARK-doc-content")).toBe(true);
+  expect(containing(out, "MARK-doc-context")).toBe(true);
+});
+
+test("a search result's content, title and source are judged", () => {
+  const out = inToolResult(
+    native("search_result", {
+      source: "MARK-sr-source",
+      title: "MARK-sr-title",
+      content: [{ type: "text", text: "MARK-sr-content" }],
+    }),
+  );
+  for (const marker of ["MARK-sr-source", "MARK-sr-title", "MARK-sr-content", "[search_result]"])
+    expect(containing(out, marker)).toBe(true);
+});
+
+test("an MCP tool result's content is judged, as a string or as text parts", () => {
+  const asString = inMessage("user", native("mcp_tool_result", { content: "MARK-mcp-string" }));
+  expect(containing(asString, "MARK-mcp-string")).toBe(true);
+  const asParts = inMessage(
+    "user",
+    native("mcp_tool_result", { content: [{ type: "text", text: "MARK-mcp-part" }] }),
+  );
+  expect(containing(asParts, "MARK-mcp-part")).toBe(true);
+});
+
+test("compaction content is judged", () => {
+  const out = inMessage("assistant", native("compaction", { content: "MARK-compaction" }));
+  expect(containing(out, "MARK-compaction")).toBe(true);
+});
+
+test("a native mid-conversation system turn's text is judged", () => {
+  const out = inMessage(
+    "system",
+    native("mid_conv_system", { content: [{ type: "text", text: "MARK-mid-native" }] }),
+  );
+  expect(containing(out, "MARK-mid-native")).toBe(true);
+});
+
+test("a Responses local shell output is judged", () => {
+  const out = inMessage(
+    "user",
+    native("local_shell_call_output", { call_id: "c1", output: "MARK-shell-output" }, "openai"),
+  );
+  expect(containing(out, "MARK-shell-output")).toBe(true);
+});
+
+test("the vendor bag is judged", () => {
+  const out = segments(
+    req({
+      vendor: {
+        openai: {
+          prediction: { type: "content", content: "MARK-prediction" },
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: "x", schema: { description: "MARK-format-desc" } },
+          },
+        },
+      },
+    }),
+  );
+  expect(containing(out, "MARK-prediction")).toBe(true);
+  expect(containing(out, "MARK-format-desc")).toBe(true);
+});
+
+test("an empty vendor bag adds nothing", () => {
+  expect(segments(req({ vendor: {} }))).toEqual([]);
+});
+
+test("a base64 document source's data is not judged", () => {
+  const out = inToolResult(
+    native("document", {
+      source: { type: "base64", media_type: "application/pdf", data: "B64-MARKER" },
+      title: "MARK-pdf-title",
+    }),
+  );
+  expect(containing(out, "MARK-pdf-title")).toBe(true);
+  expect(containing(out, "B64-MARKER")).toBe(false);
+});
+
+test("signatures, encrypted content, ids and other excluded keys are not judged", () => {
+  const out = inMessage(
+    "assistant",
+    native("compaction", {
+      content: "visible",
+      signature: "SIG-MARKER",
+      encrypted_content: "ENC-MARKER",
+      encrypted_index: "IDX-MARKER",
+      id: "ID-MARKER",
+      tool_use_id: "TUID-MARKER",
+      media_type: "MT-MARKER",
+      cache_control: { type: "ephemeral", ttl: "CC-MARKER" },
+      nested: [{ type: "TYPE-MARKER", signature: "SIG2-MARKER" }],
+    }),
+  );
+  expect(containing(out, "visible")).toBe(true);
+  for (const marker of [
+    "SIG-MARKER",
+    "SIG2-MARKER",
+    "ENC-MARKER",
+    "IDX-MARKER",
+    "ID-MARKER",
+    "TUID-MARKER",
+    "MT-MARKER",
+    "CC-MARKER",
+    "TYPE-MARKER",
+  ])
+    expect(containing(out, marker)).toBe(false);
+});
+
+test("an obvious base64 payload is skipped wherever it sits", () => {
+  const blob = "QUJD".repeat(300);
+  const out = inMessage("assistant", native("redacted_thinking", { data: blob, note: "kept" }));
+  expect(containing(out, "kept")).toBe(true);
+  expect(containing(out, blob.slice(0, 64))).toBe(false);
+  // A short base64-alphabet string is ordinary text and stays.
+  const short = inMessage("assistant", native("compaction", { content: "SecretWord" }));
+  expect(containing(short, "SecretWord")).toBe(true);
+});
+
+test("a native block with no judged strings contributes nothing", () => {
+  expect(inMessage("assistant", native("redacted_thinking", { signature: "s" }))).toEqual([]);
 });
 
 test("no segment exceeds SEGMENT_CHARS and nothing is cut", () => {
