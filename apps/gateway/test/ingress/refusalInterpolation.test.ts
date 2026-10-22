@@ -65,6 +65,9 @@ const GATEWAY_OWNED = new Set([
   "reason",
   // A loop position.
   "j",
+  // A string literal exported from `dispatch/index.ts`: the fixed refusal for a
+  // `localOnly` dispatch whose model is not local-only.
+  "LOCAL_ONLY_MESSAGE",
   // This repository's own pattern, printed so a client learns the rule it
   // broke without being quoted its own value back.
   "TOOL_NAME.source",

@@ -20,6 +20,7 @@ import {
   blankHealth,
   type Candidate,
   healthKey,
+  localOnlyModel,
   rank,
   recordFailure,
   recordSuccess,
@@ -123,7 +124,26 @@ export type DispatchOptions = {
    * who built it.
    */
   requestTransforms?: boolean;
+  /**
+   * Whether this request may reach only a local-only model — a configured
+   * virtual model whose every target is on `custom`. Defaults to `false`.
+   *
+   * `true` for every dispatch smart routing makes on text not shown to be
+   * public: the rerouted request (`routes/proxy.ts`), each confidentiality
+   * classifier call (`smartRouter/check.ts`), and the guardrail classifier when
+   * smart routing chose its model (`guardrail/judge.ts`). Those callers checked
+   * the model against their own snapshot; this checks it again against the
+   * snapshot dispatch routes from, so a target added in between cannot carry
+   * the request out. A model that is not local-only here fails before any
+   * candidate is tried, `INTERNAL` with `LOCAL_ONLY_MESSAGE`, and no adapter
+   * is called. Failover then runs within that model's own targets, all
+   * `custom`.
+   */
+  localOnly?: boolean;
 };
+
+/** A `localOnly` dispatch whose model is not local-only on dispatch's own snapshot. */
+export const LOCAL_ONLY_MESSAGE = "confidential routing is not configured";
 
 export async function dispatch(
   request: ChatRequest,
@@ -312,7 +332,16 @@ export async function dispatch(
     log.rtkEstimatedTokensSaved = transformed.report.estimatedTokensSaved;
     log.rtkFilters = transformed.report.filters;
     checkCancellation();
-    model = resolveModel(dispatchRequest.model, snapshot, deps.providers);
+    if (options.localOnly === true) {
+      const local = localOnlyModel(dispatchRequest.model, snapshot, deps.providers);
+      if (local === null) {
+        clearDeadline();
+        return fail("INTERNAL", LOCAL_ONLY_MESSAGE);
+      }
+      model = local;
+    } else {
+      model = resolveModel(dispatchRequest.model, snapshot, deps.providers);
+    }
   } catch (error) {
     clearDeadline();
     if (isClientAbort(error)) return fail("TIMEOUT", "client disconnected", true);

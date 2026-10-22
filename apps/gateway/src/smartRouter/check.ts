@@ -9,7 +9,12 @@ import {
 } from "@omni/ir";
 import { localOnlyModel } from "@omni/router";
 import type { RequestLog } from "@omni/store";
-import { type DispatchDeps, type DispatchOutcome, dispatch } from "../dispatch/index.ts";
+import {
+  type DispatchDeps,
+  type DispatchOutcome,
+  dispatch,
+  LOCAL_ONLY_MESSAGE,
+} from "../dispatch/index.ts";
 import type { VerdictCache } from "../guardrail/cache.ts";
 import type { GuardrailDeps, ScreenThrew } from "../guardrail/judge.ts";
 import { finishLog, newCompletedRequestLog, type UsageDebit } from "../logging.ts";
@@ -23,8 +28,12 @@ import { segments } from "./extract.ts";
 
 /** A classifier call timed out, failed, or answered something unreadable. `UPSTREAM`, 502. */
 export const UNAVAILABLE_MESSAGE = "confidentiality check unavailable";
-/** Either model unset, unresolvable, or not local-only. `INTERNAL`, 500. */
-export const UNCONFIGURED_MESSAGE = "confidential routing is not configured";
+/**
+ * Either model unset, unresolvable, or not local-only. `INTERNAL`, 500. The
+ * same words dispatch fails a `localOnly` request with, since it is the same
+ * finding made against a later snapshot.
+ */
+export const UNCONFIGURED_MESSAGE = LOCAL_ONLY_MESSAGE;
 /** On the check's one classifier row, the link between it and the request it judged. */
 export const CLASSIFIER_NOTE = "smart-router:classifier";
 
@@ -35,16 +44,19 @@ export const MAX_UNCACHED_SEGMENTS = 64;
 
 /**
  * Where the request goes. `local` with `model` equal to the request's own is the
- * already-local case: nothing to reroute. `cancelled` is the client hanging up
- * while the check ran — a disconnect, not a failed check.
+ * already-local case: nothing to reroute. `local.classifier` is the classifier
+ * model this check validated as local-only, against its own snapshot — the one
+ * a guardrail on the same request must use, rather than re-reading settings
+ * that may have changed since. `cancelled` is the client hanging up while the
+ * check ran — a disconnect, not a failed check.
  */
 export type SmartRouteDecision =
   | { kind: "external"; notes: readonly string[] }
-  | { kind: "local"; model: string; notes: readonly string[] }
+  | { kind: "local"; model: string; classifier: string; notes: readonly string[] }
   | { kind: "refused"; error: GatewayError; notes: readonly string[] }
   | { kind: "cancelled" };
 
-export type SmartRouterDeps = GuardrailDeps & {
+export type SmartRouterDeps = Omit<GuardrailDeps, "cache"> & {
   smartRouterCache: VerdictCache<Confidentiality>;
 };
 
@@ -61,6 +73,7 @@ export function smartRouterThrew(): ScreenThrew {
     error: refusal("UPSTREAM", UNAVAILABLE_MESSAGE),
     notes: ["smart-router:unavailable"],
     warning: "confidentiality check failed",
+    reason: "confidentiality check threw",
   };
 }
 
@@ -110,7 +123,12 @@ async function callSegment(
   const events: StreamEvent[] = [];
   let thrown: { error: unknown } | null = null;
   try {
-    outcome = await dispatch(input.request, callDeps, signal, id, { requestTransforms: false });
+    // `localOnly`: the segment is not yet shown to be public, so the call is
+    // refused by dispatch itself if the classifier stopped being local-only.
+    outcome = await dispatch(input.request, callDeps, signal, id, {
+      requestTransforms: false,
+      localOnly: true,
+    });
     for await (const event of outcome.events) events.push(event);
   } catch (error) {
     thrown = { error };
@@ -223,12 +241,18 @@ export async function checkConfidentiality(
   // 2. Nothing can leak from a request already bound for the operator's own
   //    hardware, so a classifier outage must not refuse it.
   if (localOnlyModel(input.request.model, snapshot, deps.providers) !== null) {
-    return { kind: "local", model: input.request.model, notes: ["smart-router:already-local"] };
+    return {
+      kind: "local",
+      model: input.request.model,
+      classifier,
+      notes: ["smart-router:already-local"],
+    };
   }
 
   const local: SmartRouteDecision = {
     kind: "local",
     model: localModel,
+    classifier,
     notes: ["smart-router:local"],
   };
   const external: SmartRouteDecision = { kind: "external", notes: ["smart-router:public"] };

@@ -526,7 +526,210 @@ for (const stream of [false, true]) {
     expect(h.externalCalls).toHaveLength(0);
     expect(h.localCalls).toHaveLength(0);
     expect((await rowOf(h, "req_1"))?.degradations).toEqual(["smart-router:unavailable"]);
+    const warned = h.logger.records.find((e) => e.msg === "confidentiality check failed");
+    expect(warned?.fields).toEqual({ requestId: "req_1", reason: "confidentiality check threw" });
     for (const line of h.logger.lines) expect(line).not.toContain("LEAKED-STORE-TEXT");
     h.store.close();
   });
 }
+
+/**
+ * The guardrail on a request going local uses the classifier the check
+ * validated, not a value read from an earlier snapshot. Here the route's own
+ * read (the first) names the external `judge` as the smart-router classifier;
+ * every later read, the check's included, names the local one.
+ */
+test("the guardrail on a confidential request uses the classifier the check validated", async () => {
+  let reads = 0;
+  const h = await smartRouterHarness({
+    policy: "Only software engineering work.",
+    deps: {
+      snapshots: {
+        get: async () => {
+          reads++;
+          const snapshot = await buildSnapshot(h.store, 1_000_000);
+          if (reads !== 1) return snapshot;
+          return {
+            ...snapshot,
+            settings: { ...snapshot.settings, smartRouterClassifierModel: "judge" },
+          };
+        },
+      },
+    },
+  });
+  const res = await h.call("anthropic", { body: bodyWith("anthropic", SECRET) });
+  expect(res.status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(0);
+  expect(h.localGuardrailCalls).toHaveLength(1);
+  expect(h.externalCalls).toHaveLength(0);
+  expect(h.localCalls).toHaveLength(1);
+  h.store.close();
+});
+
+/**
+ * The local model is re-checked at send time. The check sees an all-`custom`
+ * `local-llm`; by the time the rerouted request is dispatched it has gained an
+ * external target. Dispatch refuses it rather than routing it.
+ */
+for (const stream of [false, true]) {
+  test(`a local model that gained an external target after the check is refused (${stream ? "streaming" : "non-streaming"})`, async () => {
+    const h = await smartRouterHarness({
+      deps: {
+        snapshots: {
+          get: async () => {
+            const snapshot = await buildSnapshot(h.store, 1_000_000);
+            // Once classification has happened, `local-llm` is the mixed pool.
+            const mixed = snapshot.models.get("mixed");
+            if (h.classifierCalls.length === 0 || mixed === undefined) return snapshot;
+            const models = new Map(snapshot.models);
+            models.set("local-llm", { ...mixed, id: "local-llm" });
+            return { ...snapshot, models };
+          },
+        },
+      },
+    });
+    const res = await h.call("anthropic", { stream, body: bodyWith("anthropic", SECRET) });
+    const text = await res.text();
+    if (stream) {
+      expect(res.status).toBe(200);
+      expect(streamError("anthropic", text)).toEqual(
+        expectedStreamError("anthropic", "INTERNAL", UNCONFIGURED_MESSAGE),
+      );
+    } else {
+      expect(res.status).toBe(500);
+      expect(JSON.parse(text)).toEqual(errorBody("anthropic", "INTERNAL", UNCONFIGURED_MESSAGE));
+      expect(res.headers.get("x-omni-route")).toBeNull();
+    }
+    expect(h.classifierCalls.length).toBeGreaterThan(0);
+    expect(h.externalCalls).toHaveLength(0);
+    expect(h.localCalls).toHaveLength(0);
+    for (let i = 0; i < 50 && h.emitted.length < 2; i++) await Bun.sleep(5);
+    const parent = await rowOf(h, "req_1");
+    expect(parent?.errorCode).toBe("INTERNAL");
+    expect(parent?.requestedModel).toBe("fast");
+    expect(parent?.degradations).toContain("smart-router:local");
+    h.store.close();
+  });
+}
+
+test("an unknown model is still checked: public fails NO_CANDIDATES, confidential goes local", async () => {
+  const h = await smartRouterHarness();
+  const pub = await h.call("openai", { body: { model: "nope" } });
+  expect(pub.status).toBe(503);
+  expect((await rowOf(h, "req_1"))?.errorCode).toBe("NO_CANDIDATES");
+  expect(h.classifierCalls.length).toBeGreaterThan(0);
+  expect(h.externalCalls).toHaveLength(0);
+  expect(h.localCalls).toHaveLength(0);
+
+  const secret = await h.call("openai", { body: { model: "nope", ...bodyWith("openai", SECRET) } });
+  expect(secret.status).toBe(200);
+  expect(secret.headers.get("x-omni-route")).toBe("local");
+  expect(h.localCalls).toHaveLength(1);
+  expect(h.externalCalls).toHaveLength(0);
+  h.store.close();
+});
+
+/** More than `MAX_UNCACHED_SEGMENTS` messages, each too long to share a segment. */
+function oversize(): Record<string, unknown> {
+  return {
+    messages: Array.from({ length: 65 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `message-${i} ${"x".repeat(5_000)}`,
+    })),
+  };
+}
+
+test("an oversize request goes local unasked, tagged oversize", async () => {
+  const h = await smartRouterHarness({ classifier: "hang" });
+  const res = await h.call("anthropic", { body: oversize() });
+  expect(res.status).toBe(200);
+  expect(res.headers.get("x-omni-route")).toBe("local");
+  expect(h.classifierCalls).toHaveLength(0);
+  expect(h.localCalls).toHaveLength(1);
+  expect(h.externalCalls).toHaveLength(0);
+  expect((await rowOf(h, "req_1"))?.degradations).toEqual([
+    "smart-router:local",
+    "smart-router:oversize",
+  ]);
+  h.store.close();
+});
+
+test("an oversize request with a guardrail policy is judged by the local classifier", async () => {
+  const h = await smartRouterHarness({ classifier: "hang", policy: "Only software engineering." });
+  const res = await h.call("anthropic", { body: oversize() });
+  expect(res.status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(0);
+  expect(h.localGuardrailCalls).toHaveLength(1);
+  expect(h.externalCalls).toHaveLength(0);
+  expect(h.localCalls).toHaveLength(1);
+  const degradations = (await rowOf(h, "req_1"))?.degradations ?? [];
+  expect(degradations).toContain("smart-router:oversize");
+  expect(degradations).toContain("guardrail:allowed");
+  h.store.close();
+});
+
+/**
+ * A snapshot source where `local-judge` turns into the mixed pool once `turn`
+ * says so: the check validated it as local-only, and it gains an external
+ * target before a later classifier dispatch reads its own snapshot.
+ */
+function judgeTurnsMixed(h: () => Harness, turn: () => boolean) {
+  return {
+    get: async () => {
+      const snapshot = await buildSnapshot(h().store, 1_000_000);
+      const mixed = snapshot.models.get("mixed");
+      if (!turn() || mixed === undefined) return snapshot;
+      const models = new Map(snapshot.models);
+      models.set("local-judge", { ...mixed, id: "local-judge" });
+      return { ...snapshot, models };
+    },
+  };
+}
+
+test("a classifier call re-checks its model at send time and refuses rather than leak", async () => {
+  let reads = 0;
+  const h: Harness = await smartRouterHarness({
+    deps: {
+      // Reads 1 and 2 are the route's and the check's; from the third — the
+      // classifier call's own dispatch — `local-judge` is mixed.
+      snapshots: judgeTurnsMixed(
+        () => h,
+        () => ++reads > 2,
+      ),
+    },
+  });
+  const res = await h.call("anthropic", { body: bodyWith("anthropic", SECRET) });
+  expect(res.status).toBe(502);
+  expect(JSON.parse(await res.text())).toEqual(
+    errorBody("anthropic", "UPSTREAM", UNAVAILABLE_MESSAGE),
+  );
+  expect(h.classifierCalls).toHaveLength(0);
+  expect(h.localCalls).toHaveLength(0);
+  expect(h.externalCalls).toHaveLength(0);
+  h.store.close();
+});
+
+test("the guardrail's local classifier call re-checks its model at send time", async () => {
+  const h: Harness = await smartRouterHarness({
+    policy: "Only software engineering work.",
+    deps: {
+      // After classification, `local-judge` is mixed for the guardrail call.
+      snapshots: judgeTurnsMixed(
+        () => h,
+        () => h.classifierCalls.length > 0,
+      ),
+    },
+  });
+  const res = await h.call("anthropic", { body: bodyWith("anthropic", SECRET) });
+  expect(res.status).toBe(502);
+  expect(h.classifierCalls.length).toBeGreaterThan(0);
+  expect(h.localGuardrailCalls).toHaveLength(0);
+  expect(h.judgeCalls).toHaveLength(0);
+  expect(h.localCalls).toHaveLength(0);
+  expect(h.externalCalls).toHaveLength(0);
+  expect((await rowOf(h, "req_1"))?.degradations).toEqual([
+    "smart-router:local",
+    "guardrail:unavailable",
+  ]);
+  h.store.close();
+});

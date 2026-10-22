@@ -103,6 +103,7 @@ async function callClassifier(
     signal: AbortSignal;
     timeoutMs: number;
     debit: UsageDebit;
+    localOnly: boolean;
   },
 ): Promise<ClassifierResult> {
   const id = deps.requestId();
@@ -148,7 +149,7 @@ async function callClassifier(
       },
       signal,
       id,
-      { requestTransforms: false },
+      { requestTransforms: false, localOnly: input.localOnly },
     );
     for await (const event of outcome.events) events.push(event);
   } catch (error) {
@@ -236,6 +237,12 @@ export async function judge(
      * model. `null` is an override that is not configured, and refuses as one.
      */
     model?: string | null;
+    /**
+     * Whether the classifier call may reach only a local-only model; see
+     * `DispatchOptions.localOnly`. `true` exactly when `model` is smart
+     * routing's classifier, on a request not shown to be public.
+     */
+    localOnly?: boolean;
   },
 ): Promise<GuardrailOutcome> {
   const { settings } = await deps.snapshots.get(deps.now());
@@ -278,6 +285,7 @@ export async function judge(
     signal: input.signal,
     timeoutMs: settings.guardrailTimeoutMs,
     debit: input.debit,
+    localOnly: input.localOnly === true,
   });
   if (result.kind === "cancelled") return result;
   if (result.kind === "failed") {
@@ -335,6 +343,7 @@ export type ScreenThrew = {
   error: GatewayError;
   notes: readonly string[];
   warning: string;
+  reason: string;
 };
 
 /** A guardrail-only screen that threw: refused as the guardrail being unavailable. */
@@ -343,6 +352,7 @@ export function guardrailThrew(): ScreenThrew {
     error: refusal("UPSTREAM", UNAVAILABLE_MESSAGE),
     notes: ["guardrail:unavailable"],
     warning: "usage policy check failed",
+    reason: "usage policy check threw",
   };
 }
 
@@ -403,7 +413,7 @@ export function screenFirst(opts: {
       if (opts.signal.aborted) return { kind: "cancelled" };
       opts.logger.warn(opts.onThrow.warning, {
         requestId: opts.requestId,
-        reason: "pre-dispatch check threw",
+        reason: opts.onThrow.reason,
       });
       return { kind: "refused", error: opts.onThrow.error, notes: opts.onThrow.notes };
     }

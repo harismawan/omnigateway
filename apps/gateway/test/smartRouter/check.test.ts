@@ -196,7 +196,6 @@ async function harness(settings: Partial<Settings> = {}): Promise<Harness> {
     refresh: async (c) => await c.secrets(),
     requestId: () => `req_${++n}`,
     logger,
-    cache: new VerdictCache(),
     smartRouterCache: cache,
   };
   const debits: Harness["debits"] = [];
@@ -260,6 +259,7 @@ test("a model already local-only is not judged", async () => {
   expect(decision).toEqual({
     kind: "local",
     model: "local",
+    classifier: "classifier",
     notes: ["smart-router:already-local"],
   });
   expect(h.calls).toHaveLength(0);
@@ -300,7 +300,12 @@ test("all public goes external with one row summing every call", async () => {
 test("one confidential among many goes local and aborts the rest", async () => {
   const h = await harness();
   const decision = await h.check(request(["HANG", "SLOW SECRET", "HANG"]));
-  expect(decision).toEqual({ kind: "local", model: "local", notes: ["smart-router:local"] });
+  expect(decision).toEqual({
+    kind: "local",
+    model: "local",
+    classifier: "classifier",
+    notes: ["smart-router:local"],
+  });
   expect(h.calls).toHaveLength(3);
   // The hanging calls ended by the stop, long before their 40ms timeout.
   const hung = h.calls.filter((call) => sent(call).includes("HANG"));
@@ -422,6 +427,7 @@ test("a second run of a judged request is served from cache with no row", async 
   expect(await h.check(secret)).toEqual({
     kind: "local",
     model: "local",
+    classifier: "classifier",
     notes: ["smart-router:local"],
   });
   expect(h.calls).toHaveLength(before);
@@ -445,6 +451,7 @@ test("more than MAX_UNCACHED_SEGMENTS uncached goes local without calling", asyn
   expect(decision).toEqual({
     kind: "local",
     model: "local",
+    classifier: "classifier",
     notes: ["smart-router:local", "smart-router:oversize"],
   });
   expect(h.calls).toHaveLength(0);

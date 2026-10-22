@@ -23,7 +23,12 @@ import {
   createFrameSink,
   type FrameSink,
 } from "../bodyCapture.ts";
-import { type DispatchDeps, type DispatchOutcome, dispatch } from "../dispatch/index.ts";
+import {
+  type DispatchDeps,
+  type DispatchOptions,
+  type DispatchOutcome,
+  dispatch,
+} from "../dispatch/index.ts";
 import { createLoadRegistry } from "../dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "../dispatch/snapshotCache.ts";
 import {
@@ -627,7 +632,10 @@ async function handle(
     let began = false;
     // One dispatch closure for the request as sent and for a rerouted copy. The
     // pending row it writes names `requestedModel` — the client's — either way.
-    const runWith = (dispatchRequest: ChatRequest): Promise<DispatchOutcome> =>
+    const runWith = (
+      dispatchRequest: ChatRequest,
+      options: DispatchOptions = {},
+    ): Promise<DispatchOutcome> =>
       dispatch(
         dispatchRequest,
         {
@@ -660,6 +668,7 @@ async function handle(
         },
         request.signal,
         requestId,
+        options,
       );
     const run = (): Promise<DispatchOutcome> => runWith(chatRequest);
     // After admission, so the checks run inside the key's concurrency slot and
@@ -689,18 +698,16 @@ async function handle(
       let reroute: string | null = null;
       let route: "local" | "external" | null = null;
       let guardrailModel: string | null | undefined;
+      let guardrailLocalOnly = false;
       let notes: readonly string[] = [];
       if (smartRouting) {
-        const decision = await checkConfidentiality(
-          { ...deps, cache: deps.guardrailCache },
-          {
-            apiKeyId: key.id,
-            request: chatRequest,
-            signal: request.signal,
-            debit: classifierDebit,
-            parentRequestId: requestId,
-          },
-        );
+        const decision = await checkConfidentiality(deps, {
+          apiKeyId: key.id,
+          request: chatRequest,
+          signal: request.signal,
+          debit: classifierDebit,
+          parentRequestId: requestId,
+        });
         if (decision.kind === "refused" || decision.kind === "cancelled") return decision;
         notes = decision.notes;
         if (decision.kind === "external") {
@@ -708,7 +715,10 @@ async function handle(
           guardrailModel = settings?.guardrailModel ?? null;
         } else {
           route = "local";
-          guardrailModel = settings?.smartRouterClassifierModel ?? null;
+          // The classifier the check validated, not this snapshot's: settings
+          // may have changed between the two reads.
+          guardrailModel = decision.classifier;
+          guardrailLocalOnly = true;
           // Already local: dispatched as is, nothing to reroute.
           reroute = decision.model === chatRequest.model ? null : decision.model;
         }
@@ -725,6 +735,7 @@ async function handle(
               debit: classifierDebit,
               parentRequestId: requestId,
               ...(guardrailModel === undefined ? {} : { model: guardrailModel }),
+              localOnly: guardrailLocalOnly,
             },
           ),
         );
@@ -742,7 +753,9 @@ async function handle(
             dispatch: async (reroute) =>
               reroute === null
                 ? await run()
-                : relabel(await runWith({ ...chatRequest, model: reroute }), {
+                : // `localOnly`: re-checked on dispatch's own snapshot, so a
+                  // target added since the check cannot carry it out.
+                  relabel(await runWith({ ...chatRequest, model: reroute }, { localOnly: true }), {
                     clientModel: chatRequest.model,
                     localModel: reroute,
                   }),
