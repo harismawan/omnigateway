@@ -198,3 +198,71 @@ test("an empty request yields no segments", () => {
     ),
   ).toEqual([]);
 });
+
+test("a portable tool's input schema is judged", () => {
+  const out = segments(
+    req({
+      tools: [
+        {
+          kind: "portable",
+          name: "t",
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string", description: "MARK-schema-prop" } },
+          },
+        },
+      ],
+    }),
+  );
+  expect(containing(out, "MARK-schema-prop")).toBe(true);
+});
+
+test("a portable tool's options are judged", () => {
+  const out = segments(
+    req({
+      tools: [
+        {
+          kind: "portable",
+          name: "t",
+          inputSchema: {},
+          options: { input_examples: [{ path: "MARK-option-example" }] },
+        },
+      ],
+    }),
+  );
+  expect(containing(out, "MARK-option-example")).toBe(true);
+});
+
+test("a provider tool's wire is judged", () => {
+  const out = segments(
+    req({
+      tools: [
+        {
+          kind: "provider",
+          provider: "anthropic",
+          type: "web_search_20250305",
+          name: "web_search",
+          wire: { user_location: { city: "MARK-wire-city" } },
+        },
+      ],
+    }),
+  );
+  expect(containing(out, "MARK-wire-city")).toBe(true);
+});
+
+test("a text block's citations are judged, in messages and in system", () => {
+  const citations = [{ type: "char_location", cited_text: "MARK-citation" }];
+  const inMessage = segments(
+    req({ messages: [{ role: "user", content: [{ type: "text", text: "hi", citations }] }] }),
+  );
+  expect(containing(inMessage, "MARK-citation")).toBe(true);
+  const inSystem = segments(req({ system: [{ type: "text", text: "sys", citations }] }));
+  expect(containing(inSystem, "MARK-citation")).toBe(true);
+});
+
+test("empty citations add nothing", () => {
+  const out = segments(
+    req({ messages: [{ role: "user", content: [{ type: "text", text: "hi", citations: [] }] }] }),
+  );
+  expect(out).toEqual(["[user]\nhi"]);
+});
