@@ -133,9 +133,14 @@ newest marked as the request being judged and the rest as its context. Fewer
 are sent when fewer exist; `1` judges the last message alone. The 16,000-character
 human cap is a **total** across them, and the newest spends it first: it is cut
 only when it alone is longer, and older messages are cut, then dropped, oldest
-first. Long texts are cut to head and tail around a marker. Tool results, images,
-files, assistant replies and mid-conversation system turns are never sent. Any
-cut or drop is recorded as `guardrail:truncated`. Only a reply of exactly
+first. Long texts are cut to head and tail around a marker. The text of every
+tool result after the oldest judged human message is sent too, oldest first, in
+its own section the classifier is told is data, not instructions. Those results
+have a cap of their own, 16,000 characters in total, spent newest first and cut
+and dropped the same way. Tool-result images and files, tool-call arguments,
+assistant replies and mid-conversation system turns are never sent. A user turn
+carrying a tool result is still not a human message, so it does not count toward
+`guardrailHistoryTurns`. Any cut or drop is recorded as `guardrail:truncated`. Only a reply of exactly
 `ALLOW` that the model finished (stop reason end of turn or stop sequence)
 admits the request; one cut off at the token ceiling or stopped by the
 backend's filter is unreadable, whatever it says.
@@ -162,16 +167,19 @@ counters, though the call is never admitted itself) and toward the `5h`/`1w`
 request windows, which count rows; not the `1m` window, which counts admissions.
 That over-counts, which is the direction limits may err. A refused request still counts as one: the
 check runs after admission. Verdicts are cached per process for an hour, keyed on
-key, policy, classifier, system text and every judged message in order, so an
-agent's tool turns on one human message cost one call; a cached verdict writes no
-classifier row. Editing the policy, the classifier, or a `guardrailHistoryTurns`
+key, policy, classifier, system text, every judged message and every judged
+tool result in order, so a repeated request costs one call but each new tool turn
+in an agent's loop costs another — more latency per step and more classifier
+spend; a cached verdict writes no classifier row. Editing the policy, the classifier, or a `guardrailHistoryTurns`
 change that alters which messages are judged misses the cache naturally. Failures
 are never cached.
 
 A guardrail, not a security boundary: it does not stop prompt injection aimed at
 the classifier, a request spread over more messages than the window, a client
-that leaves the forbidden ask out of the history it sends, or one hidden in tool
-results or images. Rolling back to a build without usage policies serves every key unjudged.
+that leaves the forbidden ask out of the history it sends, or one hidden in
+images. Tool output is judged, but it is attacker-reachable text in front of the
+classifier — a fetched page or a file can push the verdict either way, including
+into refusing legitimate work. Rolling back to a build without usage policies serves every key unjudged.
 
 ## Metrics and traces
 
