@@ -8,9 +8,9 @@ import { formatCount } from "../../lib/format.ts";
 import { CONSOLE_TOPIC, invalidateTopic } from "../../session/invalidation.ts";
 import { useLive } from "../../session/live.tsx";
 import { type TopicMessage, useHeldStreamTopic, useStreamTopic } from "../../session/stream.tsx";
-import { Select } from "../../ui/Field.tsx";
 import { FillModule, FillScroller } from "../../ui/Panel.tsx";
 import { Muted, Row } from "../../ui/primitives.ts";
+import { Select } from "../../ui/Select.tsx";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { keepLevel, readConsoleFrame } from "./pushedLines.ts";
 
@@ -270,38 +270,28 @@ export function ConsoleBoard() {
               <Narrow
                 value={node}
                 aria-label="Which process to show"
-                onChange={(event) => setChosen(event.target.value)}
-              >
-                <option value="all">every process</option>
-                {nodes.map((entry) => (
-                  <option key={entry.id} value={entry.id}>
-                    {entry.self ? `${entry.id.slice(0, 8)} (this one)` : entry.id.slice(0, 8)}
-                  </option>
-                ))}
-              </Narrow>
+                options={[
+                  { value: "all", label: "every process" },
+                  ...nodes.map((entry) => ({
+                    value: entry.id,
+                    label: entry.self ? `${entry.id.slice(0, 8)} (this one)` : entry.id.slice(0, 8),
+                  })),
+                ]}
+                onValueChange={setChosen}
+              />
             ) : null}
             <Narrow
               value={level}
               aria-label="Which levels to show"
-              onChange={(event) => setLevel(event.target.value)}
-            >
-              {LEVELS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </Narrow>
+              options={LEVELS}
+              onValueChange={setLevel}
+            />
             <Narrow
               value={lines}
               aria-label="How many lines to fetch"
-              onChange={(event) => setLines(Number(event.target.value))}
-            >
-              {LIMITS.map((value) => (
-                <option key={value} value={value}>
-                  last {value}
-                </option>
-              ))}
-            </Narrow>
+              options={LIMITS.map((value) => ({ value: String(value), label: `last ${value}` }))}
+              onValueChange={(next) => setLines(Number(next))}
+            />
           </Controls>
         }
       />

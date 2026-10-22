@@ -14,6 +14,7 @@ import {
   settings,
 } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose } from "../helpers/select.ts";
 
 const logs = [
   log({ id: "req-ok", requestedModel: "fast", at: NOW - 10_000 }),
@@ -165,7 +166,7 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("fast");
-    await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
+    await choose(user, screen.getByLabelText("Show which requests"), "failed");
 
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url.includes("failed=true"))).toBe(true);
@@ -179,7 +180,7 @@ describe("LogsBoard", () => {
 
     await screen.findByText("fast");
     const control = screen.getByLabelText("Show which requests");
-    await user.selectOptions(control, "failed");
+    await choose(user, control, "failed");
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url.includes("failed=true"))).toBe(true);
     });
@@ -187,7 +188,7 @@ describe("LogsBoard", () => {
     // The four positions are exclusive. Switching away from "failed" has to
     // clear it, or the gateway is asked for rows that are both still running
     // and already failed — a set that is always empty.
-    await user.selectOptions(control, "pending");
+    await choose(user, control, "pending");
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url.includes("state=pending"))).toBe(true);
     });
@@ -247,7 +248,7 @@ describe("LogsBoard", () => {
     // The control is labelled, but the value sent is the stored id: a row
     // outlives the key that made it, so a renamed key must not change which
     // rows an existing filter selects.
-    await user.selectOptions(await screen.findByLabelText("Gateway key"), "laptop");
+    await choose(user, await screen.findByLabelText("Gateway key"), "laptop");
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url.includes("apiKeyId=key-1"))).toBe(true);
     });
@@ -259,7 +260,7 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("fast");
-    await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
+    await choose(user, screen.getByLabelText("Show which requests"), "failed");
     const box = screen.getByLabelText("Models and error codes");
     await user.type(box, "requested:fast");
     await waitFor(() => {
@@ -522,7 +523,7 @@ describe("LogsBoard", () => {
     fireEvent.scroll(screen.getByTestId("request-log-scroller"));
     await screen.findByText("deep");
 
-    await user.selectOptions(screen.getByLabelText("Show which requests"), "failed");
+    await choose(user, screen.getByLabelText("Show which requests"), "failed");
 
     await waitFor(() => {
       const last = stub.calls.at(-1);
@@ -673,7 +674,7 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     await screen.findByText("fast");
-    await user.selectOptions(screen.getByLabelText("How many requests per page"), "500");
+    await choose(user, screen.getByLabelText("How many requests per page"), "500");
 
     await waitFor(() => {
       expect(stub.calls.some((call) => call.url === "/api/logs?limit=500")).toBe(true);

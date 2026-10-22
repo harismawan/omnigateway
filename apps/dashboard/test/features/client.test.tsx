@@ -62,7 +62,7 @@ describe("client board", () => {
    * The control the catalog was fetched for, named so its absence is deliberate.
    *
    * Asserted separately from the route list because the two can come apart in
-   * both directions: a provider `<select>` rendered from a stale cache asks for
+   * both directions: a provider picker rendered from a stale cache asks for
    * nothing, and a catalog fetch with no control to show for it is a 401 for a
    * filter nobody can see.
    */

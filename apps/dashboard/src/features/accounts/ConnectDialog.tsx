@@ -18,9 +18,10 @@ import type {
 } from "../../api/types.ts";
 import { CopyValue } from "../../components/CopyValue.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Field, Input, Select } from "../../ui/Field.tsx";
+import { Field, Input } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Legend, Row, Stack } from "../../ui/primitives.ts";
+import { Select } from "../../ui/Select.tsx";
 import { describeError } from "../../ui/States.tsx";
 
 /**
@@ -345,21 +346,19 @@ export function ConnectDialog({
                   <Select
                     {...props}
                     value={provider}
-                    onChange={(event) => {
-                      const next = event.target.value as ProviderId;
+                    options={catalog.map((candidate) => ({
+                      value: candidate.id,
+                      label: candidate.label,
+                    }))}
+                    onValueChange={(chosen) => {
+                      const next = chosen as ProviderId;
                       setProvider(next);
                       // The way in belongs to the provider. Carrying the old one
                       // across would offer to store a key under a provider that
                       // has no key path, or authorize one that has no flow.
                       setAuthType(defaultWayIn(findProvider(catalog, next)));
                     }}
-                  >
-                    {catalog.map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {candidate.label}
-                      </option>
-                    ))}
-                  </Select>
+                  />
                 )}
               </Field>
             )}
@@ -369,14 +368,9 @@ export function ConnectDialog({
                   <Select
                     {...props}
                     value={authType}
-                    onChange={(event) => setAuthType(event.target.value as AuthType)}
-                  >
-                    {waysIn(entry).map((way) => (
-                      <option key={way} value={way}>
-                        {AUTH_LABEL[way]}
-                      </option>
-                    ))}
-                  </Select>
+                    options={waysIn(entry).map((way) => ({ value: way, label: AUTH_LABEL[way] }))}
+                    onValueChange={(next) => setAuthType(next as AuthType)}
+                  />
                 )}
               </Field>
             ) : null}
@@ -388,10 +382,16 @@ export function ConnectDialog({
                       <Select
                         {...props}
                         value={endpointId}
-                        onChange={(event) => {
+                        options={[
+                          { value: "", label: "Create new endpoint" },
+                          ...customEndpoints.map((credential) => ({
+                            value: String(credential.providerData.endpointId),
+                            label: String(credential.providerData.endpointLabel),
+                          })),
+                        ]}
+                        onValueChange={(chosen) => {
                           const selected = customEndpoints.find(
-                            (credential) =>
-                              credential.providerData.endpointId === event.target.value,
+                            (credential) => credential.providerData.endpointId === chosen,
                           );
                           if (selected === undefined) {
                             setEndpointId("");
@@ -414,17 +414,7 @@ export function ConnectDialog({
                               : "chat_completions",
                           );
                         }}
-                      >
-                        <option value="">Create new endpoint</option>
-                        {customEndpoints.map((credential) => (
-                          <option
-                            key={String(credential.providerData.endpointId)}
-                            value={String(credential.providerData.endpointId)}
-                          >
-                            {String(credential.providerData.endpointLabel)}
-                          </option>
-                        ))}
-                      </Select>
+                      />
                     )}
                   </Field>
                 )}
@@ -464,15 +454,17 @@ export function ConnectDialog({
                     <Select
                       {...props}
                       value={protocol}
-                      onChange={(event) =>
-                        setProtocol(event.target.value as "chat_completions" | "responses")
+                      options={[
+                        {
+                          value: "chat_completions",
+                          label: "Chat Completions (/v1/chat/completions)",
+                        },
+                        { value: "responses", label: "Responses (/v1/responses)" },
+                      ]}
+                      onValueChange={(next) =>
+                        setProtocol(next as "chat_completions" | "responses")
                       }
-                    >
-                      <option value="chat_completions">
-                        Chat Completions (/v1/chat/completions)
-                      </option>
-                      <option value="responses">Responses (/v1/responses)</option>
-                    </Select>
+                    />
                   )}
                 </Field>
               </>

@@ -6,6 +6,7 @@ import { ConsoleBoard } from "../../src/features/console/ConsoleBoard.tsx";
 import { CONSOLE_TOPIC } from "../../src/session/invalidation.ts";
 import { createFetchStub, type FetchStub } from "../helpers/fetchStub.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose } from "../helpers/select.ts";
 import { createStubTimer, installSocketStub, type StubSocket } from "../helpers/socketStub.ts";
 
 /**
@@ -237,7 +238,7 @@ test("a pushed line the level filter excludes is not shown", async () => {
   renderWithProviders(<ConsoleBoard />, { stream: { enabled: true, timer: timer.schedule } });
   await screen.findByText(/quota poll failed/);
 
-  await userEvent.selectOptions(screen.getByLabelText("Which levels to show"), "error");
+  await choose(userEvent, screen.getByLabelText("Which levels to show"), "error");
   await waitFor(() => {
     expect(stub.calls.some((call) => call.url.includes("level=error"))).toBe(true);
   });
@@ -265,7 +266,7 @@ test("the accumulated lines stay bounded at the page size", async () => {
   renderWithProviders(<ConsoleBoard />, { stream: { enabled: true, timer: timer.schedule } });
   await screen.findByText(/omnigateway listening/);
 
-  await userEvent.selectOptions(screen.getByLabelText("How many lines to fetch"), "100");
+  await choose(userEvent, screen.getByLabelText("How many lines to fetch"), "100");
   await waitFor(() => {
     expect(stub.calls.some((call) => call.url.includes("lines=100"))).toBe(true);
   });

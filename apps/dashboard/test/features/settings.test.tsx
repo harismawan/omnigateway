@@ -5,6 +5,7 @@ import { SettingsBoard } from "../../src/features/settings/SettingsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose } from "../helpers/select.ts";
 
 function stubSettings(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
@@ -311,9 +312,9 @@ describe("SettingsBoard", () => {
     const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
     renderWithProviders(<SettingsBoard />);
 
-    const select = (await screen.findByLabelText("Lazy senior dev mode")) as HTMLSelectElement;
+    const select = (await screen.findByLabelText("Lazy senior dev mode")) as HTMLButtonElement;
     expect(select.value).toBe("off");
-    await user.selectOptions(select, "ultra");
+    await choose(user, select, "ultra");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {

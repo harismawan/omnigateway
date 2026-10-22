@@ -5,6 +5,7 @@ import { UsageBoard } from "../../src/features/usage/UsageBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { apiKey, credential, model, usageBucket } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
+import { choose, waitForOption } from "../helpers/select.ts";
 
 const HOUR_MS = 3_600_000;
 
@@ -299,10 +300,10 @@ describe("UsageBoard", () => {
     });
     renderWithProviders(<UsageBoard />);
     await screen.findByText("10 requests and $0.50 over the last 24 hours.");
-    await screen.findByRole("option", { name: "claude-spare" });
+    await waitForOption(user, screen.getByRole("combobox", { name: "Account" }), "claude-spare");
 
     const before = stub.calls.length;
-    await user.selectOptions(screen.getByRole("combobox", { name: "Account" }), "cred-2");
+    await choose(user, screen.getByRole("combobox", { name: "Account" }), "cred-2");
 
     expect(
       await screen.findByText("3 requests and $0.25 over the last 24 hours on claude-spare."),
@@ -316,7 +317,7 @@ describe("UsageBoard", () => {
       expect(after.every((call) => call.url.includes("credentialId=cred-2"))).toBe(true);
     });
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "Account" }), "");
+    await choose(user, screen.getByRole("combobox", { name: "Account" }), "");
     expect(await screen.findByText("10 requests and $0.50 over the last 24 hours.")).toBeTruthy();
   });
 
@@ -333,10 +334,10 @@ describe("UsageBoard", () => {
     });
     renderWithProviders(<UsageBoard />);
     await screen.findByText("10 requests and $0.50 over the last 24 hours.");
-    await screen.findByRole("option", { name: "ci-runner" });
+    await waitForOption(user, screen.getByRole("combobox", { name: "Gateway key" }), "ci-runner");
 
     const before = stub.calls.length;
-    await user.selectOptions(screen.getByRole("combobox", { name: "Gateway key" }), "key-2");
+    await choose(user, screen.getByRole("combobox", { name: "Gateway key" }), "key-2");
 
     expect(
       await screen.findByText("4 requests and $0.75 over the last 24 hours for ci-runner."),
@@ -350,7 +351,7 @@ describe("UsageBoard", () => {
 
     // Both at once: each read carries both filters, and the summary names both.
     const mid = stub.calls.length;
-    await user.selectOptions(screen.getByRole("combobox", { name: "Account" }), "cred-1");
+    await choose(user, screen.getByRole("combobox", { name: "Account" }), "cred-1");
     expect(
       await screen.findByText(
         "4 requests and $0.75 over the last 24 hours for ci-runner on claude-main.",
@@ -378,10 +379,10 @@ describe("UsageBoard", () => {
       "GET /api/models": () => ({ models: [model()] }),
     });
     const { client } = renderWithProviders(<UsageBoard />);
-    await screen.findByRole("option", { name: "ci-runner" });
-    await screen.findByRole("option", { name: "claude-spare" });
-    await user.selectOptions(screen.getByRole("combobox", { name: "Gateway key" }), "key-2");
-    await user.selectOptions(screen.getByRole("combobox", { name: "Account" }), "cred-2");
+    await waitForOption(user, screen.getByRole("combobox", { name: "Gateway key" }), "ci-runner");
+    await waitForOption(user, screen.getByRole("combobox", { name: "Account" }), "claude-spare");
+    await choose(user, screen.getByRole("combobox", { name: "Gateway key" }), "key-2");
+    await choose(user, screen.getByRole("combobox", { name: "Account" }), "cred-2");
     await screen.findByText(/for ci-runner on claude-spare\.$/);
 
     keys = [apiKey()];
@@ -392,10 +393,8 @@ describe("UsageBoard", () => {
 
     // The controls read "All", so the page must be the whole installation again.
     expect(await screen.findByText("10 requests and $0.50 over the last 24 hours.")).toBeTruthy();
-    expect((screen.getByRole("combobox", { name: "Gateway key" }) as HTMLSelectElement).value).toBe(
-      "",
-    );
-    expect((screen.getByRole("combobox", { name: "Account" }) as HTMLSelectElement).value).toBe("");
+    expect(screen.getByRole<HTMLButtonElement>("combobox", { name: "Gateway key" }).value).toBe("");
+    expect(screen.getByRole<HTMLButtonElement>("combobox", { name: "Account" }).value).toBe("");
     const after = stub.calls.slice(before).filter((call) => call.url.startsWith("/api/usage"));
     expect(after.length).toBeGreaterThan(0);
     expect(after.some((call) => /apiKeyId|credentialId/.test(call.url))).toBe(false);
@@ -406,8 +405,8 @@ describe("UsageBoard", () => {
     credentials = [credential(), credential({ id: "cred-2", label: "claude-spare" })];
     await client.invalidateQueries({ queryKey: ["keys"] });
     await client.invalidateQueries({ queryKey: ["credentials"] });
-    await screen.findByRole("option", { name: "ci-runner" });
-    await screen.findByRole("option", { name: "claude-spare" });
+    await waitForOption(user, screen.getByRole("combobox", { name: "Gateway key" }), "ci-runner");
+    await waitForOption(user, screen.getByRole("combobox", { name: "Account" }), "claude-spare");
     const back = stub.calls.length;
     await client.invalidateQueries({ queryKey: ["usage"] });
     await waitFor(() =>

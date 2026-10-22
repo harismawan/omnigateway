@@ -3,9 +3,10 @@ import styled from "styled-components";
 import { useAgentSetup, useModels } from "../../api/queries.ts";
 import type { AgentModelMapping, SetupClient } from "../../api/types.ts";
 import { Button } from "../../ui/Button.tsx";
-import { Field, Select } from "../../ui/Field.tsx";
+import { Field } from "../../ui/Field.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Mono, Row, Stack } from "../../ui/primitives.ts";
+import { Select } from "../../ui/Select.tsx";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 
 /**
@@ -117,23 +118,20 @@ export function AgentSetup() {
                   <Select
                     {...props}
                     value={mapping[field.key] ?? ""}
-                    onChange={(event) =>
+                    options={[
+                      { value: "", label: field.required ? "Choose a pool" : "Not mapped" },
+                      ...(models.data ?? []).map((model) => ({ value: model.id, label: model.id })),
+                    ]}
+                    onValueChange={(next) =>
                       setMappings((current) => ({
                         ...current,
                         [client]: {
                           ...current[client],
-                          [field.key]: event.target.value || undefined,
+                          [field.key]: next || undefined,
                         },
                       }))
                     }
-                  >
-                    <option value="">{field.required ? "Choose a pool" : "Not mapped"}</option>
-                    {models.data?.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.id}
-                      </option>
-                    ))}
-                  </Select>
+                  />
                 )}
               </Field>
             ))}

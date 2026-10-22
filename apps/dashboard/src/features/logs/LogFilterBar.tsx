@@ -3,8 +3,9 @@ import styled from "styled-components";
 import { useCredentials, useKeys, useProviderCatalog } from "../../api/queries.ts";
 import type { LogFilters } from "../../api/types.ts";
 import { Button } from "../../ui/Button.tsx";
-import { Input, Select } from "../../ui/Field.tsx";
+import { Input } from "../../ui/Field.tsx";
 import { Row } from "../../ui/primitives.ts";
+import { Select } from "../../ui/Select.tsx";
 import { DateRangeField } from "./DateRangeField.tsx";
 
 const Bar = styled(Row)`
@@ -182,39 +183,36 @@ function OperatorFilters({
       <Narrow
         aria-label="Provider"
         value={filters.provider ?? ""}
-        onChange={(event) => patch({ provider: event.target.value || undefined })}
-      >
-        <option value="">Any provider</option>
-        {(catalog.data ?? []).map((provider) => (
-          <option key={provider.id} value={provider.id}>
-            {provider.label}
-          </option>
-        ))}
-      </Narrow>
+        options={[
+          { value: "", label: "Any provider" },
+          ...(catalog.data ?? []).map((provider) => ({
+            value: provider.id,
+            label: provider.label,
+          })),
+        ]}
+        onValueChange={(next) => patch({ provider: next || undefined })}
+      />
       <Narrow
         aria-label="Account"
         value={filters.credentialId ?? ""}
-        onChange={(event) => patch({ credentialId: event.target.value || undefined })}
-      >
-        <option value="">Any account</option>
-        {(credentials.data ?? []).map((credential) => (
-          <option key={credential.id} value={credential.id}>
-            {credential.label}
-          </option>
-        ))}
-      </Narrow>
+        options={[
+          { value: "", label: "Any account" },
+          ...(credentials.data ?? []).map((credential) => ({
+            value: credential.id,
+            label: credential.label,
+          })),
+        ]}
+        onValueChange={(next) => patch({ credentialId: next || undefined })}
+      />
       <Narrow
         aria-label="Gateway key"
         value={filters.apiKeyId ?? ""}
-        onChange={(event) => patch({ apiKeyId: event.target.value || undefined })}
-      >
-        <option value="">Any key</option>
-        {(keys.data ?? []).map((key) => (
-          <option key={key.id} value={key.id}>
-            {key.label}
-          </option>
-        ))}
-      </Narrow>
+        options={[
+          { value: "", label: "Any key" },
+          ...(keys.data ?? []).map((key) => ({ value: key.id, label: key.label })),
+        ]}
+        onValueChange={(next) => patch({ apiKeyId: next || undefined })}
+      />
     </>
   );
 }
@@ -351,20 +349,15 @@ export function LogFilterBar({ filters, onChange, operator = false }: LogFilterB
       <Narrow
         aria-label="Show which requests"
         value={stateIdOf(filters)}
-        onChange={(event) => {
-          const chosen = STATES.find((entry) => entry.id === event.target.value) ?? STATES[0];
+        options={STATES.map((entry) => ({ value: entry.id, label: entry.label }))}
+        onValueChange={(next) => {
+          const chosen = STATES.find((entry) => entry.id === next) ?? STATES[0];
           // Both keys are cleared first: the four positions are exclusive, and
           // a patch that only sets the new one would leave `failed=true` on a
           // switch to "Still running".
           patch({ state: undefined, failed: undefined, ...chosen.filters });
         }}
-      >
-        {STATES.map((entry) => (
-          <option key={entry.id} value={entry.id}>
-            {entry.label}
-          </option>
-        ))}
-      </Narrow>
+      />
 
       {operator ? <OperatorFilters filters={filters} patch={patch} /> : null}
 
