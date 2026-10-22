@@ -108,6 +108,91 @@ describe("SettingsBoard", () => {
     });
   });
 
+  describe("confidential routing model warnings", () => {
+    const configured = {
+      ...settings,
+      smartRouterEnabled: true,
+      smartRouterClassifierModel: "local-judge",
+      smartRouterLocalModel: "local-chat",
+    };
+    type State = "ok" | "unset" | "unresolved" | "notLocal";
+    const UNRESOLVED = "This model does not resolve.";
+    const NOT_LOCAL =
+      "This model has a target that is not a custom (in-house) endpoint; flagged keys' requests are refused.";
+    const UNSET = "Not set; flagged keys' requests are refused.";
+
+    /** The warning text under each picker, once the settings have loaded. */
+    async function warnings(loaded: typeof settings, classifier: State, local: State) {
+      stubSettings({
+        "GET /api/settings": () => ({
+          settings: loaded,
+          bodyLoggingAllowed: false,
+          smartRouterModels: { classifier, local },
+        }),
+        "GET /api/models": () => ({ models: [] }),
+      });
+      const view = renderWithProviders(<SettingsBoard />);
+      const field = (await screen.findByLabelText(
+        "Confidential classifier model",
+      )) as HTMLInputElement;
+      await waitFor(() => expect(field.value).toBe(loaded.smartRouterClassifierModel ?? ""));
+      const read = (id: string) => document.getElementById(id)?.textContent ?? null;
+      const found = {
+        classifier: read("smart-router-classifier-status"),
+        local: read("smart-router-local-status"),
+      };
+      view.unmount();
+      return found;
+    }
+
+    test("an unresolved or non-local model is named under its picker", async () => {
+      expect(await warnings(configured, "unresolved", "notLocal")).toEqual({
+        classifier: UNRESOLVED,
+        local: NOT_LOCAL,
+      });
+      expect(await warnings(configured, "notLocal", "unresolved")).toEqual({
+        classifier: NOT_LOCAL,
+        local: UNRESOLVED,
+      });
+    });
+
+    test("a healthy model says nothing", async () => {
+      expect(await warnings(configured, "ok", "ok")).toEqual({ classifier: null, local: null });
+    });
+
+    test("an unset model warns only while the switch is on", async () => {
+      const unset = {
+        ...configured,
+        smartRouterClassifierModel: null,
+        smartRouterLocalModel: null,
+      };
+      expect(await warnings(unset, "unset", "unset")).toEqual({ classifier: UNSET, local: UNSET });
+      expect(await warnings({ ...unset, smartRouterEnabled: false }, "unset", "unset")).toEqual({
+        classifier: null,
+        local: null,
+      });
+    });
+
+    test("a problem is reported whatever the switch, and is tied to its picker", async () => {
+      expect(
+        await warnings({ ...configured, smartRouterEnabled: false }, "unresolved", "ok"),
+      ).toEqual({ classifier: UNRESOLVED, local: null });
+      stubSettings({
+        "GET /api/settings": () => ({
+          settings: configured,
+          bodyLoggingAllowed: false,
+          smartRouterModels: { classifier: "ok", local: "notLocal" },
+        }),
+        "GET /api/models": () => ({ models: [] }),
+      });
+      renderWithProviders(<SettingsBoard />);
+      const local = await screen.findByLabelText("Local model");
+      await waitFor(() =>
+        expect(local.getAttribute("aria-describedby") ?? "").toContain("smart-router-local-status"),
+      );
+    });
+  });
+
   test("the confidential models suggest the configured models", async () => {
     const user = userEvent.setup();
     stubSettings({

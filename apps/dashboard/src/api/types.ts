@@ -486,6 +486,21 @@ export type SettingsResponse = {
    * collapsed with `||`.
    */
   dayOffsetMinutes?: number;
+  /**
+   * Each configured smart-router model's state, judged by the gateway against
+   * its live routing snapshot whatever the switch says. Mirrors
+   * `SmartRouterModelStatus` in `@omni/control`. Optional because an older
+   * gateway does not send it; absent means "not known", never "ok".
+   */
+  smartRouterModels?: SmartRouterModelStatus;
+};
+
+/** `unset`, names nothing routing resolves, resolves to a non-`custom` target, or fine. */
+export type SmartRouterModelState = "ok" | "unset" | "unresolved" | "notLocal";
+
+export type SmartRouterModelStatus = {
+  classifier: SmartRouterModelState;
+  local: SmartRouterModelState;
 };
 
 /**

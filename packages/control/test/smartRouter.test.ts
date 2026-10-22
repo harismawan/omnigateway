@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
+import { buildSnapshot } from "@omni/router";
 import { memoryStore, seedApiKey, target, virtualModel } from "@omni/testkit";
-import { smartRouterReadiness } from "../src/smartRouter.ts";
+import { smartRouterModelStatus, smartRouterReadiness } from "../src/smartRouter.ts";
 
 const local = (id: string) =>
   virtualModel({
@@ -79,5 +80,37 @@ test("either model failing the local-only rule is notLocal", async () => {
   await store.config.putModel(virtualModel({ id: "judge", targets: [target()] }));
   await store.config.putModel(local("private"));
   expect((await smartRouterReadiness(store, PROVIDER_DESCRIPTORS)).problem).toBe("notLocal");
+  store.close();
+});
+
+test("model status reports each model on its own, whatever the switch and key flags", async () => {
+  const store = await memoryStore();
+  const status = async () =>
+    smartRouterModelStatus(await buildSnapshot(store, Date.now()), PROVIDER_DESCRIPTORS);
+  // Off and no flagged key: still reported, unlike readiness.
+  expect(await status()).toEqual({ classifier: "unset", local: "unset" });
+
+  await store.config.putSettings({
+    smartRouterClassifierModel: "judge",
+    smartRouterLocalModel: "private",
+  });
+  expect(await status()).toEqual({ classifier: "unresolved", local: "unresolved" });
+
+  await store.config.putModel(virtualModel({ id: "judge", targets: [target()] }));
+  await store.config.putModel(local("private"));
+  expect(await status()).toEqual({ classifier: "notLocal", local: "ok" });
+
+  await store.config.putModel(local("judge"));
+  await store.config.putSettings({ smartRouterLocalModel: null });
+  expect(await status()).toEqual({ classifier: "ok", local: "unset" });
+  store.close();
+});
+
+test("a provider/model shorthand resolves but is never local", async () => {
+  const store = await memoryStore();
+  await store.config.putSettings({ smartRouterClassifierModel: "anthropic/claude-opus-4" });
+  expect(
+    smartRouterModelStatus(await buildSnapshot(store, Date.now()), PROVIDER_DESCRIPTORS),
+  ).toEqual({ classifier: "notLocal", local: "unset" });
   store.close();
 });

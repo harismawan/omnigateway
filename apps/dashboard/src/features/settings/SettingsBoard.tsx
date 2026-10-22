@@ -12,8 +12,9 @@ import {
   useModels,
   useSaveSettings,
   useSettings,
+  useSmartRouterModels,
 } from "../../api/queries.ts";
-import type { PonytailMode, Settings } from "../../api/types.ts";
+import type { PonytailMode, Settings, SmartRouterModelState } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Input, Textarea } from "../../ui/Field.tsx";
@@ -295,6 +296,50 @@ const Blocked = styled.p`
   }
 `;
 
+/** One board per screen, so fixed ids are unique. */
+const CLASSIFIER_STATUS_ID = "smart-router-classifier-status";
+const LOCAL_STATUS_ID = "smart-router-local-status";
+
+/** What a smart-router model's state means for flagged keys, or `null` when nothing is wrong. */
+const MODEL_WARNINGS: Readonly<Record<SmartRouterModelState, string | null>> = {
+  ok: null,
+  unset: "Not set; flagged keys' requests are refused.",
+  unresolved: "This model does not resolve.",
+  notLocal:
+    "This model has a target that is not a custom (in-house) endpoint; flagged keys' requests are refused.",
+};
+
+/**
+ * The warning under one smart-router model picker, or `null`.
+ *
+ * Blank is judged here, from the draft, and only while the switch is on: an
+ * unset model refuses nothing while the feature is off. `unresolved` and
+ * `notLocal` are the gateway's verdict on the *saved* name, so they show
+ * whatever the switch — an operator should hear before turning it on — but
+ * only while the picker still holds that name; a different draft has not been
+ * judged yet.
+ */
+function modelWarning(
+  draft: string | undefined,
+  saved: string | null | undefined,
+  state: SmartRouterModelState | undefined,
+  enabled: boolean,
+): string | null {
+  const name = (draft ?? "").trim();
+  if (name === "") return enabled ? MODEL_WARNINGS.unset : null;
+  if (state === undefined || state === "unset" || name !== saved) return null;
+  return MODEL_WARNINGS[state];
+}
+
+/**
+ * A model picker's standing warning. Warn, not down, like `Blocked`: nothing
+ * has failed until a flagged key sends a request.
+ */
+const ModelWarning = styled.p`
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.warn};
+`;
+
 /** Every field is held as the string the input carries, booleans included. */
 type Draft = Record<string, string> & {
   rtkEnabled?: string;
@@ -479,6 +524,9 @@ export function SettingsBoard() {
   // The classifier picker's suggestions: the same source the allowlist editor
   // reads. Free text is still accepted, for `provider/model`.
   const models = useModels();
+  // The gateway's verdict on each saved smart-router model, for the warnings
+  // under the pickers; `omni doctor` was the only other place that said.
+  const smartRouterModels = useSmartRouterModels();
   const save = useSaveSettings();
   const [draft, setDraft] = useState<Draft>({});
   const [problem, setProblem] = useState<string | null>(null);
@@ -495,6 +543,22 @@ export function SettingsBoard() {
   );
 
   const smartPolicyLength = (draft.smartRouterPolicy ?? "").trim().length;
+  const smartEnabled = draft.smartRouterEnabled === "true";
+  const classifierWarning = modelWarning(
+    draft.smartRouterClassifierModel,
+    settings.data?.smartRouterClassifierModel,
+    smartRouterModels.data?.classifier,
+    smartEnabled,
+  );
+  const localWarning = modelWarning(
+    draft.smartRouterLocalModel,
+    settings.data?.smartRouterLocalModel,
+    smartRouterModels.data?.local,
+    smartEnabled,
+  );
+  /** Adds a picker's warning to what its input is described by. */
+  const describedWith = (base: string | undefined, warning: string | null, id: string) =>
+    warning === null ? base : [base, id].filter((part) => part !== undefined).join(" ");
 
   const submit = () => {
     setSaved(false);
@@ -814,6 +878,11 @@ export function SettingsBoard() {
                     {(props) => (
                       <Autocomplete
                         {...props}
+                        aria-describedby={describedWith(
+                          props["aria-describedby"],
+                          classifierWarning,
+                          CLASSIFIER_STATUS_ID,
+                        )}
                         placeholder="none"
                         value={draft.smartRouterClassifierModel ?? ""}
                         suggestions={(models.data ?? []).map((model) => ({
@@ -826,6 +895,9 @@ export function SettingsBoard() {
                       />
                     )}
                   </Field>
+                  {classifierWarning === null ? null : (
+                    <ModelWarning id={CLASSIFIER_STATUS_ID}>{classifierWarning}</ModelWarning>
+                  )}
                 </Cell>
                 <Cell>
                   <Field
@@ -835,6 +907,11 @@ export function SettingsBoard() {
                     {(props) => (
                       <Autocomplete
                         {...props}
+                        aria-describedby={describedWith(
+                          props["aria-describedby"],
+                          localWarning,
+                          LOCAL_STATUS_ID,
+                        )}
                         placeholder="none"
                         value={draft.smartRouterLocalModel ?? ""}
                         suggestions={(models.data ?? []).map((model) => ({
@@ -847,6 +924,9 @@ export function SettingsBoard() {
                       />
                     )}
                   </Field>
+                  {localWarning === null ? null : (
+                    <ModelWarning id={LOCAL_STATUS_ID}>{localWarning}</ModelWarning>
+                  )}
                 </Cell>
                 <Cell>
                   <Field

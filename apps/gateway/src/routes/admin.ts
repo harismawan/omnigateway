@@ -41,8 +41,11 @@ import {
   setKeyModels,
   setKeySmartRouting,
   setupFiles,
+  smartRouterModelStatus,
 } from "@omni/control";
 import { describeError, GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
+import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
+import { buildSnapshot } from "@omni/router";
 import { hostDayOffsetMinutes, type Store } from "@omni/store";
 import { Elysia } from "elysia";
 import type { Invalidator } from "../stream/broadcaster.ts";
@@ -127,6 +130,12 @@ export type AdminDeps = {
    * they did before push existed and the console falls back to its poll.
    */
   broadcaster?: Invalidator;
+  /**
+   * Which providers this installation has, for judging the smart-router models
+   * on `/api/settings`. Defaults to the live registry, read at call time, as
+   * dispatch's own default is.
+   */
+  providers?: ProviderDescriptors;
 };
 
 /**
@@ -592,6 +601,12 @@ export function adminRoutes(deps: AdminDeps) {
           // Whether, not what. The hash never leaves the store and there is no
           // route that reads it back.
           viewerConfigured: await deps.admin.isViewerConfigured(),
+          // Each configured smart-router model's state, whatever the switch: the
+          // console warns beside the picker, which `omni doctor` alone did not.
+          smartRouterModels: smartRouterModelStatus(
+            await buildSnapshot(deps.store, deps.now()),
+            deps.providers ?? PROVIDER_DESCRIPTORS,
+          ),
         };
       })
 

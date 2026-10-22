@@ -291,7 +291,10 @@ model itself fails, the client gets that failure. Each check is its own request
 row under the key, tagged `smart-router:classifier` and charged to it. When a
 key also has a usage policy, smart routing runs first, and a request that goes
 local has its policy judged by the smart-router classifier, never by
-`guardrailModel`. `omni doctor` has a "smart routing" row, and the client
+`guardrailModel`. `omni doctor` has a "smart routing" row; the console's
+Settings screen warns under each model picker when the model is unset (switch
+on), does not resolve, or is not local-only, and the Keys board says when
+flagged keys' requests are refused or unscreened. The client
 dashboard shows "Confidential routing: on/off" for the key. The client-visible
 signals are in [docs/client-api.md](docs/client-api.md#confidential-routing).
 

@@ -207,7 +207,12 @@ guardrail check on a locally routed request, and a request already on a local
 model. A model that was edited to include an external target is refused, not sent.
 `omni doctor` has a "smart routing" row: it warns when keys carry the flag while
 the switch is on and either model is unset, resolves to nothing, or is not
-local-only, and is quiet when no key uses it or the switch is off.
+local-only, and is quiet when no key uses it or the switch is off. The console
+says the same inline: `GET /api/settings` carries `smartRouterModels`
+(`{classifier, local}`, each `ok | unset | unresolved | notLocal`, judged whatever
+the switch), Settings shows a warning under each model picker, and the Keys board
+notice fires while a flagged key exists and the switch is on with either model
+unset, unresolved or not local-only.
 
 What is judged: every text the request carries — system and mid-conversation
 system turns, user and assistant text, thinking, tool-call arguments, tool

@@ -1,5 +1,5 @@
 import type { ProviderDescriptors } from "@omni/providers/descriptors";
-import { buildSnapshot, localOnlyModel, resolveModel } from "@omni/router";
+import { buildSnapshot, localOnlyModel, resolveModel, type Snapshot } from "@omni/router";
 import type { Store } from "@omni/store";
 
 /**
@@ -46,17 +46,53 @@ export async function smartRouterReadiness(
     problem,
   });
   if (!enabled || keysWithFlag === 0) return report(null);
-  if (classifierModel === null || localModel === null) return report("unconfigured");
-  const names = [classifierModel, localModel];
-  for (const name of names) {
-    try {
-      resolveModel(name, snapshot, providers);
-    } catch {
-      return report("unresolved");
-    }
-  }
-  if (names.some((name) => localOnlyModel(name, snapshot, providers) === null)) {
-    return report("notLocal");
-  }
+  const { classifier, local } = smartRouterModelStatus(snapshot, providers);
+  const states = [classifier, local];
+  if (states.includes("unset")) return report("unconfigured");
+  if (states.includes("unresolved")) return report("unresolved");
+  if (states.includes("notLocal")) return report("notLocal");
   return report(null);
+}
+
+/**
+ * One configured smart-router model, judged on its own: `unset`, `unresolved`
+ * (names nothing routing can resolve), `notLocal` (resolves, but some target is
+ * not a `custom` endpoint), or `ok`.
+ */
+export type SmartRouterModelState = "ok" | "unset" | "unresolved" | "notLocal";
+
+export type SmartRouterModelStatus = {
+  classifier: SmartRouterModelState;
+  local: SmartRouterModelState;
+};
+
+function modelState(
+  name: string | null,
+  snapshot: Snapshot,
+  providers: ProviderDescriptors,
+): SmartRouterModelState {
+  if (name === null) return "unset";
+  try {
+    resolveModel(name, snapshot, providers);
+  } catch {
+    return "unresolved";
+  }
+  return localOnlyModel(name, snapshot, providers) === null ? "notLocal" : "ok";
+}
+
+/**
+ * Each smart-router model's state against `snapshot`, for the console's inline
+ * warnings. Unlike `smartRouterReadiness` it ignores the switch and the key
+ * flags: an operator choosing a model wants to hear it is wrong before turning
+ * the feature on, and the console decides what the switch makes of it.
+ */
+export function smartRouterModelStatus(
+  snapshot: Snapshot,
+  providers: ProviderDescriptors,
+): SmartRouterModelStatus {
+  const { smartRouterClassifierModel, smartRouterLocalModel } = snapshot.settings;
+  return {
+    classifier: modelState(smartRouterClassifierModel, snapshot, providers),
+    local: modelState(smartRouterLocalModel, snapshot, providers),
+  };
 }

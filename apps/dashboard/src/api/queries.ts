@@ -65,6 +65,7 @@ import type {
   SetupClient,
   SetupFile,
   SetupResponse,
+  SmartRouterModelStatus,
   SnapshotInfo,
   SnapshotsResponse,
   StatusResponse,
@@ -361,6 +362,17 @@ export function useBodyLoggingActive(): UseQueryResult<boolean> {
 /** Whether the environment permits capture at all, regardless of the setting. */
 export function useBodyLoggingAllowed(): UseQueryResult<boolean> {
   return useQuery({ ...settingsQuery, select: (response) => response.bodyLoggingAllowed });
+}
+
+/**
+ * The gateway's verdict on each smart-router model, for inline warnings.
+ * `null` until loaded, and from a gateway too old to send it.
+ */
+export function useSmartRouterModels(): UseQueryResult<SmartRouterModelStatus | null> {
+  return useQuery({
+    ...settingsQuery,
+    select: (response) => response.smartRouterModels ?? null,
+  });
 }
 
 /**

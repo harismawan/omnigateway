@@ -9,8 +9,19 @@ import {
 } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
-import { useKeys, useRevokeKey, useSetKeySmartRouting, useSettings } from "../../api/queries.ts";
-import type { ApiKeySummary, LimitReading, Settings } from "../../api/types.ts";
+import {
+  useKeys,
+  useRevokeKey,
+  useSetKeySmartRouting,
+  useSettings,
+  useSmartRouterModels,
+} from "../../api/queries.ts";
+import type {
+  ApiKeySummary,
+  LimitReading,
+  Settings,
+  SmartRouterModelStatus,
+} from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatDateTime } from "../../lib/format.ts";
@@ -85,20 +96,40 @@ function describeNearest(nearest: LimitReading | null): string {
  * switch expects. `undefined` settings (still loading, or failed) warn nothing:
  * absence of a reading is not evidence of a problem.
  */
-function inertReason(settings: Settings | undefined): string | null {
+function inertReason(
+  settings: Settings | undefined,
+  models: SmartRouterModelStatus | null | undefined,
+): string | null {
   if (settings === undefined) return null;
   if (!settings.smartRouterEnabled) return "confidential routing is switched off in Settings";
   if (settings.smartRouterClassifierModel === null || settings.smartRouterLocalModel === null) {
     return "the classifier model or the local model is not set in Settings";
   }
-  return null;
+  // Set, but the gateway says it cannot serve. Absent (older gateway, or not
+  // yet loaded) is not evidence of a problem.
+  const broken = (
+    [
+      ["classifier", models?.classifier],
+      ["local", models?.local],
+    ] as const
+  ).flatMap(([name, state]) =>
+    state === "unresolved"
+      ? [`the ${name} model does not resolve`]
+      : state === "notLocal"
+        ? [`the ${name} model is not local-only`]
+        : [],
+  );
+  return broken.length === 0 ? null : broken.join(" and ");
 }
 
 /** What the "local-routed" chip says on hover, led by the warning when inert. */
-function describeLocalRouted(settings: Settings | undefined): string {
+function describeLocalRouted(
+  settings: Settings | undefined,
+  models: SmartRouterModelStatus | null | undefined,
+): string {
   const meaning =
     "Requests from this key are screened for confidential content and answered by the local model when any is found.";
-  const reason = inertReason(settings);
+  const reason = inertReason(settings, models);
   return reason === null ? meaning : `Not active: ${reason}. ${meaning}`;
 }
 
@@ -118,6 +149,7 @@ const Inert = styled.p`
 export function KeysBoard() {
   const keys = useKeys();
   const settings = useSettings();
+  const smartRouterModels = useSmartRouterModels();
   const revoke = useRevokeKey();
   const smartRouting = useSetKeySmartRouting();
   const [smartFailure, setSmartFailure] = useState<string | null>(null);
@@ -133,7 +165,7 @@ export function KeysBoard() {
   const rows = keys.data ?? [];
   // Only live keys count: a revoked key's flag changes nothing it sends.
   const inert = rows.some((key) => key.revokedAt === null && key.smartRouting)
-    ? inertReason(settings.data)
+    ? inertReason(settings.data, smartRouterModels.data)
     : null;
   // Only the *count* narrows. Every key stays in `rows` and keeps its row,
   // expired ones included: a key that stopped working and then disappeared from
@@ -280,7 +312,11 @@ export function KeysBoard() {
                                   yet, so the operator hears it here and not
                                   from a client. */}
                               {key.smartRouting ? (
-                                <Chip title={describeLocalRouted(settings.data)}>local-routed</Chip>
+                                <Chip
+                                  title={describeLocalRouted(settings.data, smartRouterModels.data)}
+                                >
+                                  local-routed
+                                </Chip>
                               ) : null}
                             </Allow>
                           )}

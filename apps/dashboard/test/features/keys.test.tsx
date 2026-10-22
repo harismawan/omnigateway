@@ -1117,6 +1117,33 @@ describe("confidential routing", () => {
     expect(await notice({ ...configured, smartRouterLocalModel: null }, flagged)).toContain(
       "not set",
     );
+    // A model that is set but cannot serve is reported by the gateway.
+    const reported = async (
+      models: { classifier: string; local: string },
+      loaded: typeof settings = configured,
+    ) => {
+      stubKeys({
+        "GET /api/keys": () => ({ keys: flagged }),
+        "GET /api/settings": () => ({
+          settings: loaded,
+          bodyLoggingAllowed: false,
+          smartRouterModels: models,
+        }),
+      });
+      const view = renderWithProviders(<KeysBoard />);
+      await screen.findByText("laptop");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const found = screen.queryByRole("status")?.textContent ?? null;
+      view.unmount();
+      return found;
+    };
+    expect(await reported({ classifier: "unresolved", local: "ok" })).toContain(
+      "classifier model does not resolve",
+    );
+    expect(await reported({ classifier: "ok", local: "notLocal" })).toContain(
+      "local model is not local-only",
+    );
+    expect(await reported({ classifier: "ok", local: "ok" })).toBeNull();
     // Healthy, unflagged, or flagged only on a revoked key: nothing to say.
     expect(await notice(configured, flagged)).toBeNull();
     expect(await notice({ ...configured, smartRouterEnabled: false }, [apiKey()])).toBeNull();
