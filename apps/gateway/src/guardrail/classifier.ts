@@ -58,24 +58,25 @@ const SECTIONS = [
 ] as const;
 
 /**
- * The `<` that starts any opening or closing tag of any section, in any case,
- * with whitespace or slashes before the name and anything after it. A model
- * reading tags does not match them exactly, so `</ REQUEST x>`, `<request/>`
- * and an unterminated `</request` all read as section boundaries. No word
- * boundary after the name and no closing `>` required: `<requests>` is fenced
- * too, a superset rather than a guess at how loosely a model reads.
- */
-const SECTION_TAG = new RegExp(`<(?=[\\s/]*(?:${SECTIONS.join("|")}))`, "gi");
-
-/**
  * Keeps data from opening or closing a section of its own: a backslash after
  * the `<` of every section tag, so `</request>` reads `<\/request>` and
  * `<request>` reads `<\request>`. Every other `<` is untouched, so code or
  * markup in a request otherwise reaches the classifier exactly as written.
+ *
+ * The tag is the `<` that starts any opening or closing tag of any of the
+ * given sections, in any case, with whitespace or slashes before the name and
+ * anything after it. A model reading tags does not match them exactly, so
+ * `</ REQUEST x>`, `<request/>` and an unterminated `</request` all read as
+ * section boundaries. No word boundary after the name and no closing `>`
+ * required: `<requests>` is fenced too, a superset rather than a guess at how
+ * loosely a model reads.
  */
-function fence(text: string): string {
-  return text.replace(SECTION_TAG, "<\\");
+export function fenceFor(sections: readonly string[]): (text: string) => string {
+  const tag = new RegExp(`<(?=[\\s/]*(?:${sections.join("|")}))`, "gi");
+  return (text) => text.replace(tag, "<\\");
 }
+
+const fence = fenceFor(SECTIONS);
 
 /**
  * A fresh request for the classifier, built from nothing the client sent but
@@ -140,7 +141,7 @@ export type Verdict = "allow" | "deny";
  * or paused mid-turn is an answer the model had not finished giving — it may
  * have been on its way to "ALLOW, but…" — so it is unreadable, never an allow.
  */
-const FINISHED: Readonly<Record<StopReason, boolean>> = {
+export const FINISHED: Readonly<Record<StopReason, boolean>> = {
   endTurn: true,
   stopSequence: true,
   maxTokens: false,

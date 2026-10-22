@@ -60,8 +60,8 @@ export function verdictKey(parts: VerdictKeyParts): string {
  * next turn may succeed. Process-local is acceptable in a cluster: a miss costs
  * one call, never a wrong verdict.
  */
-export class VerdictCache {
-  readonly #entries = new Map<string, { verdict: Verdict; expiresAt: number }>();
+export class VerdictCache<V extends string = Verdict> {
+  readonly #entries = new Map<string, { verdict: V; expiresAt: number }>();
   readonly #max: number;
   readonly #ttlMs: number;
 
@@ -70,7 +70,7 @@ export class VerdictCache {
     this.#ttlMs = opts.ttlMs ?? VERDICT_TTL_MS;
   }
 
-  get(key: string, now: number): Verdict | undefined {
+  get(key: string, now: number): V | undefined {
     const entry = this.#entries.get(key);
     if (entry === undefined) return undefined;
     if (entry.expiresAt <= now) {
@@ -83,7 +83,7 @@ export class VerdictCache {
     return entry.verdict;
   }
 
-  set(key: string, verdict: Verdict, now: number): void {
+  set(key: string, verdict: V, now: number): void {
     this.#entries.delete(key);
     this.#entries.set(key, { verdict, expiresAt: now + this.#ttlMs });
     while (this.#entries.size > this.#max) {
