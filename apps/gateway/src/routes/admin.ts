@@ -39,6 +39,7 @@ import {
   setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
+  setKeySmartRouting,
   setupFiles,
 } from "@omni/control";
 import { describeError, GatewayError, type Logger, noopLogger, parseLogLevel } from "@omni/ir";
@@ -543,6 +544,20 @@ export function adminRoutes(deps: AdminDeps) {
       .put("/api/keys/:id/guardrail", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
         const key = await setKeyGuardrail(deps.store, params.id, await readJson(request));
+        changed("res:keys");
+        return key;
+      })
+
+      /**
+       * The fifth: whether the key's requests are judged for confidential
+       * content and rerouted to the local model. An absent `enabled` is a
+       * `BAD_REQUEST`, for the reason the guardrail's is — `{}` must not
+       * silently switch protection off. The global `smartRouterEnabled`
+       * setting still gates it.
+       */
+      .put("/api/keys/:id/smart-routing", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        const key = await setKeySmartRouting(deps.store, params.id, await readJson(request));
         changed("res:keys");
         return key;
       })

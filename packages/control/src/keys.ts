@@ -16,6 +16,7 @@ import {
   keyGuardrailSchema,
   keyLimitsSchema,
   keyModelsSchema,
+  keySmartRoutingSchema,
   parseOrThrow,
 } from "./schemas.ts";
 
@@ -243,8 +244,8 @@ export async function createKey(store: Store, input: unknown): Promise<CreatedKe
     expiresAt: body.expiresAt,
     // Null unless asked for: no guardrail, and no classifier call per request.
     guardrailPolicy: body.guardrailPolicy,
-    // Off at mint; a schema option to mint it on arrives with the route.
-    smartRouting: false,
+    // Off unless asked for: no confidentiality judgement per request.
+    smartRouting: body.smartRouting,
   });
 
   return { id: created.id, label: created.label, prefix: created.prefix, key: raw };
@@ -354,6 +355,29 @@ export async function setKeyGuardrail(
 
   await store.keys.setGuardrailPolicy(id, body.policy);
   return toSummary(store, { ...key, guardrailPolicy: body.policy }, now);
+}
+
+/**
+ * Replaces one key's smart routing flag and reports the key as it now stands.
+ *
+ * The fifth field editable after minting, written whole like the other four. An
+ * unknown id is refused before the write for the reason the others refuse one.
+ * The global `smartRouterEnabled` setting still gates it, so this changes
+ * nothing while that is off.
+ */
+export async function setKeySmartRouting(
+  store: Store,
+  id: string,
+  input: unknown,
+  now: number = Date.now(),
+): Promise<ApiKeySummary> {
+  const body = parseOrThrow(keySmartRoutingSchema, input);
+
+  const key = await store.keys.get(id);
+  if (key === null) throw new GatewayError("BAD_REQUEST", "no such api key");
+
+  await store.keys.setSmartRouting(id, body.enabled);
+  return toSummary(store, { ...key, smartRouting: body.enabled }, now);
 }
 
 export async function revokeKey(store: Store, id: string): Promise<void> {

@@ -640,6 +640,49 @@ test("a key's usage policy is editable behind admin auth, clearable, and never d
   expect((await store.keys.get(minted.id))?.guardrailPolicy).toBe("Work only.");
 });
 
+/**
+ * The fifth editable field: whether the key's requests are judged for
+ * confidential content. Written whole; an absent flag is refused.
+ */
+test("a key's smart routing flag is editable behind admin auth and never defaulted on edit", async () => {
+  const { call, store } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {
+    id: string;
+  };
+  expect((await store.keys.list())[0]?.smartRouting).toBe(false);
+
+  const body = { enabled: true };
+  expect((await call("PUT", `/api/keys/${created.id}/smart-routing`, body, false)).status).toBe(
+    401,
+  );
+  expect((await store.keys.list())[0]?.smartRouting).toBe(false);
+
+  const saved = await call("PUT", `/api/keys/${created.id}/smart-routing`, body);
+  expect(saved.status).toBe(200);
+  expect(((await saved.json()) as { smartRouting: boolean }).smartRouting).toBe(true);
+  expect((await store.keys.list())[0]?.smartRouting).toBe(true);
+
+  for (const refused of [{}, { enabled: "yes" }, { enabled: null }, { enabled: false, x: 1 }]) {
+    expect((await call("PUT", `/api/keys/${created.id}/smart-routing`, refused)).status).toBe(400);
+  }
+  expect((await store.keys.list())[0]?.smartRouting).toBe(true);
+
+  expect(
+    (await call("PUT", `/api/keys/${created.id}/smart-routing`, { enabled: false })).status,
+  ).toBe(200);
+  expect((await store.keys.list())[0]?.smartRouting).toBe(false);
+
+  // Settable at mint time too, and listed on the summary.
+  const minted = (await (
+    await call("POST", "/api/keys", { label: "private", smartRouting: true })
+  ).json()) as { id: string };
+  expect((await store.keys.get(minted.id))?.smartRouting).toBe(true);
+  const { keys: listed } = (await (await call("GET", "/api/keys")).json()) as {
+    keys: Array<{ id: string; smartRouting: boolean }>;
+  };
+  expect(listed.find((k) => k.id === minted.id)?.smartRouting).toBe(true);
+});
+
 test("a malformed limit matrix is refused rather than stored", async () => {
   const { call, store } = await harness();
   const created = (await (
@@ -1852,6 +1895,13 @@ const MUTATIONS: ReadonlyArray<{
     method: "PUT",
     path: "/api/keys/:key/guardrail",
     body: { policy: "Work only." },
+    topics: ["res:keys"],
+  },
+  {
+    route: "/api/keys/:id/smart-routing",
+    method: "PUT",
+    path: "/api/keys/:key/smart-routing",
+    body: { enabled: true },
     topics: ["res:keys"],
   },
   {
