@@ -449,6 +449,19 @@ Worth knowing before you deploy it:
   Anthropic thinking fields (including beta controls) pass through only to
   Anthropic; supply any required beta header yourself. Hidden adaptive display
   omits generated Responses reasoning summaries, without inventing a default.
+- **Claude Code auto mode supports Anthropic server-side classifier results.**
+  On Anthropic targets, the gateway forwards `safeguards`, protocol headers, and
+  original `safeguard_results` in both streaming and buffered replies. Safeguard
+  requests retain the client's system blocks and tool names/IDs rather than the
+  ordinary OAuth system/tool transformations. Eligibility and no-charge checks
+  still depend on Anthropic's rollout for the upstream credential/model; routing
+  to another provider does not supply them. This is not a byte-transparent proxy:
+  gateway policies and other request normalization still apply.
+  After deploying this version, start a **new Claude Code session** and check
+  `/status` → **Auto mode server: Enabled**. If the upstream is not eligible,
+  `CLAUDE_CODE_AUTO_MODE_SERVER=0` before starting Claude Code uses its separate
+  classifier calls instead; these remain billed as token usage. See
+  [Anthropic's notice guide](https://code.claude.com/docs/en/auto-mode-classifier-billing).
 - **An OpenAI OAuth (ChatGPT) target presents itself as Codex, and answers like
   it.** Requests on that leg match Codex 0.163.0's TUI field by field, which
   changes model behaviour for every client routed there, Claude Code included:

@@ -157,7 +157,13 @@ export type StreamEvent =
   | { type: "blockStart"; index: number; block: ContentBlockStart }
   | { type: "blockDelta"; index: number; delta: Delta }
   | { type: "blockEnd"; index: number }
-  | { type: "end"; stopReason: StopReason; usage: Usage }
+  | {
+      type: "end";
+      stopReason: StopReason;
+      usage: Usage;
+      /** Opaque response metadata, emitted only on the matching provider surface. */
+      vendor?: Record<string, Record<string, unknown>>;
+    }
   | { type: "error"; code: ErrorCode; message: string; retryable: boolean };
 
 export type CollectedResponse = {
@@ -166,6 +172,7 @@ export type CollectedResponse = {
   content: ContentBlock[];
   stopReason: StopReason;
   usage: Usage;
+  vendor?: Record<string, Record<string, unknown>>;
 };
 
 type Accum =
@@ -194,6 +201,7 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
   let id = "";
   let model = "";
   let stopReason: StopReason = "endTurn";
+  let vendor: CollectedResponse["vendor"];
   let usage: Usage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -251,6 +259,7 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
       case "end":
         stopReason = ev.stopReason;
         usage = ev.usage;
+        vendor = ev.vendor;
         break;
       default:
         break;
@@ -282,7 +291,7 @@ export function collect(events: Iterable<StreamEvent>): CollectedResponse {
       return { type: "toolUse", id: acc.id, name: acc.name, input: parseJson(acc.json) };
     });
 
-  return { id, model, content, stopReason, usage };
+  return { id, model, content, stopReason, usage, ...(vendor === undefined ? {} : { vendor }) };
 }
 
 /** Tool arguments arrive in fragments; a truncated stream must not throw. */

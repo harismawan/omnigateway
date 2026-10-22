@@ -150,7 +150,11 @@ export async function* anthropicStream(
       case "end":
         yield frame("message_delta", {
           type: "message_delta",
-          delta: { stop_reason: STOP_REASON[event.stopReason], stop_sequence: null },
+          delta: {
+            stop_reason: STOP_REASON[event.stopReason],
+            stop_sequence: null,
+            ...safeguardFields(event.vendor),
+          },
           // `input_tokens` is the uncached remainder, not the whole prompt:
           // that is Anthropic's own definition, and the decoder carries the
           // upstream number through unchanged. Recomputing a total here would
@@ -177,6 +181,7 @@ export async function* anthropicStream(
 
 export function anthropicResponse(collected: CollectedResponse, requestId: string): unknown {
   return {
+    ...safeguardFields(collected.vendor),
     id: requestId,
     type: "message",
     role: "assistant",
@@ -212,6 +217,14 @@ export function anthropicResponse(collected: CollectedResponse, requestId: strin
       cache_creation_input_tokens: collected.usage.cacheWriteTokens,
     },
   };
+}
+
+/** Never spread arbitrary vendor keys over a gateway-owned response envelope. */
+function safeguardFields(vendor: CollectedResponse["vendor"]): Record<string, unknown> {
+  const metadata = vendor?.anthropic;
+  return metadata !== undefined && Object.hasOwn(metadata, "safeguard_results")
+    ? { safeguard_results: metadata.safeguard_results }
+    : {};
 }
 
 export function anthropicErrorBody(code: ErrorCode, message: string): unknown {

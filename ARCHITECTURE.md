@@ -301,6 +301,26 @@ filtering reads the final merged body. `betweenTools` preserves signed progress
 replay but is conservatively off for `clear_thinking` edits (upstream support is
 unmeasured); non-Anthropic encoders degrade it to their existing off behavior.
 
+Anthropic auto-mode checks use opaque provider metadata rather than a gateway
+verdict schema. Ingress retains `safeguards` in the vendor bag and `anthropic-*`
+protocol headers in `providerHeaders.anthropic`; the codec still owns upstream
+authentication and adds the OAuth beta when needed. A non-empty safeguard list
+disables that codec's tool cloak, system prefix/rewrite, and attribution signing;
+ingress retains the raw client system representation for this path. Tool-use IDs
+are not rewritten. The wire encoder preserves opaque client system-block fields,
+but current IR text/cache placement and configured additions outrank that snapshot;
+Ponytail cannot be silently overwritten by the vendor merge. Other normalization
+and configured gateway transforms still
+apply, so this is not a general raw-proxy mode.
+
+The decoder preserves `message_delta.delta.safeguard_results` (or final-frame
+top-level results) in the terminal event's provider-keyed `vendor` bag.
+`collect()` retains it for buffered replies; Anthropic egress restores the field
+inside the final delta or on the buffered Messages object. Absence, null, and
+unsupported/unavailable statuses remain distinct. Other egress dialects ignore
+this metadata, and dispatch does not interpret it. The real-adapter regression
+suite is `apps/gateway/test/routes/autoModeSafeguards.test.ts`.
+
 Eight providers, each a directory of roughly same files — `descriptor.ts`, `codec.ts`, `wire.ts`, `decode.ts`, `models.ts`, `profile.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types and `cloak.ts` for the OAuth tool rename, `kimi` and `grok` carry `device.ts` for device-code flows. `muse` carries `endpoint.ts`, the one host check its mint and its codec share — its device flow ends in a second call that buys the Model API key inference actually uses.
 
 Three wire dialects, not two. Five of the seven speak an Anthropic- or OpenAI-shaped body; `antigravity` speaks Google's Cloud Code Assist — `v1internal:streamGenerateContent`, which nests a Gemini request inside an envelope carrying the account's own Cloud Code project id. That id is minted during OAuth rather than at request time, because a codec cannot make a network call; it lives on `credential.providerData` and the codec refuses a request that would send it blank. The endpoint is the streaming one even for a non-streaming client, since plain `generateContent` answers 400 on several models.

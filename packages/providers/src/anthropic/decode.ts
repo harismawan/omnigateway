@@ -139,7 +139,9 @@ type AnthropicEvent = {
     content?: string;
     encrypted_content?: string;
     stop_reason?: string;
+    safeguard_results?: unknown;
   };
+  safeguard_results?: unknown;
   usage?: { input_tokens?: number; output_tokens?: number };
   error?: { type?: string; message?: string };
 };
@@ -169,6 +171,7 @@ export async function* decodeAnthropic(
   let outputTokens = 0;
   let stopReason: StopReason = "endTurn";
   let terminal = false;
+  let safeguardResults: Record<string, unknown> | undefined;
   // Which open block indexes are Anthropic-native, so an `input_json_delta`
   // fills the right accumulator. A native block's input must never land in a
   // portable `toolUse`, which is what would send it onward as a function call.
@@ -323,6 +326,13 @@ export async function* decodeAnthropic(
         break;
 
       case "message_delta": {
+        // Keep the presence of null/empty/unsupported results distinct from no
+        // result. Only the client and upstream own the verdict schema.
+        const source =
+          d.delta !== undefined && Object.hasOwn(d.delta, "safeguard_results") ? d.delta : d;
+        if (Object.hasOwn(source, "safeguard_results")) {
+          safeguardResults = { safeguard_results: source.safeguard_results };
+        }
         const reason = d.delta?.stop_reason;
         if (typeof reason === "string") {
           // `Object.hasOwn` rather than a bare index: `STOP_REASON` is an
@@ -343,10 +353,14 @@ export async function* decodeAnthropic(
       }
 
       case "message_stop":
+        if (Object.hasOwn(d, "safeguard_results")) {
+          safeguardResults = { safeguard_results: d.safeguard_results };
+        }
         terminal = true;
         yield {
           type: "end",
           stopReason,
+          ...(safeguardResults === undefined ? {} : { vendor: { anthropic: safeguardResults } }),
           usage: {
             inputTokens,
             outputTokens,
