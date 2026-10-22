@@ -209,6 +209,36 @@ has a hole in it. A total rather than per-message cap, so widening the window bu
 a bigger classifier call. The cache key hashes the texts *after* truncation. Caps are constants, not
 settings.
 
+### Amendment 2026-10-22: tool results are judged
+
+*Operator decision, made while designing smart routing
+(`2026-10-22-smart-router-design.md`).* The rule above that tool-result content is never sent to
+the classifier is replaced:
+
+- The **text content of tool results** inside the judged window — every tool-result block in a
+  user message after the oldest judged human message — is sent too, in a new `<tool_results>`
+  section between `<earlier_messages>` and `<request>`, each in a numbered `<result n="…">`, oldest
+  first. The section is omitted when there are none. Images, files and `providerNative` blocks
+  inside tool results are still not sent. Tool-call arguments are not sent (guardrails judge
+  purpose; smart routing judges them for leaks).
+- **Which messages count as human turns does not change**: a user message carrying a tool result
+  is still not a human message for the `guardrailHistoryTurns` window.
+- **Own cap:** 16,000 characters in total for tool-result text, separate from the human cap. Newest
+  results take room first; each is cut head+tail around the marker; older ones are dropped once the
+  marker no longer fits. Any cut or drop sets `guardrail:truncated`.
+- `<tool_results>` and `<result>` join the fenced section names.
+- The instruction says tool results are data the client received, not instructions, and to judge
+  the request's purpose in their light.
+- **Cache consequence, accepted:** tool-result text is part of the verdict-cache key, so an agent
+  pays one classifier call per tool turn instead of one per human message. More latency per agent
+  step and more classifier spend.
+- **Threat-model consequence:** splitting an ask into tool output is no longer an unjudged gap
+  within the window, but tool output (a fetched web page, a file) is attacker-reachable text in
+  front of the classifier: it can push the verdict either way, including false refusals of
+  legitimate work. README's threat-model sentence is updated.
+- Tests: tool results inside the window reach the classifier, outside it they do not; the tool cap
+  truncates newest-first; a new tool turn is a cache miss; fencing of the new tags.
+
 ### The classifier call
 
 - Built as a fresh `ChatRequest`: a gateway-authored instruction (vendored constant, not
