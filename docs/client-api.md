@@ -81,6 +81,12 @@ observe:
   the same as an in-stream `error` event on a 200. The messages are fixed. If the
   in-house model itself fails, you get its failure; the request is never retried
   on an external provider.
+- **Provider-only features and confidential content don't mix.** A confidential
+  request that uses something only one external provider can accept — Anthropic
+  `search_result` or `document` blocks, server-tool results, provider-defined tools
+  such as `web_search` or `bash` — or tools or images the in-house model lacks,
+  cannot be served in-house, and is refused with `NO_CANDIDATES` (503) rather than
+  sent out. Drop the provider-only part, or send the content without it.
 
 Every check is charged to your key as a request of its own, visible on the
 dashboard. The check reduces leaks of ordinary confidential content; it is not a

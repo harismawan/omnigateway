@@ -130,11 +130,15 @@ sequenceDiagram
   Route->>In: validate + translate
   In-->>Route: ChatRequest (provider-neutral IR)
   Route->>Route: model allowlist,<br/>after alias normalization
+  opt key flagged for smart routing, switch on
+    Route->>Disp: local classifier per uncached segment<br/>(local-only, one row per check)
+    Disp-->>Route: PUBLIC, CONFIDENTIAL → model := local,<br/>or the request is refused
+  end
   opt key carries a usage policy
     Route->>Disp: classifier request (own id, own row,<br/>no RTK, no ponytail, no capture)
     Disp-->>Route: ALLOW, or the request is refused
   end
-  Route->>Disp: dispatch(request, signal)
+  Route->>Disp: dispatch(request, signal)<br/>(local-only when routed local)
   Disp->>RTK: filter tool results (off by default)
   RTK-->>Disp: rewritten request + savings report
   Disp->>Pony: append ponytail ruleset (off by default)
