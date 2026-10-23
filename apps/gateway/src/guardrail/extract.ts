@@ -18,6 +18,13 @@ export const SYSTEM_CAP = 8_000;
  */
 export const HUMAN_CAP = 16_000;
 
+/**
+ * How much tool-result text the classifier is shown, in total across every
+ * judged result. Separate from `HUMAN_CAP` so a large tool output (a fetched
+ * page, a file) can neither crowd out what the human wrote nor be spared by it.
+ */
+export const TOOL_RESULTS_CAP = 16_000;
+
 /** Stands where the middle of an over-long text was cut out. */
 export const TRUNCATION_MARKER = "\n[… truncated …]\n";
 
@@ -26,8 +33,15 @@ export const TRUNCATION_MARKER = "\n[… truncated …]\n";
  *
  * `human` is oldest first; its last entry is the message being judged, and
  * the ones before it are context. Empty when no human message exists.
+ * `toolResults` is the text of the tool results after the oldest judged human
+ * message, oldest first; empty when there are none.
  */
-export type JudgedText = { system: string; human: readonly string[]; truncated: boolean };
+export type JudgedText = {
+  system: string;
+  human: readonly string[];
+  toolResults: readonly string[];
+  truncated: boolean;
+};
 
 /**
  * Head plus tail around an explicit marker, never longer than `cap`.
@@ -45,6 +59,36 @@ function capText(text: string, cap: number): { text: string; truncated: boolean 
     text: `${text.slice(0, head)}${TRUNCATION_MARKER}${tail === 0 ? "" : text.slice(-tail)}`,
     truncated: true,
   };
+}
+
+/**
+ * Spends one shared cap on texts given newest first. The newest takes room
+ * first and is cut only when it alone exceeds the cap; each older one takes
+ * what is left, cut to fit. Once the room cannot hold the marker, that text and
+ * every older one are dropped, so what is kept has no hole in it. `kept` stays
+ * newest first.
+ */
+function capNewestFirst(
+  texts: readonly string[],
+  cap: number,
+): { kept: string[]; truncated: boolean } {
+  let room = cap;
+  let truncated = false;
+  const kept: string[] = [];
+  for (const text of texts) {
+    // Too little room left to cut it around the marker: this text and every
+    // older one are dropped. The newest never lands here — it starts with the
+    // whole cap.
+    if (text.length > room && room <= TRUNCATION_MARKER.length) {
+      truncated = true;
+      break;
+    }
+    const capped = capText(text, room);
+    kept.push(capped.text);
+    room -= capped.text.length;
+    truncated ||= capped.truncated;
+  }
+  return { kept, truncated };
 }
 
 /** The text blocks alone. Images, files, thinking and native blocks are never judged. */
@@ -77,19 +121,26 @@ function humanWrote(message: ChatRequest["messages"][number]): boolean {
  * and the last `turns` messages a human wrote, oldest first. `turns` is clamped
  * to `1..GUARDRAIL_HISTORY_TURNS_MAX`; anything not an integer judges one.
  *
- * Walking backwards, tool turns are skipped and never sent (`humanWrote`). That
- * keeps the judged text stable across an agent's tool turns, which is what lets
- * the verdict cache answer them; and it keeps tool output, which the human did
- * not write, out of the classifier's input entirely. More than one human
- * message is judged so a bland follow-up ("continue", "do it") is read in the
- * light of the ask it continues. Mid-conversation system turns and assistant
- * replies are never sent.
+ * Walking backwards, tool turns are not human messages and are skipped when
+ * counting the window (`humanWrote`); the text the human wrote is what the
+ * window is made of. More than one human message is judged so a bland
+ * follow-up ("continue", "do it") is read in the light of the ask it
+ * continues. Mid-conversation system turns and assistant replies are never
+ * sent.
  *
- * The human cap is shared, and the newest message spends it first: it is cut
- * head plus tail only when it alone exceeds the cap. Each older message then
- * takes what room is left, cut when it does not fit; once the room is too small
- * to hold the marker, that message and every older one are dropped. So context
- * gives way before the ask does, and the oldest before the newer.
+ * The **text of tool results** after the oldest judged human message is sent
+ * too (`toolResults`), so an ask cannot be split into tool output the
+ * classifier never sees. Only the text: images, files and native parts of a
+ * result are not sent, and neither are tool-call arguments. A tool turn changes
+ * what is judged, so an agent's tool loop no longer hits the verdict cache
+ * across turns — the accepted cost of judging them.
+ *
+ * Each cap is shared, and the newest text spends it first: it is cut head plus
+ * tail only when it alone exceeds the cap. Each older one then takes what room
+ * is left, cut when it does not fit; once the room is too small to hold the
+ * marker, that one and every older one are dropped. So context gives way
+ * before the ask does, and the oldest before the newer. Tool results have a cap
+ * of their own, so a large tool output never costs the human text its room.
  *
  * No human message at all is not a special case: the classifier is asked
  * about empty text and decides.
@@ -102,26 +153,38 @@ export function judgedText(request: ChatRequest, turns: number): JudgedText {
   const system = capText(textOf(request.system ?? []), SYSTEM_CAP);
   // Newest first while walking; reversed once at the end.
   const found: string[] = [];
+  // Index of the oldest judged human message; -1 when there is none.
+  let oldestJudged = -1;
   for (let i = request.messages.length - 1; i >= 0 && found.length < window; i--) {
     const message = request.messages[i];
-    if (message !== undefined && humanWrote(message)) found.push(textOf(message.content));
+    if (message !== undefined && humanWrote(message)) {
+      found.push(textOf(message.content));
+      oldestJudged = i;
+    }
   }
 
-  let truncated = system.truncated;
-  let room = HUMAN_CAP;
-  const human: string[] = [];
-  for (const text of found) {
-    // Too little room left to cut it around the marker: this message and every
-    // older one are dropped, so the context has no hole in it. The newest never
-    // lands here — it starts with the whole cap.
-    if (text.length > room && room <= TRUNCATION_MARKER.length) {
-      truncated = true;
-      break;
+  const human = capNewestFirst(found, HUMAN_CAP);
+
+  // Tool results are windowed by the human messages, not counted themselves:
+  // everything a tool returned after the oldest judged human message is the
+  // output of work that message set going. With no human message at all, the
+  // whole request is the window.
+  const windowStart = oldestJudged + 1;
+  const returned: string[] = [];
+  for (let i = request.messages.length - 1; i >= windowStart; i--) {
+    const message = request.messages[i];
+    if (message?.role !== "user") continue;
+    for (let j = message.content.length - 1; j >= 0; j--) {
+      const block = message.content[j];
+      if (block?.type === "toolResult") returned.push(block.content);
     }
-    const capped = capText(text, room);
-    human.push(capped.text);
-    room -= capped.text.length;
-    truncated ||= capped.truncated;
   }
-  return { system: system.text, human: human.reverse(), truncated };
+  const results = capNewestFirst(returned, TOOL_RESULTS_CAP);
+
+  return {
+    system: system.text,
+    human: human.kept.reverse(),
+    toolResults: results.kept.reverse(),
+    truncated: system.truncated || human.truncated || results.truncated,
+  };
 }

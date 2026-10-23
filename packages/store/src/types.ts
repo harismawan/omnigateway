@@ -647,6 +647,19 @@ export type ApiKey = {
    * operator notes in README accept.
    */
   guardrailPolicy: string | null;
+  /**
+   * Whether this key's requests are judged for confidential content and, when
+   * they are, routed to the operator's local model (`Settings.smartRouterLocalModel`)
+   * instead of the model the client named. `false` is "never judged".
+   *
+   * Only consulted while the global `Settings.smartRouterEnabled` is on. Every
+   * key minted before the column existed reads back `false` — no backfill.
+   *
+   * An older build ignores the column entirely, so a rollback stops judging and
+   * sends everything to the external model the client asked for — **fails
+   * open** — which the operator notes in README accept, as for `guardrailPolicy`.
+   */
+  smartRouting: boolean;
 };
 
 /**
@@ -660,6 +673,28 @@ export const GUARDRAIL_POLICY_MAX_CHARS = 4_000;
 
 /** The ceiling on `Settings.guardrailTimeoutMs`. A classifier slower than this is not one. */
 export const GUARDRAIL_TIMEOUT_MAX_MS = 60_000;
+
+/**
+ * The longest smart-router confidentiality policy, in characters after
+ * trimming. Here for the reason `GUARDRAIL_POLICY_MAX_CHARS` is: the console
+ * counts against the number the write schema enforces.
+ */
+export const SMART_ROUTER_POLICY_MAX_CHARS = 4_000;
+
+/** The ceiling on `Settings.smartRouterTimeoutMs`, per classifier call. */
+export const SMART_ROUTER_TIMEOUT_MAX_MS = 60_000;
+
+/**
+ * What the smart router's classifier is told "confidential" means, until the
+ * operator writes their own. Plain sentences, because the classifier reads it
+ * as prose and the console shows it as the field's starting text.
+ */
+export const DEFAULT_SMART_ROUTER_POLICY =
+  "Personal data: names together with ID numbers, addresses, phone numbers, emails, " +
+  "national ID (NIK), passport, bank or card numbers. " +
+  "Credentials and secrets: passwords, API keys, tokens, private keys, connection strings. " +
+  "Salaries and HR records. Customer or patient records. Non-public financial figures. " +
+  "Internal documents marked confidential or internal. Source code marked proprietary.";
 
 /**
  * The ceiling on `Settings.guardrailHistoryTurns`. The human-text cap is a total
@@ -886,6 +921,38 @@ export type Settings = {
    * alone. A malformed stored value reads as the default.
    */
   guardrailHistoryTurns: number;
+  /**
+   * The global switch for smart routing. Off, no key is judged whether or not
+   * it carries `ApiKey.smartRouting`. A stored value that is not exactly
+   * `true` reads as `false`.
+   */
+  smartRouterEnabled: boolean;
+  /**
+   * The model that judges whether a request is confidential, or `null` when
+   * none is configured. Spelled as `resolveModel` accepts it and not checked
+   * for existence at write time, the exemption `guardrailModel` has; it must
+   * resolve to a local-only model when a request is judged. A blank or
+   * non-string stored value reads as `null`.
+   */
+  smartRouterClassifierModel: string | null;
+  /**
+   * Where a request judged confidential is sent, or `null` when none is
+   * configured. Same spelling and reading rules as the classifier model, and
+   * may equal it.
+   */
+  smartRouterLocalModel: string | null;
+  /**
+   * The operator's plain-language definition of "confidential", 1..
+   * `SMART_ROUTER_POLICY_MAX_CHARS` characters after trimming. A blank,
+   * non-string or over-long stored value reads as `DEFAULT_SMART_ROUTER_POLICY`.
+   */
+  smartRouterPolicy: string;
+  /**
+   * How long one classifier call may take, in milliseconds. A positive integer
+   * at most `SMART_ROUTER_TIMEOUT_MAX_MS`; a malformed stored value reads as
+   * the default.
+   */
+  smartRouterTimeoutMs: number;
 };
 
 export interface CredentialRepo {
@@ -1112,10 +1179,10 @@ export interface KeyRepo {
   /**
    * Replaces one key's limit matrix, whole.
    *
-   * One of four fields editable after minting — the allowlist via
-   * `setModelAllowlist`, the expiry via `setExpiry` and the usage policy via
-   * `setGuardrailPolicy` are the others — and
-   * deliberately so:
+   * One of five fields editable after minting — the allowlist via
+   * `setModelAllowlist`, the expiry via `setExpiry`, the usage policy via
+   * `setGuardrailPolicy` and the routing flag via `setSmartRouting` are the
+   * others — and deliberately so:
    * `bodyLoggingOptOut` is a promise to whoever holds the key, while a limit is
    * the operator's own ceiling on their own installation. A weekly spend cap
    * that cannot be adjusted without minting a new key and redeploying every
@@ -1156,6 +1223,13 @@ export interface KeyRepo {
    * TEXT column.
    */
   setGuardrailPolicy(id: string, policy: string | null): Promise<void>;
+  /**
+   * Switches one key's smart routing on or off.
+   *
+   * The fifth field editable after minting. A boolean, so there is nothing to
+   * bound or trim; the global `smartRouterEnabled` setting still gates it.
+   */
+  setSmartRouting(id: string, enabled: boolean): Promise<void>;
   revoke(id: string): Promise<void>;
 }
 
@@ -1758,6 +1832,11 @@ export const DEFAULT_SETTINGS: Settings = {
   guardrailModel: null,
   guardrailTimeoutMs: 10_000,
   guardrailHistoryTurns: 3,
+  smartRouterEnabled: false,
+  smartRouterClassifierModel: null,
+  smartRouterLocalModel: null,
+  smartRouterPolicy: DEFAULT_SMART_ROUTER_POLICY,
+  smartRouterTimeoutMs: 10_000,
 };
 
 /** Whether a stored value is an integer inside `1..max`. */
@@ -1789,5 +1868,46 @@ export function readGuardrailSettings(
     guardrailHistoryTurns: inRange(turns, GUARDRAIL_HISTORY_TURNS_MAX)
       ? turns
       : DEFAULT_SETTINGS.guardrailHistoryTurns,
+  };
+}
+
+type SmartRouterSettingKey =
+  | "smartRouterEnabled"
+  | "smartRouterClassifierModel"
+  | "smartRouterLocalModel"
+  | "smartRouterPolicy"
+  | "smartRouterTimeoutMs";
+
+/** A non-blank string as stored, or `null`. */
+const modelOrNull = (value: unknown): string | null =>
+  typeof value === "string" && value.trim() !== "" ? value : null;
+
+/**
+ * How a stored settings row's smart-router fields read back, whatever they hold.
+ *
+ * One copy for both backends' `getSettings`. Every malformed value lands on the
+ * off/unset side: the switch is `true` only when it is exactly `true`, a blank
+ * model reads as `null` (the feature is unconfigured, which refuses a judged
+ * request rather than sending it out), a blank or over-long policy reads as
+ * `DEFAULT_SMART_ROUTER_POLICY`, and the timeout as the default unless it is an
+ * integer inside `1..SMART_ROUTER_TIMEOUT_MAX_MS`.
+ */
+export function readSmartRouterSettings(
+  stored: Partial<Record<SmartRouterSettingKey, unknown>>,
+): Pick<Settings, SmartRouterSettingKey> {
+  const policy = stored.smartRouterPolicy;
+  const timeout = stored.smartRouterTimeoutMs;
+  const trimmed = typeof policy === "string" ? policy.trim() : "";
+  return {
+    smartRouterEnabled: stored.smartRouterEnabled === true,
+    smartRouterClassifierModel: modelOrNull(stored.smartRouterClassifierModel),
+    smartRouterLocalModel: modelOrNull(stored.smartRouterLocalModel),
+    smartRouterPolicy:
+      trimmed !== "" && trimmed.length <= SMART_ROUTER_POLICY_MAX_CHARS
+        ? trimmed
+        : DEFAULT_SMART_ROUTER_POLICY,
+    smartRouterTimeoutMs: inRange(timeout, SMART_ROUTER_TIMEOUT_MAX_MS)
+      ? timeout
+      : DEFAULT_SETTINGS.smartRouterTimeoutMs,
   };
 }

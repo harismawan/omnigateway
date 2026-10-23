@@ -230,6 +230,8 @@ export async function seedApiKey(
     expiresAt: null,
     /** No usage policy, so the request path never consults a classifier. */
     guardrailPolicy: null,
+    /** Never judged for confidential content, so no classifier or rerouting. */
+    smartRouting: false,
     ...overrides,
   });
   return { raw, key };

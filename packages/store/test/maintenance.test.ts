@@ -161,6 +161,7 @@ test("a snapshot is a self-contained copy of what was committed", async () => {
       bodyLoggingOptOut: false,
       expiresAt: null,
       guardrailPolicy: null,
+      smartRouting: false,
     });
 
     await store.maintenance.snapshotTo(snapshot);
@@ -191,6 +192,7 @@ test("a snapshot is a self-contained copy of what was committed", async () => {
       bodyLoggingOptOut: false,
       expiresAt: null,
       guardrailPolicy: null,
+      smartRouting: false,
     });
     const reread = await createStore({
       path: snapshot,
@@ -233,6 +235,7 @@ test("inspect accepts a snapshot of this database", async () => {
       bodyLoggingOptOut: false,
       expiresAt: null,
       guardrailPolicy: null,
+      smartRouting: false,
     });
     await store.maintenance.snapshotTo(snapshot);
 

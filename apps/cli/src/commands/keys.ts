@@ -7,6 +7,7 @@ import {
   setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
+  setKeySmartRouting,
 } from "@omni/control";
 // The gateway's own "may this key be used now", so the listing's label and the
 // answer at `/v1` cannot drift apart.
@@ -436,6 +437,7 @@ export const keysList: Command = {
           { header: "LIMITS" },
           { header: "BODY CAPTURE" },
           { header: "POLICY" },
+          { header: "SMART ROUTING" },
           { header: "STATE" },
           { header: "EXPIRES" },
           { header: "CREATED" },
@@ -464,6 +466,9 @@ export const keysList: Command = {
           // Whether requests are judged, not what against: the text can run to
           // thousands of characters and belongs to `keys guardrail <id>`.
           key.guardrailPolicy === null ? "no" : "yes",
+          // Whether the key's confidential requests are kept on local hardware;
+          // inert unless the installation's `smartRouterEnabled` is on.
+          key.smartRouting ? "yes" : "no",
           // Three states, because an expired key is refused at `/v1` while
           // looking untouched here otherwise — a key that stopped working with
           // nothing on the board saying why is the failure this column exists
@@ -481,7 +486,7 @@ export const keysList: Command = {
 
 export const keysCreate: Command = {
   usage:
-    "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--model-limit <model>:<d>:<w>=N ...] [--expires <when>] [--policy <text>] [--no-bodies]",
+    "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--model-limit <model>:<d>:<w>=N ...] [--expires <when>] [--policy <text>] [--smart-routing] [--no-bodies]",
   summary: "Mint a gateway API key, printed once",
   options: {
     label: { type: "string" },
@@ -490,6 +495,7 @@ export const keysCreate: Command = {
     "model-limit": { type: "string", multiple: true },
     expires: { type: "string" },
     policy: { type: "string" },
+    "smart-routing": { type: "boolean" },
     "no-bodies": { type: "boolean" },
   },
   async run(args, { ctx, writer }) {
@@ -521,6 +527,8 @@ export const keysCreate: Command = {
       expiresAt: expires === undefined ? null : parseWhen("--expires", expires),
       // Absent means no guardrail. Editable afterwards with `keys guardrail`.
       guardrailPolicy: policy ?? null,
+      // Absent means off. Editable afterwards with `keys smart-routing`.
+      smartRouting: boolFlag(args.values, "smart-routing"),
     });
 
     emit(ctx, writer, created, () => {
@@ -741,6 +749,43 @@ policy: none; requests are not judged`;
 policy:
 ${key.guardrailPolicy}`;
     });
+  },
+};
+
+/**
+ * The fifth editable field: whether this key's confidential requests stay local.
+ *
+ * Unlike its siblings it never shows without changing: the flag is a bare
+ * boolean, so exactly one of `--on` and `--off` is required and both or neither
+ * is a usage error. The installation's `smartRouterEnabled` still gates it;
+ * `omni doctor` says when a flagged key would be refused.
+ */
+export const keysSmartRouting: Command = {
+  usage: "keys smart-routing <id> (--on | --off)",
+  summary: "Turn confidential-data routing on or off for one key",
+  options: {
+    on: { type: "boolean" },
+    off: { type: "boolean" },
+  },
+  async run(args, { ctx, writer }) {
+    const id = requirePositional(args, 0, "key id");
+    const on = boolFlag(args.values, "on");
+    const off = boolFlag(args.values, "off");
+    if (on === off) throw new UsageError("pass exactly one of --on or --off");
+
+    const store = await ctx.store();
+    const existing = (await listKeys(store)).find((entry) => entry.id === id);
+    if (existing === undefined) throw new CliError(`no api key "${id}"`);
+
+    const key = await setKeySmartRouting(store, id, { enabled: on });
+    emit(ctx, writer, key, () =>
+      fields([
+        ["id", key.id],
+        ["label", key.label],
+        ["prefix", `${key.prefix}…`],
+        ["smart routing", key.smartRouting ? "on" : "off"],
+      ]),
+    );
   },
 };
 

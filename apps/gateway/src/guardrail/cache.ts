@@ -1,6 +1,10 @@
 import type { Verdict } from "./classifier.ts";
 
-/** How long a verdict is reused. An hour covers an agent's tool loop on one human message. */
+/**
+ * How long a verdict is reused. An hour covers a human message re-sent while
+ * the conversation waits; a tool turn changes the key (tool results are judged)
+ * and so asks again.
+ */
 export const VERDICT_TTL_MS = 3_600_000;
 
 /**
@@ -19,12 +23,14 @@ export type VerdictKeyParts = {
   system: string;
   /** Every judged human message, oldest first, as `JudgedText.human` holds them. */
   human: readonly string[];
+  /** Every judged tool result, oldest first, as `JudgedText.toolResults` holds them. */
+  toolResults: readonly string[];
 };
 
 /**
- * One digest over every part, structured by JSON — the messages as an array,
- * never joined — so no two different tuples, and no two splits of the same
- * text into messages, can serialise to the same input. Editing the policy, the
+ * One digest over every part, structured by JSON — the messages and the tool
+ * results each as an array, never joined — so no two different tuples, and no
+ * two splits of the same text into messages, can serialise to the same input. Editing the policy, the
  * classifier model, or the history-turn setting where it changes which
  * messages are judged therefore misses naturally, and nothing ever needs
  * invalidating. Hashed so the cache holds no request text.
@@ -32,7 +38,14 @@ export type VerdictKeyParts = {
 export function verdictKey(parts: VerdictKeyParts): string {
   return Bun.CryptoHasher.hash(
     "sha256",
-    JSON.stringify([parts.apiKeyId, parts.policy, parts.model, parts.system, parts.human]),
+    JSON.stringify([
+      parts.apiKeyId,
+      parts.policy,
+      parts.model,
+      parts.system,
+      parts.human,
+      parts.toolResults,
+    ]),
     "hex",
   );
 }
@@ -46,8 +59,8 @@ export function verdictKey(parts: VerdictKeyParts): string {
  * next turn may succeed. Process-local is acceptable in a cluster: a miss costs
  * one call, never a wrong verdict.
  */
-export class VerdictCache {
-  readonly #entries = new Map<string, { verdict: Verdict; expiresAt: number }>();
+export class VerdictCache<V extends string = Verdict> {
+  readonly #entries = new Map<string, { verdict: V; expiresAt: number }>();
   readonly #max: number;
   readonly #ttlMs: number;
 
@@ -56,7 +69,7 @@ export class VerdictCache {
     this.#ttlMs = opts.ttlMs ?? VERDICT_TTL_MS;
   }
 
-  get(key: string, now: number): Verdict | undefined {
+  get(key: string, now: number): V | undefined {
     const entry = this.#entries.get(key);
     if (entry === undefined) return undefined;
     if (entry.expiresAt <= now) {
@@ -69,7 +82,7 @@ export class VerdictCache {
     return entry.verdict;
   }
 
-  set(key: string, verdict: Verdict, now: number): void {
+  set(key: string, verdict: V, now: number): void {
     this.#entries.delete(key);
     this.#entries.set(key, { verdict, expiresAt: now + this.#ttlMs });
     while (this.#entries.size > this.#max) {

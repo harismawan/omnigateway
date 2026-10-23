@@ -7,6 +7,7 @@ const parts = {
   model: "judge",
   system: "sys",
   human: ["earlier", "ask"],
+  toolResults: ["output"],
 };
 
 test("the key changes with every part, and does not concatenate ambiguously", () => {
@@ -41,6 +42,20 @@ test("the judged messages are keyed in order, and their boundaries are unambiguo
   expect(key(["ask"])).not.toBe(key(["earlier", "ask"]));
   expect(key([])).not.toBe(key([""]));
   expect(key(["ab", "c"])).toBe(key(["ab", "c"]));
+});
+
+/** A new tool turn changes the key, and so does a different split of the same text. */
+test("tool results are part of the key", () => {
+  const key = (toolResults: string[]): string => verdictKey({ ...parts, toolResults });
+  expect(key(["a"])).not.toBe(key(["b"]));
+  expect(key(["ab"])).not.toBe(key(["a", "b"]));
+  expect(key(["a"])).not.toBe(key([]));
+  expect(key(["a", "b"])).not.toBe(key(["b", "a"]));
+  // Text moved between the human and tool-result arrays is a different input.
+  expect(verdictKey({ ...parts, human: ["a"], toolResults: [] })).not.toBe(
+    verdictKey({ ...parts, human: [], toolResults: ["a"] }),
+  );
+  expect(key(["a", "b"])).toBe(key(["a", "b"]));
 });
 
 test("a verdict lives for the TTL and no longer", () => {

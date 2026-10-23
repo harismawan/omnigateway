@@ -40,6 +40,7 @@ type Row = {
   revoked_at: number | null;
   expires_at: number | null;
   guardrail_policy: string | null;
+  smart_routing: number;
 };
 
 /**
@@ -86,6 +87,8 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   expiresAt: r.expires_at,
   // Null is "no guardrail", which every row written before migration 19 holds.
   guardrailPolicy: r.guardrail_policy,
+  // 0 is "off", which every row written before migration 20 holds.
+  smartRouting: r.smart_routing === 1,
 });
 
 export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRepo {
@@ -115,8 +118,8 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       db.run(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
                                body_logging_opt_out, created_at, revoked_at, expires_at,
-                               guardrail_policy)
-         VALUES (?,?,?,?,?,?,?,?,NULL,?,?)`,
+                               guardrail_policy, smart_routing)
+         VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)`,
         [
           input.id,
           input.label,
@@ -131,6 +134,7 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
           now,
           input.expiresAt,
           input.guardrailPolicy,
+          input.smartRouting ? 1 : 0,
         ],
       );
       return { ...input, createdAt: now, revokedAt: null };
@@ -141,8 +145,8 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       db.run(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
                                body_logging_opt_out, created_at, revoked_at, expires_at,
-                               guardrail_policy)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                               guardrail_policy, smart_routing)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           row.id,
           row.label,
@@ -159,6 +163,9 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
           // Likewise: a restore that dropped the policy would hand back a key
           // freed of the purpose its operator restricted it to.
           row.guardrailPolicy,
+          // Likewise: a restore that dropped the flag would hand back a key
+          // whose confidential requests go to the external model.
+          row.smartRouting ? 1 : 0,
         ],
       );
     },
@@ -196,6 +203,10 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
       // No guard on the text: the control schema trims and bounds it, and any
       // string round-trips through a TEXT column.
       db.run("UPDATE api_keys SET guardrail_policy = ? WHERE id = ?", [policy, id]);
+    },
+
+    async setSmartRouting(id: string, enabled: boolean) {
+      db.run("UPDATE api_keys SET smart_routing = ? WHERE id = ?", [enabled ? 1 : 0, id]);
     },
 
     async revoke(id: string) {

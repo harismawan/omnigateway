@@ -522,21 +522,26 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Refuse at auth, degrade at list. Unparseable `limits` read back as `null`, distinct from `{}`;
   `authenticateApiKey` turn it into `INTERNAL` — not `AUTH`. `keys.list()` must never throw over
   such row. Nothing may collapse that `null` into `{}`.
-- Four fields editable after minting: `limits` (`setKeyLimits`, `PUT /api/keys/:id/limits`),
+- Five fields editable after minting: `limits` (`setKeyLimits`, `PUT /api/keys/:id/limits`),
   `modelAllowlist` (`setKeyModels`, `PUT /api/keys/:id/models`), `expiresAt`
-  (`setKeyExpiry`, `PUT /api/keys/:id/expiry`) and `guardrailPolicy` (`setKeyGuardrail`,
-  `PUT /api/keys/:id/guardrail`). All written whole, never patched —
+  (`setKeyExpiry`, `PUT /api/keys/:id/expiry`), `guardrailPolicy` (`setKeyGuardrail`,
+  `PUT /api/keys/:id/guardrail`) and `smartRouting` (`setKeySmartRouting`,
+  `PUT /api/keys/:id/smart-routing`). All written whole, never patched —
   `{}` is how last limit go away; allowlist `null` and `[]` opposite facts, and expiry `null`
   ("never") and absent field likewise, so both schemas refuse default. Expiry take **past
   instant** — "expire it now", reversible where `revoke` not; never add `> now` guard.
   `bodyLoggingOptOut` deliberately not editable — promise to whoever hold key. Policy `null` is
   only "no guardrail"; empty after trim refused, never coerced.
+  `smartRouting` take `{enabled}`; absent refused.
 - **Usage-policy guardrail fails closed**: only a bare `ALLOW` from the classifier admits; deny,
   timeout, error, unreadable reply, unset `guardrailModel` all refuse, fixed gateway-authored
   messages, classifier text never reaches client or stdout. Judged inside the event sequence
-  (`judgeFirst`), after admission; classifier dispatched with `requestTransforms: false`, bare
+  (`screenFirst`), after admission; classifier dispatched with `requestTransforms: false`, bare
   transport. Pin: `apps/gateway/test/guardrail/proxy.test.ts`; parser:
   `apps/gateway/test/guardrail/classifier.test.ts`.
+- Smart routing never falls back external; fails closed. Pin:
+  `apps/gateway/test/smartRouter/proxy.test.ts`; parser:
+  `apps/gateway/test/smartRouter/classifier.test.ts`.
 - Windows *slide*. `1m` exact ring in `apps/gateway`; longer windows are `usage.sumSince` —
   which must filter `state = 'done'` — plus in-memory delta, cached 30s. Composition may over-count,
   must **never** under-count, so delta keep everything at or after read instant. Failed

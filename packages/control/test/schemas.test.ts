@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { DEFAULT_SETTINGS, GUARDRAIL_POLICY_MAX_CHARS } from "@omni/store";
+import {
+  DEFAULT_SETTINGS,
+  GUARDRAIL_POLICY_MAX_CHARS,
+  SMART_ROUTER_POLICY_MAX_CHARS,
+} from "@omni/store";
 import { isProviderId } from "../src/connect.ts";
 import {
   keyCreateSchema,
@@ -260,4 +264,42 @@ test("a key minted without a policy has none, and one minted with a policy keeps
   expect(() =>
     keyCreateSchema.parse({ guardrailPolicy: "p".repeat(GUARDRAIL_POLICY_MAX_CHARS + 1) }),
   ).toThrow();
+});
+
+test("the smart router settings refuse an empty model, a blank or over-long policy, a bad timeout", () => {
+  for (const key of ["smartRouterClassifierModel", "smartRouterLocalModel"]) {
+    for (const bad of ["", "   ", 7, "x".repeat(257)]) {
+      expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, [key]: bad })).toThrow();
+    }
+    expect(settingsSchema.parse({ ...DEFAULT_SETTINGS, [key]: " local " })).toMatchObject({
+      [key]: "local",
+    });
+    expect(settingsSchema.parse({ ...DEFAULT_SETTINGS, [key]: null })).toMatchObject({
+      [key]: null,
+    });
+  }
+  for (const smartRouterPolicy of [
+    "",
+    "   ",
+    "x".repeat(SMART_ROUTER_POLICY_MAX_CHARS + 1),
+    null,
+  ]) {
+    expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, smartRouterPolicy })).toThrow();
+  }
+  // The ceiling counts characters after the trim.
+  expect(
+    settingsSchema.parse({
+      ...DEFAULT_SETTINGS,
+      smartRouterPolicy: ` ${"x".repeat(SMART_ROUTER_POLICY_MAX_CHARS)} `,
+    }).smartRouterPolicy,
+  ).toHaveLength(SMART_ROUTER_POLICY_MAX_CHARS);
+  for (const smartRouterTimeoutMs of [0, -1, 1.5, 60_001, "10000", null]) {
+    expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, smartRouterTimeoutMs })).toThrow();
+  }
+  expect(settingsSchema.parse({ ...DEFAULT_SETTINGS, smartRouterTimeoutMs: 60_000 })).toMatchObject(
+    {
+      smartRouterTimeoutMs: 60_000,
+    },
+  );
+  expect(() => settingsSchema.parse({ ...DEFAULT_SETTINGS, smartRouterEnabled: "yes" })).toThrow();
 });

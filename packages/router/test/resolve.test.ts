@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS, type ProviderDescriptors } from "@omni/providers/descriptors";
 import { entryOf, snapshot, target } from "@omni/testkit";
-import { resolveModel } from "../src/resolve.ts";
+import { localOnlyModel, resolveModel } from "../src/resolve.ts";
 
 test("resolves a configured virtual model by id", () => {
   const vm = {
@@ -247,4 +247,41 @@ test("a built-in still prices exactly as it did", () => {
   expect(viaPrefix?.provider).toBe("anthropic");
   expect(viaPrefix?.costPerMTok.input).toBeGreaterThan(0);
   expect(viaPrefix?.costPerMTok.output).toBeGreaterThan(0);
+});
+
+test("localOnlyModel returns a configured model whose every target is custom", () => {
+  const vm = {
+    id: "private",
+    strategy: "score" as const,
+    isAlias: false,
+    targets: [
+      target({ provider: "custom", model: "llama", endpointId: "ollama" }),
+      target({ provider: "custom", model: "qwen", endpointId: "vllm" }),
+    ],
+  };
+  expect(localOnlyModel("private", snapshot({ models: [vm] }))?.id).toBe("private");
+});
+
+test("localOnlyModel refuses a model with any non-custom target", () => {
+  const vm = {
+    id: "mixed",
+    strategy: "score" as const,
+    isAlias: false,
+    targets: [
+      target({ provider: "custom", model: "llama", endpointId: "ollama" }),
+      target({ provider: "anthropic", model: "claude-opus-4" }),
+    ],
+  };
+  expect(localOnlyModel("mixed", snapshot({ models: [vm] }))).toBeNull();
+});
+
+test("localOnlyModel refuses a model with no targets", () => {
+  const vm = { id: "empty", strategy: "score" as const, isAlias: false, targets: [] };
+  expect(localOnlyModel("empty", snapshot({ models: [vm] }))).toBeNull();
+});
+
+test("localOnlyModel refuses shorthand and unknown names", () => {
+  expect(localOnlyModel("anthropic/claude-x", snapshot({}))).toBeNull();
+  expect(localOnlyModel("custom/llama", snapshot({}))).toBeNull();
+  expect(localOnlyModel("no-such-model", snapshot({}))).toBeNull();
 });

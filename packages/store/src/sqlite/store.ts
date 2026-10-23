@@ -160,6 +160,7 @@ export async function createStore(opts: {
       setModelAllowlist: (id, modelAllowlist) => handle.keys.setModelAllowlist(id, modelAllowlist),
       setExpiry: (id, expiresAt) => handle.keys.setExpiry(id, expiresAt),
       setGuardrailPolicy: (id, policy) => handle.keys.setGuardrailPolicy(id, policy),
+      setSmartRouting: (id, enabled) => handle.keys.setSmartRouting(id, enabled),
       revoke: (id) => handle.keys.revoke(id),
     },
 

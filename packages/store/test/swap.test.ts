@@ -67,6 +67,7 @@ function key(id: string): ApiKeyInput {
     bodyLoggingOptOut: false,
     expiresAt: null,
     guardrailPolicy: null,
+    smartRouting: false,
   };
 }
 

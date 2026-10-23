@@ -133,9 +133,14 @@ newest marked as the request being judged and the rest as its context. Fewer
 are sent when fewer exist; `1` judges the last message alone. The 16,000-character
 human cap is a **total** across them, and the newest spends it first: it is cut
 only when it alone is longer, and older messages are cut, then dropped, oldest
-first. Long texts are cut to head and tail around a marker. Tool results, images,
-files, assistant replies and mid-conversation system turns are never sent. Any
-cut or drop is recorded as `guardrail:truncated`. Only a reply of exactly
+first. Long texts are cut to head and tail around a marker. The text of every
+tool result after the oldest judged human message is sent too, oldest first, in
+its own section the classifier is told is data, not instructions. Those results
+have a cap of their own, 16,000 characters in total, spent newest first and cut
+and dropped the same way. Tool-result images and files, tool-call arguments,
+assistant replies and mid-conversation system turns are never sent. A user turn
+carrying a tool result is still not a human message, so it does not count toward
+`guardrailHistoryTurns`. Any cut or drop is recorded as `guardrail:truncated`. Only a reply of exactly
 `ALLOW` that the model finished (stop reason end of turn or stop sequence)
 admits the request; one cut off at the token ceiling or stopped by the
 backend's filter is unreadable, whatever it says.
@@ -162,16 +167,106 @@ counters, though the call is never admitted itself) and toward the `5h`/`1w`
 request windows, which count rows; not the `1m` window, which counts admissions.
 That over-counts, which is the direction limits may err. A refused request still counts as one: the
 check runs after admission. Verdicts are cached per process for an hour, keyed on
-key, policy, classifier, system text and every judged message in order, so an
-agent's tool turns on one human message cost one call; a cached verdict writes no
-classifier row. Editing the policy, the classifier, or a `guardrailHistoryTurns`
+key, policy, classifier, system text, every judged message and every judged
+tool result in order, so a repeated request costs one call but each new tool turn
+in an agent's loop costs another — more latency per step and more classifier
+spend; a cached verdict writes no classifier row. Editing the policy, the classifier, or a `guardrailHistoryTurns`
 change that alters which messages are judged misses the cache naturally. Failures
 are never cached.
 
 A guardrail, not a security boundary: it does not stop prompt injection aimed at
 the classifier, a request spread over more messages than the window, a client
-that leaves the forbidden ask out of the history it sends, or one hidden in tool
-results or images. Rolling back to a build without usage policies serves every key unjudged.
+that leaves the forbidden ask out of the history it sends, or one hidden in
+images. Tool output is judged, but it is attacker-reachable text in front of the
+classifier — a fetched page or a file can push the verdict either way, including
+into refusing legitimate work. Rolling back to a build without usage policies serves every key unjudged.
+
+## Confidential routing
+
+A key flagged for smart routing has its requests judged for confidential content
+by a local classifier; a request that carries any is served by a local model
+instead of the one asked for. A key without the flag is never judged and nothing
+below applies to it. It is active only when `smartRouterEnabled` is on **and** the
+key's flag is on:
+
+```bash
+omni settings set smartRouterClassifierModel local-judge   # virtual model, every target custom
+omni settings set smartRouterLocalModel local-llm          # virtual model, every target custom
+omni settings set smartRouterPolicy "Personal data, credentials, salaries."   # default: DEFAULT_SMART_ROUTER_POLICY
+omni settings set smartRouterTimeoutMs 10000               # per classifier call, 1..60000, default 10000
+omni settings set smartRouterEnabled true
+omni keys smart-routing <id> --on                          # or: omni keys create --smart-routing
+omni keys smart-routing <id> --off
+omni keys list                                             # SMART ROUTING column
+```
+
+Both models must be virtual models whose every target is the `custom` provider.
+Neither is refused at write time: the gateway checks at send time, through
+`DispatchOptions.localOnly`, for the rerouted request, every classifier call, a
+guardrail check on a locally routed request, and a request already on a local
+model. A model that was edited to include an external target is refused, not sent.
+`omni doctor` has a "smart routing" row: it warns when keys carry the flag while
+the switch is on and either model is unset, resolves to nothing, or is not
+local-only, and is quiet when no key uses it or the switch is off. The console
+says the same inline: `GET /api/settings` carries `smartRouterModels`
+(`{classifier, local}`, each `ok | unset | unresolved | notLocal`, judged whatever
+the switch), Settings shows a warning under each model picker, and the Keys board
+notice fires while a flagged key exists and the switch is on with either model
+unset, unresolved or not local-only.
+
+What is judged: every text the request carries — system and mid-conversation
+system turns, user and assistant text, thinking, tool-call arguments, tool
+results, tool names, descriptions, input schemas, options and provider-tool wire,
+citations, the string fields of provider-native blocks and tool-result native
+parts (not signatures, encrypted content, ids or base64), and the vendor bag.
+Only images, files and base64 payloads are not judged. The text
+is split into segments of up to 8,000 characters, packed from the start of the
+conversation so that earlier segments stay the same as it grows. Each segment is
+judged `PUBLIC` or `CONFIDENTIAL` by the classifier, at most four at a time, each
+under `smartRouterTimeoutMs`. The first `CONFIDENTIAL` stops the rest. More than
+64 uncached segments routes local without judging (`smart-router:oversize`).
+
+| Outcome | Result | Row tag |
+|---|---|---|
+| all public | the original model | `smart-router:public` |
+| confidential | `smartRouterLocalModel` | `smart-router:local` |
+| requested model already local-only | as requested, not judged | `smart-router:already-local` |
+| timeout, error, unreadable reply | `UPSTREAM` 502, "confidentiality check unavailable" | `smart-router:unavailable` |
+| a model unset, unresolved, or not local-only | `INTERNAL` 500, "confidential routing is not configured" | `smart-router:unconfigured` |
+
+Streaming requests get the same refusals as an in-stream error on a 200. A local
+model that fails surfaces dispatch's own error; **there is never a fallback to an
+external provider**. A confidential request the local model cannot serve is
+refused `NO_CANDIDATES` (503) with `smart-router:local` on the row: provider-native
+content (an Anthropic `search_result` or `document`, a server-tool result) and
+provider-defined tools (`web_search`, `bash`, …) pin a request to their provider,
+and a `custom` target never matches; so do tools or images the local target's
+capabilities lack. Seeing these in the logs means a client sent confidential
+content through a feature only an external provider offers — expected, not a
+routing fault. Because providers also produce `UPSTREAM` and `INTERNAL`, the
+tag identifies a smart-routing outcome in the logs. Tags combine with others on
+the row — `smart-router:local` with `smart-router:oversize`, or a `guardrail:*`
+tag beside either.
+
+Each classifier call is one `request_logs` row per check, under the same key,
+tagged `smart-router:classifier`, with `requested_model` the classifier. A check
+that judges several segments is still one row, its attempts being the number of
+calls. It is charged to the key as the guardrail classifier is. Verdicts are
+cached per process for one hour per classifier model, policy and segment, so a
+growing conversation costs only its new segments; a cached verdict writes no row,
+and failures are never cached. Editing the policy or the classifier misses the
+cache naturally.
+
+With a usage policy on the same key, smart routing runs first and the guardrail
+second. When the request goes local, the guardrail check uses
+`smartRouterClassifierModel`, never `guardrailModel`, so confidential text does
+not reach a possibly external classifier.
+
+A reduction in leaks, not a security boundary: it does not stop deliberate
+evasion (encoding, splitting content across messages, prompt injection aimed at
+the classifier), content in images and files, or a classifier miss. Rolling back
+to a build without it ignores the column and sends everything external — it fails
+open.
 
 ## Metrics and traces
 

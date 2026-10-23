@@ -260,12 +260,13 @@ test("a key without a policy is served even with no classifier configured", asyn
 });
 
 /**
- * With a one-turn window, only the request-level system prompt and the last
- * message a human wrote are judged. A user turn carrying any tool result is a
- * tool turn — even with text an agent client injected beside it — and is
- * skipped whole; tool output and images never reach the classifier.
+ * With a one-turn window, the request-level system prompt, the last message a
+ * human wrote and the text of the tool results after it are judged. A user turn
+ * carrying any tool result is a tool turn — even with text an agent client
+ * injected beside it: it is not a human message, so that text is never sent —
+ * but the result's own text is. Images never reach the classifier.
  */
-test("a tool-result final turn judges the earlier human text, never the tool output or images", async () => {
+test("a tool-result final turn judges the human text and the tool text, never images", async () => {
   const h = await guardrailHarness({ settings: { guardrailHistoryTurns: 1 } });
   const png =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
@@ -304,7 +305,7 @@ test("a tool-result final turn judges the earlier human text, never the tool out
   expect(text).toContain("please review my parser");
   expect(text).toContain("AGENT-SYSTEM-PROMPT");
   expect(text).not.toContain("an older human message");
-  expect(text).not.toContain("SECRET-TOOL-OUTPUT");
+  expect(text).toContain('<tool_results>\n<result n="1">\nSECRET-TOOL-OUTPUT\n</result>');
   expect(text).not.toContain("INJECTED-REMINDER");
   expect(JSON.stringify(sent.request)).not.toContain(png);
   // Exactly the gateway's instruction and one text turn: no image, no tool block.
@@ -312,6 +313,59 @@ test("a tool-result final turn judges the earlier human text, never the tool out
   expect(sent.request.messages).toHaveLength(1);
   expect(sent.request.messages[0]?.content.map((b) => b.type)).toEqual(["text"]);
   expect(sent.request.tools).toBeUndefined();
+  h.store.close();
+});
+
+test("a tool result in the window reaches the classifier", async () => {
+  const h = await guardrailHarness();
+  const res = await h.call("anthropic", {
+    body: {
+      messages: [
+        { role: "user", content: "summarise that page" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "fetch", input: { url: "u" } }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "SECRET-OUTPUT" }],
+        },
+      ],
+    },
+  });
+  expect(res.status).toBe(200);
+  const sent = h.judgeCalls[0];
+  if (sent === undefined) throw new Error("the classifier was not called");
+  expect(classifierText(sent)).toContain("SECRET-OUTPUT");
+  h.store.close();
+});
+
+/** The accepted cost of judging tool output: an agent pays a classifier call per tool turn. */
+test("a new tool turn under the same human message is a new classifier call", async () => {
+  const h = await guardrailHarness();
+  const first = [
+    { role: "user", content: "run the build" },
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "bash", input: { cmd: "make" } }],
+    },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "built" }] },
+  ];
+  expect((await h.call("anthropic", { body: { messages: first } })).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(1);
+  // The very same request is still a hit.
+  expect((await h.call("anthropic", { body: { messages: first } })).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(1);
+  const next = [
+    ...first,
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t2", name: "bash", input: { cmd: "test" } }],
+    },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: "passed" }] },
+  ];
+  expect((await h.call("anthropic", { body: { messages: next } })).status).toBe(200);
+  expect(h.judgeCalls).toHaveLength(2);
   h.store.close();
 });
 
@@ -406,7 +460,8 @@ const agentConversation = [
 
 /**
  * By default the last three human messages are judged, oldest first, the
- * newest as the request; tool turns between them are skipped and never sent.
+ * newest as the request; the tool results after the oldest of them follow as
+ * their own section, and text injected beside a tool result is never sent.
  */
 test("by default the last three human messages reach the classifier, oldest first", async () => {
   const h = await guardrailHarness();
@@ -421,10 +476,15 @@ test("by default the last three human messages reach the classifier, oldest firs
       '<message n="2">\nHUMAN-THREE\n</message>',
       "</earlier_messages>",
       "",
+      "<tool_results>",
+      '<result n="1">\nTOOL-OUTPUT-ONE\n</result>',
+      '<result n="2">\nTOOL-OUTPUT-TWO\n</result>',
+      "</tool_results>",
+      "",
       "<request>\nHUMAN-FOUR\n</request>",
     ].join("\n"),
   );
-  for (const absent of ["HUMAN-ONE", "TOOL-OUTPUT", "INJECTED-REMINDER", "next?", "done"]) {
+  for (const absent of ["HUMAN-ONE", "INJECTED-REMINDER", "next?", "done"]) {
     expect({ absent, present: text.includes(absent) }).toEqual({ absent, present: false });
   }
   expect(sent.request.messages).toHaveLength(1);

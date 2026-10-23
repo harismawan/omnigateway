@@ -937,3 +937,53 @@ test("keys create takes a policy, and keys list says whether a key has one, not 
   expect(rows.find((row) => row.includes("staff"))).toMatch(/\byes\b/);
   expect(rows.find((row) => row.includes("plain"))).toMatch(/\bno\b/);
 });
+
+type SmartRoutingOutput = { id: string; smartRouting: boolean };
+
+async function smartRoutingOf(root: string, id: string): Promise<boolean | undefined> {
+  const listed = await cli(["keys", "list", "--json"], { root });
+  return (JSON.parse(listed.out) as { keys: SmartRoutingOutput[] }).keys.find((k) => k.id === id)
+    ?.smartRouting;
+}
+
+test("keys smart-routing turns the flag on and off, and needs exactly one of --on and --off", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "staff", "--json"], { root });
+  const id = await idOf(root, "staff");
+  expect(await smartRoutingOf(root, id)).toBe(false);
+
+  const shown = await cli(["keys", "smart-routing", id, "--on"], { root });
+  expect(shown.code).toBe(0);
+  expect(shown.out).toMatch(/smart routing\s+on/);
+  expect(await smartRoutingOf(root, id)).toBe(true);
+
+  expect((await cli(["keys", "smart-routing", id, "--off", "--json"], { root })).code).toBe(0);
+  expect(await smartRoutingOf(root, id)).toBe(false);
+
+  // Neither and both are usage errors, and nothing is written.
+  await cli(["keys", "smart-routing", id, "--on"], { root });
+  const neither = await cli(["keys", "smart-routing", id], { root });
+  expect(neither.code).toBe(2);
+  expect(neither.err).toContain("--on");
+  const both = await cli(["keys", "smart-routing", id, "--on", "--off"], { root });
+  expect(both.code).toBe(2);
+  expect(await smartRoutingOf(root, id)).toBe(true);
+
+  const missing = await cli(["keys", "smart-routing", "not-a-key", "--on"], { root });
+  expect(missing.code).not.toBe(0);
+  expect(missing.err).toContain("not-a-key");
+});
+
+test("keys create takes --smart-routing, and keys list has a smart routing column", async () => {
+  const root = makeRoot();
+  await cli(["keys", "create", "--label", "staff", "--smart-routing", "--json"], { root });
+  await cli(["keys", "create", "--label", "plain", "--json"], { root });
+  expect(await smartRoutingOf(root, await idOf(root, "staff"))).toBe(true);
+  expect(await smartRoutingOf(root, await idOf(root, "plain"))).toBe(false);
+
+  const table = await cli(["keys", "list"], { root });
+  expect(table.out).toContain("SMART ROUTING");
+  const rows = table.out.split("\n");
+  expect(rows.find((row) => row.includes("staff"))).toMatch(/\byes\b/);
+  expect(rows.find((row) => row.includes("plain"))).toMatch(/\bno\b/);
+});

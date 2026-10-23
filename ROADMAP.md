@@ -134,7 +134,11 @@ These require demonstrated operator demand and an architectural design before im
    expressions. Still unbuilt, and still deterministic. Rules about a key's *purpose* — "work
    only", which no pattern can state — shipped separately as per-key usage policies judged by a
    classifier model ([design](docs/superpowers/specs/2026-10-18-key-guardrails-design.md)); that
-   feature forecloses nothing here and should not absorb it.
+   feature forecloses nothing here and should not absorb it. Likewise, per-key confidential
+   routing now exists: a local classifier model judges what a request carries and sends
+   confidential ones to a local model ([design](docs/superpowers/specs/2026-10-22-smart-router-design.md)).
+   It is model-judged, not deterministic, so pattern detection (credential patterns, company
+   identifiers, regular expressions) remains a separate, unbuilt item here.
 4. **Exact-response caching** — isolated by key or project, explicitly bypassable, and invalidated
    across replicas. Semantic caching remains out of scope until exact caching proves valuable.
 5. **Mock provider and sanitized replay** — reproduce translation, retry, timeout, failover, and

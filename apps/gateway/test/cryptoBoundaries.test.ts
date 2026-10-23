@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { verdictKey } from "../src/guardrail/cache.ts";
 import { parseResponsesRequest } from "../src/ingress/responses.ts";
+import { segmentKey } from "../src/smartRouter/cache.ts";
 
 test("verdict keys preserve the complete UTF8 JSON tuple and empty members", () => {
   expect(
@@ -10,10 +11,20 @@ test("verdict keys preserve the complete UTF8 JSON tuple and empty members", () 
       model: "モデル",
       system: "",
       human: ["", "café"],
+      toolResults: ["", "結果🦊"],
     }),
-  ).toBe("13e280b024e57aeed5ec6cc273f0fbd2ced6a103dee990532eee9ba07fb3f948");
-  expect(verdictKey({ apiKeyId: "", policy: "", model: "", system: "", human: [] })).toBe(
-    "be4374bb3254c5871b59c635cbd456b58aaaac344d890c01f2d818b362dd7f8b",
+  ).toBe("a8e0847d2c2475bad31cfdaab1010710179d314fb571865156d1cdac76c0d57d");
+  expect(
+    verdictKey({ apiKeyId: "", policy: "", model: "", system: "", human: [], toolResults: [] }),
+  ).toBe("4ad9f43325e69195ee5aabdea79bdcbfa54b3a77e3a116d6a36e5561e6ce370d");
+});
+
+test("segment keys preserve the complete UTF8 JSON tuple and empty members", () => {
+  expect(segmentKey("モデル", "許可🦊", "秘密 café")).toBe(
+    "536ed8fffeeeebcac957349d228bdedd9b73f924d443715bdc92cb40edb9c89d",
+  );
+  expect(segmentKey("", "", "")).toBe(
+    "799c55d702efedb7750db18b36386fc3a3f4be7dddcfb649adeb41a3ed0da228",
   );
 });
 

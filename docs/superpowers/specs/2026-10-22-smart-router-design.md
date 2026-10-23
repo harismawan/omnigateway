@@ -156,7 +156,11 @@ Public requests use `guardrailModel` as today. *(Designer's call.)*
   both the row and the debit subject.
 - **A request whose model already resolves local-only** (every target `custom`) is not judged: it
   is dispatched as is, tagged `smart-router:already-local`. Nothing can leak, so a classifier
-  outage must not refuse it. *(Designer's call.)*
+  outage must not refuse it. The configuration check (both models set and local-only) still runs
+  first, for every active request. *(Designer's call.)*
+- **Whenever the request goes local** (confidential, already-local, oversize), a guardrail check on
+  the same request uses `smartRouterClassifierModel`, never `guardrailModel` — the text was not
+  shown to be public. *(Designer's call, extends "Order with guardrails".)*
 - Capability mismatch (client sent tools/images the local model lacks) is handled by dispatch's
   existing capability filters → `NO_CANDIDATES`, i.e. refused, never sent external.
 
@@ -200,10 +204,21 @@ every later turn. Judging only the last few messages would leak it. So:
   - the text of every `user` and `assistant` message;
   - **tool results' text content** *(operator decision)*;
   - tool-call arguments (`toolUse.input`, serialised) — a Write call can carry a secret just as a
-    tool result can; replayed thinking text; tool definitions' names and descriptions.
+    tool result can; replayed thinking text; tool definitions' names, descriptions, input
+    schemas, options and provider-tool wire fields (serialised); text-block citations (serialised).
     *(Designer's call: same leak path as tool results.)*
+  - text inside provider-native blocks and tool-result native parts — every string field of the
+    payload, prefixed with the block type (`[document]`), skipping `signature`,
+    `encrypted_content`, `encrypted_index`, `id`, `tool_use_id`, `type`, `cache_control`,
+    `media_type`, a base64 source's `data`, and any string over 1,000 characters made only of the
+    base64 alphabet. A text `document`, a `search_result`, an `mcp_tool_result`, a `compaction`, a
+    native `mid_conv_system` turn and a Responses `*_output` all carry plain text upstream;
+  - the vendor bag (`request.vendor`, serialised, with the tool definitions) when non-empty —
+    `prediction.content` and structured-output schema descriptions are sent upstream too.
+    *(Final-review fix: those paths reached the external provider unjudged.)*
 
-  Images, files and `providerNative` blocks are not judged (threat model). The guardrail's
+  Only images, files and base64 payloads are not judged (threat model). Judging too much costs
+  classifier tokens; judging too little leaks. The guardrail's
   `extract.ts` does not do this; smart routing needs its own extractor (sharing helpers where
   sensible).
 - **Per segment, not per request.** Each text is split into segments of at most 8,000 characters
@@ -308,7 +323,8 @@ generalised; CLI flag spelling; file layout (suggested `apps/gateway/src/smartRo
 - Confidentiality first; confidential requests' guardrail check uses the local classifier.
 - Whole history judged, per segment, cached, no truncation; oversize → local. (Tool results
   judged: operator's decision. Tool-call arguments, thinking, mid-conversation system turns, tool
-  definitions also judged: designer's.)
+  definitions also judged: designer's. Native-block text and the vendor bag also judged; only
+  images, files and base64 payloads are not.)
 - Notification: `x-omni-route` header on non-streaming; `model` rewritten to the configured local
   model id on rerouted responses (stream `start` event and collected body); log tag.
 - `smartRouterTimeoutMs` is per classifier call; no overall check deadline.

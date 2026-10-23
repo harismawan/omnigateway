@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { DEFAULT_SETTINGS } from "@omni/store";
+import { DEFAULT_SETTINGS, DEFAULT_SMART_ROUTER_POLICY } from "@omni/store";
 import { memoryStore } from "@omni/testkit";
 import { settingsSchema } from "../src/schemas.ts";
 import { putSettings } from "../src/settings.ts";
@@ -111,5 +111,60 @@ test("the history window is an integer in 1..10, and a save that omits it keeps 
   ).toBe(7);
   const { guardrailHistoryTurns: _turns, ...old } = DEFAULT_SETTINGS;
   expect((await putSettings(store, old)).guardrailHistoryTurns).toBe(7);
+  store.close();
+});
+
+test("the smart router settings save, clear, and survive a save that omits them", async () => {
+  const store = await memoryStore();
+  const saved = await putSettings(store, {
+    ...DEFAULT_SETTINGS,
+    smartRouterEnabled: true,
+    smartRouterClassifierModel: "local-judge",
+    smartRouterLocalModel: "local-chat",
+    smartRouterPolicy: "Anything about Project Falcon.",
+    smartRouterTimeoutMs: 5_000,
+  });
+  expect(saved.smartRouterEnabled).toBe(true);
+  expect(saved.smartRouterClassifierModel).toBe("local-judge");
+  expect(saved.smartRouterLocalModel).toBe("local-chat");
+  expect(saved.smartRouterPolicy).toBe("Anything about Project Falcon.");
+  expect(saved.smartRouterTimeoutMs).toBe(5_000);
+
+  // A save from a client that never heard of the five keeps every one — a
+  // reset to the defaults here would quietly switch routing off.
+  const {
+    smartRouterEnabled: _enabled,
+    smartRouterClassifierModel: _classifier,
+    smartRouterLocalModel: _local,
+    smartRouterPolicy: _policy,
+    smartRouterTimeoutMs: _timeout,
+    ...old
+  } = DEFAULT_SETTINGS;
+  const kept = await putSettings(store, { ...old, maxAttempts: 4 });
+  expect(kept.maxAttempts).toBe(4);
+  expect(kept.smartRouterEnabled).toBe(true);
+  expect(kept.smartRouterClassifierModel).toBe("local-judge");
+  expect(kept.smartRouterLocalModel).toBe("local-chat");
+  expect(kept.smartRouterPolicy).toBe("Anything about Project Falcon.");
+  expect(kept.smartRouterTimeoutMs).toBe(5_000);
+
+  // `null` is how a model is unset, distinct from omitting the field; a
+  // present `false` switches the feature off.
+  const cleared = await putSettings(store, {
+    ...old,
+    smartRouterEnabled: false,
+    smartRouterClassifierModel: null,
+    smartRouterLocalModel: null,
+  });
+  expect(cleared.smartRouterEnabled).toBe(false);
+  expect(cleared.smartRouterClassifierModel).toBeNull();
+  expect(cleared.smartRouterLocalModel).toBeNull();
+  expect(cleared.smartRouterPolicy).toBe("Anything about Project Falcon.");
+  store.close();
+});
+
+test("a stored default policy reads back as the gateway's own text", async () => {
+  const store = await memoryStore();
+  expect((await store.config.getSettings()).smartRouterPolicy).toBe(DEFAULT_SMART_ROUTER_POLICY);
   store.close();
 });

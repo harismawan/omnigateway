@@ -4,6 +4,7 @@ import {
   HUMAN_CAP,
   judgedText,
   SYSTEM_CAP,
+  TOOL_RESULTS_CAP,
   TRUNCATION_MARKER,
 } from "../../src/guardrail/extract.ts";
 
@@ -33,6 +34,7 @@ test("the system text and the last human message are judged, nothing older", () 
   expect(judged).toEqual({
     system: "sys one\n\nsys two",
     human: ["second ask"],
+    toolResults: [],
     truncated: false,
   });
 });
@@ -164,7 +166,12 @@ test("images, files, thinking and native blocks are never judged, only text bloc
     }),
     1,
   );
-  expect(judged).toEqual({ system: "sys", human: ["look at this"], truncated: false });
+  expect(judged).toEqual({
+    system: "sys",
+    human: ["look at this"],
+    toolResults: [],
+    truncated: false,
+  });
 });
 
 test("nothing to judge is judged as nothing, not a special case", () => {
@@ -177,8 +184,13 @@ test("nothing to judge is judged as nothing, not a special case", () => {
       }),
       1,
     ),
-  ).toEqual({ system: "", human: [], truncated: false });
-  expect(judgedText(req({}), 1)).toEqual({ system: "", human: [], truncated: false });
+  ).toEqual({ system: "", human: [], toolResults: [], truncated: false });
+  expect(judgedText(req({}), 1)).toEqual({
+    system: "",
+    human: [],
+    toolResults: [],
+    truncated: false,
+  });
   // A conversation whose every user turn is a tool turn has no human message.
   expect(
     judgedText(
@@ -320,6 +332,7 @@ test("the last N human messages are judged oldest first, tool turns between them
   expect(judgedText(request, 3)).toEqual({
     system: "",
     human: ["h3", "h4", "h5"],
+    toolResults: [],
     truncated: false,
   });
 });
@@ -338,7 +351,7 @@ test("a window outside 1..10 is clamped, never judging nothing", () => {
   for (const turns of [0, -2, Number.NaN, 0.5, 2.5, Infinity, -Infinity]) {
     expect({ turns, judged: judgedText(request, turns) }).toEqual({
       turns,
-      judged: { system: "", human: ["h12"], truncated: false },
+      judged: { system: "", human: ["h12"], toolResults: [], truncated: false },
     });
   }
   const ten = Array.from({ length: 10 }, (_, i) => `h${i + 3}`);
@@ -351,11 +364,13 @@ test("fewer human messages than N sends what exists, flagging nothing", () => {
   expect(judgedText(req({ messages: [user("only ask")] }), 3)).toEqual({
     system: "",
     human: ["only ask"],
+    toolResults: [],
     truncated: false,
   });
   expect(judgedText(req({ messages: [user("first"), reply("ok"), user("second")] }), 10)).toEqual({
     system: "",
     human: ["first", "second"],
+    toolResults: [],
     truncated: false,
   });
 });
@@ -386,7 +401,7 @@ test("the human cap is a total; the oldest gives way first and the newest keeps 
   // Everything fits exactly: nothing cut, nothing flagged.
   const fits = [m("A", third), m("B", third), m("C", HUMAN_CAP - 2 * third)];
   const exact = judgedText(req({ messages: fits.map(user) }), 3);
-  expect(exact).toEqual({ system: "", human: fits, truncated: false });
+  expect(exact).toEqual({ system: "", human: fits, toolResults: [], truncated: false });
   expect(total(exact.human)).toBe(HUMAN_CAP);
 
   // One character over: the oldest is cut head plus tail, the two newer whole.
@@ -404,19 +419,24 @@ test("the human cap is a total; the oldest gives way first and the newest keeps 
   // A newer message filling the cap drops every older one, untouched itself.
   const full = [m("A", 10), m("B", HUMAN_CAP - 100), m("C", 100)];
   const dropped = judgedText(req({ messages: full.map(user) }), 3);
-  expect(dropped).toEqual({ system: "", human: full.slice(1), truncated: true });
+  expect(dropped).toEqual({ system: "", human: full.slice(1), toolResults: [], truncated: true });
 
   // Room too small to hold the marker drops the message rather than over-run.
   const newest = m("C", HUMAN_CAP - 5);
   const tiny = judgedText(req({ messages: [m("A", 500), newest].map(user) }), 3);
-  expect(tiny).toEqual({ system: "", human: [newest], truncated: true });
+  expect(tiny).toEqual({ system: "", human: [newest], toolResults: [], truncated: true });
   // A message that fits the little room left whole is kept, uncut.
   const fitsTight = judgedText(req({ messages: ["tiny", newest].map(user) }), 3);
-  expect(fitsTight).toEqual({ system: "", human: ["tiny", newest], truncated: false });
+  expect(fitsTight).toEqual({
+    system: "",
+    human: ["tiny", newest],
+    toolResults: [],
+    truncated: false,
+  });
   // And everything older than a dropped message goes with it, even a message
   // small enough to fit the room left: context with a hole in it misleads.
   const gap = judgedText(req({ messages: ["tiny", m("A", 500), newest].map(user) }), 3);
-  expect(gap).toEqual({ system: "", human: [newest], truncated: true });
+  expect(gap).toEqual({ system: "", human: [newest], toolResults: [], truncated: true });
 
   // The boundary itself: room of exactly the marker's length holds the marker
   // and nothing of the message, so the message is dropped; one character more
@@ -426,18 +446,21 @@ test("the human cap is a total; the oldest gives way first and the newest keeps 
   expect(judgedText(req({ messages: [older, atMarker].map(user) }), 3)).toEqual({
     system: "",
     human: [atMarker],
+    toolResults: [],
     truncated: true,
   });
   const pastMarker = m("C", HUMAN_CAP - TRUNCATION_MARKER.length - 1);
   expect(judgedText(req({ messages: [older, pastMarker].map(user) }), 3)).toEqual({
     system: "",
     human: [`H${TRUNCATION_MARKER}`, pastMarker],
+    toolResults: [],
     truncated: true,
   });
   const twoPast = m("C", HUMAN_CAP - TRUNCATION_MARKER.length - 2);
   expect(judgedText(req({ messages: [older, twoPast].map(user) }), 3)).toEqual({
     system: "",
     human: [`H${TRUNCATION_MARKER}T`, twoPast],
+    toolResults: [],
     truncated: true,
   });
 
@@ -465,4 +488,123 @@ test("with every message long, the middle is cut and the oldest dropped, never t
   expect(judged.human[0]).toHaveLength(HUMAN_CAP / 2);
   expect(judged.human[0]?.startsWith("M")).toBe(true);
   expect(judged.human.join("")).not.toContain("O");
+});
+
+const toolTurn = (...results: Array<[string, string]>): ChatRequest["messages"][number] => ({
+  role: "user",
+  content: results.map(([toolUseId, content]) => ({ type: "toolResult", toolUseId, content })),
+});
+const toolCall = (id: string): ChatRequest["messages"][number] => ({
+  role: "assistant",
+  content: [{ type: "toolUse", id, name: "bash", input: { cmd: "ARGUMENTS" } }],
+});
+
+/**
+ * The window is the human messages; tool results are whatever came back after
+ * the oldest of them. The older "R0" sits before the newest human message, so a
+ * one-message window does not reach it and a two-message window does.
+ */
+test("tool results after the oldest judged human message are judged, oldest first", () => {
+  const request = req({
+    messages: [
+      user("old ask"),
+      toolTurn(["t0", "R0"]),
+      user("ask"),
+      toolCall("t1"),
+      toolTurn(["t1", "R1"]),
+      toolTurn(["t2", "R2"]),
+    ],
+  });
+  expect(judgedText(request, 1).toolResults).toEqual(["R1", "R2"]);
+  expect(judgedText(request, 2).toolResults).toEqual(["R0", "R1", "R2"]);
+  // Several results in one turn keep their order, and arguments are never sent.
+  const several = judgedText(
+    req({ messages: [user("ask"), toolCall("a"), toolTurn(["a", "A"], ["b", "B"])] }),
+    1,
+  );
+  expect(several.toolResults).toEqual(["A", "B"]);
+  expect(JSON.stringify(several)).not.toContain("ARGUMENTS");
+  // With no human message every tool result in the request is in the window.
+  expect(
+    judgedText(req({ messages: [toolTurn(["a", "A"]), toolCall("b"), toolTurn(["b", "B"])] }), 3)
+      .toolResults,
+  ).toEqual(["A", "B"]);
+});
+
+test("an error tool result is judged as text", () => {
+  const judged = judgedText(
+    req({
+      messages: [
+        user("ask"),
+        {
+          role: "user",
+          content: [{ type: "toolResult", toolUseId: "a", content: "boom", isError: true }],
+        },
+      ],
+    }),
+    1,
+  );
+  expect(judged.toolResults).toEqual(["boom"]);
+});
+
+test("tool-result images, files and native parts are never judged", () => {
+  const judged = judgedText(
+    req({
+      messages: [
+        user("ask"),
+        {
+          role: "user",
+          content: [
+            {
+              type: "toolResult",
+              toolUseId: "a",
+              content: "txt",
+              images: [{ type: "image", mediaType: "image/png", data: "IMGDATA" }],
+              files: [
+                { type: "file", mediaType: "application/pdf", data: "FILEDATA", filename: "f.pdf" },
+              ],
+              native: [
+                {
+                  type: "providerNative",
+                  provider: "anthropic",
+                  blockType: "search_result",
+                  data: { v: "NATIVE" },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }),
+    1,
+  );
+  expect(judged.toolResults).toEqual(["txt"]);
+  expect(JSON.stringify(judged)).not.toMatch(/IMGDATA|FILEDATA|NATIVE/);
+});
+
+/** Same newest-first rule as the human cap, against a cap of its own. */
+test("the tool-result cap keeps the newest, cuts head and tail, drops older, and flags truncation", () => {
+  const chunk = (c: string): string => c.repeat(10_000);
+  const judged = judgedText(
+    req({
+      messages: [
+        user("ask"),
+        toolTurn(["a", chunk("O")]),
+        toolTurn(["b", chunk("M")]),
+        toolTurn(["c", chunk("N")]),
+      ],
+    }),
+    1,
+  );
+  expect(judged.truncated).toBe(true);
+  expect(judged.toolResults).toHaveLength(2);
+  expect(judged.toolResults[1]).toBe(chunk("N"));
+  expect(judged.toolResults[0]).toHaveLength(TOOL_RESULTS_CAP - 10_000);
+  expect(judged.toolResults[0]).toContain(TRUNCATION_MARKER);
+  expect(judged.toolResults[0]?.startsWith("M")).toBe(true);
+  expect(judged.toolResults[0]?.endsWith("M")).toBe(true);
+  expect(judged.toolResults.join("")).not.toContain("O");
+  expect(judged.toolResults.join("").length).toBeLessThanOrEqual(TOOL_RESULTS_CAP);
+  // The human cap is untouched by tool output: the human text stays whole.
+  expect(judged.human).toEqual(["ask"]);
 });

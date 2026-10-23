@@ -109,6 +109,21 @@ describe("client board", () => {
     expect(screen.queryByText("Usage policy")).toBeNull();
   });
 
+  /** The holder learns whether their requests may be rerouted, never why or by what rule. */
+  test("a key's confidential routing reads on or off, with no policy text", async () => {
+    stub({ "GET /api/client/summary": () => apiKey({ smartRouting: true }) });
+    const first = renderWithProviders(<ClientBoard />, {
+      client: makeQueryClient({ catalog: false }),
+    });
+    expect(await screen.findByText("Confidential routing: on")).toBeTruthy();
+    expect(screen.queryByRole("switch")).toBeNull();
+    first.unmount();
+
+    stub();
+    renderWithProviders(<ClientBoard />, { client: makeQueryClient({ catalog: false }) });
+    expect(await screen.findByText("Confidential routing: off")).toBeTruthy();
+  });
+
   /** `null` and `[]` are opposite facts and must not render alike. */
   test("an empty allowlist reads as no models, not as every model", async () => {
     stub({ "GET /api/client/summary": () => apiKey({ modelAllowlist: [] }) });

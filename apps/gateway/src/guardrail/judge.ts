@@ -103,6 +103,7 @@ async function callClassifier(
     signal: AbortSignal;
     timeoutMs: number;
     debit: UsageDebit;
+    localOnly: boolean;
   },
 ): Promise<ClassifierResult> {
   const id = deps.requestId();
@@ -148,7 +149,7 @@ async function callClassifier(
       },
       signal,
       id,
-      { requestTransforms: false },
+      { requestTransforms: false, localOnly: input.localOnly },
     );
     for await (const event of outcome.events) events.push(event);
   } catch (error) {
@@ -229,10 +230,23 @@ export async function judge(
     signal: AbortSignal;
     debit: UsageDebit;
     parentRequestId: string;
+    /**
+     * The classifier model, overriding `settings.guardrailModel` when present.
+     * Smart routing passes its local classifier for a request going local, so
+     * text not shown to be public never reaches a possibly external guardrail
+     * model. `null` is an override that is not configured, and refuses as one.
+     */
+    model?: string | null;
+    /**
+     * Whether the classifier call may reach only a local-only model; see
+     * `DispatchOptions.localOnly`. `true` exactly when `model` is smart
+     * routing's classifier, on a request not shown to be public.
+     */
+    localOnly?: boolean;
   },
 ): Promise<GuardrailOutcome> {
   const { settings } = await deps.snapshots.get(deps.now());
-  const model = settings.guardrailModel;
+  const model = input.model === undefined ? settings.guardrailModel : input.model;
   if (model === null) {
     return {
       kind: "refused",
@@ -259,6 +273,7 @@ export async function judge(
     model,
     system: judged.system,
     human: judged.human,
+    toolResults: judged.toolResults,
   });
   const cached = deps.cache.get(key, deps.now());
   // A hit writes no classifier row and costs nothing.
@@ -270,6 +285,7 @@ export async function judge(
     signal: input.signal,
     timeoutMs: settings.guardrailTimeoutMs,
     debit: input.debit,
+    localOnly: input.localOnly === true,
   });
   if (result.kind === "cancelled") return result;
   if (result.kind === "failed") {
@@ -295,24 +311,82 @@ export async function judge(
 }
 
 /**
- * A dispatch whose first step is the judge.
+ * How pre-dispatch screening ended: smart routing, then the guardrail.
  *
- * Streaming routes send their head and start keepalives at once, so judging
- * inside the event sequence lets those keepalives cover the classifier's
+ * `proceed` carries where the request goes — `reroute` is the model to dispatch
+ * instead of the client's, `null` for the request as sent — and `route`, what
+ * the non-streaming response tells the client (`null` when smart routing did
+ * not judge the request).
+ */
+export type ScreenOutcome =
+  | {
+      kind: "proceed";
+      reroute: string | null;
+      route: "local" | "external" | null;
+      notes: readonly string[];
+    }
+  | { kind: "refused"; error: GatewayError; notes: readonly string[] }
+  | { kind: "cancelled" };
+
+/** A guardrail verdict as a screening outcome: an allow proceeds as sent. */
+export function guardrailScreen(outcome: GuardrailOutcome): ScreenOutcome {
+  return outcome.kind === "allowed"
+    ? { kind: "proceed", reroute: null, route: null, notes: outcome.notes }
+    : outcome;
+}
+
+/**
+ * What a screen that threw refuses with, and the warning it prints: one per
+ * check, so the line an operator greps for names the check that led.
+ */
+export type ScreenThrew = {
+  error: GatewayError;
+  notes: readonly string[];
+  warning: string;
+  reason: string;
+};
+
+/** A guardrail-only screen that threw: refused as the guardrail being unavailable. */
+export function guardrailThrew(): ScreenThrew {
+  return {
+    error: refusal("UPSTREAM", UNAVAILABLE_MESSAGE),
+    notes: ["guardrail:unavailable"],
+    warning: "usage policy check failed",
+    reason: "usage policy check threw",
+  };
+}
+
+/**
+ * A dispatch whose first step is screening.
+ *
+ * Streaming routes send their head and start keepalives at once, so screening
+ * inside the event sequence lets those keepalives cover the classifiers'
  * latency — `/v1/responses` clients abandon a connection silent for ~5s — and a
  * refusal arrives the way every other pre-commit failure does: an in-stream
  * `error` event on a 200. The non-streaming path drains the same sequence and
  * renders the error with its status. One mechanism, both paths.
  *
  * `log()` is the one row the route completes, exactly once, in every outcome:
- * dispatch's own live log with the guardrail notes added on the allow path, or
- * this wrapper's own log carrying the refusal. A client that hangs up during the
- * check makes the sequence throw its signal's reason, which every route path
+ * dispatch's own live log with the screening notes added on the proceed path,
+ * or this wrapper's own log carrying the refusal. A client that hangs up during
+ * the check makes the sequence throw its signal's reason, which every route path
  * already records as a disconnect rather than a failure.
+ *
+ * `route()` is where the request went, once the sequence got that far: `null`
+ * before then, on a refusal, and for a request smart routing did not judge.
  */
-export function judgeFirst(opts: {
-  judge: () => Promise<GuardrailOutcome>;
-  dispatch: () => Promise<DispatchOutcome>;
+export function screenFirst(opts: {
+  screen: () => Promise<ScreenOutcome>;
+  /**
+   * Dispatches the request once screening proceeds: `reroute` is the model to
+   * send instead of the client's, `route` where screening decided it goes.
+   */
+  dispatch: (
+    reroute: string | null,
+    route: "local" | "external" | null,
+  ) => Promise<DispatchOutcome>;
+  /** The refusal a screen that threw is answered with, by whichever check led. */
+  onThrow: ScreenThrew;
   signal: AbortSignal;
   requestId: string;
   startedAt: number;
@@ -320,12 +394,13 @@ export function judgeFirst(opts: {
   now: () => number;
   logger: Logger;
   surface: LogFields["surface"];
-}): DispatchOutcome {
+}): DispatchOutcome & { route: () => "local" | "external" | null } {
   const own = newCompletedRequestLog(opts.requestId, opts.startedAt, {
     requestedModel: opts.requestedModel,
     status: 0,
   });
   let inner: DispatchOutcome | null = null;
+  let route: "local" | "external" | null = null;
   let notes: readonly string[] = [];
   const noted = (log: RequestLog): RequestLog => {
     for (const note of notes) if (!log.degradations.includes(note)) log.degradations.push(note);
@@ -333,30 +408,26 @@ export function judgeFirst(opts: {
   };
 
   /**
-   * The judge failing in itself — a settings read that throws — is a check that
-   * could not run, and refuses exactly as one that timed out does: the parent
-   * row still says which guardrail outcome it was. Its message stays off
-   * stdout; it is a store's or a dependency's, never this gateway's.
+   * The screen failing in itself — a settings read that throws — is a check
+   * that could not run, and refuses exactly as one that timed out does: the
+   * parent row still says which outcome it was. Its message stays off stdout;
+   * it is a store's or a dependency's, never this gateway's.
    */
-  async function judged(): Promise<GuardrailOutcome> {
+  async function screen(): Promise<ScreenOutcome> {
     try {
-      return await opts.judge();
+      return await opts.screen();
     } catch {
       if (opts.signal.aborted) return { kind: "cancelled" };
-      opts.logger.warn("usage policy check failed", {
+      opts.logger.warn(opts.onThrow.warning, {
         requestId: opts.requestId,
-        reason: "usage policy check threw",
+        reason: opts.onThrow.reason,
       });
-      return {
-        kind: "refused",
-        error: refusal("UPSTREAM", UNAVAILABLE_MESSAGE),
-        notes: ["guardrail:unavailable"],
-      };
+      return { kind: "refused", error: opts.onThrow.error, notes: opts.onThrow.notes };
     }
   }
 
   async function* events(): AsyncGenerator<StreamEvent, void, undefined> {
-    const outcome = await judged();
+    const outcome = await screen();
     if (outcome.kind === "cancelled") throw opts.signal.reason;
     notes = outcome.notes;
     if (outcome.kind === "refused") {
@@ -374,12 +445,14 @@ export function judgeFirst(opts: {
       };
       return;
     }
-    inner = await opts.dispatch();
+    inner = await opts.dispatch(outcome.reroute, outcome.route);
+    route = outcome.route;
     yield* inner.events;
   }
 
   return {
     events: events(),
     log: () => (inner === null ? noted(own) : noted(inner.log())),
+    route: () => route,
   };
 }
