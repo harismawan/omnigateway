@@ -1,7 +1,7 @@
 # Using the gateway from a client
 
 What a client sees on `/v1/*`: the endpoints, how to authenticate, the rate-limit
-headers a response carries, and how tools decide where a request can go. Operator
+headers a response carries, how confidential routing shows, and how tools decide where a request can go. Operator
 setup is in the [README](../README.md); compatibility rules and measured client
 behaviour are in the specs under `superpowers/specs/`.
 
@@ -55,6 +55,36 @@ the header names whichever ceiling will deny first. `spend` and `concurrency`
 render on neither dialect, because no vendor defines a header for them. A
 refusal is `429` with `Retry-After` in seconds, computed from the oldest request
 still inside the window that refused you.
+
+## Confidential routing
+
+If your key has confidential routing on (the client dashboard shows
+"Confidential routing: on"), the gateway reads everything a request carries — the
+whole conversation, tool results and tool definitions included, not only the last
+message — before it is routed. Anything confidential is served by an in-house
+model instead of the one you named; images and files are not read. What you can
+observe:
+
+- **`x-omni-route: local|external`** on a non-streaming response that was judged,
+  saying where the request went (`local` also for a request that already named an
+  in-house model). A key without the feature, and a refusal, carry
+  no such header. A streaming response has already sent its head by the time the
+  request is judged, so it carries none.
+- **`model` names where it was served.** A rerouted response reports the
+  in-house model's id as `model`, in streaming and non-streaming bodies alike,
+  not the model you asked for. A request judged public, or already on an in-house
+  model, reports the model it asked for.
+- **Refusals.** If the check cannot be made the request is refused rather than
+  sent anywhere: `UPSTREAM` (502, "confidentiality check unavailable") when the
+  classifier times out or fails, and `INTERNAL` (500, "confidential routing is not
+  configured") when the gateway is not set up to serve it. Streaming requests get
+  the same as an in-stream `error` event on a 200. The messages are fixed. If the
+  in-house model itself fails, you get its failure; the request is never retried
+  on an external provider.
+
+Every check is charged to your key as a request of its own, visible on the
+dashboard. The check reduces leaks of ordinary confidential content; it is not a
+security boundary.
 
 ## Tools and routing
 

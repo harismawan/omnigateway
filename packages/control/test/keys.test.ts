@@ -14,6 +14,7 @@ import {
   setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
+  setKeySmartRouting,
 } from "../src/keys.ts";
 
 /**
@@ -362,5 +363,45 @@ test("a key can be minted with a usage policy", async () => {
   expect((await store.keys.get(created.id))?.guardrailPolicy).toBe("Work only.");
   const plain = await createKey(store, { label: "plain" });
   expect((await store.keys.get(plain.id))?.guardrailPolicy).toBeNull();
+  store.close();
+});
+
+test("smart routing is off at mint, mintable on, and toggled through the store", async () => {
+  const store = await memoryStore();
+  const plain = await createKey(store, { label: "plain" });
+  expect((await store.keys.get(plain.id))?.smartRouting).toBe(false);
+  const on = await createKey(store, { label: "private", smartRouting: true });
+  expect((await store.keys.get(on.id))?.smartRouting).toBe(true);
+
+  const set = await setKeySmartRouting(store, plain.id, { enabled: true });
+  expect(set.smartRouting).toBe(true);
+  expect((await store.keys.get(plain.id))?.smartRouting).toBe(true);
+  expect((await readOwnKey(store, plain.id)).smartRouting).toBe(true);
+  expect((await listKeys(store)).find((k) => k.id === plain.id)?.smartRouting).toBe(true);
+
+  const cleared = await setKeySmartRouting(store, plain.id, { enabled: false });
+  expect(cleared.smartRouting).toBe(false);
+  expect((await store.keys.get(plain.id))?.smartRouting).toBe(false);
+  store.close();
+});
+
+test("a smart routing edit with an absent or non-boolean flag is refused and writes nothing", async () => {
+  const store = await memoryStore();
+  const { key } = await seedApiKey(store, { smartRouting: true });
+  for (const refused of [{}, { enabled: "yes" }, { enabled: null }, { enabled: true, x: 1 }]) {
+    await expect(setKeySmartRouting(store, key.id, refused)).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+    });
+  }
+  expect((await store.keys.get(key.id))?.smartRouting).toBe(true);
+  store.close();
+});
+
+test("setting smart routing on an unknown key id is refused rather than matching no row", async () => {
+  const store = await memoryStore();
+  await seedApiKey(store);
+  await expect(setKeySmartRouting(store, "not-a-key", { enabled: true })).rejects.toThrow(
+    "no such api key",
+  );
   store.close();
 });

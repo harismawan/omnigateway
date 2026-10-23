@@ -126,7 +126,7 @@ export {
 } from "./breaker.ts";
 export { eligible, type Pair, requiredCapabilities } from "./filters.ts";
 export { QUOTA_FLOOR, quotaHeadroom, quotaStaleAfterMs, UNKNOWN_QUOTA } from "./quota.ts";
-export { resolveModel } from "./resolve.ts";
+export { localOnlyModel, resolveModel } from "./resolve.ts";
 export { buildSnapshot, healthKey } from "./snapshot.ts";
 export type {
   Candidate,

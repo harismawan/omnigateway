@@ -30,6 +30,7 @@ import {
   keysList,
   keysModels,
   keysRevoke,
+  keysSmartRouting,
 } from "./commands/keys.ts";
 import {
   modelsCatalog,
@@ -111,6 +112,7 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "keys models": keysModels,
   "keys expiry": keysExpiry,
   "keys guardrail": keysGuardrail,
+  "keys smart-routing": keysSmartRouting,
   "keys revoke": keysRevoke,
 
   "plugin list": pluginList,

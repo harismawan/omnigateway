@@ -661,6 +661,141 @@ test("custom failover stays within the target endpoint", async () => {
   store.close();
 });
 
+/**
+ * `localOnly` re-checks the model on dispatch's own snapshot: a model with any
+ * non-`custom` target fails before a candidate is tried, so confidential text
+ * a caller validated earlier cannot ride a target added since.
+ */
+test("localOnly refuses a model with an external target and calls no adapter", async () => {
+  const store = await createStore({
+    path: ":memory:",
+    encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+  });
+  await store.credentials.create({
+    id: "local-1",
+    provider: "custom",
+    label: "local-1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {
+      endpointId: "local",
+      endpointLabel: "local",
+      origin: "https://local.example.com",
+      protocol: "chat_completions",
+    },
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "key-local-1",
+    idToken: null,
+  });
+  await store.credentials.create({
+    id: "ext-1",
+    provider: "anthropic",
+    label: "ext-1",
+    authType: "apiKey",
+    enabled: true,
+    tier: 1,
+    weight: 100,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: {},
+    disabledReason: null,
+    disabledAt: null,
+    accessToken: null,
+    refreshToken: null,
+    apiKey: "key-ext-1",
+    idToken: null,
+  });
+  const localTarget = {
+    provider: "custom",
+    endpointId: "local",
+    model: "local-model",
+    tier: 1,
+    weight: 1,
+    costPerMTok: { input: 1, output: 1 },
+    capabilities: { tools: true, images: true, reasoning: true },
+  } as const;
+  await store.config.putModel({
+    id: "mixed",
+    strategy: "priority",
+    isAlias: false,
+    targets: [
+      localTarget,
+      {
+        provider: "anthropic",
+        model: "claude-opus-4",
+        tier: 1,
+        weight: 1,
+        costPerMTok: { input: 15, output: 75 },
+        capabilities: { tools: true, images: true, reasoning: true },
+      },
+    ],
+  });
+  await store.config.putModel({
+    id: "local",
+    strategy: "priority",
+    isAlias: false,
+    targets: [localTarget],
+  });
+  const calls: string[] = [];
+  const adapter: ProviderAdapter = {
+    id: "custom",
+    capabilities: { tools: true, images: true, reasoning: true },
+    async send(input) {
+      calls.push(input.model);
+      return { events: textStream("local"), degradations: [] };
+    },
+  };
+  const configured = { ...deps(store, adapter), adapters: { custom: adapter, anthropic: adapter } };
+
+  const refused = await dispatch(
+    { ...req, model: "mixed" },
+    configured,
+    new AbortController().signal,
+    "req_mixed",
+    { localOnly: true },
+  );
+  const events = await drain(refused.events);
+  expect(events).toEqual([
+    {
+      type: "error",
+      code: "INTERNAL",
+      message: "confidential routing is not configured",
+      retryable: false,
+    },
+  ]);
+  expect(calls).toEqual([]);
+  expect(refused.log()).toMatchObject({ status: 500, errorCode: "INTERNAL", attempts: 0 });
+
+  // The same model without the flag routes as ever, so the refusal is the flag's.
+  const unflagged = await dispatch(
+    { ...req, model: "mixed" },
+    configured,
+    new AbortController().signal,
+    "req_mixed_2",
+  );
+  await drain(unflagged.events);
+  expect(calls.length).toBe(1);
+
+  const served = await dispatch(
+    { ...req, model: "local" },
+    configured,
+    new AbortController().signal,
+    "req_local",
+    { localOnly: true },
+  );
+  expect((await drain(served.events)).at(-1)).toMatchObject({ type: "end" });
+  expect(calls.at(-1)).toBe("local-model");
+  expect(served.log()).toMatchObject({ status: 200, credentialId: "local-1" });
+  store.close();
+});
+
 test("a failure after the commit point surfaces as an error event, not a retry", async () => {
   const store = await seeded(2);
   const trace = createTrace({ startedAt: 1_000_000, traceparent: null });

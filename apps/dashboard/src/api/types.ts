@@ -442,6 +442,9 @@ export type KeyExpiryInput = { expiresAt: number | null };
  */
 export type KeyGuardrailInput = { policy: string | null };
 
+/** Whether the key's requests are screened for confidential content, sent whole. */
+export type KeySmartRoutingInput = { enabled: boolean };
+
 export type KeyCreateInput = {
   label: string;
   /** Null means every configured model; an empty array means none. */
@@ -483,6 +486,21 @@ export type SettingsResponse = {
    * collapsed with `||`.
    */
   dayOffsetMinutes?: number;
+  /**
+   * Each configured smart-router model's state, judged by the gateway against
+   * its live routing snapshot whatever the switch says. Mirrors
+   * `SmartRouterModelStatus` in `@omni/control`. Optional because an older
+   * gateway does not send it; absent means "not known", never "ok".
+   */
+  smartRouterModels?: SmartRouterModelStatus;
+};
+
+/** `unset`, names nothing routing resolves, resolves to a non-`custom` target, or fine. */
+export type SmartRouterModelState = "ok" | "unset" | "unresolved" | "notLocal";
+
+export type SmartRouterModelStatus = {
+  classifier: SmartRouterModelState;
+  local: SmartRouterModelState;
 };
 
 /**

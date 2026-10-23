@@ -1,4 +1,10 @@
-import { GUARDRAIL_HISTORY_TURNS_MAX, GUARDRAIL_TIMEOUT_MAX_MS } from "@omni/store/types";
+import {
+  DEFAULT_SMART_ROUTER_POLICY,
+  GUARDRAIL_HISTORY_TURNS_MAX,
+  GUARDRAIL_TIMEOUT_MAX_MS,
+  SMART_ROUTER_POLICY_MAX_CHARS,
+  SMART_ROUTER_TIMEOUT_MAX_MS,
+} from "@omni/store/types";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import styled from "styled-components";
 import {
@@ -6,11 +12,12 @@ import {
   useModels,
   useSaveSettings,
   useSettings,
+  useSmartRouterModels,
 } from "../../api/queries.ts";
-import type { PonytailMode, Settings } from "../../api/types.ts";
+import type { PonytailMode, Settings, SmartRouterModelState } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { Button } from "../../ui/Button.tsx";
-import { Field, Input } from "../../ui/Field.tsx";
+import { Field, Input, Textarea } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Grid, Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
@@ -63,6 +70,11 @@ type LimitKey = Exclude<
   | "guardrailModel"
   | "guardrailTimeoutMs"
   | "guardrailHistoryTurns"
+  | "smartRouterEnabled"
+  | "smartRouterClassifierModel"
+  | "smartRouterLocalModel"
+  | "smartRouterPolicy"
+  | "smartRouterTimeoutMs"
 >;
 
 const LIMITS: ReadonlyArray<{
@@ -262,6 +274,12 @@ const Saved = styled.p`
   color: ${({ theme }) => theme.color.ok};
 `;
 
+const PolicyCount = styled.span<{ $over: boolean }>`
+  font-size: 11px;
+  font-family: ${({ theme }) => theme.font.mono};
+  color: ${({ $over, theme }) => ($over ? theme.color.down : theme.color.inkDim)};
+`;
+
 /**
  * A control that is present but cannot act, and why.
  *
@@ -278,6 +296,50 @@ const Blocked = styled.p`
   }
 `;
 
+/** One board per screen, so fixed ids are unique. */
+const CLASSIFIER_STATUS_ID = "smart-router-classifier-status";
+const LOCAL_STATUS_ID = "smart-router-local-status";
+
+/** What a smart-router model's state means for flagged keys, or `null` when nothing is wrong. */
+const MODEL_WARNINGS: Readonly<Record<SmartRouterModelState, string | null>> = {
+  ok: null,
+  unset: "Not set; flagged keys' requests are refused.",
+  unresolved: "This model does not resolve.",
+  notLocal:
+    "This model has a target that is not a custom (in-house) endpoint; flagged keys' requests are refused.",
+};
+
+/**
+ * The warning under one smart-router model picker, or `null`.
+ *
+ * Blank is judged here, from the draft, and only while the switch is on: an
+ * unset model refuses nothing while the feature is off. `unresolved` and
+ * `notLocal` are the gateway's verdict on the *saved* name, so they show
+ * whatever the switch — an operator should hear before turning it on — but
+ * only while the picker still holds that name; a different draft has not been
+ * judged yet.
+ */
+function modelWarning(
+  draft: string | undefined,
+  saved: string | null | undefined,
+  state: SmartRouterModelState | undefined,
+  enabled: boolean,
+): string | null {
+  const name = (draft ?? "").trim();
+  if (name === "") return enabled ? MODEL_WARNINGS.unset : null;
+  if (state === undefined || state === "unset" || name !== saved) return null;
+  return MODEL_WARNINGS[state];
+}
+
+/**
+ * A model picker's standing warning. Warn, not down, like `Blocked`: nothing
+ * has failed until a flagged key sends a request.
+ */
+const ModelWarning = styled.p`
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.warn};
+`;
+
 /** Every field is held as the string the input carries, booleans included. */
 type Draft = Record<string, string> & {
   rtkEnabled?: string;
@@ -288,6 +350,11 @@ type Draft = Record<string, string> & {
   guardrailModel?: string;
   guardrailTimeoutMs?: string;
   guardrailHistoryTurns?: string;
+  smartRouterEnabled?: string;
+  smartRouterClassifierModel?: string;
+  smartRouterLocalModel?: string;
+  smartRouterPolicy?: string;
+  smartRouterTimeoutMs?: string;
 };
 
 function toDraft(settings: Settings): Draft {
@@ -303,6 +370,11 @@ function toDraft(settings: Settings): Draft {
   draft.guardrailModel = settings.guardrailModel ?? "";
   draft.guardrailTimeoutMs = String(settings.guardrailTimeoutMs);
   draft.guardrailHistoryTurns = String(settings.guardrailHistoryTurns);
+  draft.smartRouterEnabled = String(settings.smartRouterEnabled);
+  draft.smartRouterClassifierModel = settings.smartRouterClassifierModel ?? "";
+  draft.smartRouterLocalModel = settings.smartRouterLocalModel ?? "";
+  draft.smartRouterPolicy = settings.smartRouterPolicy;
+  draft.smartRouterTimeoutMs = String(settings.smartRouterTimeoutMs);
   return draft;
 }
 
@@ -368,6 +440,38 @@ function parseDraft(
   }
   const guardrailModel = (draft.guardrailModel ?? "").trim();
 
+  const smartTimeoutRaw = (draft.smartRouterTimeoutMs ?? "").trim();
+  const smartRouterTimeoutMs = Number(smartTimeoutRaw);
+  if (
+    smartTimeoutRaw.length === 0 ||
+    !Number.isInteger(smartRouterTimeoutMs) ||
+    smartRouterTimeoutMs < 1 ||
+    smartRouterTimeoutMs > SMART_ROUTER_TIMEOUT_MAX_MS
+  ) {
+    return {
+      ok: false,
+      problem: `Confidential routing timeout must be a whole number from 1 to ${SMART_ROUTER_TIMEOUT_MAX_MS}.`,
+    };
+  }
+  // Counted as the gateway counts it: trimmed. An empty policy is not "use the
+  // default", it is refused, because the route refuses it and the button beside
+  // the field is the way back.
+  const smartRouterPolicy = (draft.smartRouterPolicy ?? "").trim();
+  if (smartRouterPolicy.length === 0) {
+    return {
+      ok: false,
+      problem: "Write what counts as confidential, or use Reset to default.",
+    };
+  }
+  if (smartRouterPolicy.length > SMART_ROUTER_POLICY_MAX_CHARS) {
+    return {
+      ok: false,
+      problem: `The confidential policy is at most ${SMART_ROUTER_POLICY_MAX_CHARS} characters.`,
+    };
+  }
+  const smartRouterClassifierModel = (draft.smartRouterClassifierModel ?? "").trim();
+  const smartRouterLocalModel = (draft.smartRouterLocalModel ?? "").trim();
+
   return {
     ok: true,
     settings: {
@@ -394,6 +498,13 @@ function parseDraft(
       guardrailModel: guardrailModel.length === 0 ? null : guardrailModel,
       guardrailTimeoutMs,
       guardrailHistoryTurns,
+      smartRouterEnabled: draft.smartRouterEnabled === "true",
+      // Null when blank, for the reason `guardrailModel` is.
+      smartRouterClassifierModel:
+        smartRouterClassifierModel.length === 0 ? null : smartRouterClassifierModel,
+      smartRouterLocalModel: smartRouterLocalModel.length === 0 ? null : smartRouterLocalModel,
+      smartRouterPolicy,
+      smartRouterTimeoutMs,
     },
   };
 }
@@ -413,6 +524,9 @@ export function SettingsBoard() {
   // The classifier picker's suggestions: the same source the allowlist editor
   // reads. Free text is still accepted, for `provider/model`.
   const models = useModels();
+  // The gateway's verdict on each saved smart-router model, for the warnings
+  // under the pickers; `omni doctor` was the only other place that said.
+  const smartRouterModels = useSmartRouterModels();
   const save = useSaveSettings();
   const [draft, setDraft] = useState<Draft>({});
   const [problem, setProblem] = useState<string | null>(null);
@@ -428,8 +542,27 @@ export function SettingsBoard() {
     ...WEIGHTS.map((weight) => Math.abs(Number(draft[`w.${weight.id}`]) || 0)),
   );
 
+  const smartPolicyLength = (draft.smartRouterPolicy ?? "").trim().length;
+  const smartEnabled = draft.smartRouterEnabled === "true";
+  const classifierWarning = modelWarning(
+    draft.smartRouterClassifierModel,
+    settings.data?.smartRouterClassifierModel,
+    smartRouterModels.data?.classifier,
+    smartEnabled,
+  );
+  const localWarning = modelWarning(
+    draft.smartRouterLocalModel,
+    settings.data?.smartRouterLocalModel,
+    smartRouterModels.data?.local,
+    smartEnabled,
+  );
+  /** Adds a picker's warning to what its input is described by. */
+  const describedWith = (base: string | undefined, warning: string | null, id: string) =>
+    warning === null ? base : [base, id].filter((part) => part !== undefined).join(" ");
+
   const submit = () => {
     setSaved(false);
+    if (settings.data === undefined) return;
     const parsed = parseDraft(draft);
     if (!parsed.ok) {
       setProblem(parsed.problem);
@@ -678,7 +811,7 @@ export function SettingsBoard() {
                           type="number"
                           min={1}
                           max={GUARDRAIL_TIMEOUT_MAX_MS}
-                          step={1000}
+                          step={1}
                           value={draft.guardrailTimeoutMs ?? ""}
                           onChange={(event) =>
                             setDraft({ ...draft, guardrailTimeoutMs: event.target.value })
@@ -713,6 +846,146 @@ export function SettingsBoard() {
                   </Field>
                 </Cell>
               </Weights>
+            </Stack>
+          </Module>
+
+          <Module legend="Confidential routing" meta="per-key, local model">
+            <Stack $gap={3}>
+              <Blurb>
+                Keys with confidential routing on have each request screened by the classifier
+                model. Requests it judges confidential are answered by the local model instead of
+                the model asked for. Reduces leaks of ordinary confidential content; it is not a
+                security boundary.
+              </Blurb>
+              <Options>
+                <SwitchOption
+                  label="Enable confidential routing"
+                  checked={draft.smartRouterEnabled === "true"}
+                  onCheckedChange={(checked) =>
+                    setDraft({ ...draft, smartRouterEnabled: String(checked) })
+                  }
+                >
+                  Applies only to keys that have it switched on in Keys. While off, no request is
+                  screened or rerouted.
+                </SwitchOption>
+              </Options>
+              <Weights>
+                <Cell>
+                  <Field
+                    label="Confidential classifier model"
+                    hint="Judges each request. Blank means none."
+                  >
+                    {(props) => (
+                      <Autocomplete
+                        {...props}
+                        aria-describedby={describedWith(
+                          props["aria-describedby"],
+                          classifierWarning,
+                          CLASSIFIER_STATUS_ID,
+                        )}
+                        placeholder="none"
+                        value={draft.smartRouterClassifierModel ?? ""}
+                        suggestions={(models.data ?? []).map((model) => ({
+                          value: model.id,
+                          label: model.id,
+                        }))}
+                        onValueChange={(next) =>
+                          setDraft({ ...draft, smartRouterClassifierModel: next })
+                        }
+                      />
+                    )}
+                  </Field>
+                  {classifierWarning === null ? null : (
+                    <ModelWarning id={CLASSIFIER_STATUS_ID}>{classifierWarning}</ModelWarning>
+                  )}
+                </Cell>
+                <Cell>
+                  <Field
+                    label="Local model"
+                    hint="Answers requests judged confidential. Blank means none."
+                  >
+                    {(props) => (
+                      <Autocomplete
+                        {...props}
+                        aria-describedby={describedWith(
+                          props["aria-describedby"],
+                          localWarning,
+                          LOCAL_STATUS_ID,
+                        )}
+                        placeholder="none"
+                        value={draft.smartRouterLocalModel ?? ""}
+                        suggestions={(models.data ?? []).map((model) => ({
+                          value: model.id,
+                          label: model.id,
+                        }))}
+                        onValueChange={(next) =>
+                          setDraft({ ...draft, smartRouterLocalModel: next })
+                        }
+                      />
+                    )}
+                  </Field>
+                  {localWarning === null ? null : (
+                    <ModelWarning id={LOCAL_STATUS_ID}>{localWarning}</ModelWarning>
+                  )}
+                </Cell>
+                <Cell>
+                  <Field
+                    label="Confidential check timeout"
+                    hint="A slower check refuses the request it was screening."
+                  >
+                    {(props) => (
+                      <Row $gap={2}>
+                        <Input
+                          {...props}
+                          type="number"
+                          min={1}
+                          max={SMART_ROUTER_TIMEOUT_MAX_MS}
+                          step={1}
+                          value={draft.smartRouterTimeoutMs ?? ""}
+                          onChange={(event) =>
+                            setDraft({ ...draft, smartRouterTimeoutMs: event.target.value })
+                          }
+                        />
+                        <Legend>ms</Legend>
+                      </Row>
+                    )}
+                  </Field>
+                </Cell>
+              </Weights>
+              <Blurb>
+                Must be a virtual model whose targets are all custom (in-house) endpoints. Requests
+                are refused otherwise.
+              </Blurb>
+              <Field
+                label="What counts as confidential"
+                hint="Plain language. The classifier reads this to decide which requests stay on local hardware."
+              >
+                {(props) => (
+                  <Textarea
+                    {...props}
+                    rows={6}
+                    value={draft.smartRouterPolicy ?? ""}
+                    onChange={(event) =>
+                      setDraft({ ...draft, smartRouterPolicy: event.target.value })
+                    }
+                  />
+                )}
+              </Field>
+              <Row $gap={2}>
+                <Button
+                  type="button"
+                  $size="sm"
+                  onClick={() =>
+                    setDraft({ ...draft, smartRouterPolicy: DEFAULT_SMART_ROUTER_POLICY })
+                  }
+                >
+                  Reset to default
+                </Button>
+                <Spacer />
+                <PolicyCount $over={smartPolicyLength > SMART_ROUTER_POLICY_MAX_CHARS}>
+                  {smartPolicyLength} / {SMART_ROUTER_POLICY_MAX_CHARS}
+                </PolicyCount>
+              </Row>
             </Stack>
           </Module>
 

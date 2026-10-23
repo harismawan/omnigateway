@@ -940,6 +940,76 @@ test("doctor warns when keys carry a policy and nothing can judge them", async (
   });
 });
 
+/**
+ * A key with smart routing is refused on every request while the feature is on
+ * and either model is unset, unresolved or not local-only — and none of those is
+ * refused at write time, so `doctor` is where the operator hears of it.
+ */
+test("doctor warns when keys use smart routing and the models cannot serve them", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  type Checks = {
+    smartRouter: { keysWithFlag: number; problem: string | null; enabled: boolean };
+  };
+  const doctor = async (): Promise<Checks["smartRouter"]> =>
+    (JSON.parse((await cli(["doctor", "--json"], { root, service })).out) as Checks).smartRouter;
+  const text = async (): Promise<string> => (await cli(["doctor"], { root, service })).out;
+
+  // Nothing flagged, feature off: nothing needs a model.
+  expect(await doctor()).toMatchObject({ enabled: false, keysWithFlag: 0, problem: null });
+
+  await cli(["keys", "create", "--label", "staff", "--smart-routing", "--json"], { root });
+  // Flagged but the feature is off: inert, and not a warning.
+  expect(await doctor()).toMatchObject({ enabled: false, keysWithFlag: 1, problem: null });
+  expect(await text()).not.toContain("their requests are refused");
+
+  await cli(["settings", "set", "smartRouterEnabled", "true"], { root });
+  expect((await doctor()).problem).toBe("unconfigured");
+  expect(await text()).toContain(
+    "1 key uses smart routing and smartRouterClassifierModel/smartRouterLocalModel is unset; their requests are refused",
+  );
+
+  await cli(["settings", "set", "smartRouterClassifierModel", "no-such-judge"], { root });
+  await cli(["settings", "set", "smartRouterLocalModel", "no-such-local"], { root });
+  expect((await doctor()).problem).toBe("unresolved");
+  expect(await text()).toContain("does not resolve; their requests are refused");
+
+  // Both resolve, but to a third party's model.
+  await cli(["settings", "set", "smartRouterClassifierModel", "anthropic/claude-haiku-4"], {
+    root,
+  });
+  await cli(["settings", "set", "smartRouterLocalModel", "anthropic/claude-haiku-4"], { root });
+  expect((await doctor()).problem).toBe("notLocal");
+  expect(await text()).toContain(
+    "is not a local-only model (every target must be a custom provider); their requests are refused",
+  );
+
+  const store = await openStore(root);
+  for (const id of ["judge", "private"]) {
+    await store.config.putModel({
+      id,
+      strategy: "score",
+      isAlias: false,
+      targets: [
+        {
+          provider: "custom",
+          endpointId: "local",
+          model: "llama",
+          tier: 1,
+          weight: 1,
+          costPerMTok: { input: 0, output: 0 },
+          capabilities: { tools: true, images: true, reasoning: true },
+        },
+      ],
+    });
+  }
+  store.close();
+  await cli(["settings", "set", "smartRouterClassifierModel", "judge"], { root });
+  await cli(["settings", "set", "smartRouterLocalModel", "private"], { root });
+  expect(await doctor()).toMatchObject({ keysWithFlag: 1, problem: null });
+  expect(await text()).not.toContain("their requests are refused");
+});
+
 test("doctor reports a pin the router cannot resolve, model by model", async () => {
   const root = await installation();
   const service = fakeService({ root });
@@ -1861,6 +1931,29 @@ test("settings set changes the guardrail history window and refuses one outside 
     expect((await cli(["settings", "set", "guardrailHistoryTurns", bad], { root })).code).toBe(1);
   }
   expect(await setting(root, "guardrailHistoryTurns")).toBe(5);
+});
+
+test("settings set reaches the smart router settings, and clears the models with null", async () => {
+  const root = await installation();
+
+  expect((await cli(["settings", "set", "smartRouterEnabled", "true"], { root })).code).toBe(0);
+  expect(await setting(root, "smartRouterEnabled")).toBe(true);
+  expect((await cli(["settings", "set", "smartRouterLocalModel", "private"], { root })).code).toBe(
+    0,
+  );
+  expect(await setting(root, "smartRouterLocalModel")).toBe("private");
+  expect(
+    (await cli(["settings", "set", "smartRouterPolicy", "Anything with customer names."], { root }))
+      .code,
+  ).toBe(0);
+  expect(await setting(root, "smartRouterPolicy")).toBe("Anything with customer names.");
+
+  expect((await cli(["settings", "set", "smartRouterLocalModel", "null"], { root })).code).toBe(0);
+  expect(await setting(root, "smartRouterLocalModel")).toBeNull();
+  expect(
+    (await cli(["settings", "set", "smartRouterClassifierModel", "null"], { root })).code,
+  ).toBe(0);
+  expect(await setting(root, "smartRouterClassifierModel")).toBeNull();
 });
 
 test("settings set refuses a ponytail level that is not one of the four", async () => {

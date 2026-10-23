@@ -9,8 +9,19 @@ import {
 } from "lucide-react";
 import { Fragment, useState } from "react";
 import styled from "styled-components";
-import { useKeys, useRevokeKey } from "../../api/queries.ts";
-import type { ApiKeySummary, LimitReading } from "../../api/types.ts";
+import {
+  useKeys,
+  useRevokeKey,
+  useSetKeySmartRouting,
+  useSettings,
+  useSmartRouterModels,
+} from "../../api/queries.ts";
+import type {
+  ApiKeySummary,
+  LimitReading,
+  Settings,
+  SmartRouterModelStatus,
+} from "../../api/types.ts";
 import { Confirm } from "../../components/Confirm.tsx";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatDateTime } from "../../lib/format.ts";
@@ -18,8 +29,9 @@ import { Button, IconButton } from "../../ui/Button.tsx";
 import { Chip } from "../../ui/Chip.tsx";
 import { FillModule, FillScroller } from "../../ui/Panel.tsx";
 import { Legend, Row, Truncate } from "../../ui/primitives.ts";
-import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
+import { describeError, Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
+import { Toggle } from "../../ui/Toggle.tsx";
 import { EditExpiryDialog } from "./EditExpiryDialog.tsx";
 import { EditGuardrailDialog } from "./EditGuardrailDialog.tsx";
 import { EditLimitsDialog } from "./EditLimitsDialog.tsx";
@@ -75,9 +87,77 @@ function describeNearest(nearest: LimitReading | null): string {
   return `${name} ${ceiling}, ${share === null ? "—" : Math.round(share * 100)}% used`;
 }
 
+/**
+ * What happens to a flagged key's requests when confidential routing cannot
+ * act, as one sentence, or `null` when it can.
+ *
+ * Two different outcomes, and the operator must not confuse them: switched off,
+ * a flagged key is served exactly as an unflagged one (unscreened); switched on
+ * with either model unset, unresolvable or not local-only, every flagged
+ * request is **refused** — the gateway never falls back external. `undefined`
+ * settings (still loading, or failed) warn nothing, and an absent model status
+ * (an older gateway, or not yet loaded) counts as no problem: absence of a
+ * reading is not evidence of one.
+ */
+function inertNotice(
+  settings: Settings | undefined,
+  models: SmartRouterModelStatus | null | undefined,
+): string | null {
+  if (settings === undefined) return null;
+  if (!settings.smartRouterEnabled) {
+    return "Confidential routing is switched off in Settings; these keys' requests are not screened.";
+  }
+  const problem = (
+    name: string,
+    configured: string | null,
+    state: SmartRouterModelStatus["classifier"] | undefined,
+  ): string[] =>
+    configured === null
+      ? [`the ${name} model is not set`]
+      : state === "unresolved"
+        ? [`the ${name} model does not resolve`]
+        : state === "notLocal"
+          ? [`the ${name} model is not local-only`]
+          : [];
+  const reasons = [
+    ...problem("classifier", settings.smartRouterClassifierModel, models?.classifier),
+    ...problem("local", settings.smartRouterLocalModel, models?.local),
+  ];
+  if (reasons.length === 0) return null;
+  return `Confidential routing is misconfigured (${reasons.join(" and ")}); these keys' requests are refused.`;
+}
+
+/** What the "local-routed" chip says on hover: the notice's sentence first, when there is one. */
+function describeLocalRouted(
+  settings: Settings | undefined,
+  models: SmartRouterModelStatus | null | undefined,
+): string {
+  const meaning =
+    "Requests from this key are screened for confidential content and answered by the local model when any is found.";
+  const notice = inertNotice(settings, models);
+  return notice === null ? meaning : `${notice} ${meaning}`;
+}
+
+const Failed = styled.p`
+  padding: 0 ${({ theme }) => theme.space(2)};
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.down};
+`;
+
+/** Visible, not a tooltip: warn, not down, since nothing has failed yet. */
+const Inert = styled.p`
+  padding: 0 ${({ theme }) => theme.space(2)};
+  font-size: 12px;
+  color: ${({ theme }) => theme.color.warn};
+`;
+
 export function KeysBoard() {
   const keys = useKeys();
+  const settings = useSettings();
+  const smartRouterModels = useSmartRouterModels();
   const revoke = useRevokeKey();
+  const smartRouting = useSetKeySmartRouting();
+  const [smartFailure, setSmartFailure] = useState<string | null>(null);
   const [minting, setMinting] = useState(false);
   const [editing, setEditing] = useState<ApiKeySummary | null>(null);
   const [editingModels, setEditingModels] = useState<ApiKeySummary | null>(null);
@@ -88,6 +168,10 @@ export function KeysBoard() {
 
   const now = Date.now();
   const rows = keys.data ?? [];
+  // Only live keys count: a revoked key's flag changes nothing it sends.
+  const inert = rows.some((key) => key.revokedAt === null && key.smartRouting)
+    ? inertNotice(settings.data, smartRouterModels.data)
+    : null;
   // Only the *count* narrows. Every key stays in `rows` and keeps its row,
   // expired ones included: a key that stopped working and then disappeared from
   // the board is the bug this feature would otherwise ship, and the row is
@@ -113,6 +197,10 @@ export function KeysBoard() {
           </Button>
         }
       />
+
+      {inert === null ? null : <Inert role="status">{inert}</Inert>}
+
+      {smartFailure === null ? null : <Failed role="alert">{smartFailure}</Failed>}
 
       <FillModule legend="Issued keys" meta={`${rows.length}`} flush>
         {keys.isError ? (
@@ -142,7 +230,7 @@ export function KeysBoard() {
                   <Th $align="right">Limits</Th>
                   <Th $align="right">Created</Th>
                   <Th>Body capture</Th>
-                  <Th>Usage policy</Th>
+                  <Th>Checks</Th>
                   <Th>Status</Th>
                   <Th />
                 </tr>
@@ -213,10 +301,24 @@ export function KeysBoard() {
                           {/* Whether requests are judged, not the text: a
                               policy can run to thousands of characters and is
                               read in its own dialog. */}
-                          {key.guardrailPolicy === null ? (
+                          {key.guardrailPolicy === null && !key.smartRouting ? (
                             <Legend>—</Legend>
                           ) : (
-                            <Chip title={key.guardrailPolicy}>judged</Chip>
+                            <Allow>
+                              {key.guardrailPolicy === null ? null : (
+                                <Chip title={key.guardrailPolicy}>judged</Chip>
+                              )}
+                              {/* Warns in its tooltip when the flag cannot act
+                                  yet, so the operator hears it here and not
+                                  from a client. */}
+                              {key.smartRouting ? (
+                                <Chip
+                                  title={describeLocalRouted(settings.data, smartRouterModels.data)}
+                                >
+                                  local-routed
+                                </Chip>
+                              ) : null}
+                            </Allow>
                           )}
                         </Td>
                         <Td>
@@ -296,6 +398,27 @@ export function KeysBoard() {
                                 >
                                   <CalendarClock />
                                 </IconButton>
+                                {/* Saved the moment it moves, like no other
+                                    control on this row: it is one boolean with
+                                    nothing to compose, so a dialog would only
+                                    be a confirmation of a click. */}
+                                <Toggle
+                                  checked={key.smartRouting}
+                                  disabled={smartRouting.isPending}
+                                  label={`Confidential routing for ${key.label}`}
+                                  onCheckedChange={(enabled) => {
+                                    setSmartFailure(null);
+                                    smartRouting.mutate(
+                                      { id: key.id, enabled },
+                                      {
+                                        onError: (error) =>
+                                          setSmartFailure(
+                                            `Could not change confidential routing for "${key.label}": ${describeError(error)}`,
+                                          ),
+                                      },
+                                    );
+                                  }}
+                                />
                                 <IconButton
                                   type="button"
                                   $variant="ghost"
@@ -340,7 +463,7 @@ export function KeysBoard() {
       {/* Keyed by the row, so opening a second key starts from that key's
           matrix rather than from whatever was typed into the last one. */}
       <EditLimitsDialog
-        key={editing?.id ?? "none"}
+        key={editing?.id ?? "limits-none"}
         apiKey={editing}
         onOpenChange={(next) => {
           if (!next) setEditing(null);
@@ -351,7 +474,7 @@ export function KeysBoard() {
           key starts from that key's allowlist rather than whatever was checked
           into the last one. */}
       <EditModelsDialog
-        key={editingModels?.id ?? "none"}
+        key={editingModels?.id ?? "models-none"}
         apiKey={editingModels}
         onOpenChange={(next) => {
           if (!next) setEditingModels(null);
@@ -360,7 +483,7 @@ export function KeysBoard() {
 
       {/* Keyed by the row, same reason as the two dialogs above. */}
       <EditExpiryDialog
-        key={editingExpiry?.id ?? "none"}
+        key={editingExpiry?.id ?? "expiry-none"}
         apiKey={editingExpiry}
         onOpenChange={(next) => {
           if (!next) setEditingExpiry(null);
@@ -369,7 +492,7 @@ export function KeysBoard() {
 
       {/* Keyed by the row, same reason as the dialogs above. */}
       <EditGuardrailDialog
-        key={editingPolicy?.id ?? "none"}
+        key={editingPolicy?.id ?? "policy-none"}
         apiKey={editingPolicy}
         onOpenChange={(next) => {
           if (!next) setEditingPolicy(null);

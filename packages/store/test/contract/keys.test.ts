@@ -21,6 +21,7 @@ async function key(id: string, overrides: Partial<ApiKeyInput> = {}): Promise<Ap
     bodyLoggingOptOut: false,
     expiresAt: null,
     guardrailPolicy: null,
+    smartRouting: false,
     ...overrides,
   };
 }
@@ -136,6 +137,26 @@ forEachStore((backend) => {
     expect((await s.keys.get("k2"))?.guardrailPolicy).toBe("Work only.");
   });
 
+  test("smart routing defaults off, sets, clears", async () => {
+    const s = await backend.fresh();
+    await s.keys.create(await key("k1"));
+    await s.keys.create(await key("k2"));
+    expect((await s.keys.get("k1"))?.smartRouting).toBe(false);
+
+    await s.keys.setSmartRouting("k1", true);
+    expect((await s.keys.get("k1"))?.smartRouting).toBe(true);
+    expect((await s.keys.list()).find((k) => k.id === "k1")?.smartRouting).toBe(true);
+    // The write names one row.
+    expect((await s.keys.get("k2"))?.smartRouting).toBe(false);
+
+    await s.keys.setSmartRouting("k1", false);
+    expect((await s.keys.get("k1"))?.smartRouting).toBe(false);
+
+    // Minted on.
+    await s.keys.create(await key("k3", { smartRouting: true }));
+    expect((await s.keys.get("k3"))?.smartRouting).toBe(true);
+  });
+
   test("setModelAllowlist keeps null and [] distinct", async () => {
     const s = await backend.fresh();
     await s.keys.create(await key("k1", { modelAllowlist: ["a", "b"] }));
@@ -163,6 +184,7 @@ forEachStore((backend) => {
       revokedAt: 1_600_000_100_000,
       expiresAt: 1_600_000_200_000,
       guardrailPolicy: "Office work only.",
+      smartRouting: true,
     });
     const row = await s.keys.get("k_imported");
     expect(row?.createdAt).toBe(1_600_000_000_000);
@@ -173,6 +195,9 @@ forEachStore((backend) => {
     // Carried like the expiry: a restore that dropped it would hand back a key
     // freed of the purpose its operator restricted it to.
     expect(row?.guardrailPolicy).toBe("Office work only.");
+    // And the routing flag: dropped, a restored key's confidential requests
+    // would go to the external model.
+    expect(row?.smartRouting).toBe(true);
     expect(row?.limits).toEqual({ concurrency: 2 });
     expect(row?.bodyLoggingOptOut).toBe(true);
     await expect(
@@ -188,6 +213,7 @@ forEachStore((backend) => {
         revokedAt: null,
         expiresAt: null,
         guardrailPolicy: null,
+        smartRouting: false,
       }),
     ).rejects.toThrow("unreadable limits");
   });

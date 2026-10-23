@@ -7,6 +7,8 @@ import {
   GUARDRAIL_HISTORY_TURNS_MAX,
   GUARDRAIL_POLICY_MAX_CHARS,
   GUARDRAIL_TIMEOUT_MAX_MS,
+  SMART_ROUTER_POLICY_MAX_CHARS,
+  SMART_ROUTER_TIMEOUT_MAX_MS,
 } from "@omni/store/types";
 import { z } from "zod";
 
@@ -251,13 +253,19 @@ export const keyCreateSchema = z
      * before this field existed carries.
      */
     guardrailPolicy: guardrailPolicySchema.nullable().default(null),
+    /**
+     * Whether the key's requests are judged for confidential content and routed
+     * to the local model. Off — the default — is every key minted before this
+     * field existed; the global `smartRouterEnabled` setting still gates it.
+     */
+    smartRouting: z.boolean().default(false),
   })
   .strict();
 
 /**
- * One of the four parts of a key that may be edited after it is minted — the
- * matrix here, the model allowlist, the expiry and the usage policy in the
- * schemas below.
+ * One of the five parts of a key that may be edited after it is minted — the
+ * matrix here, the model allowlist, the expiry, the usage policy and the smart
+ * routing flag in the schemas below.
  *
  * Sent whole rather than as a patch: `limits` is one JSON document, `{}` is a
  * meaningful value, and a partial body would have to distinguish "leave this
@@ -320,6 +328,16 @@ export const keyExpirySchema = z
  * silently withdrawing an operator's restriction is the failure this refuses.
  */
 export const keyGuardrailSchema = z.object({ policy: guardrailPolicySchema.nullable() }).strict();
+
+/**
+ * The fifth part of a key that may be edited after it is minted: whether its
+ * requests are judged for confidential content.
+ *
+ * Deliberately not defaulted, exactly as `keyGuardrailSchema` is not: a body of
+ * `{}` must fail loudly rather than have an on or off chosen for it, and a flag
+ * quietly switched off sends confidential content to a third party.
+ */
+export const keySmartRoutingSchema = z.object({ enabled: z.boolean() }).strict();
 
 /**
  * How many database snapshots to keep, and for how long.
@@ -398,6 +416,19 @@ export const settingsSchema = z.object({
   guardrailTimeoutMs: z.number().int().min(1).max(GUARDRAIL_TIMEOUT_MAX_MS).optional(),
   /** How many recent human messages the classifier judges. Optional for the same reason. */
   guardrailHistoryTurns: z.number().int().min(1).max(GUARDRAIL_HISTORY_TURNS_MAX).optional(),
+  /**
+   * The five smart-router settings, all optional for the reason retention is: a
+   * save from a client that has never heard of them keeps the stored values
+   * rather than switching routing off or resetting the policy. The models are
+   * not checked for existence or locality at write time — a model that does not
+   * resolve, or has an external target, makes the request refuse when judged,
+   * and `omni doctor` reports it.
+   */
+  smartRouterEnabled: z.boolean().optional(),
+  smartRouterClassifierModel: z.string().trim().min(1).max(256).nullable().optional(),
+  smartRouterLocalModel: z.string().trim().min(1).max(256).nullable().optional(),
+  smartRouterPolicy: z.string().trim().min(1).max(SMART_ROUTER_POLICY_MAX_CHARS).optional(),
+  smartRouterTimeoutMs: z.number().int().min(1).max(SMART_ROUTER_TIMEOUT_MAX_MS).optional(),
 });
 
 /** Only these credential fields are operator-editable. Secrets are not. */

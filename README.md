@@ -216,8 +216,12 @@ omni keys guardrail <id> --clear
 The classifier sees the request's system prompt and the last few messages a human
 wrote (`guardrailHistoryTurns`, default 3, 1..10), oldest first, and judges the
 newest in their light — so "continue" after a forbidden ask is judged as that
-ask. It never sees tool results, images, or assistant replies, and only a plain
-`ALLOW` lets the request through. A deny is refused as `CONTENT_FILTER` (400); a
+ask. It also sees the text of the tool results that came back after the oldest of
+those messages (capped at 16,000 characters, newest first), as data the client
+received. It never sees images, files, tool-call arguments, or assistant replies,
+and only a plain `ALLOW` lets the request through. Tool output can sway the
+verdict either way — a fetched page can talk the classifier round or push it to
+refuse legitimate work — and an agent pays one classifier call per tool turn. A deny is refused as `CONTENT_FILTER` (400); a
 classifier that times out (`guardrailTimeoutMs`, default 10s), errors, or answers
 anything else refuses as `UPSTREAM` (502), and a key with a policy while
 `guardrailModel` is unset refuses as `INTERNAL` (500): **it fails closed**.
@@ -225,7 +229,7 @@ Streaming requests receive the same refusals as in-stream errors. The refusal
 messages are fixed; the classifier's words never reach the client. Each check is
 its own request row under the key, tagged `guardrail:classifier` and charged to
 it, and verdicts are cached for an hour per key, policy, model and judged text,
-so an agent's tool turns on one human message are judged once. The key holder sees
+so a repeated request is judged once, though each new tool turn is a new one. The key holder sees
 the policy and those rows on their client dashboard. A key without a policy is
 never judged and pays nothing. `omni doctor` warns when keys carry a policy and
 nothing can judge them.
@@ -233,9 +237,73 @@ nothing can judge them.
 **This is a guardrail, not a security boundary.** It stops ordinary misuse, not a
 client set on getting past it — by talking the classifier round, spreading a
 request over more messages than the window holds, leaving it out of the history
-it sends, or hiding it in tool results or images. **Rolling back** to
+it sends, hiding it in images, or planting text in tool output the classifier
+reads. **Rolling back** to
 a build without usage policies ignores them: every key's requests are served
 unjudged until you upgrade again.
+
+A key can also be set to **route confidential requests to a local model**. A
+classifier running on your own infrastructure reads what the request carries; if
+anything in it is confidential, the request is served by a model you host instead
+of the one the client asked for. It is active only when the global switch
+`smartRouterEnabled` **and** the key's flag are both on:
+
+```bash
+omni settings set smartRouterClassifierModel local-judge   # a virtual model, every target a custom endpoint
+omni settings set smartRouterLocalModel local-llm          # same rule
+omni settings set smartRouterEnabled true
+omni keys smart-routing <id> --on                          # or: omni keys create --smart-routing
+omni keys smart-routing <id> --off
+```
+
+Both models must be configured virtual models whose every target is the `custom`
+provider, and the gateway re-checks that at the moment of each send, so a model
+edited later cannot quietly start pointing at an external provider. Anything
+else is refused, never routed externally. `smartRouterPolicy` says what
+"confidential" means (personal data, credentials, salaries and HR records,
+customer records, non-public financials, documents marked internal, by default;
+editable on the console's Settings screen, which can reset it) and
+`smartRouterTimeoutMs` bounds each classifier call (default 10s, 1..60000).
+
+Everything the request carries is judged — system and mid-conversation system
+turns, user and assistant text, thinking, tool-call arguments, tool results, tool
+names, descriptions and input schemas, citations, the text inside provider-native
+blocks (a text document, a search result, an MCP result, a shell output) and
+pass-through vendor fields — not just the newest message, because a client
+resends the whole conversation. Only images, files and base64 payloads are not
+judged. The text is split into segments of up to
+8,000 characters, each judged `PUBLIC` or `CONFIDENTIAL` by the local classifier,
+at most four at a time. Verdicts are cached for an hour per classifier, policy
+and segment, so a conversation that grows is judged only on what is new; failures
+are not cached. A request with more than 64 segments still to judge goes local
+without being judged.
+
+| Outcome | Result | Row tag |
+| --- | --- | --- |
+| everything public | served by the model the client asked for | `smart-router:public` |
+| anything confidential | served by `smartRouterLocalModel` | `smart-router:local` |
+| asked for a local-only model already | served as asked, not judged | `smart-router:already-local` |
+| classifier timeout, error, or unreadable reply | refused, `UPSTREAM` (502) | `smart-router:unavailable` |
+| either model unset, unresolved, or not local-only | refused, `INTERNAL` (500) | `smart-router:unconfigured` |
+
+**It fails closed and never falls back to an external provider**: if the local
+model itself fails, the client gets that failure. Each check is its own request
+row under the key, tagged `smart-router:classifier` and charged to it. When a
+key also has a usage policy, smart routing runs first, and a request that goes
+local has its policy judged by the smart-router classifier, never by
+`guardrailModel`. `omni doctor` has a "smart routing" row; the console's
+Settings screen warns under each model picker when the model is unset (switch
+on), does not resolve, or is not local-only, and the Keys board says when
+flagged keys' requests are refused or unscreened. The client
+dashboard shows "Confidential routing: on/off" for the key. The client-visible
+signals are in [docs/client-api.md](docs/client-api.md#confidential-routing).
+
+**This reduces leaks of ordinary confidential content; it is not a security
+boundary.** It does not stop deliberate evasion (encoding, splitting a secret
+across messages, prompt injection aimed at the classifier), confidential content
+inside images or files, or a classifier that simply misses. **Rolling back** to a
+build without it ignores the flag and sends every request to the external
+provider (it fails open) until you upgrade again.
 
 Now use it:
 

@@ -16,6 +16,7 @@ function key(overrides: Partial<ApiKey> = {}): ApiKey {
     revokedAt: null,
     expiresAt: null,
     guardrailPolicy: null,
+    smartRouting: false,
     ...overrides,
   };
 }

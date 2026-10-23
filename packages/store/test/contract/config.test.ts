@@ -1,7 +1,12 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { SQL } from "bun";
-import { DEFAULT_SETTINGS, type VirtualModel } from "../../src/types.ts";
+import {
+  DEFAULT_SETTINGS,
+  DEFAULT_SMART_ROUTER_POLICY,
+  SMART_ROUTER_POLICY_MAX_CHARS,
+  type VirtualModel,
+} from "../../src/types.ts";
 import { forEachStore } from "./harness.ts";
 
 const base = {
@@ -107,6 +112,76 @@ forEachStore((backend) => {
       });
       expect((await s.config.getSettings()).guardrailHistoryTurns).toBe(3);
     }
+  });
+
+  test("smart router settings default off and read malformed values safely", async () => {
+    const s = await backend.fresh();
+    const fresh = await s.config.getSettings();
+    expect(fresh.smartRouterEnabled).toBe(false);
+    expect(fresh.smartRouterClassifierModel).toBeNull();
+    expect(fresh.smartRouterLocalModel).toBeNull();
+    expect(fresh.smartRouterPolicy).toBe(DEFAULT_SMART_ROUTER_POLICY);
+    expect(fresh.smartRouterTimeoutMs).toBe(10_000);
+
+    await s.config.putSettings({
+      smartRouterEnabled: true,
+      smartRouterClassifierModel: "local-judge",
+      smartRouterLocalModel: "local-chat",
+      smartRouterPolicy: "Anything about Project Falcon.",
+      smartRouterTimeoutMs: 5,
+    });
+    const saved = await s.config.getSettings();
+    expect(saved.smartRouterEnabled).toBe(true);
+    expect(saved.smartRouterClassifierModel).toBe("local-judge");
+    expect(saved.smartRouterLocalModel).toBe("local-chat");
+    expect(saved.smartRouterPolicy).toBe("Anything about Project Falcon.");
+    expect(saved.smartRouterTimeoutMs).toBe(5);
+
+    // Whatever a stored row holds reads back as the safe value: off, unset, the
+    // default policy, the default timeout.
+    await s.config.putSettings({
+      smartRouterEnabled: "yes",
+      smartRouterClassifierModel: "",
+      smartRouterLocalModel: "   ",
+      smartRouterPolicy: "  ",
+      smartRouterTimeoutMs: 0,
+    } as unknown as { smartRouterEnabled: boolean });
+    const malformed = await s.config.getSettings();
+    expect(malformed.smartRouterEnabled).toBe(false);
+    expect(malformed.smartRouterClassifierModel).toBeNull();
+    expect(malformed.smartRouterLocalModel).toBeNull();
+    expect(malformed.smartRouterPolicy).toBe(DEFAULT_SMART_ROUTER_POLICY);
+    expect(malformed.smartRouterTimeoutMs).toBe(10_000);
+
+    for (const bad of [7, true, ["x"], null]) {
+      await s.config.putSettings({
+        smartRouterClassifierModel: bad,
+        smartRouterLocalModel: bad,
+        smartRouterPolicy: bad,
+      } as unknown as { smartRouterPolicy: string });
+      const read = await s.config.getSettings();
+      expect(read.smartRouterClassifierModel).toBeNull();
+      expect(read.smartRouterLocalModel).toBeNull();
+      expect(read.smartRouterPolicy).toBe(DEFAULT_SMART_ROUTER_POLICY);
+    }
+    for (const bad of [-1, 1.5, 60_001, "5000", null]) {
+      await s.config.putSettings({ smartRouterTimeoutMs: bad } as unknown as {
+        smartRouterTimeoutMs: number;
+      });
+      expect((await s.config.getSettings()).smartRouterTimeoutMs).toBe(10_000);
+    }
+    await s.config.putSettings({ smartRouterTimeoutMs: 60_000 });
+    expect((await s.config.getSettings()).smartRouterTimeoutMs).toBe(60_000);
+
+    // The policy ceiling is a count of characters, and one over reads as default.
+    await s.config.putSettings({ smartRouterPolicy: "x".repeat(SMART_ROUTER_POLICY_MAX_CHARS) });
+    expect((await s.config.getSettings()).smartRouterPolicy).toHaveLength(
+      SMART_ROUTER_POLICY_MAX_CHARS,
+    );
+    await s.config.putSettings({
+      smartRouterPolicy: "x".repeat(SMART_ROUTER_POLICY_MAX_CHARS + 1),
+    });
+    expect((await s.config.getSettings()).smartRouterPolicy).toBe(DEFAULT_SMART_ROUTER_POLICY);
   });
 
   test("virtual models round-trip nested targets, replace on put, and remove", async () => {

@@ -1,0 +1,11 @@
+-- The Postgres half of the sqlite migration `020_key_smart_routing.sql`: a flag
+-- on a gateway API key saying its requests are judged for confidential content
+-- and, when they are, routed to the operator's local model.
+--
+-- NOT NULL DEFAULT FALSE; no backfill: every existing key was minted without
+-- the flag. Safe under a rolling deploy — one added column with a default and
+-- nothing dropped, so a replica on the previous image keeps serving, ignoring
+-- the field (and therefore sending that key's confidential requests to the
+-- external model it named until it is replaced: rollback fails open, which
+-- README's upgrade notes say).
+ALTER TABLE api_keys ADD COLUMN smart_routing BOOLEAN NOT NULL DEFAULT FALSE;

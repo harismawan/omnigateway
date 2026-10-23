@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CatalogProvider as ServerCatalogProvider } from "@omni/control";
+import type {
+  CatalogProvider as ServerCatalogProvider,
+  SmartRouterModelStatus as ServerSmartRouterModelStatus,
+} from "@omni/control";
 import {
   ADMIN_COOKIE,
   createAdminAuth,
@@ -29,7 +32,10 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
-import type { CatalogProvider as ConsoleCatalogProvider } from "../../../dashboard/src/api/types.ts";
+import type {
+  CatalogProvider as ConsoleCatalogProvider,
+  SmartRouterModelStatus as ConsoleSmartRouterModelStatus,
+} from "../../../dashboard/src/api/types.ts";
 import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
 
 /**
@@ -54,6 +60,11 @@ import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
  */
 const _consoleAcceptsServer: ConsoleCatalogProvider = {} as ServerCatalogProvider;
 const _serverAcceptsConsole: ServerCatalogProvider = {} as ConsoleCatalogProvider;
+// The same pair for `/api/settings`' `smartRouterModels`.
+const _consoleAcceptsServerStatus: ConsoleSmartRouterModelStatus =
+  {} as ServerSmartRouterModelStatus;
+const _serverAcceptsConsoleStatus: ServerSmartRouterModelStatus =
+  {} as ConsoleSmartRouterModelStatus;
 
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;
@@ -640,6 +651,49 @@ test("a key's usage policy is editable behind admin auth, clearable, and never d
   expect((await store.keys.get(minted.id))?.guardrailPolicy).toBe("Work only.");
 });
 
+/**
+ * The fifth editable field: whether the key's requests are judged for
+ * confidential content. Written whole; an absent flag is refused.
+ */
+test("a key's smart routing flag is editable behind admin auth and never defaulted on edit", async () => {
+  const { call, store } = await harness();
+  const created = (await (await call("POST", "/api/keys", { label: "cli" })).json()) as {
+    id: string;
+  };
+  expect((await store.keys.list())[0]?.smartRouting).toBe(false);
+
+  const body = { enabled: true };
+  expect((await call("PUT", `/api/keys/${created.id}/smart-routing`, body, false)).status).toBe(
+    401,
+  );
+  expect((await store.keys.list())[0]?.smartRouting).toBe(false);
+
+  const saved = await call("PUT", `/api/keys/${created.id}/smart-routing`, body);
+  expect(saved.status).toBe(200);
+  expect(((await saved.json()) as { smartRouting: boolean }).smartRouting).toBe(true);
+  expect((await store.keys.list())[0]?.smartRouting).toBe(true);
+
+  for (const refused of [{}, { enabled: "yes" }, { enabled: null }, { enabled: false, x: 1 }]) {
+    expect((await call("PUT", `/api/keys/${created.id}/smart-routing`, refused)).status).toBe(400);
+  }
+  expect((await store.keys.list())[0]?.smartRouting).toBe(true);
+
+  expect(
+    (await call("PUT", `/api/keys/${created.id}/smart-routing`, { enabled: false })).status,
+  ).toBe(200);
+  expect((await store.keys.list())[0]?.smartRouting).toBe(false);
+
+  // Settable at mint time too, and listed on the summary.
+  const minted = (await (
+    await call("POST", "/api/keys", { label: "private", smartRouting: true })
+  ).json()) as { id: string };
+  expect((await store.keys.get(minted.id))?.smartRouting).toBe(true);
+  const { keys: listed } = (await (await call("GET", "/api/keys")).json()) as {
+    keys: Array<{ id: string; smartRouting: boolean }>;
+  };
+  expect(listed.find((k) => k.id === minted.id)?.smartRouting).toBe(true);
+});
+
 test("a malformed limit matrix is refused rather than stored", async () => {
   const { call, store } = await harness();
   const created = (await (
@@ -763,6 +817,38 @@ test("settings report the day offset the rows are cut on", async () => {
     dayOffsetMinutes: number;
   };
   expect(body.dayOffsetMinutes).toBe(420);
+});
+
+/**
+ * The console's inline warnings read this, so every state must arrive — and
+ * with the switch off and no flagged key, where `omni doctor` stays quiet.
+ */
+test("settings report each smart-router model's status, switch off or on", async () => {
+  const store = await memoryStore();
+  const { call } = await harness({ store });
+  const status = async () =>
+    (
+      (await (await call("GET", "/api/settings")).json()) as {
+        smartRouterModels: { classifier: string; local: string };
+      }
+    ).smartRouterModels;
+  expect(await status()).toEqual({ classifier: "unset", local: "unset" });
+
+  await store.config.putSettings({
+    smartRouterClassifierModel: "judge",
+    smartRouterLocalModel: "nowhere",
+  });
+  await store.config.putModel(virtualModel({ id: "judge", targets: [target()] }));
+  expect(await status()).toEqual({ classifier: "notLocal", local: "unresolved" });
+
+  await store.config.putModel(
+    virtualModel({
+      id: "judge",
+      targets: [target({ provider: "custom", model: "llama", endpointId: "ollama" })],
+    }),
+  );
+  await store.config.putSettings({ smartRouterEnabled: true });
+  expect(await status()).toEqual({ classifier: "ok", local: "unresolved" });
 });
 
 /**
@@ -1852,6 +1938,13 @@ const MUTATIONS: ReadonlyArray<{
     method: "PUT",
     path: "/api/keys/:key/guardrail",
     body: { policy: "Work only." },
+    topics: ["res:keys"],
+  },
+  {
+    route: "/api/keys/:id/smart-routing",
+    method: "PUT",
+    path: "/api/keys/:key/smart-routing",
+    body: { enabled: true },
     topics: ["res:keys"],
   },
   {

@@ -108,6 +108,7 @@ export {
   setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
+  setKeySmartRouting,
 } from "./keys.ts";
 export {
   DOCKERENV_PATH,
@@ -270,6 +271,13 @@ export {
   type SetupInput,
   setupFiles,
 } from "./setup.ts";
+export {
+  type SmartRouterModelState,
+  type SmartRouterModelStatus,
+  type SmartRouterReadiness,
+  smartRouterModelStatus,
+  smartRouterReadiness,
+} from "./smartRouter.ts";
 export { type ForwardRead, fileExists, fileSize, readFrom, tailFile } from "./tail.ts";
 export {
   logLimit,

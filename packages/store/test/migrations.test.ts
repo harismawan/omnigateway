@@ -32,6 +32,7 @@ import logTextSearch017 from "../src/sqlite/migrations/017_log_text_search.sql" 
 import modelWindowIndex018 from "../src/sqlite/migrations/018_model_window_index.sql" with {
   type: "text",
 };
+import keyGuardrail019 from "../src/sqlite/migrations/019_key_guardrail.sql" with { type: "text" };
 import { NARROWED_SQL } from "../src/sqlite/usage.ts";
 
 type TableRow = { name: string };
@@ -56,6 +57,7 @@ const SQL_BY_ID = [
   logFilterIndexes016,
   logTextSearch017,
   modelWindowIndex018,
+  keyGuardrail019,
 ];
 
 /**
@@ -103,7 +105,7 @@ test("openDb applies migrations and records them", () => {
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
   expect(applied.map((row) => row.id)).toEqual([
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
   ]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
@@ -133,6 +135,7 @@ test("openDb applies migrations and records them", () => {
   expect(keyColumns).toContain("limits");
   expect(keyColumns).toContain("expires_at");
   expect(keyColumns).toContain("guardrail_policy");
+  expect(keyColumns).toContain("smart_routing");
   // Anything still reading it breaks at compile time, which is the intent.
   expect(keyColumns).not.toContain("rate_limit_per_min");
   db.close();
@@ -292,6 +295,40 @@ test("migration 19 leaves every key that predates it with no usage policy", asyn
   db.close();
 });
 
+/**
+ * Migration 20 adds the smart-routing flag and stops, as 19 did for the policy.
+ *
+ * A key minted before it must read back off: turning routing on for rows that
+ * predate the column would start rewriting its client's requests on an upgrade.
+ */
+test("migration 20 leaves every key that predates it with smart routing off", async () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  legacyDb(path, 20);
+
+  const legacy = new Database(path);
+  legacy.run(
+    `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
+                           body_logging_opt_out, created_at, revoked_at, expires_at,
+                           guardrail_policy)
+     VALUES ('before', 'b', 'sk-omni-aaaa', 'h1', NULL, '{}', 0, 0, NULL, NULL, NULL)`,
+  );
+  legacy.close();
+
+  const db = openDb(path);
+  const column = db
+    .query<{ name: string; notnull: number; dflt_value: string | null }, []>(
+      "PRAGMA table_info(api_keys)",
+    )
+    .all()
+    .find((row) => row.name === "smart_routing");
+  expect(column?.notnull).toBe(1);
+  expect(column?.dflt_value).toBe("0");
+
+  const key = await createKeyRepo(db).get("before");
+  expect(key?.smartRouting).toBe(false);
+  db.close();
+});
+
 test("migration 9 indexes request logs by key first, so a per-key window scan starts at the key", () => {
   const db = openDb(":memory:");
   // Composite order is the whole point: `(at DESC, api_key_id)` would not let a
@@ -447,7 +484,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(19);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(20);
   db.close();
 });
 

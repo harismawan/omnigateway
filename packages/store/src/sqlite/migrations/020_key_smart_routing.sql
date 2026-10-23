@@ -1,0 +1,17 @@
+-- Whether a gateway API key is judged for confidential content before routing
+-- (`apps/gateway/src/smartRouter/`): a request the local classifier calls
+-- confidential is sent to the operator's local model instead of the model it
+-- named. Only consulted while the global `smartRouterEnabled` setting is on.
+--
+-- NOT NULL DEFAULT 0, and 0 is "off". No backfill, for the reason migrations 14
+-- and 19 have none: every existing key was minted without the flag, and
+-- switching it on would start rewriting its client's requests on an upgrade the
+-- operator never connected to it.
+--
+-- Its own column rather than a member of `limits`. A routing switch is not a
+-- limit, and nesting it there would bind it to the `@omni/ratelimit/catalog`
+-- storage contract, which fails closed on any name it does not know. The cost is
+-- accepted and documented: a rollback to a build without this column ignores it
+-- and stops judging — smart routing fails open across a downgrade, sending
+-- everything to the external model the client asked for.
+ALTER TABLE api_keys ADD COLUMN smart_routing INTEGER NOT NULL DEFAULT 0;

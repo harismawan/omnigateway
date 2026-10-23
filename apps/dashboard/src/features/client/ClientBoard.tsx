@@ -411,6 +411,11 @@ export function ClientBoard() {
                 ))}
               </Row>
             )}
+            {/* Whether their requests are screened for confidential content,
+                and nothing of the rule: the policy text is the operator's to
+                keep, and a holder who could read it would know what to
+                rephrase. */}
+            <Muted>Confidential routing: {summary.data.smartRouting ? "on" : "off"}</Muted>
             {/* The holder's own restriction, read-only. A request refused for a
                 purpose the holder cannot read is one they cannot avoid
                 repeating; the operator's text is not a secret from them. */}

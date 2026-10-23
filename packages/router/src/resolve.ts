@@ -148,3 +148,30 @@ export function resolveModel(
     `model "${safeToken(name)}" is not a configured virtual model and its provider could not be inferred`,
   );
 }
+
+/**
+ * The configured virtual model `name` names, when every one of its targets is a
+ * `custom` endpoint — the operator's own hardware — and `null` otherwise.
+ *
+ * Asked of `resolveModel`, so the answer is the router's own and not a second
+ * reading of the name. `null` covers every way the answer is no: a name that
+ * does not resolve, a model with no targets (vacuously local, and not a place to
+ * send confidential content), and any target served by a third party. A
+ * `provider/model` shorthand resolves to a single non-custom target, and
+ * `custom/...` shorthand is refused by `resolveModel` itself, so only a
+ * configured model can ever be local-only.
+ */
+export function localOnlyModel(
+  name: string,
+  snapshot: Snapshot,
+  providers: ProviderDescriptors = PROVIDER_DESCRIPTORS,
+): VirtualModel | null {
+  let model: VirtualModel;
+  try {
+    model = resolveModel(name, snapshot, providers);
+  } catch {
+    return null;
+  }
+  if (model.targets.length === 0) return null;
+  return model.targets.every((t) => t.provider === "custom") ? model : null;
+}

@@ -16,6 +16,7 @@ type Row = {
   revoked_at: string | null;
   expires_at: string | null;
   guardrail_policy: string | null;
+  smart_routing: boolean;
 };
 
 /**
@@ -58,6 +59,8 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   expiresAt: numOrNull(r.expires_at),
   // Null is "no guardrail", which every row written before migration 7 holds.
   guardrailPolicy: r.guardrail_policy,
+  // FALSE is "off", which every row written before migration 8 holds.
+  smartRouting: r.smart_routing,
 });
 
 export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
@@ -84,8 +87,8 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       await sql.unsafe(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
                                body_logging_opt_out, created_at, revoked_at, expires_at,
-                               guardrail_policy)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10)`,
+                               guardrail_policy, smart_routing)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11)`,
         [
           input.id,
           input.label,
@@ -100,6 +103,7 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           now,
           input.expiresAt,
           input.guardrailPolicy,
+          input.smartRouting,
         ],
       );
       return { ...input, createdAt: now, revokedAt: null };
@@ -110,8 +114,8 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       await sql.unsafe(
         `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
                                body_logging_opt_out, created_at, revoked_at, expires_at,
-                               guardrail_policy)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+                               guardrail_policy, smart_routing)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [
           row.id,
           row.label,
@@ -128,6 +132,9 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           // Likewise: a restore that dropped the policy would hand back a key
           // freed of the purpose its operator restricted it to.
           row.guardrailPolicy,
+          // Likewise: a restore that dropped the flag would hand back a key
+          // whose confidential requests go to the external model.
+          row.smartRouting,
         ],
       );
     },
@@ -165,6 +172,10 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
       // No guard on the text: the control schema trims and bounds it, and any
       // string round-trips through a TEXT column.
       await sql.unsafe("UPDATE api_keys SET guardrail_policy = $1 WHERE id = $2", [policy, id]);
+    },
+
+    async setSmartRouting(id: string, enabled: boolean) {
+      await sql.unsafe("UPDATE api_keys SET smart_routing = $1 WHERE id = $2", [enabled, id]);
     },
 
     async revoke(id: string) {
