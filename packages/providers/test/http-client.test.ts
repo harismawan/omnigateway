@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { Transform } from "node:stream";
-import { createZstdCompress, constants as zlibConstants, zstdDecompressSync } from "node:zlib";
+import { zstdDecompressSync } from "node:zlib";
 import { createLogger } from "@omni/ir";
 import { CONNECT_ATTEMPT_TIMEOUT_MS, nodeHttpClient, zstdEncode } from "../src/http-client.ts";
 
@@ -369,33 +368,58 @@ test("the zstd stream is built at level 3 by name, not by library default", asyn
   const seen: unknown[] = [];
   const out = await zstdEncode(Buffer.from(syntheticBody()), (options) => {
     seen.push(options);
-    return createZstdCompress(options);
+    return new CompressionStream("zstd", options);
   });
-  expect(seen).toEqual([{ params: { [zlibConstants.ZSTD_c_compressionLevel]: 3 } }]);
+  expect(seen).toEqual([{ level: 3 }]);
   expect(out.byteLength).toBe(10_676);
 });
 
-test("a zstd stream that fails rejects the request instead of throwing uncaught", async () => {
-  // Fails on the first chunk, which is where a real encoder error surfaces. The
-  // no-op listener is the test's own: without it, an encoder that forgot its
-  // handler throws the error uncaught and wedges the whole test process rather
-  // than failing this test. With it, such an encoder leaves the promise
-  // pending, and the race below says so in a second.
-  const failing = () => {
-    const stream = new Transform({
-      transform(_chunk, _encoding, callback) {
-        callback(new Error("forced zstd failure"));
+test.each(["write", "close", "read", "create"] as const)(
+  "a zstd %s failure rejects the request instead of throwing uncaught",
+  async (stage) => {
+    const failure = new Error(`forced zstd ${stage} failure`);
+    const failing = () => {
+      if (stage === "create") throw failure;
+      if (stage === "read") {
+        return {
+          readable: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(failure);
+            },
+          }),
+          writable: new WritableStream<NodeJS.BufferSource>(),
+        };
+      }
+      return new TransformStream<NodeJS.BufferSource, Uint8Array>({
+        transform() {
+          if (stage === "write") throw failure;
+        },
+        flush() {
+          throw failure;
+        },
+      });
+    };
+    await expect(zstdEncode(Buffer.from("{}"), failing)).rejects.toThrow(failure.message);
+  },
+);
+
+test("zstd drains output concurrently with its single write and close", async () => {
+  const raw = Buffer.from(syntheticBody(3_000));
+  const writes: NodeJS.BufferSource[] = [];
+  const out = await zstdEncode(raw, () => {
+    // TransformStream's default backpressure holds write until output is read.
+    return new TransformStream<NodeJS.BufferSource, Uint8Array>({
+      transform(chunk, controller) {
+        writes.push(chunk);
+        controller.enqueue(raw);
+      },
+      flush(controller) {
+        controller.enqueue(Buffer.from("closed"));
       },
     });
-    stream.on("error", () => {});
-    return stream;
-  };
-  const unsettled = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error("zstdEncode never settled")), 1_000).unref();
   });
-  await expect(Promise.race([zstdEncode(Buffer.from("{}"), failing), unsettled])).rejects.toThrow(
-    "forced zstd failure",
-  );
+  expect(writes).toEqual([raw]);
+  expect(out.equals(Buffer.concat([raw, Buffer.from("closed")]))).toBe(true);
 });
 
 test("a body past 256 KiB is still one write: Codex's frame at that size too", async () => {

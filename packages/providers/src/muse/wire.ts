@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { moveToResponsesText } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
@@ -76,7 +75,7 @@ function cacheKey(req: ChatRequest, instructions: string, firstInput: unknown): 
         // instructions alone — and with no system prompt either, to one constant
         // shared by every such request on the installation.
         JSON.stringify({ instructions, firstInput: firstInput ?? null });
-  return createHash("sha256").update(stable).digest("hex").slice(0, 32);
+  return Bun.CryptoHasher.hash("sha256", stable, "hex").slice(0, 32);
 }
 
 /**

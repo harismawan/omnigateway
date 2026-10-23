@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { ANTHROPIC_CLI_VERSION, anthropicBodyOrder } from "./anthropic/profile.ts";
 import { antigravityBodyOrder } from "./antigravity/profile.ts";
 import { customBodyOrder } from "./custom/profile.ts";
@@ -89,10 +88,11 @@ export const AGENT_PREAMBLE = "You are a Claude agent, built on Anthropic's Clau
  */
 export function ccVersionSuffix(firstUserText: string): string {
   const picked = [4, 7, 20].map((i) => firstUserText[i] ?? "0").join("");
-  return createHash("sha256")
-    .update(`${CCV_SALT}${picked}${ANTHROPIC_CLI_VERSION}`)
-    .digest("hex")
-    .slice(0, 3);
+  return Bun.CryptoHasher.hash(
+    "sha256",
+    `${CCV_SALT}${picked}${ANTHROPIC_CLI_VERSION}`,
+    "hex",
+  ).slice(0, 3);
 }
 
 function billingBlock(firstUserText: string): string {

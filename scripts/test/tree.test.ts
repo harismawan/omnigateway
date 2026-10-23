@@ -46,6 +46,11 @@ afterEach(() => {
 });
 
 describe("what the hygiene checks read", () => {
+  test("an invalid base throws instead of reporting no changes", () => {
+    const root = scratch();
+    expect(() => changedSources(root, "missing-base")).toThrow();
+  });
+
   test("a clean tree reports nothing changed", () => {
     // The control. Every assertion below is "this file is listed", and a diff
     // that lists everything satisfies all of them.

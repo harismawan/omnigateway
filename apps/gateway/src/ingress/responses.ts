@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type {
   ChatRequest,
   ContentBlock,
@@ -173,7 +172,7 @@ function toIrReasoning(r: NonNullable<z.infer<typeof schema>["reasoning"]>): Rea
  * and separates ids that differ anywhere at all.
  */
 function clampCallId(raw: string): string {
-  return raw.length <= 64 ? raw : createHash("sha256").update(raw).digest("hex");
+  return raw.length <= 64 ? raw : Bun.CryptoHasher.hash("sha256", raw, "hex");
 }
 
 /** `developer` is this dialect's spelling of an operator turn inside history. */

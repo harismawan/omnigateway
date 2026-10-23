@@ -1713,16 +1713,86 @@ test("the gzip policy keeps gzip only at a saving of 64 bytes or more", async ()
   expect((await decodeArtifact(key, real.bytes, real.sha256)).ok).toBe(true);
 });
 
-test("the gzip level reaches zlib, and a compressor failure is an error, not raw", async () => {
+test.each([
+  ["omitted", undefined, 1],
+  ["default", 1, 1],
+  ["zlib default", -1, 6],
+  ["NaN default", Number.NaN, 6],
+  ["uncompressed", 0, 0],
+  ["fast", 1, 1],
+  ["best", 9, 9],
+] as const)("the gzip policy preserves the %s level", async (_name, level, zlibLevel) => {
   const key = await legacyKey;
   const json = prepareArtifact(COMPRESSIBLE_INPUT).json;
-  const n = encoder.encode(json).length;
-  // Level 0 stores without deflating, so the stream outgrows the plaintext.
-  const stored = await sealArtifactWithGzip(key, json, 0);
-  expect(layout(stored.bytes)).toEqual({ codec: 0, claimed: n, payload: n });
-  // A level zlib refuses: measuring gzip and getting raw back would misreport it.
-  await expect(sealArtifactWithGzip(key, json, 10)).rejects.toThrow();
+  const plain = encoder.encode(json);
+  const reference = await gzipAsync(plain, { level: zlibLevel });
+  const stored =
+    level === undefined
+      ? await sealArtifactWithGzip(key, json)
+      : await sealArtifactWithGzip(key, json, level);
+  // Level 0 grows the payload; all the compressed levels save well over 64 bytes.
+  expect(layout(stored.bytes)).toEqual({
+    codec: level === 0 ? 0 : 1,
+    claimed: plain.length,
+    payload: level === 0 ? plain.length : reference.length,
+  });
+  const payload = await openByHand(stored.bytes);
+  expect(level === 0 ? payload : new Uint8Array(gunzipSync(payload))).toEqual(plain);
 });
+
+test.each([-2, 10, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0.5, 1.5, 9.5])(
+  "the gzip policy rejects invalid level %s instead of falling back to raw",
+  async (level) => {
+    await expect(
+      sealArtifactWithGzip(await legacyKey, prepareArtifact(COMPRESSIBLE_INPUT).json, level),
+    ).rejects.toThrow();
+  },
+);
+
+test("the gzip cutoff bypasses compression even with an invalid level", async () => {
+  const stored = await sealArtifactWithGzip(await legacyKey, paddedJson(1023), 10);
+  expect(layout(stored.bytes)).toEqual({ codec: 0, claimed: 1023, payload: 1023 });
+});
+
+test.each(["write", "close", "read"] as const)(
+  "a gzip %s failure rejects instead of falling back to raw",
+  async (stage) => {
+    const failure = new Error(`forced gzip ${stage} failure`);
+    const original = globalThis.CompressionStream;
+    // biome-ignore lint/complexity/useArrowFunction: invoked as a constructor by the writer.
+    const failing = function () {
+      if (stage === "read") {
+        return {
+          readable: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(failure);
+            },
+          }),
+          writable: new WritableStream<NodeJS.BufferSource>(),
+        };
+      }
+      return new TransformStream<NodeJS.BufferSource, Uint8Array>({
+        transform() {
+          if (stage === "write") throw failure;
+        },
+        flush() {
+          throw failure;
+        },
+      });
+    };
+    Object.defineProperty(globalThis, "CompressionStream", { value: failing, configurable: true });
+    try {
+      await expect(
+        sealArtifactWithGzip(await legacyKey, prepareArtifact(COMPRESSIBLE_INPUT).json),
+      ).rejects.toThrow(failure.message);
+    } finally {
+      Object.defineProperty(globalThis, "CompressionStream", {
+        value: original,
+        configurable: true,
+      });
+    }
+  },
+);
 
 test("an encryption failure propagates from either writer rather than storing anything", async () => {
   const decryptOnly = await crypto.subtle.importKey("raw", new Uint8Array(32), "AES-GCM", false, [

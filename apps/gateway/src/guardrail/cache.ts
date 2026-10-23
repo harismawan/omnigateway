@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { Verdict } from "./classifier.ts";
 
 /** How long a verdict is reused. An hour covers an agent's tool loop on one human message. */
@@ -31,9 +30,11 @@ export type VerdictKeyParts = {
  * invalidating. Hashed so the cache holds no request text.
  */
 export function verdictKey(parts: VerdictKeyParts): string {
-  return createHash("sha256")
-    .update(JSON.stringify([parts.apiKeyId, parts.policy, parts.model, parts.system, parts.human]))
-    .digest("hex");
+  return Bun.CryptoHasher.hash(
+    "sha256",
+    JSON.stringify([parts.apiKeyId, parts.policy, parts.model, parts.system, parts.human]),
+    "hex",
+  );
 }
 
 /**

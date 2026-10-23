@@ -58,17 +58,10 @@ test("the package entry point has no runtime edge to the store", () => {
   // The whole set, not just the negative. `not.toContain` alone would pass
   // against a package that had quietly grown an edge to something else; this is
   // the entry point every consumer imports, so what it drags in is worth
-  // stating. `node:*` is the HTTP client, which is why `descriptors.ts` and
-  // `catalog.ts` are separate leaf subpaths in the first place. `node:zlib` is
-  // the same client's zstd request encoding, which the Codex leg needs.
-  expect(graph.bare).toEqual([
-    "@omni/ir",
-    "node:crypto",
-    "node:http",
-    "node:https",
-    "node:stream",
-    "node:zlib",
-  ]);
+  // stating. `node:*` is the ordered HTTP transport, which is why
+  // `descriptors.ts` and `catalog.ts` remain separate leaf subpaths. Hashing and
+  // request compression now use Bun/Web built-ins, without module imports.
+  expect(graph.bare).toEqual(["@omni/ir", "node:http", "node:https", "node:stream"]);
 });
 
 test("every store import in this package is type-only, in source", () => {

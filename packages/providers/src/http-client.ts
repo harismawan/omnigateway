@@ -1,7 +1,6 @@
 import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
-import * as zlib from "node:zlib";
 import { type Logger, noopLogger } from "@omni/ir";
 import type { HttpClient, HttpRequest, HttpResponse } from "./types.ts";
 
@@ -175,10 +174,6 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
  * recompressed byte for byte, from 34 KB of JSON to 383 KB — past the
  * `ZSTD_CStreamInSize` (~128 KiB) chunking an earlier note guessed would
  * change the block layout. It does not; `encode_all` is one `write_all`.
- *
- * A namespace import, read at call time: the leaf-subpath probe bundles this
- * package's root for the browser, whose `node:zlib` has no zstd export, and a
- * named import of one fails that build.
  */
 function encodeBody(req: HttpRequest): Promise<Buffer> {
   const raw = Buffer.from(req.body, "utf8");
@@ -186,29 +181,30 @@ function encodeBody(req: HttpRequest): Promise<Buffer> {
   return zstdEncode(raw);
 }
 
-type ZstdOptions = { params: Record<number, number> };
-
 /**
  * Compresses `raw` as one write to a zstd stream, at level 3 stated rather than
  * defaulted. `create` is the stream factory, a parameter so a test can see the
  * options and hand in a stream that fails: a stream error must reject the
  * request's promise, never escape as an uncaught throw.
  */
-export function zstdEncode(
-  raw: Buffer,
-  create: (options: ZstdOptions) => NodeJS.ReadWriteStream = (options) =>
-    zlib.createZstdCompress(options),
+export async function zstdEncode(
+  input: Buffer,
+  create: (options: { level: number }) => ReadableWritablePair<Uint8Array, NodeJS.BufferSource> = (
+    options,
+  ) => new CompressionStream("zstd", options),
 ): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    // Read here, not at module scope: the browser bundle's `node:zlib` has no
-    // zstd constants, and the package root must still import there.
-    const stream = create({ params: { [zlib.constants.ZSTD_c_compressionLevel]: 3 } });
-    const chunks: Buffer[] = [];
-    stream.on("data", (chunk: Buffer) => chunks.push(chunk));
-    stream.on("end", () => resolve(Buffer.concat(chunks)));
-    stream.on("error", reject);
-    stream.end(raw);
-  });
+  const raw = new Uint8Array(input);
+  const stream = create({ level: 3 });
+  const writer = stream.writable.getWriter();
+  // Drain while writing: awaiting the write first can deadlock on backpressure.
+  const [output] = await Promise.all([
+    new Response(stream.readable).arrayBuffer(),
+    (async () => {
+      await writer.write(raw);
+      await writer.close();
+    })(),
+  ]);
+  return Buffer.from(output);
 }
 
 function hasHeader(req: HttpRequest, lowerName: string): boolean {

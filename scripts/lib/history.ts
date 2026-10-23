@@ -15,7 +15,7 @@
  * branch this was written on.
  */
 
-import { execFileSync } from "node:child_process";
+import { runSync } from "./subprocess.ts";
 
 /** How the base was arrived at, so a caller can say so and a test can assert it. */
 export type BaseResolution = {
@@ -32,18 +32,19 @@ export type HistoryFailure = {
 };
 
 function run(root: string, ...argv: string[]): string {
-  return execFileSync("git", argv, { cwd: root, encoding: "utf8" });
+  return runSync(["git", ...argv], { cwd: root });
 }
 
 function verifies(root: string, ref: string): boolean {
   try {
-    execFileSync("git", ["rev-parse", "--verify", ref], {
+    const result = Bun.spawnSync(["git", "rev-parse", "--verify", ref], {
       cwd: root,
-      // Inheriting stderr would print git's own `fatal:` line just above the
-      // explanation the caller prints, which is the noise this replaces.
-      stdio: ["ignore", "ignore", "ignore"],
+      stdin: "ignore",
+      stdout: "ignore",
+      // Preserve the quiet probe and its original catch-to-false classification.
+      stderr: "ignore",
     });
-    return true;
+    return result.success;
   } catch {
     return false;
   }

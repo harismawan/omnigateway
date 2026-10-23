@@ -9,9 +9,9 @@
  * the way to make that true is for there to be one answer.
  */
 
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { runSync } from "./subprocess.ts";
 
 /**
  * TypeScript sources that differ between `base` and the **working tree**.
@@ -24,9 +24,8 @@ import { join } from "node:path";
  * commits because the fix was written as an edit rather than as a rule.
  */
 export function changedSources(root: string, base: string): string[] {
-  return execFileSync("git", ["diff", "--name-only", base], {
+  return runSync(["git", "diff", "--name-only", base], {
     cwd: root,
-    encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   })
     .split("\n")

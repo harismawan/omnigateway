@@ -2,7 +2,7 @@ import type { Dirent } from "node:fs";
 import { type FileHandle, mkdir, open, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
-import { gunzip, gzip } from "node:zlib";
+import { gunzip } from "node:zlib";
 import { decrypt } from "../encryption.ts";
 import type { BodyArtifact, BodyAttempt } from "../types.ts";
 import { boundValue } from "./bound.ts";
@@ -265,7 +265,6 @@ const GZIP_MIN_SAVING_BYTES = 64;
 /** A gzip member's fixed header and footer, before any deflate data. */
 const GZIP_FRAME_BYTES = 18;
 
-const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
 /** Copies a range into a buffer of its own, which is what WebCrypto accepts. */
@@ -286,7 +285,7 @@ type SealedArtifact = { bytes: Uint8Array; sha256: string };
  * anything is written. The plaintext is what is measured, never a compressed
  * form, so a body over budget is not admitted for compressing well.
  */
-function plaintextOf(json: string): Uint8Array {
+function plaintextOf(json: string): Uint8Array<ArrayBuffer> {
   const plain = encoder.encode(json);
   if (plain.length < 1 || plain.length > MAX_ARTIFACT_BYTES) {
     throw new Error("artifact plaintext is outside the binary envelope's bounds");
@@ -325,7 +324,19 @@ export async function sealArtifactWithGzip(
   if (plain.length < GZIP_MIN_PLAINTEXT_BYTES) {
     return sealBinary(key, plain.length, CODEC_RAW, plain);
   }
-  const packed = await gzipAsync(plain, { level });
+  // zlib treats -1 and NaN as its default (6); Web CompressionStream rejects them.
+  const stream = new CompressionStream("gzip", {
+    level: level === -1 || Number.isNaN(level) ? 6 : level,
+  });
+  const writer = stream.writable.getWriter();
+  const [output] = await Promise.all([
+    new Response(stream.readable).arrayBuffer(),
+    (async () => {
+      await writer.write(plain);
+      await writer.close();
+    })(),
+  ]);
+  const packed = new Uint8Array(output);
   if (plain.length - packed.length < GZIP_MIN_SAVING_BYTES) {
     return sealBinary(key, plain.length, CODEC_RAW, plain);
   }

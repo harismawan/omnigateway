@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { mergeHeaders, orderHeaders } from "../profile.ts";
 import { parseSse } from "../sse.ts";
@@ -53,7 +52,7 @@ const REQUEST_NAMESPACE = "omni-antigravity-req";
  * this only covers the callers that have none.
  */
 function derivedRequestId(seed: string): string {
-  const h = createHash("sha256").update(`${REQUEST_NAMESPACE}:${seed}`).digest("hex");
+  const h = Bun.CryptoHasher.hash("sha256", `${REQUEST_NAMESPACE}:${seed}`, "hex");
   const variant = ((Number.parseInt(h[16] as string, 16) & 0x3) | 0x8).toString(16);
   return [
     h.slice(0, 8),

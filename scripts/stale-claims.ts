@@ -32,21 +32,20 @@
  *
  * Run: `bun run check:claims`. Exits non-zero with the lines to fix.
  */
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBase } from "./lib/history.ts";
+import { runSync } from "./lib/subprocess.ts";
 import { changedSources, readable } from "./lib/tree.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const git = (...args: string[]): string =>
-  execFileSync("git", args, {
+  runSync(["git", ...args], {
     cwd: ROOT,
-    encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     // A path that exists at one end and not the other is ordinary here and the
     // caller handles it; git narrating each one would bury the report.
-    stdio: ["ignore", "pipe", "ignore"],
+    stderr: "ignore",
   });
 
 // `function\*?` — a generator declaration is a declaration. Without the `*`,
