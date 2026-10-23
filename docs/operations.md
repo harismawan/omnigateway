@@ -236,7 +236,14 @@ under `smartRouterTimeoutMs`. The first `CONFIDENTIAL` stops the rest. More than
 
 Streaming requests get the same refusals as an in-stream error on a 200. A local
 model that fails surfaces dispatch's own error; **there is never a fallback to an
-external provider**. Because providers also produce `UPSTREAM` and `INTERNAL`, the
+external provider**. A confidential request the local model cannot serve is
+refused `NO_CANDIDATES` (503) with `smart-router:local` on the row: provider-native
+content (an Anthropic `search_result` or `document`, a server-tool result) and
+provider-defined tools (`web_search`, `bash`, …) pin a request to their provider,
+and a `custom` target never matches; so do tools or images the local target's
+capabilities lack. Seeing these in the logs means a client sent confidential
+content through a feature only an external provider offers — expected, not a
+routing fault. Because providers also produce `UPSTREAM` and `INTERNAL`, the
 tag identifies a smart-routing outcome in the logs. Tags combine with others on
 the row — `smart-router:local` with `smart-router:oversize`, or a `guardrail:*`
 tag beside either.

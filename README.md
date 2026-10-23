@@ -282,12 +282,18 @@ without being judged.
 | --- | --- | --- |
 | everything public | served by the model the client asked for | `smart-router:public` |
 | anything confidential | served by `smartRouterLocalModel` | `smart-router:local` |
+| more than 64 segments still to judge | served by `smartRouterLocalModel`, not judged | `smart-router:local`, `smart-router:oversize` |
 | asked for a local-only model already | served as asked, not judged | `smart-router:already-local` |
 | classifier timeout, error, or unreadable reply | refused, `UPSTREAM` (502) | `smart-router:unavailable` |
 | either model unset, unresolved, or not local-only | refused, `INTERNAL` (500) | `smart-router:unconfigured` |
 
 **It fails closed and never falls back to an external provider**: if the local
-model itself fails, the client gets that failure. Each check is its own request
+model itself fails, the client gets that failure. A confidential request the local
+model cannot serve is refused with `NO_CANDIDATES` (503) rather than sent out — one
+carrying provider-native content (an Anthropic `search_result` or `document`, a
+server-tool result) or provider-defined tools (`web_search`, `bash`, …), which only
+that provider can accept, or tools or images the local model lacks. The row still
+carries `smart-router:local`. Each check is its own request
 row under the key, tagged `smart-router:classifier` and charged to it. When a
 key also has a usage policy, smart routing runs first, and a request that goes
 local has its policy judged by the smart-router classifier, never by
