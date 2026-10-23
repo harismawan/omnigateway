@@ -56,10 +56,15 @@ bun run fmt
 Dashboard:
 
 ```bash
-bun run dev:dashboard              # Vite on 5173, proxies /api and /health to 9000
-bun run build:dashboard            # writes apps/dashboard/dist
+bun run dev:dashboard              # Bun on 5173; rebuild/full reload; proxies /api and /health to 9000
+bun run build:dashboard            # typecheck + Bun production/shared build into apps/dashboard/dist
 bun run --cwd apps/dashboard test  # happy-dom suite excluded from root tests
 ```
+
+Dashboard production transforms: `apps/dashboard/tooling/transforms.ts` adapts pinned public
+TanStack hooks plus Babel styled-components (the /vite export is a public hook facade,
+not a Vite runtime dependency). `tooling/serve.ts` owns native dev/preview; dev rebuilds
+the production graph then reloads the page, resetting state rather than Fast Refresh.
 
 CLI + release:
 
@@ -649,6 +654,8 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Body `put` write `OGBA` raw (`sealArtifact`), read legacy/raw/gzip; roll back only to >= v0.13.5
   (older reader call binary `corrupt`). Pins: writer-format + mixed-corpus tests in store
   `test/contract/bodies.test.ts`. `MAX_ENVELOPE_BYTES` caps pre-read; binary `+38` (`parseBinary`).
+  Artifact gunzip keeps native `maxOutputLength` + consumed-input checks; Web decompression lacks
+  both. Bun migration boundaries: `docs/bun-builtins-audit.md`.
 - Lifecycle and swap rules below explained in `ARCHITECTURE.md#replacing-the-database-while-it-is-open`
   and `#stopping-and-restarting`. Read section before changing any.
 - Restart ask systemd, never self-SIGTERM; `--no-block` required.

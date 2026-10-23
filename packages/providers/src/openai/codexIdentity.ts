@@ -1,5 +1,3 @@
-import { createHash, createHmac } from "node:crypto";
-
 /**
  * The identifiers Codex mints, derived instead of minted.
  *
@@ -48,11 +46,11 @@ function withVersion(bytes: Uint8Array, version: number): Uint8Array {
   return out;
 }
 
-const sha256 = (seed: string): Buffer => createHash("sha256").update(seed).digest();
+const sha256 = (seed: string): Buffer => Bun.CryptoHasher.hash("sha256", seed);
 
 /** RFC 4122 UUIDv5, as Rust's `Uuid::new_v5`. */
 export function uuidV5(namespace: string, name: string): string {
-  const digest = createHash("sha1")
+  const digest = new Bun.CryptoHasher("sha1")
     .update(Buffer.from(namespace.replace(/-/g, ""), "hex"))
     .update(name, "utf8")
     .digest();
@@ -141,7 +139,9 @@ export function codexSecretsFrom(providerData: Record<string, unknown>): CodexSe
 export function ensureCodexSecrets(providerData: Record<string, unknown>): Required<CodexSecrets> {
   const stored = codexSecretsFrom(providerData);
   const salt = (): string =>
-    Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(32))).toString("hex");
+    Array.from(globalThis.crypto.getRandomValues(new Uint8Array(32)), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
   return {
     installationId: stored.installationId ?? globalThis.crypto.randomUUID(),
     idSalt: stored.idSalt ?? salt(),
@@ -151,7 +151,7 @@ export function ensureCodexSecrets(providerData: Record<string, unknown>): Requi
 /** `seed` keyed with the credential's salt, when it has one; unchanged otherwise. */
 export function keyed(salt: string | undefined, seed: string): string {
   if (salt === undefined) return seed;
-  return createHmac("sha256", salt).update(seed).digest("hex");
+  return new Bun.CryptoHasher("sha256", salt).update(seed).digest("hex");
 }
 
 /**

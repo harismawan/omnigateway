@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { HeaderPair } from "../types.ts";
 
 export type GrokDevice = {
@@ -16,7 +15,7 @@ export type GrokDevice = {
  * and then frozen onto the credential — upstream needs it stable, not true.
  */
 export function mintGrokDevice(): GrokDevice {
-  return { agentId: randomUUID() };
+  return { agentId: globalThis.crypto.randomUUID() };
 }
 
 /** Reads the identity back off a credential's providerData. */

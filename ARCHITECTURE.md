@@ -29,6 +29,10 @@ package is allowed to import: a provider-neutral core at the bottom, provider
 knowledge in one place, pure routing above that, and every side effect pushed up
 into the gateway process.
 
+The repository pins Bun 1.4.4 across development, CI and release builds.
+[The built-ins audit](docs/bun-builtins-audit.md) records native API migrations
+and the wire/security contracts that prevent equivalent-looking substitutions.
+
 ```mermaid
 graph TD
   subgraph frontends[Front ends]
@@ -841,6 +845,15 @@ flowchart TB
 ```
 
 Plugins render inline in console, so both halves must hold same React instance — two copies make every plugin hook throw. So console externalises `react`, `react-dom`, `styled-components`, `@tanstack/react-query` and `@omnigateway/dashboard-sdk` rather than bundling them, and import map in `index.html` resolves those bare specifiers to shared runtime built beside it. Specifier list, import map and shared build's entry points are one object in `apps/dashboard/shared/manifest.ts`, because those three drifting apart fails in three different and equally unhelpful ways.
+
+`apps/dashboard/tooling/build.ts` uses Bun for production HTML and one multi-entry shared-runtime
+graph. Application assets and self-hosted fonts are content-hashed; shared entry URLs stay stable.
+The thin transform adapter retains TanStack's public route generator/splitter and Babel's
+styled-components names. `tooling/serve.ts` uses Bun for development proxying/static
+preview. Development rebuilds the production graph into temporary snapshots and
+reloads the page after success (component state resets; no React Fast Refresh).
+Failed edits retain the last good snapshot; serialized rebuilds coalesce rapid edits.
+Preview serves existing `dist` on 4173 without watching; dev defaults to 5173.
 
 `@omnigateway/dashboard-sdk` is on that list too, and it is worth separating from the other four rather than reading as one more of them. Those are shared for instance identity, and every breach announces itself — a thrown hook error, a component drawing from the wrong stylesheet. The SDK is shared for **context identity**: it holds the chassis LIVE switch, so a second copy is a second `createContext` result, and a panel reading it finds no provider above it, takes the "polling is off" default, and never polls again. Nothing throws and nothing is logged; the only symptom is a panel that stopped updating, which is indistinguishable from the pause working. A plugin bundle must mark the SDK external exactly as it marks React.
 

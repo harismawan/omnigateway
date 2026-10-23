@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { HeaderPair } from "../types.ts";
 
 export type KimiDevice = {
@@ -18,7 +17,7 @@ export type KimiDevice = {
  */
 export function mintKimiDevice(): KimiDevice {
   return {
-    deviceId: randomUUID(),
+    deviceId: globalThis.crypto.randomUUID(),
     deviceName: "MacBook-Pro",
     deviceModel: "MacBookPro18,3",
     osVersion: "15.3.1",

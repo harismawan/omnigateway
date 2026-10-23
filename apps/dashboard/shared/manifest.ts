@@ -1,6 +1,6 @@
 /**
  * The federation contract: what the console externalises, what the import map
- * resolves, and what `vite.shared.config.ts` must therefore build.
+ * resolves, and what `tooling/build.ts` must therefore build.
  *
  * One object because these three lists going out of step fails in three
  * different and equally unhelpful ways. A specifier externalised but missing

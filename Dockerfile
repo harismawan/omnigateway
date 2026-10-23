@@ -1,4 +1,4 @@
-FROM oven/bun:1.4.3-alpine AS base
+FROM oven/bun:1.4.4-alpine AS base
 WORKDIR /app
 
 # Manifests first: this layer is cached until a dependency actually changes,
@@ -35,9 +35,9 @@ COPY tsconfig.base.json ./
 COPY packages packages
 COPY apps/gateway apps/gateway
 COPY apps/dashboard apps/dashboard
-# The build's own `typecheck` step reaches the repository's `scripts/` for two
+# The regular build's `typecheck` step reaches the repository's `scripts/` for two
 # import-boundary tests, which do not ship; CI typechecks, the image compiles.
-RUN cd apps/dashboard && bun run generate:routes && bunx vite build && bun run build:shared
+RUN bun run --cwd apps/dashboard build:production
 COPY scripts/build-binary.ts scripts/build-binary.ts
 RUN bun run build:binary
 

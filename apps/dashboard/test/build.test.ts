@@ -21,9 +21,11 @@
  */
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseSync } from "@babel/core";
+import * as sdk from "@omnigateway/dashboard-sdk";
 import { SHARED_IMPORTS, sharedEntryName } from "../shared/manifest.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -44,13 +46,10 @@ beforeAll(() => {
   // Built here rather than trusting whatever `dist` happens to hold: a stale
   // directory from an earlier good build would make every assertion below pass
   // while the current source produces a broken one.
-  // `NODE_ENV=production` explicitly, because `bun test` sets it to `test` and a
-  // child build inherits that. It is not cosmetic: under `test`, the CommonJS
-  // shims' `process.env.NODE_ENV === "production"` branch is not statically
-  // resolved and a require stub reappears. Releases build with it unset, which
-  // vite treats as production — so this makes the test build the artifact that
-  // actually ships rather than a variant nothing else produces.
-  const built = Bun.spawnSync(["bun", "run", "build"], {
+  // Also verify the no-typecheck Docker entrypoint. The build defines production
+  // for browser code regardless of the test runner's own NODE_ENV.
+  if (existsSync(dist)) writeFileSync(join(dist, "stale-build.txt"), "must be removed");
+  const built = Bun.spawnSync(["bun", "run", "build:production"], {
     cwd: root,
     stdout: "pipe",
     stderr: "pipe",
@@ -72,7 +71,9 @@ describe("the built console", () => {
     // module leaves this behind, and it is fatal rather than degraded: the
     // console renders nothing at all.
     const offenders = bundles(dist).filter((file) =>
-      readFileSync(file, "utf8").includes("in an environment that doesn't expose the `require`"),
+      /in an environment that doesn't expose the `require`|Dynamic require of|Cannot require module/.test(
+        readFileSync(file, "utf8"),
+      ),
     );
     expect(offenders.map((f) => f.slice(dist.length + 1))).toEqual([]);
   });
@@ -93,14 +94,9 @@ describe("the built console", () => {
     const bare = new Set<string>();
     for (const file of bundles(join(dist, "assets"))) {
       const code = readFileSync(file, "utf8");
-      for (const match of code.matchAll(/\bfrom"([^"]+)"/g)) {
-        const specifier = match[1] ?? "";
-        // Relative and absolute paths resolve on their own; only bare
-        // specifiers need the map. `${` filters out matches inside template
-        // literals — minified code contains strings that read like imports and
-        // are not, and one of them (`"${e.from}"`) failed this test before the
-        // filter existed.
-        if (specifier.includes("${")) continue;
+      for (const imported of new Bun.Transpiler({ loader: "js" }).scanImports(code)) {
+        const specifier = imported.path;
+        // Scan actual syntax: strings that look like imports are not imports.
         if (!specifier.startsWith(".") && !specifier.startsWith("/")) bare.add(specifier);
       }
     }
@@ -142,48 +138,116 @@ describe("the built console", () => {
     // binding a module does not export is a load-time SyntaxError, not an
     // `undefined`.
     //
-    // Checked against the artifact rather than the shim source, because the
-    // failure this catches includes ones the source cannot show — dropping
-    // `preserveEntrySignatures` in `vite.shared.config.ts` tree-shakes these
-    // entries to nothing while every source file still reads correctly.
-    // Both sides are brace lists of `a as b`, and the halves mean opposite
-    // things: in `export { i as useLive }` the module provides `useLive`, and
-    // in `import { useLive as fe }` the module is asked for `useLive`. So both
-    // want the half facing the module boundary — last for exports, first for
-    // imports.
-    const names = (source: string, pattern: RegExp, half: "first" | "last"): Set<string> => {
-      const out = new Set<string>();
-      for (const match of source.matchAll(pattern)) {
-        for (const part of (match[1] ?? "").split(",")) {
-          const sides = part.trim().split(/\s+as\s+/);
-          const name = (half === "first" ? sides[0] : sides[sides.length - 1])?.trim();
-          if (name !== undefined && name !== "") out.add(name);
-        }
-      }
-      return out;
-    };
-
-    const chunks = bundles(join(dist, "assets")).map((file) => readFileSync(file, "utf8"));
+    // Parse both artifact boundaries: source re-exports alone do not prove the
+    // bundler preserved them for consumers outside its graph.
+    const parser = new Bun.Transpiler({ loader: "js" });
+    const chunks = bundles(join(dist, "assets")).map((file) => {
+      const ast = parseSync(readFileSync(file, "utf8"), { configFile: false, babelrc: false });
+      if (!ast) throw new Error(`Could not parse ${file}`);
+      return ast.program.body;
+    });
     let checked = 0;
 
     for (const [specifier, url] of Object.entries(SHARED_IMPORTS)) {
       const entry = join(dist, "shared", `${sharedEntryName(url)}.js`);
-      const provided = names(readFileSync(entry, "utf8"), /export\s*\{([^}]*)\}/g, "last");
-
-      const escaped = specifier.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-      const imported = new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*"${escaped}"`, "g");
+      const provided = new Set(parser.scan(readFileSync(entry, "utf8")).exports);
+      expect(provided.size).toBeGreaterThan(0);
+      const expected = parser.scan(
+        readFileSync(join(root, "shared", `${sharedEntryName(url)}.ts`), "utf8"),
+      ).exports;
+      for (const name of expected) expect(provided).toContain(name);
+      if (specifier === "@omnigateway/dashboard-sdk") {
+        for (const name of Object.keys(sdk)) expect(provided).toContain(name);
+      }
       const wanted = new Set<string>();
-      for (const source of chunks) {
-        for (const name of names(source, imported, "first")) wanted.add(name);
+      for (const body of chunks) {
+        for (const node of body) {
+          if (node.type !== "ImportDeclaration" || node.source.value !== specifier) continue;
+          for (const binding of node.specifiers) {
+            if (binding.type === "ImportDefaultSpecifier") wanted.add("default");
+            if (binding.type === "ImportSpecifier") {
+              wanted.add(
+                binding.imported.type === "Identifier"
+                  ? binding.imported.name
+                  : binding.imported.value,
+              );
+            }
+          }
+        }
       }
 
       checked += wanted.size;
       expect([...wanted].filter((name) => !provided.has(name)).sort()).toEqual([]);
     }
 
-    // Without this the whole loop is vacuous the moment the regexes stop
-    // matching — a bundler that emits `import{a}from'react'` with single quotes
-    // would leave every `wanted` empty and every assertion trivially true.
+    // Positive control: parser or import shape changes must not make this vacuous.
     expect(checked).toBeGreaterThan(0);
+  });
+
+  test("keeps stable public URLs, ordered theme/import map, hashed external fonts and clean output", () => {
+    const html = readFileSync(join(dist, "index.html"), "utf8");
+    expect(html).toContain('type="importmap"');
+    expect(html).toContain('type="module"');
+    expect(html).toContain('localStorage.getItem("omni-theme")');
+    expect(html.indexOf('type="importmap"')).toBeLessThan(html.indexOf('type="module"'));
+    expect(html.indexOf('localStorage.getItem("omni-theme")')).toBeLessThan(
+      html.indexOf('type="module"'),
+    );
+    expect(html).toContain('href="/favicon.svg"');
+    // Absolute asset URLs must also boot when the gateway serves a deep SPA route.
+    expect(html).toMatch(/src="\/assets\/[^"/]+\.js"/);
+    expect(html).toMatch(/href="\/assets\/[^"/]+\.css"/);
+    expect(readFileSync(join(dist, "favicon.svg"))).toEqual(
+      readFileSync(join(root, "public/favicon.svg")),
+    );
+    expect(existsSync(join(dist, "shared/favicon.svg"))).toBe(false);
+    expect(existsSync(join(dist, "stale-build.txt"))).toBe(false);
+    const css = readdirSync(join(dist, "assets"))
+      .filter((name) => name.endsWith(".css"))
+      .map((name) => readFileSync(join(dist, "assets", name), "utf8"))
+      .join("\n");
+    expect(css).not.toContain("data:");
+    const fonts = [...css.matchAll(/\/assets\/([^\s)"']+\.woff2)/g)].map((match) => match[1] ?? "");
+    expect(fonts.length).toBeGreaterThan(0);
+    for (const name of fonts) {
+      const bytes = readFileSync(join(dist, "assets", name));
+      expect(bytes.subarray(0, 4).toString()).toBe("wOF2");
+      const hash = new Bun.CryptoHasher("sha256").update(bytes).digest("hex").slice(0, 16);
+      expect(name).toEndWith(`-${hash}.woff2`);
+    }
+  });
+
+  test("contains real lazy routes and representative original styled display names", () => {
+    const files = bundles(join(dist, "assets"));
+    const parser = new Bun.Transpiler({ loader: "js" });
+    const imports = files.flatMap((file) => parser.scanImports(readFileSync(file, "utf8")));
+    const lazy = imports.filter((entry) => entry.kind === "dynamic-import");
+    expect(lazy.length).toBeGreaterThan(10);
+    expect(lazy.some((entry) => entry.path.includes("login-"))).toBe(true);
+    expect(lazy.some((entry) => entry.path.includes("_app.keys-"))).toBe(true);
+    const code = files.map((file) => readFileSync(file, "utf8")).join("\n");
+    expect(code).toContain("Panel__");
+    expect(code).toContain("login__");
+    // Consumers may reference React internals, but the implementation is shared.
+    const react = bundles(join(dist, "shared")).filter((file) =>
+      readFileSync(file, "utf8").includes(
+        "__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE",
+      ),
+    );
+    // React, JSX runtime and the renderer all recognize the element symbol.
+    // Only the React implementation initializes the shared dispatcher object.
+    expect(react.length).toBeGreaterThan(0);
+    expect(
+      bundles(join(dist, "shared")).filter((file) =>
+        /\.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE\s*=/.test(
+          readFileSync(file, "utf8"),
+        ),
+      ),
+    ).toHaveLength(1);
+    for (const file of bundles(join(dist, "shared"))) {
+      for (const imported of parser.scanImports(readFileSync(file, "utf8"))) {
+        expect(imported.path.startsWith(".")).toBe(true);
+      }
+    }
   });
 });

@@ -81,7 +81,7 @@ boundary, and the background loops.
 
 ## Requirements
 
-- [Bun](https://bun.sh/) 1.4 or later. Bun is the runtime, not just the
+- [Bun](https://bun.sh/) 1.4.4 or later. Bun is the runtime, not just the
   installer, so a Node-only machine cannot run OmniGateway.
 - A directory that persists, for the SQLite database.
 - At least one Anthropic, OpenAI, Kimi Coding, Kilo, or xAI account to connect.
@@ -633,6 +633,10 @@ conventions, [docs/adding-a-provider.md](docs/adding-a-provider.md) for the
 provider checklist, and `docs/superpowers/specs/` for the design documents
 behind each feature.
 
+The checkout pins Bun 1.4.4 for local builds, CI, and releases. See the
+[Bun built-ins audit](docs/bun-builtins-audit.md) for native-tool migrations and
+compatibility boundaries.
+
 ```bash
 git clone https://github.com/harismawan/omnigateway.git
 cd omnigateway
@@ -641,6 +645,12 @@ cp .env.example .env          # then set OMNI_ENCRYPTION_KEY
 bun run build:dashboard       # the gateway serves this build
 bun run dev                   # gateway on 9000, with file watching
 ```
+
+For dashboard development, run `bun run dev:dashboard` in another terminal
+(port 5173, API/health proxied to 9000). Bun rebuilds after source changes and
+reloads the page; component state resets, with no React Fast Refresh.
+`bun run --cwd apps/dashboard preview` serves an existing build on port 4173.
+Both commands accept `--host`, `--port` and `--upstream` options.
 
 Releases are published to npm from a `v*` tag, with provenance attesting which
 commit produced them.

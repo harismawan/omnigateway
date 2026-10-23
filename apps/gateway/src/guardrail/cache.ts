@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { Verdict } from "./classifier.ts";
 
 /**
@@ -37,18 +36,18 @@ export type VerdictKeyParts = {
  * invalidating. Hashed so the cache holds no request text.
  */
 export function verdictKey(parts: VerdictKeyParts): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify([
-        parts.apiKeyId,
-        parts.policy,
-        parts.model,
-        parts.system,
-        parts.human,
-        parts.toolResults,
-      ]),
-    )
-    .digest("hex");
+  return Bun.CryptoHasher.hash(
+    "sha256",
+    JSON.stringify([
+      parts.apiKeyId,
+      parts.policy,
+      parts.model,
+      parts.system,
+      parts.human,
+      parts.toolResults,
+    ]),
+    "hex",
+  );
 }
 
 /**

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { orderFields } from "../body.ts";
 import type { CodecInput, CodecRequest, ProviderCodec } from "../codec.ts";
 import { mergeHeaders, orderHeaders } from "../profile.ts";
@@ -31,7 +30,7 @@ const CONV_NAMESPACE = "omni-grok-conv";
  * because the host may build it once and send it on more than one attempt.
  */
 function derivedUuid(value: string): string {
-  const h = createHash("sha256").update(`${CONV_NAMESPACE}:${value}`).digest("hex");
+  const h = Bun.CryptoHasher.hash("sha256", `${CONV_NAMESPACE}:${value}`, "hex");
   // Version nibble 5 and the RFC 4122 variant bits, so the id reads as the kind
   // of name-based UUID it actually is rather than as a random one.
   const variant = ((Number.parseInt(h[16] as string, 16) & 0x3) | 0x8).toString(16);

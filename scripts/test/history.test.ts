@@ -59,6 +59,14 @@ afterEach(() => {
 });
 
 describe("which commit the hygiene checks compare against", () => {
+  test("a corrupt ref retains the missing-main explanation", () => {
+    const root = scratch(1);
+    writeFileSync(join(root, ".git/refs/heads/main"), "not-a-commit\n");
+    const out = resolveBase(root, "check");
+    if (out.base !== undefined) throw new Error(`expected a refusal, got base ${out.base}`);
+    expect(out.message).toContain("this checkout has neither");
+  });
+
   test("a local `main` behind HEAD answers, and is preferred", () => {
     // The developing checkout's own shape, and the only one that ever worked.
     const root = scratch(2);

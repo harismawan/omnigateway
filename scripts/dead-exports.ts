@@ -32,14 +32,14 @@
  *
  * Run: `bun run check:dead`. Exits non-zero with what to delete.
  */
-import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { resolveBase } from "./lib/history.ts";
+import { runSync } from "./lib/subprocess.ts";
 import { changedSources, readable } from "./lib/tree.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const git = (...args: string[]): string =>
-  execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  runSync(["git", ...args], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
 
 /**
  * Comments removed, so a mention in prose never counts as a reference.

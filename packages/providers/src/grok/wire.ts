@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { type ChatRequest, CONTEXT_1M_BETA, type ToolChoice } from "@omni/ir";
 import { moveToResponsesText } from "../responseFormat.ts";
 import { systemText } from "../system.ts";
@@ -50,7 +49,7 @@ function encodeToolChoice(c: ToolChoice): unknown {
  */
 function promptCacheKey(instructions: string, firstInput: unknown): string {
   const stable = JSON.stringify({ instructions, firstInput });
-  return createHash("sha256").update(stable).digest("hex").slice(0, 32);
+  return Bun.CryptoHasher.hash("sha256", stable, "hex").slice(0, 32);
 }
 
 /**

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { VerdictCache } from "../guardrail/cache.ts";
 import type { Confidentiality } from "./classifier.ts";
 
@@ -14,7 +13,5 @@ export type ConfidentialityCache = VerdictCache<Confidentiality>;
  * naturally, and nothing ever needs invalidating.
  */
 export function segmentKey(classifierModel: string, policy: string, segment: string): string {
-  return createHash("sha256")
-    .update(JSON.stringify([classifierModel, policy, segment]))
-    .digest("hex");
+  return Bun.CryptoHasher.hash("sha256", JSON.stringify([classifierModel, policy, segment]), "hex");
 }
