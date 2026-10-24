@@ -1,4 +1,5 @@
 import type { ChatRequest } from "@omni/ir";
+import type { TraceAgent } from "@omni/store";
 
 /**
  * Who a request belongs to, as far as the caller told us.
@@ -19,8 +20,6 @@ export type TraceContext = {
   /** Something was dropped or cut; the row records {@link TRACE_INVALID}. */
   invalid: boolean;
 };
-
-export type TraceAgent = "claude-code" | "opencode" | "codex" | "pi";
 
 /** A constant on purpose: it lands in `degradations`, which never holds request data. */
 export const TRACE_INVALID = "trace:invalid";
@@ -100,7 +99,7 @@ export function extractTrace(headers: Headers, request: ChatRequest): TraceConte
   };
 }
 
-type Inferred = { agent: TraceAgent; session?: string; turn?: string };
+type Inferred = { agent: TraceAgent; session?: string | undefined; turn?: string | undefined };
 
 function inferAgent(
   request: ChatRequest,
@@ -143,7 +142,7 @@ function codexTurn(
   request: ChatRequest,
   line: (name: string) => string | undefined,
   flag: () => void,
-): { session?: string; turn?: string } | null {
+): { session: string; turn?: string | undefined } | null {
   const meta = request.vendor?.openai?.client_metadata;
   const bag = isRecord(meta) ? meta : undefined;
 

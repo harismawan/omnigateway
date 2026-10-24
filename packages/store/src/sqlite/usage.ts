@@ -3,9 +3,20 @@ import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
 import { logPageClauses, splitPage } from "../logPage.ts";
 import {
+  readSession,
+  readTrace,
+  type SessionRow,
+  sessionsSql,
+  TRACE_COLUMN_NAMES,
+  type TraceRow,
+  traceCompleteSet,
+  traceValues,
+} from "../traceColumns.ts";
+import {
   NODE_GRACE_MS,
   type RequestLog,
   type RequestState,
+  SESSIONS_LIMIT,
   type UsageBucket,
   type UsageDimension,
   type UsageGrain,
@@ -49,7 +60,7 @@ type Row = {
   rtk_compressed_code_units: number;
   rtk_estimated_tokens_saved: number;
   rtk_filters: string;
-};
+} & TraceRow;
 
 function parseRtkFilters(raw: string): import("@omni/rtk/catalog").RtkFilterId[] {
   try {
@@ -86,6 +97,7 @@ const toLog = (r: Row): RequestLog => ({
   rtkCompressedCodeUnits: r.rtk_compressed_code_units,
   rtkEstimatedTokensSaved: r.rtk_estimated_tokens_saved,
   rtkFilters: parseRtkFilters(r.rtk_filters),
+  ...readTrace(r),
 });
 
 /**
@@ -174,9 +186,10 @@ const COLUMNS = `(id, state, node_id, at, api_key_id, requested_model, resolved_
                   resolved_model, credential_id, attempts, status, error_code, input_tokens,
                   output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
                   cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
-                  rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters)`;
+                  rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters,
+                  ${TRACE_COLUMN_NAMES.join(", ")})`;
 
-const PLACEHOLDERS = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+const PLACEHOLDERS = `(${Array.from({ length: 26 + TRACE_COLUMN_NAMES.length }, () => "?").join(",")})`;
 
 function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryBindings[] {
   return [
@@ -206,6 +219,7 @@ function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryB
     log.rtkCompressedCodeUnits ?? 0,
     log.rtkEstimatedTokensSaved ?? 0,
     JSON.stringify(log.rtkFilters ?? []),
+    ...traceValues(log),
   ];
 }
 
@@ -251,7 +265,8 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_original_code_units = excluded.rtk_original_code_units,
     rtk_compressed_code_units = excluded.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = excluded.rtk_estimated_tokens_saved,
-    rtk_filters = excluded.rtk_filters
+    rtk_filters = excluded.rtk_filters,
+    ${traceCompleteSet("excluded")}
   WHERE request_logs.state = 'pending'`;
 
 /**
@@ -407,6 +422,14 @@ export function createUsageRepo(
         )
         .all(apiKeyId, limit)
         .map(toLog);
+    },
+
+    async sessions(q) {
+      const { sql, extra } = sessionsSql(() => "?", q);
+      return db
+        .query<SessionRow, SQLQueryBindings[]>(sql)
+        .all(q.since, q.until, ...extra, SESSIONS_LIMIT)
+        .map(readSession);
     },
 
     async page(query) {

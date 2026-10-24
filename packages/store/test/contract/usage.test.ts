@@ -888,3 +888,126 @@ forEachStore((backend) => {
     expect(typeof got?.at).toBe("number");
   });
 });
+
+forEachStore((backend) => {
+  const T3 = 1_730_000_000_000;
+  const trace = {
+    sessionId: "claude-code:s1",
+    turnId: "t1",
+    agent: "claude-code" as const,
+    tags: ["team-a", "exp:b"],
+    traceMetadata: { team: "search", note: "hello, world" },
+    clientRequestId: "cli-1",
+    upstreamRequestId: "req_upstream_1",
+  };
+
+  test("trace columns round-trip on append, and default to empty", async () => {
+    const s = await backend.fresh();
+    const traced = logRow({ id: "t", at: T3, ...trace });
+    const plain = logRow({ id: "p", at: T3 + 1 });
+    await s.usage.append(traced);
+    await s.usage.append(plain);
+    const rows = await s.usage.recent(10);
+    expect(rows.find((r) => r.id === "t")).toEqual(traced);
+    expect(rows.find((r) => r.id === "p")).toMatchObject({
+      sessionId: null,
+      turnId: null,
+      agent: null,
+      tags: [],
+      traceMetadata: {},
+      clientRequestId: null,
+      upstreamRequestId: null,
+    });
+  });
+
+  test("a pending row carries its trace fields before completion; completion adds the upstream id", async () => {
+    const s = await backend.fresh();
+    const { upstreamRequestId: _, ...atBegin } = trace;
+    await s.usage.begin(
+      logRow({ id: "r", at: T3, state: "pending", status: 0, ...atBegin, upstreamRequestId: null }),
+    );
+    const pending = await s.usage.page({ limit: 9, cursor: null, sessionId: "claude-code:s1" });
+    expect(pending.logs.map((r) => r.id)).toEqual(["r"]);
+    expect(pending.logs[0]?.upstreamRequestId).toBeNull();
+
+    // Completion may arrive without the trace fields (the terminal catch builds
+    // a blank log); what began keeps them.
+    await s.usage.append(logRow({ id: "r", at: T3, upstreamRequestId: "up-9" }));
+    const [done] = await s.usage.recent(1);
+    expect(done).toMatchObject({ state: "done", ...atBegin, upstreamRequestId: "up-9" });
+  });
+
+  test("session, turn, agent and tag filters are exact", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "a", at: T3, ...trace }));
+    await s.usage.append(
+      logRow({ id: "b", at: T3 + 1, ...trace, sessionId: "claude-code:s10", tags: ["team-ab"] }),
+    );
+    await s.usage.append(logRow({ id: "c", at: T3 + 2, agent: "codex", turnId: "t1" }));
+    const ids = async (q: Record<string, string>) =>
+      (await s.usage.page({ limit: 9, cursor: null, ...q })).logs.map((r) => r.id).sort();
+
+    expect(await ids({ sessionId: "claude-code:s1" })).toEqual(["a"]);
+    expect(await ids({ turnId: "t1" })).toEqual(["a", "b", "c"]);
+    expect(await ids({ agent: "codex" })).toEqual(["c"]);
+    expect(await ids({ tag: "team-a" })).toEqual(["a"]);
+    expect(await ids({ tag: "exp:b" })).toEqual(["a"]);
+    // A tag holding LIKE's own wildcards or a quote matches only itself.
+    expect(await ids({ tag: "team%" })).toEqual([]);
+    expect(await ids({ tag: 'team-a"' })).toEqual([]);
+    // Tags are identifiers: case matters on both backends.
+    expect(await ids({ tag: "TEAM-A" })).toEqual([]);
+  });
+
+  test("sessions groups by key and session, sums, counts turns, and orders by cost", async () => {
+    const s = await backend.fresh();
+    const row = (id: string, at: number, extra: object) =>
+      logRow({ id, at, costUsd: 0.01, inputTokens: 10, outputTokens: 5, ...extra });
+    await s.usage.append(row("1", T3, { sessionId: "s", agent: "codex", turnId: "x" }));
+    await s.usage.append(row("2", T3 + 10, { sessionId: "s", agent: "codex", turnId: "y" }));
+    await s.usage.append(
+      row("3", T3 + 20, { sessionId: "s", agent: "codex", turnId: "y", status: 500 }),
+    );
+    // Same session id under another key is another session.
+    await s.usage.append(row("4", T3 + 5, { sessionId: "s", apiKeyId: "k2", costUsd: 0.5 }));
+    await s.usage.append(row("5", T3, { sessionId: null }));
+    await s.usage.begin(row("6", T3 + 1, { sessionId: "s", state: "pending", status: 0 }));
+
+    const got = await s.usage.sessions({ since: T3, until: T3 + 100 });
+    expect(got).toEqual([
+      {
+        sessionId: "s",
+        apiKeyId: "k2",
+        agent: null,
+        firstAt: T3 + 5,
+        lastAt: T3 + 5,
+        requests: 1,
+        failed: 0,
+        turns: 0,
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 2,
+        cacheWriteTokens: 1,
+        costUsd: 0.5,
+      },
+      {
+        sessionId: "s",
+        apiKeyId: "k1",
+        agent: "codex",
+        firstAt: T3,
+        lastAt: T3 + 20,
+        requests: 3,
+        failed: 1,
+        turns: 2,
+        inputTokens: 30,
+        outputTokens: 15,
+        cacheReadTokens: 6,
+        cacheWriteTokens: 3,
+        costUsd: 0.03,
+      },
+    ]);
+    expect(await s.usage.sessions({ since: T3, until: T3 + 100, apiKeyId: "k1" })).toHaveLength(1);
+    expect(await s.usage.sessions({ since: T3, until: T3 + 100, agent: "codex" })).toHaveLength(1);
+    expect(await s.usage.sessions({ since: T3 + 21, until: T3 + 100 })).toEqual([]);
+  });
+});

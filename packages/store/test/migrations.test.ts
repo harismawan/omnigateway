@@ -33,7 +33,10 @@ import modelWindowIndex018 from "../src/sqlite/migrations/018_model_window_index
   type: "text",
 };
 import keyGuardrail019 from "../src/sqlite/migrations/019_key_guardrail.sql" with { type: "text" };
-import { NARROWED_SQL } from "../src/sqlite/usage.ts";
+import keySmartRouting020 from "../src/sqlite/migrations/020_key_smart_routing.sql" with {
+  type: "text",
+};
+import { createUsageRepo, NARROWED_SQL } from "../src/sqlite/usage.ts";
 
 type TableRow = { name: string };
 
@@ -58,6 +61,7 @@ const SQL_BY_ID = [
   logTextSearch017,
   modelWindowIndex018,
   keyGuardrail019,
+  keySmartRouting020,
 ];
 
 /**
@@ -105,7 +109,7 @@ test("openDb applies migrations and records them", () => {
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
   expect(applied.map((row) => row.id)).toEqual([
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
   ]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
@@ -329,6 +333,38 @@ test("migration 20 leaves every key that predates it with smart routing off", as
   db.close();
 });
 
+/**
+ * Migration 21 adds the trace columns with no backfill: a row logged before it
+ * reads back with no session, no tags, no ids — never a guessed attribution.
+ */
+test("migration 21 leaves every request log that predates it untraced", async () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  legacyDb(path, 21);
+
+  const legacy = new Database(path);
+  legacy.run(
+    `INSERT INTO request_logs (id, state, at, api_key_id, requested_model, attempts, status,
+                               input_tokens, output_tokens, cache_read_tokens,
+                               cache_write_tokens, duration_ms, cost_usd)
+     VALUES ('before', 'done', 1, 'k1', 'fast', 1, 200, 1, 1, 0, 0, 1, 0)`,
+  );
+  legacy.close();
+
+  const db = openDb(path);
+  const [row] = await createUsageRepo(db).recent(1);
+  expect(row).toMatchObject({
+    id: "before",
+    sessionId: null,
+    turnId: null,
+    agent: null,
+    tags: [],
+    traceMetadata: {},
+    clientRequestId: null,
+    upstreamRequestId: null,
+  });
+  db.close();
+});
+
 test("migration 9 indexes request logs by key first, so a per-key window scan starts at the key", () => {
   const db = openDb(":memory:");
   // Composite order is the whole point: `(at DESC, api_key_id)` would not let a
@@ -484,7 +520,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(20);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(21);
   db.close();
 });
 
