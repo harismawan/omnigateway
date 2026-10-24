@@ -442,6 +442,47 @@ A cursor names a position in one specific ordering, so a rejected or expired one
 is an error rather than a silent restart at the newest row. Changing a filter
 starts a new walk.
 
+### Sessions, tags and request ids
+
+Each row also carries who the request belongs to, as far as its caller said:
+a **session** and **turn** (inferred from Claude Code, OpenCode, Codex and Pi
+headers, or sent explicitly as `x-omni-session-id` / `x-omni-turn-id`), the
+**agent**, caller **tags** and **metadata**, the caller's own `x-request-id`,
+and the provider's request id from the attempt that produced the outcome. The
+headers and bounds are in [client-api.md](client-api.md#request-ids-and-traceability).
+All of it is caller-supplied grouping: it never selects a key, a route or a
+limit. A value the gateway drops for being malformed marks the row
+`trace:invalid`.
+
+```bash
+omni logs --session claude-code:3f1c…      # one session's requests
+omni logs --agent codex --tag team-a       # every Codex request tagged team-a
+omni logs sessions --since 2026-10-20 --until 2026-10-24
+omni logs sessions --since … --until … --key key_abc --agent claude-code
+```
+
+These filters are **exact** — they name ids copied off a row. `logs sessions`
+(and `GET /api/logs/sessions`) groups by key *and* session, highest cost first,
+at most 500 rows; both bounds are required and at most 31 days apart, because it
+reads raw rows. Guardrail and smart-router classifier rows inherit their
+parent's session, so a session's cost includes what judging it cost.
+
+The console shows the session on every row — click it to filter — and a
+**Sessions** tab beside the request log; a row there opens the log narrowed to
+that session and key. The filter box spells the same filters as `session:`,
+`turn:`, `agent:` and `tag:`; a session id keeps its own colons
+(`session:claude-code:3f1c`).
+
+The provider request id (Anthropic `request-id`, OpenAI-compatible
+`x-request-id`) is what a provider's support will ask for. It is operator-only:
+key holders see their own session, tags and request ids on the client
+dashboard, never the provider's id or the account. Every response also carries
+`x-omni-request-id`, so a client can quote the gateway's id for any request.
+
+On traces, the root `gateway.request` span carries `omni.request.id`,
+`omni.session.id`, `omni.turn.id`, `omni.agent` and `omni.upstream.request_id`.
+Tags and metadata are deliberately not span attributes.
+
 ### Exporting
 
 `omni logs export` writes matching rows to stdout as CSV or JSONL. Both time
@@ -457,6 +498,10 @@ Admins and viewers can do the same from `GET /api/logs/export`, which streams
 the response rather than building it in memory. **Metadata only** — no prompts,
 no responses, no captured bodies, whatever the capture setting says. Key holders
 have no export at all on `/api/client/*`.
+
+Exports carry the trace columns too: `sessionId`, `turnId`, `agent`, `tags`,
+`traceMetadata`, `clientRequestId`, `upstreamRequestId`. In CSV, tags and
+metadata are JSON text in one cell.
 
 The two formats differ deliberately. JSONL is lossless: one object per line, in
 a fixed key order, values verbatim. CSV is RFC 4180 and **neutralises formulas**

@@ -1,7 +1,14 @@
 # Request Traceability Design
 
 Date: 2026-10-24
-Status: draft
+Status: implemented
+
+Corrections recorded at implementation, against the clients' current source:
+
+- **OpenCode's own session header is `x-opencode-session-id`** (`packages/core/src/session/model-request.ts`), sent beside `x-opencode-session` (an affinity value). The id wins; the affinity header is the fallback. Its user agent is `opencode/<channel>/<version>/<app>`.
+- **Pi sends OpenCode's headers** when it talks to an OpenCode endpoint, with `x-opencode-client: pi`; it is recognised as Pi first. Its user agent is `pi/<version> (…)`, or `pi` in short mode.
+- **The sessions summary is also on the client surface** (`GET /api/client/sessions`), scoped by the session like `/api/client/logs`.
+- **Upstream id capture** is a per-attempt `HttpClient` decorator (`dispatch/upstreamRequestId.ts`), which tests see through via `unwatched`.
 
 ## Goal
 
@@ -111,9 +118,9 @@ Codex's `client_metadata`; nothing else of the body.
 | Agent | Detected by | Session | Turn |
 |---|---|---|---|
 | Claude Code | `x-claude-code-session-id` present | that header | — |
-| OpenCode | `x-opencode-session` present, or `user-agent` starting `opencode` | `x-opencode-session`, else `x-session-id`, else `x-session-affinity` | `x-opencode-request` |
+| OpenCode | `x-opencode-session-id` or `x-opencode-session` present, or `user-agent` starting `opencode/` | `x-opencode-session-id`, else `x-opencode-session`, else `x-session-id`, else `x-session-affinity` | `x-opencode-request` |
 | Codex | `client_metadata["x-codex-turn-metadata"]` in the Responses body, else the `x-codex-turn-metadata` header, else flat `client_metadata.thread_id`/`turn_id` | `thread_id` | `turn_id` |
-| Pi | `user-agent` identifies Pi | `x-session-id`, else `session_id`, else `x-session-affinity` | — |
+| Pi | `user-agent` `pi/…` or `pi`, or `x-opencode-client: pi` (checked before OpenCode) | `x-opencode-session`, else `x-session-id`, else `session_id`, else `x-session-affinity` | — |
 
 An inferred value is stored as `<agent>:<value>` so ids from different agents cannot collide.
 Generic headers (`x-session-id`, `x-session-affinity`) are read only once an agent-specific header
