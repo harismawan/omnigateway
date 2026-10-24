@@ -71,3 +71,24 @@ describe("formatTerms", () => {
     expect(formatTerms({ provider: "anthropic" })).toBe("");
   });
 });
+
+describe("trace terms", () => {
+  test("session, turn, agent and tag each name their own filter", () => {
+    expect(parseTerms("session:claude-code:abc turn:t1 agent:codex tag:team-a")).toEqual({
+      session: "claude-code:abc",
+      turn: "t1",
+      agent: "codex",
+      tag: "team-a",
+    });
+  });
+
+  test("a session id holding colons keeps everything after the prefix", () => {
+    // Inferred sessions are `<agent>:<id>`, so the value has a colon of its own.
+    expect(parseTerms("session:opencode:ses_1")).toEqual({ session: "opencode:ses_1" });
+  });
+
+  test("round-trips with the model terms", () => {
+    const filters = { model: "opus", session: "s:1", tag: "x", agent: "pi", turn: "t" };
+    expect(parseTerms(formatTerms(filters))).toEqual(filters);
+  });
+});

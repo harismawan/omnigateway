@@ -60,6 +60,9 @@ import type {
   ResetCreditsResponse,
   RestoreResult,
   RetentionPolicy,
+  SessionSummary,
+  SessionsQuery,
+  SessionsResponse,
   Settings,
   SettingsResponse,
   SetupClient,
@@ -101,6 +104,10 @@ const LOG_FILTER_FIELDS = [
   "credentialId",
   "apiKeyId",
   "errorCode",
+  "session",
+  "turn",
+  "agent",
+  "tag",
 ] as const satisfies ReadonlyArray<keyof LogFilters>;
 
 // JSON rather than a joined string, so no separator can appear inside a
@@ -177,6 +184,10 @@ export const queryKeys = {
   clientLogs: (limit: number) => ["client", "logs", limit] as const,
   clientLogPages: (filters: LogFilters, limit: number) =>
     ["client", "logPages", limit, logFilterKey(filters)] as const,
+  logSessions: (query: SessionsQuery) =>
+    ["logSessions", query.since, query.until, query.apiKeyId ?? null, query.agent ?? null] as const,
+  clientSessions: (query: SessionsQuery) =>
+    ["client", "sessions", query.since, query.until, query.agent ?? null] as const,
   clientQuota: ["client", "quota"] as const,
   clientQuotaHistory: (query: ClientQuotaHistoryQuery) =>
     ["client", "quota-history", query.since, query.until ?? null] as const,
@@ -552,6 +563,39 @@ export function useLogPages(
     },
     getNextPageParam: (last) => last.nextCursor,
     refetchInterval: (query) => (isHeadPage(query.state.data) ? cadence : false),
+  });
+}
+
+/**
+ * Per-session totals for the Sessions tab, operator or client.
+ *
+ * `enabled` gates the fetch to when the tab is showing: a grouped read over a
+ * week of rows is not something to run under a board nobody is looking at.
+ * Polled at the log cadence while visible, like the table it summarises.
+ */
+export function useLogSessions(
+  query: SessionsQuery,
+  enabled: boolean,
+  client = false,
+  cadence: Cadence = LOG_CADENCE_MS,
+): UseQueryResult<SessionSummary[]> {
+  return useQuery({
+    queryKey: client ? queryKeys.clientSessions(query) : queryKeys.logSessions(query),
+    enabled,
+    queryFn: async ({ signal }) => {
+      const { apiKeyId, ...rest } = query;
+      return (
+        await get<SessionsResponse>(
+          withQuery(client ? "/api/client/sessions" : "/api/logs/sessions", {
+            ...rest,
+            // The client route takes no key: its session is the scope.
+            ...(client || apiKeyId === undefined ? {} : { apiKeyId }),
+          }),
+          signal,
+        )
+      ).sessions;
+    },
+    refetchInterval: cadence,
   });
 }
 

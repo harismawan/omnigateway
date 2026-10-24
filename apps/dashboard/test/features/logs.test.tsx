@@ -741,7 +741,10 @@ describe("LogsBoard", () => {
     const dots = processing.querySelector("span span");
     if (dots === null) throw new Error("processing text has no dot slot");
     expect(getComputedStyle(dots).width).toBe("3ch");
-    expect(screen.getAllByText("—")).toHaveLength(3);
+    // Three unmeasured cells — attempts, TTFT, cost — plus the Session cell,
+    // which is empty because this request carried no session, not because it is
+    // in flight.
+    expect(screen.getAllByText("—")).toHaveLength(4);
   });
 
   test("a request still in flight updates its elapsed total", async () => {
@@ -996,5 +999,95 @@ describe("LogsBoard", () => {
     renderWithProviders(<LogsBoard />);
 
     expect(await screen.findByText("No requests have reached the gateway yet.")).toBeTruthy();
+  });
+});
+
+describe("LogsBoard traceability", () => {
+  const traced = log({
+    id: "req-traced",
+    requestedModel: "traced-model",
+    at: NOW - 5_000,
+    sessionId: "claude-code:abc123",
+    turnId: "turn-9",
+    agent: "claude-code",
+    tags: ["team-a", "exp"],
+    traceMetadata: { owner: "ops" },
+    clientRequestId: "client-77",
+    upstreamRequestId: "req_upstream_1",
+  });
+
+  test("a row shows its session and the detail shows the whole trace", async () => {
+    const user = userEvent.setup();
+    stubLogs({ "GET /api/logs": () => ({ logs: [traced], nextCursor: null }) });
+    renderWithProviders(<LogsBoard />);
+
+    expect(
+      await screen.findByRole("button", { name: "Filter by session claude-code:abc123" }),
+    ).toBeTruthy();
+    await user.click(screen.getByText("traced-model"));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("turn-9")).toBeTruthy();
+    expect(within(dialog).getByText("claude-code", { exact: true })).toBeTruthy();
+    expect(within(dialog).getByText("team-a")).toBeTruthy();
+    expect(within(dialog).getByText("exp")).toBeTruthy();
+    expect(within(dialog).getByText("owner: ops")).toBeTruthy();
+    expect(within(dialog).getByText("client-77")).toBeTruthy();
+    // The operator sees the provider's id; the client surface never does.
+    expect(within(dialog).getByText("req_upstream_1")).toBeTruthy();
+  });
+
+  test("clicking a session filters the log to it", async () => {
+    const user = userEvent.setup();
+    const stub = stubLogs({ "GET /api/logs": () => ({ logs: [traced], nextCursor: null }) });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Filter by session claude-code:abc123" }),
+    );
+    await waitFor(() => {
+      expect(stub.calls.some((call) => call.url.includes("session=claude-code%3Aabc123"))).toBe(
+        true,
+      );
+    });
+    // The click opened no dialog: it filtered.
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("the sessions tab lists sessions and opens one in the log", async () => {
+    const user = userEvent.setup();
+    const stub = stubLogs({
+      "GET /api/logs": () => ({ logs: [traced], nextCursor: null }),
+      "GET /api/logs/sessions": () => ({
+        sessions: [
+          {
+            sessionId: "claude-code:abc123",
+            apiKeyId: "key-1",
+            agent: "claude-code",
+            firstAt: NOW - 60_000,
+            lastAt: NOW - 5_000,
+            requests: 12,
+            failed: 1,
+            turns: 4,
+            inputTokens: 1000,
+            outputTokens: 200,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: 1.25,
+          },
+        ],
+      }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByRole("tab", { name: "Sessions" }));
+    const row = await screen.findByText("claude-code:abc123");
+    expect(screen.getByText("$1.25")).toBeTruthy();
+    await user.click(row);
+    await waitFor(() => {
+      const last = stub.calls.filter((c) => c.url.startsWith("/api/logs?")).at(-1);
+      expect(last?.url).toContain("session=claude-code%3Aabc123");
+      expect(last?.url).toContain("apiKeyId=key-1");
+    });
+    expect(screen.getByRole("tab", { name: "Requests", selected: true })).toBeTruthy();
   });
 });

@@ -17,6 +17,7 @@ import type {
   QuotaSample,
   QuotaWindow,
   RequestLog,
+  SessionSummary,
   Settings,
   Strategy,
   Target,
@@ -54,6 +55,7 @@ export type {
   QuotaSample,
   QuotaWindow,
   RequestLog,
+  SessionSummary,
   Settings,
   Strategy,
   Target,
@@ -96,6 +98,13 @@ export type ClientRequestLog = {
   degradations: string[];
   rtkApplied: boolean;
   rtkEstimatedTokensSaved: number;
+  /** The trace the key holder's own client sent. */
+  sessionId: string | null;
+  turnId: string | null;
+  agent: RequestLog["agent"];
+  tags: string[];
+  traceMetadata: Record<string, string>;
+  clientRequestId: string | null;
 };
 
 /**
@@ -117,6 +126,7 @@ export type RequestRow = ClientRequestLog &
       | "rtkFilterHits"
       | "rtkOriginalCodeUnits"
       | "rtkCompressedCodeUnits"
+      | "upstreamRequestId"
     >
   >;
 
@@ -568,6 +578,20 @@ export type LogsResponse = { logs: RequestLog[]; nextCursor?: string | null };
 export type ClientLogsResponse = { logs: ClientRequestLog[]; nextCursor?: string | null };
 
 /**
+ * One `(api key, session)` pair's totals. Mirrored from `SessionSummary` in
+ * `@omni/store/types`, which the console imports types from directly.
+ */
+export type SessionsResponse = { sessions: SessionSummary[] };
+
+/** What the Sessions tab asks: a bounded range, optionally narrowed. */
+export type SessionsQuery = {
+  since: number;
+  until: number;
+  apiKeyId?: string;
+  agent?: string;
+};
+
+/**
  * The filters the log routes accept, and which of them match loosely.
  *
  * Two kinds, and the split is by where the value came from. Anything the gateway
@@ -601,6 +625,14 @@ export type LogFilters = {
   apiKeyId?: string;
   /** Substring of the error code. */
   errorCode?: string;
+  /** Exact session id, as copied off a row. */
+  session?: string;
+  /** Exact turn id. */
+  turn?: string;
+  /** One of the recognised coding agents. */
+  agent?: string;
+  /** Rows carrying exactly this tag. */
+  tag?: string;
 };
 
 /** An empty filter set, so "cleared" is one value rather than eight. */

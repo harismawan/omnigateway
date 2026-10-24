@@ -8,9 +8,15 @@ import {
   useCredentials,
   useKeys,
   useLogPages,
+  useLogSessions,
   useTrimToHead,
 } from "../../api/queries.ts";
-import { type LogFilters, NO_LOG_FILTERS, type RequestRow } from "../../api/types.ts";
+import {
+  type LogFilters,
+  NO_LOG_FILTERS,
+  type RequestRow,
+  type SessionSummary,
+} from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount } from "../../lib/format.ts";
 import { isError, isPending } from "../../lib/vitals.ts";
@@ -19,11 +25,26 @@ import { Button } from "../../ui/Button.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { FillModule, FillScroller } from "../../ui/Panel.tsx";
 import { Muted, Row } from "../../ui/primitives.ts";
+import { Segment } from "../../ui/Segment.tsx";
 import { Select } from "../../ui/Select.tsx";
 import { Empty, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { BodyArtifact } from "./BodyArtifact.tsx";
 import { LogFilterBar } from "./LogFilterBar.tsx";
 import { RequestDetail, RequestTable, useCurrentTime } from "./RequestTable.tsx";
+import { SessionsTable } from "./SessionsTable.tsx";
+
+/**
+ * The Sessions tab's range when the filters name none: a week, inside the
+ * gateway's 31-day ceiling on a grouped read. An explicit range is used as is.
+ */
+const SESSIONS_DEFAULT_MS = 7 * 86_400_000;
+
+export function sessionsRange(filters: LogFilters, now: number): { since: number; until: number } {
+  const until = filters.until ?? now;
+  return { since: filters.since ?? until - SESSIONS_DEFAULT_MS, until };
+}
+
+type View = "requests" | "sessions";
 
 /** Rows per request, not rows in total: "Load older" appends another page. */
 const LIMITS = [50, 100, 250, 500] as const;
@@ -69,6 +90,7 @@ export function LogsBoard() {
   const [limit, setLimit] = useState<number>(100);
   const [filters, setFilters] = useState<LogFilters>(NO_LOG_FILTERS);
   const [open, setOpen] = useState<RequestRow | null>(null);
+  const [view, setView] = useState<View>("requests");
   const loadingMore = useRef(false);
 
   // Changing any filter changes the query key, so pagination resets to the
@@ -120,6 +142,28 @@ export function LogsBoard() {
   const failed = rows.filter(isError).length;
   const live = rows.filter(isPending).length;
 
+  // Read the clock once per filter change, not per render: the range is part of
+  // the query key, and a key that moved every render would refetch forever.
+  const range = useMemo(() => sessionsRange(filters, Date.now()), [filters]);
+  const sessions = useLogSessions(
+    {
+      ...range,
+      ...(filters.apiKeyId === undefined ? {} : { apiKeyId: filters.apiKeyId }),
+      ...(filters.agent === undefined ? {} : { agent: filters.agent }),
+    },
+    view === "sessions",
+    false,
+    cadence(LOG_CADENCE_MS, "res:logs"),
+  );
+  const filterSession = (sessionId: string, apiKeyId?: string | null) => {
+    setFilters((current) => ({
+      ...current,
+      session: sessionId,
+      ...(apiKeyId === undefined || apiKeyId === null ? {} : { apiKeyId }),
+    }));
+    setView("requests");
+  };
+
   return (
     <>
       <PageHead
@@ -154,57 +198,109 @@ export function LogsBoard() {
         }
       />
 
-      <FillModule legend="Request log" meta={`${rows.length} shown`} flush>
-        {logs.isError ? (
-          <Failure error={logs.error} onRetry={() => void logs.refetch()} />
-        ) : logs.isLoading ? (
-          <div style={{ padding: 12 }}>
-            <SkeletonRows rows={8} />
-          </div>
-        ) : rows.length === 0 ? (
-          <Empty
-            legend="Nothing to show"
-            message={
-              // With the gateway doing the matching, "no rows" no longer implies
-              // "no rows in the fetched window" — an unfiltered read that comes
-              // back empty means the log itself is empty, and that is a
-              // different thing to tell an operator than a filter that missed.
-              Object.keys(filters).length === 0
-                ? "No requests have reached the gateway yet."
-                : "No request matches these filters. Clear them to see everything."
-            }
-          />
-        ) : (
-          <FillScroller
-            ref={scroller}
-            data-testid="request-log-scroller"
-            onScroll={(event) => {
-              const view = event.currentTarget;
-              if (view.scrollHeight - view.scrollTop - view.clientHeight > NEAR_BOTTOM_PX) return;
-              if (!logs.hasNextPage) return;
-              // A ref, not `isFetchingNextPage`: one gesture emits a burst of
-              // scroll events and every one of them is at the bottom, while the
-              // query flag only rises on the render after the first call — so a
-              // flick would spend several cursors before the guard existed.
-              if (loadingMore.current) return;
-              loadingMore.current = true;
-              void logs.fetchNextPage().finally(() => {
-                loadingMore.current = false;
-              });
-            }}
+      <Row $gap={1} role="tablist" aria-label="Log view" style={{ marginBottom: 8 }}>
+        {(["requests", "sessions"] as const).map((id) => (
+          <Segment
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={view === id}
+            $on={view === id}
+            onClick={() => setView(id)}
           >
-            <RequestTable rows={rows} now={now} names={names} onOpen={setOpen} />
-            {logs.isFetchingNextPage || paused ? (
-              <More>
-                {logs.isFetchingNextPage ? <Muted>Loading older requests…</Muted> : null}
-                {paused ? (
-                  <Muted>Live updates are paused while older pages are loaded.</Muted>
-                ) : null}
-              </More>
-            ) : null}
-          </FillScroller>
-        )}
-      </FillModule>
+            {id === "requests" ? "Requests" : "Sessions"}
+          </Segment>
+        ))}
+      </Row>
+
+      {view === "sessions" ? (
+        <FillModule
+          legend="Sessions"
+          meta={sessions.data === undefined ? "" : `${sessions.data.length} shown`}
+          flush
+        >
+          {sessions.isError ? (
+            <Failure error={sessions.error} onRetry={() => void sessions.refetch()} />
+          ) : sessions.isLoading ? (
+            <div style={{ padding: 12 }}>
+              <SkeletonRows rows={6} />
+            </div>
+          ) : (sessions.data ?? []).length === 0 ? (
+            <Empty
+              legend="No sessions"
+              message="No request in this range carried a session. Coding agents are recognised automatically; any client can send x-omni-session-id."
+            />
+          ) : (
+            <FillScroller>
+              <SessionsTable
+                sessions={sessions.data ?? []}
+                keyLabels={names.keys}
+                onOpen={(session: SessionSummary) =>
+                  filterSession(session.sessionId, session.apiKeyId)
+                }
+              />
+            </FillScroller>
+          )}
+        </FillModule>
+      ) : (
+        <FillModule legend="Request log" meta={`${rows.length} shown`} flush>
+          {logs.isError ? (
+            <Failure error={logs.error} onRetry={() => void logs.refetch()} />
+          ) : logs.isLoading ? (
+            <div style={{ padding: 12 }}>
+              <SkeletonRows rows={8} />
+            </div>
+          ) : rows.length === 0 ? (
+            <Empty
+              legend="Nothing to show"
+              message={
+                // With the gateway doing the matching, "no rows" no longer implies
+                // "no rows in the fetched window" — an unfiltered read that comes
+                // back empty means the log itself is empty, and that is a
+                // different thing to tell an operator than a filter that missed.
+                Object.keys(filters).length === 0
+                  ? "No requests have reached the gateway yet."
+                  : "No request matches these filters. Clear them to see everything."
+              }
+            />
+          ) : (
+            <FillScroller
+              ref={scroller}
+              data-testid="request-log-scroller"
+              onScroll={(event) => {
+                const view = event.currentTarget;
+                if (view.scrollHeight - view.scrollTop - view.clientHeight > NEAR_BOTTOM_PX) return;
+                if (!logs.hasNextPage) return;
+                // A ref, not `isFetchingNextPage`: one gesture emits a burst of
+                // scroll events and every one of them is at the bottom, while the
+                // query flag only rises on the render after the first call — so a
+                // flick would spend several cursors before the guard existed.
+                if (loadingMore.current) return;
+                loadingMore.current = true;
+                void logs.fetchNextPage().finally(() => {
+                  loadingMore.current = false;
+                });
+              }}
+            >
+              <RequestTable
+                rows={rows}
+                now={now}
+                names={names}
+                onOpen={setOpen}
+                onSession={(sessionId) => filterSession(sessionId)}
+              />
+              {logs.isFetchingNextPage || paused ? (
+                <More>
+                  {logs.isFetchingNextPage ? <Muted>Loading older requests…</Muted> : null}
+                  {paused ? (
+                    <Muted>Live updates are paused while older pages are loaded.</Muted>
+                  ) : null}
+                </More>
+              ) : null}
+            </FillScroller>
+          )}
+        </FillModule>
+      )}
 
       <Modal
         open={open !== null}
