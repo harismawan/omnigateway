@@ -79,6 +79,7 @@ import { relabel } from "../smartRouter/relabel.ts";
 import type { Invalidator } from "../stream/broadcaster.ts";
 import type { Telemetry } from "../telemetry/index.ts";
 import type { TraceRecord } from "../telemetry/spans.ts";
+import { applyTrace, extractTrace, type TraceContext } from "../trace/extract.ts";
 import { modelListBody } from "./models.ts";
 
 export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry" | "coord"> & {
@@ -412,6 +413,9 @@ async function bodyCollectorFor(
   });
 }
 
+/** The response header naming the gateway's id for a request. */
+export const REQUEST_ID_HEADER = "x-omni-request-id";
+
 async function handle(
   deps: ResolvedProxyDeps,
   rateLimiter: ApiKeyRateLimiter,
@@ -430,6 +434,10 @@ async function handle(
     ) ?? null;
   let keyId: string | null = null;
   let requestedModel = "";
+  // What the caller said this request belongs to, once the body is parsed.
+  // Out here so every path that writes the row — begin, completion, the
+  // terminal catch — stamps the same context.
+  let traced: TraceContext | null = null;
   // Held out here so the terminal catch can complete dispatch's own log rather
   // than a blank one. The completion upsert writes `resolved_*`,
   // `credential_id`, `attempts` and the rtk columns from whatever log it is
@@ -500,8 +508,17 @@ async function handle(
   // `release` is non-null exactly when the request claimed a slot, which is the
   // same condition as "this request will be counted". A refusal never was, so
   // it reports the window untouched.
-  const limitHeaders = (): Record<string, string> =>
-    rateLimitHeaders(surface, release === null ? headroom : afterThisRequest(headroom), startedAt);
+  // Every response this route renders carries the gateway's id for the
+  // request, success or failure, streaming or not — the one id the client, the
+  // log row and stdout all share.
+  const limitHeaders = (): Record<string, string> => ({
+    ...rateLimitHeaders(
+      surface,
+      release === null ? headroom : afterThisRequest(headroom),
+      startedAt,
+    ),
+    [REQUEST_ID_HEADER]: requestId,
+  });
   const debit: UsageDebit = (id, model, usage) => {
     rateLimiter.debit(id, model, usage);
   };
@@ -585,6 +602,7 @@ async function handle(
         : surface === "responses"
           ? parseResponsesRequest(body, request.headers)
           : parseOpenAIRequest(body, request.headers);
+    traced = extractTrace(request.headers, chatRequest);
     // Which tools the client declared freeform, which only it knows and only
     // the Responses egress needs: the same call renders as `custom_tool_call`
     // or `function_call` depending on it, and a client dispatching one of the
@@ -663,6 +681,7 @@ async function handle(
               resolvedModel: target.model,
               credentialId: target.credentialId,
             });
+            if (traced !== null) applyTrace(log, traced);
             await beginLog(deps.store, log, keyId, deps.logger, deps.broadcaster);
           },
         },
@@ -707,6 +726,7 @@ async function handle(
           signal: request.signal,
           debit: classifierDebit,
           parentRequestId: requestId,
+          trace: traced,
         });
         if (decision.kind === "refused" || decision.kind === "cancelled") return decision;
         notes = decision.notes;
@@ -734,6 +754,7 @@ async function handle(
               signal: request.signal,
               debit: classifierDebit,
               parentRequestId: requestId,
+              trace: traced,
               ...(guardrailModel === undefined ? {} : { model: guardrailModel }),
               localOnly: guardrailLocalOnly,
             },
@@ -814,6 +835,7 @@ async function handle(
       // lines about the process itself. The console reads those rows; stdout
       // carries what never becomes one. `requestId` is on both, and joins them.
       logged = true;
+      if (traced !== null) applyTrace(completed, traced);
       await finishLog(
         deps.store,
         completed,
@@ -941,6 +963,7 @@ async function handle(
     completed.status = cancelled ? 499 : HTTP_STATUS[gatewayError.code];
     completed.errorCode = cancelled ? "interrupted" : gatewayError.code;
     completed.durationMs = deps.now() - startedAt;
+    if (traced !== null) applyTrace(completed, traced);
     // Completes a pending row if the request got as far as dispatch. The store
     // keeps what beginning it recorded where this log carries nothing. Skipped
     // where the row is already complete: `completed` is dispatch's own live log
@@ -1056,6 +1079,11 @@ export function proxyRoutes(deps: ProxyDeps) {
       // would also need a credential and have nothing to say about a Kimi target,
       // which is exactly when a client most needs the number.
       .post("/v1/messages/count_tokens", async ({ request }) => {
+        // Minted first, before authentication, so even a refusal names a
+        // request the client can quote. This route writes no row, so the id
+        // joins to stdout and the client's own logs, not to `request_logs`.
+        const requestId = deps.requestId();
+        const idHeader = { [REQUEST_ID_HEADER]: requestId };
         try {
           const key = await authenticateApiKey(
             deps.store,
@@ -1078,7 +1106,7 @@ export function proxyRoutes(deps: ProxyDeps) {
           // fail-open path when a long-window store read times out, and that
           // line is the only record this request leaves anywhere — without an
           // id it names no request and joins to nothing.
-          await rateLimiter.consume(key.id, key.limits, chatRequest.model, deps.requestId());
+          await rateLimiter.consume(key.id, key.limits, chatRequest.model, requestId);
           // Counted against the request the gateway will actually send. This
           // route never dispatches, so it is the one place the ruleset has to
           // be added by hand — a count that omitted it would under-report by
@@ -1089,7 +1117,10 @@ export function proxyRoutes(deps: ProxyDeps) {
           // No request-log row: nothing was dispatched and no tokens were spent,
           // so a row here would be counted by every usage aggregate. That is
           // also why no degradation is recorded for the injection above.
-          return Response.json({ input_tokens: estimateInputTokens(counted) });
+          return Response.json(
+            { input_tokens: estimateInputTokens(counted) },
+            { headers: idHeader },
+          );
         } catch (error) {
           const gatewayError = asGatewayError(error);
           logger.warn("token count failed", {
@@ -1100,12 +1131,10 @@ export function proxyRoutes(deps: ProxyDeps) {
           // No rate-limit dialect here: this route renders no usage headers,
           // but a refusal still says how long to wait rather than saying it
           // only in a body no SDK reads.
-          return errorResponse(
-            "anthropic",
-            gatewayError.code,
-            gatewayError.message,
-            retryAfterHeaders(gatewayError),
-          );
+          return errorResponse("anthropic", gatewayError.code, gatewayError.message, {
+            ...retryAfterHeaders(gatewayError),
+            ...idHeader,
+          });
         }
       })
       .onError(({ error }) => {

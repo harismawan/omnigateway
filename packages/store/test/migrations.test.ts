@@ -351,7 +351,7 @@ test("migration 21 leaves every request log that predates it untraced", async ()
   legacy.close();
 
   const db = openDb(path);
-  const [row] = await createUsageRepo(db).recent(1);
+  const [row] = await createUsageRepo(db, "node-test").recent(1);
   expect(row).toMatchObject({
     id: "before",
     sessionId: null,

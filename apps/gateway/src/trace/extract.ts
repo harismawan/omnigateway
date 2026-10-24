@@ -1,5 +1,5 @@
 import type { ChatRequest } from "@omni/ir";
-import type { TraceAgent } from "@omni/store";
+import type { RequestLog, TraceAgent } from "@omni/store";
 
 /**
  * Who a request belongs to, as far as the caller told us.
@@ -46,6 +46,32 @@ const META_KEY = /^[A-Za-z0-9._-]+$/;
  */
 const OPENCODE_UA = /^opencode\//i;
 const PI_UA = /^pi(?:\/|$)/i;
+
+/**
+ * Stamps a request's trace onto one of its log rows, in place.
+ *
+ * Every site that writes the row calls this — begin, completion, the terminal
+ * catch — so a row completed by a different path than began it still carries
+ * the same context. The upstream request id is not part of the trace; dispatch
+ * fills it in. Degradations are deduplicated, as dispatch's are.
+ */
+export function applyTrace(log: RequestLog, trace: TraceContext): void {
+  log.sessionId = trace.sessionId;
+  log.turnId = trace.turnId;
+  log.agent = trace.agent;
+  log.tags = [...trace.tags];
+  log.traceMetadata = { ...trace.metadata };
+  log.clientRequestId = trace.clientRequestId;
+  if (trace.invalid && !log.degradations.includes(TRACE_INVALID)) {
+    log.degradations.push(TRACE_INVALID);
+  }
+}
+
+/** {@link applyTrace} for a log built inline: returns it, and accepts no trace. */
+export function withTrace(log: RequestLog, trace: TraceContext | null): RequestLog {
+  if (trace !== null) applyTrace(log, trace);
+  return log;
+}
 
 export function extractTrace(headers: Headers, request: ChatRequest): TraceContext {
   let invalid = false;

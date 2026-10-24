@@ -44,6 +44,7 @@ import { classify } from "./classify.ts";
 import type { LoadRegistry } from "./loadRegistry.ts";
 import { priceOf } from "./price.ts";
 import type { RoutingSnapshotSource } from "./snapshotCache.ts";
+import { watchUpstreamRequestId } from "./upstreamRequestId.ts";
 
 export type DispatchDeps = {
   store: Store;
@@ -676,7 +677,12 @@ export async function dispatch(
                   candidate,
                   request: dispatchRequest,
                   adapter,
-                  http: deps.http,
+                  // Per attempt, so the row names the provider request id of
+                  // the attempt that produced its outcome — the serving one,
+                  // or the last tried when every attempt failed.
+                  http: watchUpstreamRequestId(deps.http, (id) => {
+                    log.upstreamRequestId = id;
+                  }),
                   now: attemptNow,
                   signal: dispatchSignal,
                   refresh: (credential) =>

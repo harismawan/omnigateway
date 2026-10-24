@@ -18,6 +18,7 @@ import {
 import type { VerdictCache } from "../guardrail/cache.ts";
 import type { GuardrailDeps, ScreenThrew } from "../guardrail/judge.ts";
 import { finishLog, newCompletedRequestLog, type UsageDebit } from "../logging.ts";
+import { type TraceContext, withTrace } from "../trace/extract.ts";
 import { segmentKey } from "./cache.ts";
 import {
   type Confidentiality,
@@ -216,6 +217,8 @@ export async function checkConfidentiality(
     signal: AbortSignal;
     debit: UsageDebit;
     parentRequestId: string;
+    /** The parent's trace, inherited by the check's row. */
+    trace?: TraceContext | null;
   },
 ): Promise<SmartRouteDecision> {
   const snapshot = await deps.snapshots.get(deps.now());
@@ -323,14 +326,17 @@ export async function checkConfidentiality(
       : { status: 200, errorCode: null };
   await finishLog(
     deps.store,
-    checkRow(
-      deps.requestId(),
-      startedAt,
-      deps.now(),
-      classifier,
-      calls,
-      logs.filter((log) => log !== undefined),
-      status,
+    withTrace(
+      checkRow(
+        deps.requestId(),
+        startedAt,
+        deps.now(),
+        classifier,
+        calls,
+        logs.filter((log) => log !== undefined),
+        status,
+      ),
+      input.trace ?? null,
     ),
     input.apiKeyId,
     deps.logger,
