@@ -110,3 +110,50 @@ test("the root span's code attribute takes error codes, never free text", () => 
   expect(rootCode("req_4", "invalid_request_error: your prompt was ...")).toBeUndefined();
   telemetry.stop();
 });
+
+/**
+ * The root span carries the request's ids and its session/turn/agent, so a
+ * trace backend can join a span to its log row. Tags and metadata are not span
+ * attributes: unbounded cardinality for a trace store, and they ride export.
+ */
+test("the root span carries request, session, turn, agent and upstream ids, never tags", () => {
+  const telemetry = createTelemetry({
+    metricsEnabled: false,
+    maxSeries: 10,
+    otlpEndpoint: "https://collector.example",
+    otlpHeaders: {},
+    traceSample: 1,
+    now: () => 0,
+    version: "test",
+    exporter: { enqueue: () => {}, flush: async () => {}, queued: () => 0, stop: () => {} },
+  });
+  const trace = telemetry.startRequest("req_t", 0, null, "openai", 0);
+  if (trace === null) throw new Error("tracing should be on");
+  telemetry.record(
+    requestLog({
+      id: "req_t",
+      sessionId: "claude-code:s1",
+      turnId: "t1",
+      agent: "claude-code",
+      tags: ["secret-tag"],
+      traceMetadata: { secret: "meta" },
+      upstreamRequestId: "up-1",
+    }),
+    null,
+    trace,
+  );
+  expect(trace.spans[0]?.attrs).toMatchObject({
+    "omni.request.id": "req_t",
+    "omni.session.id": "claude-code:s1",
+    "omni.turn.id": "t1",
+    "omni.agent": "claude-code",
+    "omni.upstream.request_id": "up-1",
+  });
+  expect(JSON.stringify(encodeTrace(trace, "test"))).not.toContain("secret");
+
+  const bare = telemetry.startRequest("req_b", 0, null, "openai", 0);
+  if (bare === null) throw new Error("tracing should be on");
+  telemetry.record(requestLog({ id: "req_b" }), null, bare);
+  expect(Object.keys(bare.spans[0]?.attrs ?? {})).not.toContain("omni.session.id");
+  telemetry.stop();
+});

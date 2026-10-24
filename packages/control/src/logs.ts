@@ -1,5 +1,12 @@
 import { GatewayError } from "@omni/ir";
-import type { RequestLog, RequestLogCursor, RequestLogQuery, Store } from "@omni/store";
+import {
+  type RequestLog,
+  type RequestLogCursor,
+  type RequestLogQuery,
+  type SessionSummary,
+  type Store,
+  TRACE_AGENTS,
+} from "@omni/store";
 import { z } from "zod";
 import { ALL, readsNothing, type Scope, scopeKey } from "./principal.ts";
 import { parseOrThrow, providerIdSchema } from "./schemas.ts";
@@ -76,6 +83,12 @@ const logFilterSchema = z
     credentialId: idSchema.optional(),
     apiKeyId: idSchema.optional(),
     errorCode: textSchema.optional(),
+    // Trace filters are exact: an id copied off a row, not a typed spelling.
+    // 256 is the ingress bound on every trace id.
+    session: z.string().min(1).max(256).optional(),
+    turn: z.string().min(1).max(256).optional(),
+    agent: z.enum(TRACE_AGENTS).optional(),
+    tag: z.string().min(1).max(64).optional(),
   })
   .strict();
 
@@ -94,6 +107,10 @@ export type LogFilterInput = {
   credentialId?: string | undefined;
   apiKeyId?: string | undefined;
   errorCode?: string | undefined;
+  session?: string | undefined;
+  turn?: string | undefined;
+  agent?: string | undefined;
+  tag?: string | undefined;
 };
 
 /** Drops keys a caller did not send, so `.strict()` sees absence rather than `undefined`. */
@@ -193,6 +210,10 @@ function toQuery(input: LogFilterInput, scope: Scope): RequestLogQuery {
     ...(filters.failed === "true" ? { failed: true } : {}),
     ...(since === undefined ? {} : { since }),
     ...(until === undefined ? {} : { until }),
+    ...(filters.session === undefined ? {} : { sessionId: filters.session }),
+    ...(filters.turn === undefined ? {} : { turnId: filters.turn }),
+    ...(filters.agent === undefined ? {} : { agent: filters.agent }),
+    ...(filters.tag === undefined ? {} : { tag: filters.tag }),
   };
 }
 
@@ -267,6 +288,13 @@ const EXPORT_COLUMNS: ReadonlyArray<keyof RequestLog> = [
   "rtkCompressedCodeUnits",
   "rtkEstimatedTokensSaved",
   "rtkFilters",
+  "sessionId",
+  "turnId",
+  "agent",
+  "tags",
+  "traceMetadata",
+  "clientRequestId",
+  "upstreamRequestId",
 ];
 
 /**
@@ -283,7 +311,9 @@ const EXPORT_COLUMNS: ReadonlyArray<keyof RequestLog> = [
  */
 export function csvCell(value: unknown): string {
   if (value === null || value === undefined) return "";
-  const text = Array.isArray(value) ? JSON.stringify(value) : String(value);
+  // Arrays and objects (degradations, tags, trace metadata) as JSON text, so a
+  // spreadsheet cell holds something parseable rather than `[object Object]`.
+  const text = typeof value === "object" ? JSON.stringify(value) : String(value);
   const first = text.trimStart().charAt(0);
   const guarded = "=+-@".includes(first) && first !== "" ? `'${text}` : text;
   return /[",\r\n]/.test(guarded) ? `"${guarded.replaceAll('"', '""')}"` : guarded;
@@ -384,4 +414,52 @@ export async function* exportLogs(
     if (page.next === null) return;
     page = await store.usage.page({ ...base, cursor: page.next });
   }
+}
+
+/** The widest range one sessions read may cover. */
+const SESSIONS_MAX_RANGE_MS = 31 * 86_400_000;
+
+const sessionQuerySchema = z
+  .object({
+    since: instantSchema,
+    until: instantSchema,
+    apiKeyId: idSchema.optional(),
+    agent: z.enum(TRACE_AGENTS).optional(),
+  })
+  .strict();
+
+export type SessionSummaryInput = {
+  since?: string | number | undefined;
+  until?: string | number | undefined;
+  apiKeyId?: string | undefined;
+  agent?: string | undefined;
+};
+
+/**
+ * Per `(api key, session)` totals over a bounded range, highest cost first.
+ *
+ * Both bounds required and at most 31 days apart: this is a grouped read over
+ * raw rows, and an unbounded one is a request for the whole retention window.
+ * Scoped the way a page is — a client reads its own key's sessions, and its
+ * `apiKeyId` cannot widen that.
+ */
+export async function sessionSummary(
+  store: Store,
+  input: SessionSummaryInput,
+  scope: Scope = ALL,
+): Promise<SessionSummary[]> {
+  const q = parseOrThrow(sessionQuerySchema, present(input));
+  if (q.since > q.until) throw new GatewayError("BAD_REQUEST", "since: must not be after until");
+  if (q.until - q.since > SESSIONS_MAX_RANGE_MS) {
+    throw new GatewayError("BAD_REQUEST", "until: range must not exceed 31 days");
+  }
+  if (readsNothing(scope)) return [];
+  const scoped = scopeKey(scope);
+  const apiKeyId = scoped ?? q.apiKeyId;
+  return await store.usage.sessions({
+    since: q.since,
+    until: q.until,
+    ...(apiKeyId === undefined ? {} : { apiKeyId }),
+    ...(q.agent === undefined ? {} : { agent: q.agent }),
+  });
 }

@@ -133,6 +133,8 @@ export {
   type LogFilterInput,
   type LogPage,
   pageLogs,
+  type SessionSummaryInput,
+  sessionSummary,
 } from "./logs.ts";
 export {
   type ModelLimits,

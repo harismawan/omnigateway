@@ -150,6 +150,13 @@ export function createTelemetry(opts: {
             api_key_id: keyId ?? "",
             status: log.status,
             ...(log.errorCode === null ? {} : codeAttr(log.errorCode)),
+            "omni.request.id": log.id,
+            ...(log.sessionId === null ? {} : { "omni.session.id": log.sessionId }),
+            ...(log.turnId === null ? {} : { "omni.turn.id": log.turnId }),
+            ...(log.agent === null ? {} : { "omni.agent": log.agent }),
+            ...(log.upstreamRequestId === null
+              ? {}
+              : { "omni.upstream.request_id": log.upstreamRequestId }),
           };
         }
       }
