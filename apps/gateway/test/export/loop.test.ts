@@ -268,6 +268,23 @@ test("skip waits for rows completed before it to settle, then counts them too", 
   expect(w.sent).toHaveLength(0);
 });
 
+test("a skip on a disabled destination waits, unapplied, until it is enabled", async () => {
+  const w = track(
+    world({ destinations: [destination({ enabled: false })], rows: [row("r1", T0 - 30_000)] }),
+  );
+  await w.loop.start();
+  await w.loop.handle({ type: "skip", ref: "s", id: "hook" });
+  await w.advance(SETTLE_MS + POLL_MS * 3);
+  let s = await stateOf(w);
+  expect([s.skipRequestedAt, s.cursorId, s.droppedTotal]).toEqual([T0, "", 0]);
+
+  w.destinations = w.destinations.map((d) => ({ ...d, enabled: true, updatedAt: d.updatedAt + 1 }));
+  await w.advance(POLL_MS);
+  s = await stateOf(w);
+  expect([s.skipRequestedAt, s.cursorId, s.droppedTotal]).toEqual([null, "r1", 1]);
+  expect(w.sent).toHaveLength(0);
+});
+
 /**
  * Two cluster workers, one destination. The lease TTL (60 s) outlasts the batch
  * deadline (45 s), so a holder stalled past its lease is past its deadline too

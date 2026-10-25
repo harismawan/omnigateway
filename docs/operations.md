@@ -571,11 +571,17 @@ you **Acknowledge** it, and comes back if it happens again. The one loss it can
 miss is a single request running longer than 24 hours whose start falls out of
 retention while it is still running.
 
-**Skip to now** (console, behind a confirm) moves a destination's cursor to the
-present without sending what lies between, counting those rows as dropped. It is
-the answer to a destination that has been broken long enough that its backlog is
-no longer wanted, and works whether or not the receiver is reachable. A
-destination whose stored filter is unreadable is refused instead: fix the filter.
+**Skip to now** (console, behind a confirm) is the answer to a destination broken
+long enough that its backlog is no longer wanted. It is a request, not an
+immediate move: the worker records the instant you asked and answers at once;
+the destination's next pass then walks every row completed up to that instant
+without sending it, counting each as dropped, and clears the request once those
+rows have settled (about 10 seconds). It needs no reachable receiver and does not
+wait out a backoff, but it is applied only by a pass, so a **disabled**
+destination keeps the request until it is enabled again. A destination whose
+stored filter is unreadable is refused before any pass reads a row — its last
+error stays `filter unreadable` — so a skip queued on it waits until the filter
+is repaired.
 
 **Send test** posts one synthetic record (model `omni-export-test`) and reports
 the status and latency; it moves no cursor. **Preview a record** shows exactly

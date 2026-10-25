@@ -488,9 +488,16 @@ The gateway can ship every completed request-log row to a store you already run,
 30-day log is not the only record: Elasticsearch or OpenSearch, any HTTP endpoint that takes JSON,
 or an OTLP collector (and through it Langfuse). Delivery is durable and resumable — each
 destination keeps a cursor that survives restarts, crashes and, in cluster mode, failover to
-another replica — and **at least once**: a row can arrive twice, never zero times while it is
-still retained. Every record carries a stable `id` to dedupe on; Elasticsearch writes are
-idempotent by it.
+another replica — and the rows a destination selects (its start position and filter) are sent
+**at least once**: a crash between send and commit resends, so a row can arrive twice. Every
+record carries a stable `id` to dedupe on; Elasticsearch writes are idempotent by it.
+
+What is not delivered is counted or flagged, never silent: records the receiver rejects one by
+one (Elasticsearch item errors, OTLP `partialSuccess`), a record too large for one request, and
+rows passed by *Skip to now* are counted as dropped; rows pruned by retention before they were
+sent raise the gap warning. One documented limit: a completion whose write commits more than
+10 seconds after its timestamp can be passed over
+([details](docs/operations.md#log-export)).
 
 **Metadata only.** A record is the row's metadata: timestamps, key id and label, requested and
 resolved model, provider, account id, status, error code, tokens, cost, latency, RTK figures,
@@ -552,8 +559,9 @@ PUT _index_template/omni-logs
           "cacheRead": { "type": "long" }, "cacheWrite": { "type": "long" } } },
         "costUsd": { "type": "double" }, "ttftMs": { "type": "long" }, "durationMs": { "type": "long" },
         "degradations": { "type": "keyword" },
-        "rtk": { "properties": { "applied": { "type": "boolean" }, "filters": { "type": "keyword" },
-          "estimatedTokensSaved": { "type": "long" } } },
+        "rtk": { "properties": { "applied": { "type": "boolean" }, "filterHits": { "type": "long" },
+          "originalCodeUnits": { "type": "long" }, "compressedCodeUnits": { "type": "long" },
+          "estimatedTokensSaved": { "type": "long" }, "filters": { "type": "keyword" } } },
         "session": { "properties": { "id": { "type": "keyword" }, "turn": { "type": "keyword" },
           "agent": { "type": "keyword" } } },
         "tags": { "type": "keyword" }, "metadata": { "type": "flattened" },

@@ -326,4 +326,26 @@ forEachStore((backend) => {
     }
     expect(await s.exportDestinations.list()).toHaveLength(MAX_EXPORT_DESTINATIONS);
   });
+
+  // Postgres alone has `config_version`. Destinations are not routing
+  // configuration: a create, edit or delete must not make every replica
+  // rebuild its routing snapshot (migration 010 adds no trigger on purpose).
+  if (backend.name === "postgres") {
+    test("destination writes never move config_version", async () => {
+      const s = await backend.fresh();
+      const admin = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string, max: 1 });
+      const version = async () =>
+        (await admin.unsafe<Array<{ version: string }>>("SELECT version FROM config_version"))[0]
+          ?.version;
+      try {
+        const before = await version();
+        await s.exportDestinations.create(input({ secret: '{"apiKey":"k"}' }));
+        await s.exportDestinations.update("es-main", { enabled: false, secret: null });
+        await s.exportDestinations.remove("es-main");
+        expect(await version()).toBe(before);
+      } finally {
+        await admin.close();
+      }
+    });
+  }
 });
