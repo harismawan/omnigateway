@@ -139,6 +139,8 @@ const ROUTES: ReadonlyArray<{
     path: "/api/logs/export?since=0&until=1&format=jsonl",
     allow: ["admin", "viewer"],
   },
+  // A grouped read over the same rows, so the same readers.
+  { method: "GET", path: "/api/logs/sessions?since=0&until=1", allow: ["admin", "viewer"] },
 
   // Metadata is readable by a reader; the payload behind it is not. A viewer
   // may diagnose an installation without being handed every prompt in it.
@@ -170,6 +172,7 @@ const ROUTES: ReadonlyArray<{
   { method: "GET", path: "/api/client/summary", allow: ["client"] },
   { method: "GET", path: "/api/client/usage", allow: ["client"] },
   { method: "GET", path: "/api/client/logs", allow: ["client"] },
+  { method: "GET", path: "/api/client/sessions?since=0&until=1", allow: ["client"] },
   { method: "GET", path: "/api/client/quota", allow: ["client"] },
   { method: "GET", path: "/api/client/quota/history", allow: ["client"] },
 
@@ -523,4 +526,62 @@ test("an expired or revoked client session stops working mid-surface", async () 
   // refused, because verify re-reads the key row.
   expect((await call("GET", "/api/client/summary", "client")).status).toBe(401);
   expect((await call("GET", "/api/client/logs", "client")).status).toBe(401);
+});
+
+test("a client filters its own rows by session and reads its own sessions only", async () => {
+  const { call, store } = await matrix();
+  const keys = await store.keys.list();
+  const mineId = keys.find((k) => k.label === "mine")?.id ?? "";
+  const theirsId = keys.find((k) => k.label !== "mine")?.id ?? "";
+  await store.usage.append(
+    requestLog({ id: "ms", at: NOW - 400, apiKeyId: mineId, sessionId: "s", tags: ["t"] }),
+  );
+  await store.usage.append(
+    requestLog({
+      id: "ts",
+      at: NOW - 300,
+      apiKeyId: theirsId,
+      sessionId: "s",
+      upstreamRequestId: "upstream-secret",
+    }),
+  );
+
+  const filtered = (await (await call("GET", "/api/client/logs?session=s", "client")).json()) as {
+    logs: Array<{ id: string; sessionId: string; tags: string[] }>;
+  };
+  expect(filtered.logs.map((r) => r.id)).toEqual(["ms"]);
+  expect(filtered.logs[0]).toMatchObject({ sessionId: "s", tags: ["t"] });
+
+  const tagged = (await (await call("GET", "/api/client/logs?tag=t", "client")).json()) as {
+    logs: Array<{ id: string }>;
+  };
+  expect(tagged.logs.map((r) => r.id)).toEqual(["ms"]);
+
+  const sessions = (await (
+    await call("GET", `/api/client/sessions?since=0&until=${NOW}`, "client")
+  ).json()) as { sessions: Array<{ apiKeyId: string }> };
+  expect(sessions.sessions.map((s) => s.apiKeyId)).toEqual([mineId]);
+
+  const body = await (await call("GET", "/api/client/logs", "client")).text();
+  expect(body).not.toContain("upstream-secret");
+  expect(body).not.toContain("upstreamRequestId");
+});
+
+test("the operator reads sessions across keys, and the log filters reach the store", async () => {
+  const { call, store } = await matrix();
+  await store.usage.append(requestLog({ id: "a", at: NOW - 400, apiKeyId: "k1", sessionId: "s" }));
+  await store.usage.append(requestLog({ id: "b", at: NOW - 300, apiKeyId: "k2", sessionId: "s" }));
+  const sessions = (await (
+    await call("GET", `/api/logs/sessions?since=0&until=${NOW}`, "admin")
+  ).json()) as { sessions: Array<{ apiKeyId: string }> };
+  expect(sessions.sessions.map((s) => s.apiKeyId).sort()).toEqual(["k1", "k2"]);
+
+  const filtered = (await (
+    await call("GET", "/api/logs?session=s&agent=codex", "admin")
+  ).json()) as {
+    logs: unknown[];
+  };
+  expect(filtered.logs).toEqual([]);
+  expect((await call("GET", "/api/logs?agent=cursor", "admin")).status).toBe(400);
+  expect((await call("GET", "/api/logs/sessions?since=0", "admin")).status).toBe(400);
 });

@@ -8,6 +8,7 @@ import {
   type CaptureLogger,
   captureLogger,
   memoryStore,
+  requestLog,
   seedCredential,
   target,
   virtualModel,
@@ -17,6 +18,7 @@ import { VerdictCache } from "../../src/guardrail/cache.ts";
 import {
   CLASSIFIER_NOTE,
   checkConfidentiality,
+  checkRow,
   MAX_UNCACHED_SEGMENTS,
   SEGMENT_CONCURRENCY,
   type SmartRouteDecision,
@@ -471,4 +473,21 @@ test("the warning line carries no segment text and no policy", async () => {
       expect(line).not.toContain(POLICY);
     }
   }
+});
+
+/**
+ * One row stands for every classifier call of a check. Its provider request id
+ * is the first call's (in call order) that has one — the same call whose target
+ * the row already names — so the choice is deterministic, not whichever settled
+ * last.
+ */
+test("the check row names the first call's provider request id", () => {
+  const call = (upstreamRequestId: string | null, routed = true): RequestLog =>
+    requestLog({ id: "x", upstreamRequestId, resolvedProvider: routed ? "custom" : null });
+  const status = { status: 200, errorCode: null };
+  expect(
+    checkRow("r", 0, 1, "local-judge", 3, [call(null, false), call("up-2"), call("up-3")], status)
+      .upstreamRequestId,
+  ).toBe("up-2");
+  expect(checkRow("r", 0, 1, "local-judge", 1, [call(null)], status).upstreamRequestId).toBeNull();
 });

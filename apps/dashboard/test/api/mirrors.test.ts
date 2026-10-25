@@ -43,6 +43,12 @@ const CLIENT_REQUEST_LOG: Record<keyof ClientRequestLog, true> = {
   state: true,
   status: true,
   ttftMs: true,
+  sessionId: true,
+  turnId: true,
+  agent: true,
+  tags: true,
+  traceMetadata: true,
+  clientRequestId: true,
 };
 
 const ACCOUNT_QUOTA: Record<keyof AccountQuota, true> = {
@@ -75,10 +81,12 @@ const ACCOUNT_QUOTA_SAMPLE: Record<keyof AccountQuotaSample, true> = {
 test("the console's client log mirror matches the projection's field list", () => {
   // The same list `clientLogShape.test.ts` asserts `toClientLog` produces.
   expect(Object.keys(CLIENT_REQUEST_LOG).sort()).toEqual([
+    "agent",
     "at",
     "attempts",
     "cacheReadTokens",
     "cacheWriteTokens",
+    "clientRequestId",
     "costUsd",
     "degradations",
     "durationMs",
@@ -91,9 +99,13 @@ test("the console's client log mirror matches the projection's field list", () =
     "resolvedProvider",
     "rtkApplied",
     "rtkEstimatedTokensSaved",
+    "sessionId",
     "state",
     "status",
+    "tags",
+    "traceMetadata",
     "ttftMs",
+    "turnId",
   ]);
 });
 

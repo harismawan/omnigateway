@@ -10,7 +10,9 @@ import {
   exportFilename,
   exportLogs,
   exportRow,
+  getLog,
   pageLogs,
+  sessionSummary,
 } from "../src/logs.ts";
 import { type Principal, scopeOf } from "../src/principal.ts";
 
@@ -206,6 +208,10 @@ test("every accepted filter reaches the store query", async () => {
     errorCode: "UPSTREAM",
     since: "1",
     until: "2",
+    session: "claude-code:s1",
+    turn: "t1",
+    agent: "claude-code",
+    tag: "team-a",
   });
 
   expect(spy.queries.at(-1)).toEqual({
@@ -222,6 +228,17 @@ test("every accepted filter reaches the store query", async () => {
     errorCode: "UPSTREAM",
     since: 1,
     until: 2,
+    sessionId: "claude-code:s1",
+    turnId: "t1",
+    agent: "claude-code",
+    tag: "team-a",
+  });
+});
+
+test("an unknown agent is refused rather than matching nothing", async () => {
+  const { store } = await seeded();
+  await expect(pageLogs(store, { agent: "cursor" })).rejects.toMatchObject({
+    code: "BAD_REQUEST",
   });
 });
 
@@ -454,4 +471,76 @@ test("the download name is the server's, and the content types are the registere
   );
   expect(EXPORT_CONTENT_TYPE.csv).toBe("text/csv; charset=utf-8");
   expect(EXPORT_CONTENT_TYPE.jsonl).toBe("application/x-ndjson");
+});
+
+test("an export carries the trace columns; tags and metadata as JSON text in CSV", () => {
+  const log = requestLog({
+    id: "r1",
+    sessionId: "claude-code:s1",
+    turnId: "t1",
+    agent: "claude-code",
+    tags: ["a", "b"],
+    traceMetadata: { owner: "ops" },
+    clientRequestId: "cli-1",
+    upstreamRequestId: "up-1",
+  });
+  const header = exportRow("csv", requestLog({ id: "h" }));
+  expect(header.length).toBeGreaterThan(0);
+  const parsed = JSON.parse(exportRow("jsonl", log)) as Record<string, unknown>;
+  expect(parsed).toMatchObject({
+    sessionId: "claude-code:s1",
+    turnId: "t1",
+    agent: "claude-code",
+    tags: ["a", "b"],
+    traceMetadata: { owner: "ops" },
+    clientRequestId: "cli-1",
+    upstreamRequestId: "up-1",
+  });
+  const csv = exportRow("csv", log);
+  expect(csv).toContain('"[""a"",""b""]"');
+  expect(csv).toContain('"{""owner"":""ops""}"');
+});
+
+test("a metadata value shaped like a formula is neutralised in CSV", () => {
+  const csv = exportRow("csv", requestLog({ id: "r1", traceMetadata: { x: "=cmd" } }));
+  // The cell is the JSON object, which opens with `{`, so no formula can start it.
+  expect(csv).toContain('"{""x"":""=cmd""}"');
+});
+
+test("sessionSummary needs both bounds, at most 31 days apart, and is scoped", async () => {
+  const { store, mine, theirs } = await seeded();
+  await store.usage.append(
+    requestLog({ id: "s1", at: NOW - 500, apiKeyId: mine.key.id, sessionId: "s" }),
+  );
+  await store.usage.append(
+    requestLog({ id: "s2", at: NOW - 400, apiKeyId: theirs.key.id, sessionId: "s" }),
+  );
+  await expect(sessionSummary(store, { since: 0 })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  await expect(
+    sessionSummary(store, { since: NOW - 32 * 86_400_000, until: NOW }),
+  ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  await expect(sessionSummary(store, { since: NOW, until: NOW - 1 })).rejects.toMatchObject({
+    code: "BAD_REQUEST",
+  });
+
+  const all = await sessionSummary(store, { since: NOW - 1_000, until: NOW });
+  expect(all.map((s) => s.apiKeyId).sort()).toEqual([mine.key.id, theirs.key.id].sort());
+
+  const own = await sessionSummary(
+    store,
+    { since: NOW - 1_000, until: NOW, apiKeyId: theirs.key.id },
+    scopeOf({ kind: "client", apiKeyId: mine.key.id }),
+  );
+  expect(own.map((s) => s.apiKeyId)).toEqual([mine.key.id]);
+});
+
+test("getLog reads one row, and a client scope cannot read another key's", async () => {
+  const { store, mine, theirs } = await seeded();
+  expect((await getLog(store, "m1"))?.id).toBe("m1");
+  expect(await getLog(store, "missing")).toBeNull();
+  const scope = scopeOf({ kind: "client", apiKeyId: mine.key.id });
+  expect((await getLog(store, "m1", scope))?.id).toBe("m1");
+  expect(await getLog(store, "t1", scope)).toBeNull();
+  expect(theirs.key.id).not.toBe(mine.key.id);
+  await expect(getLog(store, "x".repeat(500))).rejects.toMatchObject({ code: "BAD_REQUEST" });
 });

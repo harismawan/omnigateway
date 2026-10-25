@@ -35,6 +35,7 @@ import {
   removeCredential,
   removeModel,
   revokeKey,
+  sessionSummary,
   setKeyExpiry,
   setKeyGuardrail,
   setKeyLimits,
@@ -721,6 +722,16 @@ export function adminRoutes(deps: AdminDeps) {
       .get("/api/logs", async ({ request, query }) => {
         await requireReader(request, deps.admin);
         return pageLogs(deps.store, query);
+      })
+
+      /**
+       * Per `(api key, session)` totals over a bounded range, highest cost
+       * first. A grouped read over the rows `/api/logs` already serves a
+       * viewer, so the same readers.
+       */
+      .get("/api/logs/sessions", async ({ request, query }) => {
+        await requireReader(request, deps.admin);
+        return { sessions: await sessionSummary(deps.store, query) };
       })
 
       /**

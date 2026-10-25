@@ -18,6 +18,7 @@ import {
 import type { VerdictCache } from "../guardrail/cache.ts";
 import type { GuardrailDeps, ScreenThrew } from "../guardrail/judge.ts";
 import { finishLog, newCompletedRequestLog, type UsageDebit } from "../logging.ts";
+import { type TraceContext, withTrace } from "../trace/extract.ts";
 import { segmentKey } from "./cache.ts";
 import {
   type Confidentiality,
@@ -216,6 +217,8 @@ export async function checkConfidentiality(
     signal: AbortSignal;
     debit: UsageDebit;
     parentRequestId: string;
+    /** The parent's trace, inherited by the check's row. */
+    trace?: TraceContext | null;
   },
 ): Promise<SmartRouteDecision> {
   const snapshot = await deps.snapshots.get(deps.now());
@@ -323,14 +326,17 @@ export async function checkConfidentiality(
       : { status: 200, errorCode: null };
   await finishLog(
     deps.store,
-    checkRow(
-      deps.requestId(),
-      startedAt,
-      deps.now(),
-      classifier,
-      calls,
-      logs.filter((log) => log !== undefined),
-      status,
+    withTrace(
+      checkRow(
+        deps.requestId(),
+        startedAt,
+        deps.now(),
+        classifier,
+        calls,
+        logs.filter((log) => log !== undefined),
+        status,
+      ),
+      input.trace ?? null,
     ),
     input.apiKeyId,
     deps.logger,
@@ -367,9 +373,14 @@ export async function checkConfidentiality(
 /**
  * The check's one row: the classifier model as requested, the target of the
  * first call (in call order) that routed, every call's tokens and cost summed — stopped calls included,
- * since what they spent was spent.
+ * since what they spent was spent. Its provider request id is the first call's
+ * (in call order) that has one, so the row names one real upstream request and
+ * the choice does not depend on which call settled last.
+ *
+ * Exported for its test: the aggregation is the only place a multi-call check
+ * collapses to one row.
  */
-function checkRow(
+export function checkRow(
   id: string,
   startedAt: number,
   now: number,
@@ -397,5 +408,7 @@ function checkRow(
     costUsd: sum("costUsd"),
     durationMs: now - startedAt,
     degradations: [CLASSIFIER_NOTE],
+    upstreamRequestId:
+      logs.find((log) => log.upstreamRequestId !== null)?.upstreamRequestId ?? null,
   });
 }

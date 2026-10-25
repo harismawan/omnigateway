@@ -803,7 +803,78 @@ export type RequestLog = {
   rtkCompressedCodeUnits: number;
   rtkEstimatedTokensSaved: number;
   rtkFilters: RtkFilterId[];
+  /**
+   * Caller-supplied grouping, bounded and dropped-not-refused at ingress
+   * (`apps/gateway/src/trace/extract.ts`). Written at `begin` so a pending row is
+   * already filterable; completion keeps what began when it carries none.
+   * Design: docs/superpowers/specs/2026-10-24-request-traceability-design.md.
+   */
+  sessionId: string | null;
+  turnId: string | null;
+  agent: TraceAgent | null;
+  tags: string[];
+  traceMetadata: Record<string, string>;
+  /** The caller's own `x-request-id`. */
+  clientRequestId: string | null;
+  /**
+   * The provider's request id from the attempt that produced the outcome.
+   * Operator-only: it names a request on the operator's provider account.
+   */
+  upstreamRequestId: string | null;
 };
+
+/** The trace fields of a row that carries no trace — spread into every log built without one. */
+export const EMPTY_TRACE = {
+  sessionId: null,
+  turnId: null,
+  agent: null,
+  tags: [],
+  traceMetadata: {},
+  clientRequestId: null,
+  upstreamRequestId: null,
+} as const satisfies Pick<
+  RequestLog,
+  | "sessionId"
+  | "turnId"
+  | "agent"
+  | "tags"
+  | "traceMetadata"
+  | "clientRequestId"
+  | "upstreamRequestId"
+>;
+
+/** Coding agents whose correlation headers the gateway recognises. */
+export const TRACE_AGENTS = ["claude-code", "opencode", "codex", "pi"] as const;
+export type TraceAgent = (typeof TRACE_AGENTS)[number];
+
+/** One `(api key, session)` pair's traffic over a range. */
+export type SessionSummary = {
+  sessionId: string;
+  apiKeyId: string | null;
+  /** The agent the session's rows name; null for an explicit id from an unrecognised caller. */
+  agent: TraceAgent | null;
+  firstAt: number;
+  lastAt: number;
+  requests: number;
+  failed: number;
+  /** Distinct non-null turn ids. */
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+};
+
+export type SessionQuery = {
+  since: number;
+  until: number;
+  apiKeyId?: string;
+  agent?: TraceAgent;
+};
+
+/** Most sessions one summary read returns, highest cost first. */
+export const SESSIONS_LIMIT = 500;
 
 export type ScoringWeights = {
   tier: number;
@@ -1381,6 +1452,12 @@ export type RequestLogQuery = {
   failed?: boolean;
   since?: number;
   until?: number;
+  /** Exact, like the scope filters: these are ids copied from a row, not typed spellings. */
+  sessionId?: string;
+  turnId?: string;
+  agent?: TraceAgent;
+  /** Rows carrying exactly this tag. */
+  tag?: string;
 };
 
 /**
@@ -1462,6 +1539,14 @@ export interface UsageRepo {
    * way to ask for the next one.
    */
   scan(cursor: { at: number; id: string } | null, limit: number): Promise<RequestLog[]>;
+  /**
+   * Per `(api key, session)` totals over `[since, until]`, done rows only,
+   * highest cost first, at most {@link SESSIONS_LIMIT}. Rows without a session
+   * are not a session.
+   */
+  sessions(q: SessionQuery): Promise<SessionSummary[]>;
+  /** One row by request id, pending or done, or null once pruned or never written. */
+  get(id: string): Promise<RequestLog | null>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
   /**
    * What one API key has consumed since an instant, for the sliding windows a

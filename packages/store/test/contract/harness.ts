@@ -132,6 +132,13 @@ export function logRow(
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    sessionId: null,
+    turnId: null,
+    agent: null,
+    tags: [],
+    traceMetadata: {},
+    clientRequestId: null,
+    upstreamRequestId: null,
     ...overrides,
   };
 }

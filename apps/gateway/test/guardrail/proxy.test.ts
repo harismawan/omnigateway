@@ -10,6 +10,7 @@ import { createStore, deriveKey } from "@omni/store";
 import { health, memoryStore, seedCredential, target, virtualModel } from "@omni/testkit";
 import { ApiKeyRateLimiter, modelSubjectId, RateLimitExceeded } from "../../src/auth/rateLimit.ts";
 import { createRoutingSnapshotCache } from "../../src/dispatch/snapshotCache.ts";
+import { unwatched } from "../../src/dispatch/upstreamRequestId.ts";
 import { anthropicErrorBody } from "../../src/egress/anthropic.ts";
 import { openaiErrorBody } from "../../src/egress/openai.ts";
 import { responsesErrorBody } from "../../src/egress/responses.ts";
@@ -1141,8 +1142,8 @@ test("the classifier call is never captured, with body logging fully on", async 
       deps: { bodyLoggingAllowed: true },
     });
     expect((await h.call("anthropic")).status).toBe(200);
-    expect(h.targetCalls[0]?.http).not.toBe(transport);
-    expect(h.judgeCalls[0]?.http).toBe(transport);
+    expect(unwatched(h.targetCalls[0]?.http ?? transport)).not.toBe(transport);
+    expect(unwatched(h.judgeCalls[0]?.http ?? (() => Promise.reject()))).toBe(transport);
     for (let i = 0; i < 100 && (await store.bodies.get("req_1")) === null; i++) await Bun.sleep(5);
     expect(await store.bodies.get("req_1")).not.toBeNull();
     expect(await store.bodies.get("req_2")).toBeNull();
@@ -1150,4 +1151,32 @@ test("the classifier call is never captured, with body logging fully on", async 
     store.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+/**
+ * The classifier row inherits the parent's trace, so a session's cost includes
+ * what judging it cost. Its upstream request id is its own.
+ */
+test("the classifier row carries the parent's trace", async () => {
+  const h = await guardrailHarness();
+  const res = await h.call("anthropic", {
+    headers: {
+      "x-claude-code-session-id": "cc-1",
+      "x-omni-tags": "team-a",
+      "x-request-id": "client-1",
+    },
+  });
+  expect(res.status).toBe(200);
+  const rows = await h.store.usage.recent(50);
+  const classifier = rows.find((r) => r.degradations.includes("guardrail:classifier"));
+  const parent = rows.find((r) => !r.degradations.includes("guardrail:classifier"));
+  const trace = {
+    sessionId: "claude-code:cc-1",
+    agent: "claude-code",
+    tags: ["team-a"],
+    clientRequestId: "client-1",
+  };
+  expect(parent).toMatchObject(trace);
+  expect(classifier).toMatchObject(trace);
+  h.store.close();
 });

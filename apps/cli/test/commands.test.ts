@@ -1572,6 +1572,104 @@ test("logs filters and pages through the store rather than the newest rows", asy
   expect(second.logs.map((row) => row.id)).toEqual(["noise2", "noise1"]);
 });
 
+test("logs filters by session, turn, agent and tag", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(
+    requestLog({
+      id: "traced",
+      at: 1_000,
+      sessionId: "codex:th",
+      turnId: "codex:tu",
+      agent: "codex",
+      tags: ["team-a"],
+    }),
+  );
+  await store.usage.append(requestLog({ id: "plain", at: 2_000 }));
+  store.close();
+  const service = fakeService({ root });
+  for (const flags of [
+    ["--session", "codex:th"],
+    ["--turn", "codex:tu"],
+    ["--agent", "codex"],
+    ["--tag", "team-a"],
+  ]) {
+    const result = await cli(["logs", ...flags, "--json"], { root, service });
+    expect(result.code).toBe(0);
+    expect((JSON.parse(result.out) as { logs: { id: string }[] }).logs.map((r) => r.id)).toEqual([
+      "traced",
+    ]);
+  }
+});
+
+test("logs sessions prints per-session totals, highest cost first", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(
+    requestLog({ id: "a", at: 1_000, apiKeyId: "k1", sessionId: "cheap", costUsd: 0.01 }),
+  );
+  await store.usage.append(
+    requestLog({ id: "b", at: 1_100, apiKeyId: "k1", sessionId: "dear", costUsd: 2 }),
+  );
+  store.close();
+  const service = fakeService({ root });
+  const json = await cli(["logs", "sessions", "--since", "0", "--until", "2000", "--json"], {
+    root,
+    service,
+  });
+  expect(json.code).toBe(0);
+  const body = JSON.parse(json.out) as { sessions: { sessionId: string }[] };
+  expect(body.sessions.map((s) => s.sessionId)).toEqual(["dear", "cheap"]);
+
+  const text = await cli(["logs", "sessions", "--since", "0", "--until", "2000"], {
+    root,
+    service,
+  });
+  expect(text.code).toBe(0);
+  expect(text.out).toContain("dear");
+  expect(text.out.indexOf("dear")).toBeLessThan(text.out.indexOf("cheap"));
+  // Both bounds are required, as on the API.
+  expect((await cli(["logs", "sessions"], { root, service })).code).not.toBe(0);
+});
+
+test("logs show prints one request's trace and ids, or fails for an unknown id", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(
+    requestLog({
+      id: "req_show",
+      sessionId: "claude-code:s1",
+      turnId: "t1",
+      agent: "claude-code",
+      tags: ["team-a"],
+      traceMetadata: { owner: "ops" },
+      clientRequestId: "cli-1",
+      upstreamRequestId: "up-1",
+    }),
+  );
+  store.close();
+  const service = fakeService({ root });
+
+  const text = await cli(["logs", "show", "req_show"], { root, service });
+  expect(text.code).toBe(0);
+  for (const value of [
+    "claude-code:s1",
+    "t1",
+    "claude-code",
+    "team-a",
+    "owner=ops",
+    "cli-1",
+    "up-1",
+  ]) {
+    expect(text.out).toContain(value);
+  }
+  const json = await cli(["logs", "show", "req_show", "--json"], { root, service });
+  expect(JSON.parse(json.out)).toMatchObject({
+    log: { id: "req_show", upstreamRequestId: "up-1" },
+  });
+  expect((await cli(["logs", "show", "nope"], { root, service })).code).not.toBe(0);
+});
+
 test("logs export writes the bytes of the format, with no --json wrapper", async () => {
   const root = await installation();
   const store = await openStore(root);

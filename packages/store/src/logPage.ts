@@ -24,6 +24,8 @@ export function logPageClauses(
   query: RequestLogQuery,
   placeholder: (index: number) => string,
   like = "LIKE",
+  /** The dialect's case-sensitive substring position: `instr` (SQLite), `strpos` (Postgres). */
+  position = "instr",
 ): { where: string; bindings: Array<string | number | boolean> } {
   const clauses: string[] = [];
   const bindings: Array<string | number | boolean> = [];
@@ -78,6 +80,19 @@ export function logPageClauses(
   eq("credential_id", query.credentialId);
   eq("resolved_provider", query.provider);
   eq("state", query.state);
+  // Exact for the same reason: a session or turn id is copied out of a row, and
+  // a substring would let `s1` read `s10`'s rows.
+  eq("session_id", query.sessionId);
+  eq("turn_id", query.turnId);
+  eq("agent", query.agent);
+  // The tag array is JSON text, so "holds exactly this tag" is a containment
+  // test for the quoted tag. A case-sensitive substring position rather than
+  // `LIKE`: a tag is an exact identifier, so `TEAM` must not read `team`'s rows,
+  // and SQLite's `LIKE` folds ASCII case. `instr` / `strpos` take no wildcards,
+  // so nothing in the tag needs escaping.
+  if (query.tag !== undefined) {
+    clauses.push(`${position}(tags, ${bind(JSON.stringify(query.tag))}) > 0`);
+  }
 
   // The typed filters match substrings, because an exact match on a name nobody
   // recalls exactly is a filter that answers "no such traffic" for every

@@ -793,3 +793,68 @@ describe("a shortened quota history", () => {
     }
   });
 });
+
+describe("client board traceability", () => {
+  test("a session in the client's log filters it, through the client route", async () => {
+    const user = userEvent.setup();
+    const fetches = stub({
+      "GET /api/client/logs": () => ({
+        logs: [clientLog({ sessionId: "pi:s9", tags: ["mine"], requestedModel: "traced" })],
+      }),
+    });
+    renderWithProviders(<ClientBoard />, { client: makeQueryClient({ catalog: false }) });
+
+    await user.click(await screen.findByRole("button", { name: "Filter by session pi:s9" }));
+    await waitFor(() => {
+      expect(
+        fetches.calls.some(
+          (c) => c.url.startsWith("/api/client/logs?") && c.url.includes("session=pi%3As9"),
+        ),
+      ).toBe(true);
+    });
+    // Never the operator's route.
+    expect(fetches.calls.some((c) => c.url.startsWith("/api/logs"))).toBe(false);
+  });
+
+  test("the client's detail shows its own trace and no provider request id", async () => {
+    const user = userEvent.setup();
+    stub({
+      "GET /api/client/logs": () => ({
+        logs: [clientLog({ requestedModel: "traced", turnId: "t-1", clientRequestId: "c-1" })],
+      }),
+    });
+    renderWithProviders(<ClientBoard />, { client: makeQueryClient({ catalog: false }) });
+    await user.click(await screen.findByText("traced"));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("t-1")).toBeTruthy();
+    expect(within(dialog).getByText("c-1")).toBeTruthy();
+    expect(within(dialog).queryByText("Provider request id")).toBeNull();
+  });
+
+  test("the client's sessions come from its own route", async () => {
+    const fetches = stub({
+      "GET /api/client/sessions": () => ({
+        sessions: [
+          {
+            sessionId: "claude-code:mine",
+            apiKeyId: "key-1",
+            agent: "claude-code",
+            firstAt: NOW - 1_000,
+            lastAt: NOW - 500,
+            requests: 3,
+            failed: 0,
+            turns: 2,
+            inputTokens: 10,
+            outputTokens: 5,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: 0.5,
+          },
+        ],
+      }),
+    });
+    renderWithProviders(<ClientBoard />, { client: makeQueryClient({ catalog: false }) });
+    expect(await screen.findByText("claude-code:mine")).toBeTruthy();
+    expect(fetches.calls.some((c) => c.url.startsWith("/api/client/sessions?"))).toBe(true);
+  });
+});
