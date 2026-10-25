@@ -573,3 +573,100 @@ test("while down it polls the destinations and revives only on a real change", a
   expect(s.workers).toHaveLength(spawned + 1);
   expect(s.supervisor.state()).toBe("running");
 });
+
+// --- review round 2 ---------------------------------------------------------
+
+test("repeated refused restores never start a worker beside one that has not exited", async () => {
+  const s = setup({
+    worker: () => fakeWorker({ ackPause: false, terminateExits: false, exitOnStop: false }),
+  });
+  await s.supervisor.start();
+  const alive = (): number => s.workers.filter((w) => w.alive).length;
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const pausing = s.supervisor.pause().catch((e) => e);
+    await flush();
+    await s.clock.advance(PAUSE_ACK_MS + TERMINATE_WAIT_MS);
+    expect(((await pausing) as GatewayError).message).toBe(
+      "export worker did not stop; nothing was restored",
+    );
+    // The route's refused path: resume, not swapped.
+    await s.supervisor.resume(false);
+    expect(alive()).toBe(1);
+    expect(s.workers).toHaveLength(1);
+    expect(s.supervisor.state()).toBe("stopping");
+    // Export is unavailable meanwhile.
+    const refused = (await s.supervisor
+      .request({ type: "skip", id: "x" })
+      .catch((e) => e)) as GatewayError;
+    expect(refused.message).toBe("export worker not running");
+  }
+  // Polls, restarts and destination changes cannot start one either.
+  await s.supervisor.destinationsChanged();
+  await s.clock.advance(120_000);
+  expect(s.workers).toHaveLength(1);
+  expect(s.supervisor.restarts()).toBe(0);
+});
+
+test("a late exit of the stuck worker re-enables start under the normal conditions", async () => {
+  const s = setup({
+    worker: () => fakeWorker({ ackPause: false, terminateExits: false, exitOnStop: false }),
+  });
+  await s.supervisor.start();
+  const stuck = s.last();
+  const pausing = s.supervisor.pause().catch((e) => e);
+  await flush();
+  await s.clock.advance(PAUSE_ACK_MS + TERMINATE_WAIT_MS);
+  await pausing;
+  await s.supervisor.resume(false);
+  expect(s.supervisor.state()).toBe("stopping");
+
+  stuck.die();
+  await flush();
+  expect(s.workers).toHaveLength(2);
+  expect(s.supervisor.state()).toBe("running");
+  expect(s.workers.filter((w) => w.alive)).toHaveLength(1);
+});
+
+test("a late exit starts nothing when no destination is left, or after a failed swap", async () => {
+  const none = setup({
+    worker: () => fakeWorker({ ackPause: false, terminateExits: false, exitOnStop: false }),
+  });
+  await none.supervisor.start();
+  const stuck = none.last();
+  const pausing = none.supervisor.pause().catch((e) => e);
+  await flush();
+  await none.clock.advance(PAUSE_ACK_MS + TERMINATE_WAIT_MS);
+  await pausing;
+  await none.supervisor.resume(false);
+  none.box.destinations = 0;
+  stuck.die();
+  await flush();
+  expect(none.workers).toHaveLength(1);
+  expect(none.supervisor.state()).toBe("idle");
+
+  const halted = setup({ worker: () => fakeWorker({ exitOnStop: false, terminateExits: false }) });
+  await halted.supervisor.start();
+  await halted.supervisor.pause();
+  await halted.supervisor.halt();
+  halted.last().die();
+  await flush();
+  await halted.clock.advance(120_000);
+  expect(halted.workers).toHaveLength(1);
+  expect(halted.supervisor.state()).toBe("halted");
+});
+
+test("a destination re-created while the last one's worker is still stopping waits for its exit", async () => {
+  const s = setup({ worker: () => fakeWorker({ exitOnStop: false }) });
+  await s.supervisor.start();
+  const old = s.last();
+  s.box.destinations = 0;
+  await s.supervisor.destinationsChanged();
+  s.box.destinations = 1;
+  await s.supervisor.destinationsChanged();
+  expect(s.workers).toHaveLength(1);
+  expect(s.supervisor.state()).toBe("stopping");
+  old.die();
+  await flush();
+  expect(s.workers).toHaveLength(2);
+  expect(s.supervisor.state()).toBe("running");
+});

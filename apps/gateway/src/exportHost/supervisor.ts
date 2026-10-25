@@ -66,6 +66,11 @@ export type SupervisorState =
   | "paused"
   /** A swap failed; the operator's restart (or a later restore) brings it back. */
   | "halted"
+  /**
+   * A worker asked to stop (or terminated) has not exited yet. Nothing new is
+   * started beside it; when it exits, the normal start conditions apply.
+   */
+  | "stopping"
   | "stopped";
 
 /** A request the console or CLI makes of the worker, without its `ref`. */
@@ -325,8 +330,13 @@ export function createExportSupervisor(deps: SupervisorDeps): ExportSupervisor {
     }
   }
 
+  /** The only way a worker starts. Never beside one that has not exited. */
   function spawn(): void {
     if (stopped()) return;
+    if (retiring.size > 0) {
+      setState("stopping");
+      return;
+    }
     const startedAt = deps.now();
     let worker: ExportWorker;
     try {
@@ -352,9 +362,15 @@ export function createExportSupervisor(deps: SupervisorDeps): ExportSupervisor {
     worker.onMessage((message) => receive(instance, message));
     worker.onExit(() => {
       instance.gone = true;
-      retiring.delete(instance);
+      const wasRetiring = retiring.delete(instance);
       markExited();
       exited(instance);
+      // The last stopping worker is gone: whatever waited on it may start now.
+      if (wasRetiring && retiring.size === 0 && state === "stopping") {
+        void serial(async () => {
+          if (state === "stopping") await startIfWanted();
+        });
+      }
     });
     setState("running");
   }
@@ -520,7 +536,8 @@ export function createExportSupervisor(deps: SupervisorDeps): ExportSupervisor {
             spawn();
             return;
           case "restarting":
-            // The new worker reads configuration when it starts.
+          case "stopping":
+            // The next worker reads configuration when it starts.
             return;
         }
       }),
