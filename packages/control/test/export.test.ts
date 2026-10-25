@@ -236,6 +236,7 @@ test("secret schemas are strict per type", () => {
   expect(ok(webhookSecretSchema, { signingSecret: "s" })).toBe(true);
   expect(ok(webhookSecretSchema, { headers: { authorization: "Bearer t" } })).toBe(true);
   expect(ok(webhookSecretSchema, {})).toBe(false);
+  expect(ok(webhookSecretSchema, { headers: {} })).toBe(false);
   expect(ok(webhookSecretSchema, { signingSecret: "" })).toBe(false);
   expect(ok(webhookSecretSchema, { signingSecret: "s", other: 1 })).toBe(false);
 

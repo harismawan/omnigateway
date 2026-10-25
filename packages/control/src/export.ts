@@ -223,7 +223,7 @@ export const webhookSecretSchema = z
     signingSecret: secretText(1024).optional(),
   })
   .strict()
-  .refine((s) => s.headers !== undefined || s.signingSecret !== undefined, {
+  .refine((s) => Object.keys(s.headers ?? {}).length > 0 || s.signingSecret !== undefined, {
     message: "needs headers or a signingSecret",
   });
 
