@@ -636,7 +636,8 @@ and `omni doctor`. While the worker is down, *Send test*, *Preview* and *Skip to
   SQLite mode is one process: no lease, but the same epoch fence on `export.db` guards against a
   restarted worker racing a terminated one's last write.
 - **Batch.** Up to 500 rows or 5 MiB encoded, whichever first. Gzip where the receiver accepts it
-  (Elasticsearch and OTLP do; webhook opt-in via config).
+  (Elasticsearch and OTLP do; webhook opt-in via config). *2026-10-26: webhook gzip opt-in
+  deferred; part 1 sends webhooks uncompressed.*
 - **Commit.** The cursor advances to the batch's last row only after the receiver accepts it, in one
   single-row write to `export_state` together with the counters.
 - **Retry.** Transport errors, timeouts, 408, 429 and 5xx end the pass (releasing the lease) and set

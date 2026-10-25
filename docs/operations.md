@@ -550,13 +550,24 @@ cursor where it was and retries after a backoff: 1 s doubling to 5 minutes,
 jittered, longer if the receiver sends `Retry-After` (honoured up to 5 minutes).
 Any other 4xx, and any 3xx (redirects are not followed), means the
 configuration is wrong: the destination stays enabled, the cursor stays put,
-and it is retried every 5 minutes until you edit it or skip to now. Records a
+and it is retried every 5 minutes until you edit it or skip to now. In a cluster
+the backoff is the destination's, not a replica's: it is stored with the
+destination's state, so after one replica gets a 429 with `Retry-After: 300`, no
+replica sends to that destination for those 5 minutes. An edit (or a skip)
+releases it at once on every replica. Records a
 receiver rejects individually — Elasticsearch per-item mapping errors, OTLP
 `partialSuccess` — and a record too large for one request are counted as
 dropped, and the batch commits past them. Nothing is discarded silently: the
 last error, as a fixed summary like `HTTP 401` or
 `dropped 3 of 500: mapper_parsing_exception`, shows on the Export page beside
-lag and last success. A receiver's response text is never stored or shown.
+lag and last success. A receiver's response text is never stored or shown, and
+an Elasticsearch error type is repeated only when it is one of a fixed list
+(`mapper_parsing_exception`, `document_parsing_exception`,
+`strict_dynamic_mapping_exception`, `version_conflict_engine_exception`,
+`illegal_argument_exception`, `index_not_found_exception`,
+`cluster_block_exception`, `security_exception`, `circuit_breaking_exception`,
+`es_rejected_execution_exception`); any other is summarised by its status alone
+(`HTTP 401`, `dropped 1 of 500`).
 
 **Gap warning.** Maintenance prunes `request_logs` at `logRetentionDays` as it
 always has; export never delays it. When a destination falls within a day of
@@ -600,6 +611,12 @@ and every cursor write is fenced, so a replica that stalls past its lease cannot
 move a cursor another has advanced. A replica's death hands the destination to
 another, which resumes from the committed cursor. Each replica's worker re-reads
 destinations every tick, so an edit made anywhere takes effect within seconds.
+An edit also stops a pass already running on the old configuration — its
+filter, URL and credential are read together, once, when the pass starts — and
+the next pass starts on the new one. A batch already sent when you saved cannot
+be recalled: if its receiver accepts it, it counts. A pass's preparation and
+every batch run under its lease, renewed before each batch; a replica stalled
+past its lease sends nothing.
 
 **Metrics**, on `/metrics` when it is enabled, labelled by destination id:
 

@@ -537,7 +537,8 @@ with `_id` = the request id, so a resend overwrites. Index pattern defaults to
 `omni-logs-{yyyy.MM.dd}`, the date taken from the row's `at` in UTC. Auth is `apiKey`
 (`{"apiKey":"…"}`, sent as `Authorization: ApiKey …`), `basic`
 (`{"username":"…","password":"…"}`) or `none`. Per-item mapping errors are counted as dropped
-and the batch commits; per-item 429/5xx retry the batch. The gateway creates no index template;
+and the batch commits; per-item 429/5xx retry the batch. Error types are shown only from a fixed
+list of known Elasticsearch names; anything else is summarised by status alone. The gateway creates no index template;
 this one is recommended:
 
 ```
