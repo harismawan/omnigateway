@@ -1,3 +1,8 @@
+// The leaf, not the barrel: this module stays pure and light enough for the
+// export worker. The name rule lives in `@omni/control` because the config
+// write validates a pattern with it; one copy, so what the write accepted is
+// what this encoder sends.
+import { expandIndexPattern, indexNameProblem } from "@omni/control/exportIndex";
 import type { BatchEnvelope } from "../batch.ts";
 import type { RequestRecord } from "../record.ts";
 
@@ -9,8 +14,6 @@ import type { RequestRecord } from "../record.ts";
  * date comes from the record's own `at`.
  */
 
-export const DEFAULT_INDEX_PATTERN = "omni-logs-{yyyy.MM.dd}";
-
 /** Both flavours take NDJSON under this type. */
 export const BULK_CONTENT_TYPE = "application/x-ndjson";
 
@@ -18,27 +21,6 @@ export const BULK_CONTENT_TYPE = "application/x-ndjson";
 export const BULK_ENVELOPE: BatchEnvelope = { fixedBytes: 0, separatorBytes: 0 };
 
 export type BulkOptions = { indexPattern: string };
-
-const DATE_TOKEN = "{yyyy.MM.dd}";
-const MAX_INDEX_BYTES = 255;
-const FORBIDDEN = /[\\/*?"<>| ,#:]/;
-
-/**
- * Why Elasticsearch would refuse this index name, or `null` when it would not.
- *
- * Checked before sending because a refused index comes back as a per-item 400
- * on every document — which the bulk reader rightly reads as "drop these" — so
- * a bad pattern would silently discard everything the destination sends.
- */
-export function indexNameProblem(name: string): string | null {
-  if (name.length === 0) return "index name is empty";
-  if (name !== name.toLowerCase()) return "index name must be lowercase";
-  if (name === "." || name === "..") return "index name cannot be . or ..";
-  if (/^[-_+]/.test(name)) return "index name cannot start with -, _ or +";
-  if (FORBIDDEN.test(name)) return 'index name cannot contain \\ / * ? " < > | space , # or :';
-  if (Buffer.byteLength(name) > MAX_INDEX_BYTES) return "index name is longer than 255 bytes";
-  return null;
-}
 
 /**
  * The index for a document started at `at` (epoch ms): every `{yyyy.MM.dd}` in
@@ -50,13 +32,7 @@ export function indexNameProblem(name: string): string | null {
  * must log a fixed summary, never this message.
  */
 export function indexName(pattern: string, at: number): string {
-  const day = new Date(at);
-  const date = [
-    String(day.getUTCFullYear()).padStart(4, "0"),
-    String(day.getUTCMonth() + 1).padStart(2, "0"),
-    String(day.getUTCDate()).padStart(2, "0"),
-  ].join(".");
-  const name = pattern.replaceAll(DATE_TOKEN, date);
+  const name = expandIndexPattern(pattern, at);
   const problem = indexNameProblem(name);
   if (problem !== null) throw new RangeError(`${problem}: ${JSON.stringify(name)}`);
   return name;

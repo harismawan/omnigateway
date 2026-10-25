@@ -95,6 +95,36 @@ export {
   vacuum,
 } from "./database.ts";
 export { type DryRunCandidate, type DryRunResult, dryRun } from "./dryRun.ts";
+export {
+  createDestination,
+  DEFAULT_MAX_REQUEST_BYTES,
+  type DestinationSummary,
+  destinationIdSchema,
+  type ElasticsearchConfig,
+  type ElasticsearchSecret,
+  elasticsearchConfigSchema,
+  elasticsearchSecretSchemas,
+  exportFilterSchema,
+  getDestination,
+  listDestinations,
+  type OtlpConfig,
+  type OtlpSecret,
+  otlpConfigSchema,
+  otlpSecretSchema,
+  removeDestination,
+  setDestinationBodies,
+  updateDestination,
+  type WebhookConfig,
+  type WebhookSecret,
+  webhookConfigSchema,
+  webhookSecretSchema,
+} from "./export.ts";
+export {
+  DEFAULT_INDEX_PATTERN,
+  expandIndexPattern,
+  INDEX_DATE_TOKEN,
+  indexNameProblem,
+} from "./exportIndex.ts";
 export { type GuardrailReadiness, guardrailReadiness } from "./guardrail.ts";
 export {
   type ApiKeySummary,

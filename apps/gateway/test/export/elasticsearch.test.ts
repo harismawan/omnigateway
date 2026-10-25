@@ -1,12 +1,11 @@
 import { expect, test } from "bun:test";
+import { DEFAULT_INDEX_PATTERN } from "@omni/control/exportIndex";
 import { requestLog } from "@omni/testkit";
 import {
   BULK_ENVELOPE,
   bulkPart,
-  DEFAULT_INDEX_PATTERN,
   encodeBulk,
   indexName,
-  indexNameProblem,
   readBulkResponse,
 } from "../../src/export/encoders/elasticsearch.ts";
 import { buildRecord } from "../../src/export/record.ts";
@@ -66,13 +65,11 @@ test("an index name Elasticsearch would refuse is refused before sending", () =>
       indexPattern: "LOGS",
     }),
   ).toThrow(/lowercase/);
-  for (const bad of ["", ".", "..", "-x", "_x", "+x", "a b", "a,b", "a#b", "a*", "a/b", "a\\b"]) {
-    expect(indexNameProblem(bad)).not.toBeNull();
-  }
-  expect(indexNameProblem("a".repeat(256))).not.toBeNull();
-  expect(indexNameProblem("é".repeat(128))).not.toBeNull();
-  expect(indexNameProblem("omni-logs-2026.01.05")).toBeNull();
-  expect(indexNameProblem(".hidden-but-allowed")).toBeNull();
+  // The name rule itself is `@omni/control`'s, tested there; here, that the
+  // encoder applies it after expansion.
+  expect(() => indexName("a b-{yyyy.MM.dd}", 0)).toThrow(/cannot contain/);
+  expect(() => indexName(`${"a".repeat(246)}{yyyy.MM.dd}`, 0)).toThrow(/255 bytes/);
+  expect(indexName(`${"a".repeat(245)}{yyyy.MM.dd}`, 0)).toHaveLength(255);
 });
 
 test("errors:false commits everything without reading items", () => {
