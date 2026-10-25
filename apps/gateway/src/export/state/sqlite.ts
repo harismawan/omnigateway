@@ -2,11 +2,11 @@ import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { dirname, join } from "node:path";
 import {
   boundMessage,
-  boundMs,
   CommitTimeoutError,
   type ExportState,
   type ExportStateStore,
   ORPHAN_KEEP_MS,
+  remainingMs,
 } from "../state.ts";
 import { commitValues, readState, type StateRow, statements } from "./sql.ts";
 
@@ -99,8 +99,7 @@ export function openSqliteExportState(path: string): ExportStateStore {
     async commit(generation, epoch, next, bound) {
       const values = [generation, epoch, ...commitValues(next)];
       if (bound === undefined) return changed(SQL.commit, values);
-      const ms = boundMs(bound);
-      if (ms === null) throw new CommitTimeoutError();
+      const ms = remainingMs(bound);
       // The write is synchronous: once it holds the lock it finishes. What can
       // outlast the deadline is waiting for the lock, so that wait is bounded
       // by the time left, for this statement only.

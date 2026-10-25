@@ -974,7 +974,10 @@ test("every batch commit is bounded by the batch's remaining deadline", async ()
     bounds.push(
       call.bound === undefined
         ? undefined
-        : { remainingMs: call.bound.remainingMs, aborted: call.bound.signal.aborted },
+        : {
+            remainingMs: call.bound.deadlineAt - call.bound.now(),
+            aborted: call.bound.signal.aborted,
+          },
     );
     return write();
   };
@@ -1027,7 +1030,7 @@ test("a commit blocked on export.db's writer lock past the deadline never lands"
   };
   const bounds: number[] = [];
   w.onCommit = async (call, write) => {
-    if (call.bound !== undefined) bounds.push(call.bound.remainingMs);
+    if (call.bound !== undefined) bounds.push(call.bound.deadlineAt - call.bound.now());
     try {
       return await write();
     } finally {

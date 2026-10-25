@@ -5,13 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPostgresStore, deriveKey } from "@omni/store";
 import { SQL } from "bun";
-import { createPostgresExportState } from "../../src/export/state/postgres.ts";
+import { type CommitStep, createPostgresExportState } from "../../src/export/state/postgres.ts";
 import {
   EXPORT_DB_FILENAME,
   exportDbPathFor,
   openSqliteExportState,
 } from "../../src/export/state/sqlite.ts";
 import {
+  type CommitBound,
   CommitTimeoutError,
   type ExportStateStore,
   LAST_ERROR_MAX_CHARS,
@@ -36,6 +37,11 @@ type Backend = {
 };
 
 const DAY = 24 * 60 * 60 * 1000;
+
+/** A commit bound `ms` from now on the wall clock, optionally on a given signal. */
+function within(ms: number, signal = new AbortController().signal): CommitBound {
+  return { signal, deadlineAt: Date.now() + ms, now: Date.now };
+}
 const G = "11111111-1111-4111-8111-111111111111";
 const H = "22222222-2222-4222-8222-222222222222";
 const K = "33333333-3333-4333-8333-333333333333";
@@ -316,7 +322,7 @@ forEachState((backend) => {
           G,
           epoch,
           { cursorAt: 9, cursorId: "r1", seenRetentionLoweredAt: 0, exportedDelta: 1 },
-          { signal: new AbortController().signal, remainingMs: 150 },
+          within(150),
         ),
       ).rejects.toBeInstanceOf(CommitTimeoutError);
       expect(performance.now() - started).toBeLessThan(3_000);
@@ -331,7 +337,7 @@ forEachState((backend) => {
         G,
         epoch,
         { cursorAt: 9, cursorId: "r1", seenRetentionLoweredAt: 0, exportedDelta: 1 },
-        { signal: new AbortController().signal, remainingMs: 5_000 },
+        within(5_000),
       ),
     ).toBe(true);
     expect((await s.list())[0]?.cursorId).toBe("r1");
@@ -344,12 +350,10 @@ forEachState((backend) => {
     const aborted = new AbortController();
     aborted.abort(new Error("deadline"));
     const next = { cursorAt: 9, cursorId: "r1", seenRetentionLoweredAt: 0 };
-    await expect(
-      s.commit(G, epoch, next, { signal: aborted.signal, remainingMs: 5_000 }),
-    ).rejects.toBeInstanceOf(CommitTimeoutError);
-    await expect(
-      s.commit(G, epoch, next, { signal: new AbortController().signal, remainingMs: 0 }),
-    ).rejects.toBeInstanceOf(CommitTimeoutError);
+    await expect(s.commit(G, epoch, next, within(5_000, aborted.signal))).rejects.toBeInstanceOf(
+      CommitTimeoutError,
+    );
+    await expect(s.commit(G, epoch, next, within(0))).rejects.toBeInstanceOf(CommitTimeoutError);
     expect((await s.list())[0]?.cursorId).toBe("");
   });
 
@@ -569,5 +573,164 @@ if (pg !== undefined && pg !== "") {
     } finally {
       await pool.close();
     }
+  });
+}
+
+/**
+ * The Postgres bounded commit, phase by phase: a commit that has not completed
+ * in the database by its deadline never takes effect, whether the deadline
+ * passes while it waits for a connection, during its setup, while its UPDATE
+ * waits on a row lock, or just before COMMIT.
+ */
+if (pg !== undefined && pg !== "") {
+  describe("postgres bounded commit", () => {
+    const pools: SQL[] = [];
+    afterEach(async () => {
+      for (const pool of pools.splice(0)) await pool.close();
+    });
+
+    async function setup(max: number) {
+      const admin = new SQL({ url: pg, max: 1 });
+      try {
+        await admin.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+      } finally {
+        await admin.close();
+      }
+      const store = await createPostgresStore({
+        url: pg as string,
+        encryptionKey: await deriveKey("test-encryption-key-0123456789"),
+      });
+      store.close();
+      const pool = new SQL({ url: pg, max });
+      pools.push(pool);
+      // What reached the server, in order.
+      const steps: CommitStep[] = [];
+      let hook: (step: CommitStep) => Promise<void> = async () => {};
+      const s = createPostgresExportState(pool, {
+        beforeStatement: (step) => hook(step),
+        sent: (step) => steps.push(step),
+      });
+      await s.ensure(G, 0);
+      const { epoch } = (await s.claim(G)) ?? { epoch: -1 };
+      steps.length = 0;
+      return {
+        s,
+        pool,
+        epoch,
+        steps,
+        setHook(next: (step: CommitStep) => Promise<void>) {
+          hook = next;
+        },
+      };
+    }
+    const next = { cursorAt: 9, cursorId: "r1", seenRetentionLoweredAt: 0, exportedDelta: 1 };
+    const unchanged = async (s: ExportStateStore) => {
+      const [row] = await s.list();
+      expect([row?.cursorAt, row?.cursorId, row?.exportedTotal]).toEqual([0, "", 0]);
+    };
+
+    test("the normal path runs begin, one setup, the update and commit, and lands", async () => {
+      const { s, epoch, steps } = await setup(2);
+      expect(await s.commit(G, epoch, next, within(5_000))).toBe(true);
+      expect(steps).toEqual(["begin", "setup", "update", "commit"]);
+      expect((await s.list())[0]?.cursorId).toBe("r1");
+    });
+
+    test("expiry while waiting for a connection rejects in time; the late connection writes nothing", async () => {
+      const { s, pool, epoch, steps } = await setup(1);
+      const held = await pool.reserve();
+      const started = performance.now();
+      try {
+        await expect(s.commit(G, epoch, next, within(150))).rejects.toBeInstanceOf(
+          CommitTimeoutError,
+        );
+        expect(performance.now() - started).toBeLessThan(1_000);
+      } finally {
+        held.release();
+      }
+      // The connection the commit asked for arrives now; it must be handed back unused.
+      await Bun.sleep(200);
+      expect(steps).toEqual([]);
+      await unchanged(s);
+      // And the pool is not leaked: the next commit gets that connection.
+      expect(await s.commit(G, epoch, next, within(5_000))).toBe(true);
+    });
+
+    test("expiry during setup issues no update and rolls back", async () => {
+      const { s, epoch, steps, setHook } = await setup(2);
+      const controller = new AbortController();
+      setHook(async (step) => {
+        // The deadline passes while the setup statement is on the wire (or,
+        // on a fast loopback, just after it answered). The update's hook gives
+        // the timer room to fire either way: the check made after the hook,
+        // immediately before sending, is what must refuse the UPDATE.
+        if (step === "setup") setTimeout(() => controller.abort(new Error("deadline")), 0);
+        if (step === "update") await Bun.sleep(20);
+      });
+      await expect(
+        s.commit(G, epoch, next, within(5_000, controller.signal)),
+      ).rejects.toBeInstanceOf(CommitTimeoutError);
+      expect(controller.signal.aborted).toBe(true);
+      expect(steps).toEqual(["begin", "setup"]);
+      await unchanged(s);
+    });
+
+    test("expiry during an update blocked on a row lock cancels it; the row is unchanged", async () => {
+      const { s, epoch, steps } = await setup(2);
+      const other = new SQL({ url: pg, max: 1 });
+      const lock = await other.reserve();
+      await lock.unsafe("BEGIN");
+      await lock.unsafe("SELECT * FROM export_state WHERE generation = $1 FOR UPDATE", [G]);
+      // The database's own timeouts would wait 5 s; the signal fires at 150 ms
+      // and must cancel the statement in flight.
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error("deadline")), 150);
+      const started = performance.now();
+      try {
+        await expect(
+          s.commit(G, epoch, next, within(5_000, controller.signal)),
+        ).rejects.toBeInstanceOf(CommitTimeoutError);
+        expect(performance.now() - started).toBeLessThan(2_000);
+        // Sent, blocked, cancelled: no COMMIT followed it.
+        expect(steps).toEqual(["begin", "setup", "update"]);
+      } finally {
+        await lock.unsafe("ROLLBACK");
+        lock.release();
+        await other.close();
+      }
+      await unchanged(s);
+    });
+
+    test("a deadline passing just before COMMIT rolls the transaction back", async () => {
+      const { s, epoch, steps, setHook } = await setup(2);
+      const controller = new AbortController();
+      setHook(async (step) => {
+        if (step === "commit") controller.abort(new Error("deadline"));
+      });
+      await expect(
+        s.commit(G, epoch, next, within(5_000, controller.signal)),
+      ).rejects.toBeInstanceOf(CommitTimeoutError);
+      // The update ran; COMMIT was never sent, so it rolled back.
+      expect(steps).toEqual(["begin", "setup", "update"]);
+      await unchanged(s);
+    });
+
+    test("the remaining time is recomputed from the deadline at each statement", async () => {
+      const { s, epoch, steps, setHook } = await setup(2);
+      // Each statement's check reads the clock afresh: a clock that passes the
+      // deadline after setup stops the update without any signal firing.
+      let now = 1_000;
+      const bound: CommitBound = {
+        signal: new AbortController().signal,
+        deadlineAt: 2_000,
+        now: () => now,
+      };
+      setHook(async (step) => {
+        if (step === "update") now = 2_000;
+      });
+      await expect(s.commit(G, epoch, next, bound)).rejects.toBeInstanceOf(CommitTimeoutError);
+      expect(steps).toEqual(["begin", "setup"]);
+      await unchanged(s);
+    });
   });
 }

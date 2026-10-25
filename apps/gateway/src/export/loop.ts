@@ -507,7 +507,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         generation,
         epoch,
         { ...next, seenRetentionLoweredAt: seen },
-        { signal: batch.signal, remainingMs: batch.deadlineAt - deps.now() },
+        { signal: batch.signal, deadlineAt: batch.deadlineAt, now: deps.now },
       );
       if (!ok) {
         logger.info("export pass fenced out", { reason: "another holder claimed the cursor" });

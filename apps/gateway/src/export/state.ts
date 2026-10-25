@@ -75,26 +75,30 @@ export type ExportCommit = {
 };
 
 /**
- * The deadline a commit must land within. The epoch fence stops a stale
- * holder; it does not stop a write that lands after the batch's own deadline,
- * so the store bounds the write itself: a commit that has not completed in the
- * database within `remainingMs` (or by the time `signal` aborts, checked before
- * the write is issued) fails with {@link CommitTimeoutError} and changes
- * nothing.
+ * The deadline a commit must land within, as an **absolute** instant on the
+ * caller's clock — never a precomputed duration, which every await before the
+ * write would silently stretch. The epoch fence stops a stale holder; it does
+ * not stop a write that lands after the batch's own deadline, so the store
+ * bounds the write itself: a commit that has not completed in the database by
+ * `deadlineAt` (or by the time `signal` aborts) fails with
+ * {@link CommitTimeoutError} and changes nothing.
  *
- * Postgres: the conditional UPDATE runs in a transaction with
- * `SET LOCAL statement_timeout` and `lock_timeout` at `remainingMs`, so the
- * server cancels a write blocked on a row lock or a slow disk. SQLite: the
- * connection's `busy_timeout` is `remainingMs` for that one statement (the
- * write itself is synchronous and cannot be cut once it holds the lock).
+ * Postgres (`state/postgres.ts`): connection acquisition is raced against the
+ * deadline (a connection that arrives late is handed back unused); before
+ * each statement — `BEGIN`, one setup, the fenced `UPDATE`, `COMMIT` — the
+ * signal is checked and the time left recomputed; the setup sets
+ * `statement_timeout` and `lock_timeout` to that time for the transaction; an
+ * abort cancels the statement in flight, and the transaction rolls back.
+ * SQLite (`state/sqlite.ts`): the wait for the writer lock is bounded to the
+ * time left, and the signal is checked immediately before the synchronous
+ * write.
  *
- * Residual, by design: a write the database completed just before the bound
- * counts as committed even if the caller only learns of it after its deadline
- * — the rows were accepted by the receiver, so that is at-least-once, not a
- * loss. Waiting for a pool connection is not covered on Postgres beyond the
- * signal check made once one is held.
+ * Residual, by design: a `COMMIT` already sent to the server when the
+ * deadline passes may complete there. Then the write is committed though the
+ * caller hears of it late — the rows were accepted by the receiver, so that is
+ * at-least-once, not a loss.
  */
-export type CommitBound = { signal: AbortSignal; remainingMs: number };
+export type CommitBound = { signal: AbortSignal; deadlineAt: number; now: () => number };
 
 /** A bounded commit that did not land in time; nothing was written. */
 export class CommitTimeoutError extends Error {
@@ -104,10 +108,15 @@ export class CommitTimeoutError extends Error {
   }
 }
 
-/** Whole milliseconds, at least 1, for a bound that still has time left; null when none is left. */
-export function boundMs(bound: CommitBound): number | null {
-  if (bound.signal.aborted || !(bound.remainingMs >= 1)) return null;
-  return Math.max(1, Math.floor(bound.remainingMs));
+/**
+ * Whole milliseconds left on `bound`, at least 1; throws
+ * {@link CommitTimeoutError} when the signal has aborted or none is left.
+ * Called afresh before every statement.
+ */
+export function remainingMs(bound: CommitBound): number {
+  const left = Math.floor(bound.deadlineAt - bound.now());
+  if (bound.signal.aborted || !(left >= 1)) throw new CommitTimeoutError();
+  return left;
 }
 
 export interface ExportStateStore {
