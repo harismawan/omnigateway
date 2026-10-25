@@ -22,7 +22,7 @@ omni start
 **Further reading**, once the gateway is up:
 
 - [docs/client-api.md](docs/client-api.md) — endpoints, authentication, rate-limit headers, and how tools decide where a request can go
-- [docs/operations.md](docs/operations.md) — key limits, logs, recording bodies, snapshots and restore
+- [docs/operations.md](docs/operations.md) — key limits, logs, log export, recording bodies, snapshots and restore
 - [docs/deploying.md](docs/deploying.md) — systemd, reverse proxies, cluster mode, Docker and Kubernetes
 - [docs/plugins.md](docs/plugins.md) — installing, verifying and removing plugins
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how it is built
@@ -59,6 +59,8 @@ omni start
   week.
 - **Reports usage.** Requests, tokens, and cost by provider, model, key, and
   day — metadata only.
+- **Exports its request log.** Every completed request's metadata, durably, to
+  Elasticsearch, a webhook, or an OTLP collector such as Langfuse.
 - **Backs itself up.** Snapshot the database from the console or the CLI, see
   what it occupies, reclaim what deletion left behind, and restore a snapshot
   without stopping the gateway.
@@ -374,6 +376,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni logs export` | matching request metadata as CSV or JSONL on stdout; `--since` and `--until` required |
 | `omni logs sessions` | per-session requests, turns, tokens and cost, highest cost first; filter the log with `--session`, `--agent`, `--tag` |
 | `omni logs show <request-id>` | everything recorded about one request: routing, cost, session, tags, client and provider request ids |
+| `omni export …` | log export destinations: list, show, add, `set`, remove; see [Exporting request logs](#exporting-request-logs) |
 | `omni bodies <request-id>` | captured bodies for one request; withheld unless you pass `--full` |
 | `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
 | `omni usage` | spend and tokens, by provider, model, key, or day; `--account <id>` and `--key <id>` narrow to one account or gateway key |
@@ -427,6 +430,7 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](docs/operations.md#recording-bodies) |
+| `OMNI_EXPORT_BODIES_ALLOWED` | No | unset | Reserved for exporting captured bodies to [log export](#exporting-request-logs) destinations, which is not available yet; export sends metadata only |
 | `OMNI_METRICS_TOKEN` | No | unset | Registers authenticated `GET /metrics`; unset means no route |
 | `OMNI_METRICS_MAX_SERIES` | No | `5000` | Series cap before new `api_key_id` values fold to `other` |
 | `OMNI_OTLP_ENDPOINT` | No | unset | Enables OTLP/HTTP span export to `<endpoint>/v1/traces` |
@@ -478,6 +482,145 @@ file each, taken live, never carrying captured bodies, and restorable without
 stopping the gateway. Both, with compaction and clearing bodies, are in
 [docs/operations.md](docs/operations.md).
 
+## Exporting request logs
+
+The gateway can ship every completed request-log row to a store you already run, so the local
+30-day log is not the only record: Elasticsearch or OpenSearch, any HTTP endpoint that takes JSON,
+or an OTLP collector (and through it Langfuse). Delivery is durable and resumable — each
+destination keeps a cursor that survives restarts, crashes and, in cluster mode, failover to
+another replica — and **at least once**: a row can arrive twice, never zero times while it is
+still retained. Every record carries a stable `id` to dedupe on; Elasticsearch writes are
+idempotent by it.
+
+**Metadata only.** A record is the row's metadata: timestamps, key id and label, requested and
+resolved model, provider, account id, status, error code, tokens, cost, latency, RTK figures,
+session, turn, agent, tags, metadata and request ids, as JSON with
+`"schema": "omni.request_log/v1"`. Body export is not available yet; the per-destination switch
+exists and is refused, and `OMNI_EXPORT_BODIES_ALLOWED` is reserved for it.
+
+Add destinations on the console's **Export** page or with `omni export`. Up to ten; ids are
+`[a-z0-9-]{1,40}`. Secrets — API keys, passwords, secret headers, the webhook signing secret —
+are encrypted with `OMNI_ENCRYPTION_KEY`, never shown again, and on the CLI read only from
+`--secret-file <path>` or stdin (`--secret-file -`):
+
+```bash
+echo '{"apiKey":"<base64 id:key>"}' > es.json
+omni export add elasticsearch es --url https://es.internal:9200 --auth apiKey --secret-file es.json
+omni export add webhook hook --url https://hooks.example.com/omni --secret-file - <<< '{"signingSecret":"…"}'
+omni export add otlp collector --endpoint http://otel:4318 --signal logs --start-from oldest
+omni export list                   # type, state, target, secret set / not set, filter
+omni export set es --filter-key key_ci --failed-only   # the filter is written whole
+```
+
+- **Start position.** `--start-from now` (the default) exports what completes from creation on;
+  `oldest` starts from the oldest row still retained. Nothing older than retention can be
+  exported, and the position is fixed at creation — a worker that starts late skips nothing.
+- **Filter.** Optional: gateway key ids, model names (matched exactly against requested or
+  resolved), and failed requests only (status ≥ 400). An empty list selects nothing.
+- **Send test**, **Skip to now** and **Preview a record** run inside the gateway, so they are on
+  the console only; `omni export test|skip` say so. `omni export` administers SQLite
+  installations and refuses on a Postgres (cluster) one: use the console there.
+
+Rows go out 10–15 seconds after the request completes, in batches of at most 500 records or
+5 MiB. Lag, failures, the retention-gap warning, skip-to-now and what a restore does to export
+are in [docs/operations.md](docs/operations.md#log-export).
+
+**Elasticsearch / OpenSearch.** `_bulk` to `<url>/_bulk`, gzipped, one `index` action per row
+with `_id` = the request id, so a resend overwrites. Index pattern defaults to
+`omni-logs-{yyyy.MM.dd}`, the date taken from the row's `at` in UTC. Auth is `apiKey`
+(`{"apiKey":"…"}`, sent as `Authorization: ApiKey …`), `basic`
+(`{"username":"…","password":"…"}`) or `none`. Per-item mapping errors are counted as dropped
+and the batch commits; per-item 429/5xx retry the batch. The gateway creates no index template;
+this one is recommended:
+
+```
+PUT _index_template/omni-logs
+{
+  "index_patterns": ["omni-logs-*"],
+  "template": {
+    "mappings": {
+      "dynamic": false,
+      "properties": {
+        "schema": { "type": "keyword" }, "id": { "type": "keyword" },
+        "at": { "type": "date" }, "completedAt": { "type": "date" }, "nodeId": { "type": "keyword" },
+        "apiKey": { "properties": { "id": { "type": "keyword" }, "label": { "type": "keyword" } } },
+        "model": { "properties": { "requested": { "type": "keyword" },
+          "resolved": { "type": "keyword" }, "provider": { "type": "keyword" } } },
+        "credentialId": { "type": "keyword" }, "status": { "type": "short" },
+        "errorCode": { "type": "keyword" }, "attempts": { "type": "short" },
+        "tokens": { "properties": { "input": { "type": "long" }, "output": { "type": "long" },
+          "cacheRead": { "type": "long" }, "cacheWrite": { "type": "long" } } },
+        "costUsd": { "type": "double" }, "ttftMs": { "type": "long" }, "durationMs": { "type": "long" },
+        "degradations": { "type": "keyword" },
+        "rtk": { "properties": { "applied": { "type": "boolean" }, "filters": { "type": "keyword" },
+          "estimatedTokensSaved": { "type": "long" } } },
+        "session": { "properties": { "id": { "type": "keyword" }, "turn": { "type": "keyword" },
+          "agent": { "type": "keyword" } } },
+        "tags": { "type": "keyword" }, "metadata": { "type": "flattened" },
+        "requestIds": { "properties": { "client": { "type": "keyword" },
+          "upstream": { "type": "keyword" } } }
+      }
+    }
+  }
+}
+```
+
+`metadata` keys are caller-supplied, hence `flattened` (OpenSearch: `flat_object`) rather than
+one mapped field per key. `dynamic: false` keeps any field added to the schema later in
+`_source` without mapping it.
+
+**Webhook.** `POST` to the URL exactly as configured, uncompressed, with
+`{"schema":"omni.request_log/v1","records":[…]}`. Any 2xx accepts the batch; the response body is
+ignored. Plain headers go in the config, credential headers in the secret
+(`{"headers":{…},"signingSecret":"…"}`). With a signing secret, every request carries
+`x-omni-timestamp: <unix seconds>` and `x-omni-signature: sha256=<hex>`: HMAC-SHA256, keyed with
+the secret's UTF-8 bytes, over the exact string `<timestamp>.<raw body>`. Verify it before
+parsing:
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verify(rawBody: Buffer, headers: Headers, secret: string, toleranceSeconds = 300): boolean {
+  const timestamp = headers.get("x-omni-timestamp") ?? "";
+  const signature = headers.get("x-omni-signature") ?? "";
+  if (!/^\d+$/.test(timestamp)) return false;
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSeconds) return false; // replay
+  const mac = createHmac("sha256", secret).update(`${timestamp}.`).update(rawBody).digest("hex");
+  const expected = Buffer.from(`sha256=${mac}`);
+  const given = Buffer.from(signature);
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+```
+
+**OTLP.** OTLP/HTTP JSON, gzipped, to `<endpoint>/v1/logs` or `<endpoint>/v1/traces`; headers
+come from the secret (`{"headers":{…}}`). `logs` sends one log record per row; `traces` one
+`CLIENT` span per row, named `chat <requested model>`, from `at` to `at + durationMs`, status
+`ERROR` with the gateway's error code on failure. Trace and span ids derive from the request id
+alone, so a resend is the same span. Attributes are the GenAI conventions
+`gen_ai.operation.name` (`chat`), `gen_ai.request.model`, `gen_ai.response.model`,
+`gen_ai.system` (the gateway's provider id), `gen_ai.usage.input_tokens` (the whole prompt,
+cached tokens included) and `gen_ai.usage.output_tokens`, the session as `session.id`, and
+everything else under `omni.*`. `partialSuccess` rejections count as dropped. These are separate
+from the sampled live spans `OMNI_OTLP_ENDPOINT` sends.
+
+**Langfuse**, through its OTLP endpoint — a traces destination whose secret carries the Basic
+auth built from the project's public and secret keys:
+
+```bash
+printf '{"headers":{"authorization":"Basic %s","x-langfuse-ingestion-version":"4"}}' \
+  "$(printf '%s' 'pk-lf-…:sk-lf-…' | base64 -w0)" > langfuse.json
+omni export add otlp langfuse --signal traces \
+  --endpoint https://cloud.langfuse.com/api/public/otel --secret-file langfuse.json
+```
+
+Spans arrive as generations with model and token usage, grouped by session. Other regions and
+self-hosted URLs: see
+[Langfuse's OpenTelemetry docs](https://langfuse.com/integrations/native/opentelemetry).
+
+**Outbound requests.** URLs are `http:` or `https:` with no credentials, query or fragment in a
+base URL; private and loopback hosts are allowed. Redirects are never followed (a 3xx is a
+configuration error). Connect timeout 5 s, request timeout 20 s.
+
 ## Docker
 
 ```bash
@@ -510,6 +653,7 @@ Worth knowing before you deploy it:
 - **Two grains of usage history.** Detailed request logs are pruned after 30
   days by default; a daily rollup is kept for 400 days. A day uses a fixed UTC
   offset, defaulting to the host's current offset; fleets must set it explicitly.
+  Keep rows longer by [exporting them](#exporting-request-logs).
 - **Body capture is forensics, not an archive.** It is off unless you turn it on
   with both keys, it expires on the request-log window, and it is capped at
   100,000 rows. `omni bodies` reads one request's capture; nothing searches
@@ -578,14 +722,16 @@ built: [docs/roadmap.md](docs/roadmap.md).
 - Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so
   OAuth callbacks match what the providers have registered.
 - The gateway talks to your providers and to nobody else — except your collector, if you name
-  one with `OMNI_OTLP_ENDPOINT`. No CDN fonts or undeclared third-party origins. A plugin may
+  one with `OMNI_OTLP_ENDPOINT`, and the [log export](#exporting-request-logs) destinations you
+  add. No CDN fonts or undeclared third-party origins. A plugin may
   declare outbound origins of its own, and `omni plugin verify <id>` shows exactly which ones it
   asked for — as does its manifest, which is a plain file you can read before installing.
 - A log-export webhook with a signing secret sends `x-omni-timestamp: <unix seconds>` and
   `x-omni-signature: sha256=<hex>`, the HMAC-SHA256 (keyed with the secret's UTF-8 bytes) of the
   exact string `<timestamp>.<body>`: the timestamp header's value, a `.`, then the raw request
-  body, decompressed if it arrived gzipped. Recompute it, compare in constant time, and refuse a
-  timestamp outside your own tolerance window to stop replays.
+  body. Recompute it, compare in constant time, and refuse a timestamp outside your own tolerance
+  window to stop replays; [the snippet](#exporting-request-logs) does all three. Export records
+  carry key labels and account ids, so treat a destination as you would the request log itself.
 - **Plugins run inside the gateway process, with its privileges** — the
   capability context is a guardrail, not a sandbox. Read the
   [security note](#plugins) before installing one you did not write.

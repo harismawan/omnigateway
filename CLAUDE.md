@@ -673,6 +673,12 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   **Nothing may sit between swap and that comparison.** `swapIn` rebuild `usage_rollup` last
   and guarded, for that reason; cost documented in `README.md`.
 - `omni db restore` refuse while gateway running, no override.
+- Log export worker never write main SQLite file (read-only handle; state in `export.db`), else
+  `data_version` move and every request rebuild routing snapshot. Pin: `test/export/worker.test.ts`.
+- Postgres `export_destinations` / `export_state` carry no `bump_config_version` trigger. Pin:
+  `test/export/state.test.ts`. Design + rest: `ARCHITECTURE.md#log-export`.
+- Main thread reach export only via `export/spawn.ts` + `export/protocol.ts`. Pin:
+  `apps/gateway/test/export/boundary.test.ts`.
 - Plugin ordering traps, both silent when reversed: channel registry build **before**
   `loadPlugins` in `apps/gateway/src/index.ts`; route's `close` read `registry.topics(id)`
   **before** `registry.remove(id)`. Tables, migrations, events, channels, externals, asset
