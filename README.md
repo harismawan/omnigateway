@@ -581,6 +581,11 @@ built: [docs/roadmap.md](docs/roadmap.md).
   one with `OMNI_OTLP_ENDPOINT`. No CDN fonts or undeclared third-party origins. A plugin may
   declare outbound origins of its own, and `omni plugin verify <id>` shows exactly which ones it
   asked for — as does its manifest, which is a plain file you can read before installing.
+- A log-export webhook with a signing secret sends `x-omni-timestamp: <unix seconds>` and
+  `x-omni-signature: sha256=<hex>`, the HMAC-SHA256 (keyed with the secret's UTF-8 bytes) of the
+  exact string `<timestamp>.<body>`: the timestamp header's value, a `.`, then the raw request
+  body, decompressed if it arrived gzipped. Recompute it, compare in constant time, and refuse a
+  timestamp outside your own tolerance window to stop replays.
 - **Plugins run inside the gateway process, with its privileges** — the
   capability context is a guardrail, not a sandbox. Read the
   [security note](#plugins) before installing one you did not write.
