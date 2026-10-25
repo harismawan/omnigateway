@@ -44,6 +44,10 @@ export function indexNameProblem(name: string): string | null {
  * The index for a document started at `at` (epoch ms): every `{yyyy.MM.dd}` in
  * the pattern becomes that UTC day, everything else is kept verbatim. Throws
  * when the result is not a name Elasticsearch accepts.
+ *
+ * The thrown message quotes the operator-configured name, for a test or an
+ * admin-facing validation error. This module logs nothing; a caller that logs
+ * must log a fixed summary, never this message.
  */
 export function indexName(pattern: string, at: number): string {
   const day = new Date(at);
