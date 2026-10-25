@@ -23,6 +23,15 @@ import {
   dbVacuum,
 } from "./commands/db.ts";
 import {
+  exportAdd,
+  exportList,
+  exportRemove,
+  exportSet,
+  exportShow,
+  exportSkip,
+  exportTest,
+} from "./commands/export.ts";
+import {
   keysCreate,
   keysExpiry,
   keysGuardrail,
@@ -122,6 +131,14 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "plugin install": pluginInstall,
   "plugin update": pluginUpdate,
   "plugin remove": pluginRemove,
+
+  "export list": exportList,
+  "export show": exportShow,
+  "export add": exportAdd,
+  "export set": exportSet,
+  "export test": exportTest,
+  "export skip": exportSkip,
+  "export remove": exportRemove,
 
   "settings get": settingsGet,
   "settings set": settingsSet,

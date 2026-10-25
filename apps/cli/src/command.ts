@@ -64,6 +64,8 @@ export type Command = {
   /** `omni <usage>`, shown in help. */
   usage: string;
   summary: string;
+  /** Longer text for `omni <command> --help`, when one line of usage cannot carry the flags. */
+  help?: string;
   options?: OptionSpec;
   run: (args: Parsed, env: CommandEnv) => Promise<void>;
 };
