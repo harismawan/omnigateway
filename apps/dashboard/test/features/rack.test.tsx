@@ -43,3 +43,19 @@ test("the rail reaches the database screen", async () => {
   const link = await screen.findByRole("link", { name: "Database" });
   expect(link.getAttribute("href")).toBe("/database");
 });
+
+test("the rail reaches the export screen, in the settings group", async () => {
+  renderWithRouter(
+    <Rack>
+      <div>page content</div>
+    </Rack>,
+  );
+
+  const link = await screen.findByRole("link", { name: "Export" });
+  expect(link.getAttribute("href")).toBe("/export");
+  const labels = screen
+    .getAllByRole("link")
+    .map((entry) => entry.textContent)
+    .filter((text) => text === "Settings" || text === "Export" || text === "Database");
+  expect(labels).toEqual(["Settings", "Export", "Database"]);
+});

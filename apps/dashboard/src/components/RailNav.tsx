@@ -8,6 +8,7 @@ import {
   Gauge,
   KeyRound,
   ScrollText,
+  Share2,
   SlidersHorizontal,
   Terminal,
 } from "lucide-react";
@@ -49,6 +50,12 @@ const DESTINATIONS: Destination[] = [
     label: "Settings",
     blurb: "Routing weights, retries, retention",
     Icon: SlidersHorizontal,
+  },
+  {
+    to: "/export",
+    label: "Export",
+    blurb: "Send request logs to Elasticsearch, a webhook, or OTLP",
+    Icon: Share2,
   },
   {
     to: "/database",
