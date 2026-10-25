@@ -11,6 +11,7 @@ export type CopyCounts = {
   requestLogs: number;
   /** Rows skipped because they were still pending, or carried no completion. */
   skippedPending: number;
+  exportDestinations: number;
 };
 
 export type CopyReport = {
@@ -26,6 +27,7 @@ export const NOT_CARRIED = [
   "quota readings and credential health (re-probed and re-measured within one poll interval)",
   "sessions and pending OAuth flows (ephemeral; every operator logs in again)",
   "plugin_* tables (their SQL is the source dialect's; carry them by hand)",
+  "export state (each destination starts at the copy's end; rows the source had not yet sent are not sent)",
 ] as const;
 
 /**
@@ -42,13 +44,20 @@ export const NOT_CARRIED = [
  * a merge, and a merge has no right answer for a duplicate key.
  */
 export async function copyStore(source: Store, target: Store): Promise<CopyReport> {
-  const [keys, models, credentials, hash] = await Promise.all([
+  const [keys, models, credentials, hash, destinations] = await Promise.all([
     target.keys.list(),
     target.config.listModels(),
     target.credentials.list(),
     target.config.getAdminPasswordHash(),
+    target.exportDestinations.list(),
   ]);
-  if (keys.length > 0 || models.length > 0 || credentials.length > 0 || hash !== null) {
+  if (
+    keys.length > 0 ||
+    models.length > 0 ||
+    credentials.length > 0 ||
+    hash !== null ||
+    destinations.length > 0
+  ) {
     throw new GatewayError("CONFLICT", "the target already holds data; copy into an empty store");
   }
 
@@ -70,6 +79,7 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
     models: 0,
     requestLogs: 0,
     skippedPending: 0,
+    exportDestinations: 0,
   };
 
   // Configuration first, so a copy that fails part-way through the logs leaves
@@ -124,6 +134,25 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
     cursor = { at: last.at, id: last.id };
   }
   await target.usage.rebuildRollup();
+
+  // After the logs, and from "now": the target stamps every copied row's
+  // completion afresh and holds no export state, so a destination carried at
+  // its old position would re-send the whole copied history. Starting at the
+  // copy's end resumes delivery with the first request the new backend serves.
+  for (const destination of await source.exportDestinations.list()) {
+    await target.exportDestinations.create({
+      id: destination.id,
+      type: destination.type,
+      config: destination.config,
+      filter: destination.filter,
+      enabled: destination.enabled,
+      includeBodies: destination.includeBodies,
+      maxRequestBytes: destination.maxRequestBytes,
+      secret: await source.exportDestinations.openSecret(destination.id),
+      startFrom: "now",
+    });
+    counts.exportDestinations += 1;
+  }
 
   return { counts, notCarried: NOT_CARRIED };
 }

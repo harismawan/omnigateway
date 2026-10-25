@@ -135,14 +135,24 @@ test("providerIdSchema still refuses an id that cannot name a provider", () => {
  * as an operator's toggle refusing to stick.
  */
 test("every settings field survives a round trip through the schema", () => {
-  expect(settingsSchema.parse(DEFAULT_SETTINGS)).toEqual(DEFAULT_SETTINGS);
+  // The one exception, and deliberately: `logRetentionLoweredAt` is the store's
+  // own marker, moved only by a write that lowers retention. A client echoing it
+  // back has it dropped here, and the store keeps the larger of the two anyway.
+  const { logRetentionLoweredAt: _marker, ...editable } = DEFAULT_SETTINGS;
+  expect(settingsSchema.parse(DEFAULT_SETTINGS)).toEqual(editable);
 
   const on = {
-    ...DEFAULT_SETTINGS,
+    ...editable,
     bodyLoggingEnabled: true,
     bodyLoggingCaptureStreamChunks: true,
   };
   expect(settingsSchema.parse(on)).toEqual(on);
+});
+
+test("the retention-lowered marker is never written from a settings save", () => {
+  expect(
+    settingsSchema.parse({ ...DEFAULT_SETTINGS, logRetentionLoweredAt: 9_999 }),
+  ).not.toHaveProperty("logRetentionLoweredAt");
 });
 
 test("the body logging settings are booleans, not anything truthy", () => {

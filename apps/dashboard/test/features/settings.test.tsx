@@ -404,8 +404,14 @@ describe("SettingsBoard", () => {
       expect(put?.url).toBe("/api/settings");
       // Snapshot retention is not on this form and is not sent by it: the
       // database panel owns that policy, and the settings schema leaves both
-      // fields optional so a save from here cannot reset them.
-      const { snapshotKeepLatest: _keep, snapshotMaxAgeDays: _age, ...sent } = settings;
+      // fields optional so a save from here cannot reset them. Nor is the
+      // store's retention-lowered marker, which only the store moves.
+      const {
+        snapshotKeepLatest: _keep,
+        snapshotMaxAgeDays: _age,
+        logRetentionLoweredAt: _marker,
+        ...sent
+      } = settings;
       expect(JSON.parse(String(put?.init?.body))).toEqual({
         ...sent,
         weights: { ...settings.weights, cost: 4 },
