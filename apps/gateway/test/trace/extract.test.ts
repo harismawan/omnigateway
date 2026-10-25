@@ -258,7 +258,7 @@ describe("review fixes", () => {
   test("prototype-shaped metadata keys are ordinary keys and count toward the cap", () => {
     const t = extractTrace(h({ "x-omni-metadata": "__proto__:x,constructor:y" }), base);
     expect(Object.keys(t.metadata).sort()).toEqual(["__proto__", "constructor"]);
-    expect(t.metadata["constructor"]).toBe("y");
+    expect(Object.entries(t.metadata)).toContainEqual(["constructor", "y"]);
     const many = Array.from({ length: 16 }, (_, i) => `k${i}:v`).join(",");
     const capped = extractTrace(h({ "x-omni-metadata": `${many},constructor:z` }), base);
     expect(Object.keys(capped.metadata)).toHaveLength(16);
