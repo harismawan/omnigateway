@@ -29,6 +29,7 @@ import {
   EMPTY_TRACE,
   generateApiKey,
   hashApiKey,
+  UNSTAMPED,
 } from "@omni/store";
 
 let seq = 0;
@@ -278,6 +279,7 @@ export function requestLog(overrides: Partial<RequestLog> & { id: string }): Req
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
     ...EMPTY_TRACE,
+    ...UNSTAMPED,
     ...overrides,
   };
 }

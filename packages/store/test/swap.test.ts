@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveKey } from "../src/encryption.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import { type ApiKeyInput, EMPTY_TRACE, type RequestLog, type Store } from "../src/types.ts";
+import {
+  type ApiKeyInput,
+  EMPTY_TRACE,
+  type RequestLog,
+  type Store,
+  UNSTAMPED,
+} from "../src/types.ts";
 
 const SECRET = "test-secret-value-for-unit-tests";
 
@@ -37,6 +43,7 @@ function logRow(id: string, at: number, apiKeyId: string | null): RequestLog {
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
     ...EMPTY_TRACE,
+    ...UNSTAMPED,
   };
 }
 

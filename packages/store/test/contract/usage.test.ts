@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { RTK_FILTER_IDS } from "@omni/rtk/catalog";
 import { HOUR_MS, hostDayOffsetMinutes, startOfDay } from "../../src/sqlite/rollup.ts";
 import { NODE_GRACE_MS } from "../../src/types.ts";
-import { forEachStore, logRow } from "./harness.ts";
+import { exec, forEachStore, logRow } from "./harness.ts";
 
 const T = 1_700_000_000_000;
 /** Noon local time on day `n` from a fixed date, so local-midnight buckets are unambiguous. */
@@ -48,7 +48,8 @@ forEachStore((backend) => {
     });
     await s.usage.append(log);
     const [got] = await s.usage.recent(10);
-    expect(got).toEqual(log);
+    // Every column the caller wrote, plus the completion instant the store stamps.
+    expect(got).toEqual({ ...log, completedAt: expect.any(Number) });
     expect(typeof got?.at).toBe("number");
     expect(typeof got?.inputTokens).toBe("number");
   });
@@ -882,7 +883,7 @@ forEachStore((backend) => {
     const row = logRow({ id: "r1", at: T2, degradations: ["a:b"], errorCode: "UPSTREAM" });
     await s.usage.append(row);
     const [got] = (await s.usage.page({ limit: 1, cursor: null })).logs;
-    expect(got).toEqual(row);
+    expect(got).toEqual({ ...row, completedAt: expect.any(Number) });
     // Numeric, not the BIGINT string Postgres returns: the cursor is cut from
     // this value, and a stringified `at` compares lexically on the next read.
     expect(typeof got?.at).toBe("number");
@@ -908,7 +909,7 @@ forEachStore((backend) => {
     await s.usage.append(traced);
     await s.usage.append(plain);
     const rows = await s.usage.recent(10);
-    expect(rows.find((r) => r.id === "t")).toEqual(traced);
+    expect(rows.find((r) => r.id === "t")).toEqual({ ...traced, completedAt: expect.any(Number) });
     expect(rows.find((r) => r.id === "p")).toMatchObject({
       sessionId: null,
       turnId: null,
@@ -1012,13 +1013,187 @@ forEachStore((backend) => {
   });
 });
 
+/**
+ * The export cursor: `completed_at`, stamped by the store in the statement that
+ * completes a row, so a long request that finishes after shorter, later ones is
+ * still ahead of a cursor that has passed them.
+ */
+forEachStore((backend) => {
+  const T4 = 1_740_000_000_000;
+  const tick = () => Bun.sleep(3);
+  const page = (
+    s: import("../../src/types.ts").Store,
+    q: Partial<import("../../src/types.ts").ExportPageQuery> = {},
+  ) =>
+    s.usage.exportPage({
+      after: { completedAt: 0, id: "" },
+      settledBefore: Number.MAX_SAFE_INTEGER,
+      limit: 100,
+      ...q,
+    });
+
+  test("append stamps completedAt from the store's clock, ignoring the caller's", async () => {
+    const s = await backend.fresh();
+    const before = Date.now();
+    await s.usage.append(logRow({ id: "r", at: T4, completedAt: 5 }));
+    const row = await s.usage.get("r");
+    expect(row?.completedAt).not.toBe(5);
+    // The database clock on Postgres; loose so a container clock a little off
+    // the test's own still passes.
+    expect(row?.completedAt).toBeGreaterThan(before - 60_000);
+    expect(row?.completedAt).toBeLessThan(Date.now() + 60_000);
+  });
+
+  test("a pending row has no completedAt until it completes", async () => {
+    const s = await backend.fresh();
+    await s.usage.begin(logRow({ id: "p", at: T4, state: "pending", status: 0, completedAt: 9 }));
+    expect((await s.usage.get("p"))?.completedAt).toBeNull();
+    await s.usage.route("p", { provider: "anthropic", model: "m", credentialId: "c1" });
+    expect((await s.usage.get("p"))?.completedAt).toBeNull();
+    await s.usage.append(logRow({ id: "p", at: T4 }));
+    expect(typeof (await s.usage.get("p"))?.completedAt).toBe("number");
+  });
+
+  test("sweepPending stamps completedAt on the rows it retires", async () => {
+    const s = await backend.fresh("node-a");
+    await s.usage.begin(logRow({ id: "p", at: T4, state: "pending", status: 0 }));
+    const before = Date.now();
+    expect(await s.usage.sweepPending(Date.now())).toBe(1);
+    const swept = await s.usage.get("p");
+    expect(swept?.state).toBe("done");
+    expect(swept?.completedAt).toBeGreaterThan(before - 60_000);
+  });
+
+  test("a claim that loses to a sweep keeps the sweep's completedAt", async () => {
+    const a = await backend.fresh("node-a");
+    const b = await backend.sibling("node-b");
+    await a.usage.begin(logRow({ id: "r", at: T4, state: "pending", status: 0 }));
+    expect(await b.usage.sweepPending(Date.now() + NODE_GRACE_MS + 1)).toBe(1);
+    const swept = (await a.usage.get("r"))?.completedAt;
+    await tick();
+    await a.usage.append(logRow({ id: "r", at: T4 }));
+    expect((await a.usage.get("r"))?.completedAt).toBe(swept as number);
+  });
+
+  test("exportPage orders by completion: a long request finishing last comes last", async () => {
+    const s = await backend.fresh();
+    // `a-long` starts first and finishes last; `b-short` starts later and
+    // finishes first. Ordered by `at` the long one would be passed and skipped.
+    await s.usage.begin(logRow({ id: "a-long", at: T4, state: "pending", status: 0 }));
+    await s.usage.append(logRow({ id: "b-short", at: T4 + 1_000 }));
+    await tick();
+    await s.usage.append(logRow({ id: "a-long", at: T4, durationMs: 60_000 }));
+    await s.usage.begin(logRow({ id: "c-pending", at: T4 + 2_000, state: "pending", status: 0 }));
+
+    const rows = await page(s);
+    expect(rows.map((r) => r.id)).toEqual(["b-short", "a-long"]);
+    expect(rows[0]?.completedAt).toBeLessThan(rows[1]?.completedAt as number);
+    expect(rows[1]).toMatchObject({ id: "a-long", state: "done", at: T4, durationMs: 60_000 });
+
+    // A cursor already past the short one still finds the long one.
+    const short = rows[0] as import("../../src/types.ts").RequestLog;
+    const after = { completedAt: short.completedAt as number, id: short.id };
+    expect((await page(s, { after })).map((r) => r.id)).toEqual(["a-long"]);
+  });
+
+  test("exportPage respects the settle bound and limit, and the keyset is exclusive", async () => {
+    const s = await backend.fresh();
+    for (const id of ["r1", "r2", "r3"]) {
+      await s.usage.append(logRow({ id, at: T4 }));
+      await tick();
+    }
+    const all = await page(s);
+    expect(all.map((r) => r.id)).toEqual(["r1", "r2", "r3"]);
+    const [r1, r2] = all as [
+      import("../../src/types.ts").RequestLog,
+      import("../../src/types.ts").RequestLog,
+    ];
+    const at = (r: import("../../src/types.ts").RequestLog) => r.completedAt as number;
+
+    // Inclusive at the bound, nothing past it.
+    expect((await page(s, { settledBefore: at(r2) })).map((r) => r.id)).toEqual(["r1", "r2"]);
+    expect((await page(s, { settledBefore: at(r1) - 1 })).map((r) => r.id)).toEqual([]);
+    expect((await page(s, { limit: 2 })).map((r) => r.id)).toEqual(["r1", "r2"]);
+    // The row the cursor names is not returned again.
+    const next = await page(s, { after: { completedAt: at(r2), id: r2.id } });
+    expect(next.map((r) => r.id)).toEqual(["r3"]);
+  });
+
+  test("exportPage breaks completion ties by id", async () => {
+    const s = await backend.fresh();
+    for (const id of ["t-c", "t-a", "t-b"]) await s.usage.append(logRow({ id, at: T4 }));
+    await exec(backend, s, `UPDATE request_logs SET completed_at = ${T4} WHERE id LIKE 't-%'`);
+    expect((await page(s)).map((r) => r.id)).toEqual(["t-a", "t-b", "t-c"]);
+    // A cursor landing inside the tie resumes after it, losing nothing.
+    const after = { completedAt: T4, id: "t-a" };
+    expect((await page(s, { after, limit: 1 })).map((r) => r.id)).toEqual(["t-b"]);
+  });
+
+  test("exportPage filters by key, by either model exactly, and by failure", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "1", at: T4, apiKeyId: "k1", requestedModel: "opus" }));
+    await s.usage.append(
+      logRow({ id: "2", at: T4, apiKeyId: "k2", requestedModel: "fast", resolvedModel: "opus" }),
+    );
+    await s.usage.append(logRow({ id: "3", at: T4, apiKeyId: null, status: 502 }));
+    await s.usage.append(
+      logRow({ id: "4", at: T4, apiKeyId: "k1", requestedModel: "opus-2", status: 429 }),
+    );
+    const ids = async (filter: import("../../src/types.ts").ExportFilter) =>
+      (await page(s, { filter })).map((r) => r.id).sort();
+
+    expect(await ids({})).toEqual(["1", "2", "3", "4"]);
+    expect(await ids({ apiKeyIds: ["k1"] })).toEqual(["1", "4"]);
+    expect(await ids({ apiKeyIds: ["k1", "k2"] })).toEqual(["1", "2", "4"]);
+    // Exact, on either model: `opus` is not a substring filter for `opus-2`.
+    expect(await ids({ models: ["opus"] })).toEqual(["1", "2"]);
+    expect(await ids({ models: ["opus", "opus-2"] })).toEqual(["1", "2", "4"]);
+    expect(await ids({ failedOnly: true })).toEqual(["3", "4"]);
+    expect(await ids({ failedOnly: false })).toEqual(["1", "2", "3", "4"]);
+    expect(await ids({ apiKeyIds: ["k1"], failedOnly: true })).toEqual(["4"]);
+    // A present but empty list selects nothing, rather than everything.
+    expect(await ids({ apiKeyIds: [] })).toEqual([]);
+    expect(await ids({ models: [] })).toEqual([]);
+  });
+
+  test("the migration backfills completedAt on done rows from at + duration", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "old-done", at: T4, durationMs: 1_500 }));
+    await s.usage.begin(logRow({ id: "old-pending", at: T4 + 1, state: "pending", status: 0 }));
+    // Wind the schema back to before the migration, then reopen to run it again.
+    const id = backend.name === "sqlite" ? 22 : 10;
+    await exec(
+      backend,
+      s,
+      "DROP INDEX idx_request_logs_completed",
+      "ALTER TABLE request_logs DROP COLUMN completed_at",
+      "DROP TABLE export_destinations",
+      ...(backend.name === "postgres" ? ["DROP TABLE export_state"] : []),
+      `DELETE FROM migrations WHERE id = ${id}`,
+    );
+    const reopened = await backend.sibling();
+    expect((await reopened.usage.get("old-done"))?.completedAt).toBe(T4 + 1_500);
+    expect((await reopened.usage.get("old-pending"))?.completedAt).toBeNull();
+    // And a destination starting from the oldest row finds it.
+    expect(
+      (
+        await reopened.usage.exportPage({
+          after: { completedAt: 0, id: "" },
+          settledBefore: Number.MAX_SAFE_INTEGER,
+          limit: 10,
+        })
+      ).map((r) => r.id),
+    ).toEqual(["old-done"]);
+  });
+});
+
 forEachStore((backend) => {
   test("get reads one row by id, pending or done, or null", async () => {
     const s = await backend.fresh();
     const done = logRow({ id: "d1", at: 1, sessionId: "s", upstreamRequestId: "up" });
     await s.usage.append(done);
     await s.usage.begin(logRow({ id: "p1", at: 2, state: "pending", status: 0 }));
-    expect(await s.usage.get("d1")).toEqual(done);
+    expect(await s.usage.get("d1")).toEqual({ ...done, completedAt: expect.any(Number) });
     expect((await s.usage.get("p1"))?.state).toBe("pending");
     expect(await s.usage.get("nope")).toBeNull();
   });

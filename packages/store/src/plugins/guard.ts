@@ -61,6 +61,7 @@ export const CORE_TABLES = [
   "api_keys",
   "credential_health",
   "credentials",
+  "export_destinations",
   "migrations",
   "nodes",
   "plugin_migrations",
@@ -79,7 +80,7 @@ export const CORE_TABLES = [
  * that list is pinned against a migrated SQLite file; the Postgres contract
  * suite pins the union against a migrated Postgres schema the same way.
  */
-export const POSTGRES_CORE_TABLES = ["config_version"] as const;
+export const POSTGRES_CORE_TABLES = ["config_version", "export_state"] as const;
 
 /**
  * A core name appearing as a whole word anywhere in the statement.

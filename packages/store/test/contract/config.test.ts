@@ -69,6 +69,66 @@ forEachStore((backend) => {
     expect((await s.config.getSettings()).bodyRetentionDays).toBe(7);
   });
 
+  /**
+   * The marker the export worker reads to learn that retention was shortened,
+   * however briefly. Monotonic: it never goes backwards, whoever writes.
+   */
+  test("lowering log retention sets logRetentionLoweredAt; nothing else moves it back", async () => {
+    const s = await backend.fresh();
+    expect((await s.config.getSettings()).logRetentionLoweredAt).toBe(0);
+
+    // Raising, and unrelated writes, leave it alone.
+    await s.config.putSettings({ logRetentionDays: 60 });
+    await s.config.putSettings({ maxAttempts: 4 });
+    expect((await s.config.getSettings()).logRetentionLoweredAt).toBe(0);
+
+    const before = Date.now();
+    const lowered = await s.config.putSettings({ logRetentionDays: 7 });
+    expect(lowered.logRetentionLoweredAt).toBeGreaterThanOrEqual(before);
+    expect((await s.config.getSettings()).logRetentionLoweredAt).toBe(
+      lowered.logRetentionLoweredAt,
+    );
+
+    // A second lowering inside the same millisecond still moves it forward.
+    const again = await s.config.putSettings({ logRetentionDays: 6 });
+    expect(again.logRetentionLoweredAt).toBeGreaterThan(lowered.logRetentionLoweredAt);
+    const marker = again.logRetentionLoweredAt;
+
+    // Raising, an equal value, and an unrelated write keep it.
+    await s.config.putSettings({ logRetentionDays: 30 });
+    await s.config.putSettings({ logRetentionDays: 30, rtkEnabled: true });
+    expect((await s.config.getSettings()).logRetentionLoweredAt).toBe(marker);
+
+    // A client resubmitting a stale settings object cannot erase it.
+    await s.config.putSettings({ ...DEFAULT_SETTINGS, logRetentionLoweredAt: 0 });
+    expect((await s.config.getSettings()).logRetentionLoweredAt).toBe(marker);
+    // Nor a malformed one.
+    await s.config.putSettings({ logRetentionLoweredAt: "soon" } as unknown as {
+      logRetentionLoweredAt: number;
+    });
+    expect((await s.config.getSettings()).logRetentionLoweredAt).toBe(marker);
+    // A larger incoming value is kept: the marker is max(stored, incoming).
+    await s.config.putSettings({ logRetentionLoweredAt: marker + 5 });
+    expect((await s.config.getSettings()).logRetentionLoweredAt).toBe(marker + 5);
+  });
+
+  test("a stale settings write racing a lowering never loses the marker", async () => {
+    const a = await backend.fresh();
+    const b = await backend.sibling();
+    for (let round = 0; round < 15; round++) {
+      await a.config.putSettings({ logRetentionDays: 30 });
+      const stale = await b.config.getSettings();
+      const before = stale.logRetentionLoweredAt;
+      // One writer lowers retention while another saves the settings object it
+      // read before that — the console's whole-object save.
+      await Promise.all([
+        a.config.putSettings({ logRetentionDays: 7 }),
+        b.config.putSettings({ ...stale, maxAttempts: 2 + (round % 3) }),
+      ]);
+      expect((await a.config.getSettings()).logRetentionLoweredAt).toBeGreaterThan(before);
+    }
+  });
+
   test("guardrail settings default unconfigured and read malformed values safely", async () => {
     const s = await backend.fresh();
     expect((await s.config.getSettings()).guardrailModel).toBeNull();

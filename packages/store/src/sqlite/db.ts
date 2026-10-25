@@ -20,6 +20,7 @@ import modelWindowIndex018 from "./migrations/018_model_window_index.sql" with {
 import keyGuardrail019 from "./migrations/019_key_guardrail.sql" with { type: "text" };
 import keySmartRouting020 from "./migrations/020_key_smart_routing.sql" with { type: "text" };
 import requestTrace021 from "./migrations/021_request_trace.sql" with { type: "text" };
+import logExport022 from "./migrations/022_log_export.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -74,6 +75,9 @@ const MIGRATIONS: ReadonlyArray<{
   // No `after`: rows written before the columns existed carry no trace, and
   // inventing one would attribute old traffic to sessions it never had.
   { id: 21, sql: requestTrace021 },
+  // The backfill is in the SQL: `completed_at = at + duration_ms` needs no day
+  // arithmetic, so it needs no `after`.
+  { id: 22, sql: logExport022 },
 ];
 
 /**

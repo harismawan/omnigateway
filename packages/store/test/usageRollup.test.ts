@@ -3,7 +3,13 @@ import { expect, test } from "bun:test";
 import { openDb } from "../src/sqlite/db.ts";
 import { HOUR_MS } from "../src/sqlite/rollup.ts";
 import { createUsageRepo } from "../src/sqlite/usage.ts";
-import { EMPTY_TRACE, type RequestLog, type UsageRepo, type UsageSums } from "../src/types.ts";
+import {
+  EMPTY_TRACE,
+  type RequestLog,
+  UNSTAMPED,
+  type UsageRepo,
+  type UsageSums,
+} from "../src/types.ts";
 
 /** An hour boundary well clear of the epoch, so no arithmetic here is negative. */
 const H0 = 480_000 * HOUR_MS;
@@ -34,6 +40,7 @@ function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLo
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
     ...EMPTY_TRACE,
+    ...UNSTAMPED,
     ...patch,
   };
 }

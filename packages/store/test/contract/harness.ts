@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, afterEach, describe, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -103,6 +104,29 @@ export function forEachStore(define: (backend: Backend) => void): void {
   });
 }
 
+/**
+ * Runs statements against a store's database past its repos, for the cases a
+ * contract test must arrange what no repo method writes: a legacy schema, a
+ * forced tie. Each statement must be spelled the same in both dialects.
+ */
+export async function exec(backend: Backend, store: Store, ...statements: string[]): Promise<void> {
+  if (backend.name === "sqlite") {
+    const db = new Database(store.databasePath);
+    try {
+      for (const statement of statements) db.run(statement);
+    } finally {
+      db.close();
+    }
+    return;
+  }
+  const sql = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string, max: 1 });
+  try {
+    for (const statement of statements) await sql.unsafe(statement);
+  } finally {
+    await sql.close();
+  }
+}
+
 /** A complete row, so a schema change breaks here once rather than in each test. */
 export function logRow(
   overrides: Partial<import("../../src/types.ts").RequestLog> & { id: string },
@@ -139,6 +163,7 @@ export function logRow(
     traceMetadata: {},
     clientRequestId: null,
     upstreamRequestId: null,
+    completedAt: null,
     ...overrides,
   };
 }

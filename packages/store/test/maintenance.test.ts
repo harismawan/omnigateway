@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveKey } from "../src/encryption.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import { EMPTY_TRACE, type RequestLog, type Store } from "../src/types.ts";
+import { EMPTY_TRACE, type RequestLog, type Store, UNSTAMPED } from "../src/types.ts";
 
 /**
  * A store on disk, because `VACUUM INTO` writes a file and an in-memory
@@ -67,6 +67,7 @@ function log(id: string): RequestLog {
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
     ...EMPTY_TRACE,
+    ...UNSTAMPED,
   };
 }
 
@@ -204,6 +205,40 @@ test("a snapshot is a self-contained copy of what was committed", async () => {
     } finally {
       reread.close();
     }
+  } finally {
+    await cleanup(store, root);
+  }
+});
+
+/**
+ * Export destinations are configuration and travel with a snapshot like every
+ * other config table — generation included, so the restored destination picks
+ * its own cursor back up, and the secret still sealed.
+ */
+test("a snapshot carries export destinations with their generation and sealed secret", async () => {
+  const { store, root } = await tempStore();
+  const snapshot = join(root, "snap.sqlite");
+  try {
+    const created = await store.exportDestinations.create({
+      id: "es",
+      type: "elasticsearch",
+      config: { url: "https://es:9200" },
+      secret: "ApiKey abc",
+      startFrom: "now",
+    });
+    await store.maintenance.snapshotTo(snapshot);
+
+    const copy = await createStore({
+      path: snapshot,
+      encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+    });
+    try {
+      expect(await copy.exportDestinations.list()).toEqual([created]);
+      expect(await copy.exportDestinations.openSecret("es")).toBe("ApiKey abc");
+    } finally {
+      copy.close();
+    }
+    expect(await readFile(snapshot, "latin1")).not.toContain("ApiKey abc");
   } finally {
     await cleanup(store, root);
   }

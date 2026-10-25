@@ -9,7 +9,7 @@ import {
   startOfDay,
 } from "../src/sqlite/rollup.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import { EMPTY_TRACE, type RequestLog, type Store } from "../src/types.ts";
+import { EMPTY_TRACE, type RequestLog, type Store, UNSTAMPED } from "../src/types.ts";
 
 const DAY_MS = 86_400_000;
 const localDay = (at: number): number => startOfDay(at, hostDayOffsetMinutes());
@@ -47,6 +47,7 @@ function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLo
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
     ...EMPTY_TRACE,
+    ...UNSTAMPED,
     ...patch,
   };
 }
