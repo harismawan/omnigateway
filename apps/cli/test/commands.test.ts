@@ -908,6 +908,68 @@ test("doctor reports a target pinned to an account that is gone", async () => {
 });
 
 /**
+ * Log export, as far as the CLI can see it without the gateway: destinations
+ * from the store and the worker's `export.db`, opened read-only. Unreadable
+ * state is "unavailable", never a failure of `doctor`.
+ */
+test("doctor reports export: none, unavailable, worker down, lag and the gap warning", async () => {
+  const root = await installation();
+  const service = fakeService({ root });
+  type Checks = { export: { destinations: number; status: string; warnings: string[] } };
+  const doctor = async (): Promise<Checks["export"]> =>
+    (JSON.parse((await cli(["doctor", "--json"], { root, service })).out) as Checks).export;
+
+  expect(await doctor()).toEqual({ destinations: 0, status: "none", warnings: [] });
+
+  const store = await openStore(root);
+  const created = await store.exportDestinations.create({
+    id: "hook",
+    type: "webhook",
+    config: { url: "https://receiver.example/in", headers: {} },
+    startFrom: "now",
+  });
+  store.close();
+
+  // No export.db yet, and no gateway: the worker is down; the state unread.
+  expect(await doctor()).toEqual({
+    destinations: 1,
+    status: "warnings",
+    warnings: ["export worker down: the gateway is not running"],
+  });
+  expect(Bun.file(join(root, "export.db")).size).toBe(0);
+  const text = (await cli(["doctor"], { root, service })).out;
+  expect(text).toContain("export worker down: the gateway is not running");
+
+  // The worker's state: two hours behind, a gap flagged.
+  const { Database } = await import("bun:sqlite");
+  const db = new Database(join(root, "export.db"), { create: true });
+  db.run(`CREATE TABLE export_state (generation TEXT PRIMARY KEY, cursor_at INTEGER NOT NULL,
+    cursor_id TEXT NOT NULL DEFAULT '', epoch INTEGER NOT NULL DEFAULT 0, last_success_at INTEGER,
+    last_error TEXT, last_error_at INTEGER, exported_total INTEGER NOT NULL DEFAULT 0,
+    dropped_total INTEGER NOT NULL DEFAULT 0, caught_up_through INTEGER NOT NULL DEFAULT 0,
+    seen_retention_lowered_at INTEGER NOT NULL DEFAULT 0, gap_possible_at INTEGER,
+    skip_requested_at INTEGER, orphaned_at INTEGER)`);
+  const now = Date.now();
+  db.run(
+    "INSERT INTO export_state (generation, cursor_at, last_success_at, gap_possible_at) VALUES (?, ?, ?, ?)",
+    [created.generation, now - 2 * 60 * 60 * 1000, now - 1000, now],
+  );
+  db.close();
+  // A gateway running under the pidfile supervisor.
+  const running = fakeService({ root, alivePids: new Set([4242]) });
+  await Bun.write(join(running.deps.stateDir, "gateway.pid"), "4242\n");
+  const checks = (
+    JSON.parse((await cli(["doctor", "--json"], { root, service: running })).out) as Checks
+  ).export;
+  expect(checks.status).toBe("warnings");
+  expect(checks.warnings).toContain(
+    "hook: export is within a day of log retention or past it; rows may have been pruned before export",
+  );
+  expect(checks.warnings.some((w) => /^hook: 1[12]\d min behind$/.test(w))).toBe(true);
+  expect(checks.warnings).not.toContain("export worker down: the gateway is not running");
+});
+
+/**
  * A key carrying a usage policy is refused on every request while the classifier
  * is unset or does not resolve — fail closed — and neither is refused at write
  * time, so `doctor` is where the operator hears of it.

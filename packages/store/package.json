@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./exportReader": "./src/exportReader.ts",
+    "./exportStatus": "./src/exportStatus.ts",
     "./types": "./src/types.ts"
   },
   "dependencies": {

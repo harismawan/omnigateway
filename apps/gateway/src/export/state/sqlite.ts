@@ -1,5 +1,4 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { dirname, join } from "node:path";
 import {
   boundMessage,
   CommitTimeoutError,
@@ -15,13 +14,11 @@ import { commitValues, readState, type StateRow, statements } from "./sql.ts";
  * opened and migrated by the export worker alone. Design: *Destination* →
  * where `export_state` lives, and *Asynchrony* for why it cannot be the main
  * file. Not part of snapshots; a restore swaps the main file and leaves this
- * one, so cursors survive it keyed by generation.
+ * one, so cursors survive it keyed by generation. Where it is
+ * (`exportDbPathFor`) lives in `@omni/store/exportStatus`, beside the
+ * read-only reader `omni doctor` opens it with, so the two cannot disagree.
  */
-export const EXPORT_DB_FILENAME = "export.db";
-
-export function exportDbPathFor(databasePath: string): string {
-  return join(dirname(databasePath), EXPORT_DB_FILENAME);
-}
+export { EXPORT_DB_FILENAME, exportDbPathFor } from "@omni/store/exportStatus";
 
 /**
  * The schema, versioned by `PRAGMA user_version`: one table, the same columns

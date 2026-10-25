@@ -119,6 +119,7 @@ export {
   webhookConfigSchema,
   webhookSecretSchema,
 } from "./export.ts";
+export { type ExportDoctor, exportDoctor } from "./exportDoctor.ts";
 export {
   DEFAULT_INDEX_PATTERN,
   expandIndexPattern,
