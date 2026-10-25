@@ -137,6 +137,37 @@ const DEADLINE = new Error("batch deadline");
 const DEADLINE_SUMMARY = "deadline exceeded";
 const INTERNAL_SUMMARY = "internal error";
 
+type CommitNext = {
+  cursorAt: number;
+  cursorId: string;
+  caughtUpThrough?: number;
+  exportedDelta?: number;
+  droppedDelta?: number;
+  lastSuccessAt?: number;
+};
+
+/**
+ * `work`, or the signal's reason as soon as it aborts — whichever first. The
+ * work itself is not stopped (a store read cannot be), only no longer awaited.
+ */
+function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 const zeroCounters = (): DestinationCounters => ({
   recordsSent: 0,
   recordsDropped: 0,
@@ -162,6 +193,29 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
 
   let statusTimer: unknown = null;
   let lastStatusAt = Number.NEGATIVE_INFINITY;
+
+  /**
+   * `test`, `preview` and `skip` in flight: each uses the handles, so pause
+   * and stop cancel them (an outbound test is aborted) and wait for them to
+   * reply before closing anything.
+   */
+  const operations = new Set<{ done: Promise<void>; controller: AbortController }>();
+
+  /**
+   * Handle work a cancelled caller stopped waiting for (`guard`): a store read
+   * cannot be interrupted, so pause and stop wait for it to finish before
+   * closing the handle it runs on.
+   */
+  const abandoned = new Set<Promise<unknown>>();
+  const guard = <T>(work: Promise<T>, signal: AbortSignal): Promise<T> => {
+    const settled = work.then(
+      () => {},
+      () => {},
+    );
+    abandoned.add(settled);
+    void settled.finally(() => abandoned.delete(settled));
+    return abortable(work, signal);
+  };
 
   // --- status ------------------------------------------------------------
 
@@ -231,12 +285,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     dbNow: number,
   ): Promise<void> {
     const seen = Math.max(position.seenRetentionLoweredAt, rt.loweredFlagged);
-    const reason = gapReason(
-      { ...position, seenRetentionLoweredAt: seen },
-      settings,
-      dbNow,
-      rt.destination.createdAt,
-    );
+    const reason = gapReason({ ...position, seenRetentionLoweredAt: seen }, settings, dbNow);
     if (reason === null) return;
     if (reason === "retention-lowered") rt.loweredFlagged = settings.logRetentionLoweredAt;
     await flag(h, rt, reason);
@@ -429,22 +478,21 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     /** Prepared after a pending skip is applied: a skip needs no working receiver. */
     let sender: Sender | null = null;
 
-    /** Re-reads the retention marker, flags a shortening first, then commits fenced. */
-    const commit = async (next: {
-      cursorAt: number;
-      cursorId: string;
-      caughtUpThrough?: number;
-      exportedDelta?: number;
-      droppedDelta?: number;
-      lastSuccessAt?: number;
-    }): Promise<boolean> => {
-      const settings = await h.reader.settings();
+    /**
+     * Re-reads the retention marker, flags a shortening first, then commits
+     * fenced — unless `batch` has aborted by then. The epoch fence stops a
+     * stale holder, not an expired deadline, so the deadline is checked here,
+     * against every await before the write and immediately before it.
+     */
+    const commit = async (next: CommitNext, batch: AbortSignal): Promise<boolean> => {
+      const settings = await guard(h.reader.settings(), batch);
       const lowered = settings.logRetentionLoweredAt;
-      if (lowered > Math.max(position.seenRetentionLoweredAt, rt.loweredFlagged, d.createdAt)) {
+      if (lowered > Math.max(position.seenRetentionLoweredAt, rt.loweredFlagged)) {
         rt.loweredFlagged = lowered;
-        await flag(h, rt, "retention-lowered");
+        await guard(flag(h, rt, "retention-lowered"), batch);
       }
       const seen = Math.max(lowered, position.seenRetentionLoweredAt);
+      batch.throwIfAborted();
       const ok = await h.state.commit(generation, epoch, { ...next, seenRetentionLoweredAt: seen });
       if (!ok) {
         logger.info("export pass fenced out", { reason: "another holder claimed the cursor" });
@@ -470,8 +518,9 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
       const timer = timers.setTimeout(() => deadline.abort(DEADLINE), BATCH_DEADLINE_MS);
       const batchSignal = AbortSignal.any([signal, deadline.signal]);
       try {
-        const dbNow = await readClock(h);
-        await checkGap(h, rt, position, await h.reader.settings(), dbNow);
+        const dbNow = await guard(readClock(h), batchSignal);
+        const settings = await guard(h.reader.settings(), batchSignal);
+        await guard(checkGap(h, rt, position, settings, dbNow), batchSignal);
         const settled = dbNow - SETTLE_MS;
         const after = { completedAt: position.cursorAt, id: position.cursorId };
 
@@ -487,13 +536,14 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           });
           const last = rows.at(-1);
           if (last !== undefined) {
-            const ok = await commit({ ...cursorOf(last), droppedDelta: rows.length });
+            const ok = await commit({ ...cursorOf(last), droppedDelta: rows.length }, batchSignal);
             if (!ok) return;
             rt.counters.recordsDropped += rows.length;
             continue;
           }
           if (bound < skipAt) return; // the skip's last rows are not settled yet
-          if (!(await commit({ ...cursorOfPosition(position), caughtUpThrough: skipAt }))) return;
+          const done = { ...cursorOfPosition(position), caughtUpThrough: skipAt };
+          if (!(await commit(done, batchSignal))) return;
           await h.state.clearSkip(generation, skipAt);
           skipAt = null;
           // The operator's action on a failing destination: try it again now.
@@ -503,7 +553,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         }
 
         if (sender === null) {
-          const secret = d.hasSecret ? await h.reader.openSecret(d.id) : null;
+          const secret = d.hasSecret ? await guard(h.reader.openSecret(d.id), batchSignal) : null;
           const prepared = prepare(d, secret);
           if (!prepared.ok) {
             await hardFailure(h, rt, epoch, prepared.error, null, true);
@@ -520,7 +570,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           signal: batchSignal,
         });
         if (rows.length === 0) {
-          await commit({ ...cursorOfPosition(position), caughtUpThrough: settled });
+          await commit({ ...cursorOfPosition(position), caughtUpThrough: settled }, batchSignal);
           return;
         }
         const outcome = await sendRows(h, rt, epoch, sender, rows, batchSignal, commit);
@@ -561,15 +611,9 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     sender: Sender,
     rows: RequestLog[],
     signal: AbortSignal,
-    commit: (next: {
-      cursorAt: number;
-      cursorId: string;
-      exportedDelta?: number;
-      droppedDelta?: number;
-      lastSuccessAt?: number;
-    }) => Promise<boolean>,
+    commit: (next: CommitNext, batch: AbortSignal) => Promise<boolean>,
   ): Promise<"continue" | "stop" | Exclude<DeliveryOutcome, { kind: "ok" }>> {
-    const labels = await h.reader.keyLabels();
+    const labels = await guard(h.reader.keyLabels(), signal);
     const parts: string[] = [];
     for (const row of rows) {
       signal.throwIfAborted();
@@ -594,12 +638,15 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
       if (outcome.kind !== "ok") return outcome;
       const last = rows[cut.start + cut.parts.length - 1];
       if (last === undefined) throw new Error("unreachable: batch past its rows");
-      const ok = await commit({
-        ...cursorOf(last),
-        exportedDelta: cut.parts.length - outcome.dropped,
-        droppedDelta: outcome.dropped + pending.drops,
-        lastSuccessAt: deps.now(),
-      });
+      const ok = await commit(
+        {
+          ...cursorOf(last),
+          exportedDelta: cut.parts.length - outcome.dropped,
+          droppedDelta: outcome.dropped + pending.drops,
+          lastSuccessAt: deps.now(),
+        },
+        signal,
+      );
       if (!ok) return "stop";
       if (pending.drops > 0) reasons.push(OVERSIZED_REASON);
       reasons.push(...outcome.reasons);
@@ -612,7 +659,8 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     }
     if (pending.through !== null) {
       // Trailing (or only) oversized records: nothing to send, but the cursor moves past them.
-      if (!(await commit({ ...cursorOf(pending.through), droppedDelta: pending.drops }))) {
+      const past = { ...cursorOf(pending.through), droppedDelta: pending.drops };
+      if (!(await commit(past, signal))) {
         return "stop";
       }
       reasons.push(OVERSIZED_REASON);
@@ -692,7 +740,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     return (await h.reader.destinations()).find((d) => d.id === id) ?? null;
   }
 
-  async function runTest(ref: string, id: string): Promise<TestResult> {
+  async function runTest(ref: string, id: string, cancel: AbortSignal): Promise<TestResult> {
     const fail = (error: string, status: number | null = null): TestResult => ({
       type: "testResult",
       ref,
@@ -702,9 +750,10 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     });
     const h = handles;
     if (h === null || phase !== "running") return fail(REPLY_ERRORS.paused);
-    const d = await find(h, id);
+    const d = await guard(find(h, id), cancel);
     if (d === null) return fail(REPLY_ERRORS.noDestination);
-    const prepared = prepare(d, d.hasSecret ? await h.reader.openSecret(d.id) : null);
+    const secret = d.hasSecret ? await guard(h.reader.openSecret(d.id), cancel) : null;
+    const prepared = prepare(d, secret);
     if (!prepared.ok) return fail(prepared.error);
     const at = deps.now();
     let part: string;
@@ -718,7 +767,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     try {
       const outcome = await deliver(prepared.sender, [part], {
         transport: deps.transport,
-        signal: deadline.signal,
+        signal: AbortSignal.any([cancel, deadline.signal]),
         timers,
         now: deps.now,
       });
@@ -734,48 +783,60 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         latencyMs: deps.now() - at,
       };
     } catch {
-      return fail(DEADLINE_SUMMARY);
+      return fail(cancel.aborted ? REPLY_ERRORS.paused : DEADLINE_SUMMARY);
     } finally {
       timers.clearTimeout(timer);
     }
   }
 
-  async function runPreview(ref: string, requestId: string): Promise<WorkerMessage> {
+  async function runPreview(
+    ref: string,
+    requestId: string,
+    cancel: AbortSignal,
+  ): Promise<WorkerMessage> {
     const h = handles;
     if (h === null || phase !== "running") {
       return { type: "previewResult", ref, ok: false, error: REPLY_ERRORS.paused };
     }
-    const row = await h.reader.getLog(requestId);
+    const row = await guard(h.reader.getLog(requestId), cancel);
     if (row === null) {
       return { type: "previewResult", ref, ok: false, error: REPLY_ERRORS.noRequest };
     }
-    const labels = await h.reader.keyLabels();
+    const labels = await guard(h.reader.keyLabels(), cancel);
     const keyLabel = row.apiKeyId === null ? null : (labels.get(row.apiKeyId) ?? null);
     return { type: "previewResult", ref, ok: true, record: buildRecord(row, { keyLabel, nodeId }) };
   }
 
-  async function runSkip(ref: string, id: string): Promise<WorkerMessage> {
+  async function runSkip(ref: string, id: string, cancel: AbortSignal): Promise<WorkerMessage> {
     const h = handles;
     if (h === null || phase !== "running") {
       return { type: "skipResult", ref, ok: false, error: REPLY_ERRORS.paused };
     }
-    const d = await find(h, id);
+    const d = await guard(find(h, id), cancel);
     if (d === null)
       return { type: "skipResult", ref, ok: false, error: REPLY_ERRORS.noDestination };
-    const at = await readClock(h);
+    const at = await guard(readClock(h), cancel);
+    // Cancelled before the writes, or not at all: a skip the main thread was
+    // told landed did land, and one it was told was refused did not.
+    cancel.throwIfAborted();
     await h.state.ensure(d.generation, d.startAt);
     await h.state.requestSkip(d.generation, at);
     void tick();
     return { type: "skipResult", ref, ok: true, at };
   }
 
-  /** Cancels every pass and waits for them to unwind, at most `budgetMs` when given. */
+  /**
+   * Cancels every pass and every test/preview/skip, and waits for all of them
+   * to unwind — at most `budgetMs` when given (stop) — so no handle is closed
+   * under work still using it and every request has had its reply.
+   */
   async function cancelAll(reason: Error, budgetMs: number | null): Promise<void> {
     if (tickTimer !== null) timers.clearTimeout(tickTimer);
     tickTimer = null;
     if (statusTimer !== null) timers.clearTimeout(statusTimer);
     statusTimer = null;
     for (const rt of runtimes.values()) rt.controller?.abort(reason);
+    for (const op of operations) op.controller.abort(reason);
     const settled = idle();
     if (budgetMs === null) {
       await settled;
@@ -802,29 +863,57 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     }
   }
 
-  async function reply(work: () => Promise<WorkerMessage>, fallback: WorkerMessage): Promise<void> {
-    try {
-      deps.post(await work());
-    } catch {
-      logger.warn("export request failed", { reason: INTERNAL_SUMMARY });
-      deps.post(fallback);
-    }
+  /**
+   * Runs one request against the handles as a tracked operation and posts its
+   * reply — always exactly one. Cancelled by pause or stop, it replies
+   * `paused` (or what it had); the lifecycle step waits for that reply.
+   */
+  function reply(
+    work: (cancel: AbortSignal) => Promise<WorkerMessage>,
+    fallback: WorkerMessage,
+    cancelled: WorkerMessage,
+  ): Promise<void> {
+    const controller = new AbortController();
+    const op = { controller, done: Promise.resolve() };
+    op.done = (async () => {
+      try {
+        deps.post(await work(controller.signal));
+      } catch {
+        if (controller.signal.aborted) {
+          deps.post(cancelled);
+        } else {
+          logger.warn("export request failed", { reason: INTERNAL_SUMMARY });
+          deps.post(fallback);
+        }
+      } finally {
+        operations.delete(op);
+      }
+    })();
+    operations.add(op);
+    return op.done;
   }
 
   async function idle(): Promise<void> {
     for (;;) {
-      const pending = [ticking, ...[...runtimes.values()].map((rt) => rt.running)].filter(
-        (p): p is Promise<void> => p !== null,
-      );
+      const pending = [
+        ticking,
+        ...[...runtimes.values()].map((rt) => rt.running),
+        ...[...operations].map((op) => op.done),
+        ...abandoned,
+      ].filter((p): p is Promise<unknown> => p !== null);
       if (pending.length === 0) return;
       await Promise.allSettled(pending);
     }
   }
 
+  /**
+   * Fresh handles and a tick. Runtimes — counters, backoff — are kept: they
+   * belong to this worker instance, which a pause does not end. Only a new
+   * worker starts its counters at zero.
+   */
   async function open(): Promise<void> {
     handles = await deps.open();
     phase = "running";
-    runtimes.clear();
     await tick();
   }
 
@@ -860,26 +949,39 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           return;
         case "test":
           await reply(
-            () => runTest(message.ref, message.id),
+            (cancel) => runTest(message.ref, message.id, cancel),
             testFailure(message.ref, REPLY_ERRORS.internal),
+            testFailure(message.ref, REPLY_ERRORS.paused),
           );
           return;
-        case "preview":
-          await reply(() => runPreview(message.ref, message.requestId), {
+        case "preview": {
+          const failed = (error: string): WorkerMessage => ({
             type: "previewResult",
             ref: message.ref,
             ok: false,
-            error: REPLY_ERRORS.internal,
+            error,
           });
+          await reply(
+            (cancel) => runPreview(message.ref, message.requestId, cancel),
+            failed(REPLY_ERRORS.internal),
+            failed(REPLY_ERRORS.paused),
+          );
           return;
-        case "skip":
-          await reply(() => runSkip(message.ref, message.id), {
+        }
+        case "skip": {
+          const failed = (error: string): WorkerMessage => ({
             type: "skipResult",
             ref: message.ref,
             ok: false,
-            error: REPLY_ERRORS.internal,
+            error,
           });
+          await reply(
+            (cancel) => runSkip(message.ref, message.id, cancel),
+            failed(REPLY_ERRORS.internal),
+            failed(REPLY_ERRORS.paused),
+          );
           return;
+        }
       }
     },
 

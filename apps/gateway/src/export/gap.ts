@@ -34,22 +34,20 @@ export function effectivePosition(s: { cursorAt: number; caughtUpThrough: number
 /**
  * Why the destination should be flagged now, or null.
  *
- * `createdAt` floors the retention marker: a shortening that happened before
- * the destination existed cannot have pruned anything it owed — rows older
- * than retention were never exportable — and a fresh state row starts at
- * `seen = 0`, so without the floor every destination created on an install
- * that ever shortened retention would be flagged on its first tick.
+ * The retention marker is compared exactly as the spec words it —
+ * `logRetentionLoweredAt > seen_retention_lowered_at`, for every destination
+ * — with no exemption for a shortening older than the destination: a new
+ * state row starts at `seen = 0`, so a destination created on an install that
+ * ever shortened retention is flagged once, at its first check, and the
+ * commit that follows records the marker as seen. Conservative by design.
  */
 export function gapReason(
   state: { cursorAt: number; caughtUpThrough: number; seenRetentionLoweredAt: number },
   settings: Pick<Settings, "logRetentionDays" | "logRetentionLoweredAt">,
   now: number,
-  createdAt: number,
 ): GapReason | null {
   const horizon = now - settings.logRetentionDays * DAY_MS;
   if (effectivePosition(state) < horizon + GAP_MARGIN_MS) return "lag";
-  if (settings.logRetentionLoweredAt > Math.max(state.seenRetentionLoweredAt, createdAt)) {
-    return "retention-lowered";
-  }
+  if (settings.logRetentionLoweredAt > state.seenRetentionLoweredAt) return "retention-lowered";
   return null;
 }

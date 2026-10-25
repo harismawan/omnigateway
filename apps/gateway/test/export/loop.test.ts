@@ -407,12 +407,18 @@ test("gap warning: shortening retention flags at the next commit, before committ
   expect((await stateOf(w)).gapPossibleAt).toBeNull();
 });
 
-test("gap warning: a shortening before the destination existed is not flagged", async () => {
+test("gap warning: any shortening newer than the one last seen flags, even one before creation", async () => {
+  // Spec *Retention changes*: `logRetentionLoweredAt > seen_retention_lowered_at`
+  // flags every destination — no exemption for when the destination was made.
   const w = track(world());
   w.settings = { ...w.settings, logRetentionLoweredAt: T0 - 120_000 };
   await w.loop.start();
-  await w.advance(POLL_MS * 2);
-  expect((await stateOf(w)).gapPossibleAt).toBeNull();
+  await w.settle();
+  const s = await stateOf(w);
+  expect(s.gapPossibleAt).toBe(T0);
+  // The commit that follows records the marker as seen.
+  await w.advance(POLL_MS);
+  expect((await stateOf(w)).seenRetentionLoweredAt).toBe(T0 - 120_000);
 });
 
 test("a destination with an unreadable filter is refused and never exported", async () => {
@@ -717,4 +723,202 @@ test("a tick in flight when pause arrives starts no pass", async () => {
   await w.advance(POLL_MS * 3);
   expect(w.sent).toHaveLength(0);
   expect(w.posted.filter((m) => m.type === "paused")).toHaveLength(2);
+});
+
+test("a batch whose deadline expires during a commit's settings read stays uncommitted", async () => {
+  const w = track(world({ rows: [row("r1", T0 - 20_000)] }));
+  // The receiver accepts; the commit's prerequisite (re-reading settings) then
+  // hangs until the 45 s batch deadline has passed.
+  let reads = 0;
+  const held: Array<() => void> = [];
+  const release = (): void => {
+    for (const resolve of held.splice(0)) resolve();
+  };
+  w.answer = () => {
+    w.beforeSettings = () => {
+      reads += 1;
+      return new Promise<void>((resolve) => {
+        held.push(resolve);
+      });
+    };
+    return new Response(null, { status: 200 });
+  };
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(1);
+  expect(reads).toBeGreaterThanOrEqual(1);
+  await w.advance(BATCH_DEADLINE_MS);
+  w.beforeSettings = async () => {};
+  release();
+  await w.settle();
+  const s = await stateOf(w);
+  expect([s.cursorId, s.exportedTotal]).toEqual(["", 0]);
+  expect(s.lastError).toBe("deadline exceeded");
+});
+
+test("a pass cancelled by pause during a commit's settings read commits nothing", async () => {
+  const w = track(world({ rows: [row("r1", T0 - 20_000)] }));
+  const held: Array<() => void> = [];
+  const release = (): void => {
+    for (const resolve of held.splice(0)) resolve();
+  };
+  w.answer = () => {
+    w.beforeSettings = () =>
+      new Promise<void>((resolve) => {
+        held.push(resolve);
+      });
+    return new Response(null, { status: 200 });
+  };
+  await w.loop.start();
+  await w.settle();
+  const paused = w.loop.handle({ type: "pause" });
+  await Bun.sleep(5);
+  w.beforeSettings = async () => {};
+  release();
+  await paused;
+  const reopened = (await import("../../src/export/state/sqlite.ts")).openSqliteExportState(
+    w.statePath,
+  );
+  try {
+    const [s] = await reopened.list();
+    expect([s?.cursorId, s?.exportedTotal]).toEqual(["", 0]);
+  } finally {
+    reopened.close();
+  }
+});
+
+test("pause cancels an outbound test, replies to it, and only then acknowledges", async () => {
+  const w = track(world());
+  w.answer = () => new Promise<Response>(() => {});
+  await w.loop.start();
+  await w.settle();
+  const testing = w.loop.handle({ type: "test", ref: "t", id: "hook" });
+  await Bun.sleep(5);
+  expect(w.sent).toHaveLength(1);
+  await w.loop.handle({ type: "pause" });
+  await testing;
+  const order = w.posted.filter((m) => m.type !== "status").map((m) => m.type);
+  expect(order).toEqual(["testResult", "paused"]);
+  expect(w.posted.find((m) => m.type === "testResult")).toMatchObject({
+    ref: "t",
+    ok: false,
+    error: "export worker paused",
+  });
+  // Nothing of the test is left running: no timers, handles closed after it.
+  expect(w.clock.pending()).toBe(0);
+  expect(w.closes).toBe(1);
+});
+
+test("pause drains a skip that is using the handles before closing them", async () => {
+  const w = track(world({ rows: [row("r1", T0 - 20_000)] }));
+  await w.loop.start();
+  await w.settle();
+  const held: Array<() => void> = [];
+  w.beforeSettings = async () => {};
+  w.beforeDestinations = () =>
+    new Promise<void>((resolve) => {
+      held.push(resolve);
+    });
+  const skipping = w.loop.handle({ type: "skip", ref: "s", id: "hook" });
+  await Bun.sleep(5);
+  let pausedYet = false;
+  const pausing = w.loop.handle({ type: "pause" }).then(() => {
+    pausedYet = true;
+  });
+  await Bun.sleep(5);
+  expect(pausedYet).toBe(false);
+  expect(w.closes).toBe(0);
+  w.beforeDestinations = async () => {};
+  for (const resolve of held.splice(0)) resolve();
+  await Promise.all([skipping, pausing]);
+  const order = w.posted.filter((m) => m.type !== "status").map((m) => m.type);
+  expect(order).toEqual(["skipResult", "paused"]);
+  expect(w.closes).toBe(1);
+});
+
+test("stop cancels an outbound test too, and leaves no timer behind", async () => {
+  const w = track(world());
+  w.answer = () => new Promise<Response>(() => {});
+  await w.loop.start();
+  await w.settle();
+  const testing = w.loop.handle({ type: "test", ref: "t", id: "hook" });
+  await Bun.sleep(5);
+  await w.loop.handle({ type: "stop" });
+  await testing;
+  expect(w.clock.pending()).toBe(0);
+  expect(w.closes).toBe(1);
+});
+
+test("counters survive pause and resume within one worker instance", async () => {
+  const w = track(world({ rows: [row("r1", T0 - 20_000)] }));
+  await w.loop.start();
+  await w.settle();
+  await w.advance(STATUS_INTERVAL_MS);
+  expect(lastStatus(w)?.counters.recordsSent).toBe(1);
+  await w.loop.handle({ type: "pause" });
+  await w.loop.handle({ type: "resume" });
+  w.rows.push(row("r2", w.clock.now - SETTLE_MS));
+  await w.advance(POLL_MS);
+  await w.advance(STATUS_INTERVAL_MS);
+  expect(lastStatus(w)?.counters).toMatchObject({ recordsSent: 2, batchesOk: 2 });
+});
+
+test("a skip cancelled by pause before its writes replies paused and writes nothing", async () => {
+  const w = track(world());
+  await w.loop.start();
+  await w.settle();
+  const held: Array<() => void> = [];
+  w.beforeDestinations = () =>
+    new Promise<void>((resolve) => {
+      held.push(resolve);
+    });
+  const skipping = w.loop.handle({ type: "skip", ref: "s", id: "hook" });
+  await Bun.sleep(5);
+  // The skip's read is still on the handle: pause waits for it before closing.
+  const pausing = w.loop.handle({ type: "pause" });
+  await Bun.sleep(5);
+  expect(w.closes).toBe(0);
+  for (const resolve of held.splice(0)) resolve();
+  await Promise.all([pausing, skipping]);
+  expect(w.closes).toBe(1);
+  expect(w.posted.find((m) => m.type === "skipResult")).toEqual({
+    type: "skipResult",
+    ref: "s",
+    ok: false,
+    error: "export worker paused",
+  });
+  const reopened = (await import("../../src/export/state/sqlite.ts")).openSqliteExportState(
+    w.statePath,
+  );
+  try {
+    expect((await reopened.list())[0]?.skipRequestedAt).toBeNull();
+  } finally {
+    reopened.close();
+  }
+});
+
+test("pause drains a preview reading the handles, then replies before acknowledging", async () => {
+  const w = track(world({ rows: [row("r1", T0 - 20_000)] }));
+  await w.loop.start();
+  await w.settle();
+  const held: Array<() => void> = [];
+  // Hold the preview's row read.
+  w.beforeGetLog = () =>
+    new Promise<void>((resolve) => {
+      held.push(resolve);
+    });
+  const previewing = w.loop.handle({ type: "preview", ref: "p", requestId: "r1" });
+  await Bun.sleep(5);
+  const pausing = w.loop.handle({ type: "pause" });
+  await Bun.sleep(5);
+  expect(w.closes).toBe(0);
+  for (const resolve of held.splice(0)) resolve();
+  await Promise.all([previewing, pausing]);
+  const order = w.posted.filter((m) => m.type !== "status").map((m) => m.type);
+  expect(order).toEqual(["previewResult", "paused"]);
+  expect(w.posted.find((m) => m.type === "previewResult")).toMatchObject({
+    ok: false,
+    error: "export worker paused",
+  });
+  expect(w.closes).toBe(1);
 });

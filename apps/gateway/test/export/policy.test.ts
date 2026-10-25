@@ -38,33 +38,26 @@ test("the effective position is the later of the cursor and the caught-up bound"
 test("a destination within a day of the prune horizon is flagged; one well inside is not", () => {
   // H = now - 30 d; the flag line is H + 24 h = now - 29 d.
   const line = NOW - 29 * DAY;
-  expect(gapReason(view({ cursorAt: line - 1 }), settings(), NOW, 0)).toBe("lag");
-  expect(gapReason(view({ cursorAt: line }), settings(), NOW, 0)).toBeNull();
-  expect(gapReason(view({ cursorAt: NOW - DAY }), settings(), NOW, 0)).toBeNull();
+  expect(gapReason(view({ cursorAt: line - 1 }), settings(), NOW)).toBe("lag");
+  expect(gapReason(view({ cursorAt: line }), settings(), NOW)).toBeNull();
+  expect(gapReason(view({ cursorAt: NOW - DAY }), settings(), NOW)).toBeNull();
 });
 
 test("an idle caught-up destination is judged by its caught-up bound, not its old cursor", () => {
   const idle = view({ cursorAt: NOW - 100 * DAY, caughtUpThrough: NOW - SETTLE_MS });
-  expect(gapReason(idle, settings(), NOW, 0)).toBeNull();
+  expect(gapReason(idle, settings(), NOW)).toBeNull();
 });
 
 test("a retention shortening newer than the last one seen flags, whatever the position", () => {
   const fresh = view({ cursorAt: NOW, caughtUpThrough: NOW, seenRetentionLoweredAt: 100 });
-  expect(gapReason(fresh, settings({ logRetentionLoweredAt: 101 }), NOW, 0)).toBe(
-    "retention-lowered",
-  );
-  expect(gapReason(fresh, settings({ logRetentionLoweredAt: 100 }), NOW, 0)).toBeNull();
+  expect(gapReason(fresh, settings({ logRetentionLoweredAt: 101 }), NOW)).toBe("retention-lowered");
+  expect(gapReason(fresh, settings({ logRetentionLoweredAt: 100 }), NOW)).toBeNull();
 });
 
-test("a shortening before the destination existed is not one it could have lost rows to", () => {
+test("any shortening newer than the one last seen flags; there is no creation-time floor", () => {
   const fresh = view({ cursorAt: NOW, seenRetentionLoweredAt: 0 });
-  const created = NOW - 1_000;
-  expect(gapReason(fresh, settings({ logRetentionLoweredAt: created - 1 }), NOW, created)).toBe(
-    null,
-  );
-  expect(gapReason(fresh, settings({ logRetentionLoweredAt: created + 1 }), NOW, created)).toBe(
-    "retention-lowered",
-  );
+  expect(gapReason(fresh, settings({ logRetentionLoweredAt: 1 }), NOW)).toBe("retention-lowered");
+  expect(gapReason(fresh, settings({ logRetentionLoweredAt: 0 }), NOW)).toBeNull();
 });
 
 test("backoff starts at 1 s, doubles, caps at 5 min, and is jittered downward only", () => {

@@ -77,8 +77,18 @@ export type TransportInit = {
 export type TransportResponse = {
   status: number;
   headers: { get(name: string): string | null };
-  /** The body, bounded by the transport. Never quoted anywhere. */
+  /**
+   * The whole body. Rejects with {@link IncompleteResponseError} when the
+   * receiver ends it early (connection cut, short `content-length`, broken
+   * chunking) and with {@link ResponseTooLargeError} past the transport's
+   * bound — never resolves partial text. Never quoted anywhere.
+   */
   text(): Promise<string>;
+  /**
+   * Drains and drops the body. Rejects with {@link IncompleteResponseError}
+   * when it was cut short; an over-limit body is simply dropped.
+   */
+  discard(): Promise<void>;
 };
 
 /**
@@ -92,6 +102,22 @@ export class ConnectTimeoutError extends Error {
   constructor() {
     super("connect timeout");
     this.name = "ConnectTimeoutError";
+  }
+}
+
+/** The receiver ended the response before its body was complete: a transport failure. */
+export class IncompleteResponseError extends Error {
+  constructor() {
+    super("incomplete response");
+    this.name = "IncompleteResponseError";
+  }
+}
+
+/** The response body passed the transport's bound; what was read is not the reply. */
+export class ResponseTooLargeError extends Error {
+  constructor() {
+    super("response too large");
+    this.name = "ResponseTooLargeError";
   }
 }
 
@@ -377,9 +403,33 @@ export async function deliver(
       connectTimeoutMs: CONNECT_TIMEOUT_MS,
     });
     const status = response.status;
-    // Read whatever the answer, so the connection is released; bounded by the
-    // transport, and never quoted.
-    const reply = await response.text();
+    // Every answer is read to its end — a cut connection is a transport
+    // failure whatever the status said. Only Elasticsearch and OTLP have a
+    // reply that means something; the rest is drained and dropped, so a body
+    // past the bound matters only where it would be parsed.
+    const parsed = sender.type !== "webhook" && (status < 300 || status >= 400);
+    let reply = "";
+    try {
+      if (parsed) reply = await response.text();
+      else await response.discard();
+    } catch (error) {
+      if (request.signal.aborted) throw error;
+      if (error instanceof ResponseTooLargeError) {
+        // A reply that cannot be read whole cannot be trusted to say "accepted".
+        if (status >= 200 && status <= 299) {
+          return { kind: "failed", status, error: `HTTP ${status} response too large` };
+        }
+        reply = "";
+      } else {
+        const incomplete = error instanceof IncompleteResponseError;
+        return {
+          kind: "retry",
+          status,
+          error: incomplete ? "incomplete response" : "network error",
+          retryAfterMs: null,
+        };
+      }
+    }
     // Cut mid-body by the timeout or the caller: not an answer to read.
     if (request.signal.aborted) throw request.signal.reason;
     if (status >= 200 && status <= 299) return sender.accepted(reply, status, parts.length);

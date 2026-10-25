@@ -5,14 +5,17 @@ import {
   type DeliveryOutcome,
   deliver,
   droppedSummary,
+  IncompleteResponseError,
   type Prepared,
   prepare,
   REFUSALS,
+  ResponseTooLargeError,
   type Sender,
   type Transport,
 } from "../../src/export/deliver.ts";
 import { BULK_CONTENT_TYPE } from "../../src/export/encoders/elasticsearch.ts";
 import { buildRecord } from "../../src/export/record.ts";
+import { asTransportResponse } from "./harness.ts";
 
 /**
  * Per-destination delivery: what is sent where, with which headers, and what a
@@ -56,7 +59,7 @@ function receiver(respond: () => Response): { transport: Transport; seen: Seen[]
       headers: init.headers,
       body: new TextDecoder().decode(gzip ? Bun.gunzipSync(raw) : raw),
     });
-    return respond();
+    return asTransportResponse(respond());
   };
   return { transport, seen };
 }
@@ -368,6 +371,7 @@ test("a timeout while the reply body is being read is a timeout, not an unreadab
       for (const fire of pending.splice(0)) fire();
       return '{"errors":tr';
     },
+    discard: async () => {},
   });
   const part = sender.part(buildRecord(requestLog({ id: "r", at: NOW }), { keyLabel: null }));
   expect(
@@ -378,4 +382,64 @@ test("a timeout while the reply body is being read is a timeout, not an unreadab
       now: () => NOW,
     }),
   ).toEqual({ kind: "retry", status: null, error: "timeout", retryAfterMs: null });
+});
+
+/** A 2xx whose body read fails the way `httpTransport` fails it. */
+const brokenBody =
+  (error: Error): Transport =>
+  async () => ({
+    status: 200,
+    headers: new Headers(),
+    text: async () => {
+      throw error;
+    },
+    // As `httpTransport`: a cut connection rejects; an over-limit body is just dropped.
+    discard: async () => {
+      if (error instanceof IncompleteResponseError) throw error;
+    },
+  });
+
+test("an incomplete 2xx reply is a retryable transport failure for every format, never ok", async () => {
+  const senders = [
+    senderOf(destination({})),
+    senderOf(
+      destination({ type: "elasticsearch", config: { url: "https://es:9200", auth: "none" } }),
+    ),
+    senderOf(
+      destination({ type: "otlp", config: { endpoint: "https://otel:4318", signal: "logs" } }),
+    ),
+  ];
+  for (const sender of senders) {
+    expect(await sendOne(sender, brokenBody(new IncompleteResponseError()))).toEqual({
+      kind: "retry",
+      status: 200,
+      error: "incomplete response",
+      retryAfterMs: null,
+    });
+  }
+});
+
+test("an over-limit 2xx: webhook needs only the status; ES and OTLP must not commit", async () => {
+  const tooBig = brokenBody(new ResponseTooLargeError());
+  // A webhook's 2xx is the whole answer; its body is discarded, never read.
+  expect(await sendOne(senderOf(destination({})), tooBig)).toMatchObject({
+    kind: "ok",
+    status: 200,
+  });
+  const es = senderOf(
+    destination({ type: "elasticsearch", config: { url: "https://es:9200", auth: "none" } }),
+  );
+  expect(await sendOne(es, tooBig)).toEqual({
+    kind: "failed",
+    status: 200,
+    error: "HTTP 200 response too large",
+  });
+  const otlp = senderOf(
+    destination({ type: "otlp", config: { endpoint: "https://otel:4318", signal: "logs" } }),
+  );
+  expect(await sendOne(otlp, tooBig)).toEqual({
+    kind: "failed",
+    status: 200,
+    error: "HTTP 200 response too large",
+  });
 });

@@ -73,9 +73,14 @@ export const MAIN_MESSAGE_TYPES = [
 // --- worker → main -------------------------------------------------------
 
 /**
- * Counters this worker has added since it started, per destination: what the
- * main thread folds into `omni_export_*_total`. Process-local, like every
- * other metric; persisted totals are on {@link DestinationStatus} itself.
+ * Counters this **worker instance** has added since it was spawned, per
+ * destination: what the main thread folds into `omni_export_*_total`. They
+ * only grow while the instance lives — pause and resume keep them — and a
+ * newly spawned worker (restart after a crash, or after a stop) starts them
+ * at zero. So the main thread tracks a baseline per instance: add each
+ * status's increase over the last one from the same instance, never the raw
+ * value. Persisted totals, all senders together, are on
+ * {@link DestinationStatus} itself.
  */
 export type DestinationCounters = {
   recordsSent: number;

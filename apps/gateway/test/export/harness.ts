@@ -107,6 +107,10 @@ export type World = {
   sent: Sent[];
   posted: WorkerMessage[];
   logger: CaptureLogger;
+  /** Runs before every single-row read (preview). */
+  beforeGetLog: () => Promise<void>;
+  /** Runs before every settings read; a test holds a commit's prerequisite with it. */
+  beforeSettings: () => Promise<void>;
   /** Runs before every configuration read; a test holds a tick with it. */
   beforeDestinations: () => Promise<void>;
   /** Runs before every cursor read; a test makes it hang to reach the batch deadline. */
@@ -153,6 +157,8 @@ export function world(
     answer: (_req: Sent): Answer => new Response(null, { status: 200 }),
     beforePage: async () => {},
     beforeDestinations: async () => {},
+    beforeSettings: async () => {},
+    beforeGetLog: async () => {},
     opens: 0,
     closes: 0,
   } as unknown as World & { statePath: string };
@@ -164,7 +170,10 @@ export function world(
       return w.destinations.map((d) => ({ ...d }));
     },
     openSecret: async (id) => w.secrets.get(id) ?? null,
-    settings: async () => ({ ...w.settings }),
+    settings: async () => {
+      await w.beforeSettings();
+      return { ...w.settings };
+    },
     keyLabels: async () => new Map(w.labels),
     exportPage: async (q: ExportPageQuery) => {
       await w.beforePage(q.signal);
@@ -188,7 +197,10 @@ export function world(
         )
         .slice(0, q.limit);
     },
-    getLog: async (id) => w.rows.find((r) => r.id === id) ?? null,
+    getLog: async (id) => {
+      await w.beforeGetLog();
+      return w.rows.find((r) => r.id === id) ?? null;
+    },
     now: async () => clock.now,
     close() {},
   };
@@ -216,7 +228,7 @@ export function world(
         init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
       }),
     ]);
-    return answered as TransportResponse;
+    return asTransportResponse(answered);
   };
 
   w.state = () => {
@@ -274,6 +286,18 @@ export function world(
     rmSync(dir, { recursive: true, force: true });
   };
   return w;
+}
+
+/** A fetch `Response` as the transport hands one back. */
+export function asTransportResponse(res: Response): TransportResponse {
+  return {
+    status: res.status,
+    headers: res.headers,
+    text: () => res.text(),
+    discard: async () => {
+      await res.arrayBuffer();
+    },
+  };
 }
 
 /** A lease client over one shared in-memory coordinator, as two cluster nodes would see Redis. */

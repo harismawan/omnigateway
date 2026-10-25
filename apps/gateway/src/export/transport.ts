@@ -1,7 +1,13 @@
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { Socket } from "node:net";
-import { ConnectTimeoutError, type Transport, type TransportResponse } from "./deliver.ts";
+import {
+  ConnectTimeoutError,
+  IncompleteResponseError,
+  ResponseTooLargeError,
+  type Transport,
+  type TransportResponse,
+} from "./deliver.ts";
 
 /**
  * The export worker's HTTP transport. Not `HttpClient` — destinations are not
@@ -13,8 +19,14 @@ import { ConnectTimeoutError, type Transport, type TransportResponse } from "./d
  *
  * Redirects are never followed: node does not follow them, and the 3xx comes
  * back to `deliver`, which treats it as a hard failure. A response body is
- * read only up to {@link MAX_RESPONSE_BYTES}; past that it is cut, and the
- * reader treats what it has as unreadable rather than waiting for the rest.
+ * read whole or not at all: a body the receiver cut short rejects
+ * ({@link IncompleteResponseError}), and one past {@link MAX_RESPONSE_BYTES}
+ * rejects as {@link ResponseTooLargeError} — partial text is never handed
+ * back as though it were the reply.
+ *
+ * IPv6 literals: `URL.hostname` keeps the brackets (`[::1]`), which a socket
+ * cannot resolve, so they are stripped for the connect; node's own `Host`
+ * header puts them back.
  */
 
 /** What a bulk or OTLP reply needs; a 500-item `_bulk` answer is well under it. */
@@ -35,7 +47,7 @@ export const httpTransport: Transport = (url, init) =>
     const outgoing = send(
       {
         protocol: target.protocol,
-        hostname: target.hostname,
+        hostname: target.hostname.replace(/^\[(.*)\]$/, "$1"),
         port: target.port || (target.protocol === "https:" ? 443 : 80),
         path: `${target.pathname}${target.search}`,
         method: init.method,
@@ -86,31 +98,62 @@ function response(incoming: IncomingMessage): TransportResponse {
     if (Array.isArray(value)) for (const one of value) headers.append(name, one);
     else if (typeof value === "string") headers.set(name, value);
   }
-  let text: Promise<string> | null = null;
+  let body: Promise<string> | null = null;
+  /**
+   * The body, whole. `complete` is node's own word that the message ended as
+   * framed (content-length reached, last chunk seen); a `close` or `error`
+   * before it is a cut connection. `keep: false` drains without holding
+   * bytes, so an over-limit body is dropped rather than refused.
+   */
+  const read = (keep: boolean): Promise<string> =>
+    new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let over = false;
+      let done = false;
+      const finish = (outcome: () => void): void => {
+        if (done) return;
+        done = true;
+        outcome();
+      };
+      incoming.on("data", (chunk: Buffer) => {
+        size += chunk.byteLength;
+        if (!keep || over) return;
+        if (size > MAX_RESPONSE_BYTES) {
+          over = true;
+          chunks.length = 0;
+          finish(() => reject(new ResponseTooLargeError()));
+          incoming.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      incoming.on("end", () => {
+        finish(() =>
+          incoming.complete
+            ? resolve(Buffer.concat(chunks).toString("utf8"))
+            : reject(new IncompleteResponseError()),
+        );
+      });
+      incoming.on("error", () => finish(() => reject(new IncompleteResponseError())));
+      incoming.on("close", () => {
+        finish(() =>
+          incoming.complete
+            ? resolve(Buffer.concat(chunks).toString("utf8"))
+            : reject(new IncompleteResponseError()),
+        );
+      });
+    });
   return {
     status: incoming.statusCode ?? 0,
     headers,
     text() {
-      text ??= new Promise<string>((resolve) => {
-        const chunks: Buffer[] = [];
-        let size = 0;
-        const done = (): void => resolve(Buffer.concat(chunks).toString("utf8"));
-        incoming.on("data", (chunk: Buffer) => {
-          if (size >= MAX_RESPONSE_BYTES) return;
-          const room = MAX_RESPONSE_BYTES - size;
-          const kept = chunk.byteLength > room ? chunk.subarray(0, room) : chunk;
-          chunks.push(kept);
-          size += kept.byteLength;
-          if (size >= MAX_RESPONSE_BYTES) {
-            incoming.destroy();
-            done();
-          }
-        });
-        incoming.on("end", done);
-        incoming.on("error", done);
-        incoming.on("close", done);
-      });
-      return text;
+      body ??= read(true);
+      return body;
+    },
+    async discard() {
+      body ??= read(false);
+      await body;
     },
   };
 }

@@ -1,6 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
-import { ConnectTimeoutError } from "../../src/export/deliver.ts";
+import {
+  ConnectTimeoutError,
+  IncompleteResponseError,
+  ResponseTooLargeError,
+} from "../../src/export/deliver.ts";
 import { httpTransport, MAX_RESPONSE_BYTES } from "../../src/export/transport.ts";
 
 /** The production transport against real local sockets. */
@@ -58,9 +62,63 @@ test("never follows a redirect: the 3xx comes back as itself", async () => {
   expect(seen.slice(before).map((s) => s.path)).toEqual(["/redirect"]);
 });
 
-test("a response body is read only up to the bound", async () => {
+test("a body past the bound rejects as too large, never as a shorter reply", async () => {
   const res = await httpTransport(`${base}/big`, init());
-  expect((await res.text()).length).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+  expect(res.status).toBe(200);
+  await expect(res.text()).rejects.toBeInstanceOf(ResponseTooLargeError);
+});
+
+/**
+ * A raw HTTP server that answers 200 and then breaks the body: a declared
+ * length it never finishes, or a chunked body it never terminates.
+ */
+const raw = createServer((socket) => {
+  sockets.push(socket);
+  socket.once("data", (chunk) => {
+    const head = chunk.toString("latin1");
+    if (head.includes("/short-length")) {
+      socket.end('HTTP/1.1 200 OK\r\ncontent-length: 100\r\nconnection: close\r\n\r\n{"errors":fa');
+    } else {
+      socket.write('HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\n{"err\r\n');
+      setTimeout(() => socket.destroy(), 20);
+    }
+  });
+}).listen(0, "127.0.0.1");
+const rawBase = () => `http://127.0.0.1:${(raw.address() as { port: number }).port}`;
+afterAll(() => raw.close());
+
+test("a body cut short by the receiver rejects as incomplete, never resolves partial text", async () => {
+  for (const path of ["/short-length", "/broken-chunked"]) {
+    const res = await httpTransport(`${rawBase()}${path}`, init());
+    expect(res.status).toBe(200);
+    await expect(res.text()).rejects.toBeInstanceOf(IncompleteResponseError);
+  }
+});
+
+test("a body can be discarded without reading it", async () => {
+  const res = await httpTransport(`${base}/big`, init());
+  await res.discard();
+});
+
+test("an IPv6 literal destination connects, with a correct Host header", async () => {
+  let v6: ReturnType<typeof Bun.serve> | null = null;
+  try {
+    v6 = Bun.serve({
+      hostname: "::1",
+      port: 0,
+      fetch: (req) => new Response(req.headers.get("host")),
+    });
+  } catch {
+    // No IPv6 loopback on this host: nothing to test.
+    return;
+  }
+  try {
+    const res = await httpTransport(`http://[::1]:${v6.port}/in`, init());
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(`[::1]:${v6.port}`);
+  } finally {
+    v6.stop(true);
+  }
 });
 
 test("no connection within the connect timeout rejects as ConnectTimeoutError", async () => {
