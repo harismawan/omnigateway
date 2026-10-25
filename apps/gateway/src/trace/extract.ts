@@ -117,8 +117,14 @@ export function extractTrace(headers: Headers, request: ChatRequest): TraceConte
    * silently swapped for an identity it did not choose.
    */
   const explicitOr = (name: string, fallback: () => string | null): string | null => {
+    // Presence is asked of the headers themselves, not of the bounded read:
+    // an oversized line reads as absent there, and a blank one as empty, but
+    // either way the caller chose to set this field and inference must not
+    // stand in for it.
+    if (!headers.has(name)) return fallback();
     const raw = line(name);
-    return raw !== undefined && raw.trim().length > 0 ? id(raw) : fallback();
+    if (raw !== undefined && raw.trim().length === 0) flag();
+    return raw === undefined ? null : id(raw);
   };
   const sessionId = explicitOr("x-omni-session-id", () => prefixed(inferred?.session));
   const turnId = explicitOr("x-omni-turn-id", () => prefixed(inferred?.turn));

@@ -265,3 +265,18 @@ describe("review fixes", () => {
     expect(capped.invalid).toBe(true);
   });
 });
+
+test("an explicit header that is present but oversized or blank still blocks inference", () => {
+  const huge = extractTrace(
+    h({ "x-omni-session-id": "a".repeat(4097), "x-claude-code-session-id": "inferred" }),
+    base,
+  );
+  expect(huge.sessionId).toBeNull();
+  expect(huge.invalid).toBe(true);
+  const blank = extractTrace(
+    h({ "x-omni-turn-id": "   ", "x-opencode-session": "s", "x-opencode-request": "r" }),
+    base,
+  );
+  expect(blank.turnId).toBeNull();
+  expect(blank.sessionId).toBe("opencode:s");
+});

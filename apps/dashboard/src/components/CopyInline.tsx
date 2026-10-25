@@ -36,7 +36,22 @@ export type CopyInlineProps = {
   value: string;
   /** Names the action, e.g. "Copy session". */
   label: string;
+  /**
+   * Whether to print the value beside the button. Off where the value is
+   * already on screen in another form (tags as chips), so it is not shown
+   * twice; the fallback then selects the hidden copy for the keyboard.
+   */
+  showValue?: boolean;
 };
+
+const Hidden = styled.span`
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+`;
 
 /**
  * A value with a small copy action beside it, for dense detail lists where
@@ -44,7 +59,7 @@ export type CopyInlineProps = {
  * plain-HTTP gateway still falls back to selecting the value; the button's name
  * says what actually happened.
  */
-export function CopyInline({ value, label }: CopyInlineProps) {
+export function CopyInline({ value, label, showValue = true }: CopyInlineProps) {
   const [outcome, setOutcome] = useState<CopyOutcome | null>(null);
   const textRef = useRef<HTMLSpanElement>(null);
 
@@ -65,7 +80,7 @@ export function CopyInline({ value, label }: CopyInlineProps) {
 
   return (
     <Wrap>
-      <Text ref={textRef}>{value}</Text>
+      {showValue ? <Text ref={textRef}>{value}</Text> : <Hidden ref={textRef}>{value}</Hidden>}
       <Action
         type="button"
         aria-label={name}

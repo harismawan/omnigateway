@@ -399,7 +399,23 @@ export function RequestDetail({ log, names, children }: RequestDetailProps) {
 
       {log.tags.length === 0 && Object.keys(log.traceMetadata).length === 0 ? null : (
         <Stack $gap={1}>
-          <Legend>Tags and metadata</Legend>
+          <Row $gap={2} $wrap>
+            <Legend>Tags and metadata</Legend>
+            {/* Copied in the header syntax the caller sends, so a value can be
+                pasted straight back into `x-omni-tags` / `x-omni-metadata`. */}
+            {log.tags.length === 0 ? null : (
+              <CopyInline value={log.tags.join(",")} label="Copy tags" showValue={false} />
+            )}
+            {Object.keys(log.traceMetadata).length === 0 ? null : (
+              <CopyInline
+                value={Object.entries(log.traceMetadata)
+                  .map(([key, value]) => `${encodeURIComponent(key)}:${encodeURIComponent(value)}`)
+                  .join(",")}
+                label="Copy metadata"
+                showValue={false}
+              />
+            )}
+          </Row>
           <Row $gap={1} $wrap>
             {log.tags.map((tag) => (
               <Chip key={`tag:${tag}`}>{tag}</Chip>

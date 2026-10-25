@@ -128,13 +128,17 @@ const logFilterParams = (filters: LogFilters): Record<string, string | number | 
 
 /** A stable key for a sessions range: an open one keys on its span, not on the clock. */
 const sessionsRangeKey = (query: SessionsQuery): string =>
-  query.until === null ? `last:${query.spanMs}` : `${query.since}..${query.until}`;
+  query.since === null
+    ? `last:${query.spanMs}`
+    : `${query.since}..${query.until === null ? "now" : query.until}`;
 
 /** The bounds to send, reading the clock at fetch time for an open range. */
 const sessionsBounds = (query: SessionsQuery): { since: number; until: number } => {
-  if (query.until !== null) return { since: query.since, until: query.until };
-  const until = Date.now();
-  return { since: until - query.spanMs, until };
+  if (query.since === null) {
+    const until = Date.now();
+    return { since: until - query.spanMs, until };
+  }
+  return { since: query.since, until: query.until ?? Date.now() };
 };
 
 export const queryKeys = {

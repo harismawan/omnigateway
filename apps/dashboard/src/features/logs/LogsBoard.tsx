@@ -42,16 +42,16 @@ const SESSIONS_DEFAULT_MS = 7 * 86_400_000;
 
 /**
  * The Sessions tab's range. Open-ended unless the filters name an upper bound:
- * an open range ends at fetch time, so it keeps counting new requests. A lone
- * `since` becomes the span back from now.
+ * an open range ends at fetch time, so it keeps counting new requests. A
+ * `since` the operator chose stays exactly where they put it; only with no
+ * bounds at all does the start slide, a week back from now.
  */
-export function sessionsRange(filters: LogFilters, now: number): SessionsQuery {
+export function sessionsRange(filters: LogFilters): SessionsQuery {
   if (filters.until !== undefined) {
     return { since: filters.since ?? filters.until - SESSIONS_DEFAULT_MS, until: filters.until };
   }
-  const spanMs =
-    filters.since === undefined ? SESSIONS_DEFAULT_MS : Math.max(0, now - filters.since);
-  return { since: null, until: null, spanMs };
+  if (filters.since !== undefined) return { since: filters.since, until: null };
+  return { since: null, until: null, spanMs: SESSIONS_DEFAULT_MS };
 }
 
 type View = "requests" | "sessions";
@@ -154,7 +154,7 @@ export function LogsBoard() {
 
   // Recomputed per filter change, not per render: an explicit range is part of
   // the query key; an open one keys on its span and reads the clock at fetch.
-  const range = useMemo(() => sessionsRange(filters, Date.now()), [filters]);
+  const range = useMemo(() => sessionsRange(filters), [filters]);
   const sessions = useLogSessions(
     {
       ...range,

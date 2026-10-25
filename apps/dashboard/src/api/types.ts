@@ -588,12 +588,15 @@ export type SessionsResponse = { sessions: SessionSummary[] };
  *
  * `until: null` is an open-ended range ending *now*: the upper bound is read
  * at fetch time rather than pinned in the key, so a refetch — a poll or a
- * `res:logs` push — includes requests that arrived since the tab opened.
- * `spanMs` is how far back from that moment an open range starts.
+ * `res:logs` push — includes requests that arrived since the tab opened. Its
+ * start is either a fixed `since` the operator chose, or, with `since: null`,
+ * a sliding `spanMs` back from that moment.
  */
-export type SessionsQuery =
-  | { since: number; until: number; apiKeyId?: string; agent?: string }
-  | { since: null; until: null; spanMs: number; apiKeyId?: string; agent?: string };
+export type SessionsQuery = (
+  | { since: number; until: number }
+  | { since: number; until: null }
+  | { since: null; until: null; spanMs: number }
+) & { apiKeyId?: string; agent?: string };
 
 /**
  * The filters the log routes accept, and which of them match loosely.

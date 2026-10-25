@@ -1106,6 +1106,8 @@ describe("LogsBoard trace copy", () => {
             turnId: "t-1",
             clientRequestId: "cli-1",
             upstreamRequestId: "up-1",
+            tags: ["a", "b"],
+            traceMetadata: { owner: "ops" },
           }),
         ],
         nextCursor: null,
@@ -1129,9 +1131,31 @@ describe("LogsBoard trace copy", () => {
       "Copy turn",
       "Copy client request id",
       "Copy provider request id",
+      "Copy tags",
+      "Copy metadata",
     ]) {
       await user.click(within(dialog).getByRole("button", { name: label }));
     }
-    expect(copied).toEqual(["req-copy", "claude-code:abc", "t-1", "cli-1", "up-1"]);
+    expect(copied).toEqual([
+      "req-copy",
+      "claude-code:abc",
+      "t-1",
+      "cli-1",
+      "up-1",
+      "a,b",
+      "owner:ops",
+    ]);
+  });
+});
+
+describe("sessionsRange", () => {
+  test("an explicit since stays fixed; only an absent until is open-ended", async () => {
+    const { sessionsRange } = await import("../../src/features/logs/LogsBoard.tsx");
+    expect(sessionsRange({ since: 1_000 })).toEqual({ since: 1_000, until: null });
+    expect(sessionsRange({})).toEqual({ since: null, until: null, spanMs: 7 * 86_400_000 });
+    expect(sessionsRange({ since: 1_000, until: 2_000 })).toEqual({
+      since: 1_000,
+      until: 2_000,
+    });
   });
 });
