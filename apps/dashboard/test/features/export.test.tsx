@@ -599,6 +599,44 @@ describe("ExportBoard", () => {
     expectMasked("tok-orphan");
   });
 
+  test("a named secret header may have an empty value, and a wholly blank row is ignored", async () => {
+    const user = userEvent.setup();
+    const stub = stubExport(
+      {
+        destinations: [
+          destination({
+            id: "lf",
+            type: "otlp",
+            config: { endpoint: "https://lf.example/otel", signal: "logs" },
+          }),
+          destination({ generation: "gen-2" }),
+        ],
+      },
+      {
+        "PUT /api/export/destinations/lf": () => ({ destination: destination() }),
+        "PUT /api/export/destinations/hook": () => ({ destination: destination() }),
+      },
+    );
+    renderWithProviders(<ExportBoard />);
+
+    for (const id of ["lf", "hook"]) {
+      await user.click(await screen.findByRole("button", { name: `Edit ${id}` }));
+      const dialog = await screen.findByRole("dialog");
+      await user.click(within(dialog).getByRole("button", { name: "Replace secret" }));
+      await user.click(within(dialog).getByRole("button", { name: "Add secret header" }));
+      await user.type(within(dialog).getByLabelText("Secret header 1 name"), "x-empty");
+      // Row 2 stays wholly blank.
+      await user.click(within(dialog).getByRole("button", { name: "Add secret header" }));
+      await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+      await waitFor(() =>
+        expect(
+          (bodyOf(stub, "PUT", `/api/export/destinations/${id}`) as { secret: unknown }).secret,
+        ).toEqual({ headers: { "x-empty": "" } }),
+      );
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+  });
+
   test("the bodies switch is shown off and disabled, as a later release", async () => {
     const user = userEvent.setup();
     stubExport();

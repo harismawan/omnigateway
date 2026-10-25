@@ -185,7 +185,8 @@ function filterOf(draft: Draft): ExportFilter | string {
 
 /**
  * Secret header rows as a record, or a problem naming the row by number —
- * never by its value. A wholly blank row is ignored.
+ * never by its value. A wholly blank row is ignored; a named row may have an
+ * empty value, as control's header schema allows.
  */
 function secretHeadersOf(rows: readonly HeaderRow[]): Record<string, string> | string {
   const out: Record<string, string> = {};
@@ -193,7 +194,7 @@ function secretHeadersOf(rows: readonly HeaderRow[]): Record<string, string> | s
     const name = row.name.trim();
     if (name.length === 0 && row.value.length === 0) continue;
     if (name.length === 0) return `Secret header ${index + 1} needs a name.`;
-    if (row.value.length === 0) return `Secret header ${index + 1} needs a value.`;
+    // An empty value is a header the gateway accepts and sends as such.
     out[name] = row.value;
   }
   return out;
