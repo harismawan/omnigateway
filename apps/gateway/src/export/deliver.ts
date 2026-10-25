@@ -20,6 +20,7 @@ import {
   BULK_CONTENT_TYPE,
   BULK_ENVELOPE,
   bulkPart,
+  OTHER_ERROR_TYPE,
   readBulkResponse,
   retryableStatus,
 } from "./encoders/elasticsearch.ts";
@@ -185,7 +186,7 @@ function limitsFor(d: ExportDestination): BatchLimits {
 
 /**
  * The sender for `d`, or why it is refused. `secretText` is what
- * `openSecret` returned. Refusals, in order: an unreadable stored filter (the
+ * the one-statement snapshot read (`destinationWithSecret`) returned. Refusals, in order: an unreadable stored filter (the
  * scope of what leaves the installation, so never guessed at); a config its
  * type's schema no longer accepts; a secret that is missing where the config
  * needs one, present where it needs none, or fails its type's strict schema —
@@ -311,7 +312,8 @@ function json(text: string): unknown {
   }
 }
 
-const UNKNOWN_REASON = "unknown";
+/** An error type the receiver named but this gateway does not repeat: summarised by status alone. */
+const UNKNOWN_REASON = OTHER_ERROR_TYPE;
 
 function bulkOutcome(text: string, status: number): DeliveryOutcome {
   const outcome = readBulkResponse(json(text), status);

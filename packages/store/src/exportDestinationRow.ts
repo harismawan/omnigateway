@@ -13,6 +13,9 @@ import {
 export const DESTINATION_COLUMNS = `id, generation, type, enabled, config, filter, include_bodies,
   max_request_bytes, start_at, created_at, updated_at, secret IS NOT NULL AS has_secret`;
 
+/** {@link DESTINATION_COLUMNS} plus the ciphertext, for the one read that opens it. */
+export const DESTINATION_WITH_SECRET_COLUMNS = `${DESTINATION_COLUMNS}, secret`;
+
 /** A destination row as either driver returns it: SQLite 0/1 and numbers, Postgres booleans and BIGINT strings. */
 export type DestinationRow = {
   id: string;

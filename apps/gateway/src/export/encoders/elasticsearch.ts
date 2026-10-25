@@ -61,8 +61,9 @@ export type BulkDropped = { id: string | null; status: number; reason: string };
  * - otherwise the batch commits, with `dropped` naming items the receiver
  *   refused for good (mapping conflicts and the like).
  *
- * Reasons are the receiver's `error.type` only, and only when it is a plain
- * identifier. Its `reason` text is never read: it can echo document content.
+ * Reasons are the receiver's `error.type` only, and only when it is one of
+ * {@link ES_ERROR_TYPES}; anything else reads as {@link OTHER_ERROR_TYPE}.
+ * Its `reason` text is never read: it can echo document content.
  */
 export type BulkOutcome = {
   retry: boolean;
@@ -70,9 +71,33 @@ export type BulkOutcome = {
   failure: { status: number; reason: string } | null;
 };
 
-const UNKNOWN = "unknown";
+/**
+ * The Elasticsearch / OpenSearch error types this gateway will repeat — in
+ * `last_error`, status, logs and the console. A closed allowlist: an
+ * identifier-shaped `error.type` is still the receiver's text (a proxy or a
+ * hostile receiver can put a credential there), so only names on this list
+ * survive, and everything else reads as {@link OTHER_ERROR_TYPE}. Adding a
+ * name is a deliberate edit.
+ */
+export const ES_ERROR_TYPES: ReadonlySet<string> = new Set([
+  // Per-document refusals: the document is dropped and the batch commits.
+  "mapper_parsing_exception",
+  "document_parsing_exception",
+  "strict_dynamic_mapping_exception",
+  "version_conflict_engine_exception",
+  "illegal_argument_exception",
+  // Index or cluster refusals: usually the whole request.
+  "index_not_found_exception",
+  "cluster_block_exception",
+  "security_exception",
+  "circuit_breaking_exception",
+  "es_rejected_execution_exception",
+]);
+
+/** Every error type not in {@link ES_ERROR_TYPES}, and every unreadable one. */
+export const OTHER_ERROR_TYPE = "other";
+
 const UNREADABLE = "unreadable-bulk-response";
-const ERROR_TYPE = /^[A-Za-z0-9_.]{1,64}$/;
 const MAX_ID = 256;
 
 export function retryableStatus(status: number): boolean {
@@ -82,7 +107,7 @@ export function retryableStatus(status: number): boolean {
 export function readBulkResponse(json: unknown, httpStatus: number): BulkOutcome {
   if (retryableStatus(httpStatus)) return { retry: true, dropped: [], failure: null };
   if (httpStatus < 200 || httpStatus > 299) {
-    const reason = isRecord(json) ? errorType(json.error) : UNKNOWN;
+    const reason = isRecord(json) ? errorType(json.error) : OTHER_ERROR_TYPE;
     return { retry: false, dropped: [], failure: { status: httpStatus, reason } };
   }
   const unreadable: BulkOutcome = {
@@ -117,8 +142,8 @@ export function readBulkResponse(json: unknown, httpStatus: number): BulkOutcome
 }
 
 function errorType(error: unknown): string {
-  if (!isRecord(error) || typeof error.type !== "string") return UNKNOWN;
-  return ERROR_TYPE.test(error.type) ? error.type : UNKNOWN;
+  if (!isRecord(error) || typeof error.type !== "string") return OTHER_ERROR_TYPE;
+  return ES_ERROR_TYPES.has(error.type) ? error.type : OTHER_ERROR_TYPE;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

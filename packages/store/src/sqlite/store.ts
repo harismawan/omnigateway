@@ -249,6 +249,7 @@ export async function createStore(opts: {
       update: (id, patch) => handle.exportDestinations.update(id, patch),
       remove: (id) => handle.exportDestinations.remove(id),
       openSecret: (id) => handle.exportDestinations.openSecret(id),
+      openWithSecret: (id) => handle.exportDestinations.openWithSecret(id),
     },
 
     routing: {

@@ -134,6 +134,7 @@ const CANCELLED = {
   pause: new Error("export paused"),
   stop: new Error("export stopped"),
   removed: new Error("destination removed or disabled"),
+  changed: new Error("destination configuration changed"),
 };
 const DEADLINE = new Error("batch deadline");
 
@@ -415,11 +416,17 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         continue;
       }
       if (rt.destination.updatedAt !== d.updatedAt) {
-        // An edit is the operator's answer to a failure: try again now.
+        // An edit is the operator's answer to a failure: try again now. A
+        // pass still running holds the old snapshot — its config, filter and
+        // secret — so it is cancelled; the next tick starts one from a fresh
+        // snapshot. A batch already on the wire cannot be recalled: if its
+        // receiver accepts it, its commit (already authorised by the old
+        // scope's read) may land. Everything after it uses the new scope.
         rt.failures = 0;
         rt.retryAt = null;
         rt.failing = false;
         rt.refused = false;
+        rt.controller?.abort(CANCELLED.changed);
       }
       rt.destination = d;
       if (!d.enabled) rt.controller?.abort(CANCELLED.removed);
@@ -461,8 +468,22 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
   }
 
   async function pass(h: Handles, rt: Runtime, signal: AbortSignal): Promise<void> {
-    const d = rt.destination;
-    const generation = d.generation;
+    const generation = rt.destination.generation;
+    // The pass's whole configuration — config, filter, enabled, secret — is
+    // one snapshot, read by one statement, and bound to the generation and
+    // `updatedAt` the tick saw: a row that changed since is not this pass's
+    // to send (the next tick's sync cancels and restarts it), and a config is
+    // never paired with a secret from another version of the row.
+    const snapshot = await guard(h.reader.destinationWithSecret(rt.destination.id), signal);
+    if (
+      snapshot === null ||
+      snapshot.destination.generation !== generation ||
+      snapshot.destination.updatedAt !== rt.destination.updatedAt ||
+      !snapshot.destination.enabled
+    ) {
+      return;
+    }
+    const d = snapshot.destination;
     await h.state.ensure(generation, d.startAt);
     const claimed = await h.state.claim(generation);
     if (claimed === null || signal.aborted) return;
@@ -569,8 +590,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         }
 
         if (sender === null) {
-          const secret = d.hasSecret ? await guard(h.reader.openSecret(d.id), batchSignal) : null;
-          const prepared = prepare(d, secret);
+          const prepared = prepare(d, snapshot.secret);
           if (!prepared.ok) {
             await hardFailure(h, rt, epoch, prepared.error, null, true);
             return;
@@ -767,10 +787,10 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     });
     const h = handles;
     if (h === null || phase !== "running") return fail(REPLY_ERRORS.paused);
-    const d = await guard(find(h, id), cancel);
-    if (d === null) return fail(REPLY_ERRORS.noDestination);
-    const secret = d.hasSecret ? await guard(h.reader.openSecret(d.id), cancel) : null;
-    const prepared = prepare(d, secret);
+    // Config and secret from one read: the test goes where its credential belongs.
+    const snapshot = await guard(h.reader.destinationWithSecret(id), cancel);
+    if (snapshot === null) return fail(REPLY_ERRORS.noDestination);
+    const prepared = prepare(snapshot.destination, snapshot.secret);
     if (!prepared.ok) return fail(prepared.error);
     const at = deps.now();
     let part: string;

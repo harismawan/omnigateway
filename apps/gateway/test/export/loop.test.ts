@@ -1111,3 +1111,161 @@ test("ackGap clears the warning raised at or before `seenAt`, and a later flag s
     error: "export worker paused",
   });
 });
+
+test("a receiver's unrecognised error type never reaches last_error, status, logs or drops", async () => {
+  const canary = "SECRET_CANARY_123";
+  const es = destination({
+    type: "elasticsearch",
+    config: { url: "https://es.test:9200", auth: "none" },
+  });
+  // Per item: dropped with the fixed reason.
+  const w = track(world({ destinations: [es], rows: [row("r1", T0 - 20_000)] }));
+  w.answer = () =>
+    Response.json({
+      errors: true,
+      items: [{ index: { _id: "r1", status: 400, error: { type: canary } } }],
+    });
+  await w.loop.start();
+  await w.settle();
+  await w.advance(STATUS_INTERVAL_MS);
+  expect((await stateOf(w)).lastError).toBe("dropped 1 of 1");
+  // Top level: the hard failure names the status alone.
+  w.rows.push(row("r2", w.clock.now - SETTLE_MS));
+  w.answer = () => Response.json({ error: { type: canary } }, { status: 401 });
+  await w.advance(POLL_MS);
+  await w.advance(STATUS_INTERVAL_MS);
+  expect((await stateOf(w)).lastError).toBe("HTTP 401");
+  const everything = JSON.stringify([await stateOf(w), w.posted, w.logger.lines, w.logger.records]);
+  expect(everything).not.toContain(canary);
+});
+
+/** Pauses the next destination-and-secret read until the returned release is called. */
+function holdSnapshot(w: World): { reached: Promise<void>; release: () => void } {
+  let release: () => void = () => {};
+  let reached: () => void = () => {};
+  const reachedP = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let used = false;
+  w.beforeSnapshot = async () => {
+    if (used) return;
+    used = true;
+    reached();
+    await gate;
+  };
+  return { reached: reachedP, release };
+}
+
+test("an edit replacing URL and secret mid-pass never pairs the old URL with the new secret", async () => {
+  const hook = destination({
+    hasSecret: true,
+    config: { url: "https://hooks.test/in", headers: {} },
+  });
+  const w = track(world({ destinations: [hook], rows: [row("r1", T0 - 20_000)] }));
+  w.secrets.set("hook", '{"headers":{"authorization":"old-secret"}}');
+  const held = holdSnapshot(w);
+  await w.loop.start();
+  await held.reached;
+  // The operator replaces both while the pass is about to load its credentials.
+  w.destinations[0] = {
+    ...hook,
+    config: { url: "https://new.test/in", headers: {} },
+    updatedAt: hook.updatedAt + 1,
+  };
+  w.secrets.set("hook", '{"headers":{"authorization":"new-secret"}}');
+  held.release();
+  await w.settle();
+  await w.advance(POLL_MS);
+  for (const sent of w.sent) {
+    const pair = `${sent.url} ${sent.headers.authorization}`;
+    expect(["https://hooks.test/in old-secret", "https://new.test/in new-secret"]).toContain(pair);
+  }
+  expect(w.sent.some((s) => s.url === "https://new.test/in")).toBe(true);
+});
+
+test("a slug deleted and recreated mid-pass: the old pass never sends with the new row's secret", async () => {
+  const old = destination({ hasSecret: true, config: { url: "https://old.test/in", headers: {} } });
+  const w = track(world({ destinations: [old], rows: [row("r1", T0 - 20_000)] }));
+  w.secrets.set("hook", '{"headers":{"authorization":"old-secret"}}');
+  const held = holdSnapshot(w);
+  await w.loop.start();
+  await held.reached;
+  w.destinations[0] = destination({
+    generation: "22222222-2222-4222-8222-222222222222",
+    hasSecret: true,
+    config: { url: "https://new.test/in", headers: {} },
+    startAt: T0,
+  });
+  w.secrets.set("hook", '{"headers":{"authorization":"new-secret"}}');
+  held.release();
+  await w.settle();
+  // The old generation's pass sends nothing: its row is gone.
+  expect(
+    w.sent.filter(
+      (s) => s.headers.authorization === "new-secret" && s.url !== "https://new.test/in",
+    ),
+  ).toEqual([]);
+  expect(
+    w.sent.filter(
+      (s) => s.url === "https://old.test/in" && s.headers.authorization !== "old-secret",
+    ),
+  ).toEqual([]);
+  expect(w.sent.filter((s) => s.url === "https://old.test/in")).toEqual([]);
+});
+
+test("Send test reads URL and secret from one snapshot too", async () => {
+  const hook = destination({
+    hasSecret: true,
+    config: { url: "https://hooks.test/in", headers: {} },
+  });
+  const w = track(world({ destinations: [hook] }));
+  w.secrets.set("hook", '{"headers":{"authorization":"old-secret"}}');
+  await w.loop.start();
+  await w.settle();
+  const held = holdSnapshot(w);
+  const testing = w.loop.handle({ type: "test", ref: "t", id: "hook" });
+  await held.reached;
+  w.destinations[0] = {
+    ...hook,
+    config: { url: "https://new.test/in", headers: {} },
+    updatedAt: hook.updatedAt + 1,
+  };
+  w.secrets.set("hook", '{"headers":{"authorization":"new-secret"}}');
+  held.release();
+  await testing;
+  expect(w.sent).toHaveLength(1);
+  expect(`${w.sent[0]?.url} ${w.sent[0]?.headers.authorization}`).toBe(
+    "https://new.test/in new-secret",
+  );
+});
+
+test("narrowing the filter mid-pass cancels the pass: no row outside the new scope is sent", async () => {
+  const rows = Array.from({ length: 1_000 }, (_, i) =>
+    row(`r${String(i).padStart(4, "0")}`, T0 - 30_000 + i, { apiKeyId: "k1" }),
+  );
+  const w = track(world({ rows }));
+  // The first 500-row delivery is held at the receiver.
+  const held: Array<(r: Response) => void> = [];
+  w.answer = () =>
+    new Promise<Response>((resolve) => {
+      held.push(resolve);
+    });
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(1);
+  // The operator narrows the scope to nothing and the main thread says so.
+  const [d] = w.destinations;
+  if (d === undefined) throw new Error("no destination");
+  w.destinations[0] = { ...d, filter: { apiKeyIds: [] }, updatedAt: d.updatedAt + 1 };
+  await w.loop.handle({ type: "destinationsChanged" });
+  w.answer = () => new Response(null, { status: 200 });
+  for (const resolve of held.splice(0)) resolve(new Response(null, { status: 200 }));
+  await w.settle();
+  await w.advance(POLL_MS * 3);
+  // Row 501 and on are never sent: the batch on the wire was the last of the old scope.
+  expect(w.sent).toHaveLength(1);
+  expect(sentIds(w)).not.toContain("r0500");
+});

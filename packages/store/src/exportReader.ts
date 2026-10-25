@@ -30,8 +30,14 @@ import type { ExportDestination, ExportPageQuery, RequestLog, Settings } from ".
 export type ExportReader = {
   /** Every destination, by id, never with its secret. */
   destinations(): Promise<ExportDestination[]>;
-  /** The decrypted secret, or null when none is set. */
-  openSecret(id: string): Promise<string | null>;
+  /**
+   * The destination and its decrypted secret from **one** read, so they are
+   * the same version of the row — never a config from one read paired with a
+   * secret from another. Null when no destination has that id.
+   */
+  destinationWithSecret(
+    id: string,
+  ): Promise<{ destination: ExportDestination; secret: string | null } | null>;
   settings(): Promise<Settings>;
   /** Key id → label, for the records' `apiKey.label`. */
   keyLabels(): Promise<Map<string, string>>;
@@ -73,7 +79,7 @@ export function openSqliteExportReader(
   let closed = false;
   return {
     destinations: () => destinations.list(),
-    openSecret: (id) => destinations.openSecret(id),
+    destinationWithSecret: (id) => destinations.openWithSecret(id),
     settings: () => config.getSettings(),
     keyLabels: async () => labels(await keys.list()),
     exportPage: (q) => usage.exportPage(q),
@@ -97,7 +103,7 @@ export function createPostgresExportReader(sql: SQL, key: CryptoKey): ExportRead
   const destinations = pgDestinations(sql, key);
   return {
     destinations: () => destinations.list(),
-    openSecret: (id) => destinations.openSecret(id),
+    destinationWithSecret: (id) => destinations.openWithSecret(id),
     settings: () => config.getSettings(),
     keyLabels: async () => labels(await keys.list()),
     exportPage: (q) => usage.exportPage(q),

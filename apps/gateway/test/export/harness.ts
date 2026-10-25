@@ -117,6 +117,8 @@ export type World = {
     },
     write: () => Promise<boolean>,
   ) => Promise<boolean>;
+  /** Runs before every destination-and-secret read; a test pauses a pass there. */
+  beforeSnapshot: (id: string) => Promise<void>;
   /** Runs before every single-row read (preview). */
   beforeGetLog: () => Promise<void>;
   /** Runs before every settings read; a test holds a commit's prerequisite with it. */
@@ -169,6 +171,7 @@ export function world(
     beforeDestinations: async () => {},
     beforeSettings: async () => {},
     beforeGetLog: async () => {},
+    beforeSnapshot: async () => {},
     onCommit: (_call: unknown, write: () => Promise<boolean>) => write(),
     opens: 0,
     closes: 0,
@@ -180,7 +183,13 @@ export function world(
       await w.beforeDestinations();
       return w.destinations.map((d) => ({ ...d }));
     },
-    openSecret: async (id) => w.secrets.get(id) ?? null,
+    // One consistent read, as the store's single SELECT gives it: the row and
+    // the secret of the same moment.
+    destinationWithSecret: async (id) => {
+      await w.beforeSnapshot(id);
+      const d = w.destinations.find((x) => x.id === id);
+      return d === undefined ? null : { destination: { ...d }, secret: w.secrets.get(id) ?? null };
+    },
     settings: async () => {
       await w.beforeSettings();
       return { ...w.settings };

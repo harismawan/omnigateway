@@ -2,6 +2,7 @@ import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { decrypt, encrypt } from "../encryption.ts";
 import {
   DESTINATION_COLUMNS,
+  DESTINATION_WITH_SECRET_COLUMNS,
   type DestinationRow,
   readDestination,
 } from "../exportDestinationRow.ts";
@@ -124,6 +125,21 @@ export function createExportDestinationRepo(db: Database, key: CryptoKey): Expor
 
     async remove(id) {
       return db.run("DELETE FROM export_destinations WHERE id = ?", [id]).changes > 0;
+    },
+
+    async openWithSecret(id) {
+      const row = db
+        .query<DestinationRow & { secret: string | null }, [string]>(
+          `SELECT ${DESTINATION_WITH_SECRET_COLUMNS} FROM export_destinations WHERE id = ?`,
+        )
+        .get(id);
+      if (row === null) return null;
+      const destination = readDestination(row);
+      if (destination === null) return null;
+      return {
+        destination,
+        secret: row.secret === null ? null : await decrypt(key, row.secret),
+      };
     },
 
     async openSecret(id) {

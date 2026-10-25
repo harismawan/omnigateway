@@ -249,6 +249,35 @@ forEachStore((backend) => {
     expect(await s.exportDestinations.openSecret("bare")).toBeNull();
   });
 
+  test("openWithSecret reads the row and its secret together, from one statement", async () => {
+    const s = await backend.fresh();
+    const created = await s.exportDestinations.create(
+      input({ secret: "one", config: { url: "https://a:9200" } }),
+    );
+    const first = await s.exportDestinations.openWithSecret("es-main");
+    expect(first?.destination).toEqual(created);
+    expect(first?.secret).toBe("one");
+    expect(JSON.stringify(first?.destination)).not.toContain('"one"');
+
+    await s.exportDestinations.update("es-main", {
+      config: { url: "https://b:9200" },
+      secret: "two",
+    });
+    const second = await s.exportDestinations.openWithSecret("es-main");
+    expect(second?.destination.config).toEqual({ url: "https://b:9200" });
+    expect(second?.secret).toBe("two");
+
+    // A recreated slug is a new generation, read with its own secret.
+    await s.exportDestinations.remove("es-main");
+    const again = await s.exportDestinations.create(input({ config: { url: "https://c:9200" } }));
+    const third = await s.exportDestinations.openWithSecret("es-main");
+    expect(third?.destination.generation).toBe(again.generation);
+    expect(third?.destination.generation).not.toBe(created.generation);
+    expect(third?.secret).toBeNull();
+
+    expect(await s.exportDestinations.openWithSecret("nope")).toBeNull();
+  });
+
   test("update patches the named fields; secret sets, null clears, absent keeps", async () => {
     const s = await backend.fresh();
     const created = await s.exportDestinations.create(input({ secret: "one" }));

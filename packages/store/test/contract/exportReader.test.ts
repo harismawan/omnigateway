@@ -64,7 +64,10 @@ forEachStore((backend) => {
       const r = await readerFor(s);
       const [hook] = await r.destinations();
       expect(hook?.id).toBe("hook");
-      expect(await r.openSecret("hook")).toBe('{"signingSecret":"s3cret"}');
+      const opened = await r.destinationWithSecret("hook");
+      expect(opened?.destination.id).toBe("hook");
+      expect(opened?.secret).toBe('{"signingSecret":"s3cret"}');
+      expect(await r.destinationWithSecret("absent")).toBeNull();
       expect((await r.settings()).logRetentionDays).toBe(9);
       expect((await r.keyLabels()).get("k1")).toBe("team");
       const page = await r.exportPage({
@@ -136,12 +139,12 @@ forEachStore((backend) => {
         opened.push(r);
         expect(Object.keys(r).sort()).toEqual([
           "close",
+          "destinationWithSecret",
           "destinations",
           "exportPage",
           "getLog",
           "keyLabels",
           "now",
-          "openSecret",
           "settings",
         ]);
         r.close();

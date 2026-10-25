@@ -4,6 +4,7 @@ import { requestLog } from "@omni/testkit";
 import {
   BULK_ENVELOPE,
   bulkPart,
+  ES_ERROR_TYPES,
   encodeBulk,
   indexName,
   readBulkResponse,
@@ -130,7 +131,7 @@ test("non-retryable item errors are dropped by error.type and the batch commits"
   expect(JSON.stringify(out)).not.toContain("secret");
 });
 
-test("an item error with no usable type is dropped as unknown, never echoed", () => {
+test("an item error with no usable type is dropped as other, never echoed", () => {
   const out = readBulkResponse(
     {
       errors: true,
@@ -145,9 +146,9 @@ test("an item error with no usable type is dropped as unknown, never echoed", ()
   expect(out).toEqual({
     retry: false,
     dropped: [
-      { id: null, status: 400, reason: "unknown" },
-      { id: "a", status: 400, reason: "unknown" },
-      { id: null, status: 400, reason: "unknown" },
+      { id: null, status: 400, reason: "other" },
+      { id: "a", status: 400, reason: "other" },
+      { id: null, status: 400, reason: "other" },
     ],
     failure: null,
   });
@@ -176,7 +177,7 @@ test("a top-level hard status is a failure named by error.type and status only",
   expect(readBulkResponse("<html>Forbidden</html>", 403)).toEqual({
     retry: false,
     dropped: [],
-    failure: { status: 403, reason: "unknown" },
+    failure: { status: 403, reason: "other" },
   });
 });
 
@@ -197,5 +198,39 @@ test("a success status with an unreadable body is a failure, never a silent comm
       dropped: [],
       failure: { status: 200, reason: "unreadable-bulk-response" },
     });
+  }
+});
+
+test("an identifier-shaped error.type outside the known set is never echoed: top level and per item", () => {
+  const canary = "SECRET_CANARY_123";
+  const top = readBulkResponse({ error: { type: canary } }, 401);
+  expect(top).toEqual({ retry: false, dropped: [], failure: { status: 401, reason: "other" } });
+  const items = readBulkResponse(
+    { errors: true, items: [{ index: { _id: "a", status: 400, error: { type: canary } } }] },
+    200,
+  );
+  expect(items).toEqual({
+    retry: false,
+    dropped: [{ id: "a", status: 400, reason: "other" }],
+    failure: null,
+  });
+  expect(JSON.stringify([top, items])).not.toContain(canary);
+});
+
+test("the recognised error types are a closed, documented set", () => {
+  expect([...ES_ERROR_TYPES].sort()).toEqual([
+    "circuit_breaking_exception",
+    "cluster_block_exception",
+    "document_parsing_exception",
+    "es_rejected_execution_exception",
+    "illegal_argument_exception",
+    "index_not_found_exception",
+    "mapper_parsing_exception",
+    "security_exception",
+    "strict_dynamic_mapping_exception",
+    "version_conflict_engine_exception",
+  ]);
+  for (const type of ES_ERROR_TYPES) {
+    expect(readBulkResponse({ error: { type } }, 400).failure?.reason).toBe(type);
   }
 });

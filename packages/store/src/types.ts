@@ -2015,6 +2015,16 @@ export interface ExportDestinationRepo {
   remove(id: string): Promise<boolean>;
   /** The decrypted secret, or null when none is set. For the export worker only. */
   openSecret(id: string): Promise<string | null>;
+  /**
+   * The destination and its decrypted secret, read by **one** statement, so
+   * the two always belong to the same version of the row: an edit replacing
+   * the URL and the secret together, or a delete and re-create of the slug,
+   * can never pair one version's config with another's secret. Null when no
+   * destination has that id. For the export worker only.
+   */
+  openWithSecret(
+    id: string,
+  ): Promise<{ destination: ExportDestination; secret: string | null } | null>;
 }
 
 export type RoutingChange =
