@@ -842,6 +842,26 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     return { type: "skipResult", ref, ok: true, at };
   }
 
+  async function runAckGap(
+    ref: string,
+    id: string,
+    seenAt: number,
+    cancel: AbortSignal,
+  ): Promise<WorkerMessage> {
+    const h = handles;
+    if (h === null || phase !== "running") {
+      return { type: "ackGapResult", ref, ok: false, error: REPLY_ERRORS.paused };
+    }
+    const d = await guard(find(h, id), cancel);
+    if (d === null) {
+      return { type: "ackGapResult", ref, ok: false, error: REPLY_ERRORS.noDestination };
+    }
+    cancel.throwIfAborted();
+    const cleared = await h.state.clearGap(d.generation, seenAt);
+    if (cleared) requestStatus();
+    return { type: "ackGapResult", ref, ok: true, cleared };
+  }
+
   /**
    * Cancels every pass and every test/preview/skip, and waits for all of them
    * to unwind — at most `budgetMs` when given (stop) — so no handle is closed
@@ -994,6 +1014,20 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           });
           await reply(
             (cancel) => runSkip(message.ref, message.id, cancel),
+            failed(REPLY_ERRORS.internal),
+            failed(REPLY_ERRORS.paused),
+          );
+          return;
+        }
+        case "ackGap": {
+          const failed = (error: string): WorkerMessage => ({
+            type: "ackGapResult",
+            ref: message.ref,
+            ok: false,
+            error,
+          });
+          await reply(
+            (cancel) => runAckGap(message.ref, message.id, message.seenAt, cancel),
             failed(REPLY_ERRORS.internal),
             failed(REPLY_ERRORS.paused),
           );

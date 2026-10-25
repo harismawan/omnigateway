@@ -12,9 +12,10 @@ import type { ExportDestinationType } from "@omni/store/types";
  * status carries counters, instants and fixed summaries, never a request id,
  * a URL or a receiver's words.
  *
- * Replies to `test`, `preview` and `skip` echo the caller's `ref`, so several
- * can be in flight at once. While the worker is paused (or never got its
- * handles) each is answered `{ ok: false, error: "paused" }` at once.
+ * Replies to `test`, `preview`, `skip` and `ackGap` echo the caller's `ref`,
+ * so several can be in flight at once. While the worker is paused (or never
+ * got its handles) each is answered `{ ok: false, error: "export worker
+ * paused" }` at once.
  */
 
 /** What the worker is started with: `new Worker(url, { workerData: init })`. */
@@ -51,6 +52,12 @@ export type MainMessage =
   | { type: "preview"; ref: string; requestId: string }
   /** *Skip to now* for destination `id`; answered by `skipResult`. */
   | { type: "skip"; ref: string; id: string }
+  /**
+   * The operator acknowledges destination `id`'s gap warning, as shown: clears
+   * `gap_possible_at` when it is at or before `seenAt`, so a warning raised
+   * after the operator looked survives. Answered by `ackGapResult`.
+   */
+  | { type: "ackGap"; ref: string; id: string; seenAt: number }
   /** Cancel in-flight passes, close every handle, answer `paused`. */
   | { type: "pause" }
   /** Reopen fresh handles and continue. */
@@ -65,6 +72,7 @@ export const MAIN_MESSAGE_TYPES = [
   "test",
   "preview",
   "skip",
+  "ackGap",
   "pause",
   "resume",
   "stop",
@@ -132,6 +140,9 @@ export type WorkerMessage =
   | { type: "previewResult"; ref: string; ok: false; error: string }
   | { type: "skipResult"; ref: string; ok: true; at: number }
   | { type: "skipResult"; ref: string; ok: false; error: string }
+  /** `cleared` is false when there was no warning at or before `seenAt` to clear. */
+  | { type: "ackGapResult"; ref: string; ok: true; cleared: boolean }
+  | { type: "ackGapResult"; ref: string; ok: false; error: string }
   /** Sent after every in-flight pass stopped and every handle closed. */
   | { type: "paused" };
 

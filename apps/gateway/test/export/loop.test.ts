@@ -1049,3 +1049,48 @@ test("a commit blocked on export.db's writer lock past the deadline never lands"
   expect([s.cursorId, s.exportedTotal]).toEqual(["", 0]);
   expect(s.lastError).toBe("deadline exceeded");
 });
+
+test("ackGap clears the warning raised at or before `seenAt`, and a later flag survives", async () => {
+  const w = track(
+    world({ destinations: [destination({ enabled: false, startAt: T0 - 29.5 * DAY })] }),
+  );
+  await w.loop.start();
+  await w.settle();
+  expect((await stateOf(w)).gapPossibleAt).toBe(T0);
+
+  // Acknowledging a warning older than the one shown clears nothing.
+  await w.loop.handle({ type: "ackGap", ref: "a0", id: "hook", seenAt: T0 - 1 });
+  expect(w.posted.find((m) => m.type === "ackGapResult")).toEqual({
+    type: "ackGapResult",
+    ref: "a0",
+    ok: true,
+    cleared: false,
+  });
+  expect((await stateOf(w)).gapPossibleAt).toBe(T0);
+
+  await w.loop.handle({ type: "ackGap", ref: "a1", id: "hook", seenAt: T0 });
+  expect(w.posted.filter((m) => m.type === "ackGapResult").at(-1)).toEqual({
+    type: "ackGapResult",
+    ref: "a1",
+    ok: true,
+    cleared: true,
+  });
+  expect((await stateOf(w)).gapPossibleAt).toBeNull();
+
+  await w.loop.handle({ type: "ackGap", ref: "a2", id: "absent", seenAt: T0 });
+  expect(w.posted.at(-1)).toEqual({
+    type: "ackGapResult",
+    ref: "a2",
+    ok: false,
+    error: "no such export destination",
+  });
+
+  await w.loop.handle({ type: "pause" });
+  await w.loop.handle({ type: "ackGap", ref: "a3", id: "hook", seenAt: T0 });
+  expect(w.posted.at(-1)).toEqual({
+    type: "ackGapResult",
+    ref: "a3",
+    ok: false,
+    error: "export worker paused",
+  });
+});
