@@ -1,7 +1,7 @@
 # Log Export Design
 
 Date: 2026-10-24
-Status: draft
+Status: draft (revised 2026-10-25: bodies stay in the store, 64 MiB per artifact; export-only and latest-per-conversation modes removed)
 
 ## Goal
 
@@ -155,7 +155,7 @@ written only by the export worker.
 | `secret` | encrypted envelope (`encrypt()` from `packages/store/src/encryption.ts`), nullable |
 | `filter` | JSON: optional `apiKeyIds[]`, `models[]` (requested or resolved), `failedOnly` |
 | `include_bodies` | boolean, default false |
-| `body_retention` | `every` \| `latestPerConversation`, default `every`; export-only mode only (see *Latest body per conversation*) |
+| `max_request_bytes` | integer, nullable — the encoded-request limit for this receiver; null takes the type's default (see *Bodies*) |
 | `start_at` | the starting cursor, fixed **at creation** by the main thread: the database clock's now for `startFrom: "now"`, `0` for `"oldest"`. The worker initialises state from this value, never from its own start time, so a worker that starts late (crash, backoff) skips nothing |
 | `created_at`, `updated_at` | |
 
@@ -247,408 +247,244 @@ by the console's "preview record".
 
 ## Bodies
 
-Bodies reach a destination in one of two modes, chosen install-wide by
-`Settings.bodyLoggingTarget: "store" | "export"` (default `"store"`):
+*Operator decisions (2026-10-25):* bodies stay in the store and the export worker reads them from
+there — there is no export-only mode and no in-memory body path. The store's limit on a body is
+raised to **64 MiB per artifact**, and the structural limits inside it (per-string, array, depth,
+key count) are removed, so a body is stored whole up to that size. An artifact holds the client
+request and response and every provider attempt. Disk is bounded by body retention (1 day by
+default) and the existing 100,000-row cap. No per-conversation deduplication: every request's body
+is exported as its own.
 
-- **`store`** — today's body capture, unchanged: bounded artifacts (512 KiB, 64 KiB per string)
-  kept in the store and readable on the dashboard; export attaches the client part to the metadata
-  record. Described in the rest of this section.
-- **`export`** — full, unbounded bodies that never touch the store and exist only to be shipped.
-  Described in *Export-only bodies* below.
+Why 64 MiB and not unlimited (operator-approved): a 1M-token prompt is ~4–5 MB of JSON and Anthropic
+refuses requests over 32 MB, so 64 MiB keeps every realistic body whole while the existing envelope
+(uint32 length), Postgres `bytea` (≈1 GB field) and whole-artifact decrypt/parse all stay valid and
+memory stays computable. Unlimited would need a chunked storage format, streaming capture into a
+worker and streaming reads.
 
-In `store` mode, `include_bodies` exports the *client* request and response from the body artifact
-(the pre-RTK client view, already masked by `MASK_RULES` at capture). Provider attempts and stream
-chunks are not exported.
+### What changes in body capture
 
-The exporter checks every gate **at send time**, for each record. Turning a gate off stops body
-export immediately, even for artifacts captured earlier and still retained (artifacts outlive the
-capture gates; `bodies.get` does not consult them):
+- **`MAX_ARTIFACT_BYTES` = 64 MiB** (was 512 KiB). An artifact over it after masking still gets
+  today's omission marker (`omitBodies`, `truncated: true`), so an oversized body is recorded as
+  omitted, never silently dropped.
+- **No structural bounding.** `boundValue` (64 KiB per string, last 24 array items, depth 6, first 80
+  keys) is no longer applied to captured bodies. Masking (`MASK_RULES`) still runs on every string.
+- **Stack-safe walking.** With the depth bound gone, masking (`maskSecrets`, recursive today) is
+  rewritten as an iterative walk with an explicit stack, so deeply nested but small JSON is masked
+  rather than overflowing. Serialization and parsing use the native `JSON` functions, which can still
+  throw on pathologically deep input however small it is; on a `RangeError` the artifact is written as
+  an omission marker with reason `nesting too deep`, never a failed capture with nothing recorded.
+- **Capture caps follow the artifact cap.** `MAX_CAPTURED_BODY_BYTES` (wire request, response text,
+  drained stream bytes, SSE frame sink) becomes the same 64 MiB per side. Bytes past it are still
+  drained and discarded, never left in the pipe, and mark the side `truncated`, as today.
+- **Readers follow.** `MAX_ENVELOPE_BYTES`, `MAX_BINARY_ENVELOPE_BYTES`, the gunzip
+  `maxOutputLength` and the Postgres read's SQL length filter all derive from `MAX_ARTIFACT_BYTES`,
+  so they move with it and keep their meaning: past them an envelope is `corrupt`. Every existing
+  integrity check (authenticated header, claimed length, digest, gzip output length and consumed
+  input) is unchanged. Artifacts written under the old cap still read.
+- `bodyLoggingCaptureStreamChunks` is unchanged and optional; turning it on roughly doubles what a
+  streamed response stores.
 
-1. `OMNI_BODY_LOGGING_ALLOWED` and `settings.bodyLoggingEnabled`, as currently set;
-2. the row's key is not `bodyLoggingOptOut`;
-3. **`OMNI_EXPORT_BODIES_ALLOWED=true` at boot** — new, so a console admin alone cannot start
-   sending prompt content to a third-party system;
-4. the destination's `include_bodies` is on, set only by an admin.
+### Memory and the request path
 
-If any gate fails, the record carries no `body` field at all. When all hold, `body.state` is:
+Raising the cap 128× makes three things that were negligible at 512 KiB real, and the design bounds
+each:
 
-- `"included"` — the artifact was read; client request and response attached;
-- `"truncated"` — as included, but a part exceeded 256 KiB serialized (head kept);
-- `"unavailable"` — no artifact found. This covers both "never captured" and "pruned by body
-  retention" (one day by default, against thirty for logs): pruning deletes the artifact's pointer
-  row too, so the two cannot be told apart without new capture-provenance storage, which this design
-  does not add. Operators who need bodies exported should keep export lag well under body retention.
+**1. A global capture budget, never back-pressure.** `OMNI_BODY_CAPTURE_BUDGET_BYTES` (default
+512 MiB) bounds all bytes held for body capture across in-flight requests: collector buffers, the
+frame sink, and parts queued for the body writer. Each collector reserves against it as bytes arrive
+(a shared counter in the main thread; capture is main-thread code today). A reservation that would
+exceed the budget **abandons that request's capture**: its buffers are freed, further bytes are
+drained and discarded, and the artifact is written as an omission marker with reason
+`capture budget exhausted` and `truncated: true`, counted in
+`omni_bodies_dropped_total{reason="budget"}`. The client stream is never slowed. Reservations are
+released when the body writer acknowledges the write (or the capture is abandoned).
 
-Classifier rows have no artifact by design and read `"unavailable"`.
+**2. Sealing off the main thread.** At 512 KiB the artifact was masked, serialized, compressed,
+encrypted and written inside `finishLog`, awaited. Now:
 
-## Export-only bodies
+- `finishLog` **does not await** the body write. It hands the request's parts to the **body writer**
+  — a dedicated `Worker` (`apps/gateway/src/bodies/writer.ts`) — and returns. Row completion, debits,
+  telemetry and the client response never wait on a body.
+- **What crosses to the worker is raw text, not parsed trees.** Collectors keep what they already
+  keep as strings/chunks (wire request body text, response chunks, frames); the client request is
+  passed as the **raw request text** the route read, not the parsed object (the route reads the body
+  as text once, `JSON.parse`s it for the IR, and keeps the text for capture — replacing
+  `captured.client.request = body`). The client response is passed as the serialized JSON the route
+  already sends (non-streaming) or the frame list (streaming). No structured clone of an object tree
+  happens on the main thread. Joining chunks, `JSON.parse`, masking, `JSON.stringify`, gzip and
+  AES-GCM all run in the worker.
+- **Handed over in bounded chunks, never one big copy.** A string is copied by `postMessage`
+  synchronously on the sender, so the main thread never posts more than 1 MiB of text per message:
+  each part is encoded to bytes in 1 MiB slices and each slice's `ArrayBuffer` is **transferred**
+  (zero-copy) in its own message, yielding to the event loop between slices (`setTimeout(0)`), so a
+  64 MiB part costs the loop sixty-four ~1 MiB encodes spread over turns rather than one 64 MiB
+  stall. The encode copy is reserved against the capture budget before it is made and released when
+  the worker acknowledges the slice; the worker reassembles slices by `(requestId, part, seq)`.
+- **Who writes what.** The worker seals and, in SQLite mode, writes the encrypted file; the database
+  write stays on the connection that writes today:
+  - **SQLite:** the worker writes the artifact to a **staging path**
+    (`request_bodies/.staging/<requestId>.<nonce>`), `fsync`s it, renames it to its final relPath,
+    and posts `{ requestId, at, relPath, size, sha256, truncated, generation }` back; the **main
+    thread** runs the existing one-row `request_bodies` upsert. One writer connection for the main
+    file means `PRAGMA data_version` does not move for other connections' commits (a worker writing
+    the row would make every captured request rebuild the routing snapshot via
+    `sqlite/store.ts` `routing.version()`) and no new writer-lock contention.
+  - **Postgres:** the worker writes the `bytea` row through its own small pool (2 connections).
+    `request_bodies` carries no `bump_config_version` trigger, so it moves no routing version. A
+    64 MiB parameter is well inside Postgres' field limit and Bun SQL's parameter handling.
+- **Queue limit.** At most 1,000 requests may be waiting for the writer; past that a capture is
+  abandoned the same way (reason `backlog`).
+- **Failure isolation.** A writer crash loses what it held (`reason="writer_crash"`, each affected
+  request's capture state set to `failed`), is restarted with backoff, and never affects inference.
 
-*Operator decisions:* log every body in full with no size cap; send it only to export destinations;
-keep the database (Postgres or SQLite) to metadata alone; **hold bodies in memory only — no disk
-spool** — and ship them quickly so little is held; when memory is full, drop the oldest; optionally
-keep only the latest body per conversation.
+**3. Bounded reads.** Decoding an artifact (decrypt, gunzip, `JSON.parse`) of up to 64 MiB is still
+done whole — that is what the cap buys — but never on the main thread:
 
-### What changes when `bodyLoggingTarget = "export"`
+- The admin body route (`GET /api/requests/:id/body`) and `omni bodies` decode in the body writer
+  worker (a `read` message) and return a **preview**: each part's first 1 MiB of serialized JSON plus
+  its full size and a `previewTruncated` flag. The dashboard renders only that.
+- A new `GET /api/requests/:id/body/raw?part=…` (admin-only, like the existing route) streams one
+  part's full JSON, decoded in the worker, as a download.
+- The export worker decodes in its own thread (see *Exporting bodies*).
 
-- **No body reaches the store.** `bodies.put` is not called and the existing collector
-  (`bodyCapture.ts`) is bypassed entirely: no `request_bodies` row, no Postgres `bytea`, no artifact
-  file. Nothing is written to disk anywhere. The dashboard's body view and `omni bodies` show "sent
-  to export destinations" for these requests instead of content.
-- **`request_logs` gains one column**, `body_capture TEXT NULL`, written by `usage.begin` in the
-  statement it already runs: `store` | `export` | null (body logging off). It records the
-  **decision at admission** and never changes, so an exported metadata row is never stale. The
-  metadata record carries it as `"bodyCapture": "export"`: "a body for this request id was meant to
-  follow on the body channel".
-- **Capture is unbounded.** No 512 KiB artifact ceiling, no 64 KiB string cap, no array or depth
-  bounding. What is captured is the **client view, as raw bytes**:
-  - **Request:** in export mode the route reads `await request.arrayBuffer()` once, hands those bytes
-    to capture, and parses JSON from the same buffer (`JSON.parse(new TextDecoder().decode(buf))`),
-    replacing today's `request.json()` (`routes/proxy.ts:580`). No second read, no re-serialisation.
-  - **Non-streaming response:** serialised once for the response; capture encodes its own copy.
-  - **Streaming response:** the exact encoded bytes enqueued to the client — events, keepalive
-    comments and delimiters — captured at the point the SSE `ReadableStream` enqueues them, not from
-    the parsed-event callback (`:355`, `:365–366`), which omits keepalives and trailing delimiters.
-  - Provider attempts and parsed stream frames are not captured; the raw SSE bytes already hold every
-    event.
-- **The limits that remain are not ours to lift:** the HTTP server's request-body limit (Bun's
-  `maxRequestBodySize`, unchanged by this design), the memory budget below, and each receiver's own
-  limits, handled by segmenting.
-- **Gates.** Export mode needs the same capture gates as store mode (`OMNI_BODY_LOGGING_ALLOWED`,
-  `bodyLoggingEnabled`, key not `bodyLoggingOptOut`) plus `OMNI_EXPORT_BODIES_ALLOWED`; the settings
-  schema refuses `"export"` without the latter. Switching the target applies to requests admitted
-  after the change.
-- **Durability: none, by decision.** Bodies live only in the gateway process's memory until a
-  destination accepts them. A restart, deploy or crash loses whatever was not yet sent — normally
-  well under a second's worth (see *Shipping*), but everything held if a destination was down. Every
-  loss that the gateway can still observe is reported (below); losses at process exit cannot be, and
-  a receiver finds them by joining: a metadata record with `bodyCapture: "export"` and no body
-  document.
+### SQLite staging and the orphan sweep
 
-### The body worker
+`sweepOrphans` deletes artifact files with no pointer row. The worker's file exists briefly before
+the main thread writes its row, so:
 
-A dedicated Bun `Worker`, the **body worker** (`apps/gateway/src/export/bodyWorker.ts`), separate
-from the metadata export worker so neither can delay the other. It opens no database at all — it
-holds bodies in memory and sends them. Started whenever `bodyLoggingTarget = "export"`.
+- The worker writes only under `request_bodies/.staging/` until the file is complete, and the sweep
+  never lists `.staging/`.
+- After the rename to the final path, the window until the pointer row lands is covered by a
+  **pending-publication set** in the main thread. The worker posts `publishing { relPath }` and
+  **waits for the main thread's `publish-ok` before renaming**; the main thread adds the relPath to
+  the set before replying. So by the time the file exists under its final name the main thread
+  already protects it. The set entry is removed when the pointer row lands, when the worker reports
+  failure, or when the worker is restarted (a crashed worker's pending paths are cleared and those
+  files, if present, become ordinary orphans for the next sweep). The sweep already re-checks each
+  candidate against the table immediately before unlinking; it now also checks this set.
+- Staging files older than one hour are removed by the sweep (a crash mid-write leaves one).
 
-- **Configuration** arrives by message from the main thread: the destination rows (≤ 10, secrets
-  still encrypted; the worker decrypts with `OMNI_ENCRYPTION_KEY`) on start and on every
-  destination change, and the capture gates on every settings change. These are configuration
-  events, not per-request messages.
-- **Memory budget.** `OMNI_BODY_BUFFER_BYTES` (default 1 GiB) bounds **every retained allocation**
-  of export-only capture, accounted in one shared **held-bytes** counter:
-  - the 16 MiB shared-memory ring (reserved once at start);
-  - bodies being captured and finished bodies waiting to be sent — chunk bytes plus a fixed 64-byte
-    charge per chunk descriptor, with chunks smaller than 4 KiB coalesced on arrival so descriptor
-    count stays proportional to size;
-  - **send-side working memory**, from a **dedicated send pool** carved out of the budget and never
-    available to capture: `max(128 MiB, 2 × the largest destination's maxRequestBytes)`. Each
-    in-flight send reserves its encoded request size from that pool before encoding begins and
-    releases it when the request completes. At most 4 sends are in flight per destination and 16 in
-    total; a send that cannot reserve waits only for other sends — which always finish — so capture
-    filling its share can never starve delivery. Capture admission sees `OMNI_BODY_BUFFER_BYTES` minus
-    the send pool;
-  - conversation-key work: the parse of the first user message is a streaming scan of the raw
-    request bytes that stops at the end of that message, with its own fixed 1 MiB cap (a first
-    message larger than that is hashed as it streams, never buffered).
-  Unaccounted allocations are limited to fixed-size bookkeeping (slot table, per-destination
-  state), independent of traffic.
+### Capture state on the row
 
-### Capture path: nothing blocking on the inference thread
+Body persistence is now asynchronous, so a row can complete before its body exists. `request_logs`
+gains one column, `body_state TEXT NULL`, written by the main thread:
 
-- **Shared ring buffer.** At start the main thread allocates a 16 MiB `SharedArrayBuffer` ring shared
-  with the body worker. A request id slot is assigned at admission from a fixed table in the same
-  shared memory.
-- **Main thread, per chunk:** a non-blocking reservation (`Atomics.compareExchange` on the ring's
-  write index) for a small frame header (slot, part, sequence, length) plus the bytes, then a copy
-  into the ring, an `Atomics.store` publishing the frame, and an `Atomics.notify`. No syscall, no
-  allocation proportional to body size, no await.
-- **Large pieces are handed off, never waited for.** A piece over 1 MiB — the raw request body, a
-  non-streaming response — skips the ring. The main thread reserves its size atomically against a
-  shared **held-bytes** counter (the budget above) and, if it fits, transfers the `ArrayBuffer` to the
-  body worker with `postMessage(…, [buffer])` — an O(1) ownership transfer, no copy, no wait. **The
-  reservation travels with the buffer**: the message carries `reserved: n`, the worker adopts it as
-  that chunk's accounting and does **not** add it again; only the release (`Atomics.sub`) happens on
-  the worker side. Ring bytes are accounted the opposite way: the ring is pre-reserved, and when the
-  worker copies a frame out of the ring into a chunk it reserves the chunk (`Atomics.add`) before
-  freeing the ring space. **Only
-  buffers nothing else will ever read are transferred:** the raw request buffer after `JSON.parse`
-  has run on it, and the capture-owned copy of a non-streaming response. That copy is
-  **reserved before it is allocated**: the main thread reserves `3 × string.length` (UTF-8's
-  worst case for a JavaScript string) against held-bytes, encodes only if the reservation
-  succeeded (otherwise abandons with `buffer_overflow`, allocating nothing), and corrects the
-  reservation down to the actual byte length right after encoding. **SSE bytes are never
-  transferred**: the `Uint8Array`s enqueued to the client belong to the response stream, and
-  detaching them would corrupt client output; SSE always goes through the ring.
-- **Overflow never blocks.** A full ring, or a held-bytes reservation that does not fit, abandons
-  that request's capture: the main thread marks its slot `abandoned` and stops copying for it. The
-  body worker records the outcome `incomplete` (or `dropped` if nothing had been accepted), reason
-  `buffer_overflow`. The client stream is unaffected.
-- **End and abandonment never need ring space.** Each slot in the shared slot table has a state word
-  and a `finalSeq` word. `finishLog` ends a capture by storing `finalSeq` (the last sequence number it
-  emitted) and setting the state to `ended` with `Atomics.store` + `Atomics.notify` — no ring
-  reservation, so a full ring cannot strand it. Abandonment is the same: state `abandoned` plus the
-  reason code in the slot. The worker scans slot states on every wake and treats a slot as finished
-  once its state is `ended` and every sequence up to `finalSeq` has been assembled, or as soon as it
-  is `abandoned`. A request whose process path never reaches `finishLog` (a bug, not a normal path)
-  is reclaimed by the worker after the gateway's maximum request duration as `incomplete`,
-  reason `not_ended`. Slots are recycled only after the worker acknowledges them in the state word.
-- **Body worker side:** waits on the ring with `Atomics.waitAsync` (never the blocking
-  `Atomics.wait`, which would starve its `postMessage` handler and its sends). Ring frames and
-  handoffs carry a per-slot sequence number assigned on the main thread in emission order; the worker
-  assembles each request's pieces in order whichever channel delivered them. Assembled bodies are
-  kept as lists of chunks, never concatenated into one buffer.
+- `null` — body capture was not attempted for this request;
+- `pending` — set at `begin` when capture is on for the request;
+- `ready` — the writer's acknowledgement landed (SQLite: the pointer upsert and the `body_state`
+  update run in **one transaction** on the main connection, `ready` or `omitted` chosen from the
+  writer's result; Postgres: the worker writes the `bytea` row, and the main thread updates
+  `body_state` on its acknowledgement);
+- `omitted` — written, but as an omission marker (over 64 MiB, budget, backlog);
+- `failed` — writer crash or write error.
 
-### Shipping: as soon as a body is finished
+Updates are single-row `UPDATE … SET body_state` on the main connection, the same kind of write
+`usage.append` already makes; they never block inference beyond that. `sweepPending` treats a row
+still `pending` an hour after completion as `failed`.
 
-The body worker does not poll. A body is ready the moment its `end` frame is assembled, so the worker
-**flushes every 250 ms**, sending every ready body for every destination that is not in backoff, plus
-immediately whenever ready bodies exceed 16 MiB. With a healthy receiver a body is held for its own
-request's duration plus at most ~250 ms and the receiver's response time; steady-state memory is
-roughly throughput × that, a few MB for typical traffic. Memory grows only while a destination is
-slow or down.
+### Exporting bodies
 
-- **Per-destination pending sets**, in memory. A body is held once, whatever the number of
-  destinations, and released when every body-enabled destination has accepted it (or it is evicted).
-  With no body-enabled destination, bodies are released as soon as they finish — there is nothing to
-  wait for — and the console warns "export-only body capture is on but no destination receives
-  bodies".
-- **Gates are rechecked at send time.**
-- **Masking happens in the body worker at send time**, not on the request path, as a
-  **bounded-state streaming transducer** equivalent to applying `MASK_RULES` in order to the whole
-  text. Every rule matches a run of token characters (`[A-Za-z0-9_-]`, plus `.~+/=` after a
-  `bearer` scheme), optionally preceded by `bearer\s+`, and decides on at most its first 64
-  characters: `OPAQUE` at 41, the prefixed rules at prefix + 8. So the transducer holds back only the
-  current unfinished run, **capped at 64 characters**, plus a flag for "inside a `bearer` context"
-  (the whitespace after the scheme is passed through as it streams, however long). Once a run passes
-  the cap its fate is decided — elided whole, or elided after its kept prefix — and the rest of the run
-  is dropped as it streams. Memory is constant regardless of body or run length. The builder
-  implements it as a hand-written state machine, not by running the regexes over windows, and a
-  differential test asserts equality with `maskString` on the whole text for generated inputs,
-  including runs of millions of characters and boundaries at every offset. The opaque-token rule also
-  elides long base64 runs (inline images) — accepted, it is the existing rule.
-- **Body documents are separate from metadata records**, joined by request id:
-  - **Elasticsearch:** index `bodyIndex` (default `omni-bodies-{yyyy.MM.dd}`), one document per part
-    segment, `_id` = `<requestId>:<part>:<n>`, fields `requestId`, `apiKeyId`, `at`, `part`,
-    `contentType`, `complete`, `segment`, `segments`, `text`. README's recommended mapping sets `text`
-    to `index: false`.
-  - **Webhook:** one `POST` per part segment with the raw bytes as the body, its original content
-    type, and `x-omni-request-id`, `x-omni-body-part`, `x-omni-body-segment`,
-    `x-omni-body-segments`, `x-omni-body-complete` headers; signed like metadata batches.
-  - **OTLP logs:** one LogRecord per part segment, body as the string value, request id and part as
-    attributes. **OTLP traces** destinations cannot enable bodies (the API refuses it).
-- **Segmenting by encoded size, not raw size.** Each destination has `maxRequestBytes` — the limit
-  on the **final encoded HTTP request** including envelope and escaping (defaults: Elasticsearch
-  90 MiB under its 100 MB `http.max_content_length`; webhook 50 MiB; OTLP 4 MiB). The encoder fills a
-  segment until the next code point would push the encoded request past the limit (JSON escaping can
-  expand text up to sixfold), so every request fits. Boundaries are a pure function of the masked
-  text and the limit, so a resend produces identical segments and ids. Small bodies are batched into
-  one bulk request up to the same limit.
-- **Failures** follow *Delivery*'s backoff: a retryable error keeps the body pending for that
-  destination; a hard 4xx pauses that destination's body delivery (metadata delivery is independent
-  and continues). A `413` despite the encoded limit halves that destination's effective limit once,
-  logs it, and retries. Bodies pending during backoff count against the memory budget and are subject
-  to eviction.
-- **Cluster:** each node ships the bodies it captured; no lease, no coordination — no other node holds
-  them.
+`include_bodies` on a destination attaches the body to each exported record.
 
-### Latest body per conversation
+- **The export waits for the body, briefly.** A destination with `include_bodies` does not send a row
+  whose `body_state` is `pending`: the export pass stops at that row (it is the cursor's next row,
+  so nothing after it is sent either) until it becomes terminal, for at most **60 seconds after the
+  row's `completed_at`**. Past that the row is sent with `body.state: "unavailable"` and
+  `omni_export_bodies_late_total` is counted. Destinations without `include_bodies` never wait.
+- **What is exported:** the client request and response (the pre-RTK client view, masked at
+  capture). Provider attempts and stream chunks stay in the store.
+- **Gates, checked at send time for every record** — turning one off stops body export immediately,
+  even for artifacts captured earlier and still retained:
+  1. `OMNI_BODY_LOGGING_ALLOWED` and `settings.bodyLoggingEnabled`, as currently set;
+  2. the row's key is not `bodyLoggingOptOut`;
+  3. **`OMNI_EXPORT_BODIES_ALLOWED=true` at boot** — new, so a console admin alone cannot start
+     sending prompt content to a third-party system;
+  4. the destination's `include_bodies` is on, set only by an admin.
+- If any gate fails, the record carries no `body` field. When all hold, `body.state` is:
+  - `"included"` — the artifact was read and is whole;
+  - `"incomplete"` — read, but the artifact or the client side is `truncated` (client hung up, stream
+    ended on an error, a side passed 64 MiB); the parts that exist are attached;
+  - `"omitted"` — the artifact is an omission marker (over 64 MiB, budget, backlog, or a legacy
+    artifact the old 512 KiB cap omitted); no parts attached, `reason` carried;
+  - `"unavailable"` — no artifact: never captured, failed, waited past 60 s, or pruned by body
+    retention (1 day by default against 30 for logs — operators exporting bodies keep lag well under
+    body retention).
+- Classifier rows have no artifact by design and read `"unavailable"`.
 
-*Operator decision.* Agent clients resend the whole conversation every turn, so each body mostly
-contains the previous one. A destination with `body_retention = "latestPerConversation"` keeps only
-the newest body per conversation, so receiver storage — and the body worker's memory during an
-outage — scales with conversations rather than with requests.
+**Inline or separate.** A body rides inside the metadata record when the whole encoded record fits
+the destination's `maxRequestBytes`. Otherwise the metadata record carries
+`body: { state, parts: { request: n, response: m } }` and the body follows as separate **body
+documents**, joined by request id:
 
-- **Conversation key** = `sha256(api_key_id + "\0" + session_id + "\0" + branch)`, hex, computed by
-  the body worker from the raw request bytes. Session id comes from the traceability design's
-  `session_id` (inferred or explicit), passed to capture at admission; the API key id is included so
-  equal session ids under different keys never share a key. **`branch`** identifies one linear
-  conversation inside a session:
-  - when the client supplies an explicit thread or conversation identity, that wins: Codex's
-    `thread_id` from its turn metadata (one per thread, including subagent threads). Turn ids are
-    not used: a turn is one request, not a conversation;
-  - otherwise it is derived from the **first message the user authored**, found per surface
-    (Anthropic `messages`, Chat Completions `messages`, Responses `input`), skipping client-injected
-    context turns (user turns consisting only of `<system-reminder>…</system-reminder>`,
-    `<environment_context>…</environment_context>` or `AGENTS.md` instruction blocks; a pinned
-    table extended by tests captured from real Claude Code, Codex and OpenCode requests). A first
-    message alone does **not** prove one linear conversation — two branches can share it — so this
-    derivation is used only where it has been verified: the worker keeps, per (API key, session,
-    first-message hash), the message count and the hash of the message prefix of the newest body.
-    A new body extends that branch only if its message list **starts with** the stored prefix
-    (same messages, in order) and is longer or equal; a body that diverges from it is a different
-    branch and **falls back to `every`** for itself, leaving the stored branch unchanged. Prefix
-    hashes are computed in the same streaming scan, chained per message, with constant memory.
-    **Branch state is bounded:** each entry is a fixed ~200 bytes, charged to the body memory budget;
-    entries live in an LRU capped at 100,000 and expire 24 h after their last body.
-    **Message-derived branches carry an incarnation**, because absence from the worker's memory
-    does not prove absence at the receiver: when the worker starts a branch entry (first body seen,
-    or the entry was evicted, expired or lost to a restart), it mints a random 64-bit incarnation
-    and the key becomes `sha256(api_key_id + session_id + first-message hash + incarnation)`. A
-    branch that resumes after its entry was lost therefore gets a **new** key and a new manifest; it
-    can never overwrite what an earlier incarnation exported, whether that history matches or
-    diverges. The cost is an extra conversation document on the receiver after a restart or an
-    eviction, which a reader groups by `sessionId` and orders by `at`. Explicit thread identities
-    (Codex `thread_id`) need no incarnation — the client vouches for the conversation;
-  - if neither yields a value, or the request shape is not recognised, the request **falls back to
-    `every`** (its key is its request id). Ambiguity always falls back; it never guesses.
-  Consequences, all intended:
-  - the main conversation, each subagent, and one-off utility calls (title, summary) in the same
-    session have different first messages, so they get different keys and never overwrite each
-    other;
-  - for message-derived branches, a compaction replaces the history, so the first message changes and
-    a new key starts; the pre-compaction body is kept. For explicit thread identities (Codex
-    `thread_id`), compaction stays in the same thread and the compacted body replaces the old one —
-    the pre-compaction history is then lost on the receiver, stated in README;
-  - a request **without** a session id, or whose body cannot be parsed for a first user message,
-    falls back to `every` for that request (its key is its request id).
-- **Ordering.** Requests in one conversation can finish out of order (a long stream overtaken by a
-  short one), and an older body must never replace a newer one. **Conversation order is admission
-  order**: a client sends turn N+1 only after it has the answer to turn N, so within one
-  conversation the later request is always admitted later — including a compacted request, which
-  is admitted after the history it replaces even though it carries fewer messages. Concurrent
-  captures in one conversation (a client retry, parallel calls) are ordered by admission too: the
-  later-admitted one wins. So each body's `version` is an **admission sequence**, unique across the
-  cluster and never truncated:
-  - Cluster mode: `INCR omni:body-version` on coord (Redis) — a 64-bit counter, persistent in Redis,
-    far beyond any realistic total (2⁶³). The body worker issues it when it first sees the slot at
-    admission (off the request path; a few ms after admission at most, and slots are seen in
-    admission order per node). Single-node mode: `version = max(nowMicros × 1024, last + 1)`, where
-    `nowMicros` is wall-clock microseconds since the epoch and `last` the previous version issued
-    by this process. It needs no persistence: after a restart the clock alone is already past
-    every version issued before (a restart takes far longer than 1 µs), and within a process
-    `last + 1` keeps it strictly increasing even if the clock steps back. The only exposure is a
-    wall clock stepped backwards *across* a restart by more than the restart took; the worker
-    refuses to issue versions (falls back to `every`) while the clock reads earlier than the
-    `startedAt` the main thread recorded for its previous start, if known, and README tells
-    operators to run NTP with slewing rather than stepping.
-  - Cross-node nuance: two nodes can admit two turns of one conversation within milliseconds only if
-    the client sent the second before the first was answered — that is a concurrent capture, and the
-    rule "later INCR wins" is the ordering policy for it.
-  - If coord is unavailable, the body falls back to `every` rather than risk a version that could
-    collide or go backwards.
-  - **Versions are `bigint` end to end.** `nowMicros × 1024` (~1.8 × 10¹⁸) is beyond JavaScript's
-    safe-integer range, so every version computation uses `bigint`; Redis `INCR` replies are parsed
-    as `bigint`; versions are written into Elasticsearch requests as JSON integer literals produced
-    from the `bigint`'s decimal string (never through `number`), and stored manifests are parsed with
-    a lossless integer reader for the `version` field. Elasticsearch external versions accept any
-    value up to 2⁶³−1, which both schemes stay below.
-  - Message count plays no part in ordering; it is used only for branch verification (above).
-- **Elasticsearch: immutable segments plus one manifest**, so replacement is atomic from a reader's
-  point of view and never depends on deleting the right documents:
-  - **Index.** Conversation bodies go to a **non-dated** index, `conversationIndex` (default
-    `omni-conversations`), so the same key always lands in the same index regardless of date. (The
-    dated `omni-bodies-*` index is used only for `every` bodies.) Retention there is the operator's
-    ILM/delete-by-query job on `at`; README gives one.
-  - **Segments** are written first, as immutable documents
-    `_id = <conversationKey>:<version>:<requestId>:<part>:<n>` (plain `index`, idempotent on
-    resend). The request id makes the id globally unique even if two versions were ever equal. A
-    segment is never modified or reused.
-  - **Manifest** last: one document per key, `_id = <conversationKey>`, written with
-    `version_type=external` and the body's version, holding `{ conversationKey, sessionId, apiKeyId,
-    requestId, version, at, parts: { request: segments, response: segments }, complete, turns }`.
-    Elasticsearch accepts it only if its version is higher than the stored one; a `409
-    version_conflict` means a newer body is already current and counts as **delivered**. The
-    manifest is written only after every segment of that body was accepted, so a manifest never
-    points at missing segments.
-  - **Readers** fetch the manifest, then its segments by id. Segments of superseded versions are
-    unreachable through the manifest and are garbage, but are **kept for a reader-safety interval of
-    10 minutes** after being superseded, so a reader holding manifest V can still fetch V's segments
-    after V+1 is published. After a manifest write succeeds, the worker schedules a
-    `delete_by_query` for that key's segments with `version < manifest.version` **and `supersededAt`
-    older than 10 minutes** (each segment of the previous version gets `supersededAt` via an
-    `update_by_query` when its successor's manifest lands), run by a cleanup pass every minute and
-    retried until it succeeds. README's reader contract also says: if a segment is missing, re-fetch
-    the manifest and retry — needed only for reads slower than the interval; segments are filtered by `version` and `requestId` fields
-    stored on each segment document. An older body arriving late writes
-    segments under its own version — they cannot collide with or resurrect anything — and its
-    manifest write is rejected with `409`. **A `409` is not proof of a newer body**: a retry of a manifest
-    write that succeeded but whose response was lost also gets `409`, at the *same* version. So on
-    `409` the worker reads the stored manifest: same version **and** same `requestId` → the earlier
-    attempt succeeded, the body is delivered, nothing is deleted; anything else (strictly higher
-    version, or an equal version naming another request) → this body is superseded and the worker
-    deletes **this body's** segments explicitly (`delete_by_query` on `conversationKey`,
-    `version = this` and `requestId = this`), retried with backoff until it succeeds or the body's
-    destination entry is dropped. Whether these segments were ever referenced cannot be proven — an
-    earlier attempt of this same body may have published its manifest, lost the response, and been
-    superseded by V+1 before this retry — so they get the **same treatment as superseded
-    segments**: marked `supersededAt` now and deleted by the cleanup pass after the 10-minute
-    reader-safety interval, never immediately. Cleanup never touches a segment named by the stored manifest.
-- **Webhook and OTLP** cannot replace. They receive the newest body per key *at the time of
-  sending*; a body already sent stays sent. Each delivery carries `x-omni-conversation-key` / the
-  `omni.conversation.key` attribute and the version, so a receiver can do its own upsert.
-- **In memory, by version, not by finish order.** For each key the worker keeps, per
-  `latestPerConversation` destination, at most one pending body: the one with the **highest
-  version**. When a body finishes, it replaces the pending one only if its version is higher; if it
-  is lower (an older request that finished late), the finishing body is the one superseded for that
-  destination. Superseded bodies are released once no destination still needs them (`every`
-  destinations still do), counted (`omni_export_bodies_superseded_total`), not reported as losses.
-  The worker also remembers, per key and destination, the highest version already **delivered**. An
-  entry is **pinned** while any capture with the same key and an older version is still in flight
-  (the worker tracks in-flight captures per key), so it cannot be forgotten while it still matters;
-  unpinned entries live in an LRU of 100,000 keys. A finishing body older than the remembered version
-  is superseded at once rather than sent. If an unpinned entry was evicted and an old body for that key
-  later finishes, the Elasticsearch manifest's external version still rejects it (`409`), so the
-  memory bound costs at most one redundant send, never a regression.
-- **What is given up**, stated in README: per-turn bodies; anything the client rewrote out of its
-  history between turns (dropped thinking blocks, cleared tool results from context editing, changed
-  system reminders); and every response except the newest, beyond what survives as assistant
-  messages in the latest request.
+- **Elasticsearch:** index `bodyIndex` (default `omni-bodies-{yyyy.MM.dd}` on the row's `at`), one
+  document per part segment, `_id` = `<requestId>:<part>:<n>`, fields `requestId`, `apiKeyId`, `at`,
+  `part`, `segment`, `segments`, `text`. Idempotent on resend. README's recommended mapping sets
+  `text` to `index: false`.
+- **Webhook:** one `POST` per part segment with the JSON text as the body and `x-omni-request-id`,
+  `x-omni-body-part`, `x-omni-body-segment`, `x-omni-body-segments` headers, signed like metadata
+  batches.
+- **OTLP logs:** one LogRecord per part segment, body as the string value, request id and part as
+  attributes. **OTLP traces** destinations cannot enable bodies (the API refuses it).
 
-### When memory is full: drop the oldest
+**Segmenting by encoded size.** Each destination has `maxRequestBytes` — the limit on the final
+encoded HTTP request, envelope and escaping included (defaults: Elasticsearch 90 MiB under its
+100 MB `http.max_content_length`; webhook 50 MiB; OTLP 4 MiB). The encoder fills a segment until the
+next code point would push the encoded request past the limit (JSON escaping can expand text up to
+sixfold), so every request fits. Boundaries are a pure function of the text and the limit, so a
+resend produces identical segments and ids. A `413` despite the limit halves that destination's
+effective limit once, logs it, and retries.
 
-Before accepting more bytes would exceed `OMNI_BODY_BUFFER_BYTES`, the body worker frees memory:
+**Export-worker memory.** Decoding is whole-artifact, so the export worker bounds it with a
+worker-wide **body budget of 192 MiB** shared by all destinations, and admits one body at a time:
 
-1. It drops the **oldest finished** bodies (by finish time), whether or not some destinations already
-   have them, until the new bytes fit.
-2. If none remain, it abandons the **oldest in-flight** capture (by admission time) and marks its
-   slot `abandoned` so the main thread stops copying for it.
-3. Only if the bytes belong to the oldest capture itself and nothing else can be freed is that capture
-   abandoned.
+- **One body in the worker at a time, all destinations included** (a semaphore held from decode to
+  the body's last segment being accepted or the pass ending). That rules out reservation deadlock by
+  construction: no second body can hold budget while the first waits for room.
+- **The reservation is taken once, up front, for everything that body will need:** the decode
+  workspace and the export after it. It is computed from the artifact's plaintext length `P`,
+  read **before** decrypting and then verified:
+  - **binary (`OGBA`) envelopes:** `P` is the header's claimed length, already capped at
+    `MAX_ARTIFACT_BYTES` by `parseBinary` before any decrypt; it is used provisionally for admission,
+    and the decode then enforces it (GCM authenticates the header; gunzip must produce exactly `P`) —
+    a mismatch is `corrupt`, as today;
+  - **legacy `enc:v1:` envelopes** (no length header): `P` = the ciphertext length derived from the
+    validated hex (`(envelope length − 65) / 2`, the AES-GCM plaintext being ciphertext minus tag),
+    which bounds the plaintext exactly; these were written under the 512 KiB cap, so they are small.
 
-The main thread's own reservations (handoffs) fail fast against the shared counter rather than wait
-for this; they abandon their capture as in *Capture path*.
+  The reservation is then `ciphertext + P` for decrypt and gunzip,
+  `2 × P` for the client text extracted as UTF-16 strings, and `maxRequestBytes` for one encoded
+  segment. The parsed tree is never built for export: the client request and response are extracted
+  by a streaming JSON scanner over the decrypted text that copies out only the two client fields, so
+  no node-heavy object graph exists to under-estimate.
+- If that reservation exceeds the whole budget, the body is exported with `body.state: "omitted"`,
+  reason `export budget`, counted — never partially sent. With the defaults this is an artifact over
+  ~40 MiB of plaintext on an Elasticsearch destination; operators exporting bodies that large raise
+  `OMNI_EXPORT_BODY_BUDGET_BYTES`.
+- The decrypt/gunzip buffers are released as soon as the client text is extracted; the reservation
+  shrinks to the text plus one segment and is released entirely after the last segment is accepted.
+- A batch never holds more than one record's body: rows with bodies are sent body by body (metadata
+  for the rows before it go first in their own batch).
+- A pass checks for cancellation (lease loss, pause, stop) between segments and releases the
+  semaphore and its reservation on cancellation.
 
-### Reporting losses
+### Restore, import and shutdown
 
-Every body the gateway can still observe ends in one **outcome**: `complete` | `incomplete` |
-`dropped`, with `reason` `buffer_overflow` | `evicted` | `worker_crash`.
-
-- **To destinations.** A body that was cut short is sent with `complete: false`. A body with no
-  content left gets a small **tombstone** (`{ requestId, part: "outcome", state, reason }`), sent like
-  a body. Tombstones are held in memory too, capped at 100,000; beyond that the oldest are folded into
-  a per-destination **gap counter** (`count`, `fromAt`, `toAt`), sent as one gap tombstone on that
-  destination's next successful send and reset only by that send's acceptance (a snapshot is taken
-  before sending; drops during the send accumulate into the next one).
-- **Worker crash.** The held-bytes counter, the slot table, and the **loss ledger** live in shared
-  memory owned by the main thread. The ledger holds, per destination, two counters: bodies not yet
-  delivered to that destination, and outcomes (tombstones and the gap counter) not yet delivered to
-  it — with the oldest and newest `at`. The **main thread increments** the per-destination body
-  counter atomically when it accepts a capture at admission (one `Atomics.add` per body-enabled
-  destination, at most ten), so a body that is still in the ring or in a queued handoff — not yet seen
-  by the worker — is already counted. The worker decrements on delivery, supersession and release,
-  and moves a count from "bodies" to "outcomes" when it turns a body into a tombstone. When
-  the body worker dies, the main thread reads the ledger, adds the totals to
-  `omni_export_bodies_dropped_total{reason="worker_crash"}`, marks every in-flight slot
-  `abandoned`, resets the held-bytes counter, and restarts the worker with backoff (as in *Failure
-  isolation*), passing the per-destination ledger values in its start message. The new worker seeds
-  each destination's gap counter with them, so every destination is told — as one gap tombstone —
-  about bodies and outcomes it will never receive. Their content and individual request ids are
-  gone.
-- **Metrics:** `omni_export_bodies_dropped_total{reason}`, `omni_export_bodies_superseded_total`,
-  `omni_export_body_buffer_bytes` (current held bytes), `omni_export_bodies_sent_total{destination}`.
-  The console and `omni doctor` warn when the buffer has been over 80% for more than a minute.
-- **Dashboard mirror.** The main thread records each final outcome into two dashboard-only columns,
-  `body_outcome` and `body_outcome_reason`, batched once per second off any request. A row whose
-  outcome stays empty was lost at process exit.
+The body writer joins the lifecycle the export worker already has (see *Restore and import*): before
+a swap the main thread sends it `pause`; it finishes or abandons its current write, stops accepting,
+closes its handles, discards its queue (each request counted as `writer_crash`-equivalent
+`reason="restore"`), and acks. Acknowledgements carry the **generation** the main thread stamped at
+enqueue; after a swap the generation increments, so a late ack from before the swap is ignored and
+cannot write a pointer into the restored database. Staging files are cleaned on resume. On shutdown
+the writer gets the same 5 s as everything else; whatever is unwritten is lost and was counted.
 
 ### Sizing, stated in README
 
-A full 1M-token prompt is roughly 4–5 MB of JSON; responses are far smaller. With a healthy receiver
-the body worker holds a few MB. During a receiver outage, `every` fills a 1 GiB buffer in minutes
-under agent traffic (each turn resends the conversation), after which the oldest bodies are dropped;
-`latestPerConversation` holds about one body per active conversation (e.g. 50 × 5 MB) and stops
-growing. Operators who need full per-turn history through long receiver outages should use store mode
-or accept the loss; this design deliberately has no disk buffer.
+A full 1M-token prompt is ~4–5 MB of JSON; an artifact also stores each provider attempt's request
+and response, so failover doubles it. Coding agents resend the whole conversation every turn, so
+stored body volume tracks *conversation length × turns*: ten agents on long sessions can write
+several GB an hour. Body retention (1 day default) and the 100,000-row cap bound disk; size the disk
+(SQLite) or database (Postgres) for a day of traffic, or shorten body retention. The capture budget
+(512 MiB default) bounds memory; raise it if `omni_bodies_dropped_total{reason="budget"}` grows.
 
 ## Asynchrony
 
@@ -663,14 +499,8 @@ column in the `UPDATE` that `usage.append` / `sweepPending` already run — no e
 extra transaction. A request completes identically whether zero or ten destinations exist, and
 whether they are healthy, failing, hanging or unreachable.
 
-**The one exception is export-only body capture**, when the operator turns it on
-(`bodyLoggingTarget = "export"`). Capture has to happen while the bytes pass, so the request path
-then copies each chunk into a shared-memory ring with a non-blocking atomic reservation — no
-syscall, no await (see *Capture path*). A full ring abandons that request's capture rather than slow
-the client; assembly, masking and sending happen in the body worker. It
-replaces, rather than adds to, today's store-mode capture, which awaits `bodies.put` in
-`finishLog`. Nothing about destinations — their health, their number — reaches the request path
-even then.
+Body capture is not export work and is not affected by any destination. Its own move off the
+request path — the body-write queue and the body writer — is described in *Bodies*.
 
 ### 2. Nothing on the gateway's event loop, and no lock inference waits on
 
@@ -903,71 +733,50 @@ generation, and a destination restored without a state row starts from its `star
 - Secrets never appear in API reads, logs, `last_error`, metrics or snapshots in plaintext.
 - Request path unaffected: inference latency and outcome identical with a destination failing,
   hanging (receiver that never responds) or slow.
-- Export-only bodies:
-  - a 200 MiB request and a 200 MiB streamed response are exported byte-identical (after masking),
-    SSE keepalives and delimiters included, while process RSS stays within `OMNI_BODY_BUFFER_BYTES`
-    + a fixed bound;
-  - the request body is read once (`arrayBuffer`) and parsed from the same bytes; `JSON.parse` never
-    sees a detached buffer;
-  - main-thread capture performs no syscall and no await (instrument `fs` on the main thread and
-    assert zero calls during a captured request); a receiver that hangs does not change client
-    latency;
-  - nothing is written to disk by capture or the body worker, on either backend — no
-    `request_bodies` row, no file;
-  - SSE buffers enqueued to the client are never detached (byte-identical client output with capture
-    on, including chunks larger than the ring);
-  - the body worker processes handoffs while idle on the ring (`waitAsync`) and assembles pieces in
-    sequence order across ring and handoff;
-  - flush: with a healthy stub receiver, a finished body is sent within 250 ms + receiver time, and
-    held bytes return to ~0 between bursts;
-  - memory full: held bytes never exceed `OMNI_BODY_BUFFER_BYTES` under a single endless stream and
-    under a burst; eviction order is oldest finished, then oldest in flight; handoffs fail fast
-    without waiting; every eviction and overflow yields an outcome (`complete: false` or a
-    tombstone) and its counter; tombstones beyond 100,000 fold into one gap tombstone; drops during
-    a gap send appear in the next one;
-  - worker crash: the main thread counts held bodies and undelivered outcomes from the shared ledger
-    as `worker_crash`, abandons in-flight slots, restarts the worker, and each destination then
-    receives one gap tombstone covering them; inference unaffected;
-  - accounting: held bytes include descriptors and in-flight send buffers; a handed-off buffer is
-    counted once; a non-streaming response copy is reserved before encoding and nothing is allocated
-    when the reservation fails; with capture filling its whole share, sends still proceed from the
-    send pool (no starvation); with 16 concurrent sends of maximum size the budget still holds; tiny
-    SSE chunks are coalesced;
-  - crash ledger: a body still in a queued handoff when the worker dies is counted and reported;
-  - end/abandon with the ring completely full still finishes or abandons the capture; a slot never
-    reaching `finishLog` is reclaimed as `not_ended`;
-  - with zero body-enabled destinations, bodies are released as soon as they finish;
-  - masking: the streaming transducer equals `maskString` on the whole text for generated inputs,
-    including multi-million-character runs and `bearer` with unbounded whitespace, at constant
-    memory; masking across segment boundaries equals masking the whole text;
-  - segmenting: every encoded request ≤ `maxRequestBytes` for worst-case escaping input (control
-    characters, quotes); segment ids are stable across resends;
-  - the settings schema refuses `"export"` without `OMNI_EXPORT_BODIES_ALLOWED`; OTLP-traces
-    destinations cannot enable bodies; switching the target applies to newly admitted requests
-    only; the exported metadata row's `bodyCapture` never changes after admission;
-  - latest per conversation: the main conversation, a subagent and a title request in one session
-    get three keys; a compaction starts a new key; a request without a session id is kept as
-    `every`; equal session ids under two API keys get two keys; Codex threads (main and subagent)
-    get separate keys from `thread_id`; injected `<system-reminder>`/`AGENTS.md`/environment user
-    turns are skipped when choosing the first message; two branches sharing a first message — the
-    diverging one falls back to `every` and the stored branch is not overwritten; an unrecognised
-    shape falls back to `every`; a late old body whose delivered-version entry was evicted is still
-    rejected by the manifest; a rejected version's segments are deleted; a manifest retry after a
-    lost-but-successful write (equal-version `409`, same request id) is treated as delivered and
-    deletes nothing; versions from two nodes never collide (64-bit coord counter); a later-admitted
-    turn always outranks an earlier one regardless of node clocks; a Codex compacted body (fewer
-    messages, same `thread_id`) replaces the pre-compaction body; a single-node restart never
-    reissues a lower version; coord unavailable → `every`; versions above 2⁵³ survive a round trip
-    through Redis, the bulk request and the manifest read without precision loss; a reader that
-    fetched manifest V can still read all of V's segments for 10 minutes after V+1 is published;
-    branch state stays within its cap; a branch resumed after its entry was evicted or the worker
-    restarted gets a new incarnation and key and never overwrites the earlier manifest; an older body finishing after a newer one never replaces it, in memory (version
-    compare) or in Elasticsearch (manifest `409`); a reader following the manifest never sees
-    segments of two versions or a missing segment, including when an old body's segments arrive
-    after a newer manifest; bodies land in the non-dated conversation index across a date change;
-    superseded bodies are not sent to `latestPerConversation` destinations but still are to `every`
-    destinations, and are not counted as losses; during a receiver outage memory holds about one
-    body per conversation for a `latestPerConversation`-only setup.
+- Bodies:
+  - capture stores a 20 MB client request (with its one attempt) whole, and separately a 20 MB
+    streamed response whole — no structural bounding — and each reads back byte-identical (after
+    masking) on both backends, including a real Bun SQL round trip on Postgres; a request + response
+    + attempts whose combined artifact passes 64 MiB is an omission marker; a side over 64 MiB is
+    drained, discarded and marked `truncated`; artifacts written under the old 512 KiB cap still read;
+  - masking of a 100,000-deep nested JSON body succeeds (iterative walk); a serialization
+    `RangeError` yields an omission with reason `nesting too deep`;
+  - the main thread hands a 64 MiB part over in ≤ 1 MiB transferred slices and yields between them;
+  - the reader's ceilings (envelope, binary envelope, gunzip output, Postgres length filter) follow
+    `MAX_ARTIFACT_BYTES`, and an envelope past them is `corrupt`;
+  - capture budget: concurrent long streams never hold more than `OMNI_BODY_CAPTURE_BUDGET_BYTES`;
+    the request that would exceed it is abandoned as an omission (`reason=budget`) while its client
+    stream is byte-identical and unslowed; a full writer queue abandons with `reason=backlog`;
+  - `finishLog` does not await the body write: with the writer stalled, client latency and row
+    completion are unchanged, and main-thread event-loop lag with 10 concurrent 50 MB captures stays
+    within the no-capture bound (only strings cross `postMessage`; no parse or stringify of a body on
+    the main thread — assert by instrumenting `JSON.parse`/`JSON.stringify` on large inputs);
+  - the route reads the client body as text once and parses the IR from it;
+  - SQLite: the worker writes only under `.staging/` until rename, and renames only after
+    `publish-ok`; the main thread writes every pointer row and its `body_state` in one transaction
+    (`data_version` on the main connection is unchanged by the worker); the orphan sweep never
+    deletes a staged file or a file in the pending-publication set; a crashed worker's pending paths
+    are cleared; staging files older than an hour are removed;
+  - export worker: with three destinations exporting large bodies concurrently, only one body is in
+    the worker at a time and peak body memory stays within `OMNI_EXPORT_BODY_BUDGET_BYTES`; the
+    reservation is computed from the authenticated plaintext length (a highly compressible gzip
+    artifact is reserved at its expanded size); a body whose reservation exceeds the budget is
+    exported `omitted` / `export budget`; the client fields are extracted by the streaming scanner
+    without building the parsed tree;
+  - `body_state` moves `pending` → `ready` / `omitted` / `failed`; a writer crash marks its requests
+    `failed`; `sweepPending` fails rows pending over an hour;
+  - restore: the writer pauses, drops its queue (counted), and an ack from before the swap is
+    ignored (generation); staging is cleaned on resume;
+  - the admin body route and `omni bodies` decode in the worker and return a 1 MiB-per-part preview;
+    `/api/requests/:id/body/raw` streams a full part and is refused for a viewer;
+  - body export: a destination with `include_bodies` holds a `pending` row up to 60 s after
+    `completed_at` and then sends it `unavailable` (counted); all four gates checked at send time;
+    `included` / `incomplete` / `omitted` (with reason, including legacy 512 KiB omissions) /
+    `unavailable` each produced from the matching artifact; a body that fits rides inline, a larger
+    one goes as segmented body documents with stable ids and every encoded request within
+    `maxRequestBytes` for worst-case escaping input; a `413` halves the limit once; OTLP-traces
+    destinations cannot enable bodies; the export worker decodes at most one artifact at a time
+    across all destinations.
 - Polling: the request path posts nothing to the worker (assert no message other than
   configuration, gate and lifecycle messages); a completed request reaches a stub receiver within
   settle + one tick; a sustained stream of rows is drained pass after pass without falling behind a
@@ -998,9 +807,8 @@ generation, and a destination restored without a state row starts from its `star
 
 ## Docs
 
-README (operator section, `OMNI_EXPORT_BODIES_ALLOWED`, `bodyLoggingTarget`, `body_retention`,
-`OMNI_BODY_BUFFER_BYTES`, the no-durability statement and the sizing paragraph from *Export-only
-bodies*, recommended Elasticsearch mappings for
+README (operator section, `OMNI_EXPORT_BODIES_ALLOWED`, `OMNI_BODY_CAPTURE_BUDGET_BYTES`, the
+64 MiB body limit and the sizing paragraph from *Bodies*, recommended Elasticsearch mappings for
 both indices with body `text` unindexed, raising Bun's request-body limit if larger requests are
 expected, a
 Langfuse-through-OTLP example), `docs/operations.md` (lag, gaps, skip-to-now), `ARCHITECTURE.md`
@@ -1038,38 +846,27 @@ attribute names beyond the GenAI ones listed; CLI flag spelling.
 - Hard 4xx pauses a destination rather than discarding; per-item bulk errors are dropped and
   counted.
 - Export never blocks, delays or changes retention pruning.
-- A third gate, `OMNI_EXPORT_BODIES_ALLOWED`, for body export; in store mode client bodies only,
-  256 KiB cap; all gates rechecked at send time; "never captured" and "expired" collapse into
-  `unavailable`.
-- *Operator decisions:* export-only body mode (`bodyLoggingTarget = "export"`) with no size cap and
-  no body in the database; **bodies held in memory only, no disk spool**, shipped every 250 ms; when
-  memory is full the oldest are dropped.
-- Export-only bodies: raw client-view bytes (request read once as `arrayBuffer`, SSE captured as
-  enqueued bytes; no provider attempts); a dedicated body worker with no database, fed by a 16 MiB
-  shared-memory ring for small chunks and zero-copy `ArrayBuffer` handoff for pieces over 1 MiB, all
-  under one `OMNI_BODY_BUFFER_BYTES` budget (default 1 GiB) — the main thread never blocks, overflow
-  abandons the capture; flush every 250 ms or at 16 MiB ready; masking in the body worker by a
-  bounded-state transducer (64-character carry); separate body documents `<requestId>:<part>:<n>`;
-  segments sized by final encoded bytes (ES 90 MiB, webhook 50 MiB, OTLP 4 MiB); each node ships its
-  own bodies without a lease; eviction oldest finished then oldest in flight; `body_capture` fixed
-  at admission, outcomes shipped as `complete: false` bodies or tombstones (100,000 cap, then a gap
-  counter) and mirrored to dashboard-only columns; losses at process exit are not reported and are
-  found by joining metadata to bodies; no dashboard view of these bodies.
-- *Operator decision:* per-destination `body_retention = latestPerConversation`. Designer's calls
-  within it: key = sha256(API key + session id + branch), branch = explicit thread id (Codex) or the
-  first user-authored message with injected context turns skipped **and** a verified message-prefix
-  extension of the stored branch, plus a random incarnation per branch entry so a lost entry never
-  reuses a key; divergence or ambiguity → `every`; version = a 64-bit cluster-wide admission sequence
-  (coord `INCR`), so ordering ignores clocks, survives compaction, and versions are unique; segment ids include the request
-  id; equal-version `409`s are checked against the manifest's request id; supersession
-  by version, never finish order; Elasticsearch writes immutable versioned segments then one
-  externally versioned manifest per conversation in a non-dated `omni-conversations` index, with
-  stale segments cleaned up afterwards; superseded bodies dropped without tombstones.
-- Body memory budget covers ring, chunks, descriptors and send buffers, with a dedicated send pool
-  capture cannot use; response copies reserved before allocation; ≤ 4 sends per destination, 16
-  total; handoff reservations transfer with the buffer; end/abandon signalled through the shared
-  slot table, never the ring; a shared loss ledger survives worker crashes and becomes gap
-  tombstones.
+- *Operator decisions (2026-10-25):* bodies stay in the store and are exported from it; the body limit
+  is 64 MiB per artifact with structural bounding removed; disk is bounded by body retention and the
+  100,000-row cap; client and attempts are both stored; no per-conversation deduplication.
+- A global capture budget (`OMNI_BODY_CAPTURE_BUDGET_BYTES`, 512 MiB) and a 1,000-request writer
+  queue; exceeding either abandons that request's capture as an omission, never slows inference.
+- Body sealing in a body-writer `Worker`; only raw text crosses `postMessage` (the route keeps the
+  client body as text); SQLite pointer rows still written by the main thread after a staged,
+  fsynced, renamed file; Postgres rows written by the worker.
+- `request_logs.body_state` (`pending`/`ready`/`omitted`/`failed`) so export can wait for a body; a
+  body-enabled destination waits at most 60 s past `completed_at`.
+- Exported body states `included` / `incomplete` / `omitted` / `unavailable`; a third gate,
+  `OMNI_EXPORT_BODIES_ALLOWED`; client request/response only; gates rechecked at send time.
+- A body that does not fit one receiver request is sent as segmented body documents
+  `<requestId>:<part>:<n>`, sized by final encoded bytes (ES 90 MiB, webhook 50 MiB, OTLP 4 MiB).
+- Reads decode in workers: the dashboard gets a 1 MiB-per-part preview and an admin-only raw
+  download; the export worker admits one body at a time across destinations, reserves its whole
+  need up front from the authenticated plaintext length under `OMNI_EXPORT_BODY_BUDGET_BYTES`
+  (192 MiB), extracts client fields with a streaming scanner, one body per batch.
+- Main thread hands bodies to the writer in ≤ 1 MiB transferred slices with yields; SQLite rename only
+  after the main thread acknowledges the pending publication; masking walks iteratively.
+- Body writer pauses for restore; acks carry a generation so pre-swap acks are ignored.
 - Key labels and credential ids included in records.
 - Private hosts allowed for destinations, no redirects.
 - 10-destination cap; new destinations start from now unless told otherwise.
