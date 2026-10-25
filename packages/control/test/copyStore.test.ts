@@ -83,8 +83,17 @@ test("copies configuration, credentials, keys and completed logs into an empty s
     hasSecret: true,
   });
   expect(hook?.generation).not.toBe(original?.generation);
+  // The destination's initial cursor is `(startAt, '')`, and nothing copied is
+  // ahead of it — not even a row stamped in the same millisecond.
   const [copiedLog] = await target_.usage.recent(1);
-  expect(hook?.startAt).toBeGreaterThanOrEqual(copiedLog?.completedAt as number);
+  expect(hook?.startAt).toBeGreaterThan(copiedLog?.completedAt as number);
+  expect(
+    await target_.usage.exportPage({
+      after: { completedAt: hook?.startAt as number, id: "" },
+      settledBefore: Number.MAX_SAFE_INTEGER,
+      limit: 10,
+    }),
+  ).toEqual([]);
   expect(await target_.exportDestinations.openSecret("hook")).toBe("signing-secret");
   expect(report.notCarried.some((line) => line.startsWith("export state"))).toBe(true);
 
@@ -150,8 +159,24 @@ if (pg === undefined) {
     await seedCredential(source, { id: "c1", accessToken: "test-token-1" });
     const { key } = await seedApiKey(source, { limits: {} });
     await source.usage.append(requestLog({ id: "r1", apiKeyId: key.id, at: 1_700_000_000_000 }));
+    await source.exportDestinations.create({
+      id: "es",
+      type: "elasticsearch",
+      config: { url: "https://es:9200" },
+      startFrom: "oldest",
+    });
 
     const report = await copyStore(source, target_);
+    // Postgres stamps from its own clock; the boundary must still be past the
+    // copied row on that clock.
+    const es = await target_.exportDestinations.get("es");
+    expect(
+      await target_.usage.exportPage({
+        after: { completedAt: es?.startAt as number, id: "" },
+        settledBefore: Number.MAX_SAFE_INTEGER,
+        limit: 10,
+      }),
+    ).toEqual([]);
     expect(report.counts.credentials).toBe(1);
     expect((await (await target_.credentials.get("c1"))?.secrets())?.accessToken).toBe(
       "test-token-1",

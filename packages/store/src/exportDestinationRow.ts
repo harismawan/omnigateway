@@ -32,33 +32,55 @@ export type DestinationRow = {
 const isType = (value: string): value is ExportDestinationType =>
   (EXPORT_DESTINATION_TYPES as readonly string[]).includes(value);
 
-const strings = (value: unknown): string[] | undefined =>
-  Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : undefined;
-
-function parseObject(raw: string): Record<string, unknown> {
+/** A stored JSON object, or null when the text is not one. */
+function parseObject(raw: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(raw);
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
-      : {};
+      : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
+/** `config` is type-specific and validated above the store; unreadable reads as empty. */
+const parseConfig = (raw: string): Record<string, unknown> => parseObject(raw) ?? {};
+
 /**
- * The stored filter, narrowed. A malformed list member is dropped rather than
- * passed through, so a hand-edited row can narrow a filter but never turn it
- * into something the SQL builder cannot bind.
+ * Selects no row whatever it is combined with: an empty key set.
+ *
+ * What an unreadable stored filter reads as. A filter is the scope of what
+ * leaves the installation, so every way of misreading one must narrow — never
+ * widen — and dropping a field that failed to parse would be a widening:
+ * `{"apiKeyIds":"k1"}` read as "no key filter" ships every key's traffic.
  */
-function parseFilter(raw: string): ExportFilter {
+export const MATCH_NOTHING: ExportFilter = Object.freeze({ apiKeyIds: [] });
+
+const FILTER_FIELDS = new Set(["apiKeyIds", "models", "failedOnly"]);
+
+const stringList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((v) => typeof v === "string");
+
+/**
+ * The stored filter exactly as written, or null when any part of it cannot be
+ * read: not a JSON object, a list that is not all strings, a `failedOnly` that
+ * is not a boolean, or a field this build does not know (which a newer build
+ * may have meant as a restriction). Absent fields are absent; nothing is
+ * dropped or coerced, because both are ways of widening a scope.
+ */
+function parseFilter(raw: string): ExportFilter | null {
   const stored = parseObject(raw);
-  const apiKeyIds = strings(stored.apiKeyIds);
-  const models = strings(stored.models);
+  if (stored === null) return null;
+  if (Object.keys(stored).some((key) => !FILTER_FIELDS.has(key))) return null;
+  const { apiKeyIds, models, failedOnly } = stored;
+  if (apiKeyIds !== undefined && !stringList(apiKeyIds)) return null;
+  if (models !== undefined && !stringList(models)) return null;
+  if (failedOnly !== undefined && typeof failedOnly !== "boolean") return null;
   return {
     ...(apiKeyIds === undefined ? {} : { apiKeyIds }),
     ...(models === undefined ? {} : { models }),
-    ...(stored.failedOnly === true ? { failedOnly: true } : {}),
+    ...(failedOnly === undefined ? {} : { failedOnly }),
   };
 }
 
@@ -70,13 +92,15 @@ const flag = (value: number | boolean): boolean => value === true || value === 1
  */
 export function readDestination(r: DestinationRow): ExportDestination | null {
   if (!isType(r.type)) return null;
+  const filter = parseFilter(r.filter);
   return {
     id: r.id,
     generation: r.generation,
     type: r.type,
     enabled: flag(r.enabled),
-    config: parseObject(r.config),
-    filter: parseFilter(r.filter),
+    config: parseConfig(r.config),
+    filter: filter ?? MATCH_NOTHING,
+    filterMalformed: filter === null,
     includeBodies: flag(r.include_bodies),
     maxRequestBytes: r.max_request_bytes === null ? null : Number(r.max_request_bytes),
     startAt: Number(r.start_at),

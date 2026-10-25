@@ -3,10 +3,11 @@ import { expect, test } from "bun:test";
 import { SQL } from "bun";
 import {
   type ExportDestinationInput,
+  type ExportFilter,
   ExportLimitError,
   MAX_EXPORT_DESTINATIONS,
 } from "../../src/types.ts";
-import { forEachStore } from "./harness.ts";
+import { exec, forEachStore, logRow } from "./harness.ts";
 
 const input = (overrides: Partial<ExportDestinationInput> = {}): ExportDestinationInput => ({
   id: "es-main",
@@ -93,6 +94,105 @@ forEachStore((backend) => {
     expect(oldest.startAt).toBe(0);
     // Two creations, two generations: state is keyed by generation, never by slug.
     expect(now.generation).not.toBe(oldest.generation);
+  });
+
+  /**
+   * For a copy into a new backend: the destination must start strictly after
+   * every row the store already holds, even one stamped in the creation's own
+   * millisecond or ahead of the clock, or the initial cursor `(startAt, '')`
+   * would re-send it.
+   */
+  test("startFrom afterExisting starts strictly after every completed row", async () => {
+    const s = await backend.fresh();
+    expect(
+      (await s.exportDestinations.create(input({ id: "empty", startFrom: "afterExisting" })))
+        .startAt,
+    ).toBeGreaterThan(Date.now() - 60_000);
+
+    await s.usage.append(logRow({ id: "r1", at: 1 }));
+    await s.usage.append(logRow({ id: "r2", at: 2 }));
+    const ahead = Date.now() + 3_600_000;
+    await exec(backend, s, `UPDATE request_logs SET completed_at = ${ahead} WHERE id = 'r2'`);
+    await s.usage.begin(logRow({ id: "p", at: 3, state: "pending", status: 0 }));
+
+    const d = await s.exportDestinations.create(input({ id: "copy", startFrom: "afterExisting" }));
+    expect(d.startAt).toBe(ahead + 1);
+    const page = await s.usage.exportPage({
+      after: { completedAt: d.startAt, id: "" },
+      settledBefore: Number.MAX_SAFE_INTEGER,
+      limit: 10,
+    });
+    expect(page).toEqual([]);
+  });
+
+  /**
+   * A filter is the scope of what leaves the installation, so a stored one
+   * nothing can read must narrow to nothing — never fall open to everything —
+   * and must say so, so the worker can refuse rather than silently skip.
+   */
+  test("a malformed stored filter reads as match-nothing and is flagged", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "r1", at: 1, apiKeyId: "k1", status: 500 }));
+    await s.usage.append(logRow({ id: "r2", at: 2, apiKeyId: "k2", status: 200 }));
+    await s.exportDestinations.create(input({ id: "d", filter: {} }));
+    const fine = await s.exportDestinations.get("d");
+    expect(fine).toMatchObject({ filter: {}, filterMalformed: false });
+
+    const malformed = [
+      "not json",
+      "[]",
+      "null",
+      '"k1"',
+      '{"apiKeyIds":"k1"}',
+      '{"apiKeyIds":null}',
+      '{"apiKeyIds":["k1",7]}',
+      '{"models":{"0":"opus"}}',
+      '{"models":["opus",null]}',
+      '{"failedOnly":"true"}',
+      '{"failedOnly":1}',
+      '{"failedOnly":null}',
+      '{"states":["done"]}',
+    ];
+    for (const raw of malformed) {
+      await exec(
+        backend,
+        s,
+        `UPDATE export_destinations SET filter = '${raw.replaceAll("'", "''")}' WHERE id = 'd'`,
+      );
+      const read = await s.exportDestinations.get("d");
+      expect({ raw, malformed: read?.filterMalformed }).toEqual({ raw, malformed: true });
+      expect((await s.exportDestinations.list())[0]?.filterMalformed).toBe(true);
+      // Even a reader that ignores the flag selects nothing with what it got.
+      const rows = await s.usage.exportPage({
+        after: { completedAt: 0, id: "" },
+        settledBefore: Number.MAX_SAFE_INTEGER,
+        limit: 10,
+        filter: read?.filter as ExportFilter,
+      });
+      expect({ raw, rows: rows.map((r) => r.id) }).toEqual({ raw, rows: [] });
+    }
+
+    // Well-formed shapes are not flagged, an explicit `false` included.
+    for (const raw of [
+      "{}",
+      '{"apiKeyIds":[]}',
+      '{"apiKeyIds":["k1"],"models":["opus"],"failedOnly":true}',
+      '{"failedOnly":false}',
+    ]) {
+      await exec(backend, s, `UPDATE export_destinations SET filter = '${raw}' WHERE id = 'd'`);
+      expect({ raw, malformed: (await s.exportDestinations.get("d"))?.filterMalformed }).toEqual({
+        raw,
+        malformed: false,
+      });
+    }
+    expect((await s.exportDestinations.get("d"))?.filter).toEqual({ failedOnly: false });
+
+    // A repaired filter written through the repo clears the flag.
+    await s.exportDestinations.update("d", { filter: { apiKeyIds: ["k1"] } });
+    expect(await s.exportDestinations.get("d")).toMatchObject({
+      filter: { apiKeyIds: ["k1"] },
+      filterMalformed: false,
+    });
   });
 
   test("a recreated slug gets a fresh generation", async () => {

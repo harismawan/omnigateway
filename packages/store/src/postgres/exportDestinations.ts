@@ -7,6 +7,7 @@ import {
 } from "../exportDestinationRow.ts";
 import {
   type ExportDestination,
+  type ExportDestinationInput,
   type ExportDestinationRepo,
   ExportLimitError,
   MAX_EXPORT_DESTINATIONS,
@@ -15,6 +16,21 @@ import type { Conn, Rows } from "./db.ts";
 
 /** The database clock in epoch ms, so `start_at` and `completed_at` are on one clock. */
 const DB_NOW_MS = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
+/**
+ * `start_at` per `startFrom`, from the database clock, never this replica's:
+ * the cursor it seeds is compared with `completed_at`, stamped from that same
+ * clock. `afterExisting` is one past the newest stamp already held (or now,
+ * whichever is later), so the cursor `(start_at, '')` is strictly past every
+ * existing row, a same-millisecond one included. A completion committing
+ * concurrently with it is not covered; the one caller (`copyStore`) writes
+ * into a store nothing else is serving.
+ */
+const START_AT: Readonly<Record<ExportDestinationInput["startFrom"], string>> = {
+  now: DB_NOW_MS,
+  oldest: "0",
+  afterExisting: `GREATEST(${DB_NOW_MS}, (SELECT COALESCE(MAX(completed_at), 0) + 1 FROM request_logs))`,
+};
 
 export function createExportDestinationRepo(sql: SQL, key: CryptoKey): ExportDestinationRepo {
   const read = async (id: string, conn: Conn = sql): Promise<ExportDestination | null> => {
@@ -57,8 +73,7 @@ export function createExportDestinationRepo(sql: SQL, key: CryptoKey): ExportDes
           `INSERT INTO export_destinations
              (id, generation, type, enabled, config, secret, filter, include_bodies,
               max_request_bytes, start_at, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
-                   CASE WHEN $10 THEN ${DB_NOW_MS} ELSE 0 END, $11, $11)`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, ${START_AT[input.startFrom]}, $10, $10)`,
           [
             input.id,
             crypto.randomUUID(),
@@ -69,10 +84,6 @@ export function createExportDestinationRepo(sql: SQL, key: CryptoKey): ExportDes
             JSON.stringify(input.filter ?? {}),
             input.includeBodies === true,
             input.maxRequestBytes ?? null,
-            // `start_at` from the database clock, never this replica's: the
-            // cursor it seeds is compared with `completed_at`, which is
-            // stamped from that same clock.
-            input.startFrom === "now",
             now,
           ],
         );

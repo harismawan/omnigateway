@@ -135,10 +135,13 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
   }
   await target.usage.rebuildRollup();
 
-  // After the logs, and from "now": the target stamps every copied row's
-  // completion afresh and holds no export state, so a destination carried at
-  // its old position would re-send the whole copied history. Starting at the
-  // copy's end resumes delivery with the first request the new backend serves.
+  // After the logs, and strictly past them: the target stamps every copied
+  // row's completion afresh and holds no export state, so a destination carried
+  // at its old position would re-send the whole copied history. `"now"` is not
+  // enough — the last copied row can share the creation's millisecond, and the
+  // initial cursor `(startAt, '')` would include it. `"afterExisting"` starts
+  // one past the newest stamp the target holds, so delivery resumes with the
+  // first request the new backend serves.
   for (const destination of await source.exportDestinations.list()) {
     await target.exportDestinations.create({
       id: destination.id,
@@ -149,7 +152,7 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
       includeBodies: destination.includeBodies,
       maxRequestBytes: destination.maxRequestBytes,
       secret: await source.exportDestinations.openSecret(destination.id),
-      startFrom: "now",
+      startFrom: "afterExisting",
     });
     counts.exportDestinations += 1;
   }

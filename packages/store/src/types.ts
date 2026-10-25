@@ -1934,11 +1934,23 @@ export type ExportDestination = {
   enabled: boolean;
   /** Type-specific and non-secret; validated by `@omni/control`, stored as given. */
   config: Record<string, unknown>;
+  /** Match-nothing whenever `filterMalformed` is true. */
   filter: ExportFilter;
+  /**
+   * The stored filter could not be read — bad JSON, a field of the wrong type,
+   * an unknown field. `filter` then selects nothing rather than everything, and
+   * the worker must refuse to export (and say why) rather than send rows outside
+   * a scope it cannot read. A filter written through the repo clears it.
+   */
+  filterMalformed: boolean;
   includeBodies: boolean;
   /** The encoded-request limit for this receiver; null takes the type's default. */
   maxRequestBytes: number | null;
-  /** Where the cursor starts: database-clock now for `startFrom: "now"`, 0 for `"oldest"`. */
+  /**
+   * Where the cursor starts, as `(startAt, '')`: database-clock now for
+   * `startFrom: "now"`, 0 for `"oldest"`, and for `"afterExisting"` one past
+   * the latest `completed_at` already held (or now, whichever is later).
+   */
   startAt: number;
   hasSecret: boolean;
   createdAt: number;
@@ -1957,7 +1969,12 @@ export type ExportDestinationInput = {
   maxRequestBytes?: number | null;
   /** Encrypted with the store's key before it is written. */
   secret?: string | null;
-  startFrom: "now" | "oldest";
+  /**
+   * `"afterExisting"` is for a copy into a new store: the copied rows were all
+   * stamped moments ago, possibly in the same millisecond as this creation, so
+   * `"now"` alone could leave one ahead of the cursor and re-send it.
+   */
+  startFrom: "now" | "oldest" | "afterExisting";
 };
 
 /**
