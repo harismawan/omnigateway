@@ -233,6 +233,28 @@ export const otlpSecretSchema = z
   })
   .strict();
 
+/**
+ * A secret as a write carries it: the object itself, or its JSON text — the
+ * store contract is "a string sets", so a caller holding the serialised form
+ * passes it as is. Text is parsed here and then held to the same strict schema.
+ * Unparseable text is refused with a fixed message: the parser's own error can
+ * quote the input, and the input is a credential.
+ */
+function secretInput<T>(schema: z.ZodType<T>) {
+  return z
+    .unknown()
+    .transform((value, ctx): unknown => {
+      if (typeof value !== "string") return value;
+      try {
+        return JSON.parse(value);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "must be a JSON object" });
+        return z.NEVER;
+      }
+    })
+    .pipe(schema);
+}
+
 export type ElasticsearchSecret = z.infer<typeof elasticsearchSecretSchema>;
 export type WebhookSecret = z.infer<typeof webhookSecretSchema>;
 export type OtlpSecret = z.infer<typeof otlpSecretSchema>;
@@ -252,7 +274,7 @@ const createSchema = z.discriminatedUnion("type", [
       ...common,
       type: z.literal("elasticsearch"),
       config: elasticsearchConfigSchema,
-      secret: elasticsearchSecretSchema.optional(),
+      secret: secretInput(elasticsearchSecretSchema).optional(),
     })
     .strict(),
   z
@@ -260,7 +282,7 @@ const createSchema = z.discriminatedUnion("type", [
       ...common,
       type: z.literal("webhook"),
       config: webhookConfigSchema,
-      secret: webhookSecretSchema.optional(),
+      secret: secretInput(webhookSecretSchema).optional(),
     })
     .strict(),
   z
@@ -268,7 +290,7 @@ const createSchema = z.discriminatedUnion("type", [
       ...common,
       type: z.literal("otlp"),
       config: otlpConfigSchema,
-      secret: otlpSecretSchema.optional(),
+      secret: secretInput(otlpSecretSchema).optional(),
     })
     .strict(),
 ]);
@@ -290,21 +312,21 @@ const patchSchemas = {
     .object({
       ...patchCommon,
       config: elasticsearchConfigSchema.optional(),
-      secret: elasticsearchSecretSchema.nullable().optional(),
+      secret: secretInput(elasticsearchSecretSchema).nullable().optional(),
     })
     .strict(),
   webhook: z
     .object({
       ...patchCommon,
       config: webhookConfigSchema.optional(),
-      secret: webhookSecretSchema.nullable().optional(),
+      secret: secretInput(webhookSecretSchema).nullable().optional(),
     })
     .strict(),
   otlp: z
     .object({
       ...patchCommon,
       config: otlpConfigSchema.optional(),
-      secret: otlpSecretSchema.nullable().optional(),
+      secret: secretInput(otlpSecretSchema).nullable().optional(),
     })
     .strict(),
 } as const;
@@ -376,6 +398,18 @@ function checkWebhookHeaders(config: WebhookConfig, secret: WebhookSecret): void
       throw bad(`secret.headers.${name}: is also a plain header`);
     }
   }
+}
+
+/**
+ * The stored webhook secret, or null when none is set or it does not parse —
+ * then it holds no header this build could send, so nothing can collide. Read
+ * only to compare header names; never returned or quoted.
+ */
+async function retainedWebhookSecret(store: Store, id: string): Promise<WebhookSecret | null> {
+  const text = await store.exportDestinations.openSecret(id);
+  if (text === null) return null;
+  const result = secretInput(webhookSecretSchema).safeParse(text);
+  return result.success ? result.data : null;
 }
 
 /** The stored config read through its type's schema, or null when it no longer parses. */
@@ -464,6 +498,10 @@ export async function updateDestination(
       if (body.secret !== undefined && body.secret !== null) {
         const config = body.config ?? storedConfig(webhookConfigSchema, current);
         if (config !== null) checkWebhookHeaders(config, body.secret);
+      } else if (body.secret === undefined && body.config !== undefined && current.hasSecret) {
+        // The secret is kept, so the new plain headers are judged against it.
+        const retained = await retainedWebhookSecret(store, id);
+        if (retained !== null) checkWebhookHeaders(body.config, retained);
       }
       Object.assign(patch, commonPatch(body));
       break;

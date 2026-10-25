@@ -531,6 +531,118 @@ test("an OTLP destination exporting bodies cannot switch to traces", async () =>
   });
 });
 
+// ── secrets given as JSON text (the store contract: a string sets) ──────────
+
+test("a secret given as a JSON string is parsed and validated on create, per type", async () => {
+  const store = await memoryStore();
+  await createDestination(store, es({ secret: '{"apiKey":"es-key-text"}' }));
+  expect(await store.exportDestinations.openSecret("es-main")).toBe('{"apiKey":"es-key-text"}');
+  await createDestination(store, webhook({ secret: '{"signingSecret":"whsec-text"}' }));
+  expect(await store.exportDestinations.openSecret("hook")).toBe('{"signingSecret":"whsec-text"}');
+  const created = await createDestination(
+    store,
+    otlp({ secret: '{"headers":{"authorization":"Basic b3RscA=="}}' }),
+  );
+  expect(created.hasSecret).toBe(true);
+  expect(JSON.stringify(created)).not.toContain("b3RscA==");
+  expect(await store.exportDestinations.openSecret("langfuse")).toBe(
+    '{"headers":{"authorization":"Basic b3RscA=="}}',
+  );
+});
+
+test("a secret string that is not JSON is refused without echoing it", async () => {
+  const store = await memoryStore();
+  await createDestination(store, webhook({ secret: { signingSecret: "first" } }));
+  for (const promise of [
+    createDestination(store, webhook({ id: "w2", secret: "{not json SECRET-TEXT" })),
+    updateDestination(store, "hook", { secret: "{not json SECRET-TEXT" }),
+  ]) {
+    const error = await refusal(promise);
+    expect(error.code).toBe("BAD_REQUEST");
+    expect(error.message).toBe("secret: must be a JSON object");
+    expect(error.message).not.toContain("SECRET-TEXT");
+  }
+  expect(await store.exportDestinations.openSecret("hook")).toBe('{"signingSecret":"first"}');
+});
+
+test("a secret string of valid JSON must still pass the strict per-type schema", async () => {
+  const store = await memoryStore();
+  await createDestination(store, es());
+  await createDestination(store, webhook());
+  await createDestination(store, otlp());
+  for (const [id, secret] of [
+    ["es-main", '{"apiKey":"k","extra":1}'],
+    ["es-main", '{"username":"u","password":"p"}'],
+    ["es-main", '"just-a-string"'],
+    ["hook", "{}"],
+    ["hook", '{"signingSecret":""}'],
+    ["langfuse", '{"headers":{}}'],
+    ["langfuse", "[]"],
+  ] as const) {
+    const error = await refusal(updateDestination(store, id, { secret }));
+    expect(error.code).toBe("BAD_REQUEST");
+  }
+  expect(await store.exportDestinations.openSecret("es-main")).toBe(
+    '{"apiKey":"es-api-key-secret"}',
+  );
+});
+
+test("updateDestination with a string secret replaces; null clears; absent keeps", async () => {
+  const store = await memoryStore();
+  await createDestination(store, otlp({ secret: { headers: { authorization: "Bearer one" } } }));
+
+  const kept = await updateDestination(store, "langfuse", { enabled: false });
+  expect(kept.hasSecret).toBe(true);
+  expect(await store.exportDestinations.openSecret("langfuse")).toBe(
+    '{"headers":{"authorization":"Bearer one"}}',
+  );
+
+  const replaced = await updateDestination(store, "langfuse", {
+    secret: '{"headers":{"authorization":"Bearer two"}}',
+  });
+  expect(replaced.hasSecret).toBe(true);
+  expect(await store.exportDestinations.openSecret("langfuse")).toBe(
+    '{"headers":{"authorization":"Bearer two"}}',
+  );
+
+  expect((await updateDestination(store, "langfuse", { secret: null })).hasSecret).toBe(false);
+  expect(await store.exportDestinations.openSecret("langfuse")).toBeNull();
+
+  // Elasticsearch: switching auth with the new credential as text.
+  await createDestination(store, es());
+  const basic = await updateDestination(store, "es-main", {
+    config: { url: "http://es.internal:9200", auth: "basic" },
+    secret: '{"username":"elastic","password":"pw"}',
+  });
+  expect(basic).toMatchObject({ config: { auth: "basic" }, hasSecret: true });
+});
+
+test("a webhook config-only update may not collide with the retained secret headers", async () => {
+  const store = await memoryStore();
+  await createDestination(
+    store,
+    webhook({ secret: { headers: { Authorization: "Bearer t" }, signingSecret: "s" } }),
+  );
+  const error = await refusal(
+    updateDestination(store, "hook", {
+      config: { url: "https://hooks.example.com/omni/", headers: { authorization: "plain" } },
+    }),
+  );
+  expect(error.code).toBe("BAD_REQUEST");
+  expect(error.message).toMatch(/authorization/i);
+  expect(error.message).not.toContain("Bearer t");
+
+  const ok = await updateDestination(store, "hook", {
+    config: { url: "https://hooks.example.com/omni/", headers: { "x-team": "a" } },
+  });
+  expect(ok.config).toEqual({ url: "https://hooks.example.com/omni/", headers: { "x-team": "a" } });
+  // Replacing the secret in the same edit judges the new secret, not the old one.
+  await updateDestination(store, "hook", {
+    config: { url: "https://hooks.example.com/omni/", headers: { authorization: "plain" } },
+    secret: { signingSecret: "s2" },
+  });
+});
+
 test("removeDestination deletes the row", async () => {
   const store: Store = await memoryStore();
   await createDestination(store, webhook());
