@@ -24,7 +24,7 @@ import type {
 } from "./protocol.ts";
 import { REPLY_ERRORS } from "./protocol.ts";
 import { buildRecord } from "./record.ts";
-import type { ExportState, ExportStateStore } from "./state.ts";
+import { CommitTimeoutError, type ExportState, type ExportStateStore } from "./state.ts";
 
 /**
  * The export worker's delivery loop: everything the worker does, with every
@@ -46,9 +46,12 @@ import type { ExportState, ExportStateStore } from "./state.ts";
  * for a gap against the committed position. Each batch — read, encode, send,
  * commit — runs under a {@link BATCH_DEADLINE_MS} deadline from that renewal,
  * shorter than the lease TTL, through one `AbortSignal` reaching the store
- * read, the encoder loop and the request. Every commit is fenced by the
- * epoch: a `false` means another holder took over, and the pass stops without
- * writing anything else.
+ * read, the encoder loop and the request — and into the commit itself, which
+ * the state store bounds to the time left (`CommitBound`), so a write the
+ * database has not completed by the deadline never takes effect. Every commit
+ * is also fenced by the epoch: a `false` means another holder took over, and
+ * the pass stops without writing anything else. The two guard different
+ * things — the deadline a slow holder, the fence a superseded one.
  *
  * **Failures.** Retryable answers (transport error, timeout, 408, 429, 5xx)
  * end the pass with the cursor where it was and the next attempt backed off
@@ -136,6 +139,9 @@ const DEADLINE = new Error("batch deadline");
 
 const DEADLINE_SUMMARY = "deadline exceeded";
 const INTERNAL_SUMMARY = "internal error";
+
+/** One batch's cancellation and the instant its 45 s deadline falls. */
+type Batch = { signal: AbortSignal; deadlineAt: number };
 
 type CommitNext = {
   cursorAt: number;
@@ -484,16 +490,25 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
      * stale holder, not an expired deadline, so the deadline is checked here,
      * against every await before the write and immediately before it.
      */
-    const commit = async (next: CommitNext, batch: AbortSignal): Promise<boolean> => {
-      const settings = await guard(h.reader.settings(), batch);
+    const commit = async (next: CommitNext, batch: Batch): Promise<boolean> => {
+      const settings = await guard(h.reader.settings(), batch.signal);
       const lowered = settings.logRetentionLoweredAt;
       if (lowered > Math.max(position.seenRetentionLoweredAt, rt.loweredFlagged)) {
         rt.loweredFlagged = lowered;
-        await guard(flag(h, rt, "retention-lowered"), batch);
+        await guard(flag(h, rt, "retention-lowered"), batch.signal);
       }
       const seen = Math.max(lowered, position.seenRetentionLoweredAt);
-      batch.throwIfAborted();
-      const ok = await h.state.commit(generation, epoch, { ...next, seenRetentionLoweredAt: seen });
+      batch.signal.throwIfAborted();
+      // The write itself is bounded by the store to the time left: a commit
+      // the database has not completed by the deadline does not take effect.
+      // Not raced here — a write the database did complete is committed, and
+      // the loop must know it to keep its position honest.
+      const ok = await h.state.commit(
+        generation,
+        epoch,
+        { ...next, seenRetentionLoweredAt: seen },
+        { signal: batch.signal, remainingMs: batch.deadlineAt - deps.now() },
+      );
       if (!ok) {
         logger.info("export pass fenced out", { reason: "another holder claimed the cursor" });
         return false;
@@ -517,6 +532,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
       const deadline = new AbortController();
       const timer = timers.setTimeout(() => deadline.abort(DEADLINE), BATCH_DEADLINE_MS);
       const batchSignal = AbortSignal.any([signal, deadline.signal]);
+      const batch: Batch = { signal: batchSignal, deadlineAt: deps.now() + BATCH_DEADLINE_MS };
       try {
         const dbNow = await guard(readClock(h), batchSignal);
         const settings = await guard(h.reader.settings(), batchSignal);
@@ -536,14 +552,14 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           });
           const last = rows.at(-1);
           if (last !== undefined) {
-            const ok = await commit({ ...cursorOf(last), droppedDelta: rows.length }, batchSignal);
+            const ok = await commit({ ...cursorOf(last), droppedDelta: rows.length }, batch);
             if (!ok) return;
             rt.counters.recordsDropped += rows.length;
             continue;
           }
           if (bound < skipAt) return; // the skip's last rows are not settled yet
           const done = { ...cursorOfPosition(position), caughtUpThrough: skipAt };
-          if (!(await commit(done, batchSignal))) return;
+          if (!(await commit(done, batch))) return;
           await h.state.clearSkip(generation, skipAt);
           skipAt = null;
           // The operator's action on a failing destination: try it again now.
@@ -570,10 +586,10 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           signal: batchSignal,
         });
         if (rows.length === 0) {
-          await commit({ ...cursorOfPosition(position), caughtUpThrough: settled }, batchSignal);
+          await commit({ ...cursorOfPosition(position), caughtUpThrough: settled }, batch);
           return;
         }
-        const outcome = await sendRows(h, rt, epoch, sender, rows, batchSignal, commit);
+        const outcome = await sendRows(h, rt, epoch, sender, rows, batch, commit);
         if (outcome === "stop") return;
         if (outcome !== "continue") {
           await settle(h, rt, epoch, outcome);
@@ -581,7 +597,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         }
       } catch (error) {
         if (signal.aborted) return;
-        if (deadline.signal.aborted) {
+        if (deadline.signal.aborted || error instanceof CommitTimeoutError) {
           await retryable(h, rt, epoch, DEADLINE_SUMMARY, null, null);
           return;
         }
@@ -610,9 +626,10 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     epoch: number,
     sender: Sender,
     rows: RequestLog[],
-    signal: AbortSignal,
-    commit: (next: CommitNext, batch: AbortSignal) => Promise<boolean>,
+    batch: Batch,
+    commit: (next: CommitNext, batch: Batch) => Promise<boolean>,
   ): Promise<"continue" | "stop" | Exclude<DeliveryOutcome, { kind: "ok" }>> {
+    const signal = batch.signal;
     const labels = await guard(h.reader.keyLabels(), signal);
     const parts: string[] = [];
     for (const row of rows) {
@@ -645,7 +662,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           droppedDelta: outcome.dropped + pending.drops,
           lastSuccessAt: deps.now(),
         },
-        signal,
+        batch,
       );
       if (!ok) return "stop";
       if (pending.drops > 0) reasons.push(OVERSIZED_REASON);
@@ -660,7 +677,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     if (pending.through !== null) {
       // Trailing (or only) oversized records: nothing to send, but the cursor moves past them.
       const past = { ...cursorOf(pending.through), droppedDelta: pending.drops };
-      if (!(await commit(past, signal))) {
+      if (!(await commit(past, batch))) {
         return "stop";
       }
       reasons.push(OVERSIZED_REASON);

@@ -3,6 +3,7 @@ import { BACKOFF_MAX_MS } from "../../src/export/backoff.ts";
 import { MAX_BATCH_BYTES } from "../../src/export/batch.ts";
 import { REFUSALS } from "../../src/export/deliver.ts";
 import { SETTLE_MS } from "../../src/export/gap.ts";
+import type { LeaseClient } from "../../src/export/loop.ts";
 import {
   BATCH_DEADLINE_MS,
   LEASE_TTL_MS,
@@ -12,6 +13,7 @@ import {
   TEST_MODEL,
 } from "../../src/export/loop.ts";
 import type { DestinationStatus, WorkerMessage } from "../../src/export/protocol.ts";
+import { CommitTimeoutError } from "../../src/export/state.ts";
 import { DAY, destination, row, sharedLease, stateOf, T0, type World, world } from "./harness.ts";
 
 /**
@@ -266,43 +268,85 @@ test("skip waits for rows completed before it to settle, then counts them too", 
   expect(w.sent).toHaveLength(0);
 });
 
-test("a commit after a simulated stall is rejected by the epoch fence; the cursor never goes back", async () => {
-  const { lease } = sharedLease(() => a.clock.now);
-  const a = track(world({ lease, nodeId: "node-a", rows: [row("r1", T0 - 20_000)] }));
-  // A's receiver stalls past the lease TTL.
-  let release: (r: Response) => void = () => {};
+/**
+ * Two cluster workers, one destination. The lease TTL (60 s) outlasts the batch
+ * deadline (45 s), so a holder stalled past its lease is past its deadline too
+ * and the bounded commit refuses it; the epoch fence is what decides when the
+ * lease is lost early (Redis restarted, flushed, failed over).
+ */
+function twoHolders(): {
+  a: World;
+  b: World;
+  lease: LeaseClient;
+  release: (r: Response) => void;
+} {
+  const shared = sharedLease(() => a.clock.now);
+  const a = track(world({ lease: shared.lease, nodeId: "node-a", rows: [row("r1", T0 - 20_000)] }));
+  const held: Array<(r: Response) => void> = [];
   a.answer = () =>
     new Promise<Response>((resolve) => {
-      release = resolve;
+      held.push(resolve);
     });
-  await a.loop.start();
-  await a.settle();
-  expect(a.sent).toHaveLength(1);
-
-  // B shares the main database, export.db, the clock and the coordinator.
   const b = track(
     world({
-      lease,
+      lease: shared.lease,
       nodeId: "node-b",
       statePath: a.statePath,
       reader: a,
       clock: a.clock,
     }),
   );
-  a.clock.now += LEASE_TTL_MS + 1;
+  return {
+    a,
+    b,
+    lease: shared.lease,
+    release: (r) => {
+      for (const resolve of held.splice(0)) resolve(r);
+    },
+  };
+}
+
+test("a stalled holder whose lease was lost has its commit rejected by the epoch fence", async () => {
+  const { a, b, lease, release } = twoHolders();
+  await a.loop.start();
+  await a.settle();
+  expect(a.sent).toHaveLength(1);
+  // A stalls inside its deadline; B cannot start while A holds the lease...
+  a.clock.now += 1_000;
   await b.loop.start();
+  await b.settle();
+  expect(b.sent).toHaveLength(0);
+  // ...until the coordinator loses it (a Redis restart, a flush).
+  await lease.release(`export:${destination().generation}`, "node-a");
+  await b.loop.handle({ type: "destinationsChanged" });
   await b.settle();
   expect(b.sent.map((s) => s.ids)).toEqual([["r1"]]);
   const afterB = await stateOf(b);
   expect(afterB.cursorId).toBe("r1");
 
-  // A wakes and its receiver says OK: its commit is fenced out.
+  // A wakes within its deadline and its receiver says OK: the fence refuses it.
   release(new Response(null, { status: 200 }));
   await a.settle();
   const final = await stateOf(b);
   expect(final.exportedTotal).toBe(1);
   expect(final.epoch).toBe(afterB.epoch);
   expect(a.logger.records.some((r) => r.msg === "export pass fenced out")).toBe(true);
+});
+
+test("a holder stalled past its lease TTL is past its deadline: its commit never lands", async () => {
+  const { a, b, release } = twoHolders();
+  await a.loop.start();
+  await a.settle();
+  a.clock.now += LEASE_TTL_MS + 1;
+  await b.loop.start();
+  await b.settle();
+  expect(b.sent.map((s) => s.ids)).toEqual([["r1"]]);
+  const afterB = await stateOf(b);
+
+  release(new Response(null, { status: 200 }));
+  await a.settle();
+  const final = await stateOf(b);
+  expect([final.cursorId, final.exportedTotal, final.epoch]).toEqual(["r1", 1, afterB.epoch]);
 });
 
 test("two cluster workers never run two passes for one destination", async () => {
@@ -921,4 +965,84 @@ test("pause drains a preview reading the handles, then replies before acknowledg
     error: "export worker paused",
   });
   expect(w.closes).toBe(1);
+});
+
+test("every batch commit is bounded by the batch's remaining deadline", async () => {
+  const w = track(world({ rows: [row("r1", T0 - 20_000)] }));
+  const bounds: Array<{ remainingMs: number; aborted: boolean } | undefined> = [];
+  w.onCommit = (call, write) => {
+    bounds.push(
+      call.bound === undefined
+        ? undefined
+        : { remainingMs: call.bound.remainingMs, aborted: call.bound.signal.aborted },
+    );
+    return write();
+  };
+  await w.loop.start();
+  await w.settle();
+  expect(bounds.length).toBeGreaterThan(0);
+  for (const bound of bounds) {
+    expect(bound).toBeDefined();
+    expect(bound?.aborted).toBe(false);
+    expect(bound?.remainingMs).toBeGreaterThanOrEqual(1);
+    expect(bound?.remainingMs).toBeLessThanOrEqual(BATCH_DEADLINE_MS);
+  }
+});
+
+test("a commit the store times out at the deadline leaves the batch uncommitted and recorded", async () => {
+  const w = track(world({ rows: [row("r1", T0 - 20_000)] }));
+  // The store's own bound fires: what Postgres' statement/lock timeout or
+  // SQLite's busy timeout does to a write that would land after the deadline.
+  w.onCommit = async (call) => {
+    if (call.next.cursorId === "r1") throw new CommitTimeoutError();
+    return true;
+  };
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(1);
+  const s = await stateOf(w);
+  expect([s.cursorId, s.exportedTotal]).toEqual(["", 0]);
+  expect(s.lastError).toBe("deadline exceeded");
+  await w.advance(STATUS_INTERVAL_MS);
+  expect(lastStatus(w)?.counters.batchesRetry).toBe(1);
+  expect(lastStatus(w)?.counters.batchesOk).toBe(0);
+  // Retried normally once the store lets it through.
+  w.onCommit = (_call, write) => write();
+  await w.advance(POLL_MS * 2);
+  expect((await stateOf(w)).cursorId).toBe("r1");
+});
+
+test("a commit blocked on export.db's writer lock past the deadline never lands", async () => {
+  // Against the real store: when the receiver answers, another connection
+  // takes export.db's writer lock and the batch has 100 ms left. The commit
+  // waits on the lock only that long, is refused, and nothing moves.
+  const w = track(world({ rows: [row("r1", T0 - 20_000)] }));
+  const { Database } = await import("bun:sqlite");
+  let blocker: InstanceType<typeof Database> | null = null;
+  w.answer = () => {
+    blocker = new Database(w.statePath);
+    blocker.run("BEGIN IMMEDIATE");
+    w.clock.now += BATCH_DEADLINE_MS - 100;
+    return new Response(null, { status: 200 });
+  };
+  const bounds: number[] = [];
+  w.onCommit = async (call, write) => {
+    if (call.bound !== undefined) bounds.push(call.bound.remainingMs);
+    try {
+      return await write();
+    } finally {
+      const held = blocker as InstanceType<typeof Database> | null;
+      blocker = null;
+      held?.run("ROLLBACK");
+      held?.close();
+    }
+  };
+  const started = performance.now();
+  await w.loop.start();
+  await w.settle();
+  expect(bounds[0]).toBeLessThanOrEqual(100);
+  expect(performance.now() - started).toBeLessThan(2_000);
+  const s = await stateOf(w);
+  expect([s.cursorId, s.exportedTotal]).toEqual(["", 0]);
+  expect(s.lastError).toBe("deadline exceeded");
 });

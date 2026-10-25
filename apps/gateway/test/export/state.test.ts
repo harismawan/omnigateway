@@ -12,6 +12,7 @@ import {
   openSqliteExportState,
 } from "../../src/export/state/sqlite.ts";
 import {
+  CommitTimeoutError,
   type ExportStateStore,
   LAST_ERROR_MAX_CHARS,
   ORPHAN_KEEP_MS,
@@ -23,7 +24,16 @@ import {
  * Postgres half runs when `OMNI_TEST_DATABASE_URL` names a server and is
  * skipped, visibly, when it does not — the same gate as the store contract.
  */
-type Backend = { name: "sqlite" | "postgres"; fresh(): Promise<ExportStateStore> };
+type Backend = {
+  name: "sqlite" | "postgres";
+  fresh(): Promise<ExportStateStore>;
+  /**
+   * Holds the lock a commit to `generation` must wait for, from another
+   * connection, until the returned release is called: a row lock (`SELECT …
+   * FOR UPDATE`) on Postgres, the writer lock (`BEGIN IMMEDIATE`) on SQLite.
+   */
+  holdLock(generation: string): Promise<() => Promise<void>>;
+};
 
 const DAY = 24 * 60 * 60 * 1000;
 const G = "11111111-1111-4111-8111-111111111111";
@@ -41,14 +51,24 @@ function forEachState(define: (backend: Backend) => void): void {
     afterAll(async () => {
       for (const dir of dirs) await rm(dir, { recursive: true, force: true });
     });
+    let path = "";
     define({
       name: "sqlite",
       async fresh() {
         const dir = await mkdtemp(join(tmpdir(), "omni-export-state-"));
         dirs.push(dir);
-        const s = openSqliteExportState(exportDbPathFor(join(dir, "omnigateway.db")));
+        path = exportDbPathFor(join(dir, "omnigateway.db"));
+        const s = openSqliteExportState(path);
         opened.push(s);
         return s;
+      },
+      async holdLock() {
+        const other = new Database(path);
+        other.run("BEGIN IMMEDIATE");
+        return async () => {
+          other.run("ROLLBACK");
+          other.close();
+        };
       },
     });
   });
@@ -84,6 +104,19 @@ function forEachState(define: (backend: Backend) => void): void {
         const s = createPostgresExportState(pool);
         opened.push(s);
         return s;
+      },
+      async holdLock(generation) {
+        const other = new SQL({ url, max: 1 });
+        const conn = await other.reserve();
+        await conn.unsafe("BEGIN");
+        await conn.unsafe("SELECT * FROM export_state WHERE generation = $1 FOR UPDATE", [
+          generation,
+        ]);
+        return async () => {
+          await conn.unsafe("ROLLBACK");
+          conn.release();
+          await other.close();
+        };
       },
     });
   });
@@ -269,6 +302,55 @@ forEachState((backend) => {
     expect([row?.cursorAt, row?.caughtUpThrough, row?.seenRetentionLoweredAt]).toEqual([
       2, 1_000, 50,
     ]);
+  });
+
+  test("a bounded commit blocked past its remaining time fails and leaves the row unchanged", async () => {
+    const s = await backend.fresh();
+    await s.ensure(G, 0);
+    const { epoch } = (await s.claim(G)) ?? { epoch: -1 };
+    const release = await backend.holdLock(G);
+    const started = performance.now();
+    try {
+      await expect(
+        s.commit(
+          G,
+          epoch,
+          { cursorAt: 9, cursorId: "r1", seenRetentionLoweredAt: 0, exportedDelta: 1 },
+          { signal: new AbortController().signal, remainingMs: 150 },
+        ),
+      ).rejects.toBeInstanceOf(CommitTimeoutError);
+      expect(performance.now() - started).toBeLessThan(3_000);
+    } finally {
+      await release();
+    }
+    const [row] = await s.list();
+    expect([row?.cursorAt, row?.cursorId, row?.exportedTotal]).toEqual([0, "", 0]);
+    // The bound is per commit: the next one, unblocked, lands.
+    expect(
+      await s.commit(
+        G,
+        epoch,
+        { cursorAt: 9, cursorId: "r1", seenRetentionLoweredAt: 0, exportedDelta: 1 },
+        { signal: new AbortController().signal, remainingMs: 5_000 },
+      ),
+    ).toBe(true);
+    expect((await s.list())[0]?.cursorId).toBe("r1");
+  });
+
+  test("a bounded commit with an aborted signal, or no time left, writes nothing", async () => {
+    const s = await backend.fresh();
+    await s.ensure(G, 0);
+    const { epoch } = (await s.claim(G)) ?? { epoch: -1 };
+    const aborted = new AbortController();
+    aborted.abort(new Error("deadline"));
+    const next = { cursorAt: 9, cursorId: "r1", seenRetentionLoweredAt: 0 };
+    await expect(
+      s.commit(G, epoch, next, { signal: aborted.signal, remainingMs: 5_000 }),
+    ).rejects.toBeInstanceOf(CommitTimeoutError);
+    await expect(
+      s.commit(G, epoch, next, { signal: new AbortController().signal, remainingMs: 0 }),
+    ).rejects.toBeInstanceOf(CommitTimeoutError);
+    expect((await s.list())[0]?.cursorId).toBe("");
   });
 
   test("commit against an unknown generation is false", async () => {

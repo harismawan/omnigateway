@@ -1,6 +1,13 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { dirname, join } from "node:path";
-import { boundMessage, type ExportState, type ExportStateStore, ORPHAN_KEEP_MS } from "../state.ts";
+import {
+  boundMessage,
+  boundMs,
+  CommitTimeoutError,
+  type ExportState,
+  type ExportStateStore,
+  ORPHAN_KEEP_MS,
+} from "../state.ts";
 import { commitValues, readState, type StateRow, statements } from "./sql.ts";
 
 /**
@@ -59,6 +66,8 @@ const SQL = statements({
   jsonSet: (param) => `(SELECT value FROM json_each(${param}))`,
 });
 
+const BUSY_TIMEOUT_MS = 5000;
+
 export function openSqliteExportState(path: string): ExportStateStore {
   const db = new Database(path, { create: true });
   db.run("PRAGMA journal_mode = WAL");
@@ -67,7 +76,7 @@ export function openSqliteExportState(path: string): ExportStateStore {
   db.run("PRAGMA synchronous = NORMAL");
   // A restarted worker may open this file while a terminated one's last write
   // is still landing; wait for it rather than fail the pass.
-  db.run("PRAGMA busy_timeout = 5000");
+  db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   migrate(db);
 
   let closed = false;
@@ -87,8 +96,23 @@ export function openSqliteExportState(path: string): ExportStateStore {
       const row = db.query<StateRow, [string]>(SQL.claim).get(generation);
       return row === null ? null : readState(row);
     },
-    async commit(generation, epoch, next) {
-      return changed(SQL.commit, [generation, epoch, ...commitValues(next)]);
+    async commit(generation, epoch, next, bound) {
+      const values = [generation, epoch, ...commitValues(next)];
+      if (bound === undefined) return changed(SQL.commit, values);
+      const ms = boundMs(bound);
+      if (ms === null) throw new CommitTimeoutError();
+      // The write is synchronous: once it holds the lock it finishes. What can
+      // outlast the deadline is waiting for the lock, so that wait is bounded
+      // by the time left, for this statement only.
+      db.run(`PRAGMA busy_timeout = ${Math.min(ms, BUSY_TIMEOUT_MS)}`);
+      try {
+        return changed(SQL.commit, values);
+      } catch (error) {
+        if ((error as { code?: unknown }).code === "SQLITE_BUSY") throw new CommitTimeoutError();
+        throw error;
+      } finally {
+        db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      }
     },
     async recordError(generation, epoch, message, at) {
       return changed(SQL.recordError, [generation, epoch, boundMessage(message), at]);

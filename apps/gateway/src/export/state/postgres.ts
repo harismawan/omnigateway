@@ -1,5 +1,11 @@
 import type { SQL } from "bun";
-import { boundMessage, type ExportStateStore, ORPHAN_KEEP_MS } from "../state.ts";
+import {
+  boundMessage,
+  boundMs,
+  CommitTimeoutError,
+  type ExportStateStore,
+  ORPHAN_KEEP_MS,
+} from "../state.ts";
 import { commitValues, readState, type StateRow, statements } from "./sql.ts";
 
 /**
@@ -22,6 +28,15 @@ const Q = statements({
 
 type Rows<T> = T[] & { count: number };
 
+/** `57014` query_canceled (statement_timeout), `55P03` lock_not_available (lock_timeout). */
+const TIMEOUT_CODES = new Set(["57014", "55P03"]);
+
+function cancelledByTimeout(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { errno, code } = error as { errno?: unknown; code?: unknown };
+  return TIMEOUT_CODES.has(String(errno)) || TIMEOUT_CODES.has(String(code));
+}
+
 export function createPostgresExportState(sql: SQL): ExportStateStore {
   const changed = async (statement: string, args: unknown[]): Promise<boolean> =>
     (await sql.unsafe<Rows<unknown>>(statement, args)).count > 0;
@@ -34,8 +49,27 @@ export function createPostgresExportState(sql: SQL): ExportStateStore {
       const row = (await sql.unsafe<Rows<StateRow>>(Q.claim, [generation]))[0];
       return row === undefined ? null : readState(row);
     },
-    commit: (generation, epoch, next) =>
-      changed(Q.commit, [generation, epoch, ...commitValues(next)]),
+    async commit(generation, epoch, next, bound) {
+      const values = [generation, epoch, ...commitValues(next)];
+      if (bound === undefined) return changed(Q.commit, values);
+      const ms = boundMs(bound);
+      if (ms === null) throw new CommitTimeoutError();
+      try {
+        return await sql.begin(async (tx) => {
+          // Checked once a connection is held: the wait for one is not bounded here.
+          if (bound.signal.aborted) throw new CommitTimeoutError();
+          // Integers formatted here, never interpolated text: SET takes no parameters.
+          await tx.unsafe(`SET LOCAL statement_timeout = ${ms}`);
+          await tx.unsafe(`SET LOCAL lock_timeout = ${ms}`);
+          return (await tx.unsafe<Rows<unknown>>(Q.commit, values)).count > 0;
+        });
+      } catch (error) {
+        if (error instanceof CommitTimeoutError || cancelledByTimeout(error)) {
+          throw new CommitTimeoutError();
+        }
+        throw error;
+      }
+    },
     recordError: (generation, epoch, message, at) =>
       changed(Q.recordError, [generation, epoch, boundMessage(message), at]),
     flagGap: (generation, at) => changed(Q.flagGap, [generation, at]),

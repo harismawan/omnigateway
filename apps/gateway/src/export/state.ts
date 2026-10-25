@@ -74,13 +74,58 @@ export type ExportCommit = {
   lastSuccessAt?: number;
 };
 
+/**
+ * The deadline a commit must land within. The epoch fence stops a stale
+ * holder; it does not stop a write that lands after the batch's own deadline,
+ * so the store bounds the write itself: a commit that has not completed in the
+ * database within `remainingMs` (or by the time `signal` aborts, checked before
+ * the write is issued) fails with {@link CommitTimeoutError} and changes
+ * nothing.
+ *
+ * Postgres: the conditional UPDATE runs in a transaction with
+ * `SET LOCAL statement_timeout` and `lock_timeout` at `remainingMs`, so the
+ * server cancels a write blocked on a row lock or a slow disk. SQLite: the
+ * connection's `busy_timeout` is `remainingMs` for that one statement (the
+ * write itself is synchronous and cannot be cut once it holds the lock).
+ *
+ * Residual, by design: a write the database completed just before the bound
+ * counts as committed even if the caller only learns of it after its deadline
+ * — the rows were accepted by the receiver, so that is at-least-once, not a
+ * loss. Waiting for a pool connection is not covered on Postgres beyond the
+ * signal check made once one is held.
+ */
+export type CommitBound = { signal: AbortSignal; remainingMs: number };
+
+/** A bounded commit that did not land in time; nothing was written. */
+export class CommitTimeoutError extends Error {
+  constructor() {
+    super("commit deadline exceeded");
+    this.name = "CommitTimeoutError";
+  }
+}
+
+/** Whole milliseconds, at least 1, for a bound that still has time left; null when none is left. */
+export function boundMs(bound: CommitBound): number | null {
+  if (bound.signal.aborted || !(bound.remainingMs >= 1)) return null;
+  return Math.max(1, Math.floor(bound.remainingMs));
+}
+
 export interface ExportStateStore {
   /** Inserts the row at cursor `(startAt, '')` when absent; never touches an existing one. */
   ensure(generation: string, startAt: number): Promise<void>;
   /** Takes the next epoch; `null` when the row does not exist. */
   claim(generation: string): Promise<ExportState | null>;
-  /** `false` (nothing written) when fenced out, the row is gone, or the cursor would go back. */
-  commit(generation: string, epoch: number, next: ExportCommit): Promise<boolean>;
+  /**
+   * `false` (nothing written) when fenced out, the row is gone, or the cursor
+   * would go back. With `bound`, rejects with {@link CommitTimeoutError} when
+   * the write cannot land within it — and then nothing was written either.
+   */
+  commit(
+    generation: string,
+    epoch: number,
+    next: ExportCommit,
+    bound?: CommitBound,
+  ): Promise<boolean>;
   /** Fenced like `commit`; `message` is bounded to {@link LAST_ERROR_MAX_CHARS}. */
   recordError(generation: string, epoch: number, message: string, at: number): Promise<boolean>;
   /** Sets `gap_possible_at` once, until cleared; `true` only when this call set it. */

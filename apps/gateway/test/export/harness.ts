@@ -15,7 +15,7 @@ import type { Transport, TransportInit, TransportResponse } from "../../src/expo
 import { createExportLoop, type ExportLoop, type LeaseClient } from "../../src/export/loop.ts";
 import type { WorkerMessage } from "../../src/export/protocol.ts";
 import { openSqliteExportState } from "../../src/export/state/sqlite.ts";
-import type { ExportStateStore } from "../../src/export/state.ts";
+import type { CommitBound, ExportCommit, ExportStateStore } from "../../src/export/state.ts";
 
 /**
  * A fake world for the export loop: a clock and timers the test advances, an
@@ -107,6 +107,16 @@ export type World = {
   sent: Sent[];
   posted: WorkerMessage[];
   logger: CaptureLogger;
+  /** Wraps every state commit; the default just writes. */
+  onCommit: (
+    call: {
+      generation: string;
+      epoch: number;
+      next: ExportCommit;
+      bound: CommitBound | undefined;
+    },
+    write: () => Promise<boolean>,
+  ) => Promise<boolean>;
   /** Runs before every single-row read (preview). */
   beforeGetLog: () => Promise<void>;
   /** Runs before every settings read; a test holds a commit's prerequisite with it. */
@@ -159,6 +169,7 @@ export function world(
     beforeDestinations: async () => {},
     beforeSettings: async () => {},
     beforeGetLog: async () => {},
+    onCommit: (_call: unknown, write: () => Promise<boolean>) => write(),
     opens: 0,
     closes: 0,
   } as unknown as World & { statePath: string };
@@ -257,15 +268,24 @@ export function world(
   w.loop = createExportLoop({
     open: async () => {
       w.opens += 1;
-      const state = openSqliteExportState(statePath);
-      current = state;
+      const real = openSqliteExportState(statePath);
+      current = real;
+      // Every commit goes through the test's hook, which sees what bound the
+      // loop passed and may delay or fail the write.
+      const state: ExportStateStore = {
+        ...real,
+        commit: (generation, epoch, next, bound) =>
+          w.onCommit({ generation, epoch, next, bound }, () =>
+            real.commit(generation, epoch, next, bound),
+          ),
+      };
       return {
         reader,
         state,
         lease: opts.lease ?? null,
         close() {
           w.closes += 1;
-          state.close();
+          real.close();
         },
       };
     },
