@@ -238,3 +238,13 @@ test("cluster mode needs both URLs, and the URLs need cluster mode", () => {
   expect(() => loadConfig({ ...base, OMNI_DATABASE_URL: pg })).toThrow("OMNI_CLUSTER_MODE");
   expect(() => loadConfig({ ...base, OMNI_REDIS_URL: redis })).toThrow("OMNI_CLUSTER_MODE");
 });
+
+test("OMNI_EXPORT_BODIES_ALLOWED is off unless set to a truthy spelling", () => {
+  expect(loadConfig(base).exportBodiesAllowed).toBe(false);
+  expect(loadConfig({ ...base, OMNI_EXPORT_BODIES_ALLOWED: "true" }).exportBodiesAllowed).toBe(
+    true,
+  );
+  expect(loadConfig({ ...base, OMNI_EXPORT_BODIES_ALLOWED: "nope" }).exportBodiesAllowed).toBe(
+    false,
+  );
+});

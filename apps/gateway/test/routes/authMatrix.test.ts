@@ -236,6 +236,31 @@ const ROUTES: ReadonlyArray<{
   // returned. Neither is a reader's to press.
   { method: "GET", path: "/api/credentials/c1/resets", allow: ["admin"] },
   { method: "POST", path: "/api/credentials/c1/resets/redeem", allow: ["admin"], body: {} },
+
+  // Log export. Configuration reads never carry a secret, so a reader sees them;
+  // a preview is one record of a row `/api/logs` already serves a viewer.
+  { method: "GET", path: "/api/export/destinations", allow: ["admin", "viewer"] },
+  { method: "GET", path: "/api/export/destinations/nope", allow: ["admin", "viewer"] },
+  { method: "GET", path: "/api/export/preview?requestId=m1", allow: ["admin", "viewer"] },
+  // Writes, and the three that make the worker act — a test sends to the
+  // operator's receiver, a skip drops rows unsent — are the operator's alone.
+  { method: "POST", path: "/api/export/destinations", allow: ["admin"], body: {} },
+  { method: "PUT", path: "/api/export/destinations/nope", allow: ["admin"], body: {} },
+  {
+    method: "PUT",
+    path: "/api/export/destinations/nope/bodies",
+    allow: ["admin"],
+    body: { include: false },
+  },
+  { method: "DELETE", path: "/api/export/destinations/nope", allow: ["admin"] },
+  { method: "POST", path: "/api/export/destinations/nope/test", allow: ["admin"] },
+  { method: "POST", path: "/api/export/destinations/nope/skip", allow: ["admin"] },
+  {
+    method: "POST",
+    path: "/api/export/destinations/nope/gap/acknowledge",
+    allow: ["admin"],
+    body: { seenAt: 0 },
+  },
 ];
 
 /**

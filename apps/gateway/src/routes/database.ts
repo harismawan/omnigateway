@@ -23,7 +23,7 @@ import {
   stagedImportPath,
   vacuum,
 } from "@omni/control";
-import { GatewayError, type Logger, noopLogger } from "@omni/ir";
+import { describeError, GatewayError, type Logger, noopLogger } from "@omni/ir";
 import { Elysia } from "elysia";
 import type { QuiesceLatch } from "../quiesce.ts";
 import type { Broadcaster } from "../stream/broadcaster.ts";
@@ -64,7 +64,43 @@ export type DatabaseRouteDeps = {
    * literally true, and it is the only caller of that method anywhere.
    */
   broadcaster?: Pick<Broadcaster, "invalidateAll">;
+  /**
+   * The export worker, which holds its own read handle on the file a swap
+   * replaces. Paused before the swap and resumed after the reopen — or halted
+   * when the swap fails. Absent in tests that have no export.
+   */
+  exportWorker?: ExportPause;
 };
+
+/** What a swap needs of the export supervisor (`exportHost/supervisor.ts`). */
+export type ExportPause = {
+  /** Resolves once the worker closed every handle, or was terminated. Never throws. */
+  pause(): Promise<void>;
+  resume(): Promise<void>;
+  halt(): Promise<void>;
+};
+
+/**
+ * The one restore or import this process is running, or null.
+ *
+ * Wider than the single-flight guard inside `@omni/control`, which covers the
+ * operation alone: this one spans the steps the gateway adds around it —
+ * pausing the export worker, the swap, and resuming it — so a second restore
+ * arriving while the first is still pausing the worker is refused rather
+ * than resuming a worker the first one is about to swap underneath. Taken
+ * before the latch, so a refused request closes and reopens nothing. The
+ * control lock still runs inside it and still refuses a vacuum or snapshot
+ * in progress. Process-local, like that lock.
+ */
+let swapping: "a restore" | "an import" | null = null;
+
+/** Takes the widened guard, or refuses: the same words the control lock uses. */
+function holdSwap(holder: "a restore" | "an import"): void {
+  if (swapping !== null) {
+    throw new GatewayError("CONFLICT", `${swapping} is already running on this database`);
+  }
+  swapping = holder;
+}
 
 /**
  * How long in-flight client work has to finish before the database moves.
@@ -94,6 +130,20 @@ async function swap(
   label: string,
   operation: () => Promise<RestoreResult>,
 ): Promise<RestoreResult> {
+  holdSwap(label === "import" ? "an import" : "a restore");
+  try {
+    return await swapGuarded(deps, logger, label, operation);
+  } finally {
+    swapping = null;
+  }
+}
+
+async function swapGuarded(
+  deps: DatabaseRouteDeps,
+  logger: Logger,
+  label: string,
+  operation: () => Promise<RestoreResult>,
+): Promise<RestoreResult> {
   const startedAt = deps.now();
   /**
    * Whether this call is the one that shut the gate.
@@ -112,7 +162,14 @@ async function swap(
    * another request can run.
    */
   const closedHere = !deps.latch.isClosed();
-  const quiesce = await deps.latch.close(deps.quiesceDeadlineMs ?? QUIESCE_DEADLINE_MS);
+  // Step 1 of *Restore and import*: the export worker closes every handle
+  // (or is terminated at 5 s) while client traffic drains, both before the
+  // file moves. `close()` shuts the gate synchronously, so the pause starts
+  // with the latch already shut.
+  const [quiesce] = await Promise.all([
+    deps.latch.close(deps.quiesceDeadlineMs ?? QUIESCE_DEADLINE_MS),
+    deps.exportWorker?.pause(),
+  ]);
   if (!quiesce.drained) {
     logger.warn("client requests still in flight at the quiesce deadline", {
       reason: label,
@@ -120,6 +177,8 @@ async function swap(
     });
   }
 
+  /** Step 3: resume on success or any failure before the swap; a failed swap leaves it stopped. */
+  let swapFailed = false;
   try {
     const result = await operation();
     deps.snapshots?.invalidate();
@@ -185,6 +244,7 @@ async function swap(
     return result;
   } catch (error) {
     if (error instanceof SwapFailedError) {
+      swapFailed = true;
       // Deliberately not reopened, and for the same reason deliberately not
       // broadcast. The file this gateway would serve from is half-swapped, and
       // answering client traffic out of it is worse than answering none.
@@ -205,6 +265,28 @@ async function swap(
     // opening anything.
     if (closedHere) deps.latch.open();
     throw error;
+  } finally {
+    // Last, after the session invalidation the success path owns, and never
+    // throwing: nothing may sit between the swap and that comparison. The
+    // worker reopens only now, after `reopen()` returned, so the main file's
+    // WAL and SHM exist again before its read-only handle does.
+    await settleExport(deps, logger, swapFailed);
+  }
+}
+
+async function settleExport(
+  deps: DatabaseRouteDeps,
+  logger: Logger,
+  swapFailed: boolean,
+): Promise<void> {
+  const worker = deps.exportWorker;
+  if (worker === undefined) return;
+  try {
+    await (swapFailed ? worker.halt() : worker.resume());
+  } catch (error) {
+    logger.warn("export worker not resumed after the swap", {
+      reason: describeError(error, "unknown"),
+    });
   }
 }
 
