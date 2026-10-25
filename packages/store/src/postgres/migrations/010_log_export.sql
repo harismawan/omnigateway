@@ -31,7 +31,11 @@ CREATE TABLE export_destinations (
 -- export worker under its epoch fence. Also no `bump_config_version` trigger,
 -- and for a stronger reason: the worker writes it on every batch. Not carried
 -- by snapshots; a restored destination resumes from its own generation's row,
--- or from `start_at` when there is none.
+-- or from `start_at` when there is none. `orphaned_at` is when the worker first
+-- found no destination with this generation (cleared if one reappears); the row
+-- is deleted 7 days after it, long enough to survive restoring a recent
+-- snapshot. Schema and SQL shared with SQLite's `export.db`:
+-- `apps/gateway/src/export/state/`.
 CREATE TABLE export_state (
   generation                TEXT PRIMARY KEY,
   cursor_at                 BIGINT NOT NULL,
@@ -45,5 +49,6 @@ CREATE TABLE export_state (
   caught_up_through         BIGINT NOT NULL DEFAULT 0,
   seen_retention_lowered_at BIGINT NOT NULL DEFAULT 0,
   gap_possible_at           BIGINT,
-  skip_requested_at         BIGINT
+  skip_requested_at         BIGINT,
+  orphaned_at               BIGINT
 );
