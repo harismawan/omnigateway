@@ -50,5 +50,11 @@ CREATE TABLE export_state (
   seen_retention_lowered_at BIGINT NOT NULL DEFAULT 0,
   gap_possible_at           BIGINT,
   skip_requested_at         BIGINT,
-  orphaned_at               BIGINT
+  orphaned_at               BIGINT,
+  -- The shared retry schedule: every replica honours one backoff and one
+  -- Retry-After. Written fenced with last_error, cleared by a commit.
+  retry_at                  BIGINT,
+  retry_for_updated_at      BIGINT,
+  failing                   BOOLEAN NOT NULL DEFAULT FALSE,
+  failures                  INTEGER NOT NULL DEFAULT 0
 );

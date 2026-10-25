@@ -117,13 +117,12 @@ type Runtime = {
   destination: ExportDestination;
   running: Promise<void> | null;
   controller: AbortController | null;
-  /** Consecutive retryable failures. */
+  /**
+   * Consecutive retryable failures this pass knows of, seeded from the shared
+   * row at claim. The schedule itself (`retry_at`, `failing`) lives in the
+   * shared state alone, so every node reads the same one.
+   */
   failures: number;
-  retryAt: number | null;
-  /** Last attempt was a hard failure or a refusal. */
-  failing: boolean;
-  /** Last attempt was refused (filter, config, secret, index name): not a batch failure. */
-  refused: boolean;
   /** The largest retention marker this worker already flagged a gap for. */
   loweredFlagged: number;
   counters: DestinationCounters;
@@ -272,8 +271,8 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
       droppedTotal: s?.droppedTotal ?? 0,
       gapPossibleAt: s?.gapPossibleAt ?? null,
       skipRequestedAt: s?.skipRequestedAt ?? null,
-      retryAt: rt?.retryAt ?? null,
-      failing: rt?.failing ?? false,
+      // The shared schedule: every node reports the same backoff.
+      ...scheduleOf(d, s),
       counters: { ...(rt?.counters ?? zeroCounters()) },
     };
   }
@@ -375,9 +374,9 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
       // *Skip to now* is the operator's answer to a failing destination: it
       // does not wait out the backoff — except where the skip cannot apply,
       // an unreadable filter, which is refused before anything is read.
-      const skipPending = (states.get(d.generation)?.skipRequestedAt ?? null) !== null;
-      const due = rt.retryAt === null || deps.now() >= rt.retryAt;
-      if (!due && !(skipPending && !d.filterMalformed)) continue;
+      const s = states.get(d.generation);
+      const skipPending = (s?.skipRequestedAt ?? null) !== null;
+      if (!due(d, s, dbNow) && !(skipPending && !d.filterMalformed)) continue;
       startPass(h, rt);
     }
 
@@ -408,9 +407,6 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           running: null,
           controller: null,
           failures: 0,
-          retryAt: null,
-          failing: false,
-          refused: false,
           loweredFlagged: 0,
           counters: zeroCounters(),
         });
@@ -424,14 +420,20 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         // receiver accepts it, its commit (already authorised by the old
         // scope's read) may land. Everything after it uses the new scope.
         rt.failures = 0;
-        rt.retryAt = null;
-        rt.failing = false;
-        rt.refused = false;
         rt.controller?.abort(CANCELLED.changed);
       }
       rt.destination = d;
       if (!d.enabled) rt.controller?.abort(CANCELLED.removed);
     }
+  }
+
+  /**
+   * The shared clock, as last measured: the database's on Postgres. Retry
+   * instants are written and compared on it, so nodes with skewed clocks
+   * agree on when a destination is due.
+   */
+  function sharedNow(): number {
+    return deps.now() + clockOffset;
   }
 
   async function readClock(h: Handles): Promise<number> {
@@ -532,6 +534,10 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     await guard(h.state.ensure(generation, d.startAt), signal);
     const claimed = await guard(h.state.claim(generation), signal);
     if (claimed === null || signal.aborted) return;
+    // Another node may have failed between this node's tick and its claim:
+    // its schedule binds this pass too, unless a skip overrides it.
+    if (claimed.skipRequestedAt === null && !due(d, claimed, sharedNow())) return;
+    rt.failures = current(d, claimed) ? claimed.failures : 0;
     const epoch = claimed.epoch;
     const position = {
       cursorAt: claimed.cursorAt,
@@ -628,7 +634,6 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           skipAt = null;
           // The operator's action on a failing destination: try it again now.
           succeeded(rt);
-          rt.refused = false;
           continue;
         }
 
@@ -639,7 +644,6 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
             return;
           }
           sender = prepared.sender;
-          rt.refused = false;
         }
         const rows = await h.reader.exportPage({
           after,
@@ -757,8 +761,6 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
 
   function succeeded(rt: Runtime): void {
     rt.failures = 0;
-    rt.retryAt = null;
-    rt.failing = false;
   }
 
   async function settle(
@@ -783,14 +785,19 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     retryAfterMs: number | null,
   ): Promise<void> {
     rt.failures += 1;
-    rt.retryAt = deps.now() + retryDelay(rt.failures, retryAfterMs, deps.random);
+    const retryAt = sharedNow() + retryDelay(rt.failures, retryAfterMs, deps.random);
     rt.counters.batchesRetry += 1;
     logger.debug("export batch will be retried", {
       ...(status === null ? {} : { status }),
       retryable: true,
       reason: error,
     });
-    await h.state.recordError(rt.destination.generation, epoch, error, deps.now());
+    await h.state.recordError(rt.destination.generation, epoch, error, deps.now(), {
+      retryAt,
+      forUpdatedAt: rt.destination.updatedAt,
+      failing: false,
+      failures: rt.failures,
+    });
   }
 
   async function hardFailure(
@@ -802,16 +809,19 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     refused: boolean,
   ): Promise<void> {
     rt.failures = 0;
-    rt.retryAt = deps.now() + BACKOFF_MAX_MS;
-    rt.failing = true;
-    rt.refused = refused;
+    const retryAt = sharedNow() + BACKOFF_MAX_MS;
     if (!refused) rt.counters.batchesFailed += 1;
     logger.warn(refused ? "export destination refused" : "export destination failing", {
       ...(status === null ? {} : { status }),
       retryable: false,
       reason: error,
     });
-    await h.state.recordError(rt.destination.generation, epoch, error, deps.now());
+    await h.state.recordError(rt.destination.generation, epoch, error, deps.now(), {
+      retryAt,
+      forUpdatedAt: rt.destination.updatedAt,
+      failing: true,
+      failures: 0,
+    });
   }
 
   // --- messages ----------------------------------------------------------
@@ -1124,6 +1134,37 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         return;
     }
   }
+}
+
+/**
+ * Whether a shared retry schedule still applies to `d`: it was written for
+ * this version of the destination. An edit since (a newer `updatedAt`) is the
+ * operator's answer to the failure, so the schedule no longer binds.
+ */
+function current(
+  d: ExportDestination,
+  s: Pick<ExportState, "retryAt" | "retryForUpdatedAt">,
+): boolean {
+  return s.retryAt !== null && (s.retryForUpdatedAt === null || d.updatedAt <= s.retryForUpdatedAt);
+}
+
+/** Whether `d` may start a pass at shared instant `now`, by the shared schedule alone. */
+function due(
+  d: ExportDestination,
+  s: Pick<ExportState, "retryAt" | "retryForUpdatedAt"> | undefined,
+  now: number,
+): boolean {
+  if (s === undefined || !current(d, s)) return true;
+  return now >= (s.retryAt as number);
+}
+
+/** The schedule as status reports it: what binds `d` now, from shared state. */
+function scheduleOf(
+  d: ExportDestination,
+  s: ExportState | undefined,
+): { retryAt: number | null; failing: boolean } {
+  if (s === undefined || !current(d, s)) return { retryAt: null, failing: false };
+  return { retryAt: s.retryAt, failing: s.failing };
 }
 
 function testFailure(ref: string, error: string): TestResult {

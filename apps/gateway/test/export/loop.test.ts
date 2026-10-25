@@ -1331,3 +1331,65 @@ test("a failed renewal before the first batch ends the pass without sending", as
   expect(w.sent).toHaveLength(0);
   expect((await stateOf(w)).cursorId).toBe("");
 });
+
+test("cluster: node A's 429 Retry-After is honoured by node B, which waits", async () => {
+  const { a, b } = twoHolders();
+  a.answer = () => new Response("", { status: 429, headers: { "retry-after": "300" } });
+  await a.loop.start();
+  await a.settle();
+  expect(a.sent).toHaveLength(1);
+  const failed = await stateOf(a);
+  expect(failed.retryAt).toBe(T0 + 300_000);
+
+  // B, sharing the state and the lease, starts after A's pass released the lease.
+  b.answer = () => new Response(null, { status: 200 });
+  await b.loop.start();
+  await b.advance(POLL_MS * 4);
+  expect(b.sent).toHaveLength(0);
+  // B's status agrees with A's: the schedule is shared.
+  await b.advance(STATUS_INTERVAL_MS);
+  expect(lastStatus(b)?.retryAt).toBe(T0 + 300_000);
+
+  // Past Retry-After, whichever node ticks next sends.
+  a.answer = () => new Response(null, { status: 200 });
+  await b.advance(300_000);
+  expect(a.sent.length + b.sent.length).toBe(2);
+  expect((await stateOf(b)).cursorId).toBe("r1");
+});
+
+test("cluster: a hard failure on one node holds every node back until an edit", async () => {
+  const { a, b } = twoHolders();
+  a.answer = () => new Response("", { status: 401 });
+  await a.loop.start();
+  await a.settle();
+  b.answer = () => new Response(null, { status: 200 });
+  await b.loop.start();
+  await b.advance(POLL_MS * 3);
+  expect(b.sent).toHaveLength(0);
+  await b.advance(STATUS_INTERVAL_MS);
+  expect(lastStatus(b)?.failing).toBe(true);
+  // An edit on the shared configuration (newer updatedAt) releases it at once, on any node.
+  a.answer = () => new Response(null, { status: 200 });
+  const [d] = b.destinations;
+  if (d === undefined) throw new Error("no destination");
+  b.destinations[0] = { ...d, updatedAt: d.updatedAt + 1 };
+  await b.loop.handle({ type: "destinationsChanged" });
+  await b.settle();
+  expect(b.sent).toHaveLength(1);
+  expect((await stateOf(b)).cursorId).toBe("r1");
+  expect((await stateOf(b)).retryAt).toBeNull();
+});
+
+test("cluster: a skip requested anywhere bypasses the shared backoff", async () => {
+  const { a, b } = twoHolders();
+  a.answer = () => new Response("", { status: 503, headers: { "retry-after": "300" } });
+  await a.loop.start();
+  await a.settle();
+  await b.loop.start();
+  await b.settle();
+  await b.loop.handle({ type: "skip", ref: "s", id: "hook" });
+  await b.settle();
+  await b.advance(SETTLE_MS + POLL_MS);
+  const s = await stateOf(b);
+  expect([s.cursorId, s.droppedTotal, s.skipRequestedAt]).toEqual(["r1", 1, null]);
+});

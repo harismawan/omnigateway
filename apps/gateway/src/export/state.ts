@@ -58,6 +58,28 @@ export type ExportState = {
   skipRequestedAt: number | null;
   /** When `deleteOrphans` first found no live destination for this generation. */
   orphanedAt: number | null;
+  /**
+   * The destination's shared retry schedule, written with the failure that
+   * set it and cleared by the next commit, so every cluster node honours one
+   * backoff and one `Retry-After`: no node starts a pass before `retryAt`.
+   * `retryForUpdatedAt` is the destination's `updatedAt` when it was set — an
+   * edit after it (a newer `updatedAt`) is the operator's answer and retries
+   * at once, as does a pending skip.
+   */
+  retryAt: number | null;
+  retryForUpdatedAt: number | null;
+  /** The last attempt was a hard failure or a refusal (until a success). */
+  failing: boolean;
+  /** Consecutive retryable failures, for the doubling backoff. */
+  failures: number;
+};
+
+/** The retry schedule a failure writes (see {@link ExportState.retryAt}). */
+export type RetrySchedule = {
+  retryAt: number;
+  forUpdatedAt: number;
+  failing: boolean;
+  failures: number;
 };
 
 /** What a successful batch (or an idle, caught-up pass) commits. */
@@ -135,8 +157,19 @@ export interface ExportStateStore {
     next: ExportCommit,
     bound?: CommitBound,
   ): Promise<boolean>;
-  /** Fenced like `commit`; `message` is bounded to {@link LAST_ERROR_MAX_CHARS}. */
-  recordError(generation: string, epoch: number, message: string, at: number): Promise<boolean>;
+  /**
+   * Fenced like `commit`; `message` is bounded to {@link LAST_ERROR_MAX_CHARS}.
+   * With `schedule`, the failure's retry schedule is written in the same
+   * statement; without, the stored schedule is kept (a drop summary written
+   * after a successful commit).
+   */
+  recordError(
+    generation: string,
+    epoch: number,
+    message: string,
+    at: number,
+    schedule?: RetrySchedule,
+  ): Promise<boolean>;
   /** Sets `gap_possible_at` once, until cleared; `true` only when this call set it. */
   flagGap(generation: string, at: number): Promise<boolean>;
   /** The operator's acknowledgement of the flag raised at `seenAt` or earlier; a later one survives. */

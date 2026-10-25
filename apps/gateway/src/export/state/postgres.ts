@@ -25,6 +25,7 @@ const Q = statements({
   p: (n) => `$${n}`,
   greatest: "GREATEST",
   jsonSet: (param) => `(SELECT jsonb_array_elements_text(${param}::jsonb))`,
+  false: "FALSE",
 });
 
 type Rows<T> = T[] & { count: number };
@@ -186,8 +187,19 @@ export function createPostgresExportState(
       if (bound === undefined) return changed(Q.commit, values);
       return boundedCommit(values, bound);
     },
-    recordError: (generation, epoch, message, at) =>
-      changed(Q.recordError, [generation, epoch, boundMessage(message), at]),
+    recordError: (generation, epoch, message, at, schedule) =>
+      schedule === undefined
+        ? changed(Q.recordError, [generation, epoch, boundMessage(message), at])
+        : changed(Q.recordFailure, [
+            generation,
+            epoch,
+            boundMessage(message),
+            at,
+            schedule.retryAt,
+            schedule.forUpdatedAt,
+            schedule.failing,
+            schedule.failures,
+          ]),
     flagGap: (generation, at) => changed(Q.flagGap, [generation, at]),
     clearGap: (generation, seenAt) => changed(Q.clearGap, [generation, seenAt]),
     requestSkip: (generation, at) => changed(Q.requestSkip, [generation, at]),

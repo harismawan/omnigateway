@@ -148,6 +148,10 @@ forEachState((backend) => {
       gapPossibleAt: null,
       skipRequestedAt: null,
       orphanedAt: null,
+      retryAt: null,
+      retryForUpdatedAt: null,
+      failing: false,
+      failures: 0,
     });
     const { epoch } = (await s.claim(G)) ?? { epoch: -1 };
     expect(
@@ -395,6 +399,46 @@ forEachState((backend) => {
     expect([row?.lastErrorAt, row?.lastSuccessAt]).toEqual([3_000, 4_000]);
   });
 
+  test("a failure's retry schedule is shared, fenced with recordError, and cleared by a commit", async () => {
+    const s = await backend.fresh();
+    await s.ensure(G, 0);
+    const epoch = (await s.claim(G))?.epoch ?? -1;
+    const schedule = { retryAt: 9_000, forUpdatedAt: 77, failing: false, failures: 3 };
+    expect(await s.recordError(G, epoch, "HTTP 429", 1_000, schedule)).toBe(true);
+    let [row] = await s.list();
+    expect(row).toMatchObject({
+      lastError: "HTTP 429",
+      retryAt: 9_000,
+      retryForUpdatedAt: 77,
+      failing: false,
+      failures: 3,
+    });
+    // A hard failure.
+    await s.recordError(G, epoch, "HTTP 401", 2_000, {
+      retryAt: 302_000,
+      forUpdatedAt: 77,
+      failing: true,
+      failures: 0,
+    });
+    [row] = await s.list();
+    expect([row?.retryAt, row?.failing, row?.failures]).toEqual([302_000, true, 0]);
+    // A stale holder cannot move another's schedule.
+    expect(await s.recordError(G, epoch - 1, "HTTP 500", 3_000, schedule)).toBe(false);
+    // A summary without a schedule (drops after a commit) leaves it alone.
+    await s.recordError(G, epoch, "dropped 1 of 2", 3_500);
+    [row] = await s.list();
+    expect([row?.retryAt, row?.failing]).toEqual([302_000, true]);
+    // A commit is a success: the schedule is cleared.
+    await s.commit(G, epoch, { cursorAt: 5, cursorId: "r", seenRetentionLoweredAt: 0 });
+    [row] = await s.list();
+    expect(row).toMatchObject({
+      retryAt: null,
+      retryForUpdatedAt: null,
+      failing: false,
+      failures: 0,
+    });
+  });
+
   test("flagGap sets once until cleared; unfenced; clearGap never clears a newer flag", async () => {
     const s = await backend.fresh();
     expect(await s.flagGap(G, 10)).toBe(false);
@@ -495,6 +539,33 @@ describe("sqlite export.db", () => {
     for (const dir of dirs) await rm(dir, { recursive: true, force: true });
   });
 
+  test("an export.db from before the retry schedule is upgraded in place, keeping its rows", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "omni-export-state-"));
+    dirs.push(dir);
+    const path = exportDbPathFor(join(dir, "omnigateway.db"));
+    // Version 1, exactly as the first release wrote it.
+    const v1 = new Database(path, { create: true });
+    v1.run(`CREATE TABLE export_state (
+      generation TEXT PRIMARY KEY, cursor_at INTEGER NOT NULL, cursor_id TEXT NOT NULL DEFAULT '',
+      epoch INTEGER NOT NULL DEFAULT 0, last_success_at INTEGER, last_error TEXT,
+      last_error_at INTEGER, exported_total INTEGER NOT NULL DEFAULT 0,
+      dropped_total INTEGER NOT NULL DEFAULT 0, caught_up_through INTEGER NOT NULL DEFAULT 0,
+      seen_retention_lowered_at INTEGER NOT NULL DEFAULT 0, gap_possible_at INTEGER,
+      skip_requested_at INTEGER, orphaned_at INTEGER)`);
+    v1.run("INSERT INTO export_state (generation, cursor_at, cursor_id) VALUES (?, 42, 'r1')", [G]);
+    v1.run("PRAGMA user_version = 1");
+    v1.close();
+    const upgraded = openSqliteExportState(path);
+    try {
+      const [row] = await upgraded.list();
+      expect(row).toMatchObject({ cursorAt: 42, cursorId: "r1", retryAt: null, failing: false });
+    } finally {
+      upgraded.close();
+    }
+    // Opening again is a no-op.
+    openSqliteExportState(path).close();
+  });
+
   test("lives beside the main file as export.db, in WAL mode, and survives a reopen", async () => {
     const dir = await mkdtemp(join(tmpdir(), "omni-export-state-"));
     dirs.push(dir);
@@ -525,7 +596,7 @@ describe("sqlite export.db", () => {
       ).toBe("wal");
       expect(
         raw.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version,
-      ).toBe(1);
+      ).toBe(2);
     } finally {
       raw.close();
     }
