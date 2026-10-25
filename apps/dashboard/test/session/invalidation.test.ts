@@ -277,3 +277,20 @@ test("res:usage leaves the client's quota alone, which is why that one polls", (
   // the reason.
   expect(stale(client, queryKeys.clientQuota)).toBe(false);
 });
+
+/**
+ * The Sessions summaries poll at the log cadence only when the socket is down;
+ * under LIVE they depend on `res:logs` to refresh, like the tables they total.
+ */
+test("res:logs refreshes both sessions summaries", () => {
+  const client = seeded();
+  const operator = queryKeys.logSessions({ since: 0, until: 1 });
+  const own = queryKeys.clientSessions({ since: 0, until: 1 });
+  client.setQueryData(operator, []);
+  client.setQueryData(own, []);
+
+  invalidateTopic(client, "res:logs");
+
+  expect(stale(client, operator)).toBe(true);
+  expect(stale(client, own)).toBe(true);
+});

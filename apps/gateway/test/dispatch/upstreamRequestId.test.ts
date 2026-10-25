@@ -184,3 +184,47 @@ test("an oversized or unprintable id is not recorded", async () => {
   expect(long.upstreamRequestId).toBeNull();
   store.close();
 });
+
+test("a final attempt that never got a response head does not keep an earlier attempt's id", async () => {
+  const store = await seeded(2);
+  let n = 0;
+  const log = await run(store, async () => {
+    n += 1;
+    if (n === 1) return respond(503, { "request-id": "first-failed" });
+    throw new Error("connect ECONNREFUSED");
+  });
+  expect(log.attempts).toBe(2);
+  expect(log.upstreamRequestId).toBeNull();
+  store.close();
+});
+
+test("a late response from an abandoned attempt cannot overwrite the current one's id", async () => {
+  const { createUpstreamRequestIdRecorder } = await import(
+    "../../src/dispatch/upstreamRequestId.ts"
+  );
+  let current: string | null = "unset";
+  const recorder = createUpstreamRequestIdRecorder((id) => {
+    current = id;
+  });
+  let release: (() => void) | undefined;
+  const slow: HttpClient = () =>
+    new Promise((resolve) => {
+      release = () => resolve(respond(200, { "request-id": "late" }));
+    });
+  const call = {
+    provider: "anthropic" as const,
+    url: "x",
+    method: "POST",
+    headers: [],
+    body: "",
+    signal: new AbortController().signal,
+  };
+  const pending = recorder.forAttempt(slow)(call);
+  // The next attempt starts: it clears the id and supersedes the first.
+  const second = recorder.forAttempt(async () => respond(200, { "request-id": "second" }));
+  await second(call);
+  expect(current).toBe("second");
+  release?.();
+  await pending;
+  expect(current).toBe("second");
+});

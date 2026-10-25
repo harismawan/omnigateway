@@ -583,13 +583,17 @@ export type ClientLogsResponse = { logs: ClientRequestLog[]; nextCursor?: string
  */
 export type SessionsResponse = { sessions: SessionSummary[] };
 
-/** What the Sessions tab asks: a bounded range, optionally narrowed. */
-export type SessionsQuery = {
-  since: number;
-  until: number;
-  apiKeyId?: string;
-  agent?: string;
-};
+/**
+ * What the Sessions tab asks: a range, optionally narrowed.
+ *
+ * `until: null` is an open-ended range ending *now*: the upper bound is read
+ * at fetch time rather than pinned in the key, so a refetch — a poll or a
+ * `res:logs` push — includes requests that arrived since the tab opened.
+ * `spanMs` is how far back from that moment an open range starts.
+ */
+export type SessionsQuery =
+  | { since: number; until: number; apiKeyId?: string; agent?: string }
+  | { since: null; until: null; spanMs: number; apiKeyId?: string; agent?: string };
 
 /**
  * The filters the log routes accept, and which of them match loosely.

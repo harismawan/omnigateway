@@ -60,7 +60,7 @@ export function applyTrace(log: RequestLog, trace: TraceContext): void {
   log.turnId = trace.turnId;
   log.agent = trace.agent;
   log.tags = [...trace.tags];
-  log.traceMetadata = { ...trace.metadata };
+  log.traceMetadata = Object.assign(Object.create(null), trace.metadata);
   log.clientRequestId = trace.clientRequestId;
   if (trace.invalid && !log.degradations.includes(TRACE_INVALID)) {
     log.degradations.push(TRACE_INVALID);
@@ -90,26 +90,38 @@ export function extractTrace(headers: Headers, request: ChatRequest): TraceConte
     return raw;
   };
 
-  const id = (raw: string | undefined): string | null => {
+  /**
+   * Bounds the value as it will be **stored**, prefix included: the API's
+   * filters accept at most 256 characters, so a longer stored id would be a
+   * session nobody can filter on.
+   */
+  const id = (raw: string | undefined, prefix = ""): string | null => {
     if (raw === undefined) return null;
     const value = raw.trim();
     if (value.length === 0) return null;
-    if (value.length > MAX_ID || !PRINTABLE_ID.test(value)) {
+    const stored = `${prefix}${value}`;
+    if (stored.length > MAX_ID || !PRINTABLE_ID.test(value)) {
       flag();
       return null;
     }
-    return value;
+    return stored;
   };
 
   const inferred = inferAgent(request, line, flag);
-  const prefixed = (value: string | undefined): string | null => {
-    if (inferred === null || value === undefined) return null;
-    const bounded = id(value);
-    return bounded === null ? null : `${inferred.agent}:${bounded}`;
-  };
+  const prefixed = (value: string | undefined): string | null =>
+    inferred === null ? null : id(value, `${inferred.agent}:`);
 
-  const sessionId = id(line("x-omni-session-id")) ?? prefixed(inferred?.session);
-  const turnId = id(line("x-omni-turn-id")) ?? prefixed(inferred?.turn);
+  /**
+   * The explicit header wins whenever it is **present**, valid or not: a
+   * caller who named a session and got it wrong has its field dropped, never
+   * silently swapped for an identity it did not choose.
+   */
+  const explicitOr = (name: string, fallback: () => string | null): string | null => {
+    const raw = line(name);
+    return raw !== undefined && raw.trim().length > 0 ? id(raw) : fallback();
+  };
+  const sessionId = explicitOr("x-omni-session-id", () => prefixed(inferred?.session));
+  const turnId = explicitOr("x-omni-turn-id", () => prefixed(inferred?.turn));
   const tags = parseTags(line("x-omni-tags"), flag);
   const metadata = parseMetadata(line("x-omni-metadata"), flag);
   const clientRequestId = id(line("x-request-id"));
@@ -220,7 +232,9 @@ function parseTags(raw: string | undefined, flag: () => void): string[] {
 }
 
 function parseMetadata(raw: string | undefined, flag: () => void): Record<string, string> {
-  const out: Record<string, string> = {};
+  // Null prototype: `__proto__` and `constructor` are ordinary caller keys here,
+  // not object machinery, and must count toward the cap like any other.
+  const out: Record<string, string> = Object.create(null);
   if (raw === undefined) return out;
   for (const part of raw.split(",")) {
     if (part.trim().length === 0) continue;
@@ -243,7 +257,7 @@ function parseMetadata(raw: string | undefined, flag: () => void): Record<string
       flag();
       continue;
     }
-    if (!(key in out) && Object.keys(out).length === MAX_META) {
+    if (!Object.hasOwn(out, key) && Object.keys(out).length === MAX_META) {
       flag();
       continue;
     }

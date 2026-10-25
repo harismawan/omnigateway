@@ -229,3 +229,39 @@ test("Anthropic metadata.user_id never reaches the context", () => {
   expect(JSON.stringify(t)).not.toContain("acct");
   expect(t.sessionId).toBeNull();
 });
+
+describe("review fixes", () => {
+  test("the bound applies to the stored, prefixed id, so it stays filterable", () => {
+    // 256 is accepted for an explicit id; an inferred one gains `claude-code:`.
+    const raw = "a".repeat(256);
+    const explicit = extractTrace(h({ "x-omni-session-id": raw }), base);
+    expect(explicit.sessionId).toBe(raw);
+    const inferred = extractTrace(h({ "x-claude-code-session-id": raw }), base);
+    expect(inferred.sessionId).toBeNull();
+    expect(inferred.invalid).toBe(true);
+    const fits = "b".repeat(256 - "claude-code:".length);
+    expect(extractTrace(h({ "x-claude-code-session-id": fits }), base).sessionId).toBe(
+      `claude-code:${fits}`,
+    );
+  });
+
+  test("a present but invalid explicit id drops the field rather than falling back", () => {
+    const t = extractTrace(
+      h({ "x-omni-session-id": "has space", "x-claude-code-session-id": "cc-1" }),
+      base,
+    );
+    expect(t.sessionId).toBeNull();
+    expect(t.agent).toBe("claude-code");
+    expect(t.invalid).toBe(true);
+  });
+
+  test("prototype-shaped metadata keys are ordinary keys and count toward the cap", () => {
+    const t = extractTrace(h({ "x-omni-metadata": "__proto__:x,constructor:y" }), base);
+    expect(Object.keys(t.metadata).sort()).toEqual(["__proto__", "constructor"]);
+    expect(t.metadata["constructor"]).toBe("y");
+    const many = Array.from({ length: 16 }, (_, i) => `k${i}:v`).join(",");
+    const capped = extractTrace(h({ "x-omni-metadata": `${many},constructor:z` }), base);
+    expect(Object.keys(capped.metadata)).toHaveLength(16);
+    expect(capped.invalid).toBe(true);
+  });
+});

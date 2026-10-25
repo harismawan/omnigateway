@@ -16,6 +16,7 @@ import {
   NO_LOG_FILTERS,
   type RequestRow,
   type SessionSummary,
+  type SessionsQuery,
 } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { formatCount } from "../../lib/format.ts";
@@ -35,13 +36,22 @@ import { SessionsTable } from "./SessionsTable.tsx";
 
 /**
  * The Sessions tab's range when the filters name none: a week, inside the
- * gateway's 31-day ceiling on a grouped read. An explicit range is used as is.
+ * gateway's 31-day ceiling on a grouped read.
  */
 const SESSIONS_DEFAULT_MS = 7 * 86_400_000;
 
-export function sessionsRange(filters: LogFilters, now: number): { since: number; until: number } {
-  const until = filters.until ?? now;
-  return { since: filters.since ?? until - SESSIONS_DEFAULT_MS, until };
+/**
+ * The Sessions tab's range. Open-ended unless the filters name an upper bound:
+ * an open range ends at fetch time, so it keeps counting new requests. A lone
+ * `since` becomes the span back from now.
+ */
+export function sessionsRange(filters: LogFilters, now: number): SessionsQuery {
+  if (filters.until !== undefined) {
+    return { since: filters.since ?? filters.until - SESSIONS_DEFAULT_MS, until: filters.until };
+  }
+  const spanMs =
+    filters.since === undefined ? SESSIONS_DEFAULT_MS : Math.max(0, now - filters.since);
+  return { since: null, until: null, spanMs };
 }
 
 type View = "requests" | "sessions";
@@ -142,8 +152,8 @@ export function LogsBoard() {
   const failed = rows.filter(isError).length;
   const live = rows.filter(isPending).length;
 
-  // Read the clock once per filter change, not per render: the range is part of
-  // the query key, and a key that moved every render would refetch forever.
+  // Recomputed per filter change, not per render: an explicit range is part of
+  // the query key; an open one keys on its span and reads the clock at fetch.
   const range = useMemo(() => sessionsRange(filters, Date.now()), [filters]);
   const sessions = useLogSessions(
     {

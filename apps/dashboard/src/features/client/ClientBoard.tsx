@@ -281,8 +281,9 @@ export function ClientBoard() {
   const logs = useClientLogPages(filters, limit, cadence(LOG_CADENCE_MS, "res:logs"));
   // The key's own sessions over the board's range, capped at the gateway's
   // 31-day ceiling on a grouped read. Scoped by the route, never by a param.
+  // Open-ended, ending at fetch time, so new requests keep counting.
   const sessions = useLogSessions(
-    { since: Math.max(since, until - 31 * 86_400_000), until },
+    { since: null, until: null, spanMs: Math.min(range.ms, 31 * 86_400_000) },
     true,
     true,
     cadence(LOG_CADENCE_MS, "res:logs"),

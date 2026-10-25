@@ -215,3 +215,32 @@ test("the latch is not consulted for the routes an operator recovers through", a
 
   store.close();
 });
+
+/**
+ * A quiesce refusal answers before any route runs, and still names the request:
+ * every inference and token-count response carries `x-omni-request-id`.
+ */
+test("a quiesce refusal carries the request id, on every gated surface", async () => {
+  const { store, latch, proxy, release } = await harness();
+  release();
+  await latch.close(2_000);
+  for (const path of [
+    "/v1/messages",
+    "/v1/chat/completions",
+    "/v1/responses",
+    "/v1/messages/count_tokens",
+  ]) {
+    const refused = await proxy(path);
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get("x-omni-request-id")).toMatch(/^req_/);
+  }
+  latch.open();
+  // An admitted request is answered under the id minted at the gate, once.
+  const ok = await proxy();
+  expect(ok.status).toBe(200);
+  const id = ok.headers.get("x-omni-request-id");
+  expect(id).toMatch(/^req_/);
+  const [row] = await store.usage.recent(1);
+  expect(row?.id).toBe(id ?? "missing");
+  store.close();
+});

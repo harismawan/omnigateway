@@ -54,7 +54,8 @@ function parseMetadata(raw: string | null): Record<string, string> {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
-    const out: Record<string, string> = {};
+    // Null prototype, as at ingress: a stored `__proto__` key is data.
+    const out: Record<string, string> = Object.create(null);
     for (const [key, value] of Object.entries(parsed)) {
       if (typeof value === "string") out[key] = value;
     }

@@ -88,6 +88,13 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry" | "coord
   /** Defaults to one in-memory coordinator for the process, shared by every consumer below. */
   coord?: Coord;
   requestId: () => string;
+  /**
+   * The id the app's gate already minted for this request, if any — so a
+   * request is answered under the same id a quiesce refusal would have named.
+   * Absent when the routes are mounted on their own (tests), in which case
+   * each handler mints from `requestId`.
+   */
+  requestIdFor?: (request: Request) => string;
   rateLimiter?: ApiKeyRateLimiter;
   keepaliveMs?: number;
   /**
@@ -131,7 +138,13 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry" | "coord
 type ResolvedProxyDeps = DispatchDeps &
   Pick<
     ProxyDeps,
-    "requestId" | "rateLimiter" | "bodyLoggingAllowed" | "emit" | "broadcaster" | "telemetry"
+    | "requestId"
+    | "requestIdFor"
+    | "rateLimiter"
+    | "bodyLoggingAllowed"
+    | "emit"
+    | "broadcaster"
+    | "telemetry"
   > & {
     keepaliveMs: number;
     logger: Logger;
@@ -422,7 +435,7 @@ async function handle(
   surface: Surface,
   request: Request,
 ): Promise<Response> {
-  const requestId = deps.requestId();
+  const requestId = deps.requestIdFor?.(request) ?? deps.requestId();
   const startedAt = deps.now();
   const trace: TraceRecord | null =
     deps.telemetry?.startRequest(
@@ -1082,7 +1095,7 @@ export function proxyRoutes(deps: ProxyDeps) {
         // Minted first, before authentication, so even a refusal names a
         // request the client can quote. This route writes no row, so the id
         // joins to stdout and the client's own logs, not to `request_logs`.
-        const requestId = deps.requestId();
+        const requestId = deps.requestIdFor?.(request) ?? deps.requestId();
         const idHeader = { [REQUEST_ID_HEADER]: requestId };
         try {
           const key = await authenticateApiKey(

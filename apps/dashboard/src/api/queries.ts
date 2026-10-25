@@ -126,6 +126,17 @@ const logFilterParams = (filters: LogFilters): Record<string, string | number | 
   return params;
 };
 
+/** A stable key for a sessions range: an open one keys on its span, not on the clock. */
+const sessionsRangeKey = (query: SessionsQuery): string =>
+  query.until === null ? `last:${query.spanMs}` : `${query.since}..${query.until}`;
+
+/** The bounds to send, reading the clock at fetch time for an open range. */
+const sessionsBounds = (query: SessionsQuery): { since: number; until: number } => {
+  if (query.until !== null) return { since: query.since, until: query.until };
+  const until = Date.now();
+  return { since: until - query.spanMs, until };
+};
+
 export const queryKeys = {
   status: ["status"] as const,
   credentials: ["credentials"] as const,
@@ -185,9 +196,9 @@ export const queryKeys = {
   clientLogPages: (filters: LogFilters, limit: number) =>
     ["client", "logPages", limit, logFilterKey(filters)] as const,
   logSessions: (query: SessionsQuery) =>
-    ["logSessions", query.since, query.until, query.apiKeyId ?? null, query.agent ?? null] as const,
+    ["logSessions", sessionsRangeKey(query), query.apiKeyId ?? null, query.agent ?? null] as const,
   clientSessions: (query: SessionsQuery) =>
-    ["client", "sessions", query.since, query.until, query.agent ?? null] as const,
+    ["client", "sessions", sessionsRangeKey(query), query.agent ?? null] as const,
   clientQuota: ["client", "quota"] as const,
   clientQuotaHistory: (query: ClientQuotaHistoryQuery) =>
     ["client", "quota-history", query.since, query.until ?? null] as const,
@@ -583,11 +594,12 @@ export function useLogSessions(
     queryKey: client ? queryKeys.clientSessions(query) : queryKeys.logSessions(query),
     enabled,
     queryFn: async ({ signal }) => {
-      const { apiKeyId, ...rest } = query;
+      const { apiKeyId, agent } = query;
       return (
         await get<SessionsResponse>(
           withQuery(client ? "/api/client/sessions" : "/api/logs/sessions", {
-            ...rest,
+            ...sessionsBounds(query),
+            ...(agent === undefined ? {} : { agent }),
             // The client route takes no key: its session is the scope.
             ...(client || apiKeyId === undefined ? {} : { apiKeyId }),
           }),
