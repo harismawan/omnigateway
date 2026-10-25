@@ -117,6 +117,8 @@ export type World = {
     },
     write: () => Promise<boolean>,
   ) => Promise<boolean>;
+  /** Runs before every epoch claim; a test stalls a pass's pre-batch work there. */
+  beforeClaim: () => Promise<void>;
   /** Runs before every destination-and-secret read; a test pauses a pass there. */
   beforeSnapshot: (id: string) => Promise<void>;
   /** Runs before every single-row read (preview). */
@@ -172,6 +174,7 @@ export function world(
     beforeSettings: async () => {},
     beforeGetLog: async () => {},
     beforeSnapshot: async () => {},
+    beforeClaim: async () => {},
     onCommit: (_call: unknown, write: () => Promise<boolean>) => write(),
     opens: 0,
     closes: 0,
@@ -283,6 +286,10 @@ export function world(
       // loop passed and may delay or fail the write.
       const state: ExportStateStore = {
         ...real,
+        claim: async (generation) => {
+          await w.beforeClaim();
+          return real.claim(generation);
+        },
         commit: (generation, epoch, next, bound) =>
           w.onCommit({ generation, epoch, next, bound }, () =>
             real.commit(generation, epoch, next, bound),

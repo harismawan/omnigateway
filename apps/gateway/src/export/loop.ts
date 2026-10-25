@@ -137,6 +137,7 @@ const CANCELLED = {
   changed: new Error("destination configuration changed"),
 };
 const DEADLINE = new Error("batch deadline");
+const LEASE_LOST = new Error("lease expired");
 
 const DEADLINE_SUMMARY = "deadline exceeded";
 const INTERNAL_SUMMARY = "internal error";
@@ -455,19 +456,62 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
       });
   }
 
+  /**
+   * The lease, held across the pass. Everything done under it before a batch
+   * — the snapshot read, `ensure`, `claim` — is bounded by the lease itself:
+   * a timer aborts the pass at the TTL measured from the acquire, so work that
+   * would outlive the lease sends nothing. Each batch renews it first (see
+   * `pass`), and its 45 s deadline is measured from that renewal.
+   */
   async function runPass(h: Handles, rt: Runtime, signal: AbortSignal): Promise<void> {
     const name = `export:${rt.destination.generation}`;
     if (h.lease !== null && !(await h.lease.acquire(name, nodeId, LEASE_TTL_MS))) return;
+    const lease = new AbortController();
+    let timer: unknown = null;
+    // When the lease was last confirmed, before the call that confirmed it.
+    let heldSince = deps.now();
+    const arm = (from: number): void => {
+      if (h.lease === null) return;
+      heldSince = from;
+      if (timer !== null) timers.clearTimeout(timer);
+      timer = timers.setTimeout(() => lease.abort(LEASE_LOST), LEASE_TTL_MS - (deps.now() - from));
+    };
+    arm(heldSince);
+    /**
+     * Lost once the TTL has run out since the last confirmation, whether the
+     * timer fired or the loop was stalled past it: a lapsed lease re-acquired
+     * by its old holder may have been someone else's in between, so it does
+     * not count as renewed.
+     */
+    const lapsed = (): boolean => lease.signal.aborted || deps.now() - heldSince >= LEASE_TTL_MS;
+    const renew = async (): Promise<boolean> => {
+      if (h.lease === null) return true;
+      if (lapsed()) {
+        lease.abort(LEASE_LOST);
+        return false;
+      }
+      const asked = deps.now();
+      const held = await h.lease.acquire(name, nodeId, LEASE_TTL_MS);
+      if (!held || lapsed()) return false;
+      arm(asked);
+      return true;
+    };
     try {
-      await pass(h, rt, signal);
+      await pass(h, rt, AbortSignal.any([signal, lease.signal]), renew);
     } finally {
+      if (timer !== null) timers.clearTimeout(timer);
       if (h.lease !== null) {
         await h.lease.release(name, nodeId).catch(() => {});
       }
     }
   }
 
-  async function pass(h: Handles, rt: Runtime, signal: AbortSignal): Promise<void> {
+  async function pass(
+    h: Handles,
+    rt: Runtime,
+    signal: AbortSignal,
+    renew: () => Promise<boolean>,
+  ): Promise<void> {
     const generation = rt.destination.generation;
     // The pass's whole configuration — config, filter, enabled, secret — is
     // one snapshot, read by one statement, and bound to the generation and
@@ -475,6 +519,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     // to send (the next tick's sync cancels and restarts it), and a config is
     // never paired with a secret from another version of the row.
     const snapshot = await guard(h.reader.destinationWithSecret(rt.destination.id), signal);
+    if (signal.aborted) return;
     if (
       snapshot === null ||
       snapshot.destination.generation !== generation ||
@@ -484,8 +529,8 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
       return;
     }
     const d = snapshot.destination;
-    await h.state.ensure(generation, d.startAt);
-    const claimed = await h.state.claim(generation);
+    await guard(h.state.ensure(generation, d.startAt), signal);
+    const claimed = await guard(h.state.claim(generation), signal);
     if (claimed === null || signal.aborted) return;
     const epoch = claimed.epoch;
     const position = {
@@ -543,12 +588,10 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     };
 
     const started = deps.now();
-    let first = true;
     while (!signal.aborted && deps.now() - started < PASS_MS) {
-      if (!first && h.lease !== null) {
-        if (!(await h.lease.acquire(`export:${generation}`, nodeId, LEASE_TTL_MS))) return;
-      }
-      first = false;
+      // Renewed immediately before every batch, the first included: the
+      // batch's deadline below starts from here, and the lease outlasts it.
+      if (!(await renew()) || signal.aborted) return;
 
       const deadline = new AbortController();
       const timer = timers.setTimeout(() => deadline.abort(DEADLINE), BATCH_DEADLINE_MS);

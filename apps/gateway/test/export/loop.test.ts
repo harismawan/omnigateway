@@ -1269,3 +1269,65 @@ test("narrowing the filter mid-pass cancels the pass: no row outside the new sco
   expect(w.sent).toHaveLength(1);
   expect(sentIds(w)).not.toContain("r0500");
 });
+
+test("pre-batch work that outlives the lease sends nothing: a claim delayed 61 s", async () => {
+  const { lease } = sharedLease(() => w.clock.now);
+  const w = track(world({ lease, rows: [row("r1", T0 - 20_000)] }));
+  // The reviewer's case: the claim stalls past the 60 s lease TTL.
+  let release: () => void = () => {};
+  let stalled = true;
+  w.beforeClaim = () =>
+    stalled
+      ? new Promise<void>((resolve) => {
+          release = resolve;
+        })
+      : Promise.resolve();
+  const acquired: number[] = [];
+  const real = lease.acquire.bind(lease);
+  lease.acquire = async (name, holder, ttl) => {
+    acquired.push(w.clock.now);
+    return real(name, holder, ttl);
+  };
+  await w.loop.start();
+  await w.settle();
+  w.clock.now += LEASE_TTL_MS + 1_000;
+  stalled = false;
+  release();
+  await w.settle();
+  expect(w.sent).toHaveLength(0);
+  expect((await stateOf(w)).cursorId).toBe("");
+});
+
+test("the lease is renewed immediately before every batch, the first included", async () => {
+  const { lease } = sharedLease(() => w.clock.now);
+  const w = track(world({ lease, rows: [row("r1", T0 - 20_000)] }));
+  const events: string[] = [];
+  const real = lease.acquire.bind(lease);
+  lease.acquire = async (name, holder, ttl) => {
+    events.push("lease");
+    return real(name, holder, ttl);
+  };
+  w.answer = () => {
+    events.push("send");
+    return new Response(null, { status: 200 });
+  };
+  await w.loop.start();
+  await w.settle();
+  // Acquire for the pass, renew before the first batch, then before the next.
+  expect(events.slice(0, 3)).toEqual(["lease", "lease", "send"]);
+});
+
+test("a failed renewal before the first batch ends the pass without sending", async () => {
+  const { lease } = sharedLease(() => w.clock.now);
+  const w = track(world({ lease, rows: [row("r1", T0 - 20_000)] }));
+  let calls = 0;
+  const real = lease.acquire.bind(lease);
+  lease.acquire = async (name, holder, ttl) => {
+    calls += 1;
+    return calls === 1 ? real(name, holder, ttl) : false;
+  };
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(0);
+  expect((await stateOf(w)).cursorId).toBe("");
+});

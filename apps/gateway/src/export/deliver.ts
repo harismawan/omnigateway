@@ -185,9 +185,10 @@ function limitsFor(d: ExportDestination): BatchLimits {
 }
 
 /**
- * The sender for `d`, or why it is refused. `secretText` is what
- * the one-statement snapshot read (`destinationWithSecret`) returned. Refusals, in order: an unreadable stored filter (the
- * scope of what leaves the installation, so never guessed at); a config its
+ * The sender for `d`, or why it is refused. `secretText` is the secret the
+ * same one-statement snapshot (`destinationWithSecret`) returned with `d`.
+ * Refusals, in order: an unreadable stored filter (the scope of what leaves
+ * the installation, so never guessed at); a config its
  * type's schema no longer accepts; a secret that is missing where the config
  * needs one, present where it needs none, or fails its type's strict schema —
  * a destination is never sent with partial credentials.
