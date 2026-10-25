@@ -69,7 +69,23 @@ export function releaseVersion(raw: string): string {
   return version;
 }
 
-export async function bundle(entry: string, outfile: string, version: string): Promise<void> {
+/**
+ * The export worker's entry, and where it lands beside the server.
+ *
+ * `spawnExportWorker` starts it with `new Worker(url)`, which is not an import,
+ * so bundling the server alone leaves the worker out and the first destination
+ * finds no worker to start. It is bundled as a file of its own, and the server
+ * is told where through `OMNI_EXPORT_WORKER`, relative to `gateway.js`.
+ */
+export const EXPORT_WORKER_ENTRY = "apps/gateway/src/export/worker.ts";
+export const EXPORT_WORKER_FILE = "export-worker.js";
+
+export async function bundle(
+  entry: string,
+  outfile: string,
+  version: string,
+  define: Readonly<Record<string, string>> = {},
+): Promise<void> {
   // No `outdir`: the artifact is written by hand so the two bundles can land
   // at the exact paths the CLI expects to find each other at.
   const result = await Bun.build({
@@ -86,7 +102,7 @@ export async function bundle(entry: string, outfile: string, version: string): P
     // binary it installed disagreed permanently. Substituting here rather than
     // reading a file at startup keeps `--version` answering on a broken
     // installation, which is half of why it is handled before anything opens.
-    define: { OMNI_CLI_VERSION: JSON.stringify(version) },
+    define: { OMNI_CLI_VERSION: JSON.stringify(version), ...define },
   });
 
   if (!result.success) {
@@ -99,6 +115,22 @@ export async function bundle(entry: string, outfile: string, version: string): P
   await Bun.write(outfile, await artifact.text());
 }
 
+/**
+ * The server and its export worker, side by side in `dir`. `entry` is the
+ * server's entry; only the build test passes another, a probe that spawns
+ * the worker the way the server does.
+ */
+export async function bundleGateway(
+  dir: string,
+  version: string,
+  entry = "apps/gateway/src/index.ts",
+): Promise<void> {
+  await bundle(entry, join(dir, "gateway.js"), version, {
+    OMNI_EXPORT_WORKER: JSON.stringify(`./${EXPORT_WORKER_FILE}`),
+  });
+  await bundle(EXPORT_WORKER_ENTRY, join(dir, EXPORT_WORKER_FILE), version);
+}
+
 export async function buildPackage(version: string): Promise<string> {
   await rm(outDir, { recursive: true, force: true });
   await mkdir(join(outDir, "bin"), { recursive: true });
@@ -106,7 +138,7 @@ export async function buildPackage(version: string): Promise<string> {
   // The CLI's bin, and the server it starts. They are siblings by contract:
   // `gatewayEntrypoint` looks for `../gateway.js` relative to the bin.
   await bundle("apps/cli/src/index.ts", join(outDir, "bin", "omni.js"), version);
-  await bundle("apps/gateway/src/index.ts", join(outDir, "gateway.js"), version);
+  await bundleGateway(outDir, version);
 
   // The console, served by that same server from `./public`.
   await cp(join(root, "apps", "dashboard", "dist"), join(outDir, "public"), { recursive: true });
@@ -123,7 +155,7 @@ export async function buildPackage(version: string): Promise<string> {
         author: "Harismawan <mail@harismawan.com>",
         type: "module",
         bin: { omni: "./bin/omni.js" },
-        files: ["bin", "gateway.js", "public", "README.md", "LICENSE"],
+        files: ["bin", "gateway.js", EXPORT_WORKER_FILE, "public", "README.md", "LICENSE"],
         dependencies: RUNTIME_DEPENDENCIES,
         // Bun is the runtime, not just the bundler: bun:sqlite, Bun.spawn and
         // Bun.file are all load-bearing. Saying so here turns a confusing

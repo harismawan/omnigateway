@@ -17,12 +17,27 @@ export type ExportWorker = {
   terminate(): void;
 };
 
+/**
+ * Where the worker entry is in a build, relative to the bundled gateway:
+ * substituted by `scripts/build-npm.ts` (a sibling `export-worker.js`) and
+ * `scripts/build-binary.ts` (the entry's path inside the compiled
+ * executable, which lists it as a second entrypoint). Undefined when running
+ * from source, where the entry sits beside this file.
+ */
+declare const OMNI_EXPORT_WORKER: string | undefined;
+
+/** The worker entry's URL, for this build. */
+function exportWorkerUrl(): string {
+  const entry = typeof OMNI_EXPORT_WORKER === "string" ? OMNI_EXPORT_WORKER : "./worker.ts";
+  return new URL(entry, import.meta.url).href;
+}
+
 export function spawnExportWorker(init: WorkerInit): ExportWorker {
   const options: Bun.WorkerOptions & { workerData: WorkerInit } = {
     name: "omni-export",
     workerData: init,
   };
-  const worker = new Worker(new URL("./worker.ts", import.meta.url).href, options);
+  const worker = new Worker(exportWorkerUrl(), options);
   return {
     post: (message) => worker.postMessage(message),
     onMessage(listener) {
