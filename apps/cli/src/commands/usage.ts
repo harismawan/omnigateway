@@ -1,12 +1,20 @@
 import {
   exportLogs,
+  getLog,
   type LogFilterInput,
   pageLogs,
   queryUsage,
   sessionSummary,
 } from "@omni/control";
 import type { RequestLog, RequestLogCursor } from "@omni/store";
-import { boolFlag, numberFlag, type Parsed, stringFlag, UsageError } from "../args.ts";
+import {
+  boolFlag,
+  numberFlag,
+  type Parsed,
+  requirePositional,
+  stringFlag,
+  UsageError,
+} from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { emit, formatTime, formatUsd, paint, table } from "../output.ts";
 import { serviceLogs } from "../service.ts";
@@ -371,6 +379,51 @@ export const logsSessions: Command = {
               formatUsd(row.costUsd),
             ]),
           ),
+    );
+  },
+};
+
+export const logsShow: Command = {
+  usage: "logs show <request-id>",
+  summary: "Everything recorded about one request, its trace and ids included",
+  options: {},
+  async run(args, { ctx, writer }) {
+    const id = requirePositional(args, 0, "request id");
+    const log = await getLog(await ctx.store(), id);
+    if (log === null) throw new UsageError(`no request ${id} in the retained log`);
+    const dash = (value: string | null): string => value ?? "—";
+    emit(ctx, writer, { log }, () =>
+      [
+        ["request", log.id],
+        ["at", formatTime(log.at)],
+        ["state", log.state],
+        ["requested", log.requestedModel || "—"],
+        [
+          "resolved",
+          log.resolvedProvider === null ? "—" : `${log.resolvedProvider}/${log.resolvedModel}`,
+        ],
+        ["status", log.errorCode === null ? String(log.status) : `${log.status} ${log.errorCode}`],
+        ["attempts", String(log.attempts)],
+        ["tokens", `${log.inputTokens}+${log.outputTokens}`],
+        ["cost", formatUsd(log.costUsd)],
+        ["session", dash(log.sessionId)],
+        ["turn", dash(log.turnId)],
+        ["agent", dash(log.agent)],
+        ["tags", log.tags.length === 0 ? "—" : log.tags.join(", ")],
+        [
+          "metadata",
+          Object.keys(log.traceMetadata).length === 0
+            ? "—"
+            : Object.entries(log.traceMetadata)
+                .map(([key, value]) => `${key}=${value}`)
+                .join(", "),
+        ],
+        ["client id", dash(log.clientRequestId)],
+        ["provider id", dash(log.upstreamRequestId)],
+        ["degradations", log.degradations.length === 0 ? "—" : log.degradations.join(", ")],
+      ]
+        .map(([label, value]) => `${paint(ctx, "dim", (label ?? "").padEnd(13))}${value}`)
+        .join("\n"),
     );
   },
 };

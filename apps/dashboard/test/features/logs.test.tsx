@@ -1091,3 +1091,47 @@ describe("LogsBoard traceability", () => {
     expect(screen.getByRole("tab", { name: "Requests", selected: true })).toBeTruthy();
   });
 });
+
+describe("LogsBoard trace copy", () => {
+  test("the trace ids in the detail each have a copy action", async () => {
+    const user = userEvent.setup();
+    const copied: string[] = [];
+    stubLogs({
+      "GET /api/logs": () => ({
+        logs: [
+          log({
+            id: "req-copy",
+            requestedModel: "copy-model",
+            sessionId: "claude-code:abc",
+            turnId: "t-1",
+            clientRequestId: "cli-1",
+            upstreamRequestId: "up-1",
+          }),
+        ],
+        nextCursor: null,
+      }),
+    });
+    renderWithProviders(<LogsBoard />);
+    await user.click(await screen.findByText("copy-model"));
+    const dialog = await screen.findByRole("dialog");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: (text: string) => {
+          copied.push(text);
+          return Promise.resolve();
+        },
+      },
+    });
+    for (const label of [
+      "Copy request id",
+      "Copy session",
+      "Copy turn",
+      "Copy client request id",
+      "Copy provider request id",
+    ]) {
+      await user.click(within(dialog).getByRole("button", { name: label }));
+    }
+    expect(copied).toEqual(["req-copy", "claude-code:abc", "t-1", "cli-1", "up-1"]);
+  });
+});

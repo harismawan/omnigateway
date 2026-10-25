@@ -1632,6 +1632,44 @@ test("logs sessions prints per-session totals, highest cost first", async () => 
   expect((await cli(["logs", "sessions"], { root, service })).code).not.toBe(0);
 });
 
+test("logs show prints one request's trace and ids, or fails for an unknown id", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.usage.append(
+    requestLog({
+      id: "req_show",
+      sessionId: "claude-code:s1",
+      turnId: "t1",
+      agent: "claude-code",
+      tags: ["team-a"],
+      traceMetadata: { owner: "ops" },
+      clientRequestId: "cli-1",
+      upstreamRequestId: "up-1",
+    }),
+  );
+  store.close();
+  const service = fakeService({ root });
+
+  const text = await cli(["logs", "show", "req_show"], { root, service });
+  expect(text.code).toBe(0);
+  for (const value of [
+    "claude-code:s1",
+    "t1",
+    "claude-code",
+    "team-a",
+    "owner=ops",
+    "cli-1",
+    "up-1",
+  ]) {
+    expect(text.out).toContain(value);
+  }
+  const json = await cli(["logs", "show", "req_show", "--json"], { root, service });
+  expect(JSON.parse(json.out)).toMatchObject({
+    log: { id: "req_show", upstreamRequestId: "up-1" },
+  });
+  expect((await cli(["logs", "show", "nope"], { root, service })).code).not.toBe(0);
+});
+
 test("logs export writes the bytes of the format, with no --json wrapper", async () => {
   const root = await installation();
   const store = await openStore(root);

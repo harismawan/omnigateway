@@ -463,3 +463,22 @@ export async function sessionSummary(
     ...(q.agent === undefined ? {} : { agent: q.agent }),
   });
 }
+
+/**
+ * One request's row, narrowed to what the scope may read, or null.
+ *
+ * A row outside a client's own key reads as absent, not as forbidden: telling
+ * a key holder that some other key's request id exists is itself a disclosure.
+ */
+export async function getLog(
+  store: Store,
+  id: string,
+  scope: Scope = ALL,
+): Promise<RequestLog | null> {
+  parseOrThrow(idSchema, id);
+  if (readsNothing(scope)) return null;
+  const row = await store.usage.get(id);
+  if (row === null) return null;
+  const scoped = scopeKey(scope);
+  return scoped === undefined || row.apiKeyId === scoped ? row : null;
+}

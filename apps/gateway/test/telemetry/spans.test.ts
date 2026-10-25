@@ -157,3 +157,31 @@ test("the root span carries request, session, turn, agent and upstream ids, neve
   expect(Object.keys(bare.spans[0]?.attrs ?? {})).not.toContain("omni.session.id");
   telemetry.stop();
 });
+
+test("each provider.http span carries its own response's upstream request id", () => {
+  let clock = 0;
+  const telemetry = createTelemetry({
+    metricsEnabled: false,
+    maxSeries: 10,
+    otlpEndpoint: "https://collector.example",
+    otlpHeaders: {},
+    traceSample: 1,
+    now: () => clock,
+    version: "test",
+    exporter: { enqueue: () => {}, flush: async () => {}, queued: () => 0, stop: () => {} },
+  });
+  const trace = telemetry.startRequest("req_h", 0, null, "openai", 0);
+  if (trace === null) throw new Error("tracing should be on");
+  clock = 5;
+  const head = { provider: "anthropic" as const, host: "h", path: "/p", durationMs: 1 };
+  telemetry.httpHead({ ...head, requestId: "req_h", status: 503, upstreamRequestId: "up-1" });
+  telemetry.httpHead({ ...head, requestId: "req_h", status: 200, upstreamRequestId: "up-2" });
+  telemetry.httpHead({ ...head, requestId: "req_h", status: 200 });
+  const spans = trace.spans.filter((span) => span.name === "provider.http");
+  expect(spans.map((span) => span.attrs["omni.upstream.request_id"])).toEqual([
+    "up-1",
+    "up-2",
+    undefined,
+  ]);
+  telemetry.stop();
+});

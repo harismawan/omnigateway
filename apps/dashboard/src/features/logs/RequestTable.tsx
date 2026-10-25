@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import styled from "styled-components";
 import type { RequestRow } from "../../api/types.ts";
+import { CopyInline } from "../../components/CopyInline.tsx";
 import {
   formatClock,
   formatCount,
@@ -273,7 +274,9 @@ export function RequestDetail({ log, names, children }: RequestDetailProps) {
     <Stack $gap={3}>
       <Detail>
         <Legend as="dt">Request id</Legend>
-        <Value>{log.id}</Value>
+        <Value>
+          <CopyInline value={log.id} label="Copy request id" />
+        </Value>
         <Legend as="dt">At</Legend>
         <Value>{formatDateTime(log.at)}</Value>
         <Legend as="dt">Requested model</Legend>
@@ -361,19 +364,35 @@ export function RequestDetail({ log, names, children }: RequestDetailProps) {
         {/* What the caller said this request belongs to. Every field is
             caller-supplied grouping, so it is shown exactly as sent. */}
         <Legend as="dt">Session</Legend>
-        <Value>{log.sessionId ?? "—"}</Value>
+        <Value>
+          {log.sessionId === null ? "—" : <CopyInline value={log.sessionId} label="Copy session" />}
+        </Value>
         <Legend as="dt">Turn</Legend>
-        <Value>{log.turnId ?? "—"}</Value>
+        <Value>
+          {log.turnId === null ? "—" : <CopyInline value={log.turnId} label="Copy turn" />}
+        </Value>
         <Legend as="dt">Agent</Legend>
         <Value>{log.agent ?? "—"}</Value>
         <Legend as="dt">Client request id</Legend>
-        <Value>{log.clientRequestId ?? "—"}</Value>
+        <Value>
+          {log.clientRequestId === null ? (
+            "—"
+          ) : (
+            <CopyInline value={log.clientRequestId} label="Copy client request id" />
+          )}
+        </Value>
         {/* The provider's id names a request on the operator's account. It is
             on the operator's row only; guarded on the field, like RTK filters. */}
         {log.upstreamRequestId === undefined ? null : (
           <>
             <Legend as="dt">Provider request id</Legend>
-            <Value>{log.upstreamRequestId ?? "—"}</Value>
+            <Value>
+              {log.upstreamRequestId === null ? (
+                "—"
+              ) : (
+                <CopyInline value={log.upstreamRequestId} label="Copy provider request id" />
+              )}
+            </Value>
           </>
         )}
       </Detail>

@@ -459,6 +459,7 @@ omni logs --session claude-code:3f1c…      # one session's requests
 omni logs --agent codex --tag team-a       # every Codex request tagged team-a
 omni logs sessions --since 2026-10-20 --until 2026-10-24
 omni logs sessions --since … --until … --key key_abc --agent claude-code
+omni logs show req_1f0c…                   # one request, trace and ids included
 ```
 
 These filters are **exact** — they name ids copied off a row. `logs sessions`
@@ -480,8 +481,14 @@ dashboard, never the provider's id or the account. Every response also carries
 `x-omni-request-id`, so a client can quote the gateway's id for any request.
 
 On traces, the root `gateway.request` span carries `omni.request.id`,
-`omni.session.id`, `omni.turn.id`, `omni.agent` and `omni.upstream.request_id`.
-Tags and metadata are deliberately not span attributes.
+`omni.session.id`, `omni.turn.id`, `omni.agent` and the outcome's
+`omni.upstream.request_id`; each `provider.http` span carries its own
+response's `omni.upstream.request_id`, so a failover trace names every upstream
+request. Tags and metadata are deliberately not span attributes.
+
+A quiesce refusal (database maintenance) also carries `x-omni-request-id`: the
+id is minted at the gate, before any route runs, and an admitted request is
+answered under that same id.
 
 ### Exporting
 

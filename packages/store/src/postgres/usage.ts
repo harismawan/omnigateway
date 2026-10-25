@@ -374,6 +374,12 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
       return rows.map(toLog);
     },
 
+    async get(id) {
+      const rows = await sql.unsafe<Rows<Row>>("SELECT * FROM request_logs WHERE id = $1", [id]);
+      const row = rows[0];
+      return row === undefined ? null : toLog(row);
+    },
+
     async sessions(q) {
       const { sql: text, extra } = sessionsSql((n) => `$${n}`, q);
       const rows = await sql.unsafe<Rows<SessionRow>>(text, [

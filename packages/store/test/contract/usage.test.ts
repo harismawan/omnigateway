@@ -1011,3 +1011,15 @@ forEachStore((backend) => {
     expect(await s.usage.sessions({ since: T3 + 21, until: T3 + 100 })).toEqual([]);
   });
 });
+
+forEachStore((backend) => {
+  test("get reads one row by id, pending or done, or null", async () => {
+    const s = await backend.fresh();
+    const done = logRow({ id: "d1", at: 1, sessionId: "s", upstreamRequestId: "up" });
+    await s.usage.append(done);
+    await s.usage.begin(logRow({ id: "p1", at: 2, state: "pending", status: 0 }));
+    expect(await s.usage.get("d1")).toEqual(done);
+    expect((await s.usage.get("p1"))?.state).toBe("pending");
+    expect(await s.usage.get("nope")).toBeNull();
+  });
+});

@@ -10,6 +10,7 @@ import {
   exportFilename,
   exportLogs,
   exportRow,
+  getLog,
   pageLogs,
   sessionSummary,
 } from "../src/logs.ts";
@@ -531,4 +532,15 @@ test("sessionSummary needs both bounds, at most 31 days apart, and is scoped", a
     scopeOf({ kind: "client", apiKeyId: mine.key.id }),
   );
   expect(own.map((s) => s.apiKeyId)).toEqual([mine.key.id]);
+});
+
+test("getLog reads one row, and a client scope cannot read another key's", async () => {
+  const { store, mine, theirs } = await seeded();
+  expect((await getLog(store, "m1"))?.id).toBe("m1");
+  expect(await getLog(store, "missing")).toBeNull();
+  const scope = scopeOf({ kind: "client", apiKeyId: mine.key.id });
+  expect((await getLog(store, "m1", scope))?.id).toBe("m1");
+  expect(await getLog(store, "t1", scope)).toBeNull();
+  expect(theirs.key.id).not.toBe(mine.key.id);
+  await expect(getLog(store, "x".repeat(500))).rejects.toMatchObject({ code: "BAD_REQUEST" });
 });

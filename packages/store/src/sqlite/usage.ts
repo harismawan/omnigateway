@@ -424,6 +424,11 @@ export function createUsageRepo(
         .map(toLog);
     },
 
+    async get(id) {
+      const row = db.query<Row, [string]>("SELECT * FROM request_logs WHERE id = ?").get(id);
+      return row === null ? null : toLog(row);
+    },
+
     async sessions(q) {
       const { sql, extra } = sessionsSql(() => "?", q);
       return db

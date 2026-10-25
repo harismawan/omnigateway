@@ -1545,6 +1545,8 @@ export interface UsageRepo {
    * are not a session.
    */
   sessions(q: SessionQuery): Promise<SessionSummary[]>;
+  /** One row by request id, pending or done, or null once pruned or never written. */
+  get(id: string): Promise<RequestLog | null>;
   aggregate(q: UsageQuery): Promise<UsageBucket[]>;
   /**
    * What one API key has consumed since an instant, for the sliding windows a

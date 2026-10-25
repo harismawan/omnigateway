@@ -128,6 +128,7 @@ export {
   exportHeader,
   exportLogs,
   exportRow,
+  getLog,
   type LogExportFormat,
   type LogExportInput,
   type LogFilterInput,

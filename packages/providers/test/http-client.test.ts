@@ -14,7 +14,7 @@ const BIG_ZSTD_BYTES = 67_060;
 const BIG_ZSTD_SHA = "e8ea96b8df64181c";
 
 /** Captures the literal request head, byte for byte, off the socket. */
-function rawServer(): {
+function rawServer(extraHeaders = ""): {
   url: string;
   head: () => Promise<string>;
   stop: () => void;
@@ -31,6 +31,7 @@ function rawServer(): {
         resolveHead(new TextDecoder().decode(data));
         socket.write(
           "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+            extraHeaders +
             "Content-Length: 2\r\nConnection: close\r\n\r\n{}",
         );
         socket.end();
@@ -470,5 +471,22 @@ test("an unmarked request goes out as the bytes it was given", async () => {
   const { head, body: sent } = await s.request();
   expect(sent.toString("utf8")).toBe(body);
   expect(contentLength(head)).toBe(Buffer.byteLength(body));
+  s.stop();
+});
+
+test("the response head event names the provider's request id, bounded", async () => {
+  const s = rawServer("request-id: req_011upstream\r\n");
+  const heads: Array<{ upstreamRequestId?: string }> = [];
+  const http = nodeHttpClient({ onResponseHead: (head) => heads.push(head) });
+  await http({
+    provider: "anthropic",
+    requestId: "req_1",
+    url: s.url,
+    method: "POST",
+    headers: [],
+    body: "{}",
+    signal: AbortSignal.timeout(5_000),
+  });
+  expect(heads[0]?.upstreamRequestId).toBe("req_011upstream");
   s.stop();
 });

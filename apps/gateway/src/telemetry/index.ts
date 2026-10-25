@@ -13,6 +13,7 @@ export type HttpHead = {
   status?: number;
   durationMs: number;
   requestId?: string;
+  upstreamRequestId?: string;
 };
 
 export type Telemetry = {
@@ -184,6 +185,10 @@ export function createTelemetry(opts: {
           host: event.host,
           path: event.path,
           ...(event.status === undefined ? {} : { status: event.status }),
+          // Per attempt, so a failover trace names each upstream request.
+          ...(event.upstreamRequestId === undefined
+            ? {}
+            : { "omni.upstream.request_id": event.upstreamRequestId }),
         },
       );
     },
