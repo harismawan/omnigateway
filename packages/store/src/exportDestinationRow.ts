@@ -54,8 +54,12 @@ const parseConfig = (raw: string): Record<string, unknown> => parseObject(raw) ?
  * leaves the installation, so every way of misreading one must narrow — never
  * widen — and dropping a field that failed to parse would be a widening:
  * `{"apiKeyIds":"k1"}` read as "no key filter" ships every key's traffic.
+ *
+ * A fresh object per call, not a shared constant: a caller owns the filter it
+ * is handed, and one array shared across reads, pushed into once, would widen
+ * every later malformed destination's scope. (`Object.freeze` is shallow.)
  */
-export const MATCH_NOTHING: ExportFilter = Object.freeze({ apiKeyIds: [] });
+export const matchNothing = (): ExportFilter => ({ apiKeyIds: [] });
 
 const FILTER_FIELDS = new Set(["apiKeyIds", "models", "failedOnly"]);
 
@@ -99,7 +103,7 @@ export function readDestination(r: DestinationRow): ExportDestination | null {
     type: r.type,
     enabled: flag(r.enabled),
     config: parseConfig(r.config),
-    filter: filter ?? MATCH_NOTHING,
+    filter: filter ?? matchNothing(),
     filterMalformed: filter === null,
     includeBodies: flag(r.include_bodies),
     maxRequestBytes: r.max_request_bytes === null ? null : Number(r.max_request_bytes),

@@ -195,6 +195,33 @@ forEachStore((backend) => {
     });
   });
 
+  /** Each read's match-nothing filter is its own: mutating one widens no other. */
+  test("a malformed filter read cannot be mutated into another destination's scope", async () => {
+    const s = await backend.fresh();
+    await s.usage.append(logRow({ id: "r1", at: 1, apiKeyId: "k1" }));
+    await s.exportDestinations.create(input({ id: "a" }));
+    await s.exportDestinations.create(input({ id: "b" }));
+    await exec(backend, s, "UPDATE export_destinations SET filter = 'not json'");
+
+    const first = await s.exportDestinations.get("a");
+    first?.filter.apiKeyIds?.push("k1");
+
+    for (const later of [
+      await s.exportDestinations.get("b"),
+      await s.exportDestinations.get("a"),
+      ...(await s.exportDestinations.list()),
+    ]) {
+      expect(later?.filter).toEqual({ apiKeyIds: [] });
+      const rows = await s.usage.exportPage({
+        after: { completedAt: 0, id: "" },
+        settledBefore: Number.MAX_SAFE_INTEGER,
+        limit: 10,
+        filter: later?.filter as ExportFilter,
+      });
+      expect(rows).toEqual([]);
+    }
+  });
+
   test("a recreated slug gets a fresh generation", async () => {
     const s = await backend.fresh();
     const first = await s.exportDestinations.create(input());
