@@ -456,8 +456,19 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
     },
 
     async exportPage(q) {
+      q.signal?.throwIfAborted();
       const { sql: text, bindings } = exportPageSql(q, (n) => `$${n}`);
-      return (await sql.unsafe<Rows<Row>>(text, bindings)).map(toLog);
+      const query = sql.unsafe<Rows<Row>>(text, bindings);
+      // The worker's batch deadline: an abort cancels the statement server-side.
+      const cancel = (): void => {
+        query.cancel();
+      };
+      q.signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        return (await query).map(toLog);
+      } finally {
+        q.signal?.removeEventListener("abort", cancel);
+      }
     },
 
     async sumSince(apiKeyId: string, sinceMs: number, requestedModel?: string) {

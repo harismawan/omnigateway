@@ -498,6 +498,7 @@ export function createUsageRepo(
     },
 
     async exportPage(q) {
+      q.signal?.throwIfAborted();
       const { sql, bindings } = exportPageSql(q, () => "?", EXPORT_FROM);
       return db
         .query<Row, SQLQueryBindings[]>(sql)

@@ -1520,6 +1520,13 @@ export type ExportPageQuery = {
   settledBefore: number;
   limit: number;
   filter?: ExportFilter;
+  /**
+   * The worker's per-batch deadline. An already-aborted signal refuses the
+   * read; on Postgres an abort mid-query cancels it. A SQLite statement is
+   * synchronous and cannot be interrupted once started — it is one short
+   * indexed read, which is what makes that acceptable.
+   */
+  signal?: AbortSignal;
 };
 
 /** What comparing the hourly rollup against the rows it summarizes found. */
