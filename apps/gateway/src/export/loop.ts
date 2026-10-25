@@ -1,0 +1,968 @@
+import type { Logger } from "@omni/ir";
+import type { ExportReader } from "@omni/store/exportReader";
+import type { ExportDestination, RequestLog, Settings } from "@omni/store/types";
+import { BACKOFF_MAX_MS, retryDelay } from "./backoff.ts";
+import { cutBatches, MAX_BATCH_RECORDS, OVERSIZED_REASON } from "./batch.ts";
+import {
+  type DeliveryOutcome,
+  deliver,
+  droppedSummary,
+  IndexRefusedError,
+  prepare,
+  REFUSALS,
+  type Sender,
+  type Timers,
+  type Transport,
+} from "./deliver.ts";
+import { effectivePosition, type GapReason, gapReason, SETTLE_MS } from "./gap.ts";
+import type {
+  DestinationCounters,
+  DestinationStatus,
+  MainMessage,
+  TestResult,
+  WorkerMessage,
+} from "./protocol.ts";
+import { REPLY_ERRORS } from "./protocol.ts";
+import { buildRecord } from "./record.ts";
+import type { ExportState, ExportStateStore } from "./state.ts";
+
+/**
+ * The export worker's delivery loop: everything the worker does, with every
+ * effect injected so a test drives it on a fake clock. `worker.ts` is only the
+ * Bun `Worker` entry that opens real handles and relays messages. Design:
+ * docs/superpowers/specs/2026-10-24-log-export-design.md (*Delivery*,
+ * *Cursor*, *Asynchrony* → Worker protocol, *Restore and import*).
+ *
+ * **Shape.** A tick every {@link POLL_MS} (and at once on
+ * `destinationsChanged`) re-reads configuration, checks every destination for
+ * a possible gap — disabled and backing-off ones included — and starts a pass
+ * for each enabled destination that has none running and whose backoff has
+ * expired. Destinations run concurrently; each has at most one pass.
+ *
+ * **A pass** takes the lease `export:<generation>` (cluster mode only), claims
+ * the state row's next epoch, and sends batches back to back until nothing
+ * settled remains or {@link PASS_MS} elapse. Before every batch it renews the
+ * lease (a failed renewal ends the pass), reads the settle clock, and checks
+ * for a gap against the committed position. Each batch — read, encode, send,
+ * commit — runs under a {@link BATCH_DEADLINE_MS} deadline from that renewal,
+ * shorter than the lease TTL, through one `AbortSignal` reaching the store
+ * read, the encoder loop and the request. Every commit is fenced by the
+ * epoch: a `false` means another holder took over, and the pass stops without
+ * writing anything else.
+ *
+ * **Failures.** Retryable answers (transport error, timeout, 408, 429, 5xx)
+ * end the pass with the cursor where it was and the next attempt backed off
+ * (`backoff.ts`); no retry ever sleeps while the lease is held. Other 4xx,
+ * any 3xx, and a refused configuration wait the maximum backoff — the
+ * destination stays enabled — until its configuration changes or the
+ * operator skips to now. Receiver-dropped records (Elasticsearch per-item
+ * errors, OTLP `partialSuccess`) and records too large for one request are
+ * counted as dropped and the batch commits past them.
+ *
+ * **Text.** Nothing here logs or stores a record, a URL, a header, a secret
+ * or a receiver's words: `last_error` and log `reason`s are the fixed
+ * summaries `deliver.ts` produces.
+ */
+
+export const POLL_MS = 5_000;
+export const PASS_MS = 30_000;
+export const BATCH_DEADLINE_MS = 45_000;
+export const LEASE_TTL_MS = 60_000;
+export const STATUS_INTERVAL_MS = 1_000;
+export const ORPHAN_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+/** How long `stop` waits for in-flight passes to unwind before closing handles regardless. */
+export const STOP_BUDGET_MS = 4_000;
+
+/** The coordinator's lease surface (`Coord["lease"]`), or null on one node. */
+export type LeaseClient = {
+  acquire(name: string, holderId: string, ttlMs: number): Promise<boolean>;
+  release(name: string, holderId: string): Promise<void>;
+};
+
+/** Everything the loop opens, opened together and closed together. */
+export type Handles = {
+  reader: ExportReader;
+  state: ExportStateStore;
+  lease: LeaseClient | null;
+  close(): void | Promise<void>;
+};
+
+export type LoopDeps = {
+  /** Opens fresh handles: at start and on every `resume`. */
+  open(): Promise<Handles>;
+  transport: Transport;
+  /** Wall clock, epoch ms: pass length, backoff, operator-facing instants. */
+  now(): number;
+  timers: Timers;
+  random(): number;
+  post(message: WorkerMessage): void;
+  logger: Logger;
+  /** Lease holder id, and `nodeId` on every record. */
+  nodeId: string;
+};
+
+export type ExportLoop = {
+  /** Opens handles and runs the first tick. */
+  start(): Promise<void>;
+  /** One main → worker message. Resolves once it is handled (`stop`: once everything is closed). */
+  handle(message: MainMessage): Promise<void>;
+  /** Resolves when no tick and no pass is in flight. */
+  idle(): Promise<void>;
+};
+
+type Runtime = {
+  destination: ExportDestination;
+  running: Promise<void> | null;
+  controller: AbortController | null;
+  /** Consecutive retryable failures. */
+  failures: number;
+  retryAt: number | null;
+  /** Last attempt was a hard failure or a refusal. */
+  failing: boolean;
+  /** Last attempt was refused (filter, config, secret, index name): not a batch failure. */
+  refused: boolean;
+  /** The largest retention marker this worker already flagged a gap for. */
+  loweredFlagged: number;
+  counters: DestinationCounters;
+};
+
+/** Why a pass was cancelled. Identity, not message, is what is compared. */
+const CANCELLED = {
+  pause: new Error("export paused"),
+  stop: new Error("export stopped"),
+  removed: new Error("destination removed or disabled"),
+};
+const DEADLINE = new Error("batch deadline");
+
+const DEADLINE_SUMMARY = "deadline exceeded";
+const INTERNAL_SUMMARY = "internal error";
+
+const zeroCounters = (): DestinationCounters => ({
+  recordsSent: 0,
+  recordsDropped: 0,
+  batchesOk: 0,
+  batchesRetry: 0,
+  batchesFailed: 0,
+  gapWarnings: 0,
+});
+
+export function createExportLoop(deps: LoopDeps): ExportLoop {
+  const { logger, nodeId, timers } = deps;
+  let phase: "idle" | "running" | "paused" | "stopped" = "idle";
+  let handles: Handles | null = null;
+  const runtimes = new Map<string, Runtime>();
+  let destinations: ExportDestination[] = [];
+  /** Database clock minus wall clock, as last measured: status lag without a query per second. */
+  let clockOffset = 0;
+
+  let tickTimer: unknown = null;
+  let ticking: Promise<void> | null = null;
+  let tickAgain = false;
+  let lastOrphanSweep = Number.NEGATIVE_INFINITY;
+
+  let statusTimer: unknown = null;
+  let lastStatusAt = Number.NEGATIVE_INFINITY;
+
+  // --- status ------------------------------------------------------------
+
+  function requestStatus(): void {
+    if (statusTimer !== null || phase !== "running") return;
+    const wait = Math.max(0, lastStatusAt + STATUS_INTERVAL_MS - deps.now());
+    statusTimer = timers.setTimeout(() => {
+      statusTimer = null;
+      lastStatusAt = deps.now();
+      void emitStatus();
+    }, wait);
+  }
+
+  async function emitStatus(): Promise<void> {
+    const h = handles;
+    if (h === null || phase !== "running") return;
+    try {
+      const states = new Map((await h.state.list()).map((s) => [s.generation, s]));
+      const dbNow = deps.now() + clockOffset;
+      deps.post({
+        type: "status",
+        at: deps.now(),
+        destinations: destinations.map((d) => statusOf(d, states.get(d.generation), dbNow)),
+      });
+    } catch {
+      logger.warn("export status unreadable", { reason: INTERNAL_SUMMARY });
+    }
+  }
+
+  function statusOf(
+    d: ExportDestination,
+    s: ExportState | undefined,
+    dbNow: number,
+  ): DestinationStatus {
+    const rt = runtimes.get(d.generation);
+    return {
+      id: d.id,
+      generation: d.generation,
+      type: d.type,
+      enabled: d.enabled,
+      lagMs: s === undefined ? null : Math.max(0, dbNow - effectivePosition(s)),
+      lastSuccessAt: s?.lastSuccessAt ?? null,
+      lastError: s?.lastError ?? null,
+      lastErrorAt: s?.lastErrorAt ?? null,
+      exportedTotal: s?.exportedTotal ?? 0,
+      droppedTotal: s?.droppedTotal ?? 0,
+      gapPossibleAt: s?.gapPossibleAt ?? null,
+      skipRequestedAt: s?.skipRequestedAt ?? null,
+      retryAt: rt?.retryAt ?? null,
+      failing: rt?.failing ?? false,
+      counters: { ...(rt?.counters ?? zeroCounters()) },
+    };
+  }
+
+  // --- gap ---------------------------------------------------------------
+
+  /**
+   * Flags the destination when `position` is within a day of the prune
+   * horizon or retention was shortened since it last committed. The flag is
+   * set once until acknowledged; the counter moves only when this call set it.
+   */
+  async function checkGap(
+    h: Handles,
+    rt: Runtime,
+    position: { cursorAt: number; caughtUpThrough: number; seenRetentionLoweredAt: number },
+    settings: Settings,
+    dbNow: number,
+  ): Promise<void> {
+    const seen = Math.max(position.seenRetentionLoweredAt, rt.loweredFlagged);
+    const reason = gapReason(
+      { ...position, seenRetentionLoweredAt: seen },
+      settings,
+      dbNow,
+      rt.destination.createdAt,
+    );
+    if (reason === null) return;
+    if (reason === "retention-lowered") rt.loweredFlagged = settings.logRetentionLoweredAt;
+    await flag(h, rt, reason);
+  }
+
+  async function flag(h: Handles, rt: Runtime, reason: GapReason): Promise<void> {
+    if (await h.state.flagGap(rt.destination.generation, deps.now())) {
+      rt.counters.gapWarnings += 1;
+      logger.warn("export gap possible", { reason });
+      requestStatus();
+    }
+  }
+
+  // --- tick --------------------------------------------------------------
+
+  function scheduleTick(ms: number): void {
+    if (phase !== "running") return;
+    if (tickTimer !== null) timers.clearTimeout(tickTimer);
+    tickTimer = timers.setTimeout(() => {
+      tickTimer = null;
+      void tick();
+    }, ms);
+  }
+
+  /** One tick, or a rerun right after the one in flight. */
+  function tick(): Promise<void> {
+    if (ticking !== null) {
+      tickAgain = true;
+      return ticking;
+    }
+    ticking = (async () => {
+      do {
+        tickAgain = false;
+        try {
+          await tickOnce();
+        } catch {
+          logger.warn("export tick failed", { reason: INTERNAL_SUMMARY });
+        }
+      } while (tickAgain && phase === "running");
+    })().finally(() => {
+      ticking = null;
+      scheduleTick(POLL_MS);
+    });
+    return ticking;
+  }
+
+  async function tickOnce(): Promise<void> {
+    const h = handles;
+    if (h === null || phase !== "running") return;
+    const list = await h.reader.destinations();
+    const settings = await h.reader.settings();
+    const dbNow = await readClock(h);
+    let states = new Map((await h.state.list()).map((s) => [s.generation, s]));
+    let ensured = false;
+    for (const d of list) {
+      if (!states.has(d.generation)) {
+        await h.state.ensure(d.generation, d.startAt);
+        ensured = true;
+      }
+    }
+    if (ensured) states = new Map((await h.state.list()).map((s) => [s.generation, s]));
+    if (phase !== "running") return;
+
+    destinations = list;
+    sync(list);
+
+    for (const d of list) {
+      const rt = runtimes.get(d.generation);
+      const s = states.get(d.generation);
+      if (rt === undefined || s === undefined) continue;
+      await checkGap(h, rt, s, settings, dbNow);
+    }
+
+    // A pause or stop may have landed during the awaits above; no pass after it.
+    if (phase !== "running") return;
+    for (const d of list) {
+      const rt = runtimes.get(d.generation);
+      if (rt === undefined || !d.enabled || rt.running !== null) continue;
+      // *Skip to now* is the operator's answer to a failing destination: it
+      // does not wait out the backoff — except where the skip cannot apply,
+      // an unreadable filter, which is refused before anything is read.
+      const skipPending = (states.get(d.generation)?.skipRequestedAt ?? null) !== null;
+      const due = rt.retryAt === null || deps.now() >= rt.retryAt;
+      if (!due && !(skipPending && !d.filterMalformed)) continue;
+      startPass(h, rt);
+    }
+
+    if (deps.now() - lastOrphanSweep >= ORPHAN_SWEEP_INTERVAL_MS) {
+      lastOrphanSweep = deps.now();
+      const removed = await h.state.deleteOrphans(
+        list.map((d) => d.generation),
+        deps.now(),
+      );
+      if (removed > 0) logger.info("export state rows removed", { count: removed });
+    }
+    requestStatus();
+  }
+
+  /** Runtimes follow the configuration: new ones made, removed ones cancelled, edits reset backoff. */
+  function sync(list: ExportDestination[]): void {
+    const live = new Set(list.map((d) => d.generation));
+    for (const [generation, rt] of runtimes) {
+      if (live.has(generation)) continue;
+      rt.controller?.abort(CANCELLED.removed);
+      runtimes.delete(generation);
+    }
+    for (const d of list) {
+      const rt = runtimes.get(d.generation);
+      if (rt === undefined) {
+        runtimes.set(d.generation, {
+          destination: d,
+          running: null,
+          controller: null,
+          failures: 0,
+          retryAt: null,
+          failing: false,
+          refused: false,
+          loweredFlagged: 0,
+          counters: zeroCounters(),
+        });
+        continue;
+      }
+      if (rt.destination.updatedAt !== d.updatedAt) {
+        // An edit is the operator's answer to a failure: try again now.
+        rt.failures = 0;
+        rt.retryAt = null;
+        rt.failing = false;
+        rt.refused = false;
+      }
+      rt.destination = d;
+      if (!d.enabled) rt.controller?.abort(CANCELLED.removed);
+    }
+  }
+
+  async function readClock(h: Handles): Promise<number> {
+    const dbNow = await h.reader.now();
+    clockOffset = dbNow - deps.now();
+    return dbNow;
+  }
+
+  // --- pass --------------------------------------------------------------
+
+  function startPass(h: Handles, rt: Runtime): void {
+    const controller = new AbortController();
+    rt.controller = controller;
+    rt.running = runPass(h, rt, controller.signal)
+      .catch(() => {
+        logger.warn("export pass failed", { reason: INTERNAL_SUMMARY });
+      })
+      .finally(() => {
+        rt.running = null;
+        rt.controller = null;
+        requestStatus();
+      });
+  }
+
+  async function runPass(h: Handles, rt: Runtime, signal: AbortSignal): Promise<void> {
+    const name = `export:${rt.destination.generation}`;
+    if (h.lease !== null && !(await h.lease.acquire(name, nodeId, LEASE_TTL_MS))) return;
+    try {
+      await pass(h, rt, signal);
+    } finally {
+      if (h.lease !== null) {
+        await h.lease.release(name, nodeId).catch(() => {});
+      }
+    }
+  }
+
+  async function pass(h: Handles, rt: Runtime, signal: AbortSignal): Promise<void> {
+    const d = rt.destination;
+    const generation = d.generation;
+    await h.state.ensure(generation, d.startAt);
+    const claimed = await h.state.claim(generation);
+    if (claimed === null || signal.aborted) return;
+    const epoch = claimed.epoch;
+    const position = {
+      cursorAt: claimed.cursorAt,
+      cursorId: claimed.cursorId,
+      caughtUpThrough: claimed.caughtUpThrough,
+      seenRetentionLoweredAt: claimed.seenRetentionLoweredAt,
+    };
+    let skipAt = claimed.skipRequestedAt;
+    // The filter is the scope of what leaves the installation: an unreadable
+    // one reads as match-nothing, which would look caught up, so it is
+    // refused here, before any read, rather than discovered by a send.
+    if (d.filterMalformed) {
+      await hardFailure(h, rt, epoch, REFUSALS.filter, null, true);
+      return;
+    }
+    /** Prepared after a pending skip is applied: a skip needs no working receiver. */
+    let sender: Sender | null = null;
+
+    /** Re-reads the retention marker, flags a shortening first, then commits fenced. */
+    const commit = async (next: {
+      cursorAt: number;
+      cursorId: string;
+      caughtUpThrough?: number;
+      exportedDelta?: number;
+      droppedDelta?: number;
+      lastSuccessAt?: number;
+    }): Promise<boolean> => {
+      const settings = await h.reader.settings();
+      const lowered = settings.logRetentionLoweredAt;
+      if (lowered > Math.max(position.seenRetentionLoweredAt, rt.loweredFlagged, d.createdAt)) {
+        rt.loweredFlagged = lowered;
+        await flag(h, rt, "retention-lowered");
+      }
+      const seen = Math.max(lowered, position.seenRetentionLoweredAt);
+      const ok = await h.state.commit(generation, epoch, { ...next, seenRetentionLoweredAt: seen });
+      if (!ok) {
+        logger.info("export pass fenced out", { reason: "another holder claimed the cursor" });
+        return false;
+      }
+      position.cursorAt = next.cursorAt;
+      position.cursorId = next.cursorId;
+      position.caughtUpThrough = Math.max(position.caughtUpThrough, next.caughtUpThrough ?? 0);
+      position.seenRetentionLoweredAt = seen;
+      requestStatus();
+      return true;
+    };
+
+    const started = deps.now();
+    let first = true;
+    while (!signal.aborted && deps.now() - started < PASS_MS) {
+      if (!first && h.lease !== null) {
+        if (!(await h.lease.acquire(`export:${generation}`, nodeId, LEASE_TTL_MS))) return;
+      }
+      first = false;
+
+      const deadline = new AbortController();
+      const timer = timers.setTimeout(() => deadline.abort(DEADLINE), BATCH_DEADLINE_MS);
+      const batchSignal = AbortSignal.any([signal, deadline.signal]);
+      try {
+        const dbNow = await readClock(h);
+        await checkGap(h, rt, position, await h.reader.settings(), dbNow);
+        const settled = dbNow - SETTLE_MS;
+        const after = { completedAt: position.cursorAt, id: position.cursorId };
+
+        if (skipAt !== null) {
+          // *Skip to now*: move past every row completed by the request, unsent, counted.
+          const bound = Math.min(settled, skipAt);
+          const rows = await h.reader.exportPage({
+            after,
+            settledBefore: bound,
+            limit: MAX_BATCH_RECORDS,
+            filter: d.filter,
+            signal: batchSignal,
+          });
+          const last = rows.at(-1);
+          if (last !== undefined) {
+            const ok = await commit({ ...cursorOf(last), droppedDelta: rows.length });
+            if (!ok) return;
+            rt.counters.recordsDropped += rows.length;
+            continue;
+          }
+          if (bound < skipAt) return; // the skip's last rows are not settled yet
+          if (!(await commit({ ...cursorOfPosition(position), caughtUpThrough: skipAt }))) return;
+          await h.state.clearSkip(generation, skipAt);
+          skipAt = null;
+          // The operator's action on a failing destination: try it again now.
+          succeeded(rt);
+          rt.refused = false;
+          continue;
+        }
+
+        if (sender === null) {
+          const secret = d.hasSecret ? await h.reader.openSecret(d.id) : null;
+          const prepared = prepare(d, secret);
+          if (!prepared.ok) {
+            await hardFailure(h, rt, epoch, prepared.error, null, true);
+            return;
+          }
+          sender = prepared.sender;
+          rt.refused = false;
+        }
+        const rows = await h.reader.exportPage({
+          after,
+          settledBefore: settled,
+          limit: MAX_BATCH_RECORDS,
+          filter: d.filter,
+          signal: batchSignal,
+        });
+        if (rows.length === 0) {
+          await commit({ ...cursorOfPosition(position), caughtUpThrough: settled });
+          return;
+        }
+        const outcome = await sendRows(h, rt, epoch, sender, rows, batchSignal, commit);
+        if (outcome === "stop") return;
+        if (outcome !== "continue") {
+          await settle(h, rt, epoch, outcome);
+          return;
+        }
+      } catch (error) {
+        if (signal.aborted) return;
+        if (deadline.signal.aborted) {
+          await retryable(h, rt, epoch, DEADLINE_SUMMARY, null, null);
+          return;
+        }
+        if (error instanceof IndexRefusedError) {
+          await hardFailure(h, rt, epoch, REFUSALS.index, null, true);
+          return;
+        }
+        logger.warn("export batch failed", { reason: INTERNAL_SUMMARY });
+        await retryable(h, rt, epoch, INTERNAL_SUMMARY, null, null);
+        return;
+      } finally {
+        timers.clearTimeout(timer);
+      }
+    }
+  }
+
+  /**
+   * Encodes `rows`, cuts them into requests and sends each, committing after
+   * every accepted one. A record too large for any request is dropped in
+   * place and the cursor moves past it with the next commit — or with a
+   * commit of its own when nothing follows it.
+   */
+  async function sendRows(
+    h: Handles,
+    rt: Runtime,
+    epoch: number,
+    sender: Sender,
+    rows: RequestLog[],
+    signal: AbortSignal,
+    commit: (next: {
+      cursorAt: number;
+      cursorId: string;
+      exportedDelta?: number;
+      droppedDelta?: number;
+      lastSuccessAt?: number;
+    }) => Promise<boolean>,
+  ): Promise<"continue" | "stop" | Exclude<DeliveryOutcome, { kind: "ok" }>> {
+    const labels = await h.reader.keyLabels();
+    const parts: string[] = [];
+    for (const row of rows) {
+      signal.throwIfAborted();
+      const keyLabel = row.apiKeyId === null ? null : (labels.get(row.apiKeyId) ?? null);
+      parts.push(sender.part(buildRecord(row, { keyLabel, nodeId })));
+    }
+
+    let pending: { drops: number; through: RequestLog | null } = { drops: 0, through: null };
+    const reasons: string[] = [];
+    let dropped = 0;
+    for (const cut of cutBatches(parts, sender.envelope, sender.limits)) {
+      if (cut.kind === "oversized") {
+        pending = { drops: pending.drops + 1, through: rows[cut.index] ?? pending.through };
+        continue;
+      }
+      const outcome = await deliver(sender, cut.parts, {
+        transport: deps.transport,
+        signal,
+        timers,
+        now: deps.now,
+      });
+      if (outcome.kind !== "ok") return outcome;
+      const last = rows[cut.start + cut.parts.length - 1];
+      if (last === undefined) throw new Error("unreachable: batch past its rows");
+      const ok = await commit({
+        ...cursorOf(last),
+        exportedDelta: cut.parts.length - outcome.dropped,
+        droppedDelta: outcome.dropped + pending.drops,
+        lastSuccessAt: deps.now(),
+      });
+      if (!ok) return "stop";
+      if (pending.drops > 0) reasons.push(OVERSIZED_REASON);
+      reasons.push(...outcome.reasons);
+      dropped += outcome.dropped + pending.drops;
+      rt.counters.batchesOk += 1;
+      rt.counters.recordsSent += cut.parts.length - outcome.dropped;
+      rt.counters.recordsDropped += outcome.dropped + pending.drops;
+      pending = { drops: 0, through: null };
+      succeeded(rt);
+    }
+    if (pending.through !== null) {
+      // Trailing (or only) oversized records: nothing to send, but the cursor moves past them.
+      if (!(await commit({ ...cursorOf(pending.through), droppedDelta: pending.drops }))) {
+        return "stop";
+      }
+      reasons.push(OVERSIZED_REASON);
+      dropped += pending.drops;
+      rt.counters.recordsDropped += pending.drops;
+    }
+    // Drops are summarised in `last_error`; the batches carrying them have committed.
+    const summary = droppedSummary(dropped, rows.length, reasons);
+    if (summary !== null) {
+      await h.state.recordError(rt.destination.generation, epoch, summary, deps.now());
+    }
+    return "continue";
+  }
+
+  function succeeded(rt: Runtime): void {
+    rt.failures = 0;
+    rt.retryAt = null;
+    rt.failing = false;
+  }
+
+  async function settle(
+    h: Handles,
+    rt: Runtime,
+    epoch: number,
+    outcome: Exclude<DeliveryOutcome, { kind: "ok" }>,
+  ): Promise<void> {
+    if (outcome.kind === "retry") {
+      await retryable(h, rt, epoch, outcome.error, outcome.status, outcome.retryAfterMs);
+    } else {
+      await hardFailure(h, rt, epoch, outcome.error, outcome.status, false);
+    }
+  }
+
+  async function retryable(
+    h: Handles,
+    rt: Runtime,
+    epoch: number,
+    error: string,
+    status: number | null,
+    retryAfterMs: number | null,
+  ): Promise<void> {
+    rt.failures += 1;
+    rt.retryAt = deps.now() + retryDelay(rt.failures, retryAfterMs, deps.random);
+    rt.counters.batchesRetry += 1;
+    logger.debug("export batch will be retried", {
+      ...(status === null ? {} : { status }),
+      retryable: true,
+      reason: error,
+    });
+    await h.state.recordError(rt.destination.generation, epoch, error, deps.now());
+  }
+
+  async function hardFailure(
+    h: Handles,
+    rt: Runtime,
+    epoch: number,
+    error: string,
+    status: number | null,
+    refused: boolean,
+  ): Promise<void> {
+    rt.failures = 0;
+    rt.retryAt = deps.now() + BACKOFF_MAX_MS;
+    rt.failing = true;
+    rt.refused = refused;
+    if (!refused) rt.counters.batchesFailed += 1;
+    logger.warn(refused ? "export destination refused" : "export destination failing", {
+      ...(status === null ? {} : { status }),
+      retryable: false,
+      reason: error,
+    });
+    await h.state.recordError(rt.destination.generation, epoch, error, deps.now());
+  }
+
+  // --- messages ----------------------------------------------------------
+
+  async function find(h: Handles, id: string): Promise<ExportDestination | null> {
+    return (await h.reader.destinations()).find((d) => d.id === id) ?? null;
+  }
+
+  async function runTest(ref: string, id: string): Promise<TestResult> {
+    const fail = (error: string, status: number | null = null): TestResult => ({
+      type: "testResult",
+      ref,
+      ok: false,
+      error,
+      status,
+    });
+    const h = handles;
+    if (h === null || phase !== "running") return fail(REPLY_ERRORS.paused);
+    const d = await find(h, id);
+    if (d === null) return fail(REPLY_ERRORS.noDestination);
+    const prepared = prepare(d, d.hasSecret ? await h.reader.openSecret(d.id) : null);
+    if (!prepared.ok) return fail(prepared.error);
+    const at = deps.now();
+    let part: string;
+    try {
+      part = prepared.sender.part(buildRecord(syntheticLog(at), { keyLabel: null, nodeId }));
+    } catch {
+      return fail(REFUSALS.index);
+    }
+    const deadline = new AbortController();
+    const timer = timers.setTimeout(() => deadline.abort(DEADLINE), BATCH_DEADLINE_MS);
+    try {
+      const outcome = await deliver(prepared.sender, [part], {
+        transport: deps.transport,
+        signal: deadline.signal,
+        timers,
+        now: deps.now,
+      });
+      if (outcome.kind !== "ok") return fail(outcome.error, outcome.status);
+      if (outcome.dropped > 0) {
+        return fail(droppedSummary(1, 1, outcome.reasons) ?? "dropped", outcome.status);
+      }
+      return {
+        type: "testResult",
+        ref,
+        ok: true,
+        status: outcome.status,
+        latencyMs: deps.now() - at,
+      };
+    } catch {
+      return fail(DEADLINE_SUMMARY);
+    } finally {
+      timers.clearTimeout(timer);
+    }
+  }
+
+  async function runPreview(ref: string, requestId: string): Promise<WorkerMessage> {
+    const h = handles;
+    if (h === null || phase !== "running") {
+      return { type: "previewResult", ref, ok: false, error: REPLY_ERRORS.paused };
+    }
+    const row = await h.reader.getLog(requestId);
+    if (row === null) {
+      return { type: "previewResult", ref, ok: false, error: REPLY_ERRORS.noRequest };
+    }
+    const labels = await h.reader.keyLabels();
+    const keyLabel = row.apiKeyId === null ? null : (labels.get(row.apiKeyId) ?? null);
+    return { type: "previewResult", ref, ok: true, record: buildRecord(row, { keyLabel, nodeId }) };
+  }
+
+  async function runSkip(ref: string, id: string): Promise<WorkerMessage> {
+    const h = handles;
+    if (h === null || phase !== "running") {
+      return { type: "skipResult", ref, ok: false, error: REPLY_ERRORS.paused };
+    }
+    const d = await find(h, id);
+    if (d === null)
+      return { type: "skipResult", ref, ok: false, error: REPLY_ERRORS.noDestination };
+    const at = await readClock(h);
+    await h.state.ensure(d.generation, d.startAt);
+    await h.state.requestSkip(d.generation, at);
+    void tick();
+    return { type: "skipResult", ref, ok: true, at };
+  }
+
+  /** Cancels every pass and waits for them to unwind, at most `budgetMs` when given. */
+  async function cancelAll(reason: Error, budgetMs: number | null): Promise<void> {
+    if (tickTimer !== null) timers.clearTimeout(tickTimer);
+    tickTimer = null;
+    if (statusTimer !== null) timers.clearTimeout(statusTimer);
+    statusTimer = null;
+    for (const rt of runtimes.values()) rt.controller?.abort(reason);
+    const settled = idle();
+    if (budgetMs === null) {
+      await settled;
+      return;
+    }
+    let timer: unknown = null;
+    await Promise.race([
+      settled,
+      new Promise<void>((resolve) => {
+        timer = timers.setTimeout(resolve, budgetMs);
+      }),
+    ]);
+    timers.clearTimeout(timer);
+  }
+
+  async function closeHandles(): Promise<void> {
+    const h = handles;
+    handles = null;
+    if (h === null) return;
+    try {
+      await h.close();
+    } catch {
+      logger.warn("export handles did not close cleanly", { reason: INTERNAL_SUMMARY });
+    }
+  }
+
+  async function reply(work: () => Promise<WorkerMessage>, fallback: WorkerMessage): Promise<void> {
+    try {
+      deps.post(await work());
+    } catch {
+      logger.warn("export request failed", { reason: INTERNAL_SUMMARY });
+      deps.post(fallback);
+    }
+  }
+
+  async function idle(): Promise<void> {
+    for (;;) {
+      const pending = [ticking, ...[...runtimes.values()].map((rt) => rt.running)].filter(
+        (p): p is Promise<void> => p !== null,
+      );
+      if (pending.length === 0) return;
+      await Promise.allSettled(pending);
+    }
+  }
+
+  async function open(): Promise<void> {
+    handles = await deps.open();
+    phase = "running";
+    runtimes.clear();
+    await tick();
+  }
+
+  /**
+   * `pause`, `resume` and `stop` run one at a time, in arrival order: a
+   * `resume` posted while a pause is still closing handles must not open new
+   * ones underneath it, and `paused` must mean "closed now".
+   */
+  let lifecycle: Promise<void> = Promise.resolve();
+  const inOrder = (work: () => Promise<void>): Promise<void> => {
+    const next = lifecycle.then(work, work);
+    lifecycle = next.catch(() => {});
+    return next;
+  };
+
+  return {
+    start: () => inOrder(open),
+
+    async handle(message) {
+      if (message.type === "pause" || message.type === "resume" || message.type === "stop") {
+        await inOrder(() => lifecycleStep(message.type));
+        return;
+      }
+      // Everything else sees the lifecycle as posted before it: a `test` sent
+      // right after `resume` runs on the reopened handles, not against "paused".
+      await lifecycle;
+      switch (message.type) {
+        case "destinationsChanged":
+          if (phase === "running") await tick();
+          return;
+        case "gatesChanged":
+          // Body export is part 2; the gates mean nothing to metadata records.
+          return;
+        case "test":
+          await reply(
+            () => runTest(message.ref, message.id),
+            testFailure(message.ref, REPLY_ERRORS.internal),
+          );
+          return;
+        case "preview":
+          await reply(() => runPreview(message.ref, message.requestId), {
+            type: "previewResult",
+            ref: message.ref,
+            ok: false,
+            error: REPLY_ERRORS.internal,
+          });
+          return;
+        case "skip":
+          await reply(() => runSkip(message.ref, message.id), {
+            type: "skipResult",
+            ref: message.ref,
+            ok: false,
+            error: REPLY_ERRORS.internal,
+          });
+          return;
+      }
+    },
+
+    idle,
+  };
+
+  async function lifecycleStep(type: "pause" | "resume" | "stop"): Promise<void> {
+    switch (type) {
+      case "pause":
+        if (phase === "running") {
+          phase = "paused";
+          await cancelAll(CANCELLED.pause, null);
+          await closeHandles();
+        }
+        if (phase === "paused") deps.post({ type: "paused" });
+        return;
+      case "resume":
+        if (phase !== "paused") return;
+        await open();
+        return;
+      case "stop":
+        if (phase === "stopped") return;
+        phase = "stopped";
+        await cancelAll(CANCELLED.stop, STOP_BUDGET_MS);
+        await closeHandles();
+        return;
+    }
+  }
+}
+
+function testFailure(ref: string, error: string): TestResult {
+  return { type: "testResult", ref, ok: false, error, status: null };
+}
+
+function cursorOf(row: RequestLog): { cursorAt: number; cursorId: string } {
+  if (row.completedAt === null) throw new Error("unreachable: exported row without completedAt");
+  return { cursorAt: row.completedAt, cursorId: row.id };
+}
+
+function cursorOfPosition(p: { cursorAt: number; cursorId: string }): {
+  cursorAt: number;
+  cursorId: string;
+} {
+  return { cursorAt: p.cursorAt, cursorId: p.cursorId };
+}
+
+/** The record *Send test* sends: obviously synthetic, carrying nothing from any request. */
+export const TEST_MODEL = "omni-export-test";
+
+function syntheticLog(at: number): RequestLog {
+  return {
+    id: `omni-export-test-${crypto.randomUUID()}`,
+    state: "done",
+    at,
+    apiKeyId: null,
+    requestedModel: TEST_MODEL,
+    resolvedProvider: null,
+    resolvedModel: null,
+    credentialId: null,
+    attempts: 0,
+    status: 200,
+    errorCode: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: null,
+    durationMs: 0,
+    costUsd: 0,
+    degradations: [],
+    rtkApplied: false,
+    rtkFilterHits: 0,
+    rtkOriginalCodeUnits: 0,
+    rtkCompressedCodeUnits: 0,
+    rtkEstimatedTokensSaved: 0,
+    rtkFilters: [],
+    sessionId: null,
+    turnId: null,
+    agent: null,
+    tags: [],
+    traceMetadata: {},
+    clientRequestId: null,
+    upstreamRequestId: null,
+    completedAt: at,
+  };
+}
