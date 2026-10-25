@@ -19,7 +19,7 @@ import {
   UsageError,
 } from "../args.ts";
 import { type Command, type CommandEnv, state } from "../command.ts";
-import { CliError, type Context } from "../context.ts";
+import { CliError, type Context, postgresUrlOf } from "../context.ts";
 import { emit, fields, formatBytes, formatTime, paint, table } from "../output.ts";
 import { status as serviceStatus } from "../service.ts";
 
@@ -34,11 +34,34 @@ import { status as serviceStatus } from "../service.ts";
  * `--secret-file -` (the prompt hides it on a terminal), and is handed to
  * control as JSON text — never printed, never quoted in an error.
  *
+ * **SQLite installations only.** The CLI opens the SQLite store; on an
+ * installation configured for Postgres a write would land in a local file
+ * the gateway never reads, so every subcommand refuses first (`guarded`).
+ *
  * **Test and skip are the worker's.** Both run inside the gateway's export
  * worker, which this process cannot reach: the CLI administers through
  * `@omni/control`, never `/api/*`. So they are refused with a pointer to the
  * console rather than approximated here.
  */
+
+const POSTGRES_REFUSAL =
+  "this installation is configured for Postgres (cluster mode), and omni export administers " +
+  "SQLite installations only; use the console (Export page)";
+
+/**
+ * Refuses before anything is opened when the installation's store is
+ * Postgres — the detection `doctor` uses. Without it, `ctx.store()` would
+ * create or edit `omnigateway.db` beside the root and report success.
+ */
+function guarded(command: Command): Command {
+  return {
+    ...command,
+    async run(args, env) {
+      if (postgresUrlOf(env.ctx) !== null) throw new CliError(POSTGRES_REFUSAL);
+      await command.run(args, env);
+    },
+  };
+}
 
 /** Flags of one destination type, so a flag of another type is refused by name. */
 const TYPE_FLAGS: Readonly<Record<ExportDestinationType, readonly string[]>> = {
@@ -181,7 +204,7 @@ function enabledState(ctx: Context, d: DestinationSummary): string {
   return state(ctx, d.enabled, d.enabled ? "enabled" : "disabled");
 }
 
-export const exportList: Command = {
+export const exportList: Command = guarded({
   usage: "export list",
   summary: "List log export destinations, without their secrets",
   async run(_args, { ctx, writer }) {
@@ -210,9 +233,9 @@ export const exportList: Command = {
       );
     });
   },
-};
+});
 
-export const exportShow: Command = {
+export const exportShow: Command = guarded({
   usage: "export show <id>",
   summary: "Show one export destination; its secret only as set or not set",
   async run(args, { ctx, writer }) {
@@ -244,7 +267,7 @@ export const exportShow: Command = {
       ].join("\n"),
     );
   },
-};
+});
 
 const ADD_USAGE = [
   "export add <type> <id> [--start-from now|oldest] [--disabled] [--secret-file <path>|-]",
@@ -254,7 +277,7 @@ const ADD_USAGE = [
   "  otlp:          --endpoint URL [--signal logs|traces]",
 ].join("\n");
 
-export const exportAdd: Command = {
+export const exportAdd: Command = guarded({
   usage: "export add <type> <id> [options]",
   summary: "Add a log export destination: elasticsearch, webhook or otlp",
   help: [
@@ -308,9 +331,9 @@ export const exportAdd: Command = {
     });
     emit(env.ctx, env.writer, created, () => `added ${created.type} destination ${created.id}`);
   },
-};
+});
 
-export const exportSet: Command = {
+export const exportSet: Command = guarded({
   usage: "export set <id> [options]",
   summary: "Change an export destination; what is not given is kept",
   help: [
@@ -377,9 +400,9 @@ export const exportSet: Command = {
     });
     emit(env.ctx, env.writer, updated, () => `${updated.id} updated`);
   },
-};
+});
 
-export const exportRemove: Command = {
+export const exportRemove: Command = guarded({
   usage: "export remove <id>",
   summary: "Delete an export destination; what it already sent stays sent",
   async run(args, { ctx, writer, prompt }) {
@@ -393,7 +416,7 @@ export const exportRemove: Command = {
     await removeDestination(store, id);
     emit(ctx, writer, { id, removed: true }, () => `${id} removed`);
   },
-};
+});
 
 /**
  * An action only the gateway's export worker performs. The destination is
@@ -401,7 +424,7 @@ export const exportRemove: Command = {
  * whether the gateway is even running.
  */
 function workerOnly(verb: "test" | "skip", summary: string): Command {
-  return {
+  return guarded({
     usage: `export ${verb} <id>`,
     summary,
     async run(args, { ctx, service }) {
@@ -413,7 +436,7 @@ function workerOnly(verb: "test" | "skip", summary: string): Command {
           (running ? "" : ". The gateway is not running: start it with omni start"),
       );
     },
-  };
+  });
 }
 
 export const exportTest = workerOnly("test", "Send one synthetic record (console only)");

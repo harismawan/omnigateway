@@ -301,6 +301,7 @@ describe("ExportBoard", () => {
     await user.type(within(dialog).getByLabelText("URL"), "https://receiver.example/in");
     await user.type(within(dialog).getByLabelText("Headers"), "x-team: gateway");
     await user.type(within(dialog).getByLabelText("Signing secret"), "whsec-1");
+    await user.click(within(dialog).getByRole("radio", { name: "Models: only these" }));
     await user.type(within(dialog).getByLabelText("Only these models"), "a, b");
     await user.click(within(dialog).getByRole("button", { name: "Add destination" }));
 
@@ -425,6 +426,177 @@ describe("ExportBoard", () => {
     await waitFor(() =>
       expect(bodyOf(stub, "PUT", "/api/export/destinations/hook")).toMatchObject({ secret: null }),
     );
+  });
+
+  /**
+   * Control reads `apiKeyIds: []` as "no key" — match nothing — and an absent
+   * one as "every key". Editing another dimension must not turn the first
+   * into the second.
+   */
+  for (const [field, other] of [
+    ["apiKeyIds", "models"],
+    ["models", "apiKeyIds"],
+  ] as const) {
+    test(`an empty ${field} list survives an edit to another filter field`, async () => {
+      const user = userEvent.setup();
+      const stub = stubExport(
+        { destinations: [destination({ filter: { [field]: [] } })] },
+        { "PUT /api/export/destinations/hook": () => ({ destination: destination() }) },
+      );
+      renderWithProviders(<ExportBoard />);
+
+      await user.click(await screen.findByRole("button", { name: "Edit hook" }));
+      const dialog = await screen.findByRole("dialog");
+      const label = field === "apiKeyIds" ? "Keys" : "Models";
+      expect(within(dialog).getByRole("radio", { name: `${label}: none` })).toBeTruthy();
+      expect(
+        (within(dialog).getByRole("radio", { name: `${label}: none` }) as HTMLInputElement).checked,
+      ).toBe(true);
+
+      if (other === "models") {
+        await user.click(within(dialog).getByRole("radio", { name: "Models: only these" }));
+        await user.type(within(dialog).getByLabelText("Only these models"), "m1");
+      } else {
+        await user.click(within(dialog).getByRole("radio", { name: "Keys: only these" }));
+        await user.type(within(dialog).getByLabelText("Only these keys"), "key_1");
+      }
+      await user.click(within(dialog).getByRole("switch", { name: "Failed requests only" }));
+      await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+
+      await waitFor(() =>
+        expect(
+          (bodyOf(stub, "PUT", "/api/export/destinations/hook") as { filter: unknown }).filter,
+        ).toEqual({
+          [field]: [],
+          [other]: [other === "models" ? "m1" : "key_1"],
+          failedOnly: true,
+        }),
+      );
+    });
+  }
+
+  test("a filter dimension is all, none or a list, and none is sent as an empty list", async () => {
+    const user = userEvent.setup();
+    const stub = stubExport(
+      { destinations: [] },
+      { "POST /api/export/destinations": () => ({ destination: destination() }) },
+    );
+    renderWithProviders(<ExportBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Add a destination" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      (within(dialog).getByRole("radio", { name: "Keys: all" }) as HTMLInputElement).checked,
+    ).toBe(true);
+    await user.type(within(dialog).getByLabelText("ID"), "hook");
+    await user.type(within(dialog).getByLabelText("URL"), "https://receiver.example/in");
+    await user.click(within(dialog).getByRole("radio", { name: "Keys: none" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add destination" }));
+
+    await waitFor(() =>
+      expect(
+        (bodyOf(stub, "POST", "/api/export/destinations") as { filter: unknown }).filter,
+      ).toEqual({ apiKeyIds: [] }),
+    );
+  });
+
+  /**
+   * Every form control holding `secret` is a password input, and the secret is
+   * nowhere in the page's visible text — a textarea or text input would put an
+   * authorization token on the operator's screen.
+   */
+  function expectMasked(secret: string) {
+    const holders = [
+      ...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"),
+    ].filter((control) => control.value.includes(secret));
+    expect(holders.length).toBeGreaterThan(0);
+    for (const control of holders) {
+      expect(control.tagName).toBe("INPUT");
+      expect((control as HTMLInputElement).type).toBe("password");
+    }
+    expect(document.body.textContent ?? "").not.toContain(secret);
+  }
+
+  test("webhook secret headers are entered per row with a masked value", async () => {
+    const user = userEvent.setup();
+    const stub = stubExport(
+      {},
+      { "PUT /api/export/destinations/hook": () => ({ destination: destination() }) },
+    );
+    renderWithProviders(<ExportBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit hook" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Replace secret" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add secret header" }));
+    await user.type(within(dialog).getByLabelText("Secret header 1 name"), "authorization");
+    await user.type(within(dialog).getByLabelText("Secret header 1 value"), "Bearer tok-123");
+    await user.click(within(dialog).getByRole("button", { name: "Add secret header" }));
+    await user.type(within(dialog).getByLabelText("Secret header 2 name"), "x-extra");
+    await user.type(within(dialog).getByLabelText("Secret header 2 value"), "tok-456");
+    expectMasked("tok-123");
+    expectMasked("tok-456");
+
+    await user.click(within(dialog).getByRole("button", { name: "Remove secret header 2" }));
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(bodyOf(stub, "PUT", "/api/export/destinations/hook")).toMatchObject({
+        secret: { headers: { authorization: "Bearer tok-123" } },
+      }),
+    );
+  });
+
+  test("OTLP secret headers and Elasticsearch basic credentials are masked, username included", async () => {
+    const user = userEvent.setup();
+    const stub = stubExport(
+      { destinations: [] },
+      { "POST /api/export/destinations": () => ({ destination: destination() }) },
+    );
+    renderWithProviders(<ExportBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Add a destination" }));
+    let dialog = await screen.findByRole("dialog");
+    await choose(user, within(dialog).getByLabelText("Type"), "otlp");
+    await user.type(within(dialog).getByLabelText("ID"), "lf");
+    await user.type(within(dialog).getByLabelText("Endpoint"), "https://lf.example/otel");
+    await user.click(within(dialog).getByRole("button", { name: "Add secret header" }));
+    await user.type(within(dialog).getByLabelText("Secret header 1 name"), "authorization");
+    await user.type(within(dialog).getByLabelText("Secret header 1 value"), "Basic otlp-tok");
+    expectMasked("otlp-tok");
+    await choose(user, within(dialog).getByLabelText("Type"), "elasticsearch");
+    await choose(user, within(dialog).getByLabelText("Authentication"), "basic");
+    await user.type(within(dialog).getByLabelText("Username"), "elastic-user");
+    await user.type(within(dialog).getByLabelText("Password"), "elastic-pw");
+    expectMasked("elastic-user");
+    expectMasked("elastic-pw");
+    await choose(user, within(dialog).getByLabelText("Authentication"), "apiKey");
+    await user.type(within(dialog).getByLabelText("API key"), "es-key");
+    expectMasked("es-key");
+    dialog = screen.getByRole("dialog");
+    await user.clear(within(dialog).getByLabelText("URL"));
+    await user.type(within(dialog).getByLabelText("URL"), "https://es:9200");
+    await user.click(within(dialog).getByRole("button", { name: "Add destination" }));
+    await waitFor(() =>
+      expect(bodyOf(stub, "POST", "/api/export/destinations")).toMatchObject({
+        type: "elasticsearch",
+        secret: { apiKey: "es-key" },
+      }),
+    );
+  });
+
+  test("a secret header row with a value but no name is refused without echoing the value", async () => {
+    const user = userEvent.setup();
+    stubExport({}, {});
+    renderWithProviders(<ExportBoard />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit hook" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Replace secret" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add secret header" }));
+    await user.type(within(dialog).getByLabelText("Secret header 1 value"), "tok-orphan");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    expect(await within(dialog).findByText("Secret header 1 needs a name.")).toBeTruthy();
+    expectMasked("tok-orphan");
   });
 
   test("the bodies switch is shown off and disabled, as a later release", async () => {

@@ -1,4 +1,5 @@
-import { useId, useState } from "react";
+import { Plus, X } from "lucide-react";
+import { type ReactNode, useId, useRef, useState } from "react";
 import styled from "styled-components";
 import { useCreateExportDestination, useUpdateExportDestination } from "../../api/queries.ts";
 import type {
@@ -7,7 +8,7 @@ import type {
   ExportDestinationView,
   ExportFilter,
 } from "../../api/types.ts";
-import { Button } from "../../ui/Button.tsx";
+import { Button, IconButton } from "../../ui/Button.tsx";
 import { Field, Input, Textarea } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";
 import { Legend, Row, Spacer, Stack } from "../../ui/primitives.ts";
@@ -65,6 +66,16 @@ type Auth = "apiKey" | "basic" | "none";
 /** What the save does with the stored secret. A new destination is always `replace`. */
 type SecretMode = "keep" | "replace" | "clear";
 
+/**
+ * One filter dimension. Control reads an absent list as "every", an empty one
+ * as "none" (match nothing) and a non-empty one as "only these" — three facts,
+ * so the draft keeps three, and a blank list field is never read as "every".
+ */
+type Scope = "all" | "none" | "list";
+
+/** A secret header row. The value is entered masked; rows are never prefilled. */
+type HeaderRow = { key: number; name: string; value: string };
+
 type Draft = {
   type: ExportDestinationType;
   id: string;
@@ -76,7 +87,9 @@ type Draft = {
   headers: string;
   endpoint: string;
   signal: "logs" | "traces";
+  keysScope: Scope;
   keys: string;
+  modelsScope: Scope;
   models: string;
   failedOnly: boolean;
   maxRequestBytes: string;
@@ -85,7 +98,7 @@ type Draft = {
   username: string;
   password: string;
   signingSecret: string;
-  secretHeaders: string;
+  secretHeaders: HeaderRow[];
 };
 
 const str = (value: unknown, fallback = ""): string =>
@@ -96,6 +109,11 @@ function headerLines(value: unknown): string {
   return Object.entries(value)
     .map(([name, v]) => `${name}: ${str(v)}`)
     .join("\n");
+}
+
+function scopeOf(list: readonly string[] | undefined): Scope {
+  if (list === undefined) return "all";
+  return list.length === 0 ? "none" : "list";
 }
 
 function draftOf(editing: ExportDestinationView | null): Draft {
@@ -112,7 +130,9 @@ function draftOf(editing: ExportDestinationView | null): Draft {
     headers: headerLines(c.headers),
     endpoint: str(c.endpoint),
     signal: c.signal === "traces" ? "traces" : "logs",
+    keysScope: scopeOf(editing?.filter.apiKeyIds),
     keys: editing?.filter.apiKeyIds?.join(", ") ?? "",
+    modelsScope: scopeOf(editing?.filter.models),
     models: editing?.filter.models?.join(", ") ?? "",
     failedOnly: editing?.filter.failedOnly === true,
     maxRequestBytes: editing?.maxRequestBytes == null ? "" : String(editing.maxRequestBytes),
@@ -120,7 +140,7 @@ function draftOf(editing: ExportDestinationView | null): Draft {
     username: "",
     password: "",
     signingSecret: "",
-    secretHeaders: "",
+    secretHeaders: [],
   };
 }
 
@@ -143,14 +163,40 @@ const listOf = (text: string): string[] =>
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
 
-function filterOf(draft: Draft): ExportFilter {
-  const keys = listOf(draft.keys);
-  const models = listOf(draft.models);
+/** One dimension as the wire carries it: absent (all), `[]` (none), or the list. */
+function dimensionOf(scope: Scope, text: string, label: string): string[] | undefined | string {
+  if (scope === "all") return undefined;
+  if (scope === "none") return [];
+  const list = listOf(text);
+  return list.length === 0 ? `List at least one under ${label}, or choose all or none.` : list;
+}
+
+function filterOf(draft: Draft): ExportFilter | string {
+  const keys = dimensionOf(draft.keysScope, draft.keys, "Keys");
+  if (typeof keys === "string") return keys;
+  const models = dimensionOf(draft.modelsScope, draft.models, "Models");
+  if (typeof models === "string") return models;
   return {
-    ...(keys.length === 0 ? {} : { apiKeyIds: keys }),
-    ...(models.length === 0 ? {} : { models }),
+    ...(keys === undefined ? {} : { apiKeyIds: keys }),
+    ...(models === undefined ? {} : { models }),
     ...(draft.failedOnly ? { failedOnly: true } : {}),
   };
+}
+
+/**
+ * Secret header rows as a record, or a problem naming the row by number —
+ * never by its value. A wholly blank row is ignored.
+ */
+function secretHeadersOf(rows: readonly HeaderRow[]): Record<string, string> | string {
+  const out: Record<string, string> = {};
+  for (const [index, row] of rows.entries()) {
+    const name = row.name.trim();
+    if (name.length === 0 && row.value.length === 0) continue;
+    if (name.length === 0) return `Secret header ${index + 1} needs a name.`;
+    if (row.value.length === 0) return `Secret header ${index + 1} needs a value.`;
+    out[name] = row.value;
+  }
+  return out;
 }
 
 function configOf(draft: Draft): Record<string, unknown> | string {
@@ -187,7 +233,7 @@ function secretOf(draft: Draft): Record<string, unknown> | null | string {
         ? "Enter the username and the password."
         : { username: draft.username, password: draft.password };
     case "webhook": {
-      const headers = parseHeaders(draft.secretHeaders, "Secret headers");
+      const headers = secretHeadersOf(draft.secretHeaders);
       if (typeof headers === "string") return headers;
       const any = Object.keys(headers).length > 0;
       if (!any && draft.signingSecret.length === 0) return null;
@@ -197,7 +243,7 @@ function secretOf(draft: Draft): Record<string, unknown> | null | string {
       };
     }
     case "otlp": {
-      const headers = parseHeaders(draft.secretHeaders, "Secret headers");
+      const headers = secretHeadersOf(draft.secretHeaders);
       if (typeof headers === "string") return headers;
       return Object.keys(headers).length === 0 ? null : { headers };
     }
@@ -237,12 +283,16 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
   const [filterTouched, setFilterTouched] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const failedId = useId();
+  const nextRow = useRef(0);
   const bodiesId = useId();
 
   const busy = create.isPending || update.isPending;
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((previous) => ({ ...previous, [key]: value }));
-  const setFilter = <K extends "keys" | "models" | "failedOnly">(key: K, value: Draft[K]) => {
+  const setFilter = <K extends "keysScope" | "keys" | "modelsScope" | "models" | "failedOnly">(
+    key: K,
+    value: Draft[K],
+  ) => {
     setFilterTouched(true);
     set(key, value);
   };
@@ -265,6 +315,8 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
     if (typeof maxRequestBytes === "string") return setProblem(maxRequestBytes);
     const secret = secretMode === "replace" ? secretOf(draft) : null;
     if (typeof secret === "string") return setProblem(secret);
+    const filter = filterOf(draft);
+    if (typeof filter === "string") return setProblem(filter);
 
     if (current === null) {
       if (draft.id.trim().length === 0) return setProblem("Give the destination an ID.");
@@ -275,7 +327,7 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
           startFrom: draft.startFrom,
           enabled: true,
           config,
-          filter: filterOf(draft),
+          filter,
           maxRequestBytes,
           ...(secret === null ? {} : { secret }),
         },
@@ -289,7 +341,7 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
     }
     const patch: ExportDestinationPatch = {
       config,
-      ...(filterTouched ? { filter: filterOf(draft) } : {}),
+      ...(filterTouched ? { filter } : {}),
       maxRequestBytes,
       ...(secretMode === "keep" ? {} : { secret: secretMode === "clear" ? null : secret }),
     };
@@ -307,7 +359,8 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
       {(props) => (
         <Input
           {...props}
-          type={key === "username" ? "text" : "password"}
+          // The username too: it is half of the encrypted credential.
+          type="password"
           autoComplete="off"
           value={draft[key]}
           onChange={(event) => set(key, event.target.value)}
@@ -316,18 +369,63 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
     </Field>
   );
 
+  const setHeaderRow = (key: number, patch: Partial<HeaderRow>) =>
+    set(
+      "secretHeaders",
+      draft.secretHeaders.map((row) => (row.key === key ? { ...row, ...patch } : row)),
+    );
+
   const secretHeadersInput = (
-    <Field label="Secret headers" hint="One per line, name: value — e.g. authorization: Bearer …">
-      {(props) => (
-        <Lines
-          {...props}
-          rows={3}
-          autoComplete="off"
-          value={draft.secretHeaders}
-          onChange={(event) => set("secretHeaders", event.target.value)}
-        />
-      )}
-    </Field>
+    <Stack $gap={1}>
+      <Legend>Secret headers</Legend>
+      {draft.secretHeaders.map((row, index) => (
+        <Row key={row.key} $gap={1}>
+          <Input
+            aria-label={`Secret header ${index + 1} name`}
+            placeholder="authorization"
+            autoComplete="off"
+            value={row.name}
+            onChange={(event) => setHeaderRow(row.key, { name: event.target.value })}
+          />
+          <Input
+            aria-label={`Secret header ${index + 1} value`}
+            type="password"
+            autoComplete="off"
+            value={row.value}
+            onChange={(event) => setHeaderRow(row.key, { value: event.target.value })}
+          />
+          <IconButton
+            type="button"
+            $variant="ghost"
+            $size="sm"
+            aria-label={`Remove secret header ${index + 1}`}
+            title="Remove this header"
+            onClick={() =>
+              set(
+                "secretHeaders",
+                draft.secretHeaders.filter((candidate) => candidate.key !== row.key),
+              )
+            }
+          >
+            <X />
+          </IconButton>
+        </Row>
+      ))}
+      <Row>
+        <Button
+          type="button"
+          $size="sm"
+          onClick={() => {
+            const key = nextRow.current++;
+            set("secretHeaders", [...draft.secretHeaders, { key, name: "", value: "" }]);
+          }}
+        >
+          <Plus />
+          Add secret header
+        </Button>
+      </Row>
+      <Note>Sent with every request and stored encrypted, e.g. authorization: Bearer …</Note>
+    </Stack>
   );
 
   const secretFields =
@@ -568,27 +666,24 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
               The stored filter is unreadable, so nothing is exported. Set one below to fix it.
             </Warn>
           ) : null}
-          <Field label="Only these keys" hint="API key IDs, comma-separated. Blank: every key.">
-            {(props) => (
-              <Input
-                {...props}
-                value={draft.keys}
-                onChange={(event) => setFilter("keys", event.target.value)}
-              />
-            )}
-          </Field>
-          <Field
-            label="Only these models"
-            hint="Requested or resolved model names, comma-separated. Blank: every model."
-          >
-            {(props) => (
-              <Input
-                {...props}
-                value={draft.models}
-                onChange={(event) => setFilter("models", event.target.value)}
-              />
-            )}
-          </Field>
+          <ScopeField
+            label="Keys"
+            listLabel="Only these keys"
+            hint="API key IDs, comma-separated."
+            scope={draft.keysScope}
+            text={draft.keys}
+            onScope={(scope) => setFilter("keysScope", scope)}
+            onText={(text) => setFilter("keys", text)}
+          />
+          <ScopeField
+            label="Models"
+            listLabel="Only these models"
+            hint="Requested or resolved model names, comma-separated."
+            scope={draft.modelsScope}
+            text={draft.models}
+            onScope={(scope) => setFilter("modelsScope", scope)}
+            onText={(text) => setFilter("models", text)}
+          />
           <Row $gap={2}>
             <Toggle
               id={failedId}
@@ -630,5 +725,77 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
         {problem === null ? null : <Problem role="alert">{problem}</Problem>}
       </Stack>
     </Modal>
+  );
+}
+
+const Choices = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: ${({ theme }) => theme.space(3)};
+  font-size: 12px;
+
+  label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+  }
+
+  input {
+    accent-color: ${({ theme }) => theme.color.accent};
+  }
+`;
+
+const SCOPE_LABEL: Record<Scope, string> = { all: "all", none: "none", list: "only these" };
+
+/** "All", "none" and "only these" as three visible choices, the list field only for the third. */
+function ScopeField({
+  label,
+  listLabel,
+  hint,
+  scope,
+  text,
+  onScope,
+  onText,
+}: {
+  label: string;
+  listLabel: string;
+  hint: string;
+  scope: Scope;
+  text: string;
+  onScope: (scope: Scope) => void;
+  onText: (text: string) => void;
+}): ReactNode {
+  const name = useId();
+  return (
+    <Stack $gap={1}>
+      <Legend as="span" id={`${name}-legend`}>
+        {label}
+      </Legend>
+      <Choices role="radiogroup" aria-labelledby={`${name}-legend`}>
+        {(["all", "none", "list"] as const).map((value) => (
+          <label key={value}>
+            <input
+              type="radio"
+              name={name}
+              aria-label={`${label}: ${SCOPE_LABEL[value]}`}
+              checked={scope === value}
+              onChange={() => onScope(value)}
+            />
+            {SCOPE_LABEL[value]}
+          </label>
+        ))}
+      </Choices>
+      {scope === "none" ? (
+        <Warn role="status">No request matches, so this destination exports nothing.</Warn>
+      ) : null}
+      {scope === "list" ? (
+        <Field label={listLabel} hint={hint}>
+          {(props) => (
+            <Input {...props} value={text} onChange={(event) => onText(event.target.value)} />
+          )}
+        </Field>
+      ) : null}
+    </Stack>
   );
 }

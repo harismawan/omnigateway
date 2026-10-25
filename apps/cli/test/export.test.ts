@@ -441,3 +441,56 @@ test("help lists the export commands and explains add's per-type flags", async (
   expect(add.out).toContain('{"apiKey"');
   expect(add.out).toContain("signingSecret");
 });
+
+/**
+ * The CLI opens SQLite only. On an installation configured for Postgres a
+ * write would land in an unrelated local file the gateway never reads, so
+ * every subcommand refuses before any store is opened — the doctor's own
+ * detection, `clusterMode && databaseUrl`.
+ */
+test("every export subcommand refuses on a Postgres installation, touching no local database", async () => {
+  const cluster = {
+    OMNI_CLUSTER_MODE: "true",
+    OMNI_DATABASE_URL: "postgres://nobody:x@127.0.0.1:1/none",
+    OMNI_REDIS_URL: "redis://127.0.0.1:1",
+  };
+  const argvs = [
+    ["export", "list"],
+    ["export", "show", "decoy"],
+    ["export", "add", "webhook", "hook", "--url", "https://receiver.example/in"],
+    ["export", "set", "decoy", "--disable"],
+    ["export", "remove", "decoy"],
+    ["export", "test", "decoy"],
+    ["export", "skip", "decoy"],
+  ];
+
+  // No database at all: none may be created.
+  const bare = makeRoot(cluster);
+  for (const argv of argvs) {
+    const result = await cli(argv, { root: bare, service: fakeService({ root: bare }) });
+    expect(result.code).toBe(1);
+    expect(result.err).toContain("configured for Postgres");
+    expect(result.err).toContain("use the console");
+  }
+  expect(await Bun.file(join(bare, "omnigateway.db")).exists()).toBe(false);
+
+  // A SQLite decoy at the default path: never read, never written.
+  const root = makeRoot(cluster);
+  const sqlite = await openStore(root);
+  await sqlite.exportDestinations.create({
+    id: "decoy",
+    type: "webhook",
+    config: { url: "https://receiver.example/in", headers: {} },
+    startFrom: "now",
+  });
+  const before = await sqlite.exportDestinations.list();
+  sqlite.close();
+  for (const argv of argvs) {
+    const result = await cli(argv, { root, service: fakeService({ root }) });
+    expect(result.code).toBe(1);
+    expect(result.out).not.toContain("decoy");
+  }
+  const after = await openStore(root);
+  expect(await after.exportDestinations.list()).toEqual(before);
+  after.close();
+});

@@ -16,7 +16,7 @@ import { resolvePin } from "@omni/store";
 import { readPostgresExportStatus, readSqliteExportStatus } from "@omni/store/exportStatus";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
-import { CliError, type Context } from "../context.ts";
+import { CliError, type Context, postgresUrlOf } from "../context.ts";
 import { emit, fields, note, paint } from "../output.ts";
 import { gatewayEntrypoint } from "../runtime.ts";
 import {
@@ -443,9 +443,9 @@ function smartRouterLine(ctx: Context, readiness: SmartRouterReadiness | null): 
  */
 async function exportState(ctx: Context, gatewayRunning: boolean): Promise<ExportDoctor | null> {
   if (ctx.configError !== null) return null;
-  const config = ctx.config();
-  if (config.clusterMode && config.databaseUrl !== null) {
-    const read = await readPostgresExportStatus(config.databaseUrl);
+  const postgres = postgresUrlOf(ctx);
+  if (postgres !== null) {
+    const read = await readPostgresExportStatus(postgres);
     return exportDoctor(read?.destinations ?? null, read?.states ?? null, {
       now: ctx.now(),
       gatewayRunning: null,
