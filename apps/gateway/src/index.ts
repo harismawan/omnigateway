@@ -344,7 +344,14 @@ async function main(): Promise<void> {
       gates: { bodyLoggingAllowed: config.bodyLoggingAllowed },
     },
     spawn: spawnExportWorker,
-    countDestinations: async () => (await store.exportDestinations.list()).length,
+    readDestinations: async () => {
+      const list = await store.exportDestinations.list();
+      return {
+        count: list.length,
+        // Changes with any create, edit (`updatedAt`) or delete-and-recreate (`generation`).
+        revision: list.map((d) => `${d.generation}@${d.updatedAt}`).join(","),
+      };
+    },
     timers: { setTimeout, clearTimeout: (handle) => clearTimeout(handle as Timer) },
     now,
     logger,

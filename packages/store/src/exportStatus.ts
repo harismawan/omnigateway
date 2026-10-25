@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { dirname, join } from "node:path";
+import { SQL } from "bun";
 
 /**
  * Read-only access to the export worker's runtime state, for `omni doctor`.
@@ -7,11 +8,11 @@ import { dirname, join } from "node:path";
  * (*Destination* → where `export_state` lives).
  *
  * The worker is the only writer of that state; nothing here writes, migrates
- * or creates: `export.db` beside the main file is opened `readonly` with
- * `query_only` on, and a missing file is not created. Anything unreadable is
- * `null` ("export status unavailable"), never a throw: `doctor` is run when
- * things are wrong. SQLite only, because the CLI administers SQLite
- * installations; a cluster's `export_state` is read by its gateways.
+ * or creates. SQLite: `export.db` beside the main file is opened `readonly`
+ * with `query_only` on, and a missing file is not created. Postgres: one
+ * connection, a `READ ONLY` transaction with a short statement timeout,
+ * closed after. Anything unreadable is `null` ("export status unavailable"),
+ * never a throw: `doctor` is run when things are wrong.
  *
  * A subpath of its own (`@omni/store/exportStatus`), not the package root,
  * like `exportReader`: it reaches state the main store never opens.
@@ -33,6 +34,15 @@ export type ExportStatusRow = {
   lastError: string | null;
   lastErrorAt: number | null;
   gapPossibleAt: number | null;
+};
+
+/** One destination as `doctor` needs it: never config, filter or secret. */
+export type ExportStatusDestination = {
+  id: string;
+  generation: string;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
 };
 
 type Row = {
@@ -74,5 +84,56 @@ export function readSqliteExportStatus(databasePath: string): ExportStatusRow[] 
     return null;
   } finally {
     db?.close();
+  }
+}
+
+/** How long the Postgres read may take, connect and each statement alike. */
+export const STATUS_TIMEOUT_MS = 3_000;
+
+type DestinationRow = {
+  id: string;
+  generation: string;
+  enabled: boolean;
+  created_at: number | string;
+  updated_at: number | string;
+};
+
+/**
+ * Destinations and their state from a Postgres store at `url`, or null when
+ * the server cannot be reached or either table read. Reads only: a `READ
+ * ONLY` transaction, so a write reached by mistake fails; one connection,
+ * opened for this call and closed after it.
+ */
+export async function readPostgresExportStatus(
+  url: string,
+): Promise<{ destinations: ExportStatusDestination[]; states: ExportStatusRow[] } | null> {
+  const sql = new SQL({
+    url,
+    max: 1,
+    connectionTimeout: Math.ceil(STATUS_TIMEOUT_MS / 1000),
+    idleTimeout: 1,
+  });
+  try {
+    return await sql.begin("read only", async (tx) => {
+      await tx.unsafe(`SET LOCAL statement_timeout = ${STATUS_TIMEOUT_MS}`);
+      const destinations = (await tx.unsafe(
+        "SELECT id, generation, enabled, created_at, updated_at FROM export_destinations ORDER BY id",
+      )) as DestinationRow[];
+      const states = (await tx.unsafe(SELECT)) as Row[];
+      return {
+        destinations: destinations.map((d) => ({
+          id: d.id,
+          generation: d.generation,
+          enabled: d.enabled,
+          createdAt: num(d.created_at),
+          updatedAt: num(d.updated_at),
+        })),
+        states: states.map(toRow),
+      };
+    });
+  } catch {
+    return null;
+  } finally {
+    await sql.close().catch(() => {});
   }
 }

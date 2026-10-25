@@ -17,7 +17,14 @@ export type FakeWorker = ExportWorker & {
 };
 
 export function fakeWorker(
-  auto: { ackPause?: boolean; onPost?: (w: FakeWorker, m: MainMessage) => void } = {},
+  auto: {
+    ackPause?: boolean;
+    /** False: `stop` does not make it exit (a worker stuck in a native call). */
+    exitOnStop?: boolean;
+    /** False: `terminate` returns while the thread runs on; the test calls `die()`. */
+    terminateExits?: boolean;
+    onPost?: (w: FakeWorker, m: MainMessage) => void;
+  } = {},
 ): FakeWorker {
   const listeners: Array<(m: WorkerMessage) => void> = [];
   const exits: Array<() => void> = [];
@@ -31,7 +38,7 @@ export function fakeWorker(
       if (message.type === "pause" && auto.ackPause !== false) {
         queueMicrotask(() => w.emit({ type: "paused" }));
       }
-      if (message.type === "stop") queueMicrotask(() => w.die());
+      if (message.type === "stop" && auto.exitOnStop !== false) queueMicrotask(() => w.die());
       auto.onPost?.(w, message);
     },
     onMessage(listener) {
@@ -42,10 +49,10 @@ export function fakeWorker(
     },
     terminate() {
       w.terminated = true;
-      w.die();
+      if (auto.terminateExits !== false) w.die();
     },
     emit(message) {
-      if (!w.alive) return;
+      if (!w.alive || w.terminated) return;
       for (const l of listeners) l(message);
     },
     die() {

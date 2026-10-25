@@ -12,7 +12,10 @@ import type { MainMessage, WorkerInit, WorkerMessage } from "./protocol.ts";
 export type ExportWorker = {
   post(message: MainMessage): void;
   onMessage(listener: (message: WorkerMessage) => void): void;
-  /** Fires once when the worker is gone, whether it exited, crashed or was terminated. */
+  /**
+   * Fires once when the worker's thread has exited — after `stop`, a crash or
+   * `terminate()` — and not before: an error notification is not an exit.
+   */
   onExit(listener: () => void): void;
   terminate(): void;
 };
@@ -44,14 +47,12 @@ export function spawnExportWorker(init: WorkerInit): ExportWorker {
       worker.addEventListener("message", (event) => listener(event.data as WorkerMessage));
     },
     onExit(listener) {
-      let fired = false;
-      const once = (): void => {
-        if (fired) return;
-        fired = true;
-        listener();
-      };
-      worker.addEventListener("close", once);
-      worker.addEventListener("error", once);
+      // `close` alone: it is the thread having exited. `error` reports an
+      // uncaught exception and comes first (the thread is still unwinding),
+      // and `terminate()` returns before the thread stops — measured on Bun
+      // 1.4.4, `close` came ~4 s after `terminate()` during a long SQLite
+      // statement. A restore may swap the file only after this fires.
+      worker.addEventListener("close", () => listener(), { once: true });
     },
     terminate: () => worker.terminate(),
   };

@@ -3,11 +3,16 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SQL } from "bun";
+import { deriveKey } from "../src/encryption.ts";
 import {
   EXPORT_DB_FILENAME,
   exportDbPathFor,
+  readPostgresExportStatus,
   readSqliteExportStatus,
+  STATUS_TIMEOUT_MS,
 } from "../src/exportStatus.ts";
+import { createPostgresStore } from "../src/postgres/store.ts";
 
 /**
  * `omni doctor`'s read of the export worker's `export.db`: read-only, and
@@ -62,3 +67,83 @@ test("rows are read, and the reader never writes", () => {
   expect(db.query<{ v: number }, []>("PRAGMA data_version").get()).toEqual(before);
   db.close();
 });
+
+test("an unreachable Postgres is unavailable, quickly", async () => {
+  const started = Date.now();
+  expect(await readPostgresExportStatus("postgres://nobody:x@127.0.0.1:1/none")).toBeNull();
+  expect(Date.now() - started).toBeLessThan(STATUS_TIMEOUT_MS + 1_000);
+});
+
+const url = process.env.OMNI_TEST_DATABASE_URL;
+if (url === undefined || url === "") {
+  test.skip("postgres: OMNI_TEST_DATABASE_URL unset, export status read not run", () => {});
+} else {
+  test("Postgres: destinations and export_state are read, never written", async () => {
+    const admin = new SQL({ url, max: 1 });
+    try {
+      await admin.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    } finally {
+      await admin.close();
+    }
+    const store = await createPostgresStore({
+      url,
+      encryptionKey: await deriveKey("test-encryption-key-0123456789"),
+    });
+    try {
+      const d = await store.exportDestinations.create({
+        id: "hook",
+        type: "webhook",
+        config: { url: "https://receiver.example/in", headers: {} },
+        startFrom: "now",
+        secret: JSON.stringify({ signingSecret: "pg-secret-never-read" }),
+      });
+      const sql = new SQL({ url, max: 1 });
+      try {
+        await sql.unsafe(
+          "INSERT INTO export_state (generation, cursor_at, last_error, last_error_at, gap_possible_at) VALUES ($1, 5, 'HTTP 500', 7, 9)",
+          [d.generation],
+        );
+        const before = await sql.unsafe("SELECT version FROM config_version");
+        const read = await readPostgresExportStatus(url);
+        expect(read).toEqual({
+          destinations: [
+            {
+              id: "hook",
+              generation: d.generation,
+              enabled: true,
+              createdAt: d.createdAt,
+              updatedAt: d.updatedAt,
+            },
+          ],
+          states: [
+            {
+              generation: d.generation,
+              cursorAt: 5,
+              caughtUpThrough: 0,
+              lastSuccessAt: null,
+              lastError: "HTTP 500",
+              lastErrorAt: 7,
+              gapPossibleAt: 9,
+            },
+          ],
+        });
+        expect(JSON.stringify(read)).not.toContain("pg-secret-never-read");
+        expect(await sql.unsafe("SELECT version FROM config_version")).toEqual(before);
+      } finally {
+        await sql.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  test("Postgres without the export tables is unavailable", async () => {
+    const admin = new SQL({ url, max: 1 });
+    try {
+      await admin.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    } finally {
+      await admin.close();
+    }
+    expect(await readPostgresExportStatus(url)).toBeNull();
+  });
+}

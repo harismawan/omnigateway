@@ -37,7 +37,10 @@ test("the real worker answers through the supervisor, pauses for a restore, resu
       gates: { bodyLoggingAllowed: false },
     },
     spawn: spawnExportWorker,
-    countDestinations: async () => (await store.exportDestinations.list()).length,
+    readDestinations: async () => {
+      const list = await store.exportDestinations.list();
+      return { count: list.length, revision: list.map((d) => d.updatedAt).join(",") };
+    },
     timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as Timer) },
     now: Date.now,
     logger: captureLogger(),
@@ -54,7 +57,7 @@ test("the real worker answers through the supervisor, pauses for a restore, resu
     await supervisor.pause();
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(supervisor.state()).toBe("paused");
-    await supervisor.resume();
+    await supervisor.resume(true);
     expect(supervisor.state()).toBe("running");
     expect(await supervisor.request({ type: "skip", id: "hook" })).toMatchObject({ ok: true });
     expect(supervisor.restarts()).toBe(0);

@@ -915,11 +915,18 @@ test("doctor reports a target pinned to an account that is gone", async () => {
 test("doctor reports export: none, unavailable, worker down, lag and the gap warning", async () => {
   const root = await installation();
   const service = fakeService({ root });
-  type Checks = { export: { destinations: number; status: string; warnings: string[] } };
+  type Checks = {
+    export: { destinations: number; status: string; available: boolean; warnings: string[] };
+  };
   const doctor = async (): Promise<Checks["export"]> =>
     (JSON.parse((await cli(["doctor", "--json"], { root, service })).out) as Checks).export;
 
-  expect(await doctor()).toEqual({ destinations: 0, status: "none", warnings: [] });
+  expect(await doctor()).toEqual({
+    destinations: 0,
+    status: "none",
+    available: true,
+    warnings: [],
+  });
 
   const store = await openStore(root);
   const created = await store.exportDestinations.create({
@@ -930,15 +937,18 @@ test("doctor reports export: none, unavailable, worker down, lag and the gap war
   });
   store.close();
 
-  // No export.db yet, and no gateway: the worker is down; the state unread.
+  // No export.db yet, and no gateway: the worker is down, and the state is
+  // unavailable — both said, neither hiding the other.
   expect(await doctor()).toEqual({
     destinations: 1,
     status: "warnings",
+    available: false,
     warnings: ["export worker down: the gateway is not running"],
   });
   expect(Bun.file(join(root, "export.db")).size).toBe(0);
   const text = (await cli(["doctor"], { root, service })).out;
   expect(text).toContain("export worker down: the gateway is not running");
+  expect(text).toContain("export status unavailable");
 
   // The worker's state: two hours behind, a gap flagged.
   const { Database } = await import("bun:sqlite");
@@ -967,6 +977,67 @@ test("doctor reports export: none, unavailable, worker down, lag and the gap war
   );
   expect(checks.warnings.some((w) => /^hook: 1[12]\d min behind$/.test(w))).toBe(true);
   expect(checks.warnings).not.toContain("export worker down: the gateway is not running");
+});
+
+/**
+ * An installation configured for Postgres is diagnosed from Postgres, never
+ * from whatever SQLite file happens to sit at the default path.
+ */
+test("doctor on a Postgres installation reads Postgres, and an unreachable one is unavailable", async () => {
+  const root = makeRoot({
+    OMNI_CLUSTER_MODE: "true",
+    OMNI_DATABASE_URL: "postgres://nobody:x@127.0.0.1:1/none",
+    OMNI_REDIS_URL: "redis://127.0.0.1:1",
+  });
+  // A SQLite file with a destination at the default path: unrelated, never read.
+  const sqlite = await openStore(root);
+  await sqlite.exportDestinations.create({
+    id: "decoy",
+    type: "webhook",
+    config: { url: "https://receiver.example/in", headers: {} },
+    startFrom: "now",
+  });
+  sqlite.close();
+  const service = fakeService({ root });
+  type Checks = { export: Record<string, unknown> };
+  const read = async () =>
+    (JSON.parse((await cli(["doctor", "--json"], { root, service })).out) as Checks).export;
+  expect(await read()).toEqual({
+    destinations: null,
+    status: "unavailable",
+    available: false,
+    warnings: [],
+  });
+  expect((await cli(["doctor"], { root, service })).out).toContain("export status unavailable");
+
+  const url = process.env.OMNI_TEST_DATABASE_URL;
+  if (url === undefined || url === "") return;
+  const { SQL } = await import("bun");
+  const admin = new SQL({ url, max: 1 });
+  await admin.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+  await admin.close();
+  const { createPostgresStore, deriveKey } = await import("@omni/store");
+  const pg = await createPostgresStore({ url, encryptionKey: await deriveKey(TEST_KEY) });
+  await pg.exportDestinations.create({
+    id: "pg-hook",
+    type: "webhook",
+    config: { url: "https://receiver.example/in", headers: {} },
+    startFrom: "now",
+  });
+  pg.close();
+  const live = makeRoot({
+    OMNI_CLUSTER_MODE: "true",
+    OMNI_DATABASE_URL: url,
+    OMNI_REDIS_URL: "redis://127.0.0.1:1",
+  });
+  const checks = (
+    JSON.parse(
+      (await cli(["doctor", "--json"], { root: live, service: fakeService({ root: live }) })).out,
+    ) as Checks
+  ).export;
+  // One destination, no state row yet; a cluster's replicas are not this
+  // CLI's to supervise, so no worker-down claim.
+  expect(checks).toEqual({ destinations: 1, status: "ok", available: true, warnings: [] });
 });
 
 /**

@@ -74,9 +74,13 @@ export type DatabaseRouteDeps = {
 
 /** What a swap needs of the export supervisor (`exportHost/supervisor.ts`). */
 export type ExportPause = {
-  /** Resolves once the worker closed every handle, or was terminated. Never throws. */
+  /**
+   * Resolves once no export worker holds a handle; rejects (a `GatewayError`)
+   * when one would not exit — then nothing may be swapped.
+   */
   pause(): Promise<void>;
-  resume(): Promise<void>;
+  /** `swapped`: the file was replaced, which clears a halt left by an earlier failed swap. */
+  resume(swapped: boolean): Promise<void>;
   halt(): Promise<void>;
 };
 
@@ -166,9 +170,9 @@ async function swapGuarded(
   // (or is terminated at 5 s) while client traffic drains, both before the
   // file moves. `close()` shuts the gate synchronously, so the pause starts
   // with the latch already shut.
-  const [quiesce] = await Promise.all([
+  const [quiesce, paused] = await Promise.all([
     deps.latch.close(deps.quiesceDeadlineMs ?? QUIESCE_DEADLINE_MS),
-    deps.exportWorker?.pause(),
+    pauseExport(deps),
   ]);
   if (!quiesce.drained) {
     logger.warn("client requests still in flight at the quiesce deadline", {
@@ -176,11 +180,19 @@ async function swapGuarded(
       count: quiesce.inFlight,
     });
   }
+  if (paused !== null) {
+    // A worker that would not exit may still hold a handle on the file: the
+    // restore is refused before anything moved, so traffic and export resume.
+    if (closedHere) deps.latch.open();
+    await settleExport(deps, logger, "refused");
+    throw paused;
+  }
 
   /** Step 3: resume on success or any failure before the swap; a failed swap leaves it stopped. */
-  let swapFailed = false;
+  let outcome: SwapOutcome = "refused";
   try {
     const result = await operation();
+    outcome = "swapped";
     deps.snapshots?.invalidate();
     // Unconditional, unlike the failure path: a swap that completed leaves a
     // database that is known good, and that is the answer even when the latch
@@ -244,7 +256,7 @@ async function swapGuarded(
     return result;
   } catch (error) {
     if (error instanceof SwapFailedError) {
-      swapFailed = true;
+      outcome = "failed";
       // Deliberately not reopened, and for the same reason deliberately not
       // broadcast. The file this gateway would serve from is half-swapped, and
       // answering client traffic out of it is worse than answering none.
@@ -270,19 +282,34 @@ async function swapGuarded(
     // throwing: nothing may sit between the swap and that comparison. The
     // worker reopens only now, after `reopen()` returned, so the main file's
     // WAL and SHM exist again before its read-only handle does.
-    await settleExport(deps, logger, swapFailed);
+    await settleExport(deps, logger, outcome);
+  }
+}
+
+/** How the swap ended, for the export worker: halted only when it began and failed. */
+type SwapOutcome = "swapped" | "refused" | "failed";
+
+/** Step 1 for export: null once no worker holds a handle, else the refusal to throw. */
+async function pauseExport(deps: DatabaseRouteDeps): Promise<GatewayError | null> {
+  try {
+    await deps.exportWorker?.pause();
+    return null;
+  } catch (error) {
+    return error instanceof GatewayError
+      ? error
+      : new GatewayError("OVERLOADED", "export worker did not stop; nothing was restored");
   }
 }
 
 async function settleExport(
   deps: DatabaseRouteDeps,
   logger: Logger,
-  swapFailed: boolean,
+  outcome: SwapOutcome,
 ): Promise<void> {
   const worker = deps.exportWorker;
   if (worker === undefined) return;
   try {
-    await (swapFailed ? worker.halt() : worker.resume());
+    await (outcome === "failed" ? worker.halt() : worker.resume(outcome === "swapped"));
   } catch (error) {
     logger.warn("export worker not resumed after the swap", {
       reason: describeError(error, "unknown"),

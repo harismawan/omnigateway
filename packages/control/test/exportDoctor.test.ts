@@ -48,6 +48,7 @@ test("no destinations: nothing to say", () => {
   expect(exportDoctor([], null, { now: NOW, gatewayRunning: false })).toEqual({
     destinations: 0,
     status: "none",
+    available: true,
     warnings: [],
   });
 });
@@ -56,6 +57,7 @@ test("a healthy destination with the gateway running is ok", () => {
   expect(exportDoctor([dest()], [row()], { now: NOW, gatewayRunning: true })).toEqual({
     destinations: 1,
     status: "ok",
+    available: true,
     warnings: [],
   });
 });
@@ -75,19 +77,27 @@ test("lag over an hour warns", () => {
   ).toEqual([]);
 });
 
-test("failing for more than 15 minutes warns, with the gateway's own summary", () => {
+test("failing: an error more than 15 min after the destination was last known healthy", () => {
+  const ok = { now: NOW, gatewayRunning: true };
+  // Delivering until 16 min ago; erroring since.
   const failing = row({
-    lastSuccessAt: NOW - 16 * MIN,
+    lastSuccessAt: NOW - 17 * MIN,
+    caughtUpThrough: 0,
     lastError: "HTTP 401",
     lastErrorAt: NOW - MIN,
   });
-  expect(exportDoctor([dest()], [failing], { now: NOW, gatewayRunning: true }).warnings).toEqual([
-    "hook: failing for 16 min (HTTP 401)",
+  expect(exportDoctor([dest()], [failing], ok).warnings).toEqual([
+    "hook: failing (HTTP 401): no successful delivery in the 16 min up to its last error",
   ]);
-  // Never succeeded: failing since it was created.
-  const never = row({ lastSuccessAt: null, lastError: "timeout", lastErrorAt: NOW - MIN });
-  expect(exportDoctor([dest()], [never], { now: NOW, gatewayRunning: true }).warnings).toEqual([
-    "hook: failing for 120 min (timeout)",
+  // Never succeeded and never caught up: healthy only as of its creation (or last edit).
+  const never = row({
+    lastSuccessAt: null,
+    caughtUpThrough: 0,
+    lastError: "timeout",
+    lastErrorAt: NOW - MIN,
+  });
+  expect(exportDoctor([dest()], [never], ok).warnings).toEqual([
+    "hook: failing (timeout): no successful delivery in the 119 min up to its last error",
   ]);
   // Recovered: the success is newer than the error.
   const recovered = row({
@@ -95,16 +105,44 @@ test("failing for more than 15 minutes warns, with the gateway's own summary", (
     lastError: "timeout",
     lastErrorAt: NOW - 30 * MIN,
   });
-  expect(exportDoctor([dest()], [recovered], { now: NOW, gatewayRunning: true }).warnings).toEqual(
-    [],
-  );
-  // Failing for ten minutes is not yet worth a line.
+  expect(exportDoctor([dest()], [recovered], ok).warnings).toEqual([]);
+  // Erroring for ten minutes is not yet worth a line.
   const fresh = row({
-    lastSuccessAt: NOW - 10 * MIN,
+    lastSuccessAt: NOW - 11 * MIN,
+    caughtUpThrough: 0,
     lastError: "timeout",
     lastErrorAt: NOW - MIN,
   });
-  expect(exportDoctor([dest()], [fresh], { now: NOW, gatewayRunning: true }).warnings).toEqual([]);
+  expect(exportDoctor([dest()], [fresh], ok).warnings).toEqual([]);
+});
+
+test("idle for hours, then one fresh failure, is not 'failing for hours'", () => {
+  // Last delivery five hours ago, but idle passes kept committing caught-up
+  // until a moment before the first error.
+  const idleThenOne = row({
+    cursorAt: NOW - 300 * MIN,
+    lastSuccessAt: NOW - 300 * MIN,
+    caughtUpThrough: NOW - 20_000,
+    lastError: "HTTP 503",
+    lastErrorAt: NOW - 5_000,
+  });
+  expect(
+    exportDoctor([dest()], [idleThenOne], { now: NOW, gatewayRunning: true }).warnings,
+  ).toEqual([]);
+  // An edit (enabling it again, fixing its URL) is a fresh start too.
+  const reEnabled = row({
+    lastSuccessAt: NOW - 3000 * MIN,
+    caughtUpThrough: NOW - 3000 * MIN,
+    cursorAt: NOW - MIN,
+    lastError: "HTTP 503",
+    lastErrorAt: NOW - 5_000,
+  });
+  expect(
+    exportDoctor([dest({ updatedAt: NOW - 2 * MIN })], [reEnabled], {
+      now: NOW,
+      gatewayRunning: true,
+    }).warnings,
+  ).toEqual([]);
 });
 
 test("the gap warning shows until acknowledged; a disabled destination warns of nothing else", () => {
@@ -132,7 +170,30 @@ test("unreadable state is unavailable, never a failure; a destination with no ro
   expect(exportDoctor([dest()], null, { now: NOW, gatewayRunning: true })).toEqual({
     destinations: 1,
     status: "unavailable",
+    available: false,
     warnings: [],
   });
   expect(exportDoctor([dest()], [], { now: NOW, gatewayRunning: true }).status).toBe("ok");
+});
+
+test("unavailable state is reported beside the worker-down warning, not hidden by it", () => {
+  expect(exportDoctor([dest()], null, { now: NOW, gatewayRunning: false })).toEqual({
+    destinations: 1,
+    status: "warnings",
+    available: false,
+    warnings: ["export worker down: the gateway is not running"],
+  });
+});
+
+test("unreadable destinations (Postgres unreachable) are unavailable, with nothing claimed", () => {
+  expect(exportDoctor(null, null, { now: NOW, gatewayRunning: null })).toEqual({
+    destinations: null,
+    status: "unavailable",
+    available: false,
+    warnings: [],
+  });
+});
+
+test("where the gateway's state is unknowable (a cluster), no worker-down claim is made", () => {
+  expect(exportDoctor([dest()], [row()], { now: NOW, gatewayRunning: null }).warnings).toEqual([]);
 });

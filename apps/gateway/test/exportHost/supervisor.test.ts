@@ -5,11 +5,13 @@ import type { MainMessage, WorkerInit, WorkerMessage } from "../../src/export/pr
 import { createExportMetrics } from "../../src/exportHost/metrics.ts";
 import {
   createExportSupervisor,
+  DOWN_RECHECK_MS,
   IDLE_RECHECK_MS,
   PAUSE_ACK_MS,
   REQUEST_TIMEOUT_MS,
   RESTART_GIVE_UP,
   STOP_TERMINATE_MS,
+  TERMINATE_WAIT_MS,
 } from "../../src/exportHost/supervisor.ts";
 import { createMetricRegistry } from "../../src/telemetry/registry.ts";
 import { type FakeWorker, fakeTimers, fakeWorker, flush, status } from "./fakes.ts";
@@ -35,7 +37,13 @@ const INIT: WorkerInit = {
 function setup(opts: { destinations?: number; worker?: () => FakeWorker } = {}) {
   const clock = fakeTimers();
   const workers: FakeWorker[] = [];
-  const box = { destinations: opts.destinations ?? 1 };
+  /** `revision` stands for the store's destination rows: it changes on any edit. */
+  const box = {
+    destinations: opts.destinations ?? 1,
+    revision: "r0",
+    hold: null as Promise<void> | null,
+    reads: 0,
+  };
   const logger = captureLogger();
   const registry = createMetricRegistry({ maxSeries: 100, now: () => clock.now });
   let changes = 0;
@@ -47,7 +55,11 @@ function setup(opts: { destinations?: number; worker?: () => FakeWorker } = {}) 
       workers.push(w);
       return w;
     },
-    countDestinations: async () => box.destinations,
+    readDestinations: async () => {
+      box.reads += 1;
+      if (box.hold !== null) await box.hold;
+      return { count: box.destinations, revision: `${box.destinations}:${box.revision}` };
+    },
     timers: clock,
     now: () => clock.now,
     logger,
@@ -264,7 +276,7 @@ test("restore: pause waits for paused, suppresses restarts, and resume continues
     .catch((e) => e)) as GatewayError;
   expect(refused.message).toBe("export worker not running");
 
-  await s.supervisor.resume();
+  await s.supervisor.resume(true);
   expect(types(s.last())).toEqual(["pause", "resume"]);
   expect(s.workers).toHaveLength(1);
   expect(s.supervisor.state()).toBe("running");
@@ -285,7 +297,7 @@ test("restore: a worker that never acks pause is terminated at 5 s, and resume s
   expect(s.workers).toHaveLength(1);
   expect(s.supervisor.restarts()).toBe(0);
 
-  await s.supervisor.resume();
+  await s.supervisor.resume(true);
   expect(s.workers).toHaveLength(2);
   expect(s.supervisor.state()).toBe("running");
 });
@@ -297,7 +309,7 @@ test("restore: a worker dying while paused is not restarted until resume", async
   s.last().die();
   await s.clock.advance(120_000);
   expect(s.workers).toHaveLength(1);
-  await s.supervisor.resume();
+  await s.supervisor.resume(true);
   expect(s.workers).toHaveLength(2);
 });
 
@@ -306,7 +318,7 @@ test("restore: resume starts a worker when the restored database has destination
   await s.supervisor.start();
   await s.supervisor.pause();
   s.box.destinations = 2;
-  await s.supervisor.resume();
+  await s.supervisor.resume(true);
   expect(s.workers).toHaveLength(1);
 });
 
@@ -317,7 +329,7 @@ test("restore: a destination change during the pause waits for resume", async ()
   s.box.destinations = 1;
   await s.supervisor.destinationsChanged();
   expect(s.workers).toHaveLength(0);
-  await s.supervisor.resume();
+  await s.supervisor.resume(true);
   expect(s.workers).toHaveLength(1);
 });
 
@@ -333,7 +345,7 @@ test("a failed swap halts export: no restart, no destination-change start, until
   expect(s.workers).toHaveLength(1);
   // The documented recovery — a restore that succeeds — resumes it.
   await s.supervisor.pause();
-  await s.supervisor.resume();
+  await s.supervisor.resume(true);
   expect(s.workers).toHaveLength(2);
 });
 
@@ -420,5 +432,144 @@ test("a spawn that throws is a death like any other: logged, backed off, retried
   expect(s.logger.lines.some((l) => l.includes("worker.ts"))).toBe(false);
   fail = false;
   await s.clock.advance(1_000);
+  expect(s.supervisor.state()).toBe("running");
+});
+
+// --- review round 1 ---------------------------------------------------------
+
+test("pause waits for a terminated worker to actually exit before it lets a swap go", async () => {
+  const s = setup({ worker: () => fakeWorker({ ackPause: false, terminateExits: false }) });
+  await s.supervisor.start();
+  let paused = false;
+  const pausing = s.supervisor.pause().then(() => {
+    paused = true;
+  });
+  await flush();
+  await s.clock.advance(PAUSE_ACK_MS);
+  // Terminated, but the thread is still running (a native call in flight).
+  expect(s.last().terminated).toBe(true);
+  expect(paused).toBe(false);
+  await s.clock.advance(1_000);
+  expect(paused).toBe(false);
+  s.last().die();
+  await pausing;
+  expect(paused).toBe(true);
+});
+
+test("a worker that never exits after terminate refuses the swap with a fixed error", async () => {
+  const s = setup({ worker: () => fakeWorker({ ackPause: false, terminateExits: false }) });
+  await s.supervisor.start();
+  const pausing = s.supervisor.pause().catch((e) => e);
+  await flush();
+  await s.clock.advance(PAUSE_ACK_MS + TERMINATE_WAIT_MS);
+  const error = (await pausing) as GatewayError;
+  expect(error).toBeInstanceOf(GatewayError);
+  expect(error.code).toBe("OVERLOADED");
+  expect(error.message).toBe("export worker did not stop; nothing was restored");
+});
+
+test("restore right after the last destination's removal waits for the stopping worker", async () => {
+  const s = setup({ worker: () => fakeWorker({ exitOnStop: false, terminateExits: false }) });
+  await s.supervisor.start();
+  const w = s.last();
+  s.box.destinations = 0;
+  await s.supervisor.destinationsChanged();
+  expect(types(w)).toEqual(["stop"]);
+  expect(w.alive).toBe(true);
+
+  let paused = false;
+  const pausing = s.supervisor.pause().then(() => {
+    paused = true;
+  });
+  await flush();
+  // A worker still stopping holds its handles: terminated now, and waited for.
+  expect(w.terminated).toBe(true);
+  expect(paused).toBe(false);
+  w.die();
+  await pausing;
+  expect(paused).toBe(true);
+});
+
+test("an error notification is not an exit: only the worker's exit counts as gone", async () => {
+  const s = setup({ worker: () => fakeWorker({ terminateExits: false }) });
+  await s.supervisor.start();
+  // A worker whose `close` has not come is still the current one.
+  s.last().terminate();
+  await flush();
+  expect(s.supervisor.state()).toBe("running");
+  s.last().die();
+  await flush();
+  expect(s.supervisor.state()).toBe("restarting");
+});
+
+test("a failed swap stays halted through a later restore that fails before swapping", async () => {
+  const s = setup();
+  await s.supervisor.start();
+  await s.supervisor.pause();
+  await s.supervisor.halt();
+  // The operator tries another restore; it is refused before the swap began.
+  await s.supervisor.pause();
+  await s.supervisor.resume(false);
+  expect(s.supervisor.state()).toBe("halted");
+  expect(s.workers).toHaveLength(1);
+  await s.clock.advance(120_000);
+  expect(s.workers).toHaveLength(1);
+  // A restore that does swap clears it.
+  await s.supervisor.pause();
+  await s.supervisor.resume(true);
+  expect(s.supervisor.state()).toBe("running");
+  expect(s.workers).toHaveLength(2);
+});
+
+test("stop invalidates lifecycle work in flight: a held read cannot spawn or re-arm polling", async () => {
+  const s = setup();
+  const gate = Promise.withResolvers<void>();
+  s.box.hold = gate.promise;
+  const starting = s.supervisor.start();
+  await flush();
+  s.supervisor.stop();
+  gate.resolve();
+  await starting;
+  expect(s.workers).toHaveLength(0);
+  expect(s.supervisor.state()).toBe("stopped");
+  expect(s.clock.pending()).toBe(0);
+
+  // The same through a destination change, and through an empty answer.
+  const t = setup({ destinations: 0 });
+  await t.supervisor.start();
+  const held = Promise.withResolvers<void>();
+  t.box.hold = held.promise;
+  t.box.destinations = 1;
+  const changing = t.supervisor.destinationsChanged();
+  await flush();
+  t.supervisor.stop();
+  held.resolve();
+  await changing;
+  expect(t.workers).toHaveLength(0);
+  expect(t.supervisor.state()).toBe("stopped");
+  expect(t.clock.pending()).toBe(0);
+});
+
+test("while down it polls the destinations and revives only on a real change", async () => {
+  const s = setup();
+  await s.supervisor.start();
+  for (let i = 0; i < RESTART_GIVE_UP; i++) {
+    s.last().die();
+    await flush();
+    if (i < RESTART_GIVE_UP - 1) await s.clock.advance(60_000);
+  }
+  expect(s.supervisor.state()).toBe("down");
+  const spawned = s.workers.length;
+  const reads = s.box.reads;
+
+  // Nothing changed: polled, not revived — the storm bound holds.
+  await s.clock.advance(DOWN_RECHECK_MS * 3);
+  expect(s.box.reads).toBe(reads + 3);
+  expect(s.workers).toHaveLength(spawned);
+
+  // Another process edited a destination (CLI, another node).
+  s.box.revision = "r1";
+  await s.clock.advance(DOWN_RECHECK_MS);
+  expect(s.workers).toHaveLength(spawned + 1);
   expect(s.supervisor.state()).toBe("running");
 });

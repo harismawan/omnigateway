@@ -9,6 +9,7 @@ import {
   type DatabaseStore,
   nodeDatabaseFs,
 } from "@omni/control";
+import { GatewayError } from "@omni/ir";
 import { createStore, deriveKey } from "@omni/store";
 import { virtualModel } from "@omni/testkit";
 import { createQuiesceLatch } from "../../src/quiesce.ts";
@@ -30,6 +31,8 @@ type HarnessOptions = {
   rebuildRollupFails?: boolean;
   /** Holds the export worker's pause until this settles. */
   pauseHeld?: Promise<void>;
+  /** The export worker could not be quiesced: `pause` rejects. */
+  pauseRefused?: true;
 };
 
 /**
@@ -118,9 +121,12 @@ async function harness(options: HarnessOptions = {}) {
     pause: async () => {
       exportSteps.push(`pause:${latch.isClosed() ? "quiesced" : "serving"}`);
       if (options.pauseHeld !== undefined) await options.pauseHeld;
+      if (options.pauseRefused === true) {
+        throw new GatewayError("OVERLOADED", "export worker did not stop; nothing was restored");
+      }
     },
-    resume: async () => {
-      exportSteps.push("resume");
+    resume: async (swapped: boolean) => {
+      exportSteps.push(swapped ? "resume:swapped" : "resume");
     },
     halt: async () => {
       exportSteps.push("halt");
@@ -447,7 +453,7 @@ test("a restore pauses the export worker before the swap and resumes it after", 
     gate.resolve();
   }
   expect((await restoring).status).toBe(200);
-  expect(exportSteps).toEqual(["pause:quiesced", "resume"]);
+  expect(exportSteps).toEqual(["pause:quiesced", "resume:swapped"]);
 
   cleanup();
 });
@@ -457,6 +463,25 @@ test("a restore refused before the swap began resumes export", async () => {
   const refused = await upload(new TextEncoder().encode("not a database at all"));
   expect(refused.status).toBe(400);
   expect(exportSteps).toEqual(["pause:quiesced", "resume"]);
+  cleanup();
+});
+
+test("an export worker that cannot be quiesced refuses the restore: nothing swapped, latch reopened", async () => {
+  const { call, snapshot, latch, store, exportSteps, cleanup } = await harness({
+    pauseRefused: true,
+  });
+  const created = await snapshot();
+  await store.config.putSettings({ logRetentionDays: 7 });
+  const refused = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+  expect(refused.status).toBe(503);
+  expect(((await refused.json()) as { error: { message: string } }).error.message).toBe(
+    "export worker did not stop; nothing was restored",
+  );
+  // Nothing was swapped: the setting written after the snapshot is still there.
+  expect((await store.config.getSettings()).logRetentionDays).toBe(7);
+  expect(latch.isClosed()).toBe(false);
+  expect(exportSteps).toEqual(["pause:quiesced", "resume"]);
+  // And the guard was released: a later restore runs.
   cleanup();
 });
 
@@ -498,7 +523,7 @@ test("a second restore while the first is pausing the worker is refused, and tou
     pause.resolve();
   }
   expect((await first).status).toBe(200);
-  expect(exportSteps).toEqual(["pause:quiesced", "resume"]);
+  expect(exportSteps).toEqual(["pause:quiesced", "resume:swapped"]);
   expect(latch.isClosed()).toBe(false);
   cleanup();
 });
