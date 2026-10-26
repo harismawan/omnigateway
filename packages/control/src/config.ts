@@ -35,6 +35,13 @@ export type Config = {
    * export worker; body export itself ships in a later release.
    */
   exportBodiesAllowed: boolean;
+  /**
+   * `OMNI_BODY_CAPTURE_BUDGET_BYTES`: the most bytes body capture may hold
+   * across every in-flight request at once (512 MiB by default). A request
+   * whose capture would pass it has its capture abandoned — recorded as an
+   * omission — rather than slowing anything the client is sent.
+   */
+  bodyCaptureBudgetBytes: number;
   /** Threshold for stdout logging. Read once, at boot. */
   logLevel: LogLevel;
   /**
@@ -78,6 +85,7 @@ export type Config = {
 };
 
 const MIN_KEY_LENGTH = 16;
+const DEFAULT_BODY_CAPTURE_BUDGET_BYTES = 512 * 1024 * 1024;
 /** Spellings of "on" a flag accepts. Anything else, including empty, is off. */
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 const DECIMAL_INTEGER = /^\d+$/;
@@ -150,6 +158,18 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const exportBodiesAllowed = TRUTHY.has(
     (env.OMNI_EXPORT_BODIES_ALLOWED ?? "").trim().toLowerCase(),
   );
+  const rawCaptureBudget =
+    env.OMNI_BODY_CAPTURE_BUDGET_BYTES ?? String(DEFAULT_BODY_CAPTURE_BUDGET_BYTES);
+  const bodyCaptureBudgetBytes = Number(rawCaptureBudget);
+  if (
+    !DECIMAL_INTEGER.test(rawCaptureBudget) ||
+    !Number.isSafeInteger(bodyCaptureBudgetBytes) ||
+    bodyCaptureBudgetBytes < 1
+  ) {
+    throw new Error(
+      `OMNI_BODY_CAPTURE_BUDGET_BYTES must be a positive integer, got "${rawCaptureBudget}"`,
+    );
+  }
 
   // Deliberately not fatal, unlike OMNI_PORT: a typo in a log level is not a
   // reason to refuse to serve traffic. The boot line says which value was
@@ -181,6 +201,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     staticDir: staticDir === undefined || staticDir.length === 0 ? null : staticDir,
     bodyLoggingAllowed,
     exportBodiesAllowed,
+    bodyCaptureBudgetBytes,
     logFile: logFile === undefined || logFile.length === 0 ? null : logFile,
     clusterMode,
     databaseUrl: clusterMode ? (databaseUrl ?? null) : null,

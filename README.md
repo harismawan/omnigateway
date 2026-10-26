@@ -430,6 +430,7 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](docs/operations.md#recording-bodies) |
+| `OMNI_BODY_CAPTURE_BUDGET_BYTES` | No | `536870912` (512 MiB) | Most bytes body capture may hold across all in-flight requests. A request that would pass it keeps its response untouched and has its body recorded as omitted (`capture budget exhausted`), counted in `omni_bodies_dropped_total{reason="budget"}` |
 | `OMNI_EXPORT_BODIES_ALLOWED` | No | unset | Reserved for exporting captured bodies to [log export](#exporting-request-logs) destinations, which is not available yet; export sends metadata only |
 | `OMNI_METRICS_TOKEN` | No | unset | Registers authenticated `GET /metrics`; unset means no route |
 | `OMNI_METRICS_MAX_SERIES` | No | `5000` | Series cap before new `api_key_id` values fold to `other` |
