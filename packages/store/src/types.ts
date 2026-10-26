@@ -849,6 +849,27 @@ export type RequestLog = {
 export type BodyState = "pending" | "ready" | "omitted" | "failed";
 
 /**
+ * A log as `usage.begin` and `usage.append` take it. The store-owned fields
+ * are the store's: `completedAt` is not an input at all, and `bodyState` may
+ * only ask for `pending` — `ready`, `omitted` and `failed` are written by
+ * `BodyRepo.publish` / `fail` and `sweepPending`, never by a log write, so they
+ * are refused here at compile time rather than discarded at run time. (The
+ * stores still write anything but `pending` as NULL, for a caller past the
+ * type.) A `RequestLog` read back from the store is not one: re-writing it
+ * means saying what its body state is to be.
+ */
+export type RequestLogWrite = Omit<RequestLog, "bodyState" | "completedAt"> & {
+  bodyState?: "pending" | null;
+};
+
+/**
+ * A log built outside the store, before the store has stamped it: every
+ * reader's `RequestLog` and a valid `RequestLogWrite` at once, which is what
+ * the gateway hands from dispatch to `begin` / `append`. `UNSTAMPED` builds one.
+ */
+export type NewRequestLog = RequestLog & { bodyState: "pending" | null };
+
+/**
  * The store-owned fields of a log built outside the store — spread beside
  * `EMPTY_TRACE`. A log starts with no body state; a capturing caller overrides
  * it with `pending`.
@@ -1631,7 +1652,7 @@ export interface UsageRepo {
    * Records a request that has started. Writes no rollup: a request that has
    * not finished has no tokens and no cost to accumulate.
    */
-  begin(log: RequestLog): Promise<void>;
+  begin(log: RequestLogWrite): Promise<void>;
   /** Updates routing fields on a pending row without completing or rolling it up. */
   route(
     id: string,
@@ -1643,7 +1664,7 @@ export interface UsageRepo {
    * failed before dispatch, but must run at most once per id: a second call
    * would count the same request into the rollup twice.
    */
-  append(log: RequestLog): Promise<void>;
+  append(log: RequestLogWrite): Promise<void>;
   /**
    * Completes every pending row whose owner is gone, as `interrupted`.
    *

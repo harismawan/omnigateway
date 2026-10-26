@@ -750,7 +750,7 @@ test("a second usage.append debits nothing, because the debit is not in the stor
   const rows = await store.usage.recent(10);
   const row = rows[0];
   if (row === undefined) throw new Error("expected the request to have been logged");
-  await store.usage.append(row);
+  await store.usage.append({ ...row, bodyState: null });
 
   expect(debits).toHaveLength(1);
   store.close();

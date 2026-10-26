@@ -7,7 +7,7 @@ import { createStore } from "../src/sqlite/store.ts";
 import {
   type ApiKeyInput,
   EMPTY_TRACE,
-  type RequestLog,
+  type NewRequestLog,
   type Store,
   UNSTAMPED,
 } from "../src/types.ts";
@@ -15,7 +15,7 @@ import {
 const SECRET = "test-secret-value-for-unit-tests";
 
 /** A complete row, so a schema change breaks here once rather than in each test. */
-function logRow(id: string, at: number, apiKeyId: string | null): RequestLog {
+function logRow(id: string, at: number, apiKeyId: string | null): NewRequestLog {
   return {
     id,
     state: "done",

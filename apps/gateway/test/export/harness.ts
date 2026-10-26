@@ -7,6 +7,7 @@ import {
   DEFAULT_SETTINGS,
   type ExportDestination,
   type ExportPageQuery,
+  type NewRequestLog,
   type RequestLog,
   type Settings,
 } from "@omni/store/types";
@@ -94,7 +95,11 @@ export function destination(over: Partial<ExportDestination> = {}): ExportDestin
 }
 
 /** A done row completed at `completedAt`. */
-export function row(id: string, completedAt: number, over: Partial<RequestLog> = {}): RequestLog {
+export function row(
+  id: string,
+  completedAt: number,
+  over: Partial<NewRequestLog> = {},
+): RequestLog {
   return requestLog({ id, at: completedAt - 100, completedAt, ...over });
 }
 

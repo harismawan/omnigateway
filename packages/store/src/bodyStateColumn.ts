@@ -1,4 +1,4 @@
-import type { BodyState, RequestLog } from "./types.ts";
+import type { BodyState, RequestLogWrite } from "./types.ts";
 
 /**
  * `request_logs.body_state` as both stores read and write it, for the reason
@@ -13,7 +13,10 @@ export function readBodyState(value: string | null): BodyState | null {
     : null;
 }
 
-/** What a log write may ask for: `pending`, or nothing — every later state is the store's. */
-export function requestedBodyState(log: RequestLog): "pending" | null {
+/**
+ * What a log write may ask for: `pending`, or nothing — every later state is the
+ * store's. `RequestLogWrite` already says so; this holds for a caller past the type.
+ */
+export function requestedBodyState(log: RequestLogWrite): "pending" | null {
   return log.bodyState === "pending" ? "pending" : null;
 }

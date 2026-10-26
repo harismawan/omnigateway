@@ -5,7 +5,7 @@ import { HOUR_MS } from "../src/sqlite/rollup.ts";
 import { createUsageRepo } from "../src/sqlite/usage.ts";
 import {
   EMPTY_TRACE,
-  type RequestLog,
+  type NewRequestLog,
   UNSTAMPED,
   type UsageRepo,
   type UsageSums,
@@ -14,7 +14,7 @@ import {
 /** An hour boundary well clear of the epoch, so no arithmetic here is negative. */
 const H0 = 480_000 * HOUR_MS;
 
-function log(patch: Partial<RequestLog> & { id: string; at: number }): RequestLog {
+function log(patch: Partial<NewRequestLog> & { id: string; at: number }): NewRequestLog {
   return {
     state: "done",
     apiKeyId: "k1",

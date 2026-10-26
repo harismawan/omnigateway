@@ -129,8 +129,8 @@ export async function exec(backend: Backend, store: Store, ...statements: string
 
 /** A complete row, so a schema change breaks here once rather than in each test. */
 export function logRow(
-  overrides: Partial<import("../../src/types.ts").RequestLog> & { id: string },
-): import("../../src/types.ts").RequestLog {
+  overrides: Partial<import("../../src/types.ts").NewRequestLog> & { id: string },
+): import("../../src/types.ts").NewRequestLog {
   return {
     state: "done",
     at: 1_700_000_000_000,

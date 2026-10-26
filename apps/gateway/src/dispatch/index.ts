@@ -32,7 +32,7 @@ import type {
   CredentialHealth,
   CredentialSecrets,
   CredentialView,
-  RequestLog,
+  NewRequestLog,
   Store,
   VirtualModel,
 } from "@omni/store";
@@ -104,7 +104,7 @@ export const PROBE_TTL_MS = 180_000;
 export type DispatchOutcome = {
   events: AsyncGenerator<StreamEvent, void, undefined>;
   /** Valid once the stream is drained. Egress writes it to the usage repo. */
-  log: () => RequestLog;
+  log: () => NewRequestLog;
 };
 
 /**
@@ -164,7 +164,7 @@ export async function dispatch(
 
   // Dispatch only ever hands back a finished log; the pending row the console
   // watches is written by the route, before this runs.
-  const log: RequestLog = newCompletedRequestLog(requestId, startedAt, {
+  const log: NewRequestLog = newCompletedRequestLog(requestId, startedAt, {
     requestedModel: request.model,
     // Dispatch assigns the terminal HTTP status before exposing this log.
     status: 0,

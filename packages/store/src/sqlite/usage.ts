@@ -18,6 +18,7 @@ import {
   BODY_PENDING_MS,
   NODE_GRACE_MS,
   type RequestLog,
+  type RequestLogWrite,
   type RequestState,
   SESSIONS_LIMIT,
   type UsageBucket,
@@ -204,7 +205,7 @@ const PLACEHOLDERS = `(${Array.from({ length: 28 + TRACE_COLUMN_NAMES.length }, 
  * from the application clock — SQLite is one node, so that clock is the only
  * one there is. `body_state` is the caller's only as far as `pending`.
  */
-function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryBindings[] {
+function values(log: RequestLogWrite, state: RequestState, nodeId: string): SQLQueryBindings[] {
   return [
     log.id,
     state,
@@ -357,7 +358,7 @@ export function createUsageRepo(
    * they summarize what the log actually says even where the upsert kept a
    * column the completing log did not carry.
    */
-  const complete = db.transaction((log: RequestLog) => {
+  const complete = db.transaction((log: RequestLogWrite) => {
     // Zero rows changed means the claim lost: the row was already done. No
     // rollup then — it was rolled up by whoever completed it.
     if (db.run(COMPLETE, values(log, "done", nodeId)).changes === 0) return;
@@ -403,7 +404,7 @@ export function createUsageRepo(
   });
 
   return {
-    async begin(log: RequestLog) {
+    async begin(log: RequestLogWrite) {
       db.run(
         `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`,
         values(log, "pending", nodeId),
@@ -419,7 +420,7 @@ export function createUsageRepo(
       );
     },
 
-    async append(log: RequestLog) {
+    async append(log: RequestLogWrite) {
       complete(log);
     },
 
@@ -446,7 +447,14 @@ export function createUsageRepo(
         // Zero duration, not elapsed-since-start: nobody knows when the process
         // died, and a row pending across a weekend of downtime would otherwise
         // put two days into the mean latency of the day it started on.
-        complete({ ...log, status: 499, errorCode: "interrupted", durationMs: 0 });
+        // `bodyState: null` asks for nothing: the row keeps whatever it holds.
+        complete({
+          ...log,
+          status: 499,
+          errorCode: "interrupted",
+          durationMs: 0,
+          bodyState: null,
+        });
       }
       return stale.length;
     },

@@ -126,7 +126,9 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
         counts.skippedPending += 1;
         continue;
       }
-      await target.usage.append(log);
+      // No body state: the corpus is not carried (above), so the target has no
+      // body for this row to be pending, ready or anything else about.
+      await target.usage.append({ ...log, bodyState: null });
       counts.requestLogs += 1;
     }
     const last = page[page.length - 1];

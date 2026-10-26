@@ -1,20 +1,26 @@
 import type { GatewayError, LogFields } from "@omni/ir";
 import { describeError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
-import { EMPTY_TRACE, type RequestLog, type Store, UNSTAMPED } from "@omni/store";
+import {
+  EMPTY_TRACE,
+  type NewRequestLog,
+  type RequestLog,
+  type Store,
+  UNSTAMPED,
+} from "@omni/store";
 import type { RequestCompleted } from "@omnigateway/plugin-api";
 import type { Invalidator } from "./stream/broadcaster.ts";
 import type { Telemetry } from "./telemetry/index.ts";
 import type { TraceRecord } from "./telemetry/spans.ts";
 
-type CompletedOverrides = Pick<RequestLog, "status"> &
-  Partial<Omit<RequestLog, "id" | "state" | "at" | "status">>;
+type CompletedOverrides = Pick<NewRequestLog, "status"> &
+  Partial<Omit<NewRequestLog, "id" | "state" | "at" | "status">>;
 
 type PendingRequestLogInput = Pick<
   RequestLog,
   "id" | "at" | "requestedModel" | "resolvedProvider" | "resolvedModel" | "credentialId"
 >;
 
-function requestLogDefaults(id: string, at: number): RequestLog {
+function requestLogDefaults(id: string, at: number): NewRequestLog {
   return {
     id,
     state: "done",
@@ -50,11 +56,11 @@ export function newCompletedRequestLog(
   id: string,
   at: number,
   overrides: CompletedOverrides,
-): RequestLog {
+): NewRequestLog {
   return { ...requestLogDefaults(id, at), ...overrides, id, state: "done", at };
 }
 
-export function newPendingRequestLog(input: PendingRequestLogInput): RequestLog {
+export function newPendingRequestLog(input: PendingRequestLogInput): NewRequestLog {
   const { id, at, requestedModel, resolvedProvider, resolvedModel, credentialId } = input;
   return {
     ...requestLogDefaults(id, at),
@@ -161,7 +167,7 @@ function report(logger: Logger, what: string, requestId: string, error: unknown)
  */
 export async function beginLog(
   store: Store,
-  log: Omit<RequestLog, "state">,
+  log: Omit<NewRequestLog, "state">,
   keyId: string | null,
   logger: Logger = noopLogger,
   broadcast?: Invalidator,
@@ -296,7 +302,7 @@ export type PluginEmit = (event: RequestCompleted) => void;
 
 export async function finishLog(
   store: Store,
-  log: RequestLog,
+  log: NewRequestLog,
   keyId: string | null,
   logger: Logger = noopLogger,
   bodies?: BodyWriter,

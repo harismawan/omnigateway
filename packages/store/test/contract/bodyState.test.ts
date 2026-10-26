@@ -13,7 +13,7 @@ import {
   type ExportReader,
   openSqliteExportReader,
 } from "../../src/exportReader.ts";
-import type { BodyPublication, Store } from "../../src/types.ts";
+import type { BodyPublication, BodyState, NewRequestLog, Store } from "../../src/types.ts";
 import { type Backend, exec, forEachStore, logRow } from "./harness.ts";
 
 /**
@@ -91,11 +91,15 @@ forEachStore((backend) => {
     expect((await s.usage.recent(10)).map((r) => r.bodyState).sort()).toEqual([null, "pending"]);
   });
 
+  // The type refuses these (`bodyStateTypes.test.ts`); this is the run-time
+  // half, for a caller that got past it — a cast, or plain JavaScript.
   test("a write can only ask for pending: a terminal state on input is ignored", async () => {
     const s = await backend.fresh();
+    const smuggled = (id: string, state: BodyState, over: Partial<NewRequestLog> = {}) =>
+      ({ ...logRow({ id, at: AT, ...over }), bodyState: state }) as unknown as NewRequestLog;
     for (const state of ["ready", "omitted", "failed"] as const) {
-      await s.usage.begin(logRow({ id: `b-${state}`, at: AT, state: "pending", bodyState: state }));
-      await s.usage.append(logRow({ id: `a-${state}`, at: AT, bodyState: state }));
+      await s.usage.begin(smuggled(`b-${state}`, state, { state: "pending" }));
+      await s.usage.append(smuggled(`a-${state}`, state));
       expect(await stateOf(s, `b-${state}`)).toBeNull();
       expect(await stateOf(s, `a-${state}`)).toBeNull();
     }

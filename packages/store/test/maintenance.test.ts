@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveKey } from "../src/encryption.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import { EMPTY_TRACE, type RequestLog, type Store, UNSTAMPED } from "../src/types.ts";
+import { EMPTY_TRACE, type NewRequestLog, type Store, UNSTAMPED } from "../src/types.ts";
 
 /**
  * A store on disk, because `VACUUM INTO` writes a file and an in-memory
@@ -39,7 +39,7 @@ async function exists(path: string): Promise<boolean> {
 const AT = Date.UTC(2026, 7, 18, 9, 0, 0);
 
 /** A log row padded out, so a few hundred of them span many pages. */
-function log(id: string): RequestLog {
+function log(id: string): NewRequestLog {
   return {
     id,
     state: "pending",

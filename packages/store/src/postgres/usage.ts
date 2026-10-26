@@ -19,6 +19,7 @@ import {
   BODY_PENDING_MS,
   NODE_GRACE_MS,
   type RequestLog,
+  type RequestLogWrite,
   type RequestState,
   SESSIONS_LIMIT,
   type UsageBucket,
@@ -188,7 +189,7 @@ const PLACEHOLDER_LIST = Array.from(
 ).join(",");
 const PLACEHOLDERS = `(${PLACEHOLDER_LIST})`;
 
-function values(log: RequestLog, state: RequestState, nodeId: string): unknown[] {
+function values(log: RequestLogWrite, state: RequestState, nodeId: string): unknown[] {
   return [
     log.id,
     state,
@@ -325,7 +326,7 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
    * they summarize what the log actually says even where the upsert kept a
    * column the completing log did not carry.
    */
-  const complete = async (conn: Conn, log: RequestLog): Promise<void> => {
+  const complete = async (conn: Conn, log: RequestLogWrite): Promise<void> => {
     // A claim: the upsert updates only a row still pending, so a row another
     // replica already retired is not rolled up a second time. See the sqlite
     // repo's `COMPLETE` for why the owner's figures lose that race.
@@ -342,7 +343,7 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
   };
 
   return {
-    async begin(log: RequestLog) {
+    async begin(log: RequestLogWrite) {
       await sql.unsafe(
         `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`,
         values(log, "pending", nodeId),
@@ -358,7 +359,7 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
       );
     },
 
-    async append(log: RequestLog) {
+    async append(log: RequestLogWrite) {
       await sql.begin((tx) => complete(tx, log));
     },
 
@@ -390,7 +391,14 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
         // died, and a row pending across a weekend of downtime would otherwise
         // put two days into the mean latency of the day it started on.
         await sql.begin((tx) =>
-          complete(tx, { ...log, status: 499, errorCode: "interrupted", durationMs: 0 }),
+          // `bodyState: null` asks for nothing: the row keeps whatever it holds.
+          complete(tx, {
+            ...log,
+            status: 499,
+            errorCode: "interrupted",
+            durationMs: 0,
+            bodyState: null,
+          }),
         );
       }
       return stale.length;

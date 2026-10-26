@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test";
-import type { RequestLog, Store } from "@omni/store";
+import type { NewRequestLog, RequestLogWrite, Store } from "@omni/store";
 import type { RequestCompleted } from "@omnigateway/plugin-api";
 import { finishLog, newCompletedRequestLog } from "../../src/logging.ts";
 
 /** A store that records appends, and can be told to fail one. */
-function stubStore(opts: { failAppend?: boolean } = {}): { store: Store; appends: RequestLog[] } {
-  const appends: RequestLog[] = [];
+function stubStore(opts: { failAppend?: boolean } = {}): {
+  store: Store;
+  appends: RequestLogWrite[];
+} {
+  const appends: RequestLogWrite[] = [];
   const store = {
     usage: {
-      async append(log: RequestLog) {
+      async append(log: RequestLogWrite) {
         if (opts.failAppend === true) throw new Error("disk full");
         appends.push(log);
       },
@@ -17,7 +20,7 @@ function stubStore(opts: { failAppend?: boolean } = {}): { store: Store; appends
   return { store, appends };
 }
 
-function log(over: Partial<RequestLog> = {}): RequestLog {
+function log(over: Partial<NewRequestLog> = {}): NewRequestLog {
   return {
     ...newCompletedRequestLog("req_1", 1_000, { requestedModel: "fast", status: 200 }),
     resolvedProvider: "anthropic",
