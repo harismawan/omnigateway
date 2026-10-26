@@ -9,7 +9,7 @@ import {
 } from "../../src/bodies/artifact.ts";
 import { maskSecrets } from "../../src/bodies/mask.ts";
 import { deriveKey } from "../../src/encryption.ts";
-import type { BodyArtifact, BodyOmission } from "../../src/types.ts";
+import type { BodyArtifact, BodyAttempt, BodyOmission } from "../../src/types.ts";
 
 const AT = Date.UTC(2026, 7, 17, 12, 0, 0);
 const SECRET = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
@@ -211,41 +211,70 @@ test("a too-deep error is omitted along with the bodies", () => {
   expect(JSON.parse(prepared.json)).toEqual(prepared.artifact);
 }, 10_000);
 
-/** An artifact whose prepared JSON is exactly `bytes` long, padded in `client.request`. */
+/** One streamed attempt, so the boundary is measured over a whole frame, not a bare client pair. */
+const BOUNDARY_ATTEMPTS: BodyAttempt[] = [
+  {
+    attempt: 1,
+    provider: "anthropic",
+    request: null,
+    response: null,
+    streamChunks: ["event: ping"],
+    truncated: false,
+  },
+];
+
+/**
+ * The complete artifact — attempt included — whose masked, serialized JSON is
+ * exactly `bytes` long, padded in `client.request`. Measured through
+ * `prepareArtifact` itself, with prose no masking rule touches, so the padding
+ * survives masking byte for byte.
+ */
 function sized(bytes: number): BodyArtifact {
-  const empty = Buffer.byteLength(prepareArtifact(artifact({ client: pad("") })).json);
-  return artifact({ client: pad(prose(bytes - empty)) });
+  const frame = (request: string) =>
+    artifact({ client: pad(request), attempts: BOUNDARY_ATTEMPTS });
+  const empty = Buffer.byteLength(prepareArtifact(frame("")).json);
+  return frame(prose(bytes - empty));
 }
 
 function pad(request: string): BodyArtifact["client"] {
   return { request, response: null, truncated: false };
 }
 
-test("an artifact exactly at the budget is kept; one byte more is an omission", () => {
-  const at = prepareArtifact(sized(MAX_ARTIFACT_BYTES));
-  expect(Buffer.byteLength(at.json)).toBe(MAX_ARTIFACT_BYTES);
-  expect(typeof at.artifact.client.request).toBe("string");
-
-  const past = prepareArtifact(
-    artifact({
-      ...sized(MAX_ARTIFACT_BYTES + 1),
-      attempts: [
-        {
-          attempt: 1,
-          provider: "anthropic",
-          request: null,
-          response: null,
-          streamChunks: ["event: ping"],
-          truncated: false,
-        },
-      ],
+/** What the artifact serializes to after masking, measured without the budget check. */
+function maskedBytes(input: BodyArtifact): number {
+  return Buffer.byteLength(
+    JSON.stringify({
+      ...input,
+      client: { ...input.client, request: maskSecrets(input.client.request) },
     }),
   );
+}
+
+test("an artifact of exactly MAX_ARTIFACT_BYTES after masking is stored whole", () => {
+  const input = sized(MAX_ARTIFACT_BYTES);
+  expect(maskedBytes(input)).toBe(MAX_ARTIFACT_BYTES);
+
+  const at = prepareArtifact(input);
+  expect(Buffer.byteLength(at.json)).toBe(MAX_ARTIFACT_BYTES);
+  // Whole: the padding, the attempt and its frames as they came in.
+  expect(at.artifact.client.request === input.client.request).toBe(true);
+  expect(at.artifact.client.truncated).toBe(false);
+  expect(at.artifact.attempts[0]?.streamChunks).toEqual(["event: ping"]);
+  expect(at.artifact.attempts[0]?.truncated).toBe(false);
+});
+
+test("an artifact of MAX_ARTIFACT_BYTES + 1 after masking is an omission", () => {
+  const input = sized(MAX_ARTIFACT_BYTES + 1);
+  expect(maskedBytes(input)).toBe(MAX_ARTIFACT_BYTES + 1);
+
+  const past = prepareArtifact(input);
   const marker = past.artifact.client.request as BodyOmission;
-  expect(marker.omitted).toBe(true);
-  expect(marker.reason).toBe(`artifact exceeded ${MAX_ARTIFACT_BYTES} bytes`);
-  // The size of what would have been written, so the operator can see by how much.
-  expect(marker.serializedBytes).toBeGreaterThan(MAX_ARTIFACT_BYTES);
+  // Exactly one byte over, and the marker says so: no allowance past the cap.
+  expect(marker).toEqual({
+    omitted: true,
+    reason: `artifact exceeded ${MAX_ARTIFACT_BYTES} bytes`,
+    serializedBytes: MAX_ARTIFACT_BYTES + 1,
+  });
   expect(past.artifact.client.truncated).toBe(true);
   expect(past.artifact.attempts[0]?.provider).toBe("anthropic");
   expect(past.artifact.attempts[0]?.streamChunks).toBeNull();
