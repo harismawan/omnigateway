@@ -764,7 +764,16 @@ test("an empty body is refused with the message request.json() gave it", async (
 test("reads the client body once, as text, and parses the request from it", async () => {
   for (const capture of [false, true]) {
     const { app, raw, store } = await harness(EVENTS, { bodyLoggingAllowed: capture });
-    if (capture) await store.config.putSettings({ bodyLoggingEnabled: true });
+    const captured: unknown[] = [];
+    if (capture) {
+      await store.config.putSettings({ bodyLoggingEnabled: true });
+      // An in-memory store has no directory of its own: its artifacts would land
+      // in the working directory. What was captured is all this needs.
+      store.bodies.put = async (artifact) => {
+        captured.push(artifact.client.request);
+        throw new Error("not written");
+      };
+    }
     const request = new Request("http://localhost/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
@@ -787,6 +796,12 @@ test("reads the client body once, as text, and parses the request from it", asyn
     const res = await app.handle(request);
     expect(res.status).toBe(200);
     expect(`${capture}: ${reads.join(",")}`).toBe(`${capture}: text`);
+    // And with capture on, the one read is also what was captured.
+    expect(captured).toEqual(
+      capture
+        ? [{ model: "fast", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }]
+        : [],
+    );
   }
 });
 
