@@ -1283,6 +1283,13 @@ export type BodyPublication = {
   omitted: boolean;
 };
 
+/**
+ * What `put` wrote: the pointer row, and whether `prepareArtifact` had to
+ * replace the bodies with a marker — which only the write can know, and which
+ * decides `ready` or `omitted` when the caller publishes it.
+ */
+export type BodyWritten = BodyPublication & { detailState: BodyDetailState };
+
 export interface BodyRepo {
   /**
    * The in-process write path, and the reason there is no raw one. (The body
@@ -1295,7 +1302,7 @@ export interface BodyRepo {
    * disk write: capture is the caller's to degrade, and it degrades to no
    * artifact rather than to a failed request.
    */
-  put(artifact: BodyArtifact): Promise<BodyArtifactRow>;
+  put(artifact: BodyArtifact): Promise<BodyWritten>;
   /**
    * Null when no row exists. Never throws on a bad artifact: a file that has
    * gone reads as `missing` and one that fails decryption or its digest reads as

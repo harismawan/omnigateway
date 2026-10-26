@@ -309,7 +309,8 @@ forEachStore((backend) => {
         },
       ],
     });
-    const row = await s.bodies.put(input);
+    const { omitted, ...row } = await s.bodies.put(input);
+    expect(omitted).toBe(false);
     expect(row.detailState).toBe("ready");
     expect(row.truncated).toBe(false);
     expect(row.relPath).toBe(`2026/08/17/${input.requestId}.json.enc`);
@@ -443,7 +444,7 @@ forEachStore((backend) => {
 
     // A retry that is now over budget leaves the earlier write as it was.
     const first = rich("req_huge_retry");
-    const row = await s.bodies.put(first);
+    const { omitted: _, ...row } = await s.bodies.put(first);
     await expect(s.bodies.put(huge("req_huge_retry"))).rejects.toThrow();
     const read = await s.bodies.get("req_huge_retry");
     expect(read?.row).toEqual(row);
@@ -619,6 +620,9 @@ forEachStore((backend) => {
     const row = await s.bodies.put(input);
     const written = (await s.bodies.get(input.requestId))?.artifact;
     expect(child(written?.client.request, "omitted")).toBe(true);
+    // Said by the write itself, so a caller can record `omitted` on the log
+    // row without reading back what it wrote.
+    expect(row.omitted).toBe(true);
     expect(row.truncated).toBe(true);
     const json = JSON.stringify(written);
     for (const format of FORMATS) {
@@ -674,7 +678,7 @@ forEachStore((backend) => {
       const second = rich(id, {
         client: { request: { after: format }, response: null, truncated: false },
       });
-      const again = await s.bodies.put(second);
+      const { omitted: _, ...again } = await s.bodies.put(second);
       expect(again.relPath).toBe(row.relPath);
       const read = await s.bodies.get(id);
       expect(read?.row).toEqual(again);

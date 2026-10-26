@@ -20,6 +20,7 @@ export type MetricName =
   | "omni_export_lag_seconds"
   | "omni_export_gap_warnings_total"
   | "omni_export_worker_restarts_total"
+  | "omni_bodies_dropped_total"
   | "omni_build_info";
 
 export type MetricLabels = Readonly<Record<string, string>>;
@@ -93,6 +94,10 @@ const DEFINITIONS: Readonly<
   },
   omni_export_worker_restarts_total: {
     help: "Times this process restarted a dead export worker.",
+    type: "counter",
+  },
+  omni_bodies_dropped_total: {
+    help: "Captured request bodies not stored, by reason.",
     type: "counter",
   },
   omni_build_info: { help: "Gateway build information.", type: "gauge" },

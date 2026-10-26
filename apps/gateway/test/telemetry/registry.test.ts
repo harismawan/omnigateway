@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createTelemetry } from "../../src/telemetry/index.ts";
 import { createMetricRegistry } from "../../src/telemetry/registry.ts";
 import { renderPrometheus } from "../../src/telemetry/render.ts";
 
@@ -23,6 +24,43 @@ test("renders Prometheus metadata, histograms, and escaped labels", () => {
   expect(text).toContain("# TYPE omni_request_duration_seconds histogram");
   expect(text).toContain('omni_request_duration_seconds_bucket{provider="anthropic",model="claude');
   expect(text.endsWith("\n")).toBe(true);
+});
+
+test("counts dropped bodies by reason, every reason present from the first scrape", () => {
+  const telemetry = createTelemetry({
+    metricsEnabled: true,
+    maxSeries: 50,
+    otlpEndpoint: null,
+    otlpHeaders: {},
+    traceSample: 1,
+    now: () => 0,
+    version: "test",
+  });
+  // A counter that appears only once it moves cannot be rated from zero.
+  const before = renderPrometheus(telemetry.registry.snapshot());
+  expect(before).toContain("# TYPE omni_bodies_dropped_total counter");
+  for (const reason of ["budget", "backlog", "writer_crash", "restore"]) {
+    expect(before).toContain(`omni_bodies_dropped_total{reason="${reason}"} 0`);
+  }
+
+  telemetry.bodiesDropped("budget");
+  telemetry.bodiesDropped("budget");
+  expect(telemetry.registry.value("omni_bodies_dropped_total", { reason: "budget" })).toBe(2);
+  expect(telemetry.registry.value("omni_bodies_dropped_total", { reason: "backlog" })).toBe(0);
+});
+
+test("dropped bodies are not counted with metrics off", () => {
+  const telemetry = createTelemetry({
+    metricsEnabled: false,
+    maxSeries: 50,
+    otlpEndpoint: null,
+    otlpHeaders: {},
+    traceSample: 1,
+    now: () => 0,
+    version: "test",
+  });
+  telemetry.bodiesDropped("budget");
+  expect(telemetry.registry.snapshot().metrics).toEqual([]);
 });
 
 test("folds new API key series past the cap without dropping totals", () => {

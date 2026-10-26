@@ -36,6 +36,8 @@ export type Telemetry = {
     after: "closed" | "open" | "halfOpen",
   ): void;
   rateLimit(dimension: string, window: string | null): void;
+  /** One captured request whose body was not stored, and why. */
+  bodiesDropped(reason: BodyDropReason): void;
   scrape(
     localInflight: ReadonlyMap<ProviderId, number>,
     streams: RegistryStats,
@@ -44,6 +46,14 @@ export type Telemetry = {
   ): string;
   stop(): void;
 };
+
+/**
+ * Why a captured body was not stored: the capture budget ran out, the body
+ * writer's queue was full, the writer died holding it, or a restore replaced
+ * the database it was going to. Closed, so the label stays four series.
+ */
+export const BODY_DROP_REASONS = ["budget", "backlog", "writer_crash", "restore"] as const;
+export type BodyDropReason = (typeof BODY_DROP_REASONS)[number];
 
 export function parseOtlpHeaders(value: string | null): Record<string, string> {
   const headers: Record<string, string> = {};
@@ -98,7 +108,13 @@ export function createTelemetry(opts: {
           ...(opts.logger === undefined ? {} : { logger: opts.logger }),
           version: opts.version,
         }));
-  if (opts.metricsEnabled) registry.set("omni_build_info", { version: opts.version }, 1);
+  if (opts.metricsEnabled) {
+    registry.set("omni_build_info", { version: opts.version }, 1);
+    // Every reason from the first scrape, so a rate over it starts at zero
+    // rather than at the first drop.
+    for (const reason of BODY_DROP_REASONS)
+      registry.add("omni_bodies_dropped_total", { reason }, 0);
+  }
 
   return {
     metricsEnabled: opts.metricsEnabled,
@@ -204,6 +220,9 @@ export function createTelemetry(opts: {
     rateLimit(dimension, window) {
       if (opts.metricsEnabled)
         registry.add("omni_ratelimit_rejected_total", { dimension, window: window ?? "none" });
+    },
+    bodiesDropped(reason) {
+      if (opts.metricsEnabled) registry.add("omni_bodies_dropped_total", { reason });
     },
     scrape(localInflight, streams, coordFallback, coordFaults) {
       for (const [provider, value] of localInflight)

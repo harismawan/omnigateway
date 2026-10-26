@@ -256,6 +256,7 @@ test("an artifact of exactly MAX_ARTIFACT_BYTES after masking is stored whole", 
 
   const at = prepareArtifact(input);
   expect(Buffer.byteLength(at.json)).toBe(MAX_ARTIFACT_BYTES);
+  expect(at.omitted).toBe(false);
   // Whole: the padding, the attempt and its frames as they came in.
   expect(at.artifact.client.request === input.client.request).toBe(true);
   expect(at.artifact.client.truncated).toBe(false);
@@ -268,6 +269,7 @@ test("an artifact of MAX_ARTIFACT_BYTES + 1 after masking is an omission", () =>
   expect(maskedBytes(input)).toBe(MAX_ARTIFACT_BYTES + 1);
 
   const past = prepareArtifact(input);
+  expect(past.omitted).toBe(true);
   const marker = past.artifact.client.request as BodyOmission;
   // Exactly one byte over, and the marker says so: no allowance past the cap.
   expect(marker).toEqual({

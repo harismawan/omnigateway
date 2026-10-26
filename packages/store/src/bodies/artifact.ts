@@ -198,7 +198,14 @@ function omitBodies(artifact: BodyArtifact, marker: BodyOmission): BodyArtifact 
  * repository so there is one place to look when asking what a stored artifact
  * has had done to it.
  */
-export function prepareArtifact(input: BodyArtifact): { artifact: BodyArtifact; json: string } {
+export type PreparedArtifact = {
+  artifact: BodyArtifact;
+  json: string;
+  /** Whether the bodies were replaced by a marker here — over budget or too deep. */
+  omitted: boolean;
+};
+
+export function prepareArtifact(input: BodyArtifact): PreparedArtifact {
   const attempts = input.attempts.map((attempt): BodyAttempt => {
     const pair = bodyPair(attempt);
     return {
@@ -227,7 +234,7 @@ export function prepareArtifact(input: BodyArtifact): { artifact: BodyArtifact; 
   // `byteLength` measures without materialising the bytes: `encoder.encode`
   // allocated a whole second copy of a body that is already at the budget.
   const size = Buffer.byteLength(json);
-  if (size <= MAX_ARTIFACT_BYTES) return { artifact: masked, json };
+  if (size <= MAX_ARTIFACT_BYTES) return { artifact: masked, json, omitted: false };
   return omitted(masked, {
     omitted: true,
     reason: `artifact exceeded ${MAX_ARTIFACT_BYTES} bytes`,
@@ -245,21 +252,18 @@ export function prepareArtifact(input: BodyArtifact): { artifact: BodyArtifact; 
  * is refused here rather than handed to a writer that would refuse it later
  * under a less specific name. "Never written oversized" is the promise.
  */
-function omitted(
-  masked: BodyArtifact,
-  marker: BodyOmission,
-): { artifact: BodyArtifact; json: string } {
+function omitted(masked: BodyArtifact, marker: BodyOmission): PreparedArtifact {
   const bodiesOmitted = omitBodies(masked, marker);
   const kept = serialize(bodiesOmitted);
   if (kept !== null && Buffer.byteLength(kept) <= MAX_ARTIFACT_BYTES) {
-    return { artifact: bodiesOmitted, json: kept };
+    return { artifact: bodiesOmitted, json: kept, omitted: true };
   }
   const stripped: BodyArtifact = { ...bodiesOmitted, error: marker };
   const json = JSON.stringify(stripped);
   if (Buffer.byteLength(json) > MAX_ARTIFACT_BYTES) {
     throw new Error(`artifact exceeded ${MAX_ARTIFACT_BYTES} bytes with every body omitted`);
   }
-  return { artifact: stripped, json };
+  return { artifact: stripped, json, omitted: true };
 }
 
 /**

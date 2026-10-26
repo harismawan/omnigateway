@@ -85,7 +85,8 @@ export type Config = {
 };
 
 const MIN_KEY_LENGTH = 16;
-const DEFAULT_BODY_CAPTURE_BUDGET_BYTES = 512 * 1024 * 1024;
+/** `OMNI_BODY_CAPTURE_BUDGET_BYTES` when unset: 512 MiB. */
+export const DEFAULT_BODY_CAPTURE_BUDGET_BYTES = 512 * 1024 * 1024;
 /** Spellings of "on" a flag accepts. Anything else, including empty, is off. */
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 const DECIMAL_INTEGER = /^\d+$/;

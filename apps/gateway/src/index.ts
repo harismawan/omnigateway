@@ -17,6 +17,7 @@ import { nodeHttpClient } from "@omni/providers";
 import { deriveKey, openStore } from "@omni/store";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
+import { createCaptureBudget } from "./bodies/budget.ts";
 import { redisCoord } from "./coord/redis.ts";
 import { spawnExportWorker } from "./export/spawn.ts";
 import { createExportMetrics } from "./exportHost/metrics.ts";
@@ -382,6 +383,7 @@ async function main(): Promise<void> {
     telemetry,
     ...(config.metricsToken === null ? {} : { metricsToken: config.metricsToken }),
     bodyLoggingAllowed: config.bodyLoggingAllowed,
+    captureBudget: createCaptureBudget(config.bodyCaptureBudgetBytes),
     dayOffsetMinutes: config.dayOffsetMinutes,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
     pluginUi: loadedPlugins.plugins,

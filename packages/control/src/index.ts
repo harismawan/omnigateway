@@ -26,7 +26,7 @@ export {
   isClientVisibleDegradation,
   toClientLog,
 } from "./clientLog.ts";
-export { type Config, loadConfig } from "./config.ts";
+export { type Config, DEFAULT_BODY_CAPTURE_BUDGET_BYTES, loadConfig } from "./config.ts";
 export {
   type ConnectDeps,
   type ConnectFlows,

@@ -686,6 +686,110 @@ test("rejects a request with no api key", async () => {
   expect(body.error.type).toBe("authentication_error");
 });
 
+/**
+ * A request that is not JSON at all answers as it always has: the parser's
+ * own message, as an internal error, on each surface's error shape, over a
+ * completed row. Pinned because the route reads the body as text and parses
+ * it itself (`request.json()` used to do both), and a JSON failure that moved
+ * to another status or message would be a client-visible change made by a
+ * refactor.
+ */
+test("a body that is not JSON answers exactly as request.json() refused it", async () => {
+  const shapes = {
+    "/v1/messages": (message: string) => ({
+      type: "error",
+      error: { type: "api_error", message },
+    }),
+    "/v1/chat/completions": (message: string) => ({
+      error: { message, type: "server_error", code: "server_error" },
+    }),
+    "/v1/responses": (message: string) => ({
+      error: { type: "server_error", code: "server_error", message, param: null },
+    }),
+  } as const;
+  const bodies: Array<[string, string]> = [
+    ["{not json", "JSON Parse error: Expected '}'"],
+    ["[1,2", "JSON Parse error: Expected ']'"],
+    ['{"a":1} x', "JSON Parse error: Unable to parse JSON string"],
+  ];
+  for (const [path, shape] of Object.entries(shapes)) {
+    const { app, raw, store } = await harness();
+    for (const [body, message] of bodies) {
+      const res = await app.handle(
+        new Request(`http://localhost${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+          body,
+        }),
+      );
+      expect(`${path} ${body}: ${res.status}`).toBe(`${path} ${body}: 500`);
+      expect(await res.json()).toEqual(shape(message));
+    }
+    const rows = await store.usage.recent(10);
+    expect(rows.map((row) => [row.state, row.status, row.errorCode])).toEqual(
+      bodies.map(() => ["done", 500, "INTERNAL"]),
+    );
+  }
+});
+
+/**
+ * An empty body is the one input whose message differs between the two
+ * parsers: `request.json()` says "Unexpected end of JSON input" and
+ * `JSON.parse("")` says "JSON Parse error: Unexpected EOF". The client is told
+ * the former, as before.
+ */
+test("an empty body is refused with the message request.json() gave it", async () => {
+  const { app, raw } = await harness();
+  for (const body of ["", undefined]) {
+    const res = await app.handle(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+        ...(body === undefined ? {} : { body }),
+      }),
+    );
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({
+      type: "error",
+      error: { type: "api_error", message: "Unexpected end of JSON input" },
+    });
+  }
+});
+
+/**
+ * Read once, as text, and parsed from that text. A second read of a consumed
+ * body throws, and a `request.json()` beside the text read would hand capture
+ * one copy and the parser another.
+ */
+test("reads the client body once, as text, and parses the request from it", async () => {
+  for (const capture of [false, true]) {
+    const { app, raw, store } = await harness(EVENTS, { bodyLoggingAllowed: capture });
+    if (capture) await store.config.putSettings({ bodyLoggingEnabled: true });
+    const request = new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+      body: JSON.stringify({
+        model: "fast",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    const reads: string[] = [];
+    for (const method of ["text", "json", "arrayBuffer", "bytes", "blob", "formData"] as const) {
+      const original = request[method].bind(request) as () => Promise<unknown>;
+      Object.defineProperty(request, method, {
+        value: () => {
+          reads.push(method);
+          return original();
+        },
+      });
+    }
+    const res = await app.handle(request);
+    expect(res.status).toBe(200);
+    expect(`${capture}: ${reads.join(",")}`).toBe(`${capture}: text`);
+  }
+});
+
 test("returns a 400 with the anthropic error shape for a malformed body", async () => {
   const { call } = await harness();
   const res = await call("/v1/messages", { max_tokens: 1, messages: [] });
@@ -945,22 +1049,21 @@ test("renders a non-streaming response before completing its row, and completes 
 });
 
 /**
- * The window the ordering above narrowed but did not close, and the billing
- * invariant that depends on the flag rather than on the order.
+ * The billing invariant on a response that cannot be serialized.
  *
- * Rendering now happens before the append, so the ordinary path has nothing left
- * that can throw afterwards — but `jsonResponse` still serialises the rendered
- * body after the row is written, and a body it cannot serialise lands in the
- * terminal catch with `logged` already true. An Anthropic-native block is the
+ * Serialization now happens once, before the append — body capture records the
+ * exact string the client is sent — so a body `JSON.stringify` refuses throws
+ * with `logged` still false, and the terminal catch completes the row exactly
+ * once. (It used to throw after the append, where only the `logged` flag kept
+ * the catch from completing it again.) An Anthropic-native block is the
  * cheapest way to arrange that honestly: its payload is carried verbatim by
  * contract, so a value `JSON.stringify` refuses reaches the response untouched.
  *
- * Without the guard the catch completes the row a second time, `rollupLog` adds
- * the same tokens and the same spend into `usage_daily` again, and every usage
- * figure the operator bills against is wrong. The client's 500 is correct and is
- * not what this is about.
+ * A second completion would add the same tokens and the same spend into
+ * `usage_daily` again, and every usage figure the operator bills against would
+ * be wrong. The client's 500 is correct and is not what this is about.
  */
-test("completes the row once when serialising the response throws after it is written", async () => {
+test("completes the row once when the response cannot be serialized", async () => {
   const unserializable: StreamEvent[] = [
     { type: "start", id: "upstream_1", model: "claude-opus-4" },
     {
@@ -1003,6 +1106,10 @@ test("completes the row once when serialising the response throws after it is wr
   const rows = await store.usage.recent(10);
   expect(rows).toHaveLength(1);
   expect(rows[0]?.state).toBe("done");
+  // The row says what the client was told, and keeps what the upstream spent.
+  expect(rows[0]?.status).toBe(500);
+  expect(rows[0]?.errorCode).toBe("INTERNAL");
+  expect(rows[0]?.inputTokens).toBe(10);
   store.close();
 });
 

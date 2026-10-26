@@ -14,11 +14,8 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
-import {
-  createBodyCollector,
-  createFrameSink,
-  MAX_CAPTURED_BODY_BYTES,
-} from "../src/bodyCapture.ts";
+import { createCaptureBudget } from "../src/bodies/budget.ts";
+import { createBodyCollector, MAX_CAPTURED_BODY_BYTES } from "../src/bodyCapture.ts";
 import { pruneLogs } from "../src/maintenance.ts";
 import { proxyRoutes } from "../src/routes/proxy.ts";
 
@@ -814,6 +811,22 @@ test("keeps an upstream credential out of every artifact", async () => {
 // Non-interference
 // ---------------------------------------------------------------------------
 
+/**
+ * A collector with all the budget in the world, so only the capture rules are
+ * under test — and the budget beside it, whose `held()` is how a test watches
+ * what capture has kept without taking the parts (which happens once).
+ */
+function collectorOf() {
+  const budget = createCaptureBudget(Number.MAX_SAFE_INTEGER);
+  const collector = createBodyCollector({
+    captureStreamChunks: false,
+    requestId: "req_1",
+    at: NOW,
+    budget,
+  });
+  return Object.assign(collector, { budget });
+}
+
 /** Reads a stream to a string, the way an adapter's SSE parser would. */
 async function readAll(stream: ReadableStream<Uint8Array> | null): Promise<string> {
   if (stream === null) return "";
@@ -843,7 +856,7 @@ test("captures a zstd-encoded request as the JSON it was before compression", as
   // The OpenAI OAuth leg asks the transport to compress. Capture sits above the
   // transport, so the artifact records the JSON the codec built — readable, and
   // never the binary the socket carries.
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const seen: HttpRequest[] = [];
   const http = collector.wrap(async (req) => {
     seen.push(req);
@@ -868,23 +881,23 @@ test("captures a zstd-encoded request as the JSON it was before compression", as
   await collector.settle();
 
   expect(seen[0]?.bodyEncoding).toBe("zstd");
-  const captured = collector.attempts()[0]?.request;
-  expect(typeof captured).toBe("object");
-  expect(captured).toEqual(JSON.parse(seen[0]?.body ?? "null"));
-  expect(captured).toMatchObject({ model: "gpt-6-astra", stream: true });
+  const captured = collector.take(null).attempts[0]?.request;
+  // The JSON text the codec built, exactly — not the zstd frame the socket carried.
+  expect(captured).toBe(seen[0]?.body ?? "missing");
+  expect(JSON.parse(captured ?? "null")).toMatchObject({ model: "gpt-6-astra", stream: true });
 });
 
 test("delivers the adapter the same bytes with capture on and off", async () => {
   const source = (): HttpClient => async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal);
 
   const bare = await readAll((await source()(fixedRequest())).body);
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const wrapped = await readAll((await collector.wrap(source())(fixedRequest())).body);
 
   expect(wrapped).toBe(bare);
   expect(wrapped).toBe(ANTHROPIC_FRAMES.join(""));
   await collector.settle();
-  expect(String(collector.attempts()[0]?.response)).toBe(bare);
+  expect(String(collector.take(null).attempts[0]?.response)).toBe(bare);
 });
 
 /**
@@ -898,25 +911,30 @@ test("delivers the adapter the same bytes with capture on and off", async () => 
  */
 test("hands the adapter its first frame before the capture branch has finished", async () => {
   const controller = new AbortController();
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal, 1));
 
   const res = await http({ ...fixedRequest(), signal: controller.signal });
   const reader = res.body?.getReader();
   if (reader === undefined) throw new Error("expected a body");
 
+  let settled = false;
+  void collector.settle().then(() => {
+    settled = true;
+  });
   const first = await reader.read();
   expect(new TextDecoder().decode(first.value)).toContain("message_start");
-  // The source is still open, so nothing has finished draining. The response
-  // arrived anyway.
-  expect(collector.attempts()[0]?.response).toBe(null);
+  // The source is still open, so the capture drain has not finished. The
+  // response arrived anyway.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(settled).toBe(false);
 
   controller.abort();
   await reader.cancel().catch(() => undefined);
   await collector.settle();
   // The drain ended on the source erroring rather than on the stream ending,
   // which is exactly the truncation a cut-off response should record.
-  expect(collector.attempts()[0]?.truncated).toBe(true);
+  expect(collector.take(null).attempts[0]?.truncated).toBe(true);
 });
 
 /**
@@ -931,7 +949,7 @@ test("hands the adapter its first frame before the capture branch has finished",
  */
 test("reports what a still-running drain has already read", async () => {
   const controller = new AbortController();
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal, 2));
 
   const res = await http({ ...fixedRequest(), signal: controller.signal });
@@ -948,12 +966,15 @@ test("reports what a still-running drain has already read", async () => {
   // needs to hand the capture branch its chunks is a scheduling detail, and a
   // fixed tick count is a test that passes on an idle machine and reports a
   // product bug on a loaded one. The deadline still fails if nothing arrives.
+  const sent = Buffer.byteLength(fixedRequest().body);
+  const delivered = Buffer.byteLength(ANTHROPIC_FRAMES.slice(0, 2).join(""));
   const deadline = Date.now() + 2_000;
-  while (collector.attempts()[0]?.response === null && Date.now() < deadline) {
+  while (collector.budget.held() < sent + delivered && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
 
-  const partial = String(collector.attempts()[0]?.response);
+  // Taken while the drain is still running, as a request cut off mid-stream is.
+  const partial = String(collector.take(null).attempts[0]?.response);
   expect(partial).toContain("message_start");
   // Still open, so this is genuinely a drain in flight rather than a finished one.
   expect(partial).not.toBe(ANTHROPIC_FRAMES.join(""));
@@ -974,7 +995,7 @@ test("reports what a still-running drain has already read", async () => {
  * proves nothing about which one waits for the other.
  */
 test("delivers the adapter's stream while the capture branch is stalled", async () => {
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   let release = (): void => {};
   const stalled = new Promise<void>((resolve) => {
     release = resolve;
@@ -1007,12 +1028,12 @@ test("delivers the adapter's stream while the capture branch is stalled", async 
 
   const res = await http(fixedRequest());
   expect(await readAll(res.body)).toBe(ANTHROPIC_FRAMES.join(""));
-  // The adapter is finished and capture has not seen a byte.
-  expect(collector.attempts()[0]?.response).toBeNull();
+  // The adapter is finished and capture has kept nothing past the request.
+  expect(collector.budget.held()).toBe(Buffer.byteLength(fixedRequest().body));
 
   release();
   await collector.settle();
-  expect(String(collector.attempts()[0]?.response)).toBe(ANTHROPIC_FRAMES.join(""));
+  expect(String(collector.take(null).attempts[0]?.response)).toBe(ANTHROPIC_FRAMES.join(""));
 });
 
 /**
@@ -1043,7 +1064,7 @@ test("drains the capture branch past its byte cap rather than abandoning it", as
     },
   });
 
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async () => ({
     status: 200,
     headers: new Headers({ "content-type": "text/event-stream" }),
@@ -1061,10 +1082,10 @@ test("drains the capture branch past its byte cap rather than abandoning it", as
 
   expect(pulled).toBe(chunks);
   expect(closed).toBe(true);
-  const attempt = collector.attempts()[0];
+  const attempt = collector.take(null).attempts[0];
   expect(attempt?.truncated).toBe(true);
-  // Read to the end, kept to the cap: the bytes past it were dropped, not stored.
-  expect(String(attempt?.response).length).toBeLessThanOrEqual(MAX_CAPTURED_BODY_BYTES + CHUNK);
+  // Read to the end, kept to the cap in bytes: the bytes past it were dropped, not stored.
+  expect(Buffer.byteLength(String(attempt?.response))).toBe(MAX_CAPTURED_BODY_BYTES);
 });
 
 /**
@@ -1075,20 +1096,31 @@ test("drains the capture branch past its byte cap rather than abandoning it", as
  * see — a sink that recorded only the final frame of every stream would satisfy
  * it — and the flag is the only trace an eviction leaves anywhere.
  */
+/** The client frames a collector has taken, failing loudly if the response is not a list. */
+function framesTaken(collector: ReturnType<typeof collectorOf>): {
+  frames: string[];
+  truncated: boolean;
+} {
+  const { client } = collector.take(null);
+  if (!Array.isArray(client.response)) throw new Error("expected the client response as frames");
+  return { frames: client.response, truncated: client.truncated };
+}
+
 test("the frame sink keeps everything inside its cap and marks what it drops", () => {
-  const sink = createFrameSink();
-  for (const frame of ["first", "second", "third"]) sink.write(frame);
-  expect(sink.frames).toEqual(["first", "second", "third"]);
-  expect(sink.truncated).toBe(false);
+  const small = collectorOf();
+  for (const frame of ["first", "second", "third"]) small.frame(frame);
+  expect(framesTaken(small)).toEqual({ frames: ["first", "second", "third"], truncated: false });
 
   // Four frames of two fifths of the cap each: the first two and everything
   // before them have to go.
+  const sink = collectorOf();
   const big = "y".repeat(Math.floor(MAX_CAPTURED_BODY_BYTES * 0.4));
-  for (let i = 0; i < 4; i++) sink.write(`${i}:${big}`);
+  for (let i = 0; i < 4; i++) sink.frame(`${i}:${big}`);
 
-  expect(sink.truncated).toBe(true);
-  expect(sink.frames.map((frame) => frame.slice(0, 2))).toEqual(["2:", "3:"]);
-  expect(sink.frames.reduce((n, frame) => n + frame.length, 0)).toBeLessThanOrEqual(
+  const { frames, truncated } = framesTaken(sink);
+  expect(truncated).toBe(true);
+  expect(frames.map((frame) => frame.slice(0, 2))).toEqual(["2:", "3:"]);
+  expect(frames.reduce((n, frame) => n + Buffer.byteLength(frame), 0)).toBeLessThanOrEqual(
     MAX_CAPTURED_BODY_BYTES,
   );
 });
@@ -1104,19 +1136,18 @@ test("the frame sink keeps everything inside its cap and marks what it drops", (
  * silently record nothing.
  */
 test("the frame sink keeps a lone frame that is larger than the cap on its own", () => {
-  const sink = createFrameSink();
   const huge = `data: ${"z".repeat(MAX_CAPTURED_BODY_BYTES)}`;
-  sink.write(huge);
-
-  expect(sink.frames).toEqual([huge]);
+  const alone = collectorOf();
+  alone.frame(huge);
   // Nothing was dropped, so nothing is claimed to have been.
-  expect(sink.truncated).toBe(false);
+  expect(framesTaken(alone)).toEqual({ frames: [huge], truncated: false });
 
   // And the next frame evicts it rather than the loop having simply given up:
   // the cap still governs once there is more than one frame to choose between.
-  sink.write("data: after");
-  expect(sink.frames).toEqual(["data: after"]);
-  expect(sink.truncated).toBe(true);
+  const sink = collectorOf();
+  sink.frame(huge);
+  sink.frame("data: after");
+  expect(framesTaken(sink)).toEqual({ frames: ["data: after"], truncated: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -1256,7 +1287,7 @@ async function dropRow(root: string, requestId: string): Promise<void> {
  * set flag would make every captured body read as incomplete.
  */
 test("does not mark a buffered response under the cap as truncated", async () => {
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async () => ({
     status: 200,
     headers: new Headers(),
@@ -1268,9 +1299,9 @@ test("does not mark a buffered response under the cap as truncated", async () =>
   expect(await res.text()).toBe('{"ok":true}');
   await collector.settle();
 
-  const attempt = collector.attempts()[0];
-  // `asBody` parses JSON, so the artifact holds the object rather than the text.
-  expect(attempt?.response).toEqual({ ok: true });
+  const attempt = collector.take(null).attempts[0];
+  // The text as it arrived; parsing is the writer's, off the request path.
+  expect(attempt?.response).toBe('{"ok":true}');
   expect(attempt?.truncated).toBe(false);
 });
 
@@ -1284,7 +1315,7 @@ test("does not mark a buffered response under the cap as truncated", async () =>
 test("reassembles a multi-byte character split across chunks", async () => {
   const text = "héllo → 世界";
   const bytes = new TextEncoder().encode(text);
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async () => ({
     status: 200,
     headers: new Headers(),
@@ -1302,7 +1333,7 @@ test("reassembles a multi-byte character split across chunks", async () => {
   await readAll(res.body);
   await collector.settle();
 
-  expect(String(collector.attempts()[0]?.response)).toBe(text);
+  expect(String(collector.take(null).attempts[0]?.response)).toBe(text);
 });
 
 /**
@@ -1314,7 +1345,7 @@ test("reassembles a multi-byte character split across chunks", async () => {
  * flushes nothing. Deleting the flush is invisible without a truncated tail.
  */
 test("flushes a trailing partial character when the stream ends mid-sequence", async () => {
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async () => ({
     status: 200,
     headers: new Headers(),
@@ -1332,5 +1363,5 @@ test("flushes a trailing partial character when the stream ends mid-sequence", a
   await readAll(res.body);
   await collector.settle();
 
-  expect(String(collector.attempts()[0]?.response)).toBe("ok�");
+  expect(String(collector.take(null).attempts[0]?.response)).toBe("ok�");
 });

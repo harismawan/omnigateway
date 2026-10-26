@@ -1,3 +1,4 @@
+import { DEFAULT_BODY_CAPTURE_BUDGET_BYTES } from "@omni/control";
 import { type Coord, memoryCoord } from "@omni/coord";
 import {
   type ChatRequest,
@@ -13,16 +14,13 @@ import {
 } from "@omni/ir";
 import { injectPonytail } from "@omni/ponytail";
 import type { HeadroomByDimension } from "@omni/ratelimit";
-import { type ApiKey, ARTIFACT_SCHEMA_VERSION } from "@omni/store";
+import type { ApiKey } from "@omni/store";
 import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
 import { ApiKeyRateLimiter, RateLimitExceeded } from "../auth/rateLimit.ts";
-import {
-  type BodyCollector,
-  createBodyCollector,
-  createFrameSink,
-  type FrameSink,
-} from "../bodyCapture.ts";
+import { type CaptureBudget, createCaptureBudget } from "../bodies/budget.ts";
+import { toArtifact } from "../bodies/toArtifact.ts";
+import { type BodyCollector, createBodyCollector } from "../bodyCapture.ts";
 import {
   type DispatchDeps,
   type DispatchOptions,
@@ -107,6 +105,13 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry" | "coord
    */
   bodyLoggingAllowed?: boolean;
   /**
+   * The process-wide ceiling on bytes held for body capture
+   * (`OMNI_BODY_CAPTURE_BUDGET_BYTES`), shared by every captured request.
+   * Defaults to a budget of its own at the default size, for routes mounted
+   * on their own.
+   */
+  captureBudget?: CaptureBudget;
+  /**
    * Announces finished requests to plugin handlers.
    *
    * Threaded to `finishLog` rather than called here, because that function is
@@ -148,6 +153,7 @@ type ResolvedProxyDeps = DispatchDeps &
   > & {
     keepaliveMs: number;
     logger: Logger;
+    captureBudget: CaptureBudget;
     /** One per process, like the limiter: a verdict is reused across requests. */
     guardrailCache: VerdictCache;
     /** One per process too: a segment's verdict is the same for every key. */
@@ -284,10 +290,38 @@ function jsonResponse(
   status: number,
   headers: Record<string, string> = {},
 ): Response {
-  return new Response(JSON.stringify(body), {
+  return serializedResponse(JSON.stringify(body), status, headers);
+}
+
+/**
+ * A JSON response from text already serialized — so body capture records the
+ * exact string the client is sent, stringified once for both.
+ */
+function serializedResponse(
+  json: string,
+  status: number,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(json, {
     status,
     headers: { "content-type": "application/json", ...headers },
   });
+}
+
+/**
+ * The client's body, read once as text and parsed from that text.
+ *
+ * Text rather than `request.json()`, because capture keeps what arrived — the
+ * raw text, handed to the collector here and to nothing else — and a second
+ * read of a consumed body is an error. Refuses exactly what `request.json()`
+ * refused, with the same messages: the client sees no difference. The one
+ * input the two parsers word differently is the empty body.
+ */
+async function readJsonBody(request: Request, captured: BodyCollector | null): Promise<unknown> {
+  const text = await request.text();
+  captured?.captureRequest(text);
+  if (text.length === 0) throw new SyntaxError("Unexpected end of JSON input");
+  return JSON.parse(text) as unknown;
 }
 
 function errorResponse(
@@ -416,6 +450,8 @@ function sseResponse(
 async function bodyCollectorFor(
   deps: ResolvedProxyDeps,
   key: ApiKey,
+  requestId: string,
+  at: number,
 ): Promise<BodyCollector | null> {
   if (deps.bodyLoggingAllowed !== true) return null;
   if (key.bodyLoggingOptOut) return null;
@@ -423,6 +459,10 @@ async function bodyCollectorFor(
   if (!settings.bodyLoggingEnabled) return null;
   return createBodyCollector({
     captureStreamChunks: settings.bodyLoggingCaptureStreamChunks,
+    requestId,
+    at,
+    budget: deps.captureBudget,
+    onAbandoned: (reason) => deps.telemetry?.bodiesDropped(reason),
   });
 }
 
@@ -461,10 +501,6 @@ async function handle(
   // the error body it renders and still write through the same one-shot path.
   let collector: BodyCollector | null = null;
   let writeBodies: BodyWriter | undefined;
-  // Out here for the same reason, and read at the one place the artifact is
-  // assembled: a sink that evicted frames to stay inside its cap is the only
-  // thing that knows the recorded response is not the whole one.
-  let frameSink: FrameSink | null = null;
   /**
    * Whether the row has already been completed.
    *
@@ -560,7 +596,7 @@ async function handle(
     }
     keyId = key.id;
 
-    const captured = await bodyCollectorFor(deps, key);
+    const captured = await bodyCollectorFor(deps, key, requestId, startedAt);
     collector = captured;
     if (captured !== null) {
       /**
@@ -584,31 +620,41 @@ async function handle(
        * renamed tools it sent, while `client.request` holds the names the
        * client chose. Neither is a leak — the originals were always in the
        * client half — but a reader diffing the two should expect it.
+       *
+       * The row was begun or completed with `body_state = 'pending'`, so this
+       * is also what moves it on: `ready` or `omitted` with the pointer row, or
+       * `failed`. **Transitional**: the artifact is parsed and sealed here, on
+       * the request's own thread, until the body writer takes it over. The
+       * pointer `put` writes is upserted again, identically, by `publish` on
+       * SQLite — the one transaction that moves the state with it.
        */
       writeBodies = async (completed) => {
         await captured.settle();
-        // Folded in here rather than at either call site, because both of them
-        // reach this function and a streamed response that outran its sink is
-        // truncated whichever way the request ended.
-        if (frameSink?.truncated === true) captured.client.truncated = true;
-        await deps.store.bodies.put({
-          schemaVersion: ARTIFACT_SCHEMA_VERSION,
-          requestId,
-          at: startedAt,
-          client: captured.client,
-          attempts: captured.attempts(),
+        const parts = captured.take(
           // The code and status only. Everything a message could add here, the
           // artifact's own bodies already hold in their original form.
-          error:
-            completed.errorCode === null
-              ? null
-              : { code: completed.errorCode, status: completed.status },
-        });
+          completed.errorCode === null
+            ? null
+            : { code: completed.errorCode, status: completed.status },
+        );
+        try {
+          const written = await deps.store.bodies.put(toArtifact(parts));
+          await deps.store.bodies.publish({
+            ...written,
+            omitted: written.omitted || parts.abandoned !== null,
+          });
+        } catch (error) {
+          // Best effort: a store that refused the write may refuse this too,
+          // and then `sweepPending` fails the row an hour after completion.
+          await deps.store.bodies.fail(requestId).catch(() => undefined);
+          throw error;
+        } finally {
+          deps.captureBudget.release(parts.reservedBytes);
+        }
       };
     }
 
-    const body: unknown = await request.json();
-    if (captured !== null) captured.client.request = body;
+    const body = await readJsonBody(request, captured);
     const chatRequest =
       surface === "anthropic"
         ? parseAnthropicRequest(body, request.headers)
@@ -695,6 +741,7 @@ async function handle(
               credentialId: target.credentialId,
             });
             if (traced !== null) applyTrace(log, traced);
+            if (captured !== null) log.bodyState = "pending";
             await beginLog(deps.store, log, keyId, deps.logger, deps.broadcaster);
           },
         },
@@ -814,7 +861,7 @@ async function handle(
       // inferred from the capture, because a disconnect is the one truncation
       // the route can state as a fact instead of guessing at from a stream that
       // stopped arriving.
-      if (captured !== null && wasCancelled) captured.client.truncated = true;
+      if (captured !== null && wasCancelled) captured.markTruncated();
       if (wasCancelled && completed.status === 0) {
         completed.status = 499;
         completed.errorCode = "interrupted";
@@ -849,6 +896,7 @@ async function handle(
       // carries what never becomes one. `requestId` is on both, and joins them.
       logged = true;
       if (traced !== null) applyTrace(completed, traced);
+      if (captured !== null) completed.bodyState = "pending";
       await finishLog(
         deps.store,
         completed,
@@ -871,16 +919,11 @@ async function handle(
             ? responsesStream(dispatched.events, render())
             : openaiStream(dispatched.events, requestId, Math.floor(deps.now() / 1000));
       // A stream has no rendered body, so what the gateway returned is the
-      // frames it wrote. The sink is handed over live: a client that hangs up
+      // frames it wrote, recorded as they go out: a client that hangs up
       // mid-stream leaves whatever had already gone out, which is precisely
       // what the artifact should hold for a request that was cut off.
-      let onFrame: ((frame: string) => void) | undefined;
-      if (captured !== null) {
-        const sink = createFrameSink();
-        frameSink = sink;
-        captured.client.response = sink.frames;
-        onFrame = sink.write;
-      }
+      const onFrame =
+        captured === null ? undefined : (frame: string): void => captured.frame(frame);
       /**
        * The end of a streaming request, wherever it comes from.
        *
@@ -928,10 +971,11 @@ async function handle(
     const failure = events.find(
       (e): e is Extract<StreamEvent, { type: "error" }> => e.type === "error",
     );
-    // Rendered before the row is completed, not after, so the body capture and
-    // the client are handed the same object. A throw from rendering then lands
-    // in the terminal catch with `logged` still false, which completes the row
-    // once — the same guarantee the flag gave when rendering came second.
+    // Rendered and serialized before the row is completed, not after, so the
+    // body capture and the client are handed the same string. A throw from
+    // either then lands in the terminal catch with `logged` still false, which
+    // completes the row once — the same guarantee the flag gave when rendering
+    // came second.
     const responseBody =
       failure !== undefined
         ? errorBody(surface, failure.code, failure.message)
@@ -940,7 +984,8 @@ async function handle(
           : surface === "responses"
             ? responsesResponse(collect(events), render())
             : openaiResponse(collect(events), requestId, Math.floor(deps.now() / 1000));
-    if (captured !== null) captured.client.response = responseBody;
+    const responseJson = JSON.stringify(responseBody);
+    captured?.captureResponse(responseJson);
 
     await log();
 
@@ -948,8 +993,8 @@ async function handle(
     // A stream's head went out before judging, so it says it in the `model`
     // instead (see `relabel`).
     const route = dispatched.route?.() ?? null;
-    return jsonResponse(
-      responseBody,
+    return serializedResponse(
+      responseJson,
       failure === undefined ? 200 : HTTP_STATUS[failure.code],
       failure === undefined && route !== null
         ? { ...limitHeaders(), "x-omni-route": route }
@@ -977,16 +1022,19 @@ async function handle(
     completed.errorCode = cancelled ? "interrupted" : gatewayError.code;
     completed.durationMs = deps.now() - startedAt;
     if (traced !== null) applyTrace(completed, traced);
+    // Pending whether or not routing began the row: a request refused before
+    // routing still has a body to write, and its row says so.
+    if (collector !== null) completed.bodyState = "pending";
     // Completes a pending row if the request got as far as dispatch. The store
     // keeps what beginning it recorded where this log carries nothing. Skipped
     // where the row is already complete: `completed` is dispatch's own live log
     // once a request got that far, so appending it twice bills its tokens twice.
-    const rejection = errorBody(surface, gatewayError.code, gatewayError.message);
-    if (collector !== null && cancelled) collector.client.truncated = true;
+    const rejection = JSON.stringify(errorBody(surface, gatewayError.code, gatewayError.message));
+    if (collector !== null && cancelled) collector.markTruncated();
     // Only where the row is still open. Where it is not, the artifact went with
     // it at the earlier `finishLog`, and writing a second one here would be the
     // duplicate write the `logged` flag exists to prevent.
-    if (collector !== null && !logged) collector.client.response = rejection;
+    if (collector !== null && !logged) collector.captureResponse(rejection);
     if (!logged)
       await finishLog(
         deps.store,
@@ -1007,7 +1055,7 @@ async function handle(
     // fact an operator needs is the one nothing recorded. A disconnect is not a
     // failure and is far too common to print; its row is the whole record.
     if (!cancelled) reportRejection(deps.logger, requestId, completed, gatewayError, surface);
-    return jsonResponse(rejection, HTTP_STATUS[gatewayError.code], {
+    return serializedResponse(rejection, HTTP_STATUS[gatewayError.code], {
       ...limitHeaders(),
       ...retryAfterHeaders(gatewayError),
     });
@@ -1035,6 +1083,7 @@ export function proxyRoutes(deps: ProxyDeps) {
     // gateway were idle.
     loadRegistry: deps.loadRegistry ?? createLoadRegistry(coord),
     keepaliveMs: deps.keepaliveMs ?? KEEPALIVE_MS,
+    captureBudget: deps.captureBudget ?? createCaptureBudget(DEFAULT_BODY_CAPTURE_BUDGET_BYTES),
     guardrailCache: new VerdictCache(),
     smartRouterCache: new VerdictCache(),
   };

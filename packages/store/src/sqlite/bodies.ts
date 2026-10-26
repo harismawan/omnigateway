@@ -18,6 +18,7 @@ import type {
   BodyPublication,
   BodyRead,
   BodyRepo,
+  BodyWritten,
 } from "../types.ts";
 
 type Row = {
@@ -147,7 +148,7 @@ export function createBodyRepo(
       const truncated =
         prepared.artifact.client.truncated ||
         prepared.artifact.attempts.some((attempt) => attempt.truncated);
-      const row: BodyArtifactRow = {
+      const row: BodyWritten = {
         requestId: artifact.requestId,
         at: artifact.at,
         relPath,
@@ -155,6 +156,7 @@ export function createBodyRepo(
         sha256: sealed.sha256,
         detailState: "ready",
         truncated,
+        omitted: prepared.omitted,
       };
       upsert(row);
       return row;

@@ -20,6 +20,7 @@ import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from 
 import type { RoutingChange, Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
+import type { CaptureBudget } from "./bodies/budget.ts";
 import { createLoadRegistry, type LoadRegistry } from "./dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "./egress/anthropic.ts";
@@ -94,6 +95,11 @@ export type AppDeps = {
    * flips mid-incident, and this is the half that says they may.
    */
   bodyLoggingAllowed?: boolean;
+  /**
+   * The process-wide capture budget (`OMNI_BODY_CAPTURE_BUDGET_BYTES`). Built
+   * by boot, one per process; absent, the proxy routes make one at the default.
+   */
+  captureBudget?: CaptureBudget;
   /** Minutes east of UTC the daily usage buckets are cut on. See `adminRoutes`. */
   dayOffsetMinutes?: number;
   logger?: Logger;
@@ -467,6 +473,7 @@ export function createApp(deps: AppDeps) {
           coord,
           loadRegistry,
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+          ...(deps.captureBudget === undefined ? {} : { captureBudget: deps.captureBudget }),
           ...(deps.emit === undefined ? {} : { emit: deps.emit }),
           ...(telemetry === undefined ? {} : { telemetry: telemetry }),
           broadcaster,
