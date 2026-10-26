@@ -1,0 +1,413 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "omnigateway"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "omnigateway.log-export",
+            "version": "omni.request_log/v1"
+          },
+          "spans": [
+            {
+              "traceId": "dee3faf91e4df2a7235a2ab5a1393ba6",
+              "spanId": "d0c0abd5395e0dc1",
+              "name": "chat smart",
+              "kind": 3,
+              "startTimeUnixNano": "1792886399120000000",
+              "endTimeUnixNano": "1792886401470000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "smart"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "claude-opus-4-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "52000"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "340"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "ses_8f2c"
+                  }
+                },
+                {
+                  "key": "omni.request.id",
+                  "value": {
+                    "stringValue": "req_01JB7Q2W3E4R5T6Y7U8I9O0P"
+                  }
+                },
+                {
+                  "key": "omni.completed_at",
+                  "value": {
+                    "stringValue": "2026-10-25T00:00:01.470Z"
+                  }
+                },
+                {
+                  "key": "omni.node.id",
+                  "value": {
+                    "stringValue": "node-7f3a"
+                  }
+                },
+                {
+                  "key": "omni.api_key.id",
+                  "value": {
+                    "stringValue": "key_team"
+                  }
+                },
+                {
+                  "key": "omni.api_key.label",
+                  "value": {
+                    "stringValue": "Équipe 🦊"
+                  }
+                },
+                {
+                  "key": "omni.credential.id",
+                  "value": {
+                    "stringValue": "cred_a1"
+                  }
+                },
+                {
+                  "key": "omni.status",
+                  "value": {
+                    "intValue": "200"
+                  }
+                },
+                {
+                  "key": "omni.attempts",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "omni.tokens.input",
+                  "value": {
+                    "intValue": "1200"
+                  }
+                },
+                {
+                  "key": "omni.tokens.cache_read",
+                  "value": {
+                    "intValue": "50000"
+                  }
+                },
+                {
+                  "key": "omni.tokens.cache_write",
+                  "value": {
+                    "intValue": "800"
+                  }
+                },
+                {
+                  "key": "omni.cost_usd",
+                  "value": {
+                    "doubleValue": 0.081234
+                  }
+                },
+                {
+                  "key": "omni.ttft_ms",
+                  "value": {
+                    "intValue": "412"
+                  }
+                },
+                {
+                  "key": "omni.duration_ms",
+                  "value": {
+                    "intValue": "2350"
+                  }
+                },
+                {
+                  "key": "omni.degradations",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "anthropic:cache-breakpoint-added"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "omni.rtk.applied",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "omni.rtk.filter_hits",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "omni.rtk.original_code_units",
+                  "value": {
+                    "intValue": "9000"
+                  }
+                },
+                {
+                  "key": "omni.rtk.compressed_code_units",
+                  "value": {
+                    "intValue": "2100"
+                  }
+                },
+                {
+                  "key": "omni.rtk.estimated_tokens_saved",
+                  "value": {
+                    "intValue": "1725"
+                  }
+                },
+                {
+                  "key": "omni.rtk.filters",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "git-diff"
+                        },
+                        {
+                          "stringValue": "grep"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "omni.turn.id",
+                  "value": {
+                    "stringValue": "turn-7"
+                  }
+                },
+                {
+                  "key": "omni.agent",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "omni.tags",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "team:core"
+                        },
+                        {
+                          "stringValue": "ci"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "omni.metadata.__proto__",
+                  "value": {
+                    "stringValue": "kept"
+                  }
+                },
+                {
+                  "key": "omni.metadata.note",
+                  "value": {
+                    "stringValue": "say \"hi\""
+                  }
+                },
+                {
+                  "key": "omni.metadata.ticket",
+                  "value": {
+                    "stringValue": "OMNI-42"
+                  }
+                },
+                {
+                  "key": "omni.client.request_id",
+                  "value": {
+                    "stringValue": "cli-123"
+                  }
+                },
+                {
+                  "key": "omni.upstream.request_id",
+                  "value": {
+                    "stringValue": "req_011CUabc"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "a38fe3dd22ad7e075b79aea9d0fb6e2a",
+              "spanId": "821dcdae86fe6aca",
+              "name": "chat gpt-5",
+              "kind": 3,
+              "startTimeUnixNano": "1792886400005000000",
+              "endTimeUnixNano": "1792886400020000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-5"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "omni.request.id",
+                  "value": {
+                    "stringValue": "req_01JB7Q2W3E4R5T6Y7U8I9O0Q"
+                  }
+                },
+                {
+                  "key": "omni.completed_at",
+                  "value": {
+                    "stringValue": "2026-10-25T00:00:00.020Z"
+                  }
+                },
+                {
+                  "key": "omni.node.id",
+                  "value": {
+                    "stringValue": "node-7f3a"
+                  }
+                },
+                {
+                  "key": "omni.status",
+                  "value": {
+                    "intValue": "503"
+                  }
+                },
+                {
+                  "key": "omni.error_code",
+                  "value": {
+                    "stringValue": "NO_CANDIDATES"
+                  }
+                },
+                {
+                  "key": "omni.attempts",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "omni.tokens.input",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "omni.tokens.cache_read",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "omni.tokens.cache_write",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "omni.cost_usd",
+                  "value": {
+                    "doubleValue": 0
+                  }
+                },
+                {
+                  "key": "omni.duration_ms",
+                  "value": {
+                    "intValue": "15"
+                  }
+                },
+                {
+                  "key": "omni.rtk.applied",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "omni.rtk.filter_hits",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "omni.rtk.original_code_units",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "omni.rtk.compressed_code_units",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "omni.rtk.estimated_tokens_saved",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "status": {
+                "code": 2,
+                "message": "NO_CANDIDATES"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

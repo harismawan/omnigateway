@@ -58,3 +58,33 @@ test("binary build fails when its entrypoint is missing", () => {
   expect(build.exitCode).not.toBe(0);
   expect(build.stderr?.toString()).toContain("missing.ts");
 });
+
+/**
+ * The compiled gateway carries its export worker and can start it.
+ *
+ * `new Worker(url)` is not an import, so `--compile` embeds the worker only
+ * when it is a second entrypoint, and the server only finds it at the path
+ * `OMNI_EXPORT_WORKER` names inside the executable. Built through the same
+ * `buildGatewayBinary` the release and the Docker image run, with a probe in
+ * place of the server that spawns the worker the way the server does, and
+ * run from another directory, so nothing on disk can stand in for it.
+ */
+test("the gateway binary can start its export worker", () => {
+  const dir = mkdtempSync(join(tmpdir(), "omni-binary-export-"));
+  dirs.push(dir);
+  const outfile = join(dir, "gateway");
+  const build = Bun.spawnSync(
+    [
+      process.execPath,
+      "-e",
+      `const { buildGatewayBinary } = await import(${JSON.stringify(join(repoRoot, "scripts/build-binary.ts"))});
+       await buildGatewayBinary(${JSON.stringify(outfile)}, ${JSON.stringify(repoRoot)}, "apps/gateway/test/fixtures/export/workerProbe.ts");`,
+    ],
+    { cwd: repoRoot },
+  );
+  expect(build.exitCode === 0 ? "" : (build.stderr?.toString() ?? "build failed")).toBe("");
+  const run = Bun.spawnSync([outfile, join(dir, "omnigateway.db")], { cwd: dir });
+  expect(run.stdout.toString().trim()).toBe(
+    JSON.stringify({ type: "previewResult", ref: "probe", ok: false, error: "no such request" }),
+  );
+}, 60_000);

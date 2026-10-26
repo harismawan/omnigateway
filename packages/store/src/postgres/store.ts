@@ -5,6 +5,7 @@ import { createBodyRepo } from "./bodies.ts";
 import { createConfigRepo } from "./config.ts";
 import { createCredentialRepo } from "./credentials.ts";
 import { num, openPg, type Rows } from "./db.ts";
+import { createExportDestinationRepo } from "./exportDestinations.ts";
 import { createKeyRepo } from "./keys.ts";
 import { createMaintenanceRepo } from "./maintenance.ts";
 import { createPluginRepo } from "./plugins.ts";
@@ -100,6 +101,7 @@ export async function createPostgresStore(opts: {
     bodies: createBodyRepo(sql, opts.encryptionKey),
     maintenance: createMaintenanceRepo(sql, nodeId),
     plugins: createPluginRepo(sql),
+    exportDestinations: createExportDestinationRepo(sql, opts.encryptionKey),
     routing: {
       version: () => {
         refresh();

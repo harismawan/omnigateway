@@ -8,7 +8,13 @@ import type {
   Target,
   VirtualModel,
 } from "../types.ts";
-import { DEFAULT_SETTINGS, readGuardrailSettings, readSmartRouterSettings } from "../types.ts";
+import {
+  DEFAULT_SETTINGS,
+  mergeSettings,
+  readGuardrailSettings,
+  readRetentionLoweredAt,
+  readSmartRouterSettings,
+} from "../types.ts";
 
 const SETTINGS_KEY = "settings";
 const ADMIN_HASH_KEY = "adminPasswordHash";
@@ -61,6 +67,70 @@ export function createConfigRepo(
     );
   };
 
+  const readSettings = (): Settings => {
+    const raw = readRaw(SETTINGS_KEY);
+    if (raw === null) return DEFAULT_SETTINGS;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      const stored =
+        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+          ? (parsed as Partial<Settings>)
+          : {};
+      // Only literal true enables this lossy transform, or either half of body
+      // capture. This runtime boundary must remain safe even if an old or
+      // manually-edited row is malformed: a truthy-but-not-true value must not
+      // start retaining prompts any more than it may start rewriting them.
+      return {
+        ...DEFAULT_SETTINGS,
+        ...stored,
+        rtkEnabled: stored.rtkEnabled === true,
+        // Two different questions, kept apart. *Absence* means on, and that
+        // is decided by `DEFAULT_SETTINGS` above, not here. What this line
+        // decides is what a *malformed* value means, and it answers the same
+        // way as its neighbours: off. This feature rewrites outbound
+        // requests, so a value nobody typed with that meaning must not switch
+        // it on — while a garbled row merely returning the installation to
+        // its pre-feature behaviour costs an operator nothing they did not
+        // already have.
+        autoCacheEnabled:
+          stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
+        // The same question its neighbours ask, put to a union instead of a
+        // boolean: anything that is not one of the four names means off.
+        ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
+        bodyRetentionDays:
+          Number.isInteger(stored.bodyRetentionDays) &&
+          (stored.bodyRetentionDays ?? 0) >= 1 &&
+          (stored.bodyRetentionDays ?? 0) <= 3_650
+            ? (stored.bodyRetentionDays as number)
+            : DEFAULT_SETTINGS.bodyRetentionDays,
+        logRetentionLoweredAt: readRetentionLoweredAt(stored.logRetentionLoweredAt),
+        bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
+        bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
+        weights: knownWeights(stored.weights),
+        // Malformed reads as unconfigured, which refuses a key carrying a
+        // policy rather than serving it unjudged. One copy for both backends.
+        ...readGuardrailSettings(stored),
+        // Malformed reads as off and unset, so a bad row never routes a
+        // request anywhere. One copy for both backends.
+        ...readSmartRouterSettings(stored),
+      };
+    } catch {
+      return DEFAULT_SETTINGS;
+    }
+  };
+
+  /**
+   * Read, merge and write as one synchronous `IMMEDIATE` transaction: the write
+   * lock is taken before the read, so neither another connection (the CLI, a
+   * sibling store) nor an interleaved call on this one can land a write between
+   * them and have it overwritten — which would lose `logRetentionLoweredAt`.
+   */
+  const putSettings = db.transaction((patch: Partial<Settings>): Settings => {
+    const next = mergeSettings(readSettings(), patch, Date.now());
+    writeRaw(SETTINGS_KEY, JSON.stringify(next));
+    return next;
+  }).immediate;
+
   return {
     async listModels() {
       type R = { id: string; targets: string; strategy: string; is_alias: number };
@@ -93,64 +163,11 @@ export function createConfigRepo(
     },
 
     async getSettings() {
-      const raw = readRaw(SETTINGS_KEY);
-      if (raw === null) return DEFAULT_SETTINGS;
-      try {
-        const parsed: unknown = JSON.parse(raw);
-        const stored =
-          parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-            ? (parsed as Partial<Settings>)
-            : {};
-        // Only literal true enables this lossy transform, or either half of body
-        // capture. This runtime boundary must remain safe even if an old or
-        // manually-edited row is malformed: a truthy-but-not-true value must not
-        // start retaining prompts any more than it may start rewriting them.
-        return {
-          ...DEFAULT_SETTINGS,
-          ...stored,
-          rtkEnabled: stored.rtkEnabled === true,
-          // Two different questions, kept apart. *Absence* means on, and that
-          // is decided by `DEFAULT_SETTINGS` above, not here. What this line
-          // decides is what a *malformed* value means, and it answers the same
-          // way as its neighbours: off. This feature rewrites outbound
-          // requests, so a value nobody typed with that meaning must not switch
-          // it on — while a garbled row merely returning the installation to
-          // its pre-feature behaviour costs an operator nothing they did not
-          // already have.
-          autoCacheEnabled:
-            stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
-          // The same question its neighbours ask, put to a union instead of a
-          // boolean: anything that is not one of the four names means off.
-          ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
-          bodyRetentionDays:
-            Number.isInteger(stored.bodyRetentionDays) &&
-            (stored.bodyRetentionDays ?? 0) >= 1 &&
-            (stored.bodyRetentionDays ?? 0) <= 3_650
-              ? (stored.bodyRetentionDays as number)
-              : DEFAULT_SETTINGS.bodyRetentionDays,
-          bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
-          bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
-          weights: knownWeights(stored.weights),
-          // Malformed reads as unconfigured, which refuses a key carrying a
-          // policy rather than serving it unjudged. One copy for both backends.
-          ...readGuardrailSettings(stored),
-          // Malformed reads as off and unset, so a bad row never routes a
-          // request anywhere. One copy for both backends.
-          ...readSmartRouterSettings(stored),
-        };
-      } catch {
-        return DEFAULT_SETTINGS;
-      }
+      return readSettings();
     },
 
     async putSettings(patch: Partial<Settings>) {
-      const current = await this.getSettings();
-      const next: Settings = {
-        ...current,
-        ...patch,
-        weights: { ...current.weights, ...patch.weights },
-      };
-      writeRaw(SETTINGS_KEY, JSON.stringify(next));
+      const next = putSettings(patch);
       emit({ type: "settingsChanged" });
       return next;
     },

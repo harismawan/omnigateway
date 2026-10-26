@@ -29,6 +29,12 @@ export type Config = {
    * capture on and off mid-incident without a restart.
    */
   bodyLoggingAllowed: boolean;
+  /**
+   * `OMNI_EXPORT_BODIES_ALLOWED`: the third, export-specific key for sending
+   * captured bodies to export destinations. Read at boot and handed to the
+   * export worker; body export itself ships in a later release.
+   */
+  exportBodiesAllowed: boolean;
   /** Threshold for stdout logging. Read once, at boot. */
   logLevel: LogLevel;
   /**
@@ -141,6 +147,9 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const dayOffsetFallbackFrom = rawDayOffset !== undefined && !validDayOffset ? rawDayOffset : null;
 
   const bodyLoggingAllowed = TRUTHY.has((env.OMNI_BODY_LOGGING_ALLOWED ?? "").trim().toLowerCase());
+  const exportBodiesAllowed = TRUTHY.has(
+    (env.OMNI_EXPORT_BODIES_ALLOWED ?? "").trim().toLowerCase(),
+  );
 
   // Deliberately not fatal, unlike OMNI_PORT: a typo in a log level is not a
   // reason to refuse to serve traffic. The boot line says which value was
@@ -171,6 +180,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     baseUrl,
     staticDir: staticDir === undefined || staticDir.length === 0 ? null : staticDir,
     bodyLoggingAllowed,
+    exportBodiesAllowed,
     logFile: logFile === undefined || logFile.length === 0 ? null : logFile,
     clusterMode,
     databaseUrl: clusterMode ? (databaseUrl ?? null) : null,

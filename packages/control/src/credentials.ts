@@ -5,6 +5,7 @@ import { isProviderId } from "./connect.ts";
 import type { Refresher } from "./oauth/refresh.ts";
 import { type BurnEstimate, burnEstimates } from "./quota/burn.ts";
 import { credentialPatchSchema, parseOrThrow, providerIdSchema } from "./schemas.ts";
+import { basePathOf, checkServerUrl } from "./serverUrl.ts";
 
 /**
  * A credential as an operator may see it: every stored column, and nothing
@@ -86,28 +87,20 @@ function customProviderData(input: ApiKeyCredentialInput): CustomProviderData {
     throw new GatewayError("BAD_REQUEST", "protocol: unsupported protocol");
   }
 
-  let url: URL;
-  try {
-    url = new URL(originInput);
-  } catch {
-    throw new GatewayError("BAD_REQUEST", "origin: must be a valid URL");
+  const checked = checkServerUrl(originInput);
+  if ("problem" in checked) {
+    throw new GatewayError(
+      "BAD_REQUEST",
+      checked.problem === "unparseable"
+        ? "origin: must be a valid URL"
+        : "origin: must be an HTTP(S) server origin",
+    );
   }
-  if (
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.hostname.length === 0 ||
-    url.username.length > 0 ||
-    url.password.length > 0 ||
-    url.search.length > 0 ||
-    url.hash.length > 0
-  ) {
-    throw new GatewayError("BAD_REQUEST", "origin: must be an HTTP(S) server origin");
-  }
+  const { url } = checked;
 
   // A base path is allowed because reverse-proxied servers routinely live at a
-  // subpath (`https://example.com/api`). Trailing slashes collapse away — a
-  // bare `/` is no path at all. The WHATWG parser has already resolved dot
-  // segments and kept percent-escapes intact, so nothing else needs guarding.
-  const basePath = url.pathname.replace(/\/+$/, "");
+  // subpath (`https://example.com/api`).
+  const basePath = basePathOf(url);
 
   return { endpointId, endpointLabel, origin: url.origin, basePath, protocol: input.protocol };
 }

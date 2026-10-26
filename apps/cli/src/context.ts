@@ -115,6 +115,19 @@ export type Context = {
   close: () => void;
 };
 
+/**
+ * The Postgres URL this installation's gateway stores into, or null for
+ * SQLite. The gateway's own rule (`openStore` takes `{url}` exactly when
+ * cluster mode names a database URL), read the same way by `doctor` and by
+ * every command that must refuse rather than write a local file the gateway
+ * never reads. Null too when the config does not parse; `ctx.store()` reports that.
+ */
+export function postgresUrlOf(ctx: Pick<Context, "configError" | "config">): string | null {
+  if (ctx.configError !== null) return null;
+  const config = ctx.config();
+  return config.clusterMode && config.databaseUrl !== null ? config.databaseUrl : null;
+}
+
 export type ContextOptions = {
   env?: Record<string, string | undefined>;
   cwd?: string;

@@ -258,6 +258,7 @@ export function log(patch: Partial<RequestLog> = {}): RequestLog {
     traceMetadata: {},
     clientRequestId: null,
     upstreamRequestId: null,
+    completedAt: null,
     ...patch,
   };
 }
@@ -333,6 +334,7 @@ export const settings: Settings = {
   breakerThreshold: 3,
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,
+  logRetentionLoweredAt: 0,
   bodyRetentionDays: 1,
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,

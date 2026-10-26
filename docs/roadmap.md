@@ -64,6 +64,15 @@ its burst cap all exist for exactly this. Putting a notifier in the core buys a
 configuration surface, a retry policy and an outbound origin that nobody asked the
 gateway for. See [writing-a-plugin.md](writing-a-plugin.md).
 
+**Log export was the exception, and why.** Shipping request logs to Elasticsearch, a
+webhook or OTLP is in the core, by operator decision, although it buys exactly that
+configuration surface, retry policy and set of outbound origins. Plugin events are
+at-most-once, per-node and dropped on overflow, so a plugin cannot give the durable,
+resumable, one-sender-per-destination delivery export needs without reimplementing a
+store cursor. Alerting has not shown that need, so it stays a plugin candidate. Designed:
+[2026-10-24-log-export-design.md](superpowers/specs/2026-10-24-log-export-design.md);
+metadata export is built, body export is not yet.
+
 ## Deliberately not planned
 
 - **Request-shape preflight.** `README.md` already scopes this out: the gateway does

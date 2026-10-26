@@ -294,3 +294,15 @@ test("res:logs refreshes both sessions summaries", () => {
   expect(stale(client, operator)).toBe(true);
   expect(stale(client, own)).toBe(true);
 });
+
+test("res:export makes the export destinations stale and nothing else", () => {
+  const client = seeded();
+  client.setQueryData(queryKeys.exportDestinations, { destinations: [] });
+
+  invalidateTopic(client, "res:export");
+
+  expect(stale(client, queryKeys.exportDestinations)).toBe(true);
+  expect(stale(client, queryKeys.keys)).toBe(false);
+  expect(stale(client, queryKeys.settings)).toBe(false);
+  expect(RES_TOPICS).toContain("res:export");
+});

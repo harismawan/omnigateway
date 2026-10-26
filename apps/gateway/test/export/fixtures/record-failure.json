@@ -1,0 +1,49 @@
+{
+  "schema": "omni.request_log/v1",
+  "id": "req_01JB7Q2W3E4R5T6Y7U8I9O0Q",
+  "at": "2026-10-25T00:00:00.005Z",
+  "completedAt": "2026-10-25T00:00:00.020Z",
+  "nodeId": null,
+  "apiKey": {
+    "id": null,
+    "label": null
+  },
+  "model": {
+    "requested": "gpt-5",
+    "resolved": null,
+    "provider": null
+  },
+  "credentialId": null,
+  "status": 503,
+  "errorCode": "NO_CANDIDATES",
+  "attempts": 0,
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0
+  },
+  "costUsd": 0,
+  "ttftMs": null,
+  "durationMs": 15,
+  "degradations": [],
+  "rtk": {
+    "applied": false,
+    "filterHits": 0,
+    "originalCodeUnits": 0,
+    "compressedCodeUnits": 0,
+    "estimatedTokensSaved": 0,
+    "filters": []
+  },
+  "session": {
+    "id": null,
+    "turn": null,
+    "agent": null
+  },
+  "tags": [],
+  "metadata": {},
+  "requestIds": {
+    "client": null,
+    "upstream": null
+  }
+}

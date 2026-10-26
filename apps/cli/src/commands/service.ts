@@ -1,5 +1,7 @@
 import { existsSync } from "node:fs";
 import {
+  type ExportDoctor,
+  exportDoctor,
   type GuardrailReadiness,
   guardrailReadiness,
   listPlugins,
@@ -11,9 +13,10 @@ import {
 } from "@omni/control";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import { resolvePin } from "@omni/store";
+import { readPostgresExportStatus, readSqliteExportStatus } from "@omni/store/exportStatus";
 import { boolFlag } from "../args.ts";
 import { type Command, state } from "../command.ts";
-import { CliError, type Context } from "../context.ts";
+import { CliError, type Context, postgresUrlOf } from "../context.ts";
 import { emit, fields, note, paint } from "../output.ts";
 import { gatewayEntrypoint } from "../runtime.ts";
 import {
@@ -425,6 +428,57 @@ function smartRouterLine(ctx: Context, readiness: SmartRouterReadiness | null): 
   return state(ctx, true, `${n} key${n === 1 ? "" : "s"}, kept local by ${readiness.localModel}`);
 }
 
+/**
+ * Log export, read-only, from whichever backend this installation is
+ * configured for. SQLite: destinations through the store, the worker's state
+ * from `export.db` opened read-only — never for writing, and a missing file
+ * stays missing. Postgres (`OMNI_DATABASE_URL` in cluster mode): one
+ * read-only connection with a short timeout, closed after; the SQLite file
+ * at the default path is never consulted then. Anything unreadable is
+ * "export status unavailable", not a failure of `doctor`.
+ *
+ * Whether the worker runs is judged from whether the gateway does, the only
+ * process it can live in — for a single node. A cluster's replicas are not
+ * this CLI's to supervise, so there it makes no claim.
+ */
+async function exportState(ctx: Context, gatewayRunning: boolean): Promise<ExportDoctor | null> {
+  if (ctx.configError !== null) return null;
+  const postgres = postgresUrlOf(ctx);
+  if (postgres !== null) {
+    const read = await readPostgresExportStatus(postgres);
+    return exportDoctor(read?.destinations ?? null, read?.states ?? null, {
+      now: ctx.now(),
+      gatewayRunning: null,
+    });
+  }
+  if (!existsSync(ctx.databasePath)) return null;
+  try {
+    const destinations = await (await ctx.store()).exportDestinations.list();
+    const states = destinations.length === 0 ? [] : readSqliteExportStatus(ctx.databasePath);
+    return exportDoctor(destinations, states, { now: ctx.now(), gatewayRunning });
+  } catch {
+    // Already reported by `config` or `database` above.
+    return null;
+  }
+}
+
+/** One line per finding for `doctor`, the first under the label. */
+function exportLines(ctx: Context, report: ExportDoctor | null): Array<[string, string]> {
+  const label = "log export";
+  if (report === null) return [[label, paint(ctx, "dim", "not checked")]];
+  if (report.status === "none") return [[label, paint(ctx, "dim", "no destinations")]];
+  const n =
+    report.destinations === null
+      ? "destinations unread"
+      : `${report.destinations} destination${report.destinations === 1 ? "" : "s"}`;
+  const lines: string[] = [
+    ...(report.available ? [] : [paint(ctx, "yellow", "export status unavailable")]),
+    ...report.warnings.map((warning) => paint(ctx, "yellow", warning)),
+  ];
+  if (lines.length === 0) return [[label, state(ctx, true, n)]];
+  return [[label, n], ...lines.map((line) => ["", line] as [string, string])];
+}
+
 export const doctor: Command = {
   usage: "doctor",
   summary: "Check what this CLI resolved, and whether it can do anything with it",
@@ -444,6 +498,7 @@ export const doctor: Command = {
     const strandedKeys = await danglingCredentials(ctx, plugins);
     const guardrail = await guardrailState(ctx);
     const smartRouter = await smartRouterState(ctx);
+    const exported = await exportState(ctx, status.running);
 
     const checks = {
       // First field, and named in the JSON as well as on stdout: the JSON form
@@ -474,6 +529,7 @@ export const doctor: Command = {
       danglingCredentials: strandedKeys,
       guardrail,
       smartRouter,
+      export: exported,
       // Repeated from stderr on purpose: `doctor` is the command an operator
       // runs to find out why the paths above are what they are, and `--json`
       // is read by scripts that never see stderr.
@@ -558,6 +614,7 @@ ${fields([
   ],
   ["usage policies", guardrailLine(ctx, guardrail, plugins)],
   ["smart routing", smartRouterLine(ctx, smartRouter)],
+  ...exportLines(ctx, exported),
   ...checks.warnings.map(
     (warning) => ["ignored", paint(ctx, "yellow", warning)] as [string, string],
   ),

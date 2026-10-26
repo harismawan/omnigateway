@@ -1,6 +1,7 @@
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
 import type { SQL } from "bun";
+import { exportPageSql } from "../exportPage.ts";
 import { logPageClauses, splitPage } from "../logPage.ts";
 import { HOUR_MS, hourOf, startOfDay } from "../sqlite/rollup.ts";
 import {
@@ -53,6 +54,7 @@ type Row = {
   rtk_compressed_code_units: string;
   rtk_estimated_tokens_saved: string;
   rtk_filters: string;
+  completed_at: string | null;
 } & TraceRow;
 
 function parseRtkFilters(raw: string): import("@omni/rtk/catalog").RtkFilterId[] {
@@ -91,6 +93,7 @@ const toLog = (r: Row): RequestLog => ({
   rtkEstimatedTokensSaved: num(r.rtk_estimated_tokens_saved),
   rtkFilters: parseRtkFilters(r.rtk_filters),
   ...readTrace(r),
+  completedAt: numOrNull(r.completed_at),
 });
 
 /**
@@ -167,14 +170,19 @@ function label(value: string | number | null): string {
   return text.length === 0 ? "unknown" : text;
 }
 
-const COLUMNS = `(id, state, node_id, at, api_key_id, requested_model, resolved_provider,
+const COLUMN_LIST = `id, state, node_id, at, api_key_id, requested_model, resolved_provider,
                   resolved_model, credential_id, attempts, status, error_code, input_tokens,
                   output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
                   cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
                   rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters,
-                  ${TRACE_COLUMN_NAMES.join(", ")})`;
+                  ${TRACE_COLUMN_NAMES.join(", ")}`;
+const COLUMNS = `(${COLUMN_LIST})`;
 
-const PLACEHOLDERS = `(${Array.from({ length: 26 + TRACE_COLUMN_NAMES.length }, (_, i) => `$${i + 1}`).join(",")})`;
+const PLACEHOLDER_LIST = Array.from(
+  { length: 26 + TRACE_COLUMN_NAMES.length },
+  (_, i) => `$${i + 1}`,
+).join(",");
+const PLACEHOLDERS = `(${PLACEHOLDER_LIST})`;
 
 function values(log: RequestLog, state: RequestState, nodeId: string): unknown[] {
   return [
@@ -209,8 +217,20 @@ function values(log: RequestLog, state: RequestState, nodeId: string): unknown[]
 }
 
 /**
+ * The database clock, in epoch ms. `completed_at` is stamped from this rather
+ * than from a replica's clock, so every writer in a cluster shares one clock
+ * and the export cursor orders their rows consistently. `clock_timestamp()`
+ * rather than `now()`: the latter is the transaction's start.
+ */
+const DB_NOW_MS = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
+/**
  * Completion upserts, because it serves both a request that began and one that
  * failed before dispatch ever ran.
+ *
+ * `completed_at` is the store's, never the caller's: the column list leaves it
+ * out, so a pending insert writes NULL, and only the two completing paths below
+ * stamp it — in the same statement that flips `state`.
  *
  * Three columns are deliberately not overwritten. `at` is omitted entirely, so
  * a row keeps the start time it was filed under and does not jump position in
@@ -219,7 +239,8 @@ function values(log: RequestLog, state: RequestState, nodeId: string): unknown[]
  * row that already began — when dispatch throws rather than yielding an error
  * event — and the log it completes may carry neither.
  */
-const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
+const COMPLETE = `INSERT INTO request_logs (${COLUMN_LIST}, completed_at)
+  VALUES (${PLACEHOLDER_LIST}, ${DB_NOW_MS})
   ON CONFLICT (id) DO UPDATE SET
     state = 'done',
     requested_model = COALESCE(NULLIF(EXCLUDED.requested_model, ''), request_logs.requested_model),
@@ -244,7 +265,8 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_compressed_code_units = EXCLUDED.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = EXCLUDED.rtk_estimated_tokens_saved,
     rtk_filters = EXCLUDED.rtk_filters,
-    ${traceCompleteSet("EXCLUDED")}
+    ${traceCompleteSet("EXCLUDED")},
+    completed_at = EXCLUDED.completed_at
   WHERE request_logs.state = 'pending'`;
 
 const sum = (row: SumRow | undefined) => ({
@@ -431,6 +453,22 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
               [cursor.at, cursor.id, limit],
             );
       return rows.map(toLog);
+    },
+
+    async exportPage(q) {
+      q.signal?.throwIfAborted();
+      const { sql: text, bindings } = exportPageSql(q, (n) => `$${n}`);
+      const query = sql.unsafe<Rows<Row>>(text, bindings);
+      // The worker's batch deadline: an abort cancels the statement server-side.
+      const cancel = (): void => {
+        query.cancel();
+      };
+      q.signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        return (await query).map(toLog);
+      } finally {
+        q.signal?.removeEventListener("abort", cancel);
+      }
     },
 
     async sumSince(apiKeyId: string, sinceMs: number, requestedModel?: string) {

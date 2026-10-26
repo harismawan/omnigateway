@@ -1,6 +1,7 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
+import { exportPageSql } from "../exportPage.ts";
 import { logPageClauses, splitPage } from "../logPage.ts";
 import {
   readSession,
@@ -60,6 +61,7 @@ type Row = {
   rtk_compressed_code_units: number;
   rtk_estimated_tokens_saved: number;
   rtk_filters: string;
+  completed_at: number | null;
 } & TraceRow;
 
 function parseRtkFilters(raw: string): import("@omni/rtk/catalog").RtkFilterId[] {
@@ -98,6 +100,7 @@ const toLog = (r: Row): RequestLog => ({
   rtkEstimatedTokensSaved: r.rtk_estimated_tokens_saved,
   rtkFilters: parseRtkFilters(r.rtk_filters),
   ...readTrace(r),
+  completedAt: r.completed_at,
 });
 
 /**
@@ -187,10 +190,16 @@ const COLUMNS = `(id, state, node_id, at, api_key_id, requested_model, resolved_
                   output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
                   cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
                   rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters,
-                  ${TRACE_COLUMN_NAMES.join(", ")})`;
+                  ${TRACE_COLUMN_NAMES.join(", ")}, completed_at)`;
 
-const PLACEHOLDERS = `(${Array.from({ length: 26 + TRACE_COLUMN_NAMES.length }, () => "?").join(",")})`;
+const PLACEHOLDERS = `(${Array.from({ length: 27 + TRACE_COLUMN_NAMES.length }, () => "?").join(",")})`;
 
+/**
+ * `completed_at` is the store's, never the caller's: whatever the log carries is
+ * ignored, a pending row is written without one, and a completion is stamped
+ * from the application clock — SQLite is one node, so that clock is the only
+ * one there is.
+ */
 function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryBindings[] {
   return [
     log.id,
@@ -220,6 +229,7 @@ function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryB
     log.rtkEstimatedTokensSaved ?? 0,
     JSON.stringify(log.rtkFilters ?? []),
     ...traceValues(log),
+    state === "done" ? Date.now() : null,
   ];
 }
 
@@ -266,7 +276,8 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_compressed_code_units = excluded.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = excluded.rtk_estimated_tokens_saved,
     rtk_filters = excluded.rtk_filters,
-    ${traceCompleteSet("excluded")}
+    ${traceCompleteSet("excluded")},
+    completed_at = excluded.completed_at
   WHERE request_logs.state = 'pending'`;
 
 /**
@@ -300,6 +311,14 @@ export const NARROWED_SQL = {
                    FROM request_logs
                   WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?`,
 } as const;
+
+/**
+ * The export read's table, pinned to the cursor's index: given a key filter,
+ * SQLite's planner otherwise takes the key's index and sorts that key's whole
+ * history on every poll. Exported for the plan test in `migrations.test.ts`,
+ * for the reason `NARROWED_SQL` is.
+ */
+export const EXPORT_FROM = "request_logs INDEXED BY idx_request_logs_completed";
 
 export function createUsageRepo(
   db: Database,
@@ -476,6 +495,15 @@ export function createUsageRepo(
               )
               .all(cursor.at, cursor.at, cursor.id, limit);
       return rows.map(toLog);
+    },
+
+    async exportPage(q) {
+      q.signal?.throwIfAborted();
+      const { sql, bindings } = exportPageSql(q, () => "?", EXPORT_FROM);
+      return db
+        .query<Row, SQLQueryBindings[]>(sql)
+        .all(...bindings)
+        .map(toLog);
     },
 
     async sumSince(apiKeyId: string, sinceMs: number, requestedModel?: string) {

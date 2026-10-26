@@ -1,0 +1,151 @@
+// The leaf, not the barrel: this module stays pure and light enough for the
+// export worker. The name rule lives in `@omni/control` because the config
+// write validates a pattern with it; one copy, so what the write accepted is
+// what this encoder sends.
+import { expandIndexPattern, indexNameProblem } from "@omni/control/exportIndex";
+import type { BatchEnvelope } from "../batch.ts";
+import type { RequestRecord } from "../record.ts";
+
+/**
+ * Elasticsearch / OpenSearch `_bulk` encoding, and reading its response.
+ *
+ * Every document is an `index` action whose `_id` is the request id, so a
+ * resend overwrites rather than duplicates. Pure: no I/O, no clock — the index
+ * date comes from the record's own `at`.
+ */
+
+/** Both flavours take NDJSON under this type. */
+export const BULK_CONTENT_TYPE = "application/x-ndjson";
+
+/** `_bulk` has no envelope: the body is the parts concatenated, each ending in `\n`. */
+export const BULK_ENVELOPE: BatchEnvelope = { fixedBytes: 0, separatorBytes: 0 };
+
+export type BulkOptions = { indexPattern: string };
+
+/**
+ * The index for a document started at `at` (epoch ms): every `{yyyy.MM.dd}` in
+ * the pattern becomes that UTC day, everything else is kept verbatim. Throws
+ * when the result is not a name Elasticsearch accepts.
+ *
+ * The thrown message quotes the operator-configured name, for a test or an
+ * admin-facing validation error. This module logs nothing; a caller that logs
+ * must log a fixed summary, never this message.
+ */
+export function indexName(pattern: string, at: number): string {
+  const name = expandIndexPattern(pattern, at);
+  const problem = indexNameProblem(name);
+  if (problem !== null) throw new RangeError(`${problem}: ${JSON.stringify(name)}`);
+  return name;
+}
+
+/** One document's action and source lines, newline-terminated. */
+export function bulkPart(record: RequestRecord, opts: BulkOptions): string {
+  const action = {
+    index: { _index: indexName(opts.indexPattern, Date.parse(record.at)), _id: record.id },
+  };
+  return `${JSON.stringify(action)}\n${JSON.stringify(record)}\n`;
+}
+
+export function encodeBulk(records: readonly RequestRecord[], opts: BulkOptions): string {
+  return records.map((record) => bulkPart(record, opts)).join("");
+}
+
+export type BulkDropped = { id: string | null; status: number; reason: string };
+
+/**
+ * What a `_bulk` reply means for the batch:
+ * - `retry` — the whole batch is resent later and the cursor does not move: a
+ *   retryable HTTP status, or any item at 429 / 5xx;
+ * - otherwise, if `failure` is set, the batch is a hard failure (a non-2xx the
+ *   worker does not retry, or a 2xx it cannot read — never a silent commit);
+ * - otherwise the batch commits, with `dropped` naming items the receiver
+ *   refused for good (mapping conflicts and the like).
+ *
+ * Reasons are the receiver's `error.type` only, and only when it is one of
+ * {@link ES_ERROR_TYPES}; anything else reads as {@link OTHER_ERROR_TYPE}.
+ * Its `reason` text is never read: it can echo document content.
+ */
+export type BulkOutcome = {
+  retry: boolean;
+  dropped: BulkDropped[];
+  failure: { status: number; reason: string } | null;
+};
+
+/**
+ * The Elasticsearch / OpenSearch error types this gateway will repeat — in
+ * `last_error`, status, logs and the console. A closed allowlist: an
+ * identifier-shaped `error.type` is still the receiver's text (a proxy or a
+ * hostile receiver can put a credential there), so only names on this list
+ * survive, and everything else reads as {@link OTHER_ERROR_TYPE}. Adding a
+ * name is a deliberate edit.
+ */
+export const ES_ERROR_TYPES: ReadonlySet<string> = new Set([
+  // Per-document refusals: the document is dropped and the batch commits.
+  "mapper_parsing_exception",
+  "document_parsing_exception",
+  "strict_dynamic_mapping_exception",
+  "version_conflict_engine_exception",
+  "illegal_argument_exception",
+  // Index or cluster refusals: usually the whole request.
+  "index_not_found_exception",
+  "cluster_block_exception",
+  "security_exception",
+  "circuit_breaking_exception",
+  "es_rejected_execution_exception",
+]);
+
+/** Every error type not in {@link ES_ERROR_TYPES}, and every unreadable one. */
+export const OTHER_ERROR_TYPE = "other";
+
+const UNREADABLE = "unreadable-bulk-response";
+const MAX_ID = 256;
+
+export function retryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+export function readBulkResponse(json: unknown, httpStatus: number): BulkOutcome {
+  if (retryableStatus(httpStatus)) return { retry: true, dropped: [], failure: null };
+  if (httpStatus < 200 || httpStatus > 299) {
+    const reason = isRecord(json) ? errorType(json.error) : OTHER_ERROR_TYPE;
+    return { retry: false, dropped: [], failure: { status: httpStatus, reason } };
+  }
+  const unreadable: BulkOutcome = {
+    retry: false,
+    dropped: [],
+    failure: { status: httpStatus, reason: UNREADABLE },
+  };
+  if (!isRecord(json)) return unreadable;
+  if (json.errors === false) return { retry: false, dropped: [], failure: null };
+  if (json.errors !== true || !Array.isArray(json.items)) return unreadable;
+
+  const dropped: BulkDropped[] = [];
+  let retry = false;
+  for (const item of json.items) {
+    // We send `index` actions only, so that is the only result we accept.
+    const result = isRecord(item) ? item.index : undefined;
+    const status = isRecord(result) ? result.status : undefined;
+    if (!isRecord(result) || typeof status !== "number" || !Number.isInteger(status)) {
+      return unreadable;
+    }
+    if (status >= 200 && status <= 299) continue;
+    if (status === 429 || status >= 500) {
+      retry = true;
+      continue;
+    }
+    const id = typeof result._id === "string" && result._id.length <= MAX_ID ? result._id : null;
+    dropped.push({ id, status, reason: errorType(result.error) });
+  }
+  return retry
+    ? { retry: true, dropped: [], failure: null }
+    : { retry: false, dropped, failure: null };
+}
+
+function errorType(error: unknown): string {
+  if (!isRecord(error) || typeof error.type !== "string") return OTHER_ERROR_TYPE;
+  return ES_ERROR_TYPES.has(error.type) ? error.type : OTHER_ERROR_TYPE;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

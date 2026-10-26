@@ -5,6 +5,7 @@ import type {
   BodyRepo,
   ConfigRepo,
   CredentialRepo,
+  ExportDestinationRepo,
   KeyRepo,
   MaintenanceRepo,
   PluginRepo,
@@ -16,6 +17,7 @@ import { createBodyRepo } from "./bodies.ts";
 import { createConfigRepo } from "./config.ts";
 import { createCredentialRepo } from "./credentials.ts";
 import { openDb } from "./db.ts";
+import { createExportDestinationRepo } from "./exportDestinations.ts";
 import { createKeyRepo } from "./keys.ts";
 import { createMaintenanceRepo } from "./maintenance.ts";
 import { createPluginRepo } from "./plugins.ts";
@@ -37,6 +39,7 @@ type Handle = {
   bodies: BodyRepo;
   maintenance: MaintenanceRepo;
   plugins: PluginRepo;
+  exportDestinations: ExportDestinationRepo;
 };
 
 /**
@@ -100,6 +103,7 @@ export async function createStore(opts: {
       // swap with everything else, which is why this is a handle repo and not
       // something a plugin is handed a `Database` to build for itself.
       plugins: createPluginRepo(db),
+      exportDestinations: createExportDestinationRepo(db, opts.encryptionKey),
     };
   };
 
@@ -180,6 +184,8 @@ export async function createStore(opts: {
       page: (query) => handle.usage.page(query),
       lastUsedByCredential: (credentialId) => handle.usage.lastUsedByCredential(credentialId),
       scan: (cursor, limit) => handle.usage.scan(cursor, limit),
+      // One required object, like `page`: the filter rides inside it.
+      exportPage: (q) => handle.usage.exportPage(q),
       sessions: (q) => handle.usage.sessions(q),
       get: (id) => handle.usage.get(id),
       aggregate: (q) => handle.usage.aggregate(q),
@@ -234,6 +240,16 @@ export async function createStore(opts: {
       listTables: (pluginId) => handle.plugins.listTables(pluginId),
       dropAll: (pluginId) => handle.plugins.dropAll(pluginId),
       orphanTables: (installedIds) => handle.plugins.orphanTables(installedIds),
+    },
+
+    exportDestinations: {
+      list: () => handle.exportDestinations.list(),
+      get: (id) => handle.exportDestinations.get(id),
+      create: (input) => handle.exportDestinations.create(input),
+      update: (id, patch) => handle.exportDestinations.update(id, patch),
+      remove: (id) => handle.exportDestinations.remove(id),
+      openSecret: (id) => handle.exportDestinations.openSecret(id),
+      openWithSecret: (id) => handle.exportDestinations.openWithSecret(id),
     },
 
     routing: {

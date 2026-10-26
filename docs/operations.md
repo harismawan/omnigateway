@@ -1,8 +1,8 @@
 # Operating the gateway
 
 Day-two material for a running installation: how gateway keys are bounded and
-what the counts mean, where the gateway's own output goes, recording request
-bodies for an incident, and the database — snapshots, restore, compaction,
+what the counts mean, where the gateway's own output goes, exporting the request
+log, recording request bodies for an incident, and the database — snapshots, restore, compaction,
 clearing bodies. First-run setup is in the [README](../README.md).
 
 ## Key limits
@@ -518,7 +518,144 @@ spreadsheet runs what it reads. Use JSONL when you need the bytes exactly.
 
 Retention applies first: an export can only contain rows the gateway still has,
 so a window older than `logRetentionDays` comes back short with nothing to say
-so. Check retention before exporting a range you intend to keep.
+so. Check retention before exporting a range you intend to keep. To keep rows
+past retention without a cron job, use [log export](#log-export).
+
+## Log export
+
+Destinations, record format, Elasticsearch mapping, webhook signatures and the
+Langfuse example are in the
+[README](../README.md#exporting-request-logs). This is what to expect once one
+is running.
+
+**Where it runs.** Export runs in a dedicated worker thread inside the gateway,
+started when the first destination exists and stopped when the last is removed.
+Inference does no export work and never waits on it: a destination that is
+failing, hanging or unreachable changes nothing about how requests are served.
+The worker reads the log on its own read-only handle and keeps its cursors in
+`export.db` beside the database (on Postgres, the `export_state` table), so it
+never writes the main SQLite file.
+
+**Lag.** The worker polls every 5 seconds and reads only rows that completed at
+least 10 seconds ago, so a request reaches its destination 10–15 seconds after it
+finished, plus the receiver's own time. A destination drains back to back — up
+to 500 records or 5 MiB per request, for up to 30 seconds per pass — so lag does
+not grow with traffic while the receiver keeps up. Destinations run
+independently: one slow receiver delays no other. A transaction that commits
+more than 10 seconds after it took its completion time could be passed over;
+completion is one short write, so this is accepted rather than guarded.
+
+**Failures.** A connection error, a timeout, 408, 429 or any 5xx leaves the
+cursor where it was and retries after a backoff: 1 s doubling to 5 minutes,
+jittered, longer if the receiver sends `Retry-After` (honoured up to 5 minutes).
+Any other 4xx, and any 3xx (redirects are not followed), means the
+configuration is wrong: the destination stays enabled, the cursor stays put,
+and it is retried every 5 minutes until you edit it or skip to now. In a cluster
+the backoff is the destination's, not a replica's: it is stored with the
+destination's state, so after one replica gets a 429 with `Retry-After: 300`, no
+replica sends to that destination for those 5 minutes. An edit (or a skip)
+releases it at once on every replica. Records a
+receiver rejects individually — Elasticsearch per-item mapping errors, OTLP
+`partialSuccess` — and a record too large for one request are counted as
+dropped, and the batch commits past them. Nothing is discarded silently: the
+last error, as a fixed summary like `HTTP 401` or
+`dropped 3 of 500: mapper_parsing_exception`, shows on the Export page beside
+lag and last success. A receiver's response text is never stored or shown, and
+an Elasticsearch error type is repeated only when it is one of a fixed list
+(`mapper_parsing_exception`, `document_parsing_exception`,
+`strict_dynamic_mapping_exception`, `version_conflict_engine_exception`,
+`illegal_argument_exception`, `index_not_found_exception`,
+`cluster_block_exception`, `security_exception`, `circuit_breaking_exception`,
+`es_rejected_execution_exception`); any other is summarised by its status alone
+(`HTTP 401`, `dropped 1 of 500`).
+
+**Gap warning.** Maintenance prunes `request_logs` at `logRetentionDays` as it
+always has; export never delays it. When a destination falls within a day of
+that horizon — it is lagging, failing or disabled for longer than retention
+minus a day — or when retention is shortened, the destination is flagged:
+*export is within a day of log retention or past it; rows may have been pruned
+before export*. It is a flag, not a count, and deliberately conservative — it
+fires whether or not a row was actually lost and whether or not the filter
+would have selected one; a destination added on an installation whose retention
+was ever shortened is flagged once, at its first check. It stays on the Export page and in `omni doctor` until
+you **Acknowledge** it, and comes back if it happens again. The one loss it can
+miss is a single request running longer than 24 hours whose start falls out of
+retention while it is still running.
+
+**Skip to now** (console, behind a confirm) is the answer to a destination broken
+long enough that its backlog is no longer wanted. It is a request, not an
+immediate move: the worker records the instant you asked and answers at once;
+the destination's next pass then walks every unsent row matching its filter
+that completed up to that instant without sending it, counting each as dropped, and clears the request once those
+rows have settled (about 10 seconds). It needs no reachable receiver and does not
+wait out a backoff, but it is applied only by a pass, so a **disabled**
+destination keeps the request until it is enabled again. A destination whose
+stored filter is unreadable is refused before any pass reads a row — its last
+error stays `filter unreadable` — so a skip queued on it waits until the filter
+is repaired.
+
+**Send test** posts one synthetic record (model `omni-export-test`) and reports
+the status and latency; it moves no cursor. **Preview a record** shows exactly
+what a given request id would be sent as.
+
+**The worker.** A worker that dies is restarted after 1 s, doubling to 60 s.
+Five deaths in ten minutes and it stays down until a destination changes (here,
+from the CLI, or on another cluster node) or the gateway restarts; the Export
+page says which state it is in, `omni_export_worker_restarts_total` counts
+restarts, and test, preview and skip answer 503 `export worker not running`
+meanwhile. Inference is unaffected throughout. On shutdown a batch in flight is
+abandoned uncommitted and sent again on the next start.
+
+**Cluster mode.** One replica at a time sends each destination, under a lease,
+and every cursor write is fenced, so a replica that stalls past its lease cannot
+move a cursor another has advanced. A replica's death hands the destination to
+another, which resumes from the committed cursor. Each replica's worker re-reads
+destinations every tick, so an edit made anywhere takes effect within seconds.
+An edit also stops a pass already running on the old configuration — its
+filter, URL and credential are read together, once, when the pass starts — and
+the next pass starts on the new one. Every edit moves the destination's
+revision (a counter the database increments, not a timestamp), which is how
+each replica tells an edit happened. Stopping the pass aborts a request still in
+flight and prevents any cursor write not yet authorised, so a batch the old
+receiver accepted after you saved may be sent again under the new configuration
+(at-least-once); only a cursor write already authorised before the edit may
+land. A pass's preparation and every batch run under its lease, renewed before
+each batch; a lease whose answer comes back too late, or a replica stalled past
+its lease, sends nothing.
+
+**Metrics**, on `/metrics` when it is enabled, labelled by destination id:
+
+| Metric | |
+| --- | --- |
+| `omni_export_records_total{outcome="sent\|dropped"}` | records delivered, or dropped by the receiver or a skip |
+| `omni_export_batches_total{outcome="ok\|retry\|failed"}` | requests accepted, to be retried, or refused as a configuration error |
+| `omni_export_lag_seconds` | now minus the destination's export position |
+| `omni_export_gap_warnings_total` | times a destination was flagged |
+| `omni_export_worker_restarts_total` | times this process restarted a dead worker (no label) |
+
+They are per process, as everything on `/metrics` is: in a fleet, the replica
+holding a destination's lease is the one whose counters move.
+
+**`omni doctor`** reports the destination count and warns on a destination more
+than an hour behind, one whose last error came more than 15 minutes after it was
+last known healthy, a gap warning not yet acknowledged, and enabled destinations
+with no gateway running to export them. It reads `export.db` read-only, or on a
+cluster the Postgres tables in a read-only transaction; if it cannot, it says
+`export status unavailable` rather than failing. A worker the running gateway
+has given up on shows on the Export page and `/metrics`, not in `doctor`.
+
+**Restore and import.** A restore or import from the Database screen pauses the
+worker first and waits for it to close every handle, then swaps the file, then
+resumes it on the restored database. Cursors are not in a snapshot; they survive
+by destination, so a restored destination resumes from its own cursor, and one
+the snapshot holds but the cursor store does not starts from its creation point.
+Rows completed after a cursor are sent, rows before it are treated as sent — at
+least once, and idempotent on Elasticsearch. A restore that fails before the
+swap resumes export as it was. A swap that fails part-way leaves export
+**halted** with the database, until a later restore succeeds or the gateway is
+restarted. If the worker will not exit within its budget, the restore is refused
+with nothing swapped (`export worker did not stop; nothing was restored`); try
+again, or restart the gateway.
 
 ## Recording bodies
 

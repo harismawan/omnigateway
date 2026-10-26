@@ -15,6 +15,11 @@ export type MetricName =
   | "omni_coord_faults_total"
   | "omni_metrics_series_folded_total"
   | "omni_otlp_spans_dropped_total"
+  | "omni_export_records_total"
+  | "omni_export_batches_total"
+  | "omni_export_lag_seconds"
+  | "omni_export_gap_warnings_total"
+  | "omni_export_worker_restarts_total"
   | "omni_build_info";
 
 export type MetricLabels = Readonly<Record<string, string>>;
@@ -40,6 +45,8 @@ export type MetricRegistry = {
   set(name: MetricName, labels: MetricLabels, value: number): void;
   observe(name: MetricName, value: number, labels: MetricLabels): void;
   value(name: MetricName, labels: MetricLabels): number;
+  /** Drops every series of `name` whose labels `match` accepts: a removed export destination's. */
+  drop(name: MetricName, match: (labels: MetricLabels) => boolean): void;
   snapshot(): MetricSnapshot;
 };
 
@@ -74,6 +81,20 @@ const DEFINITIONS: Readonly<
     type: "counter",
   },
   omni_otlp_spans_dropped_total: { help: "Spans dropped before OTLP export.", type: "counter" },
+  omni_export_records_total: { help: "Request-log records exported, by outcome.", type: "counter" },
+  omni_export_batches_total: { help: "Export batches attempted, by outcome.", type: "counter" },
+  omni_export_lag_seconds: {
+    help: "Database-clock now minus the destination's export position, in seconds.",
+    type: "gauge",
+  },
+  omni_export_gap_warnings_total: {
+    help: "Times a destination fell within a day of log retention.",
+    type: "counter",
+  },
+  omni_export_worker_restarts_total: {
+    help: "Times this process restarted a dead export worker.",
+    type: "counter",
+  },
   omni_build_info: { help: "Gateway build information.", type: "gauge" },
 };
 
@@ -146,6 +167,15 @@ export function createMetricRegistry(opts: {
     },
     value(name, labels) {
       return series.get(name)?.get(labelKey(labels))?.value ?? 0;
+    },
+    drop(name, match) {
+      const table = series.get(name);
+      if (table === undefined) return;
+      for (const [key, stored] of table) {
+        if (!match(stored.labels)) continue;
+        table.delete(key);
+        rawSeries.delete(`${name}:${key}`);
+      }
     },
     snapshot() {
       return {

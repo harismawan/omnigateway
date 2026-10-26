@@ -11,6 +11,9 @@ import type {
   DatabaseStats,
   Dimension,
   DisabledReason,
+  ExportDestination,
+  ExportDestinationType,
+  ExportFilter,
   LimitConfig,
   LimitConfigBase,
   PonytailMode,
@@ -48,6 +51,9 @@ export type {
   Dimension,
   DisabledReason,
   ErrorCode,
+  ExportDestination,
+  ExportDestinationType,
+  ExportFilter,
   LimitConfig,
   LimitConfigBase,
   PonytailMode,
@@ -930,3 +936,96 @@ export type CatalogProvider = {
 };
 
 export type CatalogResponse = { providers: CatalogProvider[] };
+
+/* ------------------------------------------------------------- log export -- */
+
+/**
+ * A log export destination as `/api/export/*` returns it. Never the secret,
+ * only `hasSecret`: the console shows a secret as set or not set and sends a
+ * replacement whole, or `null` to clear it.
+ *
+ * The configuration is the store's own `ExportDestination` as control's
+ * summary returns it — without `revision`, the export worker's change signal,
+ * which stays off the wire; `status` is the worker's report,
+ * hand-mirrored from `DestinationStatusView` in `apps/gateway/src/routes/export.ts`
+ * and pinned by `apps/gateway/test/routes/exportViewMirror.test.ts`.
+ */
+export type ExportDestinationStatus = {
+  /** Database-clock now minus the effective position; null before the first state row. */
+  lagMs: number | null;
+  lastSuccessAt: number | null;
+  /** A fixed gateway-authored summary ("HTTP 401", "timeout"), never a receiver body. */
+  lastError: string | null;
+  lastErrorAt: number | null;
+  exportedTotal: number;
+  droppedTotal: number;
+  /** Set while rows may have been pruned before export; cleared by acknowledging it. */
+  gapPossibleAt: number | null;
+  skipRequestedAt: number | null;
+  retryAt: number | null;
+  failing: boolean;
+};
+
+export type ExportDestinationView = Omit<ExportDestination, "revision"> & {
+  /** Null until the worker has reported this destination, and while it is not running. */
+  status: ExportDestinationStatus | null;
+};
+
+/**
+ * The export worker's supervisor state. Only `running` can answer a test,
+ * preview or skip; every other state is answered 503 `export worker not running`.
+ */
+export type ExportWorkerState =
+  | "idle"
+  | "running"
+  | "restarting"
+  | "down"
+  | "paused"
+  | "halted"
+  | "stopping"
+  | "stopped";
+
+export type ExportWorkerView = { state: ExportWorkerState; restarts: number };
+
+export type ExportDestinationsResponse = {
+  destinations: ExportDestinationView[];
+  worker: ExportWorkerView;
+};
+
+export type ExportDestinationResponse = { destination: ExportDestinationView };
+
+/**
+ * A create body. `secret` is the type's secret object; the gateway's schema
+ * judges it, so it is typed loosely here rather than restating three schemas.
+ */
+export type ExportDestinationCreate = {
+  id: string;
+  type: ExportDestinationType;
+  config: Record<string, unknown>;
+  startFrom: "now" | "oldest";
+  enabled?: boolean;
+  filter?: ExportFilter;
+  maxRequestBytes?: number | null;
+  secret?: Record<string, unknown>;
+};
+
+/** An edit: absent keeps, `secret: null` clears, a present `secret` replaces it whole. */
+export type ExportDestinationPatch = {
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+  filter?: ExportFilter;
+  maxRequestBytes?: number | null;
+  secret?: Record<string, unknown> | null;
+};
+
+/** A test's outcome. A delivery failure is an answer, not an error of the route. */
+export type ExportTestResult =
+  | { ok: true; status: number; latencyMs: number }
+  | { ok: false; status: number | null; error: string };
+
+export type ExportSkipResult = { ok: true; at: number };
+
+export type ExportGapAckResult = { ok: true; cleared: boolean };
+
+/** One record as it would be sent (`omni.request_log/v1`, bodies omitted). */
+export type ExportPreviewResponse = { record: unknown };

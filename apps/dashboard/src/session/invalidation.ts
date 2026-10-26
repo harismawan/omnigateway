@@ -86,6 +86,11 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
   "res:settings": { queryKey: queryKeys.settings },
   "res:models": { queryKey: queryKeys.models },
   /**
+   * Destinations and the worker's report on them share one read, so one key.
+   * Emitted on every export mutation and on material status changes.
+   */
+  "res:export": { queryKey: queryKeys.exportDestinations },
+  /**
    * Both things a quota write moves: the charts and the meters above them.
    *
    * `["quota-history", credentialId, since, until]` is the obvious half. The

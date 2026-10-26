@@ -68,6 +68,12 @@ const GATEWAY_OWNED = new Set([
   // A string literal exported from `dispatch/index.ts`: the fixed refusal for a
   // `localOnly` dispatch whose model is not local-only.
   "LOCAL_ONLY_MESSAGE",
+  // A string literal exported from `exportHost/supervisor.ts`: the fixed 503
+  // for an export worker that is not running.
+  "NOT_RUNNING",
+  // Which whole-database operation holds the restore guard in
+  // `routes/database.ts`: one of two literals that file names, typed as such.
+  "swapping",
   // This repository's own pattern, printed so a client learns the rule it
   // broke without being quoted its own value back.
   "TOOL_NAME.source",

@@ -184,3 +184,52 @@ test("the bundled CLI names that same version in doctor --json", () => {
   });
   expect(human.stdout.toString().split("\n")[0]).toBe("omni 9.9.9-test");
 });
+
+/**
+ * The export worker ships beside the server, and the bundled server finds it.
+ *
+ * `spawnExportWorker` starts it with `new Worker(url)`, which no bundler
+ * follows, so a package carrying only `gateway.js` boots fine and has no
+ * worker the moment a destination exists. The probe spawns it the way the
+ * server does, from the same `bundleGateway` the release runs; the control
+ * bundles the probe alone and must fail, or this test proves nothing.
+ */
+test("the bundled gateway can start its export worker", () => {
+  const dir = mkdtempSync(join(tmpdir(), "omni-export-worker-npm-"));
+  dirs.push(dir);
+  const db = join(dir, "omnigateway.db");
+  const probe = "apps/gateway/test/fixtures/export/workerProbe.ts";
+
+  const out = join(dir, "pkg");
+  const built = Bun.spawnSync(
+    [
+      "bun",
+      "-e",
+      `const { bundleGateway } = await import(${JSON.stringify(join(root, "scripts/build-npm.ts"))});
+       await bundleGateway(${JSON.stringify(out)}, "1.2.3", ${JSON.stringify(probe)});`,
+    ],
+    { cwd: root },
+  );
+  expect(built.exitCode === 0 ? "" : built.stderr.toString()).toBe("");
+  const run = Bun.spawnSync(["bun", "--no-install", join(out, "gateway.js"), db], { cwd: dir });
+  expect(run.stdout.toString().trim()).toBe(
+    JSON.stringify({ type: "previewResult", ref: "probe", ok: false, error: "no such request" }),
+  );
+
+  // The control: the server bundled without its worker beside it.
+  const alone = join(dir, "alone");
+  const bare = Bun.spawnSync(
+    [
+      "bun",
+      "-e",
+      `const { bundle } = await import(${JSON.stringify(join(root, "scripts/build-npm.ts"))});
+       await bundle(${JSON.stringify(probe)}, ${JSON.stringify(join(alone, "gateway.js"))}, "1.2.3");`,
+    ],
+    { cwd: root },
+  );
+  expect(bare.exitCode).toBe(0);
+  const missing = Bun.spawnSync(["bun", "--no-install", join(alone, "gateway.js"), db], {
+    cwd: dir,
+  });
+  expect(missing.stdout.toString().trim()).toBe("worker died");
+}, 60_000);

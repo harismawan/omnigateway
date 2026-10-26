@@ -18,6 +18,9 @@ import { deriveKey, openStore } from "@omni/store";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
 import { redisCoord } from "./coord/redis.ts";
+import { spawnExportWorker } from "./export/spawn.ts";
+import { createExportMetrics } from "./exportHost/metrics.ts";
+import { createExportSupervisor } from "./exportHost/supervisor.ts";
 import { createDeferredStop, createShutdown, type Shutdown } from "./lifecycle.ts";
 import { startMaintenance } from "./maintenance.ts";
 import { startRefreshScheduler } from "./oauth/scheduler.ts";
@@ -25,6 +28,7 @@ import { createPluginEventBus } from "./plugins/events.ts";
 import { installPluginProviders } from "./plugins/install.ts";
 import { loadPlugins } from "./plugins/loader.ts";
 import { startQuotaPoller } from "./quota/poller.ts";
+import { EXPORT_TOPIC } from "./routes/export.ts";
 import { createBroadcaster } from "./stream/broadcaster.ts";
 import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
 import { startConsoleStream } from "./stream/console.ts";
@@ -321,6 +325,42 @@ async function main(): Promise<void> {
     path: pluginRoot,
   });
 
+  /**
+   * The export worker's supervisor. Built before the app so the routes and
+   * the restore can reach it; started below, once the store is open and
+   * migrated — and then only when a destination exists. Everything export
+   * does runs in the worker; this thread spawns it, relays to it and keeps
+   * its latest status. Design: docs/superpowers/specs/2026-10-24-log-export-design.md.
+   */
+  const exportWorker = createExportSupervisor({
+    init: {
+      databasePath: config.clusterMode ? null : resolve(config.databasePath),
+      databaseUrl: config.clusterMode ? config.databaseUrl : null,
+      encryptionKey: config.encryptionKey,
+      redisUrl: config.clusterMode ? config.redisUrl : null,
+      nodeId,
+      logLevel: config.logLevel,
+      exportBodiesAllowed: config.exportBodiesAllowed,
+      gates: { bodyLoggingAllowed: config.bodyLoggingAllowed },
+    },
+    spawn: spawnExportWorker,
+    readDestinations: async () => {
+      const list = await store.exportDestinations.list();
+      return {
+        count: list.length,
+        // Changes with any create, edit (the database's `revision`) or
+        // delete-and-recreate (`generation`) — never a clock reading.
+        revision: list.map((d) => `${d.generation}@${d.revision}`).join(","),
+      };
+    },
+    timers: { setTimeout, clearTimeout: (handle) => clearTimeout(handle as Timer) },
+    now,
+    logger,
+    ...(telemetry.metricsEnabled ? { metrics: createExportMetrics(telemetry.registry) } : {}),
+    // Floored at one per two seconds by `INVALIDATION_FLOORS`.
+    onChange: () => broadcaster.invalidate(EXPORT_TOPIC),
+  });
+
   const app = createApp({
     store,
     coord,
@@ -345,6 +385,7 @@ async function main(): Promise<void> {
     dayOffsetMinutes: config.dayOffsetMinutes,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
     pluginUi: loadedPlugins.plugins,
+    exportWorker,
     // Only when something could receive one. `finishLog` builds the payload
     // before calling this, so passing it unconditionally would allocate a
     // RequestCompleted on every authenticated request of every install — and
@@ -401,6 +442,7 @@ async function main(): Promise<void> {
   // topic: whether `stream:console` exists at all is decided here, and nothing
   // downstream should be able to observe it half-decided.
   const stopConsoleStream = startConsoleStream({ console, broadcaster, logger, now, nodeId });
+  await exportWorker.start();
 
   // Elysia defaults Bun's socket `idleTimeout` to 30 seconds, which is shorter
   // than a request is allowed to take: `requestDeadlineMs` defaults to 0, and a
@@ -424,6 +466,9 @@ async function main(): Promise<void> {
       stopRefreshScheduler,
       stopQuotaPoller,
       stopConsoleStream,
+      // Posts `stop` and does not wait: the worker abandons its batch
+      // uncommitted, and is terminated with the process if it is still there.
+      () => exportWorker.stop(),
       () => pluginEvents.stop(),
       // Before `stopServer`, and that ordering is the point rather than tidiness.
       // `app.stop()` is called without `true`, so it drains rather than severs:

@@ -34,6 +34,17 @@ test("copies configuration, credentials, keys and completed logs into an empty s
     requestLog({ id: "r2", apiKeyId: key.id, at: 1_700_000_000_001, state: "pending" }),
   );
 
+  await source.exportDestinations.create({
+    id: "hook",
+    type: "webhook",
+    config: { url: "https://hook.example" },
+    filter: { failedOnly: true },
+    enabled: false,
+    maxRequestBytes: 2_048,
+    secret: "signing-secret",
+    startFrom: "oldest",
+  });
+
   const report = await copyStore(source, target_);
   expect(report.counts).toEqual({
     credentials: 1,
@@ -41,6 +52,7 @@ test("copies configuration, credentials, keys and completed logs into an empty s
     models: 1,
     requestLogs: 1,
     skippedPending: 1,
+    exportDestinations: 1,
   });
   expect(report.notCarried.length).toBeGreaterThan(0);
 
@@ -55,6 +67,35 @@ test("copies configuration, credentials, keys and completed logs into an empty s
   expect(copied?.revokedAt).not.toBeNull();
   expect((await target_.usage.recent(10)).map((row) => row.id)).toEqual(["r1"]);
   expect((await target_.usage.sumSince(key.id, 0)).requests).toBe(1);
+
+  // A destination arrives with its configuration and secret, but as a new
+  // destination: export state is not carried, so it starts at the copy's tail
+  // rather than re-sending every copied row.
+  const [hook] = await target_.exportDestinations.list();
+  const [original] = await source.exportDestinations.list();
+  expect(hook).toMatchObject({
+    id: "hook",
+    type: "webhook",
+    config: { url: "https://hook.example" },
+    filter: { failedOnly: true },
+    enabled: false,
+    maxRequestBytes: 2_048,
+    hasSecret: true,
+  });
+  expect(hook?.generation).not.toBe(original?.generation);
+  // The destination's initial cursor is `(startAt, '')`, and nothing copied is
+  // ahead of it — not even a row stamped in the same millisecond.
+  const [copiedLog] = await target_.usage.recent(1);
+  expect(hook?.startAt).toBeGreaterThan(copiedLog?.completedAt as number);
+  expect(
+    await target_.usage.exportPage({
+      after: { completedAt: hook?.startAt as number, id: "" },
+      settledBefore: Number.MAX_SAFE_INTEGER,
+      limit: 10,
+    }),
+  ).toEqual([]);
+  expect(await target_.exportDestinations.openSecret("hook")).toBe("signing-secret");
+  expect(report.notCarried.some((line) => line.startsWith("export state"))).toBe(true);
 
   // A second copy is refused: the target is no longer empty.
   await expect(copyStore(source, target_)).rejects.toThrow("already holds data");
@@ -118,8 +159,24 @@ if (pg === undefined) {
     await seedCredential(source, { id: "c1", accessToken: "test-token-1" });
     const { key } = await seedApiKey(source, { limits: {} });
     await source.usage.append(requestLog({ id: "r1", apiKeyId: key.id, at: 1_700_000_000_000 }));
+    await source.exportDestinations.create({
+      id: "es",
+      type: "elasticsearch",
+      config: { url: "https://es:9200" },
+      startFrom: "oldest",
+    });
 
     const report = await copyStore(source, target_);
+    // Postgres stamps from its own clock; the boundary must still be past the
+    // copied row on that clock.
+    const es = await target_.exportDestinations.get("es");
+    expect(
+      await target_.usage.exportPage({
+        after: { completedAt: es?.startAt as number, id: "" },
+        settledBefore: Number.MAX_SAFE_INTEGER,
+        limit: 10,
+      }),
+    ).toEqual([]);
     expect(report.counts.credentials).toBe(1);
     expect((await (await target_.credentials.get("c1"))?.secrets())?.accessToken).toBe(
       "test-token-1",

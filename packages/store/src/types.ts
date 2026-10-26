@@ -821,7 +821,20 @@ export type RequestLog = {
    * Operator-only: it names a request on the operator's provider account.
    */
   upstreamRequestId: string | null;
+  /**
+   * When the row became `done`, epoch ms: the export cursor's clock. Null while
+   * pending. **Store-owned**: stamped in the statement that completes the row —
+   * the application clock on SQLite, the database clock on Postgres so every
+   * replica shares one — and ignored on every write's input. `at` is when the
+   * request started, so a long request finishing after shorter, later ones is
+   * only ordered correctly by this. Design:
+   * docs/superpowers/specs/2026-10-24-log-export-design.md (*Cursor*).
+   */
+  completedAt: number | null;
 };
+
+/** The store-stamped fields of a log built outside the store — spread beside `EMPTY_TRACE`. */
+export const UNSTAMPED = { completedAt: null } as const satisfies Pick<RequestLog, "completedAt">;
 
 /** The trace fields of a row that carries no trace — spread into every log built without one. */
 export const EMPTY_TRACE = {
@@ -893,6 +906,15 @@ export type Settings = {
   breakerThreshold: number;
   breakerCooldownMs: number;
   logRetentionDays: number;
+  /**
+   * When `logRetentionDays` was last shortened, epoch ms; 0 if never. Written by
+   * `putSettings` alone, in the same write that lowers retention, as
+   * `max(stored + 1, now)` — and every settings write keeps `max(stored,
+   * incoming)`, so it never goes backwards, not even for a client resubmitting a
+   * stale settings object. The export worker compares it with what it last saw
+   * to raise the gap warning. Design: log-export spec, *Retention changes*.
+   */
+  logRetentionLoweredAt: number;
   /** Captured bodies expire independently, never later than request metadata. */
   bodyRetentionDays: number;
   /** How often provider quota is polled. Zero disables polling entirely. */
@@ -1469,6 +1491,44 @@ export type RequestLogQuery = {
  */
 export type RequestLogPage = { logs: RequestLog[]; next: RequestLogCursor | null };
 
+/**
+ * Which completed rows one export destination selects. Every present field is
+ * `AND`ed; an absent one does not filter. A present but empty list selects
+ * nothing — the operator named a set and it holds no one.
+ */
+export type ExportFilter = {
+  /** Exact key ids. Anonymous rows carry no key and never match. */
+  apiKeyIds?: string[];
+  /** Exact model names, matched against the requested **or** the resolved model. */
+  models?: string[];
+  /** Only rows with an error status (`status >= 400`). `false` does not filter. */
+  failedOnly?: boolean;
+};
+
+/**
+ * One batch of the export cursor: done rows completed after `after` and no
+ * later than `settledBefore`, ordered `(completedAt, id)`.
+ *
+ * `after` is **exclusive** — the row it names is not returned again — and
+ * `settledBefore` **inclusive**. The worker passes `now - 10 s` (the database
+ * clock on Postgres) so a row whose completing transaction is still committing
+ * is not overtaken. One object, for the reason `RequestLogQuery` is one: a
+ * forwarder cannot drop an argument it never sees separately.
+ */
+export type ExportPageQuery = {
+  after: { completedAt: number; id: string };
+  settledBefore: number;
+  limit: number;
+  filter?: ExportFilter;
+  /**
+   * The worker's per-batch deadline. An already-aborted signal refuses the
+   * read; on Postgres an abort mid-query cancels it. A SQLite statement is
+   * synchronous and cannot be interrupted once started — it is one short
+   * indexed read, which is what makes that acceptable.
+   */
+  signal?: AbortSignal;
+};
+
 /** What comparing the hourly rollup against the rows it summarizes found. */
 export type RollupAudit = {
   /** Buckets `request_logs` says should exist. Zero on an install with no traffic. */
@@ -1539,6 +1599,11 @@ export interface UsageRepo {
    * way to ask for the next one.
    */
   scan(cursor: { at: number; id: string } | null, limit: number): Promise<RequestLog[]>;
+  /**
+   * The export worker's read: see `ExportPageQuery`. Pending rows and rows
+   * without `completedAt` are never returned. Seeks `idx_request_logs_completed`.
+   */
+  exportPage(q: ExportPageQuery): Promise<RequestLog[]>;
   /**
    * Per `(api key, session)` totals over `[since, until]`, done rows only,
    * highest cost first, at most {@link SESSIONS_LIMIT}. Rows without a session
@@ -1845,6 +1910,132 @@ export interface PluginRepo {
   orphanTables(installedIds: readonly string[]): Promise<string[]>;
 }
 
+/** At most this many export destinations; `create` refuses the next with `ExportLimitError`. */
+export const MAX_EXPORT_DESTINATIONS = 10;
+
+export const EXPORT_DESTINATION_TYPES = ["elasticsearch", "webhook", "otlp"] as const;
+export type ExportDestinationType = (typeof EXPORT_DESTINATION_TYPES)[number];
+
+/** Thrown by `ExportDestinationRepo.create` when `MAX_EXPORT_DESTINATIONS` already exist. */
+export class ExportLimitError extends Error {
+  constructor() {
+    super(`at most ${MAX_EXPORT_DESTINATIONS} export destinations`);
+    this.name = "ExportLimitError";
+  }
+}
+
+/**
+ * One export destination's configuration, as every read returns it: never the
+ * secret, only whether one is set. Runtime state (cursor, counters, errors) is
+ * not here — it lives in `export_state`, keyed by `generation`.
+ */
+export type ExportDestination = {
+  /** Slug, `[a-z0-9-]{1,40}`; validated by `@omni/control`, not here. */
+  id: string;
+  /**
+   * Minted at creation and never changed: what runtime state is keyed by, so a
+   * deleted-and-recreated slug can never inherit an unrelated, advanced cursor.
+   */
+  generation: string;
+  type: ExportDestinationType;
+  enabled: boolean;
+  /** Type-specific and non-secret; validated by `@omni/control`, stored as given. */
+  config: Record<string, unknown>;
+  /** Match-nothing whenever `filterMalformed` is true. */
+  filter: ExportFilter;
+  /**
+   * The stored filter could not be read — bad JSON, a field of the wrong type,
+   * an unknown field. `filter` then selects nothing rather than everything, and
+   * the worker must refuse to export (and say why) rather than send rows outside
+   * a scope it cannot read. A filter written through the repo clears it.
+   */
+  filterMalformed: boolean;
+  includeBodies: boolean;
+  /** The encoded-request limit for this receiver; null takes the type's default. */
+  maxRequestBytes: number | null;
+  /**
+   * Where the cursor starts, as `(startAt, '')`: database-clock now for
+   * `startFrom: "now"`, 0 for `"oldest"`, and for `"afterExisting"` one past
+   * the latest `completed_at` already held (or now, whichever is later).
+   */
+  startAt: number;
+  hasSecret: boolean;
+  createdAt: number;
+  updatedAt: number;
+  /**
+   * 1 at creation, and incremented **by the database** in the same statement
+   * as every update — never derived from a clock, so two edits within one
+   * millisecond, or from replicas with skewed clocks, still differ. What the
+   * export worker compares to tell "this row changed" (a running pass is
+   * cancelled; a shared retry schedule written for another revision no longer
+   * binds). `updatedAt` is for display.
+   */
+  revision: number;
+};
+
+export type ExportDestinationInput = {
+  id: string;
+  type: ExportDestinationType;
+  config: Record<string, unknown>;
+  filter?: ExportFilter;
+  /** Defaults to true. */
+  enabled?: boolean;
+  /** Defaults to false. */
+  includeBodies?: boolean;
+  maxRequestBytes?: number | null;
+  /** Encrypted with the store's key before it is written. */
+  secret?: string | null;
+  /**
+   * `"afterExisting"` is for a copy into a new store: the copied rows were all
+   * stamped moments ago, possibly in the same millisecond as this creation, so
+   * `"now"` alone could leave one ahead of the cursor and re-send it.
+   */
+  startFrom: "now" | "oldest" | "afterExisting";
+};
+
+/**
+ * The fields an edit may change. Absent keeps; `secret: null` clears and a
+ * string replaces it whole. `id`, `type`, `generation` and `startAt` are fixed
+ * at creation.
+ */
+export type ExportDestinationPatch = {
+  config?: Record<string, unknown>;
+  filter?: ExportFilter;
+  enabled?: boolean;
+  includeBodies?: boolean;
+  maxRequestBytes?: number | null;
+  secret?: string | null;
+};
+
+/**
+ * Export destination configuration, written by the admin API alone. Not a
+ * routing table, so no write here emits a `RoutingChange` (and on Postgres the
+ * table carries no `bump_config_version` trigger).
+ */
+export interface ExportDestinationRepo {
+  /** Every destination, by id. */
+  list(): Promise<ExportDestination[]>;
+  get(id: string): Promise<ExportDestination | null>;
+  /** Throws `ExportLimitError` at `MAX_EXPORT_DESTINATIONS`, atomically with the insert. */
+  create(input: ExportDestinationInput): Promise<ExportDestination>;
+  /** The updated row, or null when no destination has that id. */
+  update(id: string, patch: ExportDestinationPatch): Promise<ExportDestination | null>;
+  /** Whether a row went. */
+  remove(id: string): Promise<boolean>;
+  /** The decrypted secret, or null when none is set. For the export worker only. */
+  openSecret(id: string): Promise<string | null>;
+  /**
+   * The destination and its decrypted secret, read by **one** statement, so
+   * the two always belong to the same version of the row: an edit replacing
+   * the URL and the secret together, or a delete and re-create of the slug,
+   * can never pair one version's config with another's secret. Null when no
+   * destination has that id. For the export worker only.
+   */
+  openWithSecret(
+    id: string,
+  ): Promise<{ destination: ExportDestination; secret: string | null } | null>;
+}
+
 export type RoutingChange =
   | { type: "healthSaved"; rows: CredentialHealth[] }
   | { type: "quotaSaved"; rows: QuotaWindow[] }
@@ -1877,6 +2068,7 @@ export type Store = {
   bodies: BodyRepo;
   maintenance: MaintenanceRepo;
   plugins: PluginRepo;
+  exportDestinations: ExportDestinationRepo;
   routing: RoutingChangeSource;
   /**
    * Closes the current database handle and opens a new one at `databasePath`.
@@ -1905,6 +2097,7 @@ export const DEFAULT_SETTINGS: Settings = {
   breakerThreshold: 3,
   breakerCooldownMs: 30_000,
   logRetentionDays: 30,
+  logRetentionLoweredAt: 0,
   bodyRetentionDays: 1,
   quotaPollIntervalMs: 300_000,
   rtkEnabled: false,
@@ -1923,6 +2116,35 @@ export const DEFAULT_SETTINGS: Settings = {
   smartRouterPolicy: DEFAULT_SMART_ROUTER_POLICY,
   smartRouterTimeoutMs: 10_000,
 };
+
+/** A stored `logRetentionLoweredAt`: a non-negative integer, else 0 ("never lowered"). */
+export const readRetentionLoweredAt = (value: unknown): number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+
+/**
+ * One settings write's result: the patch over what is stored, plus the
+ * retention marker, which never goes backwards.
+ *
+ * One copy for both backends' `putSettings`, which each call it with `current`
+ * read under their write lock. The marker keeps `max(stored, incoming)`, so a
+ * client resubmitting a stale settings object cannot erase it; and a write that
+ * shortens `logRetentionDays` moves it to `max(stored + 1, now)` — forward even
+ * across a clock step, so the export worker sees every shortening.
+ */
+export function mergeSettings(current: Settings, patch: Partial<Settings>, now: number): Settings {
+  const stored = current.logRetentionLoweredAt;
+  let marker = Math.max(stored, readRetentionLoweredAt(patch.logRetentionLoweredAt));
+  const days = patch.logRetentionDays;
+  if (typeof days === "number" && days < current.logRetentionDays) {
+    marker = Math.max(marker, stored + 1, now);
+  }
+  return {
+    ...current,
+    ...patch,
+    weights: { ...current.weights, ...patch.weights },
+    logRetentionLoweredAt: marker,
+  };
+}
 
 /** Whether a stored value is an integer inside `1..max`. */
 const inRange = (value: unknown, max: number): value is number =>

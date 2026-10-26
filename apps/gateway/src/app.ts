@@ -33,7 +33,8 @@ import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { clientRoutes } from "./routes/client.ts";
 import { connectRoutes } from "./routes/connect.ts";
-import { databaseRoutes } from "./routes/database.ts";
+import { databaseRoutes, type ExportPause } from "./routes/database.ts";
+import { absentExportWorker, type ExportWorkerHandle, exportRoutes } from "./routes/export.ts";
 import { proxyRoutes, REQUEST_ID_HEADER } from "./routes/proxy.ts";
 import { streamRoutes } from "./routes/stream.ts";
 import { type Broadcaster, createBroadcaster } from "./stream/broadcaster.ts";
@@ -171,6 +172,13 @@ export type AppDeps = {
   telemetry?: Telemetry;
   /** Registers `/metrics`; absent means the route does not exist. */
   metricsToken?: string;
+  /**
+   * The export worker's supervisor (`exportHost/supervisor.ts`), built by
+   * boot so `stopLoops` can reach it. Absent, the export routes still manage
+   * configuration and the worker's requests answer 503 — every test that
+   * does not care about export.
+   */
+  exportWorker?: ExportWorkerHandle & Partial<ExportPause>;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -359,6 +367,13 @@ export function createApp(deps: AppDeps) {
     });
   channelsRef = channels;
   const capture = deps.console;
+  const exportWorker = deps.exportWorker;
+  const exportPause: ExportPause | undefined =
+    exportWorker?.pause === undefined ||
+    exportWorker.resume === undefined ||
+    exportWorker.halt === undefined
+      ? undefined
+      : { pause: exportWorker.pause, resume: exportWorker.resume, halt: exportWorker.halt };
   const consoleFleet = createConsoleFleet({
     coord,
     nodeId,
@@ -503,10 +518,20 @@ export function createApp(deps: AppDeps) {
           latch,
           snapshots,
           broadcaster,
+          ...(exportPause === undefined ? {} : { exportWorker: exportPause }),
           fs: deps.databaseFs ?? nodeDatabaseFs(),
           now,
           logger,
           lifecycle: deps.lifecycle ?? absentLifecycle(),
+        }),
+      )
+      .use(
+        exportRoutes({
+          store: deps.store,
+          admin,
+          worker: deps.exportWorker ?? absentExportWorker,
+          broadcaster,
+          logger,
         }),
       )
       .use(

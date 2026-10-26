@@ -10,6 +10,7 @@ const GROUPS: ReadonlyArray<{ title: string; prefixes: readonly string[] }> = [
   { title: "Models", prefixes: ["models "] },
   { title: "Keys", prefixes: ["keys "] },
   { title: "Plugins", prefixes: ["plugin "] },
+  { title: "Log export", prefixes: ["export "] },
   { title: "Configuration", prefixes: ["settings ", "admin ", "db "] },
   { title: "Reports", prefixes: ["usage", "quota"] },
 ];
@@ -57,5 +58,10 @@ export function helpText(): string {
 export function commandHelp(name: string): string {
   const command = COMMANDS[name];
   if (command === undefined) return helpText();
-  return [`omni ${command.usage}`, "", command.summary].join("\n");
+  return [
+    `omni ${command.usage}`,
+    "",
+    command.summary,
+    ...(command.help === undefined ? [] : ["", command.help]),
+  ].join("\n");
 }

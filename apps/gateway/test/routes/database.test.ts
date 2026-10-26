@@ -9,6 +9,7 @@ import {
   type DatabaseStore,
   nodeDatabaseFs,
 } from "@omni/control";
+import { GatewayError } from "@omni/ir";
 import { createStore, deriveKey } from "@omni/store";
 import { virtualModel } from "@omni/testkit";
 import { createQuiesceLatch } from "../../src/quiesce.ts";
@@ -28,6 +29,10 @@ type HarnessOptions = {
   maxImportBytes?: number;
   /** The one step of a restore that runs after the swap has already succeeded. */
   rebuildRollupFails?: boolean;
+  /** Holds the export worker's pause until this settles. */
+  pauseHeld?: Promise<void>;
+  /** The export worker could not be quiesced: `pause` rejects. */
+  pauseRefused?: true;
 };
 
 /**
@@ -106,9 +111,32 @@ async function harness(options: HarnessOptions = {}) {
    */
   let invalidatedAll = 0;
 
+  /**
+   * The export worker as the restore sees it, recording each step and what
+   * the database looked like when it ran: `pause` must land before the swap,
+   * `resume` after the reopen.
+   */
+  const exportSteps: string[] = [];
+  const exportWorker = {
+    pause: async () => {
+      exportSteps.push(`pause:${latch.isClosed() ? "quiesced" : "serving"}`);
+      if (options.pauseHeld !== undefined) await options.pauseHeld;
+      if (options.pauseRefused === true) {
+        throw new GatewayError("OVERLOADED", "export worker did not stop; nothing was restored");
+      }
+    },
+    resume: async (swapped: boolean) => {
+      exportSteps.push(swapped ? "resume:swapped" : "resume");
+    },
+    halt: async () => {
+      exportSteps.push("halt");
+    },
+  };
+
   const app = databaseRoutes({
     store: routeStore,
     admin,
+    exportWorker,
     latch,
     broadcaster: {
       invalidateAll: () => {
@@ -189,6 +217,7 @@ async function harness(options: HarnessOptions = {}) {
     clock,
     holdSnapshots,
     invalidations: () => invalidatedAll,
+    exportSteps,
     call,
     login,
     upload,
@@ -406,6 +435,96 @@ test("a restore of this installation's own snapshot leaves the session alone", a
   // The whole reason the hashes are compared instead of assumed to differ.
   expect((await call("GET", "/api/database")).status).toBe(200);
 
+  cleanup();
+});
+
+test("a restore pauses the export worker before the swap and resumes it after", async () => {
+  const { call, snapshot, holdSnapshots, exportSteps, cleanup } = await harness();
+  const created = await snapshot();
+
+  const gate = Promise.withResolvers<void>();
+  holdSnapshots(gate.promise);
+  const restoring = call("POST", `/api/database/snapshots/${created.id}/restore`);
+  try {
+    await Bun.sleep(20);
+    // Paused, swap parked in its undo snapshot: not resumed yet.
+    expect(exportSteps).toEqual(["pause:quiesced"]);
+  } finally {
+    gate.resolve();
+  }
+  expect((await restoring).status).toBe(200);
+  expect(exportSteps).toEqual(["pause:quiesced", "resume:swapped"]);
+
+  cleanup();
+});
+
+test("a restore refused before the swap began resumes export", async () => {
+  const { upload, exportSteps, cleanup } = await harness();
+  const refused = await upload(new TextEncoder().encode("not a database at all"));
+  expect(refused.status).toBe(400);
+  expect(exportSteps).toEqual(["pause:quiesced", "resume"]);
+  cleanup();
+});
+
+test("an export worker that cannot be quiesced refuses the restore: nothing swapped, latch reopened", async () => {
+  const { call, snapshot, latch, store, exportSteps, cleanup } = await harness({
+    pauseRefused: true,
+  });
+  const created = await snapshot();
+  await store.config.putSettings({ logRetentionDays: 7 });
+  const refused = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+  expect(refused.status).toBe(503);
+  expect(((await refused.json()) as { error: { message: string } }).error.message).toBe(
+    "export worker did not stop; nothing was restored",
+  );
+  // Nothing was swapped: the setting written after the snapshot is still there.
+  expect((await store.config.getSettings()).logRetentionDays).toBe(7);
+  expect(latch.isClosed()).toBe(false);
+  expect(exportSteps).toEqual(["pause:quiesced", "resume"]);
+  // And the guard was released: a later restore runs.
+  cleanup();
+});
+
+test("a swap that failed leaves export stopped", async () => {
+  const { call, snapshot, exportSteps, cleanup } = await harness({
+    fs: {
+      rename: () => {
+        throw new Error("EXDEV");
+      },
+    },
+  });
+  const created = await snapshot();
+  const restored = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+  expect(restored.status).toBe(500);
+  expect(exportSteps).toEqual(["pause:quiesced", "halt"]);
+  cleanup();
+});
+
+test("a second restore while the first is pausing the worker is refused, and touches nothing", async () => {
+  const pause = Promise.withResolvers<void>();
+  const { call, latch, snapshot, exportSteps, cleanup } = await harness({
+    pauseHeld: pause.promise,
+  });
+  const created = await snapshot();
+
+  const first = call("POST", `/api/database/snapshots/${created.id}/restore`);
+  try {
+    await Bun.sleep(20);
+    expect(exportSteps).toEqual(["pause:quiesced"]);
+    const second = await call("POST", `/api/database/snapshots/${created.id}/restore`);
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { error: { message: string } }).error.message).toBe(
+      "a restore is already running on this database",
+    );
+    // The refusal neither paused, resumed nor reopened anything of the first one's.
+    expect(exportSteps).toEqual(["pause:quiesced"]);
+    expect(latch.isClosed()).toBe(true);
+  } finally {
+    pause.resolve();
+  }
+  expect((await first).status).toBe(200);
+  expect(exportSteps).toEqual(["pause:quiesced", "resume:swapped"]);
+  expect(latch.isClosed()).toBe(false);
   cleanup();
 });
 

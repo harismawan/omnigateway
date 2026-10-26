@@ -34,6 +34,14 @@ import type {
   DatabaseOverview,
   DryRunNeed,
   DryRunResult,
+  ExportDestinationCreate,
+  ExportDestinationPatch,
+  ExportDestinationResponse,
+  ExportDestinationsResponse,
+  ExportGapAckResult,
+  ExportPreviewResponse,
+  ExportSkipResult,
+  ExportTestResult,
   KeyCreateInput,
   KeyExpiryInput,
   KeyGuardrailInput,
@@ -211,6 +219,7 @@ export const queryKeys = {
   database: ["database"] as const,
   snapshots: ["database", "snapshots"] as const,
   lifecycle: ["lifecycle"] as const,
+  exportDestinations: ["export", "destinations"] as const,
   plugins: ["plugins"] as const,
   catalog: ["catalog"] as const,
 };
@@ -808,6 +817,92 @@ export function useRestoreSnapshot(): UseMutationResult<RestoreResult, Error, st
 export function useImportDatabase(): UseMutationResult<RestoreResult, Error, File> {
   return useMutation({
     mutationFn: (file: File) => post<RestoreResult>("/api/database/import", file),
+  });
+}
+
+/* ------------------------------------------------------------- log export -- */
+
+/**
+ * Export destinations and the worker's state, in one read.
+ *
+ * Polled only while nothing pushes `res:export`: the gateway emits it on every
+ * mutation and whenever a destination's status changes materially (floored at
+ * one per two seconds), so lag alone moving does not refetch under push.
+ */
+export function useExportDestinations(
+  cadence: Cadence = 10_000,
+): UseQueryResult<ExportDestinationsResponse> {
+  return useQuery({
+    queryKey: queryKeys.exportDestinations,
+    queryFn: ({ signal }) => get<ExportDestinationsResponse>("/api/export/destinations", signal),
+    refetchInterval: cadence,
+  });
+}
+
+const destinationPath = (id: string): string =>
+  `/api/export/destinations/${encodeURIComponent(id)}`;
+
+function useExportMutation<TVars, TResult>(
+  mutationFn: (vars: TVars) => Promise<TResult>,
+): UseMutationResult<TResult, Error, TVars> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.exportDestinations }),
+  });
+}
+
+export function useCreateExportDestination(): UseMutationResult<
+  ExportDestinationResponse,
+  Error,
+  ExportDestinationCreate
+> {
+  return useExportMutation((input: ExportDestinationCreate) =>
+    post<ExportDestinationResponse>("/api/export/destinations", input),
+  );
+}
+
+export function useUpdateExportDestination(): UseMutationResult<
+  ExportDestinationResponse,
+  Error,
+  { id: string; patch: ExportDestinationPatch }
+> {
+  return useExportMutation(({ id, patch }: { id: string; patch: ExportDestinationPatch }) =>
+    put<ExportDestinationResponse>(destinationPath(id), patch),
+  );
+}
+
+export function useRemoveExportDestination(): UseMutationResult<{ ok: true }, Error, string> {
+  return useExportMutation((id: string) => del<{ ok: true }>(destinationPath(id)));
+}
+
+/** Sends one synthetic record through the worker. A delivery failure resolves, not rejects. */
+export function useTestExportDestination(): UseMutationResult<ExportTestResult, Error, string> {
+  return useMutation({
+    mutationFn: (id: string) => post<ExportTestResult>(`${destinationPath(id)}/test`),
+  });
+}
+
+export function useSkipExportDestination(): UseMutationResult<ExportSkipResult, Error, string> {
+  return useExportMutation((id: string) => post<ExportSkipResult>(`${destinationPath(id)}/skip`));
+}
+
+/** `seenAt` is the `gapPossibleAt` the operator saw, so a newer warning is not cleared unseen. */
+export function useAcknowledgeExportGap(): UseMutationResult<
+  ExportGapAckResult,
+  Error,
+  { id: string; seenAt: number }
+> {
+  return useExportMutation(({ id, seenAt }: { id: string; seenAt: number }) =>
+    post<ExportGapAckResult>(`${destinationPath(id)}/gap/acknowledge`, { seenAt }),
+  );
+}
+
+/** One request's record as it would be sent; a mutation because it is asked for, not watched. */
+export function useExportPreview(): UseMutationResult<ExportPreviewResponse, Error, string> {
+  return useMutation({
+    mutationFn: (requestId: string) =>
+      get<ExportPreviewResponse>(withQuery("/api/export/preview", { requestId })),
   });
 }
 

@@ -9,8 +9,14 @@ import type {
   Target,
   VirtualModel,
 } from "../types.ts";
-import { DEFAULT_SETTINGS, readGuardrailSettings, readSmartRouterSettings } from "../types.ts";
-import type { Rows } from "./db.ts";
+import {
+  DEFAULT_SETTINGS,
+  mergeSettings,
+  readGuardrailSettings,
+  readRetentionLoweredAt,
+  readSmartRouterSettings,
+} from "../types.ts";
+import type { Conn, Rows } from "./db.ts";
 
 const SETTINGS_KEY = "settings";
 const ADMIN_HASH_KEY = "adminPasswordHash";
@@ -48,14 +54,63 @@ function knownWeights(stored: Partial<ScoringWeights> | undefined): ScoringWeigh
   };
 }
 
+/**
+ * A stored settings row as `getSettings` returns it, whatever it holds. A pure
+ * function of the raw text so `putSettings` can parse the row it locked.
+ */
+function parseSettings(raw: string | null): Settings {
+  if (raw === null) return DEFAULT_SETTINGS;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const stored =
+      parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Partial<Settings>)
+        : {};
+    // Only literal true enables this lossy transform, or either half of body
+    // capture. This runtime boundary must remain safe even if an old or
+    // manually-edited row is malformed: a truthy-but-not-true value must not
+    // start retaining prompts any more than it may start rewriting them.
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      rtkEnabled: stored.rtkEnabled === true,
+      // Absence means on, decided by `DEFAULT_SETTINGS`; a malformed value
+      // means off, the same answer as its neighbours.
+      autoCacheEnabled:
+        stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
+      // The same question its neighbours ask, put to a union instead of a
+      // boolean: anything that is not one of the four names means off.
+      ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
+      bodyRetentionDays:
+        Number.isInteger(stored.bodyRetentionDays) &&
+        (stored.bodyRetentionDays ?? 0) >= 1 &&
+        (stored.bodyRetentionDays ?? 0) <= 3_650
+          ? (stored.bodyRetentionDays as number)
+          : DEFAULT_SETTINGS.bodyRetentionDays,
+      logRetentionLoweredAt: readRetentionLoweredAt(stored.logRetentionLoweredAt),
+      bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
+      bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
+      weights: knownWeights(stored.weights),
+      // Malformed reads as unconfigured, which refuses a key carrying a
+      // policy rather than serving it unjudged. One copy for both backends.
+      ...readGuardrailSettings(stored),
+      // Malformed reads as off and unset, so a bad row never routes a
+      // request anywhere. One copy for both backends.
+      ...readSmartRouterSettings(stored),
+    };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
 export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void): ConfigRepo {
   const readRaw = async (key: string): Promise<string | null> =>
     (
       await sql.unsafe<Rows<{ value: string }>>("SELECT value FROM settings WHERE key = $1", [key])
     )[0]?.value ?? null;
 
-  const writeRaw = async (key: string, value: string): Promise<void> => {
-    await sql.unsafe(
+  const writeRaw = async (key: string, value: string, conn: Conn = sql): Promise<void> => {
+    await conn.unsafe(
       "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
       [key, value],
     );
@@ -91,58 +146,33 @@ export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void
     },
 
     async getSettings() {
-      const raw = await readRaw(SETTINGS_KEY);
-      if (raw === null) return DEFAULT_SETTINGS;
-      try {
-        const parsed: unknown = JSON.parse(raw);
-        const stored =
-          parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-            ? (parsed as Partial<Settings>)
-            : {};
-        // Only literal true enables this lossy transform, or either half of body
-        // capture. This runtime boundary must remain safe even if an old or
-        // manually-edited row is malformed: a truthy-but-not-true value must not
-        // start retaining prompts any more than it may start rewriting them.
-        return {
-          ...DEFAULT_SETTINGS,
-          ...stored,
-          rtkEnabled: stored.rtkEnabled === true,
-          // Absence means on, decided by `DEFAULT_SETTINGS`; a malformed value
-          // means off, the same answer as its neighbours.
-          autoCacheEnabled:
-            stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
-          // The same question its neighbours ask, put to a union instead of a
-          // boolean: anything that is not one of the four names means off.
-          ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
-          bodyRetentionDays:
-            Number.isInteger(stored.bodyRetentionDays) &&
-            (stored.bodyRetentionDays ?? 0) >= 1 &&
-            (stored.bodyRetentionDays ?? 0) <= 3_650
-              ? (stored.bodyRetentionDays as number)
-              : DEFAULT_SETTINGS.bodyRetentionDays,
-          bodyLoggingEnabled: stored.bodyLoggingEnabled === true,
-          bodyLoggingCaptureStreamChunks: stored.bodyLoggingCaptureStreamChunks === true,
-          weights: knownWeights(stored.weights),
-          // Malformed reads as unconfigured, which refuses a key carrying a
-          // policy rather than serving it unjudged. One copy for both backends.
-          ...readGuardrailSettings(stored),
-          // Malformed reads as off and unset, so a bad row never routes a
-          // request anywhere. One copy for both backends.
-          ...readSmartRouterSettings(stored),
-        };
-      } catch {
-        return DEFAULT_SETTINGS;
-      }
+      return parseSettings(await readRaw(SETTINGS_KEY));
     },
 
+    /**
+     * Read, merge and write in one transaction holding the settings row
+     * `FOR UPDATE`, so two replicas' writes serialise rather than each merging
+     * over the same read and the later erasing the earlier — which would lose
+     * `logRetentionLoweredAt` along with any other field. A fresh install has
+     * no row to lock, so one is inserted first (doing nothing if it exists);
+     * the insert itself waits on a concurrent first write's key.
+     */
     async putSettings(patch: Partial<Settings>) {
-      const current = await this.getSettings();
-      const next: Settings = {
-        ...current,
-        ...patch,
-        weights: { ...current.weights, ...patch.weights },
-      };
-      await writeRaw(SETTINGS_KEY, JSON.stringify(next));
+      const next = await sql.begin(async (tx): Promise<Settings> => {
+        await tx.unsafe(
+          "INSERT INTO settings (key, value) VALUES ($1, '{}') ON CONFLICT (key) DO NOTHING",
+          [SETTINGS_KEY],
+        );
+        const raw = (
+          await tx.unsafe<Rows<{ value: string }>>(
+            "SELECT value FROM settings WHERE key = $1 FOR UPDATE",
+            [SETTINGS_KEY],
+          )
+        )[0]?.value;
+        const merged = mergeSettings(parseSettings(raw ?? null), patch, Date.now());
+        await writeRaw(SETTINGS_KEY, JSON.stringify(merged), tx);
+        return merged;
+      });
       emit({ type: "settingsChanged" });
       return next;
     },

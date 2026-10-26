@@ -84,6 +84,9 @@ export const INVALIDATION_FLOORS: Readonly<Record<string, number>> = {
   "res:logs": 1_000,
   "res:quota": 5_000,
   "res:credentials": 5_000,
+  // Export status arrives up to once a second from the worker; the console's
+  // list does not need it faster than this.
+  "res:export": 2_000,
 };
 
 /** Everything else — the admin mutations, which are operator-paced already. */
