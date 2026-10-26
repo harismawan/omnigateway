@@ -24,7 +24,10 @@ CREATE TABLE export_destinations (
   max_request_bytes BIGINT,
   start_at          BIGINT NOT NULL,
   created_at        BIGINT NOT NULL,
-  updated_at        BIGINT NOT NULL
+  updated_at        BIGINT NOT NULL,
+  -- Incremented by every UPDATE in the same statement, never from a clock: the
+  -- worker's "this row changed" signal (updated_at is display only).
+  revision          BIGINT NOT NULL DEFAULT 1
 );
 
 -- Runtime state, one row per destination generation, written only by the

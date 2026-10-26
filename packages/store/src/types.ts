@@ -1962,6 +1962,15 @@ export type ExportDestination = {
   hasSecret: boolean;
   createdAt: number;
   updatedAt: number;
+  /**
+   * 1 at creation, and incremented **by the database** in the same statement
+   * as every update — never derived from a clock, so two edits within one
+   * millisecond, or from replicas with skewed clocks, still differ. What the
+   * export worker compares to tell "this row changed" (a running pass is
+   * cancelled; a shared retry schedule written for another revision no longer
+   * binds). `updatedAt` is for display.
+   */
+  revision: number;
 };
 
 export type ExportDestinationInput = {

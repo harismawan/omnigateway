@@ -11,7 +11,8 @@ import {
  * even reach a reader that would only have to remember to drop it.
  */
 export const DESTINATION_COLUMNS = `id, generation, type, enabled, config, filter, include_bodies,
-  max_request_bytes, start_at, created_at, updated_at, secret IS NOT NULL AS has_secret`;
+  max_request_bytes, start_at, created_at, updated_at, revision,
+  secret IS NOT NULL AS has_secret`;
 
 /** {@link DESTINATION_COLUMNS} plus the ciphertext, for the one read that opens it. */
 export const DESTINATION_WITH_SECRET_COLUMNS = `${DESTINATION_COLUMNS}, secret`;
@@ -29,6 +30,7 @@ export type DestinationRow = {
   start_at: number | string;
   created_at: number | string;
   updated_at: number | string;
+  revision: number | string;
   has_secret: number | boolean;
 };
 
@@ -114,5 +116,6 @@ export function readDestination(r: DestinationRow): ExportDestination | null {
     hasSecret: flag(r.has_secret),
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
+    revision: Number(r.revision),
   };
 }

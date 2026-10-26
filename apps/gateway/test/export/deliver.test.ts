@@ -40,6 +40,7 @@ function destination(over: Partial<ExportDestination>): ExportDestination {
     hasSecret: false,
     createdAt: 0,
     updatedAt: 0,
+    revision: 1,
     ...over,
   };
 }

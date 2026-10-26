@@ -333,8 +333,12 @@ const patchSchemas = {
 
 const bodiesSchema = z.object({ include: z.boolean() }).strict();
 
-/** A destination as any reader may see it: never the secret, only whether one is set. */
-export type DestinationSummary = ExportDestination;
+/**
+ * A destination as any reader may see it: never the secret, only whether one
+ * is set. `revision` is the export worker's change signal and stays off the
+ * wire; `updatedAt` is what a reader is shown.
+ */
+export type DestinationSummary = Omit<ExportDestination, "revision">;
 
 function summarize(d: ExportDestination): DestinationSummary {
   return {

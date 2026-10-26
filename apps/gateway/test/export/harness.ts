@@ -88,6 +88,7 @@ export function destination(over: Partial<ExportDestination> = {}): ExportDestin
     hasSecret: false,
     createdAt: T0 - 60_000,
     updatedAt: T0 - 60_000,
+    revision: 1,
     ...over,
   };
 }

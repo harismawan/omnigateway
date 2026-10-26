@@ -119,6 +119,7 @@ export function createExportDestinationRepo(db: Database, key: CryptoKey): Expor
         put("secret", patch.secret === null ? null : await encrypt(key, patch.secret));
       }
       put("updated_at", Date.now());
+      sets.push("revision = revision + 1");
       db.run(`UPDATE export_destinations SET ${sets.join(", ")} WHERE id = ?`, [...values, id]);
       return read(id);
     },

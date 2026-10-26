@@ -249,6 +249,20 @@ forEachStore((backend) => {
     expect(await s.exportDestinations.openSecret("bare")).toBeNull();
   });
 
+  test("revision starts at 1 and every update moves it by one, whatever the clock says", async () => {
+    const s = await backend.fresh();
+    const created = await s.exportDestinations.create(input());
+    expect(created.revision).toBe(1);
+    // Two updates within one millisecond still give two revisions.
+    const one = await s.exportDestinations.update("es-main", { enabled: false });
+    const two = await s.exportDestinations.update("es-main", { enabled: true });
+    expect([one?.revision, two?.revision]).toEqual([2, 3]);
+    expect((await s.exportDestinations.openWithSecret("es-main"))?.destination.revision).toBe(3);
+    // A recreated slug starts again at 1: a new generation, a new history.
+    await s.exportDestinations.remove("es-main");
+    expect((await s.exportDestinations.create(input())).revision).toBe(1);
+  });
+
   test("openWithSecret reads the row and its secret together, from one statement", async () => {
     const s = await backend.fresh();
     const created = await s.exportDestinations.create(

@@ -27,6 +27,7 @@ function dest(over: Partial<ExportDestination> = {}): ExportDestination {
     hasSecret: false,
     createdAt: NOW - 120 * MIN,
     updatedAt: NOW - 120 * MIN,
+    revision: 1,
     ...over,
   };
 }

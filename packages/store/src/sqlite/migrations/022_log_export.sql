@@ -33,5 +33,8 @@ CREATE TABLE export_destinations (
   max_request_bytes INTEGER,
   start_at          INTEGER NOT NULL,
   created_at        INTEGER NOT NULL,
-  updated_at        INTEGER NOT NULL
+  updated_at        INTEGER NOT NULL,
+  -- Incremented by every UPDATE in the same statement, never from a clock: the
+  -- worker's "this row changed" signal (updated_at is display only).
+  revision          INTEGER NOT NULL DEFAULT 1
 );

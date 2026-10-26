@@ -110,6 +110,7 @@ export function createExportDestinationRepo(sql: SQL, key: CryptoKey): ExportDes
         put("secret", patch.secret === null ? null : await encrypt(key, patch.secret));
       }
       put("updated_at", Date.now());
+      sets.push("revision = revision + 1");
       values.push(id);
       await sql.unsafe(
         `UPDATE export_destinations SET ${sets.join(", ")} WHERE id = $${values.length}`,
