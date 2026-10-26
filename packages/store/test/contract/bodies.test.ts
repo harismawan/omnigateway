@@ -32,6 +32,19 @@ function paddedJson(n: number): string {
 }
 
 /**
+ * Bytes shaped like a legacy envelope at any length — prefix, 24-hex IV, body
+ * hex, 32-hex tag — so only the ceiling is left to refuse them. Zeros rather
+ * than ciphertext: nothing past the ceiling is decrypted, so nothing need be.
+ */
+function legacyShaped(length: number): Uint8Array {
+  const bytes = new Uint8Array(length).fill(0x30);
+  bytes.set(new TextEncoder().encode("enc:v1:"), 0);
+  bytes[7 + 24] = 0x3a;
+  bytes[length - 33] = 0x3a;
+  return bytes;
+}
+
+/**
  * Replaces an artifact's stored bytes behind the store's back — the file on
  * SQLite, the column on Postgres — with the row's byte count and digest kept
  * honest, so neither is what decides. `null` removes the bytes. `digest` is
@@ -271,7 +284,7 @@ function child(value: unknown, key: string): unknown {
 }
 
 forEachStore((backend) => {
-  test("an artifact round-trips masked, bounded, encrypted, and named by UTC date", async () => {
+  test("an artifact round-trips masked, encrypted, and named by UTC date", async () => {
     const s = await backend.fresh();
     const marker = "CANARY-MARKER-DO-NOT-LEAK";
     const input = artifact({
@@ -391,29 +404,31 @@ forEachStore((backend) => {
   });
 
   /**
-   * `prepareArtifact` omits every body and then the error, and stops there: a
-   * frame of a few thousand attempts is still over budget with nothing left in
-   * it but markers. The writer refuses that plaintext, so `put` throws before
-   * any byte or row is written — the gateway reports a failed capture and keeps
-   * the request — rather than storing an envelope every reader calls `corrupt`.
+   * `prepareArtifact` omits every body and then the error, and refuses what is
+   * still over budget: the frame alone, which no gateway captures that large.
+   * `put` throws before any byte or row is written — the gateway reports a
+   * failed capture and keeps the request — rather than storing an envelope
+   * every reader calls `corrupt`.
    */
   test("an artifact over budget even once stripped is refused before anything is written", async () => {
     const s = await backend.fresh();
-    const attempts = Array.from({ length: 2500 }, (_, i) => ({
-      attempt: i + 1,
-      provider: "anthropic",
-      request: { prompt: "lorem ipsum dolor sit amet ".repeat(12) },
-      response: null,
-      streamChunks: null,
-      truncated: false,
-    }));
-    const huge = (requestId: string): BodyArtifact => artifact({ requestId, attempts });
-    const stripped = prepareArtifact(huge("req_huge"));
-    expect(child(stripped.artifact.error, "omitted")).toBe(true);
-    expect(Buffer.byteLength(stripped.json)).toBeGreaterThan(MAX_ARTIFACT_BYTES);
+    const huge = (requestId: string): BodyArtifact =>
+      artifact({
+        requestId,
+        attempts: [
+          {
+            attempt: 1,
+            provider: "p".repeat(MAX_ARTIFACT_BYTES),
+            request: null,
+            response: null,
+            streamChunks: null,
+            truncated: false,
+          },
+        ],
+      });
 
     await expect(s.bodies.put(huge("req_huge"))).rejects.toThrow(
-      /outside the binary envelope's bounds/,
+      `artifact exceeded ${MAX_ARTIFACT_BYTES} bytes with every body omitted`,
     );
     expect(await s.bodies.get("req_huge")).toBeNull();
     if (backend.name === "sqlite") {
@@ -428,6 +443,51 @@ forEachStore((backend) => {
     const read = await s.bodies.get("req_huge_retry");
     expect(read?.row).toEqual(row);
     expect(read?.artifact).toEqual(prepareArtifact(first).artifact);
+  });
+
+  /**
+   * The size the limit was raised for: a 20 MB prompt with its one attempt,
+   * stored whole — no string cut, no array trimmed — and read back through the
+   * store as exactly the masked JSON that was sealed. On Postgres that is a
+   * real `bytea` parameter and result through Bun SQL.
+   */
+  test("a 20 MB request with its attempt round-trips byte-identical after masking", async () => {
+    const s = await backend.fresh();
+    const turn = "the quick brown fox jumps over the lazy dog and keeps going. ";
+    const messages = Array.from({ length: 2000 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `${i}: ${turn.repeat(165)}`,
+    }));
+    const request = { model: "claude-opus-4-1-20250805", api_key: KEY_CANARY, messages };
+    const input = artifact({
+      requestId: "req_twenty_mb",
+      client: { request, response: { stop_reason: "end_turn" }, truncated: false },
+      attempts: [
+        {
+          attempt: 1,
+          provider: "anthropic",
+          request,
+          response: { stop_reason: "end_turn" },
+          streamChunks: null,
+          truncated: false,
+        },
+      ],
+    });
+    const prepared = prepareArtifact(input);
+    const plain = Buffer.byteLength(prepared.json);
+    expect(Buffer.byteLength(JSON.stringify(request))).toBeGreaterThan(20_000_000);
+    expect(plain).toBeLessThanOrEqual(MAX_ARTIFACT_BYTES);
+
+    const row = await s.bodies.put(input);
+    expect(row.sizeBytes).toBe(plain + 38);
+    const read = await s.bodies.get(input.requestId);
+    expect(read?.row.detailState).toBe("ready");
+    // One comparison of the whole text, so a failure does not print 40 MB.
+    const back = JSON.stringify(read?.artifact);
+    expect(back.length === prepared.json.length && back === prepared.json).toBe(true);
+    expect(child(read?.artifact?.client.request, "messages")).toHaveLength(2000);
+    expect(back).not.toContain("abcdefghij");
+    expect(read?.row.truncated).toBe(false);
   });
 
   test("a request id that could escape a shard directory is rejected on every store", async () => {
@@ -461,23 +521,21 @@ forEachStore((backend) => {
     const input = artifact();
     const row = await s.bodies.put(input);
     const relPath = row.relPath ?? "";
-    const key = await deriveKey(SECRET);
     const state = async (): Promise<string | undefined> =>
       (await s.bodies.get(input.requestId))?.row.detailState;
 
     await plant(backend, s, input.requestId, relPath, null);
     expect(await state()).toBe("missing");
 
-    // Authenticated and digest-matched: only the ceiling can turn it away, and
-    // having bytes too large to read is not the same fact as having none.
-    const past = new TextEncoder().encode(await encrypt(key, paddedJson(MAX_ARTIFACT_BYTES + 1)));
-    expect(past.length).toBe(CEILING + 2);
-    await plant(backend, s, input.requestId, relPath, past);
+    // A digest-matched legacy shape one byte past the ceiling: only the ceiling
+    // can turn it away, and having bytes too large to read is not the same fact
+    // as having none. Zeros, because nothing past the ceiling is decrypted.
+    await plant(backend, s, input.requestId, relPath, legacyShaped(CEILING + 1));
     expect(await state()).toBe("corrupt");
 
-    // Exactly at the ceiling is read, and the corrupt row recovers.
-    const at = new TextEncoder().encode(await encrypt(key, paddedJson(MAX_ARTIFACT_BYTES)));
-    expect(at.length).toBe(CEILING);
+    // Exactly at the binary ceiling is read, and the corrupt row recovers.
+    const at = (await sealArtifact(await deriveKey(SECRET), paddedJson(MAX_ARTIFACT_BYTES))).bytes;
+    expect(at.length).toBe(MAX_ARTIFACT_BYTES + 38);
     await plant(backend, s, input.requestId, relPath, at);
     expect(await state()).toBe("ready");
   });
@@ -516,7 +574,7 @@ forEachStore((backend) => {
       // The byte count and digest are the stored envelope's, not the plaintext's.
       expect(read?.row.sizeBytes).toBe(bytes.length);
       expect(read?.row.sha256).toBe(await sha256Hex(bytes));
-      // Whole artifact, as the writer prepared it: masked, bounded, flags kept.
+      // Whole artifact, as the writer prepared it: masked, flags kept.
       expect(read?.artifact).toEqual(prepared.artifact);
       expect(JSON.stringify(read?.artifact)).not.toContain("abcdefghij");
       expect(child(read?.artifact?.client.request, "prompt")).toContain("quick brown fox");
@@ -533,52 +591,52 @@ forEachStore((backend) => {
 
   test("an omitted artifact keeps its frame in every stored format", async () => {
     const s = await backend.fresh();
-    const wide: Record<string, string> = {};
-    for (let i = 0; i < 80; i++) wide[`k${i}`] = "lorem ipsum dolor sit amet ".repeat(400);
-    const base = artifact({
-      client: { request: wide, response: wide, truncated: false },
+    // Too deep for the native serializer, so it is omitted however small: the
+    // way to an omission marker that does not cost a 64 MiB body. Native
+    // serialization takes about a second to overflow, so the artifact is
+    // prepared by one real `put` and its JSON re-sealed in each format.
+    let deep: unknown = "leaf";
+    for (let i = 0; i < 100_000; i++) deep = [deep];
+    const input = artifact({
+      requestId: "req_omit",
+      client: { request: deep, response: { ok: true }, truncated: false },
       attempts: [
         {
           attempt: 1,
           provider: "anthropic",
-          request: wide,
-          response: wide,
+          request: { model: "fast" },
+          response: { ok: true },
           streamChunks: null,
           truncated: false,
         },
       ],
     });
-    const prepared = prepareArtifact(base);
-    expect(child(prepared.artifact.client.request, "omitted")).toBe(true);
+    const row = await s.bodies.put(input);
+    const written = (await s.bodies.get(input.requestId))?.artifact;
+    expect(child(written?.client.request, "omitted")).toBe(true);
+    expect(row.truncated).toBe(true);
+    const json = JSON.stringify(written);
     for (const format of FORMATS) {
-      const input = { ...base, requestId: `req_omit_${format}` };
-      const row = await s.bodies.put(input);
-      await plant(
-        backend,
-        s,
-        input.requestId,
-        row.relPath ?? "",
-        await seal(format, prepareArtifact(input).json),
-      );
+      await plant(backend, s, input.requestId, row.relPath ?? "", await seal(format, json));
       const read = await s.bodies.get(input.requestId);
-      expect(read?.row.detailState).toBe("ready");
-      expect(read?.artifact).toEqual(prepareArtifact(input).artifact);
-      expect(child(read?.artifact?.client.request, "omitted")).toBe(true);
+      expect(`${format}: ${read?.row.detailState}`).toBe(`${format}: ready`);
+      expect(read?.artifact).toEqual(written ?? null);
+      expect(child(read?.artifact?.client.request, "reason")).toBe("nesting too deep");
       expect(read?.artifact?.client.truncated).toBe(true);
       expect(read?.artifact?.attempts[0]?.provider).toBe("anthropic");
     }
-  });
+  }, 20_000);
 
   test("an artifact near the budget is gzipped and read back whole", async () => {
     const s = await backend.fresh();
-    // Distinct keys of prose, each inside the string budget, kept under the total.
+    // Distinct keys of prose, kept just under the total.
     const prose: Record<string, string> = {};
-    for (let i = 0; i < 30; i++)
-      prose[`k${i}`] = `section ${i}: ${"lorem ipsum dolor ".repeat(900)}`;
+    const section = "lorem ipsum dolor ".repeat(118_000);
+    for (let i = 0; i < 31; i++) prose[`k${i}`] = `section ${i}: ${section}`;
     const input = artifact({ client: { request: prose, response: null, truncated: false } });
     const prepared = prepareArtifact(input);
     const plain = Buffer.byteLength(prepared.json);
-    expect(plain).toBeGreaterThan(256 * 1024);
+    expect(plain).toBeGreaterThan(MAX_ARTIFACT_BYTES - 2 * 1024 * 1024);
     expect(plain).toBeLessThanOrEqual(MAX_ARTIFACT_BYTES);
     expect(child(prepared.artifact.client.request, "omitted")).toBeUndefined();
 

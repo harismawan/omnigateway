@@ -1139,8 +1139,29 @@ export type BodyDetailState = "none" | "ready" | "missing" | "corrupt";
 export type BodyPair = {
   request: unknown;
   response: unknown;
-  /** True when structural bounding altered either half. */
+  /**
+   * True when either half is not the whole body: capture stopped early, or the
+   * half is an omission marker. Artifacts written before bounding was removed
+   * also set it where bounding cut something.
+   */
   truncated: boolean;
+};
+
+/**
+ * What replaces a body the store would not keep, in place of the payload.
+ *
+ * A marker rather than silence: an operator looking at an incident needs to know
+ * the difference between "capture was off" and "capture ran and this could not
+ * be kept", and those are the same absence otherwise. Recognise one by
+ * `omitted: true` and a string `reason`, never by the reason's text: the text
+ * names the limit in force when it was written, and older artifacts carry
+ * older limits. `serializedBytes` is the size that was refused, or null when
+ * there is no size to give — a body too deeply nested to serialize has none.
+ */
+export type BodyOmission = {
+  omitted: true;
+  reason: string;
+  serializedBytes: number | null;
 };
 
 /** One provider attempt's wire pair, in dispatch order. */
@@ -1175,7 +1196,7 @@ export type BodyArtifact = {
   at: number;
   client: BodyPair;
   attempts: BodyAttempt[];
-  /** Whatever the request failed with, or null. Masked and bounded like a body. */
+  /** Whatever the request failed with, or null. Masked like a body. */
   error: unknown;
 };
 
@@ -1208,8 +1229,8 @@ export interface BodyRepo {
   /**
    * The only write path, and the reason there is no raw one.
    *
-   * Masking and structural bounding happen inside, before encryption, so no
-   * caller can write an unmasked or unbounded body even by mistake. Throws on a
+   * Masking and the size limit happen inside, before encryption, so no caller
+   * can write an unmasked or oversized body even by mistake. Throws on a
    * request id that could escape its shard directory, and propagates a failed
    * disk write: capture is the caller's to degrade, and it degrades to no
    * artifact rather than to a failed request.

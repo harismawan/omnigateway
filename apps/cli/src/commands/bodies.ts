@@ -40,10 +40,9 @@ const encoder = new TextEncoder();
  * How large one stored payload is as JSON.
  *
  * Not what crossed the wire, and not the file either. The artifact holds the
- * masked, structurally bounded copy, so every count here describes the *stored*
- * payload — which is the number worth printing, because it is the one an
- * operator compares against the bounds and against the other pairs in the same
- * request. The frame's `on disk` is the third number, the stored envelope, and
+ * masked copy, so every count here describes the *stored* payload — which is
+ * the number worth printing, because it is the one an operator compares against
+ * the limit and against the other pairs in the same request. The frame's `on disk` is the third number, the stored envelope, and
  * the table says which of the three it is rather than leaving a bare size to be
  * read as a request size.
  *

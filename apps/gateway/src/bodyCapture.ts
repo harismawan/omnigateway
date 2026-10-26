@@ -20,8 +20,8 @@ import { type BodyAttempt, type BodyPair, MAX_ARTIFACT_BYTES } from "@omni/store
  * A soft bound, not an accounting one. The streaming path measures the bytes it
  * read; the two buffered paths cut a string at this many code units, which is
  * never fewer bytes than it says. The hard bound on what is stored is the
- * structural bounding inside `bodies.put`, and it runs on everything captured
- * here whatever this let through.
+ * artifact budget inside `bodies.put`, which omits whatever this let through
+ * past it.
  *
  * Reusing the artifact ceiling as a per-body cap means the two numbers are not
  * the same bound. `MAX_ARTIFACT_BYTES` bounds one file on disk; this bounds each
@@ -150,10 +150,9 @@ export type FrameSink = {
  * A bounded home for the frames the gateway writes to a streaming client.
  *
  * A stream has no rendered body to record, so the frames are the response, and
- * a long one produces thousands of them. The most recent are kept, matching
- * what `MAX_ARRAY_ITEMS` does to an array on the way into an artifact: an
- * incident is about how a stream ended, and keeping the head would reliably
- * discard the terminal frame in favour of the first token.
+ * a long one produces thousands of them. The most recent are kept: an incident
+ * is about how a stream ended, and keeping the head would reliably discard the
+ * terminal frame in favour of the first token.
  */
 export function createFrameSink(): FrameSink {
   const frames: string[] = [];

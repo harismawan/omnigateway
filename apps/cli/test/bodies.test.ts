@@ -126,8 +126,8 @@ test("a truncated artifact says so rather than reading as complete", async () =>
  * Every byte count this command prints names what it measured.
  *
  * Three different numbers are in play — what crossed the wire, what was stored
- * after masking and structural bounding, and the encrypted file — and only the
- * last two are recorded anywhere. The gap is not marginal: a payload made mostly
+ * after masking, and the encrypted file — and only the last two are recorded
+ * anywhere. The gap is not marginal: a payload made mostly
  * of one long opaque token is stored as an elision. A bare `69 B` beside a
  * request is therefore read as a request size and is wrong, so the frame says
  * `on disk` and the table says what its columns are.

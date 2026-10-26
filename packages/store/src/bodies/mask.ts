@@ -204,6 +204,9 @@ export function maskString(value: string): string {
   );
 }
 
+/** A container copied but not yet filled: its source, and the copy to fill. */
+type Pending = [source: object, copy: unknown[] | Record<string, unknown>];
+
 /**
  * Masks every string value in a JSON-shaped tree, leaving the structure alone.
  *
@@ -211,17 +214,51 @@ export function maskString(value: string): string {
  * the provider, not a place secrets are carried, and rewriting one would corrupt
  * the very structure the artifact exists to let someone read.
  *
- * Runs before structural bounding rather than after. Bounding truncates strings,
- * and a secret cut in half is a secret that may no longer match the rule that
- * would have caught it whole.
+ * Iterative, with an explicit stack, because nothing bounds how deep a body
+ * nests: a few hundred kilobytes of `[` is a hundred thousand levels, which a
+ * recursive walk turns into a stack overflow and a lost capture. Each container
+ * is copied once and filled once, so a value reached twice is copied once and a
+ * cycle ends rather than spinning; neither occurs in parsed JSON.
  */
 export function maskSecrets(value: unknown): unknown {
-  if (typeof value === "string") return maskString(value);
-  if (Array.isArray(value)) return value.map(maskSecrets);
-  if (value !== null && typeof value === "object") {
-    // `fromEntries` defines own properties, so a `__proto__` key that arrived
-    // through `JSON.parse` stays a key rather than becoming an assignment.
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, maskSecrets(v)]));
+  const copies = new Map<object, unknown[] | Record<string, unknown>>();
+  const pending: Pending[] = [];
+
+  const copyOf = (input: unknown): unknown => {
+    if (typeof input === "string") return maskString(input);
+    if (input === null || typeof input !== "object") return input;
+    const seen = copies.get(input);
+    if (seen !== undefined) return seen;
+    const copy: unknown[] | Record<string, unknown> = Array.isArray(input)
+      ? new Array<unknown>(input.length)
+      : {};
+    copies.set(input, copy);
+    pending.push([input, copy]);
+    return copy;
+  };
+
+  const root = copyOf(value);
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const [source, copy] = next;
+    if (Array.isArray(copy)) {
+      const items = source as unknown[];
+      for (let i = 0; i < items.length; i++) copy[i] = copyOf(items[i]);
+      continue;
+    }
+    for (const [key, child] of Object.entries(source)) {
+      // Defined rather than assigned, so a `__proto__` key that arrived through
+      // `JSON.parse` stays a key rather than becoming the copy's prototype.
+      if (key === "__proto__") {
+        Object.defineProperty(copy, key, {
+          value: copyOf(child),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      } else {
+        copy[key] = copyOf(child);
+      }
+    }
   }
-  return value;
+  return root;
 }

@@ -5,12 +5,6 @@ export {
   bodiesDirFor,
   MAX_ARTIFACT_BYTES,
 } from "./bodies/artifact.ts";
-export {
-  MAX_ARRAY_ITEMS,
-  MAX_DEPTH,
-  MAX_OBJECT_KEYS,
-  MAX_STRING_BYTES,
-} from "./bodies/bound.ts";
 export * from "./encryption.ts";
 export { createPostgresStore } from "./postgres/store.ts";
 export { createBodyRepo } from "./sqlite/bodies.ts";

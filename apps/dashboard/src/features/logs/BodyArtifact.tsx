@@ -42,8 +42,8 @@ const ABSENCE: Record<Exclude<BodyDetailState, "ready">, { legend: string; messa
  * Exact bytes, never a compact figure.
  *
  * `formatCount` switches to compact notation past ten thousand, so 900,000 reads
- * as "900k". A size an operator is comparing against a stated 512 KB cap is a
- * number to read, not to skim.
+ * as "900k". A size an operator is comparing against a stated cap is a number to
+ * read, not to skim.
  */
 const BYTES = new Intl.NumberFormat("en-US");
 
@@ -109,7 +109,8 @@ const Payload = styled.pre`
  * because a body is whatever the client or the provider sent. This is the one
  * shape the gateway itself puts there, and telling it apart from a payload that
  * merely happens to have an `omitted` field is not worth more than checking
- * that the reason came with it.
+ * that the reason came with it. The reason's text is shown, never matched:
+ * artifacts written under an older limit carry an older reason.
  */
 function asOmission(value: unknown): BodyOmission | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
@@ -119,7 +120,7 @@ function asOmission(value: unknown): BodyOmission | null {
   return {
     omitted: true,
     reason: record.reason,
-    serializedBytes: typeof bytes === "number" ? bytes : 0,
+    serializedBytes: typeof bytes === "number" ? bytes : null,
   };
 }
 
@@ -147,9 +148,12 @@ function BodyBlock({ title, stage, value }: BodyBlockProps) {
       </Caption>
       {omitted !== null ? (
         <Note>
-          Too large to keep: {omitted.reason}. The payload was{" "}
-          {BYTES.format(omitted.serializedBytes)} bytes after structural bounding, so it was
-          replaced by this marker rather than written oversized or dropped without a trace.
+          Not kept: {omitted.reason}.
+          {omitted.serializedBytes === null
+            ? ""
+            : ` The artifact was ${BYTES.format(omitted.serializedBytes)} bytes.`}{" "}
+          The payload was replaced by this marker rather than written oversized or dropped without a
+          trace.
         </Note>
       ) : value === null || value === undefined ? (
         <Note>Nothing was recorded for this half — it never happened, or never completed.</Note>
@@ -244,10 +248,10 @@ export function BodyArtifact({ requestId }: { requestId: string }) {
     body.data === undefined || body.data.detailState !== "ready"
       ? undefined
       : // "on disk" rather than a bare size, because this is the stored envelope:
-        // it is measured after masking and structural bounding and then after
-        // encoding and encryption (hex in the legacy format), so it is neither
-        // what crossed the wire nor the size of the JSON below it. Naming the thing
-        // measured is cheaper than an operator reading it as a request size.
+        // it is measured after masking and then after encoding and encryption
+        // (hex in the legacy format), so it is neither what crossed the wire nor
+        // the size of the JSON below it. Naming the thing measured is cheaper
+        // than an operator reading it as a request size.
         `${BYTES.format(body.data.sizeBytes)} bytes on disk`;
 
   return (

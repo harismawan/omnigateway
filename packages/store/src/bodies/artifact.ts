@@ -4,8 +4,7 @@ import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { decrypt } from "../encryption.ts";
-import type { BodyArtifact, BodyAttempt } from "../types.ts";
-import { boundValue } from "./bound.ts";
+import type { BodyArtifact, BodyAttempt, BodyOmission } from "../types.ts";
 import { maskSecrets, maskString } from "./mask.ts";
 
 /**
@@ -16,15 +15,17 @@ import { maskSecrets, maskString } from "./mask.ts";
 export const ARTIFACT_SCHEMA_VERSION = 1;
 
 /**
- * The ceiling on one serialized artifact, applied after structural bounding.
+ * The ceiling on one serialized artifact, applied after masking.
  *
- * Bounding is per-value, so a payload can respect every one of its limits and
- * still be enormous in aggregate — eighty keys of sixty-four kilobytes each is
- * five megabytes of valid, bounded JSON. Past this the bodies are replaced by a
- * marker that records why, which is neither writing it oversized nor dropping it
- * without a trace.
+ * Nothing inside an artifact is bounded — no per-string, per-array, depth or
+ * key limit — so a body is stored whole up to this size or not at all. Past it
+ * the bodies are replaced by a marker that records why, which is neither
+ * writing it oversized nor dropping it without a trace. 64 MiB keeps every
+ * realistic body whole (Anthropic refuses requests over 32 MB) while the uint32
+ * claimed length, a Postgres `bytea` and a whole-artifact decrypt and parse all
+ * stay valid. Every reader ceiling below is derived from it, so it moves alone.
  */
-export const MAX_ARTIFACT_BYTES = 512 * 1024;
+export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
 /**
  * The row cap, which is what actually bounds disk.
@@ -37,19 +38,6 @@ export const BODY_ROW_CAP = 100_000;
 
 /** Sits beside the database file, so one directory is the whole installation. */
 export const BODIES_DIRNAME = "request_bodies";
-
-/**
- * What replaces the bodies of an artifact too large to store.
- *
- * A marker rather than silence: an operator looking at an incident needs to know
- * the difference between "capture was off" and "capture ran and this was too big
- * to keep", and those are the same absence otherwise.
- */
-export type BodyOmission = {
-  omitted: true;
-  reason: string;
-  serializedBytes: number;
-};
 
 const encoder = new TextEncoder();
 
@@ -97,14 +85,13 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 }
 
 /**
- * `truncated` is an OR, never a recomputation.
+ * `truncated` is carried, never recomputed.
  *
- * Bounding is one of two independent ways a body ends up incomplete, and it is
- * the only one visible from here. The other is the capture layer's: a client
- * that hung up mid-stream, a drain that ended on a source error, a response
- * past the byte cap. Those are facts the gateway knows and this function cannot
- * observe — a payload truncated by a disconnect is structurally unremarkable, so
- * deriving the flag from the value alone reports it as complete.
+ * Nothing here cuts a body, so the only ways one ends up incomplete are the
+ * capture layer's: a client that hung up mid-stream, a drain that ended on a
+ * source error, a response past the byte cap. Those are facts the gateway knows
+ * and this function cannot observe — a payload truncated by a disconnect is
+ * structurally unremarkable — so the incoming flag is the whole answer.
  *
  * An earlier version took only `{request, response}`, which silently discarded
  * the incoming flag and made every gateway-side truncation unrecordable.
@@ -114,21 +101,31 @@ function bodyPair(pair: { request: unknown; response: unknown; truncated?: boole
   response: unknown;
   truncated: boolean;
 } {
-  const request = boundValue(maskSecrets(pair.request));
-  const response = boundValue(maskSecrets(pair.response));
   return {
-    request: request.value,
-    response: response.value,
-    truncated: pair.truncated === true || request.truncated || response.truncated,
+    request: maskSecrets(pair.request),
+    response: maskSecrets(pair.response),
+    truncated: pair.truncated === true,
   };
 }
 
-function omission(serializedBytes: number): BodyOmission {
-  return {
-    omitted: true,
-    reason: `artifact exceeded ${MAX_ARTIFACT_BYTES} bytes after structural bounding`,
-    serializedBytes,
-  };
+/** Why `JSON.stringify` refused an artifact however small it was. */
+const NESTING_TOO_DEEP = "nesting too deep";
+
+/**
+ * The artifact as JSON, or null when the native serializer overflows its stack.
+ *
+ * Masking walks iteratively and has no depth limit; `JSON.stringify` recurses
+ * natively and does. Only a `RangeError` is turned into an answer: any other
+ * throw — a cycle, a `BigInt` — is not something a parsed body can contain, and
+ * stays the failed write it always was.
+ */
+function serialize(artifact: BodyArtifact): string | null {
+  try {
+    return JSON.stringify(artifact);
+  } catch (error) {
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
 }
 
 /**
@@ -136,8 +133,8 @@ function omission(serializedBytes: number): BodyOmission {
  *
  * The attempt list, its order, and its providers are what make an artifact a
  * story rather than a blob, and they cost nothing to keep. What goes is only the
- * payloads that made it too large. The error survives here because it is the one
- * field an operator opening an oversized artifact is most likely to be after.
+ * payloads that could not be stored. The error survives here because it is the
+ * one field an operator opening an omitted artifact is most likely to be after.
  */
 function omitBodies(artifact: BodyArtifact, marker: BodyOmission): BodyArtifact {
   return {
@@ -157,64 +154,79 @@ function omitBodies(artifact: BodyArtifact, marker: BodyOmission): BodyArtifact 
 }
 
 /**
- * Masks, bounds, and if necessary omits — the whole of what has to happen to a
- * body before it may be written.
+ * Masks and, if it must, omits — the whole of what has to happen to a body
+ * before it may be written.
  *
- * Masking runs before bounding on purpose. Bounding truncates strings, and a
- * secret cut in half is a secret that may no longer match the rule that would
- * have caught it whole.
+ * Nothing is cut. A body is stored whole or replaced whole by a marker saying
+ * why, because a body with pieces missing reads as a complete one; masking runs
+ * on every string either way.
  *
- * Pure, so the bounds can be tested without a filesystem, and separate from the
+ * Pure, so the limits can be tested without a filesystem, and separate from the
  * repository so there is one place to look when asking what a stored artifact
  * has had done to it.
  */
 export function prepareArtifact(input: BodyArtifact): { artifact: BodyArtifact; json: string } {
-  const client = bodyPair(input.client);
   const attempts = input.attempts.map((attempt): BodyAttempt => {
     const pair = bodyPair(attempt);
-    // Frames are strings by their type, and bounding an array of strings yields
-    // an array of strings: the array is trimmed to its last frames and each
-    // frame to its own byte budget. The assertion restates that, and is the only
-    // place `boundValue`'s `unknown` result is narrowed by construction.
-    const chunks =
-      attempt.streamChunks === null ? null : boundValue(attempt.streamChunks.map(maskString));
     return {
       attempt: attempt.attempt,
       provider: attempt.provider,
       request: pair.request,
       response: pair.response,
-      streamChunks: chunks === null ? null : (chunks.value as string[]),
-      truncated: pair.truncated || (chunks?.truncated ?? false),
+      streamChunks: attempt.streamChunks === null ? null : attempt.streamChunks.map(maskString),
+      truncated: pair.truncated,
     };
   });
-  const error = boundValue(maskSecrets(input.error));
 
-  const bounded: BodyArtifact = {
+  const masked: BodyArtifact = {
     schemaVersion: ARTIFACT_SCHEMA_VERSION,
     requestId: input.requestId,
     at: input.at,
-    client,
+    client: bodyPair(input.client),
     attempts,
-    error: error.value,
+    error: maskSecrets(input.error),
   };
 
-  const json = JSON.stringify(bounded);
+  const json = serialize(masked);
+  if (json === null) {
+    return omitted(masked, { omitted: true, reason: NESTING_TOO_DEEP, serializedBytes: null });
+  }
   // `byteLength` measures without materialising the bytes: `encoder.encode`
   // allocated a whole second copy of a body that is already at the budget.
   const size = Buffer.byteLength(json);
-  if (size <= MAX_ARTIFACT_BYTES) return { artifact: bounded, json };
+  if (size <= MAX_ARTIFACT_BYTES) return { artifact: masked, json };
+  return omitted(masked, {
+    omitted: true,
+    reason: `artifact exceeded ${MAX_ARTIFACT_BYTES} bytes`,
+    serializedBytes: size,
+  });
+}
 
-  const marker = omission(size);
-  const omitted = omitBodies(bounded, marker);
-  const omittedJson = JSON.stringify(omitted);
-  if (Buffer.byteLength(omittedJson) <= MAX_ARTIFACT_BYTES) {
-    return { artifact: omitted, json: omittedJson };
+/**
+ * The artifact with its bodies replaced by `marker`, and then its error if the
+ * error is what still does not fit, re-checked against the budget each time.
+ *
+ * The error was worth keeping right up until it was the thing over the budget
+ * or too deep to serialize. Past both, the frame alone is too large — no
+ * gateway captures one, since it names at most a handful of attempts — and that
+ * is refused here rather than handed to a writer that would refuse it later
+ * under a less specific name. "Never written oversized" is the promise.
+ */
+function omitted(
+  masked: BodyArtifact,
+  marker: BodyOmission,
+): { artifact: BodyArtifact; json: string } {
+  const bodiesOmitted = omitBodies(masked, marker);
+  const kept = serialize(bodiesOmitted);
+  if (kept !== null && Buffer.byteLength(kept) <= MAX_ARTIFACT_BYTES) {
+    return { artifact: bodiesOmitted, json: kept };
   }
-
-  // The error was worth keeping right up until it was the thing over the
-  // budget. "Never written oversized" is the stronger promise of the two.
-  const stripped: BodyArtifact = { ...omitted, error: marker };
-  return { artifact: stripped, json: JSON.stringify(stripped) };
+  const stripped: BodyArtifact = { ...bodiesOmitted, error: marker };
+  const json = JSON.stringify(stripped);
+  if (Buffer.byteLength(json) > MAX_ARTIFACT_BYTES) {
+    throw new Error(`artifact exceeded ${MAX_ARTIFACT_BYTES} bytes with every body omitted`);
+  }
+  return { artifact: stripped, json };
 }
 
 /**
@@ -252,9 +264,10 @@ const CODEC_GZIP = 1;
 
 /**
  * The gzip policy the benchmark measured against raw, and which no store writes:
- * on synthetic incompressible input at the 512 KiB cap its seal cost more
- * latency than the budget allowed, though representative cap fixtures stayed
- * within it (docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md).
+ * on synthetic incompressible input at the 512 KiB cap it was measured under,
+ * its seal cost more latency than the budget allowed, though representative cap
+ * fixtures stayed within it
+ * (docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md).
  * Below the cutoff gzip is not tried, since its header and footer eat most of
  * what a small body could save. Level 1 is the cheapest native setting. A saving
  * under the minimum is not worth a decompression on every read.
@@ -278,9 +291,8 @@ type SealedArtifact = { bytes: Uint8Array; sha256: string };
 /**
  * The plaintext as the binary envelope carries it, or a refusal.
  *
- * The budget is enforced here rather than trusted from `prepareArtifact`, whose
- * last fallback does not recheck it — a frame of a few thousand attempts is over
- * budget with every body already replaced by its marker. An envelope the reader
+ * The budget is enforced here as well as in `prepareArtifact`, because a writer
+ * is handed JSON and cannot know where it came from. An envelope the reader
  * would refuse must not be one a writer makes, so `put` throws instead, before
  * anything is written. The plaintext is what is measured, never a compressed
  * form, so a body over budget is not admitted for compressing well.
@@ -431,7 +443,17 @@ async function acquireArtifact(path: string): Promise<Uint8Array | ArtifactFailu
   }
 }
 
-const LEGACY_HEX = /^(?:[0-9a-f]{2})*$/;
+/**
+ * Lower-case hex, any length; evenness is checked separately. Not
+ * `^(?:[0-9a-f]{2})*$`: Bun's engine gives up on that group past about four
+ * million characters and answers false, which at a 64 MiB budget would call a
+ * well-formed envelope corrupt.
+ */
+const LEGACY_HEX_CHARS = /^[0-9a-f]*$/;
+
+function isLegacyHex(text: string): boolean {
+  return text.length % 2 === 0 && LEGACY_HEX_CHARS.test(text);
+}
 const LEGACY_IV_HEX_CHARS = 24;
 const LEGACY_TAG_HEX_CHARS = 32;
 
@@ -456,9 +478,9 @@ function isLegacyStructure(text: string): boolean {
     tag !== undefined &&
     iv.length === LEGACY_IV_HEX_CHARS &&
     tag.length === LEGACY_TAG_HEX_CHARS &&
-    LEGACY_HEX.test(iv) &&
-    LEGACY_HEX.test(body) &&
-    LEGACY_HEX.test(tag)
+    isLegacyHex(iv) &&
+    isLegacyHex(body) &&
+    isLegacyHex(tag)
   );
 }
 

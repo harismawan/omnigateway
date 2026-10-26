@@ -5,6 +5,7 @@ import type {
   BodyArtifact,
   BodyAttempt,
   BodyDetailState,
+  BodyOmission,
   BodyPair,
   Credential,
   CredentialHealth,
@@ -44,6 +45,7 @@ export type {
   BodyArtifact,
   BodyAttempt,
   BodyDetailState,
+  BodyOmission,
   BodyPair,
   Credential,
   CredentialHealth,
@@ -538,15 +540,6 @@ export type RequestBodyResponse = {
   at: number | null;
   artifact: BodyArtifact | null;
 };
-
-/**
- * The marker that replaced a body too large to keep.
- *
- * Written by the store in place of the payload, so an artifact that reads as
- * `ready` can still have nothing in it. Recognised structurally because the
- * bodies either side of it are `unknown` by design.
- */
-export type BodyOmission = { omitted: true; reason: string; serializedBytes: number };
 
 /** Which agent a generated configuration is for. */
 export type SetupClient = "claude" | "opencode";

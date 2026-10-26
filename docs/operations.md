@@ -702,16 +702,21 @@ without a settings edit. To retain the former body window, save an explicit
 `bodyRetentionDays` value before that sweep. Expiry runs on successful maintenance
 sweeps, not at an exact 24-hour access deadline. Lowering body retention deletes
 existing bodies on the next sweep without deleting still-retained request metadata. A hard **100,000-row cap** also applies, so
-capture is forensics, not an archive — size a volume against roughly 100 GB
-worst case, though most artifacts are kilobytes.
+capture is forensics, not an archive. One artifact may reach 64 MiB of JSON,
+so the theoretical worst case under the cap is terabytes; most artifacts are
+kilobytes, and body retention is what bounds a real corpus — size a volume for
+a day of captured traffic, or shorten `bodyRetentionDays`.
 
-That figure is stored-envelope bytes, not PostgreSQL table, TOAST, or WAL size.
-The 512 KB cap applies to the plaintext JSON; the stored file is larger. This
-version writes the binary envelope, `N + 38` bytes for a plaintext of N bytes.
-Earlier versions wrote a hex envelope, `2N + 65` bytes, about twice the cap at
-the limit; those artifacts stay readable, and nothing rewrites them, so a corpus
-is mixed until they expire under `bodyRetentionDays`, and the 100 GB worst case
-holds until then. A gzip codec is readable but not written
+Sizes here are stored-envelope bytes, not PostgreSQL table, TOAST, or WAL size.
+The 64 MiB cap applies to the plaintext JSON after masking; nothing inside a
+body is cut, so a body is kept whole or replaced by an omission marker that
+says why (too large, or nested too deeply to serialize). The stored file is
+larger than the plaintext. This version writes the binary envelope, `N + 38`
+bytes for a plaintext of N bytes. Earlier versions wrote a hex envelope,
+`2N + 65` bytes, under a 512 KB cap with structural bounds (long strings cut,
+long arrays trimmed); those artifacts stay readable as they were written, and
+nothing rewrites them, so a corpus is mixed until they expire under
+`bodyRetentionDays`. A gzip codec is readable but not written
 ([benchmark](superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md)).
 No compression ratio is promised. `SIZE` in `omni bodies` and the console is the
 stored envelope, so it differs by format.
@@ -724,8 +729,8 @@ record it `corrupt`; a v0.13.5-or-later reader recovers the row the next time it
 reads it. Roll back only to v0.13.5 or later; v0.13.5 itself stops binary writes
 and still reads the ones written. Rolling back further is unsafe until every binary
 artifact has expired under body retention, and disabling capture does not make it
-safe. An artifact above the reader's encoded-size ceiling (`1,048,641` bytes
-for the hex envelope, `524,326` for the binary one) reads as unreadable
+safe. An artifact above the reader's encoded-size ceiling (`134,217,793` bytes
+for the hex envelope, `67,108,902` for the binary one) reads as unreadable
 without being deleted; the gateway never writes one, and it recovers on its own if
 a reader accepts it later. The row digest covers the whole stored envelope and is
 checkable without the key; GCM authentication is what decides whether a body is
@@ -736,7 +741,7 @@ tokens are elided before write — a reduction in exposure, not a guarantee, and
 it costs fidelity. Treat the tree as you would the prompts themselves: encrypted
 at rest, on a volume you control, never pasted into a ticket.
 [ARCHITECTURE.md](../ARCHITECTURE.md#body-capture-forensics) documents the storage
-format, structural bounds, and masking rules.
+format, size limit, and masking rules.
 
 ## Snapshots and restore
 

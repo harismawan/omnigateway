@@ -941,11 +941,41 @@ describe("LogsBoard", () => {
     await user.click(await screen.findByText("fast"));
     const dialog = await screen.findByRole("dialog");
 
+    // A marker from an artifact written under the old cap: its reason is shown
+    // as written, never matched against today's.
     expect(
-      await within(dialog).findByText(/Too large to keep: artifact exceeded 524288 bytes/),
+      await within(dialog).findByText(
+        /Not kept: artifact exceeded 524288 bytes after structural bounding\./,
+      ),
     ).toBeTruthy();
-    expect(within(dialog).getByText(/900,000 bytes after structural bounding/)).toBeTruthy();
+    expect(within(dialog).getByText(/The artifact was 900,000 bytes\./)).toBeTruthy();
     expect(within(dialog).queryByText("Not captured")).toBeNull();
+  });
+
+  test("a body too deeply nested to serialize says why and claims no size", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({
+          requestId: "req-ok",
+          truncated: true,
+          artifact: bodyArtifact({
+            client: {
+              request: { omitted: true, reason: "nesting too deep", serializedBytes: null },
+              response: null,
+              truncated: true,
+            },
+            attempts: [],
+          }),
+        }),
+    });
+    renderWithProviders(<LogsBoard />);
+
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+
+    const note = await within(dialog).findByText(/Not kept: nesting too deep\./);
+    expect(note.textContent).not.toMatch(/bytes/);
   });
 
   test("a truncated artifact is flagged rather than passed off as whole", async () => {

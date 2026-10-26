@@ -609,12 +609,14 @@ test("writes a truncated artifact for a non-streaming request the client hung up
 test("marks a streamed response whose frames outgrew the sink as truncated", async () => {
   // Each delta is a single unbroken run, so masking collapses it and the stored
   // artifact stays small: this is measuring the sink's cap, not the artifact's.
-  const filler = "x".repeat(30_000);
+  // Each frame stays under the SSE decoder's own per-record ceiling, and enough
+  // of them pass the sink's cap.
+  const filler = "x".repeat(8 * 1024 * 1024);
   const huge = [
     ANTHROPIC_FRAMES[0] ?? "",
     ANTHROPIC_FRAMES[1] ?? "",
     ...Array.from(
-      { length: 20 },
+      { length: Math.ceil(MAX_CAPTURED_BODY_BYTES / filler.length) + 1 },
       () =>
         `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"${filler}"}}\n\n`,
     ),
@@ -666,26 +668,28 @@ test("degrades a failed artifact write to a missing artifact, not a failed reque
 
 /**
  * The same isolation, reached through the store's own refusal rather than a
- * stub. A frame of a few thousand attempts is over the artifact budget with
- * every body already omitted, and the binary writer will not seal it, so the
- * real `put` throws. The captured frame here has one attempt; the store is
- * handed it with thousands, because no fixture provider fails over that often.
+ * stub. A frame over the artifact budget with every body already omitted is
+ * refused, so the real `put` throws. The captured frame here is ordinary; the
+ * store is handed one whose provider name alone is past the budget, because no
+ * fixture provider produces a frame that large.
  */
-test("an artifact the writer refuses as over budget costs the request nothing", async () => {
+test("an artifact the store refuses as over budget costs the request nothing", async () => {
   const logger: CaptureLogger = captureLogger("debug");
   const { store, root, call } = await harness({ allowed: true, settings: CAPTURE_ON, logger });
   const put = store.bodies.put;
   store.bodies.put = (artifact) =>
     put({
       ...artifact,
-      attempts: Array.from({ length: 2500 }, (_, i) => ({
-        attempt: i + 1,
-        provider: "anthropic",
-        request: { prompt: "lorem ipsum dolor sit amet ".repeat(12) },
-        response: null,
-        streamChunks: null,
-        truncated: false,
-      })),
+      attempts: [
+        {
+          attempt: 1,
+          provider: "p".repeat(MAX_CAPTURED_BODY_BYTES),
+          request: null,
+          response: null,
+          streamChunks: null,
+          truncated: false,
+        },
+      ],
     });
 
   const res = await call(ASK);
@@ -696,7 +700,9 @@ test("an artifact the writer refuses as over budget costs the request nothing", 
   expect(rows).toHaveLength(1);
   expect(rows[0]?.state).toBe("done");
   const failure = logger.records.find((r) => r.msg === "failed to persist request bodies");
-  expect(failure?.fields.reason).toBe("artifact plaintext is outside the binary envelope's bounds");
+  expect(failure?.fields.reason).toBe(
+    `artifact exceeded ${MAX_CAPTURED_BODY_BYTES} bytes with every body omitted`,
+  );
   await cleanup(store, root);
 });
 
@@ -1075,9 +1081,9 @@ test("the frame sink keeps everything inside its cap and marks what it drops", (
   expect(sink.frames).toEqual(["first", "second", "third"]);
   expect(sink.truncated).toBe(false);
 
-  // Four frames of two hundred kilobytes, against a cap of five hundred and
-  // twelve: the first two and everything before them have to go.
-  const big = "y".repeat(200_000);
+  // Four frames of two fifths of the cap each: the first two and everything
+  // before them have to go.
+  const big = "y".repeat(Math.floor(MAX_CAPTURED_BODY_BYTES * 0.4));
   for (let i = 0; i < 4; i++) sink.write(`${i}:${big}`);
 
   expect(sink.truncated).toBe(true);

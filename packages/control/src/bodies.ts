@@ -19,7 +19,11 @@ export type RequestBodyRead = {
    * state rather than a 500.
    */
   detailState: BodyDetailState;
-  /** True when structural bounding or a mid-stream disconnect cut something. */
+  /**
+   * True when capture stopped early (a mid-stream disconnect, a body past the
+   * capture cap) or a body was omitted. Artifacts written before structural
+   * bounding was removed also set it where bounding cut something.
+   */
   truncated: boolean;
   /** Bytes as stored, which are ciphertext. Zero when nothing was written. */
   sizeBytes: number;
