@@ -277,7 +277,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
     } finally {
       reader.releaseLock();
     }
-    recordFrames(entry, entry.responseChunks.join(""));
+    if (options.captureStreamChunks) recordFrames(entry, entry.responseChunks.join(""));
   };
 
   const recordFrames = (entry: Attempt, text: string): void => {
