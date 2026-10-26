@@ -1451,3 +1451,43 @@ test("cluster: an edit with an older updatedAt (skewed replica) still releases t
   const s = await stateOf(b);
   expect([s.cursorId, s.retryAt, s.failing]).toEqual(["r1", null, false]);
 });
+
+test("cluster: an acquire whose answer arrives after the TTL claims no epoch", async () => {
+  // The reviewer's case: A's acquire succeeds in Redis, but its answer reaches
+  // A 61 s later. Meanwhile B takes the lapsed lease and claims epoch 1. A
+  // must not go on to claim epoch 2.
+  const { a, b, lease } = twoHolders();
+  a.answer = () => new Response(null, { status: 200 });
+  const real = lease.acquire.bind(lease);
+  let stall: (() => void) | null = null;
+  let stalled = false;
+  lease.acquire = async (name, holder, ttl) => {
+    const held = await real(name, holder, ttl);
+    if (holder === "node-a" && !stalled) {
+      stalled = true;
+      await new Promise<void>((resolve) => {
+        stall = resolve;
+      });
+    }
+    return held;
+  };
+  const claims: string[] = [];
+  a.beforeClaim = async () => {
+    claims.push("node-a");
+  };
+  b.beforeClaim = async () => {
+    claims.push("node-b");
+  };
+  await a.loop.start();
+  await a.settle();
+  expect(stall).not.toBeNull();
+  a.clock.now += LEASE_TTL_MS + 1_000;
+  await b.loop.start();
+  await b.settle();
+  expect(claims).toEqual(["node-b"]);
+  (stall as unknown as () => void)();
+  await a.settle();
+  expect(claims).toEqual(["node-b"]);
+  expect(a.sent).toHaveLength(0);
+  expect((await stateOf(b)).epoch).toBe(1);
+});

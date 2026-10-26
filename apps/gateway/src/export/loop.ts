@@ -71,6 +71,12 @@ export const POLL_MS = 5_000;
 export const PASS_MS = 30_000;
 export const BATCH_DEADLINE_MS = 45_000;
 export const LEASE_TTL_MS = 60_000;
+/**
+ * How much of the lease is not trusted: the lease counts as lost this long
+ * before its TTL, so a holder near expiry stops before another node, whose
+ * clock may run ahead, can take it. Still leaves 55 s, past the 45 s batch.
+ */
+export const LEASE_SAFETY_MS = 5_000;
 export const STATUS_INTERVAL_MS = 1_000;
 export const ORPHAN_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `stop` waits for in-flight passes to unwind before closing handles regardless. */
@@ -469,16 +475,31 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
    */
   async function runPass(h: Handles, rt: Runtime, signal: AbortSignal): Promise<void> {
     const name = `export:${rt.destination.generation}`;
-    if (h.lease !== null && !(await h.lease.acquire(name, nodeId, LEASE_TTL_MS))) return;
+    // The TTL runs from when the lease was *asked for*, not from when the
+    // answer arrived: an answer delayed past it describes a lease another
+    // node may already hold, so the pass ends there — no ensure, no claim,
+    // no send — and lets go of whatever it may still hold.
+    const asked = deps.now();
+    if (h.lease !== null) {
+      if (!(await h.lease.acquire(name, nodeId, LEASE_TTL_MS))) return;
+      if (deps.now() - asked >= LEASE_TTL_MS - LEASE_SAFETY_MS) {
+        logger.info("export lease answered too late", { reason: "lease expired" });
+        await h.lease.release(name, nodeId).catch(() => {});
+        return;
+      }
+    }
     const lease = new AbortController();
     let timer: unknown = null;
-    // When the lease was last confirmed, before the call that confirmed it.
-    let heldSince = deps.now();
+    // When the lease was last confirmed: before the call that confirmed it.
+    let heldSince = asked;
     const arm = (from: number): void => {
       if (h.lease === null) return;
       heldSince = from;
       if (timer !== null) timers.clearTimeout(timer);
-      timer = timers.setTimeout(() => lease.abort(LEASE_LOST), LEASE_TTL_MS - (deps.now() - from));
+      timer = timers.setTimeout(
+        () => lease.abort(LEASE_LOST),
+        Math.max(0, LEASE_TTL_MS - LEASE_SAFETY_MS - (deps.now() - from)),
+      );
     };
     arm(heldSince);
     /**
@@ -487,7 +508,8 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
      * by its old holder may have been someone else's in between, so it does
      * not count as renewed.
      */
-    const lapsed = (): boolean => lease.signal.aborted || deps.now() - heldSince >= LEASE_TTL_MS;
+    const lapsed = (): boolean =>
+      lease.signal.aborted || deps.now() - heldSince >= LEASE_TTL_MS - LEASE_SAFETY_MS;
     const renew = async (): Promise<boolean> => {
       if (h.lease === null) return true;
       if (lapsed()) {
