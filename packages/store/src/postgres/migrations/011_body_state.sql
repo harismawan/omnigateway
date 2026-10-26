@@ -3,6 +3,11 @@
 -- docs/superpowers/specs/2026-10-24-log-export-design.md (*Capture state on the
 -- row*). No backfill — a row older than the column never had its capture
 -- tracked — and no trigger: `request_logs` moves no `config_version`.
+--
+-- The column alone, and its index in 012, because the runner applies each
+-- migration in one transaction and locks are held to its end. `ADD COLUMN`
+-- with no default takes ACCESS EXCLUSIVE — not even reads get past it — but is
+-- metadata-only, so committed on its own it is gone in an instant. Beside a
+-- `CREATE INDEX` it would be held for the whole of that index's table scan,
+-- refusing every read and write of `request_logs` until it finished.
 ALTER TABLE request_logs ADD COLUMN body_state TEXT;
-CREATE INDEX idx_request_logs_body_pending ON request_logs (completed_at)
-  WHERE body_state = 'pending';

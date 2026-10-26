@@ -356,13 +356,14 @@ forEachStore((backend) => {
   test("the migration leaves every row that predates it with no body state", async () => {
     const s = await backend.fresh();
     await s.usage.append(logRow({ id: "old", at: AT }));
-    const id = backend.name === "sqlite" ? 23 : 11;
+    // One migration on SQLite; the column and its index apart on Postgres.
+    const ids = backend.name === "sqlite" ? "23" : "11, 12";
     await exec(
       backend,
       s,
       "DROP INDEX idx_request_logs_body_pending",
       "ALTER TABLE request_logs DROP COLUMN body_state",
-      `DELETE FROM migrations WHERE id = ${id}`,
+      `DELETE FROM migrations WHERE id IN (${ids})`,
     );
     const reopened = await backend.sibling();
     expect((await reopened.usage.get("old"))?.bodyState).toBeNull();

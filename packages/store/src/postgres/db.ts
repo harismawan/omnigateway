@@ -10,6 +10,7 @@ import keySmartRouting008 from "./migrations/008_key_smart_routing.sql" with { t
 import requestTrace009 from "./migrations/009_request_trace.sql" with { type: "text" };
 import logExport010 from "./migrations/010_log_export.sql" with { type: "text" };
 import bodyState011 from "./migrations/011_body_state.sql" with { type: "text" };
+import bodyStateIndex012 from "./migrations/012_body_state_index.sql" with { type: "text" };
 
 /**
  * Anything that can run a statement: the pool, a reserved connection, or the
@@ -51,7 +52,10 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string }> = [
   { id: 8, sql: keySmartRouting008 },
   { id: 9, sql: requestTrace009 },
   { id: 10, sql: logExport010 },
+  // The column and its index apart, so the column's ACCESS EXCLUSIVE commits
+  // before the index's table scan starts; see each file's header.
   { id: 11, sql: bodyState011 },
+  { id: 12, sql: bodyStateIndex012 },
 ];
 
 /**

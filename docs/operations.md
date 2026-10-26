@@ -736,6 +736,13 @@ a reader accepts it later. The row digest covers the whole stored envelope and i
 checkable without the key; GCM authentication is what decides whether a body is
 genuine.
 
+Upgrading to the version that tracks each request's body state scans
+`request_logs` once at boot to build a small partial index of bodies still
+pending. On PostgreSQL, writes to `request_logs` (and so the requests that
+log them) wait for that scan, while reads continue; on SQLite the migration
+runs before the gateway serves. Plan the upgrade for a quiet moment on a
+large log.
+
 Masking is best-effort — bearer tokens, vendor-prefixed keys, long opaque
 tokens are elided before write — a reduction in exposure, not a guarantee, and
 it costs fidelity. Treat the tree as you would the prompts themselves: encrypted

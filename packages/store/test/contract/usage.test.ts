@@ -1169,7 +1169,7 @@ forEachStore((backend) => {
       s,
       "DROP INDEX idx_request_logs_body_pending",
       "ALTER TABLE request_logs DROP COLUMN body_state",
-      `DELETE FROM migrations WHERE id = ${id + 1}`,
+      `DELETE FROM migrations WHERE id > ${id}`,
       "DROP INDEX idx_request_logs_completed",
       "ALTER TABLE request_logs DROP COLUMN completed_at",
       "DROP TABLE export_destinations",
