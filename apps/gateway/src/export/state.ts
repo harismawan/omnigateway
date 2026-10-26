@@ -62,12 +62,13 @@ export type ExportState = {
    * The destination's shared retry schedule, written with the failure that
    * set it and cleared by the next commit, so every cluster node honours one
    * backoff and one `Retry-After`: no node starts a pass before `retryAt`.
-   * `retryForUpdatedAt` is the destination's `updatedAt` when it was set — an
-   * edit after it (a newer `updatedAt`) is the operator's answer and retries
+   * `retryForRevision` is the destination's database `revision` when it was
+   * set — any edit since (a different revision; never a clock comparison,
+   * which a replica's skew could invert) is the operator's answer and retries
    * at once, as does a pending skip.
    */
   retryAt: number | null;
-  retryForUpdatedAt: number | null;
+  retryForRevision: number | null;
   /** The last attempt was a hard failure or a refusal (until a success). */
   failing: boolean;
   /** Consecutive retryable failures, for the doubling backoff. */
@@ -77,7 +78,7 @@ export type ExportState = {
 /** The retry schedule a failure writes (see {@link ExportState.retryAt}). */
 export type RetrySchedule = {
   retryAt: number;
-  forUpdatedAt: number;
+  forRevision: number;
   failing: boolean;
   failures: number;
 };

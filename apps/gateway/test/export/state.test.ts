@@ -149,7 +149,7 @@ forEachState((backend) => {
       skipRequestedAt: null,
       orphanedAt: null,
       retryAt: null,
-      retryForUpdatedAt: null,
+      retryForRevision: null,
       failing: false,
       failures: 0,
     });
@@ -403,20 +403,20 @@ forEachState((backend) => {
     const s = await backend.fresh();
     await s.ensure(G, 0);
     const epoch = (await s.claim(G))?.epoch ?? -1;
-    const schedule = { retryAt: 9_000, forUpdatedAt: 77, failing: false, failures: 3 };
+    const schedule = { retryAt: 9_000, forRevision: 77, failing: false, failures: 3 };
     expect(await s.recordError(G, epoch, "HTTP 429", 1_000, schedule)).toBe(true);
     let [row] = await s.list();
     expect(row).toMatchObject({
       lastError: "HTTP 429",
       retryAt: 9_000,
-      retryForUpdatedAt: 77,
+      retryForRevision: 77,
       failing: false,
       failures: 3,
     });
     // A hard failure.
     await s.recordError(G, epoch, "HTTP 401", 2_000, {
       retryAt: 302_000,
-      forUpdatedAt: 77,
+      forRevision: 77,
       failing: true,
       failures: 0,
     });
@@ -433,7 +433,7 @@ forEachState((backend) => {
     [row] = await s.list();
     expect(row).toMatchObject({
       retryAt: null,
-      retryForUpdatedAt: null,
+      retryForRevision: null,
       failing: false,
       failures: 0,
     });

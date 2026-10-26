@@ -1432,3 +1432,22 @@ test("an edit in the same millisecond still cancels the running pass (revision, 
   await w.advance(POLL_MS * 3);
   expect(w.sent.map((s) => s.ids.length)).toEqual([500]);
 });
+
+test("cluster: an edit with an older updatedAt (skewed replica) still releases the shared backoff", async () => {
+  const { a, b } = twoHolders();
+  a.answer = () => new Response("", { status: 401 });
+  await a.loop.start();
+  await a.settle();
+  expect((await stateOf(a)).failing).toBe(true);
+  // The reviewer's case: the editing replica's clock is a second behind, so
+  // updatedAt goes backwards; the database's revision still moves forward.
+  b.answer = () => new Response(null, { status: 200 });
+  const [d] = b.destinations;
+  if (d === undefined) throw new Error("no destination");
+  b.destinations[0] = { ...d, updatedAt: d.updatedAt - 1_000, revision: d.revision + 1 };
+  await b.loop.start();
+  await b.settle();
+  expect(b.sent).toHaveLength(1);
+  const s = await stateOf(b);
+  expect([s.cursorId, s.retryAt, s.failing]).toEqual(["r1", null, false]);
+});

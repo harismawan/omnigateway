@@ -796,7 +796,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     });
     await h.state.recordError(rt.destination.generation, epoch, error, deps.now(), {
       retryAt,
-      forUpdatedAt: rt.destination.updatedAt,
+      forRevision: rt.destination.revision,
       failing: false,
       failures: rt.failures,
     });
@@ -820,7 +820,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     });
     await h.state.recordError(rt.destination.generation, epoch, error, deps.now(), {
       retryAt,
-      forUpdatedAt: rt.destination.updatedAt,
+      forRevision: rt.destination.revision,
       failing: true,
       failures: 0,
     });
@@ -1140,20 +1140,21 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
 
 /**
  * Whether a shared retry schedule still applies to `d`: it was written for
- * this version of the destination. An edit since (a newer `updatedAt`) is the
- * operator's answer to the failure, so the schedule no longer binds.
+ * this version of the destination. An edit since — a different database
+ * `revision`, compared for equality, never a clock — is the operator's answer
+ * to the failure, so the schedule no longer binds.
  */
 function current(
   d: ExportDestination,
-  s: Pick<ExportState, "retryAt" | "retryForUpdatedAt">,
+  s: Pick<ExportState, "retryAt" | "retryForRevision">,
 ): boolean {
-  return s.retryAt !== null && (s.retryForUpdatedAt === null || d.updatedAt <= s.retryForUpdatedAt);
+  return s.retryAt !== null && (s.retryForRevision === null || d.revision === s.retryForRevision);
 }
 
 /** Whether `d` may start a pass at shared instant `now`, by the shared schedule alone. */
 function due(
   d: ExportDestination,
-  s: Pick<ExportState, "retryAt" | "retryForUpdatedAt"> | undefined,
+  s: Pick<ExportState, "retryAt" | "retryForRevision"> | undefined,
   now: number,
 ): boolean {
   if (s === undefined || !current(d, s)) return true;

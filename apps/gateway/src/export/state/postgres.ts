@@ -196,7 +196,7 @@ export function createPostgresExportState(
             boundMessage(message),
             at,
             schedule.retryAt,
-            schedule.forUpdatedAt,
+            schedule.forRevision,
             schedule.failing,
             schedule.failures,
           ]),

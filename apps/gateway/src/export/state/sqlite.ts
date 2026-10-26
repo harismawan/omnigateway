@@ -47,7 +47,7 @@ const SCHEMA: readonly string[][] = [
   // 2: the shared retry schedule (see `ExportState.retryAt`).
   [
     "ALTER TABLE export_state ADD COLUMN retry_at INTEGER",
-    "ALTER TABLE export_state ADD COLUMN retry_for_updated_at INTEGER",
+    "ALTER TABLE export_state ADD COLUMN retry_for_revision INTEGER",
     "ALTER TABLE export_state ADD COLUMN failing INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE export_state ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
   ],
@@ -128,7 +128,7 @@ export function openSqliteExportState(path: string): ExportStateStore {
         boundMessage(message),
         at,
         schedule.retryAt,
-        schedule.forUpdatedAt,
+        schedule.forRevision,
         schedule.failing ? 1 : 0,
         schedule.failures,
       ]);

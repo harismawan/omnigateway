@@ -22,7 +22,7 @@ export type Dialect = {
 const COLUMNS = `generation, cursor_at, cursor_id, epoch, last_success_at, last_error,
   last_error_at, exported_total, dropped_total, caught_up_through,
   seen_retention_lowered_at, gap_possible_at, skip_requested_at, orphaned_at,
-  retry_at, retry_for_updated_at, failing, failures`;
+  retry_at, retry_for_revision, failing, failures`;
 
 export function statements(d: Dialect) {
   const { p } = d;
@@ -41,7 +41,7 @@ export function statements(d: Dialect) {
         dropped_total = dropped_total + ${p(8)},
         last_success_at = COALESCE(${p(9)}, last_success_at),
         retry_at = NULL,
-        retry_for_updated_at = NULL,
+        retry_for_revision = NULL,
         failing = ${d.false},
         failures = 0
       WHERE generation = ${p(1)} AND epoch = ${p(2)}
@@ -49,7 +49,7 @@ export function statements(d: Dialect) {
     recordError: `UPDATE export_state SET last_error = ${p(3)}, last_error_at = ${p(4)}
       WHERE generation = ${p(1)} AND epoch = ${p(2)}`,
     recordFailure: `UPDATE export_state SET last_error = ${p(3)}, last_error_at = ${p(4)},
-        retry_at = ${p(5)}, retry_for_updated_at = ${p(6)}, failing = ${p(7)}, failures = ${p(8)}
+        retry_at = ${p(5)}, retry_for_revision = ${p(6)}, failing = ${p(7)}, failures = ${p(8)}
       WHERE generation = ${p(1)} AND epoch = ${p(2)}`,
     flagGap: `UPDATE export_state SET gap_possible_at = ${p(2)}
       WHERE generation = ${p(1)} AND gap_possible_at IS NULL`,
@@ -113,7 +113,7 @@ export type StateRow = {
   skip_requested_at: number | string | null;
   orphaned_at: number | string | null;
   retry_at: number | string | null;
-  retry_for_updated_at: number | string | null;
+  retry_for_revision: number | string | null;
   failing: number | boolean;
   failures: number | string;
 };
@@ -137,7 +137,7 @@ export function readState(row: StateRow): ExportState {
     skipRequestedAt: orNull(row.skip_requested_at),
     orphanedAt: orNull(row.orphaned_at),
     retryAt: orNull(row.retry_at),
-    retryForUpdatedAt: orNull(row.retry_for_updated_at),
+    retryForRevision: orNull(row.retry_for_revision),
     failing: row.failing === true || row.failing === 1,
     failures: Number(row.failures),
   };
