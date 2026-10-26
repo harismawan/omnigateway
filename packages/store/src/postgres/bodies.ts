@@ -12,6 +12,7 @@ import type {
   BodyArtifact,
   BodyArtifactRow,
   BodyDetailState,
+  BodyPublication,
   BodyRead,
   BodyRepo,
 } from "../types.ts";
@@ -75,6 +76,34 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
     ]);
   };
 
+  const upsert = async (row: BodyArtifactRow, bytes: Uint8Array): Promise<void> => {
+    // Upserting rather than inserting, so a retried write of the same request
+    // replaces its bytes instead of failing against the primary key.
+    await sql.unsafe(
+      `INSERT INTO request_bodies
+         (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated, bytes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (request_id) DO UPDATE SET
+         at = EXCLUDED.at,
+         rel_path = EXCLUDED.rel_path,
+         size_bytes = EXCLUDED.size_bytes,
+         sha256 = EXCLUDED.sha256,
+         detail_state = EXCLUDED.detail_state,
+         truncated = EXCLUDED.truncated,
+         bytes = EXCLUDED.bytes`,
+      [
+        row.requestId,
+        row.at,
+        row.relPath,
+        row.sizeBytes,
+        row.sha256,
+        row.detailState,
+        row.truncated,
+        bytes,
+      ],
+    );
+  };
+
   return {
     async put(artifact: BodyArtifact) {
       // The id is no longer a path segment here, but the rule is kept: a row
@@ -101,32 +130,54 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
         detailState: "ready",
         truncated,
       };
-      // Upserting rather than inserting, so a retried write of the same request
-      // replaces its bytes instead of failing against the primary key.
-      await sql.unsafe(
-        `INSERT INTO request_bodies
-           (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated, bytes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         ON CONFLICT (request_id) DO UPDATE SET
-           at = EXCLUDED.at,
-           rel_path = EXCLUDED.rel_path,
-           size_bytes = EXCLUDED.size_bytes,
-           sha256 = EXCLUDED.sha256,
-           detail_state = EXCLUDED.detail_state,
-           truncated = EXCLUDED.truncated,
-           bytes = EXCLUDED.bytes`,
-        [
-          row.requestId,
-          row.at,
-          row.relPath,
-          row.sizeBytes,
-          row.sha256,
-          row.detailState,
-          row.truncated,
-          sealed.bytes,
-        ],
-      );
+      await upsert(row, sealed.bytes);
       return row;
+    },
+
+    /**
+     * The body writer's write, from its own pool: bytes and pointer in one
+     * statement, as `put` writes them. The log row's state is `publish`'s to
+     * move, on the main pool, so the two writers never contend for one row.
+     */
+    async writeRow(row: BodyPublication & { bytes: Uint8Array }) {
+      if (!isSafeRequestId(row.requestId)) {
+        throw new Error("request id is not safe to use as an artifact path segment");
+      }
+      await upsert({ ...row, detailState: "ready" }, row.bytes);
+    },
+
+    /**
+     * The guard on the log row, and the bytes `writeRow` put in place removed in
+     * the same transaction when it refuses: a row nobody was waiting for is a
+     * body nobody asked to keep. Unless the log row already reads `ready` or
+     * `omitted` — a second write of a published request upserted over the
+     * first, and deleting it would leave that state pointing at nothing.
+     */
+    async publish(row: BodyPublication) {
+      return sql.begin(async (tx) => {
+        const moved = (
+          await tx.unsafe(
+            "UPDATE request_logs SET body_state = $1 WHERE id = $2 AND body_state = 'pending'",
+            [row.omitted ? "omitted" : "ready", row.requestId],
+          )
+        ).count;
+        if (moved > 0) return true;
+        await tx.unsafe(
+          `DELETE FROM request_bodies
+            WHERE request_id = $1
+              AND NOT EXISTS (SELECT 1 FROM request_logs
+                               WHERE id = $1 AND body_state IN ('ready', 'omitted'))`,
+          [row.requestId],
+        );
+        return false;
+      });
+    },
+
+    async fail(requestId: string) {
+      await sql.unsafe(
+        "UPDATE request_logs SET body_state = 'failed' WHERE id = $1 AND body_state = 'pending'",
+        [requestId],
+      );
     },
 
     async get(requestId: string): Promise<BodyRead | null> {

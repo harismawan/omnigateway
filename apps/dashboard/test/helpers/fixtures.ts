@@ -259,6 +259,7 @@ export function log(patch: Partial<RequestLog> = {}): RequestLog {
     clientRequestId: null,
     upstreamRequestId: null,
     completedAt: null,
+    bodyState: null,
     ...patch,
   };
 }

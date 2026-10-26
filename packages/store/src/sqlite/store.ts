@@ -65,6 +65,12 @@ export async function createStore(opts: {
   nodeId?: string;
   /** Fixed minutes east of UTC used for every daily usage bucket. */
   dayOffsetMinutes?: number;
+  /**
+   * The body writer's pending-publication set, asked by the orphan sweep: a
+   * file renamed to its final path whose pointer row has not landed. Held out
+   * here with the options, so every handle `reopen()` builds is given it.
+   */
+  isPending?: (relPath: string) => boolean;
 }): Promise<Store> {
   const logger = opts.logger ?? noopLogger;
   const nodeId = opts.nodeId ?? crypto.randomUUID();
@@ -96,7 +102,12 @@ export async function createStore(opts: {
       // is one directory: an artifact tree that could be pointed elsewhere is one
       // an operator can lose track of, and a prompt corpus is the last thing that
       // should end up somewhere nobody backs up or nobody prunes.
-      bodies: createBodyRepo(db, opts.encryptionKey, bodiesDirFor(opts.path)),
+      bodies: createBodyRepo(
+        db,
+        opts.encryptionKey,
+        bodiesDirFor(opts.path),
+        opts.isPending === undefined ? {} : { isPending: opts.isPending },
+      ),
       maintenance: createMaintenanceRepo(db, nodeId),
       // Plugin tables live in this same file, so they ride snapshots, restores,
       // and `vacuum()` with everything else — and are closed and reopened by a
@@ -209,6 +220,9 @@ export async function createStore(opts: {
       prune: (olderThan) => handle.bodies.prune(olderThan),
       pruneToCap: (cap) => handle.bodies.pruneToCap(cap),
       sweepOrphans: () => handle.bodies.sweepOrphans(),
+      publish: (row) => handle.bodies.publish(row),
+      fail: (requestId) => handle.bodies.fail(requestId),
+      writeRow: (row) => handle.bodies.writeRow(row),
     },
 
     maintenance: {

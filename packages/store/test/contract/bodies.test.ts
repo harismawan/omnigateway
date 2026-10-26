@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -10,11 +10,16 @@ import {
   MAX_ARTIFACT_BYTES,
   prepareArtifact,
   relPathFor,
+  STAGING_DIRNAME,
   sealArtifact,
   sha256Hex,
+  stagingPathFor,
+  writeArtifact,
 } from "../../src/bodies/artifact.ts";
 import { decrypt, deriveKey, encrypt } from "../../src/encryption.ts";
 import { createBodyRepo } from "../../src/postgres/bodies.ts";
+import { createBodyRepo as createSqliteBodyRepo } from "../../src/sqlite/bodies.ts";
+import { openDb } from "../../src/sqlite/db.ts";
 import { createStore } from "../../src/sqlite/store.ts";
 import type { BodyArtifact, Store } from "../../src/types.ts";
 import { type Backend, forEachStore } from "./harness.ts";
@@ -833,5 +838,117 @@ forEachStore((backend) => {
         await rm(root, { recursive: true, force: true });
       }
     });
+  }
+});
+
+/**
+ * The orphan sweep against the body writer's two windows (*SQLite staging and
+ * the orphan sweep*): a file still being written lives under `.staging/`, and
+ * one renamed to its final name before its row lands is in the main thread's
+ * pending-publication set. SQLite alone — Postgres has no files to orphan.
+ */
+async function sweepFixture(opts: {
+  isPending?: (relPath: string) => boolean;
+  now?: () => number;
+}) {
+  const root = join(tmpdir(), `omni-contract-sweep-${crypto.randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const dbPath = join(root, "omnigateway.db");
+  const dir = bodiesDirFor(dbPath);
+  const db = openDb(dbPath);
+  const repo = createSqliteBodyRepo(db, await deriveKey(SECRET), dir, opts);
+  const present = async (path: string): Promise<boolean> =>
+    stat(path).then(
+      () => true,
+      () => false,
+    );
+  const close = async (): Promise<void> => {
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  };
+  return { dir, repo, present, close };
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+const bytes = new TextEncoder().encode("OGBA-not-really");
+
+test("sqlite: staging paths sit under .staging/ and refuse an unsafe id or nonce", () => {
+  expect(STAGING_DIRNAME).toBe(".staging");
+  expect(stagingPathFor("/b", "req_1", "n0nce")).toBe(join("/b", ".staging", "req_1.n0nce"));
+  expect(() => stagingPathFor("/b", "../x", "n")).toThrow();
+  expect(() => stagingPathFor("/b", "req_1", "a/b")).toThrow();
+});
+
+test("sqlite: the orphan sweep never lists .staging/, and removes staged files over an hour old", async () => {
+  const now = Date.now();
+  const f = await sweepFixture({ now: () => now });
+  try {
+    const young = stagingPathFor(f.dir, "req_young", "a1");
+    const old = stagingPathFor(f.dir, "req_old", "b2");
+    const exact = stagingPathFor(f.dir, "req_exact", "c3");
+    for (const path of [young, old, exact]) {
+      await mkdir(join(f.dir, STAGING_DIRNAME), { recursive: true });
+      await writeFile(path, bytes);
+    }
+    await utimes(old, new Date(now - HOUR_MS - 1), new Date(now - HOUR_MS - 1));
+    await utimes(exact, new Date(now - HOUR_MS), new Date(now - HOUR_MS));
+    // A real orphan, so a sweep that deleted nothing would not pass by accident.
+    await writeArtifact(f.dir, "2025/12/31/req_orphan.json.enc", bytes);
+
+    expect(await f.repo.sweepOrphans()).toBe(2);
+    expect(await f.present(young)).toBe(true);
+    expect(await f.present(exact)).toBe(true);
+    expect(await f.present(old)).toBe(false);
+    expect(await f.present(join(f.dir, "2025/12/31/req_orphan.json.enc"))).toBe(false);
+    // The staging directory itself stays: the writer may be about to use it.
+    expect(await f.present(join(f.dir, STAGING_DIRNAME))).toBe(true);
+    expect(await f.repo.sweepOrphans()).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("sqlite: the orphan sweep spares a final-path file the main thread is publishing", async () => {
+  const publishing = new Set<string>();
+  const f = await sweepFixture({ isPending: (relPath) => publishing.has(relPath) });
+  try {
+    const rel = relPathFor("req_publishing", AT);
+    await writeArtifact(f.dir, rel, bytes);
+    await writeArtifact(f.dir, "2025/12/31/req_orphan.json.enc", bytes);
+    publishing.add(rel);
+
+    expect(await f.repo.sweepOrphans()).toBe(1);
+    expect(await f.present(join(f.dir, rel))).toBe(true);
+
+    // Once out of the set with no row, it is an ordinary orphan.
+    publishing.delete(rel);
+    expect(await f.repo.sweepOrphans()).toBe(1);
+    expect(await f.present(join(f.dir, rel))).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+
+test("sqlite: createStore threads isPending to the sweep, and it survives reopen", async () => {
+  const root = join(tmpdir(), `omni-contract-sweep-${crypto.randomUUID()}`);
+  await mkdir(root, { recursive: true });
+  const path = join(root, "omnigateway.db");
+  const rel = relPathFor("req_publishing", AT);
+  const s = await createStore({
+    path,
+    encryptionKey: await deriveKey(SECRET),
+    isPending: (relPath) => relPath === rel,
+  });
+  try {
+    const dir = bodiesDirFor(path);
+    await writeArtifact(dir, rel, bytes);
+    expect(await s.bodies.sweepOrphans()).toBe(0);
+    s.close();
+    await s.reopen();
+    expect(await s.bodies.sweepOrphans()).toBe(0);
+    expect((await stat(join(dir, rel))).isFile()).toBe(true);
+  } finally {
+    s.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

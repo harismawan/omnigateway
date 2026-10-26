@@ -831,10 +831,32 @@ export type RequestLog = {
    * docs/superpowers/specs/2026-10-24-log-export-design.md (*Cursor*).
    */
   completedAt: number | null;
+  /**
+   * Whether this request's body reached the store; null when capture was not
+   * attempted. **Store-owned past `pending`**: a write may ask for `pending`
+   * (`begin`, or `append` for a request that failed before it began) and any
+   * other value on input is ignored. `append` sets it only on a row that has
+   * none, so a body that landed while the request was in flight is never put
+   * back to pending. `ready` / `omitted` are written with the pointer row by
+   * `BodyRepo.publish`, `failed` by `BodyRepo.fail` or by `sweepPending` an
+   * hour after completion. Design: docs/superpowers/specs/2026-10-24-log-export-design.md
+   * (*Capture state on the row*).
+   */
+  bodyState: BodyState | null;
 };
 
-/** The store-stamped fields of a log built outside the store — spread beside `EMPTY_TRACE`. */
-export const UNSTAMPED = { completedAt: null } as const satisfies Pick<RequestLog, "completedAt">;
+/** See `RequestLog.bodyState`. */
+export type BodyState = "pending" | "ready" | "omitted" | "failed";
+
+/**
+ * The store-owned fields of a log built outside the store — spread beside
+ * `EMPTY_TRACE`. A log starts with no body state; a capturing caller overrides
+ * it with `pending`.
+ */
+export const UNSTAMPED = { completedAt: null, bodyState: null } as const satisfies Pick<
+  RequestLog,
+  "completedAt" | "bodyState"
+>;
 
 /** The trace fields of a row that carries no trace — spread into every log built without one. */
 export const EMPTY_TRACE = {
@@ -1225,9 +1247,26 @@ export type BodyRead = {
   artifact: BodyArtifact | null;
 };
 
+/**
+ * What the body writer reports once an artifact's bytes are in place: the
+ * pointer row's fields, and whether the artifact is an omission marker (which
+ * decides `ready` or `omitted` on the log row).
+ */
+export type BodyPublication = {
+  requestId: string;
+  at: number;
+  relPath: string;
+  sizeBytes: number;
+  sha256: string;
+  truncated: boolean;
+  omitted: boolean;
+};
+
 export interface BodyRepo {
   /**
-   * The only write path, and the reason there is no raw one.
+   * The in-process write path, and the reason there is no raw one. (The body
+   * writer's path — `writeRow` / `publish` — takes bytes it sealed itself
+   * through the same `prepareArtifact`.)
    *
    * Masking and the size limit happen inside, before encryption, so no caller
    * can write an unmasked or oversized body even by mistake. Throws on a
@@ -1250,8 +1289,36 @@ export interface BodyRepo {
    * sustained traffic bounds nothing.
    */
   pruneToCap(cap?: number): Promise<number>;
-  /** Removes artifact files with no row, which a crash between the two writes leaves. */
+  /**
+   * Removes artifact files with no row, which a crash between the two writes
+   * leaves. On SQLite it never touches a file the body writer is still writing
+   * (`.staging/`, until an hour old) or one the main thread is publishing (the
+   * repo's `isPending`). Returns how many files went.
+   */
   sweepOrphans(): Promise<number>;
+  /**
+   * Records a body the writer has put in place, guarded on the log row: only a
+   * request whose `body_state` is still `pending` moves, to `omitted` or
+   * `ready`. False when it is not — never captured, already failed, already
+   * published, or no row — and then nothing is written; on SQLite the caller
+   * deletes the file it renamed, on Postgres the `bytea` row `writeRow` wrote
+   * is removed here.
+   *
+   * SQLite: the `request_bodies` upsert and the state update are **one
+   * transaction** on the main connection, so a pointer never exists without its
+   * state or the reverse. Postgres: the writer already wrote the row through
+   * `writeRow`; this moves the state, in one transaction with removing that row
+   * when the guard refuses.
+   */
+  publish(row: BodyPublication): Promise<boolean>;
+  /** `body_state = 'failed'` where it is still `pending`; anything else is left as it is. */
+  fail(requestId: string): Promise<void>;
+  /**
+   * Postgres only: the body writer's own pool writes the sealed bytes and the
+   * pointer in one upsert, before `publish` moves the state. SQLite throws —
+   * its pointer row is written by `publish` on the main connection alone.
+   */
+  writeRow(row: BodyPublication & { bytes: Uint8Array }): Promise<void>;
 }
 
 /**
@@ -1585,6 +1652,12 @@ export interface UsageRepo {
    * another process's rows are swept only once its heartbeat is older than
    * `NODE_GRACE_MS`, or it never wrote one. On one node this is every pending
    * row at startup, which is what it was before. Returns how many were swept.
+   *
+   * The same call fails bodies still `pending` an hour after their row
+   * completed, whoever owns the row: an acknowledgement that has not landed by
+   * then never will. Measured on `now` on SQLite, on the database clock on
+   * Postgres — the clock `completed_at` was stamped from. Not counted in the
+   * return.
    */
   sweepPending(now: number): Promise<number>;
   /**
@@ -1794,6 +1867,9 @@ export type TableStats = {
 
 /** How long a process may go without a heartbeat before its rows are retirable. */
 export const NODE_GRACE_MS = 60_000;
+
+/** How long after its row completed a body may stay `pending` before `sweepPending` fails it. */
+export const BODY_PENDING_MS = 60 * 60 * 1000;
 
 export interface MaintenanceRepo {
   stats(): Promise<DatabaseStats>;

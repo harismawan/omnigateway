@@ -8,12 +8,14 @@ import {
   readArtifact,
   relPathFor,
   sealArtifact,
+  sweepStaged,
   writeArtifact,
 } from "../bodies/artifact.ts";
 import type {
   BodyArtifact,
   BodyArtifactRow,
   BodyDetailState,
+  BodyPublication,
   BodyRead,
   BodyRepo,
 } from "../types.ts";
@@ -50,8 +52,20 @@ const toRow = (r: Row): BodyArtifactRow => ({
  * configured, because an artifact tree that can be pointed somewhere else is a
  * tree an operator can lose track of, and a prompt corpus is the last thing that
  * should be able to end up somewhere nobody is backing up or nobody is deleting.
+ *
+ * `isPending` is the main thread's pending-publication set: a file the body
+ * writer has renamed to its final name whose row has not landed yet. The sweep
+ * spares those. `now` is the staging sweep's clock. Both default for callers
+ * with no body writer.
  */
-export function createBodyRepo(db: Database, key: CryptoKey, dir: string): BodyRepo {
+export function createBodyRepo(
+  db: Database,
+  key: CryptoKey,
+  dir: string,
+  opts: { isPending?: (relPath: string) => boolean; now?: () => number } = {},
+): BodyRepo {
+  const isPending = opts.isPending ?? (() => false);
+  const now = opts.now ?? Date.now;
   /**
    * Deletes files and rows together, in that order.
    *
@@ -74,6 +88,47 @@ export function createBodyRepo(db: Database, key: CryptoKey, dir: string): BodyR
   const recordState = (requestId: string, state: BodyDetailState): void => {
     db.run("UPDATE request_bodies SET detail_state = ? WHERE request_id = ?", [state, requestId]);
   };
+
+  const upsert = (row: BodyArtifactRow): void => {
+    // Upserting rather than inserting, so a retried write of the same request
+    // replaces its pointer instead of failing against the primary key.
+    db.run(
+      `INSERT INTO request_bodies (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated)
+       VALUES (?,?,?,?,?,?,?)
+       ON CONFLICT (request_id) DO UPDATE SET
+         at = excluded.at,
+         rel_path = excluded.rel_path,
+         size_bytes = excluded.size_bytes,
+         sha256 = excluded.sha256,
+         detail_state = excluded.detail_state,
+         truncated = excluded.truncated`,
+      [
+        row.requestId,
+        row.at,
+        row.relPath,
+        row.sizeBytes,
+        row.sha256,
+        row.detailState,
+        row.truncated ? 1 : 0,
+      ],
+    );
+  };
+
+  /**
+   * The state first, because it is the guard: zero rows changed means the
+   * request is not waiting for a body, and nothing has been written to undo.
+   * The upsert after it shares the transaction, so a failing pointer write
+   * takes the state change down with it.
+   */
+  const publish = db.transaction((row: BodyPublication): boolean => {
+    const moved = db.run(
+      "UPDATE request_logs SET body_state = ? WHERE id = ? AND body_state = 'pending'",
+      [row.omitted ? "omitted" : "ready", row.requestId],
+    ).changes;
+    if (moved === 0) return false;
+    upsert({ ...row, detailState: "ready" });
+    return true;
+  });
 
   return {
     async put(artifact: BodyArtifact) {
@@ -101,29 +156,28 @@ export function createBodyRepo(db: Database, key: CryptoKey, dir: string): BodyR
         detailState: "ready",
         truncated,
       };
-      // Upserting rather than inserting, so a retried write of the same request
-      // replaces its pointer instead of failing against the primary key.
-      db.run(
-        `INSERT INTO request_bodies (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated)
-         VALUES (?,?,?,?,?,?,?)
-         ON CONFLICT (request_id) DO UPDATE SET
-           at = excluded.at,
-           rel_path = excluded.rel_path,
-           size_bytes = excluded.size_bytes,
-           sha256 = excluded.sha256,
-           detail_state = excluded.detail_state,
-           truncated = excluded.truncated`,
-        [
-          row.requestId,
-          row.at,
-          row.relPath,
-          row.sizeBytes,
-          row.sha256,
-          row.detailState,
-          row.truncated ? 1 : 0,
-        ],
-      );
+      upsert(row);
       return row;
+    },
+
+    async publish(row: BodyPublication) {
+      // The path is joined under the bodies directory by every later delete, so
+      // it must be the one this request's id and time name — nothing else.
+      if (!isSafeRequestId(row.requestId) || row.relPath !== relPathFor(row.requestId, row.at)) {
+        throw new Error("publication does not name this request's artifact path");
+      }
+      return publish(row);
+    },
+
+    async fail(requestId: string) {
+      db.run(
+        "UPDATE request_logs SET body_state = 'failed' WHERE id = ? AND body_state = 'pending'",
+        [requestId],
+      );
+    },
+
+    async writeRow() {
+      throw new Error("writeRow is Postgres-only");
     },
 
     async get(requestId: string): Promise<BodyRead | null> {
@@ -187,6 +241,12 @@ export function createBodyRepo(db: Database, key: CryptoKey, dir: string): BodyR
      * outlast the slowest tree walk on the slowest disk anyone runs this on. The
      * snapshot stays because it answers for almost every file without a query;
      * the re-check only runs for the few it does not recognise.
+     *
+     * The body writer adds two windows of its own, and each has its own guard.
+     * A file still being written is under `.staging/`, which `listArtifacts`
+     * never walks; what a crashed write left there goes once it is an hour old.
+     * A file renamed to its final name before its row lands is in `isPending`,
+     * asked at the same moment as the table.
      */
     async sweepOrphans() {
       const known = new Set(
@@ -203,11 +263,11 @@ export function createBodyRepo(db: Database, key: CryptoKey, dir: string): BodyR
       let removed = 0;
       for (const rel of await listArtifacts(dir)) {
         if (known.has(rel)) continue;
-        if ((claimed.get(rel)?.n ?? 0) > 0) continue;
+        if (isPending(rel) || (claimed.get(rel)?.n ?? 0) > 0) continue;
         await deleteArtifact(dir, rel);
         removed += 1;
       }
-      return removed;
+      return removed + (await sweepStaged(dir, now()));
     },
   };
 }

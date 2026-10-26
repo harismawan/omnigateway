@@ -1,6 +1,7 @@
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
 import type { SQL } from "bun";
+import { readBodyState, requestedBodyState } from "../bodyStateColumn.ts";
 import { exportPageSql } from "../exportPage.ts";
 import { logPageClauses, splitPage } from "../logPage.ts";
 import { HOUR_MS, hourOf, startOfDay } from "../sqlite/rollup.ts";
@@ -15,6 +16,7 @@ import {
   traceValues,
 } from "../traceColumns.ts";
 import {
+  BODY_PENDING_MS,
   NODE_GRACE_MS,
   type RequestLog,
   type RequestState,
@@ -55,6 +57,7 @@ type Row = {
   rtk_estimated_tokens_saved: string;
   rtk_filters: string;
   completed_at: string | null;
+  body_state: string | null;
 } & TraceRow;
 
 function parseRtkFilters(raw: string): import("@omni/rtk/catalog").RtkFilterId[] {
@@ -94,6 +97,7 @@ const toLog = (r: Row): RequestLog => ({
   rtkFilters: parseRtkFilters(r.rtk_filters),
   ...readTrace(r),
   completedAt: numOrNull(r.completed_at),
+  bodyState: readBodyState(r.body_state),
 });
 
 /**
@@ -175,11 +179,11 @@ const COLUMN_LIST = `id, state, node_id, at, api_key_id, requested_model, resolv
                   output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
                   cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
                   rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters,
-                  ${TRACE_COLUMN_NAMES.join(", ")}`;
+                  ${TRACE_COLUMN_NAMES.join(", ")}, body_state`;
 const COLUMNS = `(${COLUMN_LIST})`;
 
 const PLACEHOLDER_LIST = Array.from(
-  { length: 26 + TRACE_COLUMN_NAMES.length },
+  { length: 27 + TRACE_COLUMN_NAMES.length },
   (_, i) => `$${i + 1}`,
 ).join(",");
 const PLACEHOLDERS = `(${PLACEHOLDER_LIST})`;
@@ -213,6 +217,7 @@ function values(log: RequestLog, state: RequestState, nodeId: string): unknown[]
     log.rtkEstimatedTokensSaved ?? 0,
     JSON.stringify(log.rtkFilters ?? []),
     ...traceValues(log),
+    requestedBodyState(log),
   ];
 }
 
@@ -237,7 +242,9 @@ const DB_NOW_MS = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
  * the log the instant it finishes. `requested_model` and `api_key_id` fall back
  * to what the row already holds, because the route's terminal catch can reach a
  * row that already began — when dispatch throws rather than yielding an error
- * event — and the log it completes may carry neither.
+ * event — and the log it completes may carry neither. `body_state` keeps what
+ * the row holds and takes the log's `pending` only where it holds nothing; see
+ * the sqlite repo's `COMPLETE`.
  */
 const COMPLETE = `INSERT INTO request_logs (${COLUMN_LIST}, completed_at)
   VALUES (${PLACEHOLDER_LIST}, ${DB_NOW_MS})
@@ -266,7 +273,8 @@ const COMPLETE = `INSERT INTO request_logs (${COLUMN_LIST}, completed_at)
     rtk_estimated_tokens_saved = EXCLUDED.rtk_estimated_tokens_saved,
     rtk_filters = EXCLUDED.rtk_filters,
     ${traceCompleteSet("EXCLUDED")},
-    completed_at = EXCLUDED.completed_at
+    completed_at = EXCLUDED.completed_at,
+    body_state = COALESCE(request_logs.body_state, EXCLUDED.body_state)
   WHERE request_logs.state = 'pending'`;
 
 const sum = (row: SumRow | undefined) => ({
@@ -355,6 +363,14 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
     },
 
     async sweepPending(now) {
+      // Bodies an hour past completion, as the sqlite repo does, on the
+      // database clock: `completed_at` was stamped from it, so a replica's skew
+      // cannot fail a body early or hold one past its hour.
+      await sql.unsafe(
+        `UPDATE request_logs SET body_state = 'failed'
+          WHERE body_state = 'pending' AND completed_at <= ${DB_NOW_MS} - $1`,
+        [BODY_PENDING_MS],
+      );
       // Own rows, or rows of a node with no live heartbeat. `NOT IN` against
       // the live set rather than a join on the dead set, because a node that
       // never wrote a heartbeat has no row to join against and is dead too.

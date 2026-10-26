@@ -1246,5 +1246,6 @@ function syntheticLog(at: number): RequestLog {
     clientRequestId: null,
     upstreamRequestId: null,
     completedAt: at,
+    bodyState: null,
   };
 }

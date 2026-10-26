@@ -1,5 +1,14 @@
 import type { Dirent } from "node:fs";
-import { type FileHandle, mkdir, open, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
+import {
+  type FileHandle,
+  mkdir,
+  open,
+  readdir,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
@@ -74,6 +83,30 @@ export function relPathFor(requestId: string, at: number): string {
   const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(date.getUTCDate()).padStart(2, "0");
   return `${yyyy}/${mm}/${dd}/${requestId}.json.enc`;
+}
+
+/**
+ * Where the body writer puts an artifact until it is complete, under the bodies
+ * directory. The orphan sweep never lists it — a half-written file has no row
+ * yet by design — and removes what a crashed write left there once it is an
+ * hour old. Design: docs/superpowers/specs/2026-10-24-log-export-design.md
+ * (*SQLite staging and the orphan sweep*).
+ */
+export const STAGING_DIRNAME = ".staging";
+
+/** How long a staged file may sit before the sweep takes it as a crashed write's. */
+export const STAGING_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * `<dir>/.staging/<requestId>.<nonce>`. The nonce keeps two writes of one
+ * request — a retry after a writer restart — from sharing a file. Both become a
+ * path segment, so both are held to the request-id character set.
+ */
+export function stagingPathFor(dir: string, requestId: string, nonce: string): string {
+  if (!isSafeRequestId(requestId) || !isSafeRequestId(nonce)) {
+    throw new Error("staging name is not safe to use as a path segment");
+  }
+  return join(dir, STAGING_DIRNAME, `${requestId}.${nonce}`);
 }
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -697,6 +730,10 @@ export async function deleteArtifact(dir: string, relPath: string): Promise<void
  * Walked by hand rather than with a recursive `readdir` option so the traversal
  * is the same on every runtime this has to run on, and so a directory that has
  * never been created reads as an empty tree rather than an error.
+ *
+ * `.staging/` is not walked: nothing in it is an artifact yet, and a caller
+ * reconciling this list against `rel_path` would read every in-progress write
+ * as an orphan. `sweepStaged` is what clears it.
  */
 export async function listArtifacts(dir: string): Promise<string[]> {
   const out: string[] = [];
@@ -708,6 +745,7 @@ export async function listArtifacts(dir: string): Promise<string[]> {
       return;
     }
     for (const entry of entries) {
+      if (prefix === "" && entry.name === STAGING_DIRNAME) continue;
       const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
       if (entry.isDirectory()) await walk(join(current, entry.name), rel);
       else if (entry.isFile()) out.push(rel);
@@ -715,4 +753,33 @@ export async function listArtifacts(dir: string): Promise<string[]> {
   };
   await walk(dir, "");
   return out;
+}
+
+/**
+ * Removes staged files older than `STAGING_MAX_AGE_MS` at `now`, and returns
+ * how many went. A write in progress is seconds old and a crashed one stays
+ * behind forever, so age alone tells them apart: no write runs for an hour. The
+ * directory itself is kept — the writer may be about to use it.
+ */
+export async function sweepStaged(dir: string, now: number): Promise<number> {
+  const staging = join(dir, STAGING_DIRNAME);
+  let entries: Dirent[];
+  try {
+    entries = await readdir(staging, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const path = join(staging, entry.name);
+    try {
+      if (now - (await stat(path)).mtimeMs <= STAGING_MAX_AGE_MS) continue;
+      await unlink(path);
+      removed += 1;
+    } catch {
+      // Renamed or removed under the sweep: either way it is not ours to count.
+    }
+  }
+  return removed;
 }

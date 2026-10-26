@@ -1161,10 +1161,15 @@ forEachStore((backend) => {
     await s.usage.append(logRow({ id: "old-done", at: T4, durationMs: 1_500 }));
     await s.usage.begin(logRow({ id: "old-pending", at: T4 + 1, state: "pending", status: 0 }));
     // Wind the schema back to before the migration, then reopen to run it again.
+    // The body-state migration after it goes too: a database from before this
+    // one never had it, and its index is on the column dropped here.
     const id = backend.name === "sqlite" ? 22 : 10;
     await exec(
       backend,
       s,
+      "DROP INDEX idx_request_logs_body_pending",
+      "ALTER TABLE request_logs DROP COLUMN body_state",
+      `DELETE FROM migrations WHERE id = ${id + 1}`,
       "DROP INDEX idx_request_logs_completed",
       "ALTER TABLE request_logs DROP COLUMN completed_at",
       "DROP TABLE export_destinations",

@@ -164,6 +164,7 @@ export function logRow(
     clientRequestId: null,
     upstreamRequestId: null,
     completedAt: null,
+    bodyState: null,
     ...overrides,
   };
 }
