@@ -39,7 +39,10 @@ test("the real worker answers through the supervisor, pauses for a restore, resu
     spawn: spawnExportWorker,
     readDestinations: async () => {
       const list = await store.exportDestinations.list();
-      return { count: list.length, revision: list.map((d) => d.updatedAt).join(",") };
+      return {
+        count: list.length,
+        revision: list.map((d) => `${d.generation}@${d.revision}`).join(","),
+      };
     },
     timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as Timer) },
     now: Date.now,

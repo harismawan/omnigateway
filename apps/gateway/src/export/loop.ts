@@ -412,13 +412,15 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         });
         continue;
       }
-      if (rt.destination.updatedAt !== d.updatedAt) {
-        // An edit is the operator's answer to a failure: try again now. A
-        // pass still running holds the old snapshot — its config, filter and
-        // secret — so it is cancelled; the next tick starts one from a fresh
-        // snapshot. A batch already on the wire cannot be recalled: if its
-        // receiver accepts it, its commit (already authorised by the old
-        // scope's read) may land. Everything after it uses the new scope.
+      if (rt.destination.revision !== d.revision) {
+        // A change is told by the database's revision, never by `updatedAt`:
+        // two edits in one millisecond, or from replicas with skewed clocks,
+        // still differ. A pass still running holds the old snapshot — its
+        // config, filter and secret — so it is cancelled; the next tick starts
+        // one from a fresh snapshot. Cancelling aborts the request in flight
+        // and stops any commit not yet authorised, so a batch the receiver
+        // accepted after the edit is sent again under the new configuration
+        // (at-least-once); only a commit already authorised may land.
         rt.failures = 0;
         rt.controller?.abort(CANCELLED.changed);
       }
@@ -517,7 +519,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     const generation = rt.destination.generation;
     // The pass's whole configuration — config, filter, enabled, secret — is
     // one snapshot, read by one statement, and bound to the generation and
-    // `updatedAt` the tick saw: a row that changed since is not this pass's
+    // `revision` the tick saw: a row that changed since is not this pass's
     // to send (the next tick's sync cancels and restarts it), and a config is
     // never paired with a secret from another version of the row.
     const snapshot = await guard(h.reader.destinationWithSecret(rt.destination.id), signal);
@@ -525,7 +527,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     if (
       snapshot === null ||
       snapshot.destination.generation !== generation ||
-      snapshot.destination.updatedAt !== rt.destination.updatedAt ||
+      snapshot.destination.revision !== rt.destination.revision ||
       !snapshot.destination.enabled
     ) {
       return;

@@ -155,6 +155,7 @@ test("a hard 4xx pauses the destination at maximum backoff, cursor unmoved, unti
   const [d] = w.destinations;
   if (d === undefined) throw new Error("no destination");
   d.updatedAt += 1;
+  d.revision += 1;
   await w.loop.handle({ type: "destinationsChanged" });
   await w.settle();
   expect(w.sent).toHaveLength(2);
@@ -278,7 +279,12 @@ test("a skip on a disabled destination waits, unapplied, until it is enabled", a
   let s = await stateOf(w);
   expect([s.skipRequestedAt, s.cursorId, s.droppedTotal]).toEqual([T0, "", 0]);
 
-  w.destinations = w.destinations.map((d) => ({ ...d, enabled: true, updatedAt: d.updatedAt + 1 }));
+  w.destinations = w.destinations.map((d) => ({
+    ...d,
+    enabled: true,
+    updatedAt: d.updatedAt + 1,
+    revision: d.revision + 1,
+  }));
   await w.advance(POLL_MS);
   s = await stateOf(w);
   expect([s.skipRequestedAt, s.cursorId, s.droppedTotal]).toEqual([null, "r1", 1]);
@@ -1174,6 +1180,7 @@ test("an edit replacing URL and secret mid-pass never pairs the old URL with the
     ...hook,
     config: { url: "https://new.test/in", headers: {} },
     updatedAt: hook.updatedAt + 1,
+    revision: hook.revision + 1,
   };
   w.secrets.set("hook", '{"headers":{"authorization":"new-secret"}}');
   held.release();
@@ -1232,6 +1239,7 @@ test("Send test reads URL and secret from one snapshot too", async () => {
     ...hook,
     config: { url: "https://new.test/in", headers: {} },
     updatedAt: hook.updatedAt + 1,
+    revision: hook.revision + 1,
   };
   w.secrets.set("hook", '{"headers":{"authorization":"new-secret"}}');
   held.release();
@@ -1259,7 +1267,12 @@ test("narrowing the filter mid-pass cancels the pass: no row outside the new sco
   // The operator narrows the scope to nothing and the main thread says so.
   const [d] = w.destinations;
   if (d === undefined) throw new Error("no destination");
-  w.destinations[0] = { ...d, filter: { apiKeyIds: [] }, updatedAt: d.updatedAt + 1 };
+  w.destinations[0] = {
+    ...d,
+    filter: { apiKeyIds: [] },
+    updatedAt: d.updatedAt + 1,
+    revision: d.revision + 1,
+  };
   await w.loop.handle({ type: "destinationsChanged" });
   w.answer = () => new Response(null, { status: 200 });
   for (const resolve of held.splice(0)) resolve(new Response(null, { status: 200 }));
@@ -1368,11 +1381,11 @@ test("cluster: a hard failure on one node holds every node back until an edit", 
   expect(b.sent).toHaveLength(0);
   await b.advance(STATUS_INTERVAL_MS);
   expect(lastStatus(b)?.failing).toBe(true);
-  // An edit on the shared configuration (newer updatedAt) releases it at once, on any node.
+  // An edit on the shared configuration (a new revision) releases it at once, on any node.
   a.answer = () => new Response(null, { status: 200 });
   const [d] = b.destinations;
   if (d === undefined) throw new Error("no destination");
-  b.destinations[0] = { ...d, updatedAt: d.updatedAt + 1 };
+  b.destinations[0] = { ...d, updatedAt: d.updatedAt + 1, revision: d.revision + 1 };
   await b.loop.handle({ type: "destinationsChanged" });
   await b.settle();
   expect(b.sent).toHaveLength(1);
@@ -1392,4 +1405,30 @@ test("cluster: a skip requested anywhere bypasses the shared backoff", async () 
   await b.advance(SETTLE_MS + POLL_MS);
   const s = await stateOf(b);
   expect([s.cursorId, s.droppedTotal, s.skipRequestedAt]).toEqual(["r1", 1, null]);
+});
+
+test("an edit in the same millisecond still cancels the running pass (revision, not clock)", async () => {
+  const rows = Array.from({ length: 1_000 }, (_, i) =>
+    row(`r${String(i).padStart(4, "0")}`, T0 - 30_000 + i, { apiKeyId: "k1" }),
+  );
+  const w = track(world({ rows }));
+  const held: Array<(r: Response) => void> = [];
+  w.answer = () =>
+    new Promise<Response>((resolve) => {
+      held.push(resolve);
+    });
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(1);
+  // The reviewer's case: the edit lands with the same updatedAt; only the
+  // database's revision moves.
+  const [d] = w.destinations;
+  if (d === undefined) throw new Error("no destination");
+  w.destinations[0] = { ...d, filter: { apiKeyIds: [] }, revision: d.revision + 1 };
+  await w.loop.handle({ type: "destinationsChanged" });
+  w.answer = () => new Response(null, { status: 200 });
+  for (const resolve of held.splice(0)) resolve(new Response(null, { status: 200 }));
+  await w.settle();
+  await w.advance(POLL_MS * 3);
+  expect(w.sent.map((s) => s.ids.length)).toEqual([500]);
 });

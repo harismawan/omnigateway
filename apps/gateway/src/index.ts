@@ -348,8 +348,9 @@ async function main(): Promise<void> {
       const list = await store.exportDestinations.list();
       return {
         count: list.length,
-        // Changes with any create, edit (`updatedAt`) or delete-and-recreate (`generation`).
-        revision: list.map((d) => `${d.generation}@${d.updatedAt}`).join(","),
+        // Changes with any create, edit (the database's `revision`) or
+        // delete-and-recreate (`generation`) — never a clock reading.
+        revision: list.map((d) => `${d.generation}@${d.revision}`).join(","),
       };
     },
     timers: { setTimeout, clearTimeout: (handle) => clearTimeout(handle as Timer) },

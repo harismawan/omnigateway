@@ -119,8 +119,9 @@ const NOT_QUIESCED = "export worker did not stop; nothing was restored";
 
 /**
  * The destinations as the supervisor needs them: how many, and a revision
- * that changes whenever any of them is created, edited or removed (ids and
- * `updatedAt`s, read through the store's existing list — no trigger).
+ * that changes whenever any of them is created, edited or removed
+ * (generations and database `revision`s, read through the store's existing
+ * list — no trigger, and no clock).
  */
 export type DestinationsRead = { count: number; revision: string };
 
