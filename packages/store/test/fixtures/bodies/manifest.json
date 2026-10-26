@@ -1,0 +1,535 @@
+{
+  "legacy-hex.json.enc": {
+    "sha256": "9e0eb61c8a53ad536ef81908b99fae7d9f2ebea7477a485d88f5f592bcc319d1",
+    "artifact": {
+      "schemaVersion": 1,
+      "requestId": "req_fixture_bounded",
+      "at": 1786968000000,
+      "client": {
+        "request": {
+          "model": "fast",
+          "api_key": "sk-[redacted]",
+          "messages": [
+            {
+              "role": "user",
+              "content": "turn 6"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 7"
+            },
+            {
+              "role": "user",
+              "content": "turn 8"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 9"
+            },
+            {
+              "role": "user",
+              "content": "turn 10"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 11"
+            },
+            {
+              "role": "user",
+              "content": "turn 12"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 13"
+            },
+            {
+              "role": "user",
+              "content": "turn 14"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 15"
+            },
+            {
+              "role": "user",
+              "content": "turn 16"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 17"
+            },
+            {
+              "role": "user",
+              "content": "turn 18"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 19"
+            },
+            {
+              "role": "user",
+              "content": "turn 20"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 21"
+            },
+            {
+              "role": "user",
+              "content": "turn 22"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 23"
+            },
+            {
+              "role": "user",
+              "content": "turn 24"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 25"
+            },
+            {
+              "role": "user",
+              "content": "turn 26"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 27"
+            },
+            {
+              "role": "user",
+              "content": "turn 28"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 29"
+            }
+          ],
+          "deep": {
+            "l2": {
+              "l3": {
+                "l4": {
+                  "l5": {
+                    "l6": "[omitted: nesting past 6 levels]"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "response": {
+          "id": "msg_1",
+          "content": [
+            {
+              "type": "text",
+              "text": "hello"
+            }
+          ]
+        },
+        "truncated": true
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "provider": "anthropic",
+          "request": {
+            "model": "claude-opus-4-1-20250805"
+          },
+          "response": {
+            "stop_reason": "end_turn"
+          },
+          "streamChunks": ["event: message_start", "event: message_stop"],
+          "truncated": false
+        }
+      ],
+      "error": {
+        "code": "UPSTREAM",
+        "status": 502
+      }
+    }
+  },
+  "binary-raw.json.enc": {
+    "sha256": "195e16f73098eafbc279612d76c7ddac56efe852d0c8b642d35d4a966275ca50",
+    "artifact": {
+      "schemaVersion": 1,
+      "requestId": "req_fixture_bounded",
+      "at": 1786968000000,
+      "client": {
+        "request": {
+          "model": "fast",
+          "api_key": "sk-[redacted]",
+          "messages": [
+            {
+              "role": "user",
+              "content": "turn 6"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 7"
+            },
+            {
+              "role": "user",
+              "content": "turn 8"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 9"
+            },
+            {
+              "role": "user",
+              "content": "turn 10"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 11"
+            },
+            {
+              "role": "user",
+              "content": "turn 12"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 13"
+            },
+            {
+              "role": "user",
+              "content": "turn 14"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 15"
+            },
+            {
+              "role": "user",
+              "content": "turn 16"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 17"
+            },
+            {
+              "role": "user",
+              "content": "turn 18"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 19"
+            },
+            {
+              "role": "user",
+              "content": "turn 20"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 21"
+            },
+            {
+              "role": "user",
+              "content": "turn 22"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 23"
+            },
+            {
+              "role": "user",
+              "content": "turn 24"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 25"
+            },
+            {
+              "role": "user",
+              "content": "turn 26"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 27"
+            },
+            {
+              "role": "user",
+              "content": "turn 28"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 29"
+            }
+          ],
+          "deep": {
+            "l2": {
+              "l3": {
+                "l4": {
+                  "l5": {
+                    "l6": "[omitted: nesting past 6 levels]"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "response": {
+          "id": "msg_1",
+          "content": [
+            {
+              "type": "text",
+              "text": "hello"
+            }
+          ]
+        },
+        "truncated": true
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "provider": "anthropic",
+          "request": {
+            "model": "claude-opus-4-1-20250805"
+          },
+          "response": {
+            "stop_reason": "end_turn"
+          },
+          "streamChunks": ["event: message_start", "event: message_stop"],
+          "truncated": false
+        }
+      ],
+      "error": {
+        "code": "UPSTREAM",
+        "status": 502
+      }
+    }
+  },
+  "binary-gzip.json.enc": {
+    "sha256": "0199dbf8701e86f854ba5cd829fce2600a2d63afe833afbfcd8ebc7dad62ec9f",
+    "artifact": {
+      "schemaVersion": 1,
+      "requestId": "req_fixture_bounded",
+      "at": 1786968000000,
+      "client": {
+        "request": {
+          "model": "fast",
+          "api_key": "sk-[redacted]",
+          "messages": [
+            {
+              "role": "user",
+              "content": "turn 6"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 7"
+            },
+            {
+              "role": "user",
+              "content": "turn 8"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 9"
+            },
+            {
+              "role": "user",
+              "content": "turn 10"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 11"
+            },
+            {
+              "role": "user",
+              "content": "turn 12"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 13"
+            },
+            {
+              "role": "user",
+              "content": "turn 14"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 15"
+            },
+            {
+              "role": "user",
+              "content": "turn 16"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 17"
+            },
+            {
+              "role": "user",
+              "content": "turn 18"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 19"
+            },
+            {
+              "role": "user",
+              "content": "turn 20"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 21"
+            },
+            {
+              "role": "user",
+              "content": "turn 22"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 23"
+            },
+            {
+              "role": "user",
+              "content": "turn 24"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 25"
+            },
+            {
+              "role": "user",
+              "content": "turn 26"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 27"
+            },
+            {
+              "role": "user",
+              "content": "turn 28"
+            },
+            {
+              "role": "assistant",
+              "content": "turn 29"
+            }
+          ],
+          "deep": {
+            "l2": {
+              "l3": {
+                "l4": {
+                  "l5": {
+                    "l6": "[omitted: nesting past 6 levels]"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "response": {
+          "id": "msg_1",
+          "content": [
+            {
+              "type": "text",
+              "text": "hello"
+            }
+          ]
+        },
+        "truncated": true
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "provider": "anthropic",
+          "request": {
+            "model": "claude-opus-4-1-20250805"
+          },
+          "response": {
+            "stop_reason": "end_turn"
+          },
+          "streamChunks": ["event: message_start", "event: message_stop"],
+          "truncated": false
+        }
+      ],
+      "error": {
+        "code": "UPSTREAM",
+        "status": 502
+      }
+    }
+  },
+  "legacy-hex-omitted.json.enc": {
+    "sha256": "2f50b18277ddef4b96cc39f3d3c71bebab80e163306fa6956e919b1342153a2e",
+    "artifact": {
+      "schemaVersion": 1,
+      "requestId": "req_fixture_omitted",
+      "at": 1786968000000,
+      "client": {
+        "request": {
+          "omitted": true,
+          "reason": "artifact exceeded 524288 bytes after structural bounding",
+          "serializedBytes": 3459092
+        },
+        "response": {
+          "omitted": true,
+          "reason": "artifact exceeded 524288 bytes after structural bounding",
+          "serializedBytes": 3459092
+        },
+        "truncated": true
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "provider": "anthropic",
+          "request": {
+            "omitted": true,
+            "reason": "artifact exceeded 524288 bytes after structural bounding",
+            "serializedBytes": 3459092
+          },
+          "response": {
+            "omitted": true,
+            "reason": "artifact exceeded 524288 bytes after structural bounding",
+            "serializedBytes": 3459092
+          },
+          "streamChunks": null,
+          "truncated": true
+        }
+      ],
+      "error": null
+    }
+  },
+  "binary-raw-omitted.json.enc": {
+    "sha256": "eb19cafaa4568c1cdcde78e563ee886afbbbc6e770a25485dfaf40b4f555d2d4",
+    "artifact": {
+      "schemaVersion": 1,
+      "requestId": "req_fixture_omitted",
+      "at": 1786968000000,
+      "client": {
+        "request": {
+          "omitted": true,
+          "reason": "artifact exceeded 524288 bytes after structural bounding",
+          "serializedBytes": 3459092
+        },
+        "response": {
+          "omitted": true,
+          "reason": "artifact exceeded 524288 bytes after structural bounding",
+          "serializedBytes": 3459092
+        },
+        "truncated": true
+      },
+      "attempts": [
+        {
+          "attempt": 1,
+          "provider": "anthropic",
+          "request": {
+            "omitted": true,
+            "reason": "artifact exceeded 524288 bytes after structural bounding",
+            "serializedBytes": 3459092
+          },
+          "response": {
+            "omitted": true,
+            "reason": "artifact exceeded 524288 bytes after structural bounding",
+            "serializedBytes": 3459092
+          },
+          "streamChunks": null,
+          "truncated": true
+        }
+      ],
+      "error": null
+    }
+  }
+}
