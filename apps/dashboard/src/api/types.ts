@@ -944,8 +944,9 @@ export type CatalogResponse = { providers: CatalogProvider[] };
  * only `hasSecret`: the console shows a secret as set or not set and sends a
  * replacement whole, or `null` to clear it.
  *
- * The configuration is the store's own `ExportDestination` (the route returns
- * it unchanged through control's summary); `status` is the worker's report,
+ * The configuration is the store's own `ExportDestination` as control's
+ * summary returns it — without `revision`, the export worker's change signal,
+ * which stays off the wire; `status` is the worker's report,
  * hand-mirrored from `DestinationStatusView` in `apps/gateway/src/routes/export.ts`
  * and pinned by `apps/gateway/test/routes/exportViewMirror.test.ts`.
  */
@@ -965,7 +966,7 @@ export type ExportDestinationStatus = {
   failing: boolean;
 };
 
-export type ExportDestinationView = ExportDestination & {
+export type ExportDestinationView = Omit<ExportDestination, "revision"> & {
   /** Null until the worker has reported this destination, and while it is not running. */
   status: ExportDestinationStatus | null;
 };

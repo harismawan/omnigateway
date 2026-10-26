@@ -613,10 +613,15 @@ another, which resumes from the committed cursor. Each replica's worker re-reads
 destinations every tick, so an edit made anywhere takes effect within seconds.
 An edit also stops a pass already running on the old configuration — its
 filter, URL and credential are read together, once, when the pass starts — and
-the next pass starts on the new one. A batch already sent when you saved cannot
-be recalled: if its receiver accepts it, it counts. A pass's preparation and
-every batch run under its lease, renewed before each batch; a replica stalled
-past its lease sends nothing.
+the next pass starts on the new one. Every edit moves the destination's
+revision (a counter the database increments, not a timestamp), which is how
+each replica tells an edit happened. Stopping the pass aborts a request still in
+flight and prevents any cursor write not yet authorised, so a batch the old
+receiver accepted after you saved may be sent again under the new configuration
+(at-least-once); only a cursor write already authorised before the edit may
+land. A pass's preparation and every batch run under its lease, renewed before
+each batch; a lease whose answer comes back too late, or a replica stalled past
+its lease, sends nothing.
 
 **Metrics**, on `/metrics` when it is enabled, labelled by destination id:
 
