@@ -182,6 +182,15 @@ export function createConfigRepo(
       return next;
     },
 
+    async importSettings(settings) {
+      // Unlike a user patch, this is a restored normalized snapshot, not a new
+      // assignment. Preserve dangling IDs and the source retention marker exactly.
+      db.transaction(() => {
+        writeRaw(SETTINGS_KEY, JSON.stringify({ ...settings, ...readPromptSettings(settings) }));
+      }).immediate();
+      emit({ type: "settingsChanged" });
+    },
+
     async getAdminPasswordHash() {
       return readRaw(ADMIN_HASH_KEY);
     },

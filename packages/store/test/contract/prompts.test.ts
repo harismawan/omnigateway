@@ -42,6 +42,48 @@ async function waitForPromptWaiters(sql: SQL, count: number): Promise<void> {
 }
 
 forEachStore((backend) => {
+  test("internal restore retains dangling assignments under locks; ordinary writes still guard new references", async () => {
+    const store = await backend.fresh();
+    await store.prompts.create(prompt());
+    const settings = {
+      ...(await store.config.getSettings()),
+      prompts: ["missing-global", "team", "ponytail-full"],
+      ponytailMode: "full" as const,
+    };
+    const config = store.config;
+    const keys = store.keys;
+    await store.reopen();
+    await config.importSettings(settings);
+    expect(await config.getSettings()).toEqual(settings);
+    const created = await keys.create(key("original"));
+    const restored = {
+      ...created,
+      id: "restored",
+      hash: "restored",
+      prompts: { ids: ["missing-key", "team"], inheritGlobal: false },
+    };
+    await keys.importRow(restored, "restore");
+    expect(await keys.get("restored")).toEqual(restored);
+    await expect(keys.importRow(restored, "restore")).rejects.toThrow();
+    expect(await keys.get("restored")).toEqual(restored);
+    await config.putSettings({ prompts: settings.prompts });
+    await keys.setPrompts("restored", restored.prompts);
+    await expect(
+      config.putSettings({ prompts: [...settings.prompts, "new-missing"] }),
+    ).rejects.toMatchObject({ kind: "missing" });
+    await expect(
+      keys.setPrompts("restored", { ids: ["missing-key", "new-missing"], inheritGlobal: false }),
+    ).rejects.toMatchObject({ kind: "missing" });
+    await expect(
+      keys.importRow({ ...restored, id: "ordinary", hash: "ordinary" }),
+    ).rejects.toMatchObject({ kind: "missing" });
+    await expect(store.prompts.remove("team")).rejects.toMatchObject({ kind: "assigned" });
+    const aliases = { ...settings, prompts: [] };
+    await config.importSettings(aliases);
+    expect((await config.getSettings()).prompts).toEqual([]);
+    expect((await config.getSettings()).ponytailMode).toBe("off");
+  });
+
   test("key assignment writers emit privacy-safe routing changes after commit only", async () => {
     const store = await backend.fresh();
     const changes: unknown[] = [];
@@ -340,6 +382,47 @@ forEachStore((backend) => {
   });
 
   if (backend.name === "postgres") {
+    for (const writer of ["settings-restore", "key-restore"] as const) {
+      test(`${writer} waits for management lock before writing assignments`, async () => {
+        const store = await backend.fresh();
+        const row = await store.keys.create(key("k"));
+        const settings = { ...(await store.config.getSettings()), prompts: ["missing"] };
+        const sql = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string });
+        const conn = await sql.reserve();
+        let writing: Promise<void> | undefined;
+        try {
+          await conn.unsafe("BEGIN");
+          await conn.unsafe("SELECT pg_advisory_xact_lock(hashtext($1))", [
+            "omni:prompt-management",
+          ]);
+          writing =
+            writer === "settings-restore"
+              ? store.config.importSettings(settings)
+              : store.keys.importRow(
+                  {
+                    ...row,
+                    id: "restored",
+                    hash: "restored",
+                    prompts: { ids: ["missing"], inheritGlobal: false },
+                  },
+                  "restore",
+                );
+          await waitForPromptWaiters(sql, 1);
+          expect((await store.config.getSettings()).prompts).toEqual([]);
+          expect(await store.keys.get("restored")).toBeNull();
+          await conn.unsafe("COMMIT");
+          await writing;
+          if (writer === "settings-restore")
+            expect((await store.config.getSettings()).prompts).toEqual(["missing"]);
+          else expect((await store.keys.get("restored"))?.prompts.ids).toEqual(["missing"]);
+        } finally {
+          await conn.unsafe("ROLLBACK");
+          await writing;
+          conn.release();
+          await sql.close();
+        }
+      });
+    }
     for (const first of ["activation", "pruning"] as const) {
       test(`oldest retained activation versus pruning: ${first} wins management lock`, async () => {
         const store = await backend.fresh();

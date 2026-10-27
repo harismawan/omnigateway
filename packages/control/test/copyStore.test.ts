@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { builtinPrompts, resolvePrompts } from "@omni/prompts";
 import { createStore, deriveKey, type PromptDetail, type Store } from "@omni/store";
 import {
   memoryStore,
@@ -171,8 +172,57 @@ async function promptOnlyTarget(source: Store, target_: Store) {
   expect(await target_.prompts.get("team")).toEqual(retained());
 }
 
+async function danglingCopy(source: Store, target_: Store) {
+  await source.prompts.importRow(retained());
+  const { key } = await seedApiKey(source);
+  // Model normalized reads from a restored DB: missing IDs are supported stored
+  // state, not something an ordinary assignment writer is allowed to introduce.
+  const settings = {
+    ...(await source.config.getSettings()),
+    prompts: ["missing-global", "team", "ponytail-full"],
+    ponytailMode: "full" as const,
+    logRetentionDays: 1,
+    logRetentionLoweredAt: 123,
+  };
+  const assignment = { ids: ["missing-key", "team", "ponytail-lite"], inheritGlobal: true };
+  const restored = {
+    ...source,
+    config: { ...source.config, getSettings: async () => settings },
+    keys: { ...source.keys, list: async () => [{ ...key, prompts: assignment }] },
+  };
+  // Import must not reconcile source aliases against unrelated target defaults.
+  await target_.config.putSettings({ ponytailMode: "ultra" });
+  await copyStore(restored, target_);
+  expect(await target_.config.getSettings()).toEqual(settings);
+  expect((await target_.keys.get(key.id))?.prompts).toEqual(assignment);
+  expect(await target_.prompts.get("team")).toEqual(retained());
+  const active = new Map(
+    [...builtinPrompts(), ...(await target_.prompts.listActive())].map((p) => [p.id, p]),
+  );
+  const resolved = resolvePrompts(settings.prompts, assignment, active);
+  expect(resolved.prompts.map((p) => p.id)).toEqual(["team", "ponytail-lite"]);
+  expect(resolved.notes).toContain("prompt:missing");
+  await target_.config.putSettings({ prompts: settings.prompts });
+  await target_.keys.setPrompts(key.id, assignment);
+  await expect(
+    target_.config.putSettings({ prompts: [...settings.prompts, "new-missing"] }),
+  ).rejects.toMatchObject({ kind: "missing" });
+  await expect(
+    target_.keys.setPrompts(key.id, { ...assignment, ids: [...assignment.ids, "new-missing"] }),
+  ).rejects.toMatchObject({ kind: "missing" });
+  await expect(
+    target_.keys.importRow({
+      ...key,
+      id: "ordinary-import",
+      hash: "ordinary-import",
+      prompts: assignment,
+    }),
+  ).rejects.toMatchObject({ kind: "missing" });
+  await expect(target_.prompts.remove("team")).rejects.toMatchObject({ kind: "assigned" });
+}
+
 for (const direction of ["sqlite→sqlite", "sqlite→postgres", "postgres→sqlite"] as const) {
-  for (const scenario of [promptCopy, promptOnlyTarget]) {
+  for (const scenario of [promptCopy, promptOnlyTarget, danglingCopy]) {
     test.skipIf(direction.includes("postgres") && !process.env.OMNI_TEST_DATABASE_URL)(
       `${direction} ${scenario.name}: exact history/counts or prompt-only target preflight`,
       async () => {
@@ -231,6 +281,30 @@ test("invalid or vanished source history refuses before any target write", async
       await expect(copyStore(unreadable, target_)).rejects.toThrow("source prompt history");
       expect(await target_.config.getAdminPasswordHash()).toBeNull();
       expect(await target_.prompts.list()).toEqual([]);
+    }
+  } finally {
+    source.close();
+    target_.close();
+  }
+});
+
+test("deterministic key import refusals precede library writes", async () => {
+  const source = await memoryStore();
+  const target_ = await memoryStore();
+  try {
+    await source.prompts.importRow(retained());
+    const { key } = await seedApiKey(source);
+    for (const rows of [
+      [{ ...key, limits: null }],
+      [key, { ...key, id: "duplicate-hash" }],
+      [key, { ...key, hash: "duplicate-id" }],
+    ]) {
+      await expect(
+        copyStore({ ...source, keys: { ...source.keys, list: async () => rows } }, target_),
+      ).rejects.toThrow();
+      expect(await target_.prompts.list()).toEqual([]);
+      expect(await target_.keys.list()).toEqual([]);
+      expect(await target_.config.getAdminPasswordHash()).toBeNull();
     }
   } finally {
     source.close();

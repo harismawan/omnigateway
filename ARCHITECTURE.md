@@ -174,8 +174,8 @@ Two details diagram flattens. Credentials decrypt at step 13, not sooner — ran
 with appended system text; the catalog subpath alone supplies persistence vocabulary. It composes
 the pinned `@omni/ponytail` texts rather than adding another dispatch stage. Screening runs first on
 client content; `requestTransforms: false` excludes all managed prompts from classifier requests.
-`buildSnapshot` reads user text only via `prompts.listActive()`, adds built-ins, and caches the active
-map alongside settings. Proxy resolves once from that snapshot and the authenticated key; dispatch
+`buildSnapshot` reads user text only via `prompts.listActive()` and caches the active map alongside
+settings. Proxy adds built-ins and resolves once from that snapshot and the authenticated key; dispatch
 injects before model resolution and retries reuse the same bytes. `count_tokens` uses that same
 path. No request-path version-history lookup occurs. Missing/inactive resolution notes stay separate
 from the injection report. Applied `id@version` identifiers survive pending/terminal failure logs,
@@ -189,10 +189,16 @@ both prompt tables refresh snapshots across nodes. Privacy-safe prompt invalidat
 authorized console data and each holder's own summary without broadcasting texts or other key IDs.
 SQLite swap forwarders resolve the current repository per call, including held prompt methods.
 Snapshots include both prompt tables without extending the migration-001 required-table check;
-old snapshots migrate on reopen. Backend copy validates retained histories before writing, imports
-them exactly through internal `PromptRepo.importRow` before global/key assignments, counts only
-user rows/versions, and refuses targets already holding user prompts. Saves/activations are not an
+old snapshots migrate on reopen. Backend copy validates retained histories and deterministic key
+constraints before writing, imports history exactly through internal `PromptRepo.importRow` before
+global/key assignments, counts only user rows/versions, and refuses targets already holding user
+prompts. Saves/activations are not an
 import format: they would renumber pruned history and replace timestamps.
+Internal `config.importSettings` and `keys.importRow(row, "restore")` retain normalized source
+assignments, including restored dangling IDs, under the same mutation locks. They are not exposed
+to API/CLI assignment writers; normal writes still reject newly introduced missing references.
+Settings import preserves the source retention marker and explicit-list ponytail alias, not a merge
+against unrelated target settings.
 
 ## Observability
 

@@ -1151,6 +1151,8 @@ export interface ConfigRepo {
   removeModel(id: string): Promise<void>;
   getSettings(): Promise<Settings>;
   putSettings(patch: Partial<Settings>): Promise<Settings>;
+  /** Internal backend-copy/restore only: exact normalized settings, including dangling IDs. */
+  importSettings(settings: Settings): Promise<void>;
   getAdminPasswordHash(): Promise<string | null>;
   /** Writes only if no admin hash exists; reports whether this call won. */
   setAdminPasswordHashIfAbsent(hash: string): Promise<boolean>;
@@ -1392,8 +1394,9 @@ export interface KeyRepo {
    * `revokedAt` included. For copying an installation between backends and
    * nothing else; a key minted here goes through `create`. A row whose
    * `limits` are `null` is refused, because nothing could read it back.
+   * Internal restore mode preserves source dangling assignments; never use for API writes.
    */
-  importRow(row: ApiKey): Promise<void>;
+  importRow(row: ApiKey, mode?: "restore"): Promise<void>;
   /**
    * Replaces one key's limit matrix, whole.
    *

@@ -190,6 +190,20 @@ export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void
       return readRaw(ADMIN_HASH_KEY);
     },
 
+    async importSettings(settings) {
+      // Restore is not alias reconciliation against unrelated target settings.
+      // Keep the same management-before-settings/config-version lock order.
+      await sql.begin(async (tx) => {
+        await lockPromptManagement(tx);
+        await writeRaw(
+          SETTINGS_KEY,
+          JSON.stringify({ ...settings, ...readPromptSettings(settings) }),
+          tx,
+        );
+      });
+      emit({ type: "settingsChanged" });
+    },
+
     async setAdminPasswordHashIfAbsent(hash: string) {
       const result = await sql.unsafe(
         "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",

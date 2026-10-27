@@ -1,5 +1,6 @@
 import { GatewayError } from "@omni/ir";
 import { MAX_PROMPT_VERSIONS, MAX_USER_PROMPTS } from "@omni/prompts/catalog";
+import { parseLimitConfig } from "@omni/ratelimit/catalog";
 import type { PromptDetail, Store } from "@omni/store";
 
 /** How many request rows travel per read. */
@@ -69,6 +70,8 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
   // Every refusal the copy can make is made before anything is written, so a
   // failure never leaves a half-filled target that the retry then refuses.
   const keys_ = await source.keys.list();
+  const keyIds = new Set<string>();
+  const keyHashes = new Set<string>();
   for (const key of keys_) {
     if (key.limits === null) {
       throw new GatewayError(
@@ -76,6 +79,17 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
         `api key ${key.id} has unreadable limits; repair it first`,
       );
     }
+    // Restore mode bypasses only reference existence, never deterministic key
+    // constraints. Validate the whole batch before importing any library row.
+    parseLimitConfig(key.limits);
+    if (keyIds.has(key.id) || keyHashes.has(key.hash)) {
+      throw new GatewayError(
+        "BAD_REQUEST",
+        "source api keys have duplicate identity; repair them first",
+      );
+    }
+    keyIds.add(key.id);
+    keyHashes.add(key.hash);
   }
 
   // Read and validate every retained history before writing anything. Ordinary
@@ -126,7 +140,7 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
     counts.prompts++;
     counts.promptVersions += detail.versions.length;
   }
-  await target.config.putSettings(settings);
+  await target.config.importSettings(settings);
   const adminHash = await source.config.getAdminPasswordHash();
   if (adminHash !== null) await target.config.setAdminPasswordHash(adminHash);
   await target.config.setViewerPasswordHash(await source.config.getViewerPasswordHash());
@@ -154,7 +168,7 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
   }
 
   for (const key of keys_) {
-    await target.keys.importRow(key);
+    await target.keys.importRow(key, "restore");
     counts.apiKeys += 1;
   }
 

@@ -176,11 +176,11 @@ export function createKeyRepo(
       return { ...input, prompts, createdAt: now, revokedAt: null };
     },
 
-    async importRow(row) {
+    async importRow(row, mode) {
       if (row.limits === null) throw new Error(`api key ${row.id} has unreadable limits`);
       const prompts = readPromptAssignment(row.prompts);
       db.transaction(() => {
-        check(prompts.ids);
+        if (mode !== "restore") check(prompts.ids);
         db.run(
           `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
                                body_logging_opt_out, created_at, revoked_at, expires_at,
