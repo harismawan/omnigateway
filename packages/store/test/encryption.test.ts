@@ -64,3 +64,23 @@ test("round-trips empty and multi-byte values", async () => {
   expect(await decrypt(key, await encrypt(key, ""))).toBe("");
   expect(await decrypt(key, await encrypt(key, "日本語 🎉"))).toBe("日本語 🎉");
 });
+
+test("large legacy decryption never expands ciphertext through numeric iterators", async () => {
+  const key = await deriveKey(SECRET);
+  const text = "é ".repeat(100_000);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text)),
+  );
+  const envelope = `enc:v1:${Buffer.from(iv).toString("hex")}:${Buffer.from(sealed.subarray(0, -16)).toString("hex")}:${Buffer.from(sealed.subarray(-16)).toString("hex")}`;
+  const iterator = Uint8Array.prototype[Symbol.iterator];
+  Uint8Array.prototype[Symbol.iterator] = function () {
+    if (this.length > 1024) throw new Error("large numeric iterator allocation");
+    return iterator.call(this);
+  };
+  try {
+    expect(await decrypt(key, envelope)).toBe(text);
+  } finally {
+    Uint8Array.prototype[Symbol.iterator] = iterator;
+  }
+});

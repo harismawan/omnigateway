@@ -64,7 +64,10 @@ export async function decrypt(key: CryptoKey, value: string): Promise<string> {
   ) {
     throw new Error("malformed ciphertext");
   }
-  const sealed = new Uint8Array([...unhex(bodyHex), ...unhex(tagHex)]);
+  // Legacy bodies can approach 64 MiB. Never expand bytes into JS number arrays.
+  const sealed = new Uint8Array((bodyHex.length + tagHex.length) / 2);
+  unhexInto(bodyHex, sealed, 0);
+  unhexInto(tagHex, sealed, bodyHex.length / 2);
   const plain = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: unhex(ivHex), tagLength: TAG_BYTES * 8 },
     key,
@@ -84,6 +87,11 @@ function hex(bytes: Uint8Array): string {
 
 function unhex(s: string): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(s.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(s.slice(i * 2, i * 2 + 2), 16);
+  unhexInto(s, out, 0);
   return out;
+}
+
+function unhexInto(s: string, out: Uint8Array, offset: number): void {
+  for (let i = 0; i < s.length / 2; i++)
+    out[offset + i] = Number.parseInt(s.slice(i * 2, i * 2 + 2), 16);
 }
