@@ -813,6 +813,7 @@ export const keysPrompts: Command = {
   summary: "Replace prompt assignments; --ids '' clears, --no-global disables inheritance",
   options: { ids: { type: "string" }, "no-global": { type: "boolean" } },
   async run(args, { ctx, writer }) {
+    if (args.positionals.length > 1) throw new UsageError("unexpected positional arguments");
     const id = requirePositional(args, 0, "key id");
     const ids = stringFlag(args.values, "ids");
     if (ids === undefined) throw new UsageError("--ids is required; use --ids '' to clear");

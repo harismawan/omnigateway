@@ -76,7 +76,12 @@ export async function run(
   try {
     args = parse(resolved.rest, resolved.command.options ?? {});
   } catch (error) {
-    writer.err(describeError(error, "could not parse arguments"));
+    // Unknown-option diagnostics quote argv, which may be mistaken prompt text.
+    writer.err(
+      resolved.name.startsWith("prompts ")
+        ? "invalid prompt command arguments"
+        : describeError(error, "could not parse arguments"),
+    );
     writer.err(`usage: omni ${resolved.command.usage}`);
     return 2;
   }

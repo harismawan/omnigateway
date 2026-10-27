@@ -2,9 +2,76 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { createPrompt, type PromptView, putSettings } from "@omni/control";
-import { CliError } from "../src/context.ts";
+import { parse } from "../src/args.ts";
+import { keysPrompts } from "../src/commands/keys.ts";
+import { settingsSet } from "../src/commands/settings.ts";
+import { CliError, createContext } from "../src/context.ts";
 import { run } from "../src/run.ts";
-import { capture, cli, fakeService, makeRoot, openStore } from "./helpers/harness.ts";
+import { capture, cli, fakeService, makeRoot, openStore, silentPrompt } from "./helpers/harness.ts";
+
+test("assignment surplus positionals refuse before opening the store or calling effects", async () => {
+  const root = makeRoot();
+  for (const [command, argv] of [
+    [keysPrompts, ["key-id", "PRIVATE SURPLUS", "--ids", "team", "--no-global"]],
+    [settingsSet, ["prompts", "team", "PRIVATE SURPLUS"]],
+  ] as const) {
+    let effects = 0;
+    const forbidden = () => {
+      effects++;
+      throw new Error("unexpected effect");
+    };
+    const captured = capture();
+    const ctx = createContext(parse([]), { env: {}, cwd: root });
+    await expect(
+      command.run(parse(argv, command.options), {
+        ctx: { ...ctx, store: forbidden },
+        writer: captured.writer,
+        prompt: silentPrompt,
+        promptInput: { readFile: forbidden, readStdin: forbidden },
+        setupFs: { homeDir: root, cwd: root, read: forbidden, write: forbidden },
+        service: forbidden,
+        connect: forbidden,
+        connectable: forbidden,
+        foreground: forbidden,
+      }),
+    ).rejects.toThrow("unexpected positional arguments");
+    expect(effects).toBe(0);
+    const result = await cli(
+      command === keysPrompts ? ["keys", "prompts", ...argv] : ["settings", "set", ...argv],
+      { root },
+    );
+    expect(result.code).toBe(2);
+    expect(result.out + result.err).not.toContain("PRIVATE SURPLUS");
+  }
+});
+
+test("prompt parser errors never echo dash-prefixed bodies or unknown options", async () => {
+  const root = makeRoot();
+  let effects = 0;
+  const forbidden = async () => {
+    effects++;
+    throw new Error("unexpected input");
+  };
+  for (const args of [
+    ["list"],
+    ["show", "team"],
+    ["create", "team", "--name", "Team"],
+    ["save", "team"],
+    ["activate", "team", "1"],
+    ["duplicate", "team", "copy"],
+    ["remove", "team"],
+  ]) {
+    const result = await cli(["prompts", ...args, "--PRIVATE-PROMPT-TEXT"], {
+      root,
+      promptInput: { readFile: forbidden, readStdin: forbidden },
+    });
+    expect(result.code).toBe(2);
+    expect(result.err).toStartWith("invalid prompt command arguments\nusage: omni prompts ");
+    expect(result.out + result.err).not.toContain("PRIVATE-PROMPT-TEXT");
+    expect(result.out + result.err).not.toContain("Unknown option");
+  }
+  expect(effects).toBe(0);
+});
 
 function input(text: string) {
   return { readFile: async (_path: string) => text, readStdin: async () => text };

@@ -2232,6 +2232,9 @@ test("settings prompt lists clear explicitly and unrelated/legacy alias writes r
     activate: true,
   });
   const old = await store.config.getSettings();
+  const surplus = await cli(["settings", "set", "prompts", "team", "ponytail-full"], { root });
+  expect(surplus.code).toBe(2);
+  expect(await store.config.getSettings()).toEqual(old);
   const assigned = await cli(["settings", "set", "prompts", "team,ponytail-full", "--json"], {
     root,
   });

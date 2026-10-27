@@ -129,6 +129,9 @@ export const settingsSet: Command = {
   help: "Set global prompt order with: omni settings set prompts a,b. Use prompts '' to clear. ponytailMode remains a compatibility alias; unrelated setting changes retain prompt assignments.",
   async run(args, { ctx, writer }) {
     const path = requirePositional(args, 0, "setting path");
+    if (path === "prompts" && args.positionals.length > 2) {
+      throw new UsageError("unexpected positional arguments");
+    }
     const raw =
       path === "prompts" && args.positionals[1] === "" ? "" : requirePositional(args, 1, "value");
 

@@ -40,6 +40,13 @@ test("keys prompts requires --ids, replaces the whole assignment and preserves o
   });
   const before = await store.keys.get(id);
   if (before === null) throw new Error("created key missing");
+  const surplus = await cli(
+    ["keys", "prompts", id, "WRONG-SECOND-KEY", "--ids", "team", "--no-global"],
+    { root },
+  );
+  expect(surplus.code).toBe(2);
+  expect(surplus.err).not.toContain("WRONG-SECOND-KEY");
+  expect(await store.keys.get(id)).toEqual(before);
   for (const flags of [[], ["--no-global"]]) {
     const refused = await cli(["keys", "prompts", id, ...flags], { root });
     expect(refused.code).toBe(2);
