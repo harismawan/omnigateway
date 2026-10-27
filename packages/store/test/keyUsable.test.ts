@@ -17,6 +17,7 @@ function key(overrides: Partial<ApiKey> = {}): ApiKey {
     expiresAt: null,
     guardrailPolicy: null,
     smartRouting: false,
+    prompts: { ids: [], inheritGlobal: true },
     ...overrides,
   };
 }

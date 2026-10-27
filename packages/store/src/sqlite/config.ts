@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { isPonytailMode } from "@omni/ponytail/catalog";
+import { readPromptIds } from "@omni/prompts/catalog";
+import { checkPromptReferences, storedPromptIds } from "../promptAssignments.ts";
 import type {
   ConfigRepo,
   ScoringWeights,
@@ -83,6 +85,7 @@ export function createConfigRepo(
       return {
         ...DEFAULT_SETTINGS,
         ...stored,
+        prompts: storedPromptIds(stored),
         rtkEnabled: stored.rtkEnabled === true,
         // Two different questions, kept apart. *Absence* means on, and that
         // is decided by `DEFAULT_SETTINGS` above, not here. What this line
@@ -126,7 +129,19 @@ export function createConfigRepo(
    * them and have it overwritten — which would lose `logRetentionLoweredAt`.
    */
   const putSettings = db.transaction((patch: Partial<Settings>): Settings => {
-    const next = mergeSettings(readSettings(), patch, Date.now());
+    const current = readSettings();
+    const next = mergeSettings(current, patch, Date.now());
+    next.prompts = readPromptIds(next.prompts);
+    checkPromptReferences(
+      next.prompts,
+      current.prompts,
+      new Set(
+        db
+          .query<{ id: string }, []>("SELECT id FROM prompts")
+          .all()
+          .map((r) => r.id),
+      ),
+    );
     writeRaw(SETTINGS_KEY, JSON.stringify(next));
     return next;
   }).immediate;

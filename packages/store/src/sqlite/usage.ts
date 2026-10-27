@@ -4,6 +4,7 @@ import { isRtkFilterId } from "@omni/rtk/catalog";
 import { readBodyState, requestedBodyState } from "../bodyStateColumn.ts";
 import { exportPageSql } from "../exportPage.ts";
 import { logPageClauses, splitPage } from "../logPage.ts";
+import { readAppliedPrompts } from "../promptAssignments.ts";
 import {
   readSession,
   readTrace,
@@ -39,6 +40,7 @@ import {
 } from "./rollup.ts";
 
 type Row = {
+  prompts: string;
   id: string;
   state: string;
   at: number;
@@ -78,6 +80,7 @@ function parseRtkFilters(raw: string): import("@omni/rtk/catalog").RtkFilterId[]
 }
 
 const toLog = (r: Row): RequestLog => ({
+  prompts: readAppliedPrompts(r.prompts),
   id: r.id,
   state: r.state === "pending" ? "pending" : "done",
   at: r.at,
@@ -195,9 +198,9 @@ const COLUMNS = `(id, state, node_id, at, api_key_id, requested_model, resolved_
                   output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
                   cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
                   rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters,
-                  ${TRACE_COLUMN_NAMES.join(", ")}, completed_at, body_state)`;
+                  ${TRACE_COLUMN_NAMES.join(", ")}, completed_at, body_state, prompts)`;
 
-const PLACEHOLDERS = `(${Array.from({ length: 28 + TRACE_COLUMN_NAMES.length }, () => "?").join(",")})`;
+const PLACEHOLDERS = `(${Array.from({ length: 29 + TRACE_COLUMN_NAMES.length }, () => "?").join(",")})`;
 
 /**
  * `completed_at` is the store's, never the caller's: whatever the log carries is
@@ -236,6 +239,7 @@ function values(log: RequestLogWrite, state: RequestState, nodeId: string): SQLQ
     ...traceValues(log),
     state === "done" ? Date.now() : null,
     requestedBodyState(log),
+    JSON.stringify(log.prompts ?? []),
   ];
 }
 
@@ -288,6 +292,7 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_compressed_code_units = excluded.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = excluded.rtk_estimated_tokens_saved,
     rtk_filters = excluded.rtk_filters,
+    prompts = excluded.prompts,
     ${traceCompleteSet("excluded")},
     completed_at = excluded.completed_at,
     body_state = COALESCE(request_logs.body_state, excluded.body_state)

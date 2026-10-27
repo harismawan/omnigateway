@@ -278,6 +278,7 @@ export function requestLog(overrides: Partial<NewRequestLog> & { id: string }): 
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    prompts: [],
     ...EMPTY_TRACE,
     ...UNSTAMPED,
     ...overrides,

@@ -187,6 +187,7 @@
       "dependencies": {
         "@omni/ir": "workspace:*",
         "@omni/ponytail": "workspace:*",
+        "@omni/prompts": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/rtk": "workspace:*",
       },

@@ -69,6 +69,7 @@ function logRow(id: string, at: number, apiKeyId: string | null): NewRequestLog 
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    prompts: [],
     ...EMPTY_TRACE,
     ...UNSTAMPED,
   };

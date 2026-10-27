@@ -584,6 +584,7 @@ export type VirtualModel = {
 };
 
 export type ApiKey = {
+  prompts: import("@omni/prompts/catalog").PromptAssignment;
   id: string;
   label: string;
   /** First 12 chars of the key, for display. Never the full key. */
@@ -777,6 +778,7 @@ export const credentialExpired = (
 export type RequestState = "pending" | "done";
 
 export type RequestLog = {
+  prompts: string[];
   id: string;
   state: RequestState;
   at: number;
@@ -1000,6 +1002,7 @@ export type Settings = {
    * did not already have.
    */
   ponytailMode: PonytailMode;
+  prompts: string[];
   /**
    * Whether request and response bodies are captured at all.
    *
@@ -1358,11 +1361,13 @@ export interface BodyRepo {
  * `limits` is non-nullable here where `ApiKey` allows null: the unreadable state
  * is something a reader discovers, never something a writer may ask for.
  */
-export type ApiKeyInput = Omit<ApiKey, "createdAt" | "revokedAt" | "limits"> & {
+export type ApiKeyInput = Omit<ApiKey, "createdAt" | "revokedAt" | "limits" | "prompts"> & {
+  prompts?: import("@omni/prompts/catalog").PromptAssignment;
   limits: LimitConfig;
 };
 
 export interface KeyRepo {
+  setPrompts(id: string, prompts: import("@omni/prompts/catalog").PromptAssignment): Promise<void>;
   /**
    * Every key, including any whose `limits` could not be parsed — those carry
    * `limits: null`. One meddled row must not cost an operator the listing that
@@ -1560,6 +1565,7 @@ export type RequestLogCursor = { at: number; id: string };
  *   because "not failed" and "succeeded" differ on pending rows.
  */
 export type RequestLogQuery = {
+  promptId?: string | undefined;
   limit: number;
   cursor: RequestLogCursor | null;
   apiKeyId?: string;
@@ -2176,12 +2182,65 @@ export interface ExportDestinationRepo {
   ): Promise<{ destination: ExportDestination; secret: string | null } | null>;
 }
 
+export type { PromptAssignment } from "@omni/prompts/catalog";
+
+export type Prompt = {
+  id: string;
+  name: string;
+  description: string | null;
+  activeVersion: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+export type PromptVersion = {
+  promptId: string;
+  version: number;
+  text: string;
+  note: string | null;
+  createdAt: number;
+};
+export type PromptDetail = Prompt & { versions: PromptVersion[] };
+export type ActivePrompt = Prompt & { version: number; text: string };
+export type PromptAssignments = { global: boolean; keyIds: string[] };
+export type PromptCreate = {
+  id: string;
+  name: string;
+  description: string | null;
+  text: string;
+  note: string | null;
+  activate: boolean;
+};
+export type PromptSave = { text: string; note: string | null; activate: boolean };
+export interface PromptRepo {
+  list(): Promise<Prompt[]>;
+  get(id: string): Promise<PromptDetail | null>;
+  listActive(): Promise<ActivePrompt[]>;
+  assignments(id: string): Promise<PromptAssignments>;
+  create(input: PromptCreate): Promise<PromptDetail>;
+  update(id: string, input: { name: string; description: string | null }): Promise<Prompt>;
+  saveVersion(id: string, input: PromptSave): Promise<PromptVersion>;
+  activate(id: string, version: number): Promise<Prompt>;
+  remove(id: string): Promise<void>;
+  /** Inserts exact retained history; never renumbers or prunes an imported row. */
+  importRow(row: PromptDetail): Promise<void>;
+}
+export class PromptStoreError extends Error {
+  constructor(
+    public readonly kind: "missing" | "exists" | "limit" | "assigned" | "version-missing",
+    public readonly assignments?: PromptAssignments,
+  ) {
+    super(`prompt ${kind}`);
+    this.name = "PromptStoreError";
+  }
+}
+
 export type RoutingChange =
   | { type: "healthSaved"; rows: CredentialHealth[] }
   | { type: "quotaSaved"; rows: QuotaWindow[] }
   | { type: "credentialsChanged" }
   | { type: "modelsChanged" }
-  | { type: "settingsChanged" };
+  | { type: "settingsChanged" }
+  | { type: "promptsChanged" };
 
 export interface RoutingChangeSource {
   /** SQLite connection-local view of commits made by other connections. */
@@ -2204,6 +2263,7 @@ export type Store = {
   credentials: CredentialRepo;
   config: ConfigRepo;
   keys: KeyRepo;
+  prompts: PromptRepo;
   usage: UsageRepo;
   bodies: BodyRepo;
   maintenance: MaintenanceRepo;
@@ -2243,6 +2303,7 @@ export const DEFAULT_SETTINGS: Settings = {
   rtkEnabled: false,
   autoCacheEnabled: true,
   ponytailMode: "off",
+  prompts: [],
   bodyLoggingEnabled: false,
   bodyLoggingCaptureStreamChunks: false,
   snapshotKeepLatest: 5,

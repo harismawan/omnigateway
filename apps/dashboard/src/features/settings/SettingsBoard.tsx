@@ -380,7 +380,7 @@ function toDraft(settings: Settings): Draft {
 
 function parseDraft(
   draft: Draft,
-): { ok: true; settings: Settings } | { ok: false; problem: string } {
+): { ok: true; settings: Omit<Settings, "prompts"> } | { ok: false; problem: string } {
   const weights = {} as Settings["weights"];
   for (const weight of WEIGHTS) {
     // A blank field is not zero. Reading it as zero would silently retune the
@@ -569,10 +569,13 @@ export function SettingsBoard() {
       return;
     }
     setProblem(null);
-    save.mutate(parsed.settings, {
-      onSuccess: () => setSaved(true),
-      onError: (error) => setProblem(describeError(error)),
-    });
+    save.mutate(
+      { ...parsed.settings, prompts: settings.data?.prompts ?? [] },
+      {
+        onSuccess: () => setSaved(true),
+        onError: (error) => setProblem(describeError(error)),
+      },
+    );
   };
 
   return (

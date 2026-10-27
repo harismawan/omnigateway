@@ -180,6 +180,7 @@ async function toSummary(store: Store, key: ApiKey, now: number): Promise<ApiKey
     // they cannot use as intended. It is the operator's text, not a secret.
     guardrailPolicy: key.guardrailPolicy,
     smartRouting: key.smartRouting,
+    prompts: key.prompts,
   };
 }
 

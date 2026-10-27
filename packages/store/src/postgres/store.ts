@@ -9,6 +9,7 @@ import { createExportDestinationRepo } from "./exportDestinations.ts";
 import { createKeyRepo } from "./keys.ts";
 import { createMaintenanceRepo } from "./maintenance.ts";
 import { createPluginRepo } from "./plugins.ts";
+import { createPromptRepo } from "./prompts.ts";
 import { createUsageRepo } from "./usage.ts";
 
 /** The URL as it may be shown: host and database, never the password. */
@@ -97,6 +98,7 @@ export async function createPostgresStore(opts: {
     // The one repo handed the logger: an unreadable `limits` column is
     // reported rather than thrown, so this is where that trail is written.
     keys: createKeyRepo(sql, logger),
+    prompts: createPromptRepo(sql, emit),
     usage: createUsageRepo(sql, nodeId, dayOffsetMinutes),
     bodies: createBodyRepo(sql, opts.encryptionKey),
     maintenance: createMaintenanceRepo(sql, nodeId),

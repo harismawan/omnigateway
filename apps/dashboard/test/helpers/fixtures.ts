@@ -170,6 +170,7 @@ export function apiKey(patch: Partial<ApiKeySummary> = {}): ApiKeySummary {
   const limits = patch.limits === undefined ? { requests: { "1m": 120 } } : patch.limits;
   return {
     id: "key-1",
+    prompts: { ids: [], inheritGlobal: true },
     label: "laptop",
     prefix: "omni_sk_a1b2",
     modelAllowlist: null,
@@ -226,6 +227,7 @@ function scopeReadings(limits: LimitConfigBase, model: string | null): LimitRead
 
 export function log(patch: Partial<RequestLog> = {}): RequestLog {
   return {
+    prompts: [],
     id: "req-1",
     state: "done",
     at: NOW - 60_000,
@@ -329,6 +331,7 @@ export function usageBucket(patch: Partial<UsageBucket> = {}): UsageBucket {
 }
 
 export const settings: Settings = {
+  prompts: [],
   weights: { tier: 10, health: 3, quota: 2, load: 2, cost: 1, latency: 1 },
   maxAttempts: 3,
   requestDeadlineMs: 120_000,

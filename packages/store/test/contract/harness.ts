@@ -150,6 +150,7 @@ export function logRow(
     durationMs: 200,
     costUsd: 0.001,
     degradations: [],
+    prompts: [],
     rtkApplied: false,
     rtkFilterHits: 0,
     rtkOriginalCodeUnits: 0,

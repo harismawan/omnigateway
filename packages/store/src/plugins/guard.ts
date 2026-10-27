@@ -65,6 +65,8 @@ export const CORE_TABLES = [
   "migrations",
   "nodes",
   "plugin_migrations",
+  "prompts",
+  "prompt_versions",
   "quota_samples",
   "quota_windows",
   "request_bodies",

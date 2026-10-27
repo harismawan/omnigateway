@@ -102,7 +102,7 @@ if (url === undefined || url === "") {
     });
     try {
       const ids: { id: number }[] = await admin.unsafe("SELECT id FROM migrations ORDER BY id");
-      expect(ids.map((r) => r.id).slice(-3)).toEqual([10, 11, 12]);
+      expect(ids.map((r) => r.id).slice(-3)).toEqual([11, 12, 13]);
     } finally {
       store.close();
       await admin.close();
