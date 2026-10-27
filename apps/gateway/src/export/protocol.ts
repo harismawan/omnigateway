@@ -32,12 +32,12 @@ export type WorkerInit = {
   /** This process's identity: the lease holder, and `nodeId` on every record. */
   nodeId: string;
   logLevel: "debug" | "info" | "warn" | "error";
-  /** `OMNI_EXPORT_BODIES_ALLOWED`. Carried for part 2; part 1 sends no bodies. */
+  /** Boot-only `OMNI_EXPORT_BODIES_ALLOWED` opt-in. */
   exportBodiesAllowed: boolean;
   gates: BodyGates;
 };
 
-/** The body-capture gates the worker cannot read for itself. Unused until body export ships. */
+/** Environment gate and settings-change cancellation notification. Settings are also read at send. */
 export type BodyGates = { bodyLoggingAllowed: boolean; bodyLoggingEnabled?: boolean };
 
 // --- main → worker -------------------------------------------------------

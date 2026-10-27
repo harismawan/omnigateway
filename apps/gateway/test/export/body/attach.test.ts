@@ -62,6 +62,7 @@ test("three destinations admit only one body through final release and cancel sa
   controller.abort(new Error("cancelled"));
   await expect(two).rejects.toThrow("cancelled");
   one.release();
+  expect(one.client).toBeUndefined();
   const last = await three;
   expect(reads).toBe(2);
   last.release();

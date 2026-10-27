@@ -59,9 +59,15 @@ export function createBodyAttacher(limit: number) {
         if (!extracted) return { record, release: slot.release };
         record.body = { state: extracted.truncated ? "incomplete" : "included" };
         if (extracted.reason !== null) record.body = { state: "omitted", reason: extracted.reason };
-        return extracted.reason !== null
-          ? { record, release: slot.release }
-          : { record, client: extracted.client, release: slot.release };
+        const attachment: Attachment = {
+          record,
+          release() {
+            delete attachment.client;
+            slot.release();
+          },
+        };
+        if (extracted.reason === null) attachment.client = extracted.client;
+        return attachment;
       } catch (error) {
         slot.release();
         throw error;

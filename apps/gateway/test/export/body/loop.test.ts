@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { destination, row, stateOf, T0, type World, world } from "../harness.ts";
+import { destination, row, sharedLease, stateOf, T0, type World, world } from "../harness.ts";
 
 test("oversized metadata is dropped without blocking later rows, with gates off or segmented bodies", async () => {
   for (const enabled of [false, true]) {
@@ -36,18 +36,34 @@ test("body opt-in retains bounded metadata batching and flushes multiple rows be
   expect(pending.sent.map((s) => s.ids)).toEqual([["m1", "m2"]]);
 });
 
-test("elapsed deadline blocks bodies after awaited snapshot even without timer callbacks", async () => {
-  const w = setup();
-  artifact(w, "secret");
-  let reads = 0;
-  w.beforeSnapshot = async () => {
-    if (++reads === 2) w.clock.now += 61000;
-  };
-  await w.loop.start();
-  await w.settle();
-  expect(w.sent).toHaveLength(0);
-  expect((await stateOf(w)).cursorId).toBe("");
-});
+test.each([false, true])(
+  "elapsed deadline blocks bodies without timer callbacks (lease=%s)",
+  async (lease) => {
+    const w = lease
+      ? world({
+          bodies: true,
+          lease: sharedLease(() => T0).lease,
+          destinations: [destination({ includeBodies: true })],
+          rows: [row("body", T0 - 20000, { apiKeyId: "key" })],
+        })
+      : setup();
+    if (lease) {
+      worlds.push(w);
+      w.settings.bodyLoggingEnabled = true;
+      const log = w.rows[0];
+      if (log) log.bodyState = "ready";
+    }
+    artifact(w, "secret");
+    let reads = 0;
+    w.beforeSnapshot = async () => {
+      if (++reads === 2) w.clock.now += 61000;
+    };
+    await w.loop.start();
+    await w.settle();
+    expect(w.sent).toHaveLength(0);
+    expect((await stateOf(w)).cursorId).toBe("");
+  },
+);
 
 test("database-only gate flip during awaited destination snapshot prevents body send", async () => {
   const w = setup();

@@ -464,6 +464,11 @@ worker-wide **body budget of 192 MiB** shared by all destinations, and admits on
   incompressible gzip overhead and native workspace. Trials examine at most
   `maxRequestBytes` code units; encoded segment arrays are never retained. This
   accounts body allocations, not total RSS or GC arenas.
+  This is a conservative estimate for the pinned runtime, not a proof about all
+  native allocator internals. The real three-destination large-pipeline probe
+  records heap/external growth against a post-fixture GC baseline, wire-buffer
+  sizes, concurrent decodes, cancellation and replay; runtime upgrades must recheck
+  that evidence. Released attachments clear client references before slot handoff.
   The parsed tree is never built for export: the client request and response are extracted
   by a streaming JSON scanner over the decrypted text that copies out only the two client fields, so
   no node-heavy object graph exists to under-estimate.

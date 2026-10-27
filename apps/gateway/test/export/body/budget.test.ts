@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createBodyBudget, reservationBytes } from "../../../src/export/body/budget.ts";
+import { createBodyBudget } from "../../../src/export/body/budget.ts";
 
 test("one admitted body across destinations; cancellation releases reservations", async () => {
   const budget = createBodyBudget(1000);
@@ -25,7 +25,6 @@ test("one admitted body across destinations; cancellation releases reservations"
   expect(second.reserve(1001)).toBe(false);
   expect(budget.held()).toBe(0);
   second.release();
-  expect(reservationBytes(100, 200, 300)).toBe(1000);
 });
 
 test("cancellation during slot handoff does not strand the semaphore", async () => {

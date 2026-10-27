@@ -1,10 +1,8 @@
-/** Whole-artifact admission shared by every destination in one worker. */
-export function reservationBytes(ciphertext: number, plaintext: number, segment: number): number {
-  return ciphertext + 3 * plaintext + segment;
-}
-
 /**
- * Cover actual allocations, not just retained payload counters. E includes
+ * Conservative estimate of concurrently reachable allocations on pinned Bun,
+ * not an allocator/RSS bound. The real large-pipeline regression in
+ * test/export/body/memory.test.ts can falsify its headroom on runtime upgrades.
+ * E includes
  * legacy hex (decoded UTF-16 plus unhex/decrypt), P includes expanded UTF-8,
  * UTF-16 source/client copies and packed scanner stack. Encoding trials can
  * escape each input byte sixfold; OTLP nests the inline record once more.
