@@ -42,6 +42,29 @@ async function waitForPromptWaiters(sql: SQL, count: number): Promise<void> {
 }
 
 forEachStore((backend) => {
+  test("key assignment writers emit privacy-safe routing changes after commit only", async () => {
+    const store = await backend.fresh();
+    const changes: unknown[] = [];
+    store.routing.subscribe((change) => changes.push(change));
+    await store.keys.create({
+      ...key("minted"),
+      prompts: { ids: ["ponytail-lite"], inheritGlobal: false },
+    });
+    expect(changes).toEqual([{ type: "promptsChanged" }]);
+    changes.length = 0;
+    await store.keys.setPrompts("minted", { ids: [], inheritGlobal: true });
+    expect(changes).toEqual([{ type: "promptsChanged" }]);
+    changes.length = 0;
+    const row = await store.keys.get("minted");
+    if (!row) throw new Error("missing key");
+    await store.keys.importRow({ ...row, id: "imported", hash: "imported" });
+    expect(changes).toEqual([{ type: "promptsChanged" }]);
+    changes.length = 0;
+    await expect(
+      store.keys.setPrompts("minted", { ids: ["missing"], inheritGlobal: true }),
+    ).rejects.toThrow();
+    expect(changes).toEqual([]);
+  });
   test("library drafts, metadata, immutable versions and rollback", async () => {
     const store = await backend.fresh();
     const changes: string[] = [];

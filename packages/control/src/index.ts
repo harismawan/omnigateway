@@ -142,6 +142,7 @@ export {
   createKey,
   type LimitReading,
   listKeys,
+  type OwnKeySummary,
   readOwnKey,
   revokeKey,
   setKeyExpiry,

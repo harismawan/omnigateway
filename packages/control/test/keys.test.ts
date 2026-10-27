@@ -52,6 +52,31 @@ test("prompt assignments mint with defaults, replace whole and reject invalid ed
   }
 });
 
+test("effective texts extend only readOwnKey, never the shared listKeys projection", async () => {
+  const store = await memoryStore();
+  try {
+    await store.prompts.create({
+      id: "team",
+      name: "Team",
+      text: "private policy",
+      description: "hidden metadata",
+      note: "history",
+      activate: true,
+    });
+    const key = await createKey(store, { prompts: { ids: ["team"], inheritGlobal: false } });
+    const own = await readOwnKey(store, key.id);
+    expect(own.effectivePrompts).toEqual([
+      { id: "team", name: "Team", version: 1, text: "private policy" },
+    ]);
+    const listed = await listKeys(store);
+    expect(listed).toHaveLength(1);
+    expect(Object.keys(listed[0] ?? {})).not.toContain("effectivePrompts");
+    expect(JSON.stringify(listed)).not.toContain("private policy");
+  } finally {
+    store.close();
+  }
+});
+
 /**
  * Limits are editable after creation; `bodyLoggingOptOut` is not.
  *

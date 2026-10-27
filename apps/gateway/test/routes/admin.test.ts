@@ -2128,7 +2128,14 @@ const MUTATIONS: ReadonlyArray<{
     method: "POST",
     path: "/api/keys",
     body: { label: "cli" },
-    topics: ["res:keys"],
+    topics: ["res:keys", "res:prompts"],
+  },
+  {
+    route: "/api/keys/:id/prompts",
+    method: "PUT",
+    path: "/api/keys/:key/prompts",
+    body: { ids: ["ponytail-lite"], inheritGlobal: false },
+    topics: ["res:keys", "res:prompts"],
   },
   {
     route: "/api/keys/:id/limits",
@@ -2171,7 +2178,7 @@ const MUTATIONS: ReadonlyArray<{
     method: "PUT",
     path: "/api/settings",
     body: "settings",
-    topics: ["res:settings"],
+    topics: ["res:settings", "res:prompts"],
   },
   // Granting or withdrawing read-only access. Announces `res:settings` because
   // that is where the console renders whether the access exists.
@@ -2218,7 +2225,7 @@ const MUTATIONS: ReadonlyArray<{
   },
 ];
 
-test("every admin mutation announces its own resource, and only its own", async () => {
+test("every admin mutation announces exactly its affected resources", async () => {
   for (const mutation of MUTATIONS) {
     const { call, store, topics } = await harness({
       configured: mutation.path !== "/api/setup",

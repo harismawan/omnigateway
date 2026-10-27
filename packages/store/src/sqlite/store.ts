@@ -99,7 +99,7 @@ export async function createStore(opts: {
       config: createConfigRepo(db, emit),
       // The one repo handed the logger: an unreadable `limits` column is
       // reported rather than thrown, so this is where that trail is written.
-      keys: createKeyRepo(db, logger),
+      keys: createKeyRepo(db, logger, emit),
       prompts: createPromptRepo(db, emit),
       usage: createUsageRepo(db, nodeId, dayOffsetMinutes),
       // Derived from the database path rather than configured. One installation

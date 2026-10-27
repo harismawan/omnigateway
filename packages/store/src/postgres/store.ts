@@ -97,7 +97,7 @@ export async function createPostgresStore(opts: {
     config: createConfigRepo(sql, emit),
     // The one repo handed the logger: an unreadable `limits` column is
     // reported rather than thrown, so this is where that trail is written.
-    keys: createKeyRepo(sql, logger),
+    keys: createKeyRepo(sql, logger, emit),
     prompts: createPromptRepo(sql, emit),
     usage: createUsageRepo(sql, nodeId, dayOffsetMinutes),
     bodies: createBodyRepo(sql, opts.encryptionKey),

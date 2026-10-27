@@ -3,7 +3,7 @@ import { readPromptAssignment } from "@omni/prompts/catalog";
 import { type LimitConfig, parseLimitConfig } from "@omni/ratelimit/catalog";
 import type { SQL } from "bun";
 import { checkPromptReferences, parsePromptJson } from "../promptAssignments.ts";
-import type { ApiKey, KeyRepo } from "../types.ts";
+import type { ApiKey, KeyRepo, RoutingChange } from "../types.ts";
 import { type Conn, num, numOrNull, type Rows } from "./db.ts";
 import { lockPromptManagement } from "./promptLock.ts";
 
@@ -68,7 +68,11 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   smartRouting: r.smart_routing,
 });
 
-export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
+export function createKeyRepo(
+  sql: SQL,
+  logger: Logger,
+  emit: (change: RoutingChange) => void,
+): KeyRepo {
   const check = async (conn: Conn, ids: string[], previous: string[] = []) =>
     checkPromptReferences(
       ids,
@@ -101,6 +105,7 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           id,
         ]);
       });
+      emit({ type: "promptsChanged" });
     },
     async list() {
       const rows = await sql.unsafe<Rows<Row>>("SELECT * FROM api_keys ORDER BY created_at DESC");
@@ -144,6 +149,7 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           ],
         );
       });
+      emit({ type: "promptsChanged" });
       return { ...input, prompts, createdAt: now, revokedAt: null };
     },
 
@@ -181,6 +187,7 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
           ],
         );
       });
+      emit({ type: "promptsChanged" });
     },
 
     async setLimits(id: string, limits: LimitConfig) {

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { OwnKeySummary } from "@omni/control";
 import { hostDayOffsetMinutes, type Store } from "@omni/store";
 import {
   memoryStore,
@@ -16,6 +17,73 @@ import {
 } from "./upstream.ts";
 
 const NOW = 1_000_000;
+
+test("an already-open holder reads only its current effective policies, never library/history/another key", async () => {
+  const h = await harness();
+  try {
+    for (const [id, text] of [
+      ["team", "team policy"],
+      ["private", "OTHER KEY SECRET"],
+      ["draft", "inactive"],
+    ] as const) {
+      await h.store.prompts.create({
+        id,
+        name: id,
+        text,
+        description: "not client data",
+        note: "history secret",
+        activate: id !== "draft",
+      });
+    }
+    await h.store.config.putSettings({ prompts: ["team", "draft"] });
+    const mine = await seedApiKey(h.store);
+    const theirs = await seedApiKey(h.store, {
+      prompts: { ids: ["private"], inheritGlobal: false },
+    });
+    const cookie = await h.login(mine.raw);
+    const own = async () => {
+      const response = await h.api(`/api/client/summary?apiKeyId=${theirs.key.id}`, cookie);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const summary = (await response.json()) as OwnKeySummary & { dayOffsetMinutes: number };
+      expect(summary.id).toBe(mine.key.id);
+      expect(summary.dayOffsetMinutes).toBe(420);
+      expect(JSON.stringify(summary)).not.toContain("OTHER KEY SECRET");
+      expect(JSON.stringify(summary)).not.toContain(theirs.key.id);
+      return summary;
+    };
+    const summary = await own();
+    expect(summary.effectivePrompts.map((p: { id: string }) => p.id)).toEqual(["team"]);
+    expect(summary.effectivePrompts).toEqual([
+      { id: "team", name: "team", version: 1, text: "team policy" },
+    ]);
+    const libraryResponse = await h.api("/api/prompts", cookie);
+    expect(libraryResponse.status).toBe(401);
+    expect((await h.api("/api/prompts/team", cookie)).status).toBe(401);
+    expect((await h.api("/api/keys", cookie)).status).toBe(401);
+    await h.store.prompts.update("team", { name: "renamed", description: null });
+    await h.store.prompts.saveVersion("team", {
+      text: "new active policy",
+      note: null,
+      activate: true,
+    });
+    expect((await own()).effectivePrompts).toEqual([
+      { id: "team", name: "renamed", version: 2, text: "new active policy" },
+    ]);
+    await h.store.prompts.activate("team", 1);
+    expect((await own()).effectivePrompts[0]?.text).toBe("team policy");
+    await h.store.keys.setPrompts(mine.key.id, { ids: [], inheritGlobal: false });
+    expect((await own()).effectivePrompts).toEqual([]);
+    await h.store.keys.setPrompts(mine.key.id, { ids: ["ponytail-lite"], inheritGlobal: true });
+    await h.store.config.putSettings({ prompts: ["ponytail-full", "team"] });
+    expect((await own()).effectivePrompts.map((p: { id: string }) => p.id)).toEqual([
+      "team",
+      "ponytail-lite",
+    ]);
+  } finally {
+    h.store.close();
+  }
+});
 
 /**
  * The client surface against the app that actually ships.
@@ -219,6 +287,7 @@ test("the summary carries the key's own model overrides, and nothing beside them
   });
   expect(Object.keys(summary).sort()).toEqual(
     [
+      "effectivePrompts",
       "bodyLoggingOptOut",
       "createdAt",
       "dayOffsetMinutes",

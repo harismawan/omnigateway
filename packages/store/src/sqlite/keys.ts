@@ -3,7 +3,7 @@ import { type Logger, noopLogger } from "@omni/ir";
 import { readPromptAssignment } from "@omni/prompts/catalog";
 import { type LimitConfig, parseLimitConfig } from "@omni/ratelimit/catalog";
 import { checkPromptReferences, parsePromptJson } from "../promptAssignments.ts";
-import type { ApiKey, KeyRepo } from "../types.ts";
+import type { ApiKey, KeyRepo, RoutingChange } from "../types.ts";
 
 const PREFIX = "sk-omni-";
 
@@ -95,7 +95,11 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   smartRouting: r.smart_routing === 1,
 });
 
-export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRepo {
+export function createKeyRepo(
+  db: Database,
+  logger: Logger = noopLogger,
+  emit: (change: RoutingChange) => void = () => {},
+): KeyRepo {
   const check = (ids: string[], previous: string[] = []) =>
     checkPromptReferences(
       ids,
@@ -117,6 +121,7 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
         check(prompts.ids, readPromptAssignment(parsePromptJson(previous?.prompts ?? null)).ids);
         db.run("UPDATE api_keys SET prompts = ? WHERE id = ?", [JSON.stringify(prompts), id]);
       }).immediate();
+      emit({ type: "promptsChanged" });
     },
     async list() {
       return db
@@ -167,6 +172,7 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
           ],
         );
       }).immediate();
+      emit({ type: "promptsChanged" });
       return { ...input, prompts, createdAt: now, revokedAt: null };
     },
 
@@ -203,6 +209,7 @@ export function createKeyRepo(db: Database, logger: Logger = noopLogger): KeyRep
           ],
         );
       }).immediate();
+      emit({ type: "promptsChanged" });
     },
 
     async setLimits(id: string, limits: LimitConfig) {

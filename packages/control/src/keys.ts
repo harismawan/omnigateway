@@ -1,4 +1,5 @@
 import { GatewayError } from "@omni/ir";
+import { builtinPrompts, type ResolvedPrompt, resolvePrompts } from "@omni/prompts";
 import {
   type Dimension,
   type LimitConfig,
@@ -59,6 +60,11 @@ export type ApiKeySummary = Omit<ApiKey, "hash"> & {
    * measure against a ceiling nobody can read.
    */
   limitUsage: LimitReading[];
+};
+
+/** Effective policy text belongs only to the holder's scoped read, not listKeys. */
+export type OwnKeySummary = ApiKeySummary & {
+  effectivePrompts: Array<{ id: string; name: string; version: number | string; text: string }>;
 };
 
 /** The windows any dimension of this matrix is counted over. */
@@ -196,11 +202,8 @@ export async function listKeys(store: Store, now: number = Date.now()): Promise<
 /**
  * One key as its own holder sees it.
  *
- * Deliberately the same `ApiKeySummary` the operator's listing is built from,
- * produced by the same `toSummary`. A second, narrower shape for the client
- * would be a second answer to "what is safe to show about a key", and the two
- * would drift — the summary already excludes `hash` because that question was
- * settled once, here.
+ * The shared safe key projection plus only this holder's effective active
+ * policies. No library/history/assignment-count operations on this path.
  *
  * `bodyLoggingOptOut` is included and is the point: it is a promise made to
  * whoever holds this key, and the holder is exactly who should be able to
@@ -210,13 +213,38 @@ export async function readOwnKey(
   store: Store,
   apiKeyId: string,
   now: number = Date.now(),
-): Promise<ApiKeySummary> {
+): Promise<OwnKeySummary> {
   const key = await store.keys.get(apiKeyId);
   // A live session whose key vanished. Refused rather than reported empty: an
   // empty summary reads as "a key with no limits", which is the opposite of
   // what a missing key means.
   if (key === null) throw new GatewayError("AUTH", "no such api key");
-  return toSummary(store, key, now);
+  const [settings, active] = await Promise.all([
+    store.config.getSettings(),
+    store.prompts.listActive(),
+  ]);
+  const builtins = builtinPrompts();
+  const available = new Map<string, ResolvedPrompt>([
+    ...builtins.map((p): [string, ResolvedPrompt] => [p.id, p]),
+    ...active.map((p): [string, ResolvedPrompt] => [p.id, p]),
+  ]);
+  const names = new Map([
+    ...builtins.map((p): [string, string] => [
+      p.id,
+      `Ponytail ${p.id.slice("ponytail-".length).replace(/^./, (c) => c.toUpperCase())}`,
+    ]),
+    ...active.map((p): [string, string] => [p.id, p.name]),
+  ]);
+  const { prompts } = resolvePrompts(settings.prompts, key.prompts, available);
+  return {
+    ...(await toSummary(store, key, now)),
+    effectivePrompts: prompts.map(({ id, version, text }) => ({
+      id,
+      name: names.get(id) ?? id,
+      version,
+      text,
+    })),
+  };
 }
 
 export type CreatedKey = { id: string; label: string; prefix: string; key: string };

@@ -44,6 +44,8 @@ export type StreamDeps = {
  * a future frame carrying a payload would break it, which is why the set is
  * enumerated here rather than derived.
  */
+// Effective policies refresh through bounded own-summary polling, including
+// while LIVE. Never grant a holder the console's res:prompts library topic.
 const CLIENT_TOPICS: ReadonlySet<string> = new Set(["res:usage", "res:logs"]);
 
 export function authorised(
