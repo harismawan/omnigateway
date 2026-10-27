@@ -149,7 +149,17 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
         entry.generation !== generation
       )
         return;
-      if (!accepting && message.type !== "slice-ack") return;
+      // Closing admission must not suppress confirmed disposal from the live
+      // worker while pause settles publications. Retired-instance replies are
+      // fenced by the generic host, so unknown owners still wait for close.
+      if (
+        !accepting &&
+        message.type !== "slice-ack" &&
+        message.type !== "cleaned" &&
+        message.type !== "discarded" &&
+        message.type !== "unowned"
+      )
+        return;
       if (message.type === "slice-ack") {
         const bytes = Math.min(entry.slices, message.bytes);
         entry.slices -= bytes;

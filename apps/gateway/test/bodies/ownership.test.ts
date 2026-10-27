@@ -276,3 +276,85 @@ for (const mode of ["stop", "halt"] as const)
       }
     });
   }
+
+test("refused publication during successful pause clears pending paths across repeated resumes", async () => {
+  const root = await mkdtemp("/tmp/opencode/body-pause-refusal-");
+  const key = await deriveKey("pause-refusal-test");
+  let host: ReturnType<typeof createBodyWriterHost>;
+  const store = await createStore({
+    path: join(root, "main.sqlite"),
+    encryptionKey: key,
+    isPending: (path) => host?.isPending(path) ?? false,
+  });
+  const budget = createCaptureBudget(10000);
+  let link: ReturnType<typeof transport>;
+  let entered = false;
+  let decide = () => {};
+  let decision = Promise.resolve();
+  let spawns = 0;
+  let cleaned = 0;
+  const writer = createBodyWriter({
+    key,
+    dir: bodiesDirFor(store.databasePath),
+    post: (message) => link.receive(message),
+  });
+  link = transport(writer, (message) => {
+    if (message.type === "cleaned") cleaned++;
+  });
+  host = createBodyWriterHost({
+    spawn: () => {
+      spawns++;
+      return link.worker;
+    },
+    bodies: {
+      fail: store.bodies.fail,
+      publish: async (row) => {
+        entered = true;
+        await decision;
+        return store.bodies.publish(row);
+      },
+    },
+    budget,
+    logger: noopLogger,
+    now: Date.now,
+    timers,
+  });
+  const paths: string[] = [];
+  try {
+    await host.start();
+    for (let cycle = 0; cycle < 8; cycle++) {
+      const id = `refused_${cycle}`;
+      const path = `1970/01/01/${id}.json.enc`;
+      paths.push(path);
+      await store.usage.append({ ...requestLog({ id, at: 1000 }), bodyState: "pending" });
+      // The main repository must refuse the publication, not a test-only result.
+      await store.bodies.fail(id);
+      entered = false;
+      decision = new Promise<void>((resolve) => {
+        decide = resolve;
+      });
+      const p = parts(id);
+      budget.reserve(p.reservedBytes);
+      host.enqueue(p);
+      await until(() => entered);
+      expect(host.isPending(path)).toBe(true);
+      expect(await Bun.file(join(bodiesDirFor(store.databasePath), path)).exists()).toBe(true);
+      const pausing = host.pause();
+      await tick(); // Pause closes admission while the main decision is pending.
+      decide();
+      await pausing;
+      expect(cleaned).toBe(cycle + 1);
+      expect(await Bun.file(join(bodiesDirFor(store.databasePath), path)).exists()).toBe(false);
+      expect(paths.filter((candidate) => host.isPending(candidate))).toEqual([]);
+      expect(budget.held()).toBe(0);
+      await host.resume(false);
+      expect(paths.filter((candidate) => host.isPending(candidate))).toEqual([]);
+      expect(spawns).toBe(1); // No thread close/restart repairs these paths for us.
+    }
+  } finally {
+    decide();
+    host.stop();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
