@@ -484,7 +484,7 @@ describe("Prompt Management", () => {
       ).toBe("off"),
     );
     expect(screen.getByRole("link", { name: /Edit prompts for/ }).getAttribute("href")).toBe(
-      "/keys?prompts=key-1",
+      "/keys?editPrompts=key-1",
     );
   });
   test("selector orders IDs, removes, and filters second builtin", async () => {

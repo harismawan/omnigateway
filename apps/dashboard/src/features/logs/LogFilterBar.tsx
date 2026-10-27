@@ -71,6 +71,7 @@ const TERMS = [
   { prefix: "turn", field: "turn" },
   { prefix: "agent", field: "agent" },
   { prefix: "tag", field: "tag" },
+  { prefix: "prompt", field: "prompt" },
 ] as const satisfies ReadonlyArray<{ prefix: string; field: keyof LogFilters }>;
 
 /** What the box writes, and the only keys it may clear. */
@@ -83,6 +84,7 @@ const TERM_FIELDS = [
   "turn",
   "agent",
   "tag",
+  "prompt",
 ] as const;
 
 type TermFilters = Pick<LogFilters, (typeof TERM_FIELDS)[number]>;
@@ -139,6 +141,7 @@ export function formatTerms(filters: LogFilters): string {
   if (filters.turn !== undefined) parts.push(`turn:${filters.turn}`);
   if (filters.agent !== undefined) parts.push(`agent:${filters.agent}`);
   if (filters.tag !== undefined) parts.push(`tag:${filters.tag}`);
+  if (filters.prompt !== undefined) parts.push(`prompt:${filters.prompt}`);
   return parts.join(" ");
 }
 

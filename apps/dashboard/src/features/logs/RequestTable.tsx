@@ -17,6 +17,7 @@ import { Lamp } from "../../ui/Lamp.tsx";
 import { Legend, Mono, Row, Stack, Truncate } from "../../ui/primitives.ts";
 import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { ProcessingTokens, TokenBreakdown, tokenBreakdownLabel } from "../../ui/TokenBreakdown.tsx";
+import { AppliedPromptChips } from "../prompts/AppliedPromptChips.tsx";
 
 /**
  * The labels a row can be annotated with, where the reader is entitled to them.
@@ -397,6 +398,12 @@ export function RequestDetail({ log, names, children }: RequestDetailProps) {
         )}
       </Detail>
 
+      {(log.prompts ?? []).length === 0 ? null : (
+        <Stack $gap={1}>
+          <Legend>Applied prompts</Legend>
+          <AppliedPromptChips prompts={log.prompts} operator={names !== undefined} />
+        </Stack>
+      )}
       {log.tags.length === 0 && Object.keys(log.traceMetadata).length === 0 ? null : (
         <Stack $gap={1}>
           <Row $gap={2} $wrap>

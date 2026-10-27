@@ -154,7 +154,7 @@ export function PromptAssignments({
                       : "Unavailable"}
                   </Td>
                   <Td>
-                    <Link to="/keys" search={{ prompts: key.id }}>
+                    <Link to="/keys" search={{ editPrompts: key.id }}>
                       Edit prompts for {key.label}
                     </Link>
                   </Td>

@@ -465,7 +465,10 @@ export type KeysResponse = { keys: ApiKeySummary[] };
  * `SettingsResponse` is: a gateway older than it does not send one, and zero is
  * a real offset rather than a stand-in for absent.
  */
-export type ClientSummaryResponse = ApiKeySummary & { dayOffsetMinutes?: number };
+export type ClientSummaryResponse = ApiKeySummary & {
+  dayOffsetMinutes?: number;
+  effectivePrompts: Array<{ id: string; name: string; version: number | string; text: string }>;
+};
 
 /** The whole matrix, sent whole. `{}` leaves the key unlimited. */
 export type KeyLimitsInput = { limits: LimitConfig };
@@ -498,6 +501,7 @@ export type KeyGuardrailInput = { policy: string | null };
 export type KeySmartRoutingInput = { enabled: boolean };
 
 export type KeyCreateInput = {
+  prompts: PromptAssignment;
   label: string;
   /** Null means every configured model; an empty array means none. */
   modelAllowlist: string[] | null;
@@ -686,6 +690,8 @@ export type LogFilters = {
   agent?: string;
   /** Rows carrying exactly this tag. */
   tag?: string;
+  /** Exact applied prompt ID before its version separator. */
+  prompt?: string;
 };
 
 /** An empty filter set, so "cleared" is one value rather than eight. */

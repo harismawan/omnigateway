@@ -122,6 +122,7 @@ const LOG_FILTER_FIELDS = [
   "turn",
   "agent",
   "tag",
+  "prompt",
 ] as const satisfies ReadonlyArray<keyof LogFilters>;
 
 // JSON rather than a joined string, so no separator can appear inside a
@@ -1112,6 +1113,8 @@ export function useClientLogout(): UseMutationResult<{ ok: true }, Error, void> 
  * this whole surface exists to avoid.
  */
 const clientSummaryQuery = {
+  // Policy has no pushed topic for holders; stay fresh even while LIVE suppresses log polling.
+  refetchInterval: 10_000,
   queryKey: queryKeys.clientSummary,
   queryFn: ({ signal }: { signal: AbortSignal }) =>
     get<ClientSummaryResponse>("/api/client/summary", signal),

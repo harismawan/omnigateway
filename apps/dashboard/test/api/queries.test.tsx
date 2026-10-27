@@ -3,9 +3,11 @@ import { renderHook, waitFor } from "@testing-library/react";
 import {
   pollConnect,
   queryKeys,
+  useClientLogPages,
   useCreateKey,
   useCredentials,
   useKeys,
+  useLogPages,
   useLogs,
   useUsage,
 } from "../../src/api/queries.ts";
@@ -14,6 +16,33 @@ import { apiKey, credential, log } from "../helpers/fixtures.ts";
 import { makeQueryClient, queryWrapper } from "../helpers/render.tsx";
 
 describe("query hooks", () => {
+  test("prompt filter survives both wire projections while client identity filters cannot escape", async () => {
+    const stub = createFetchStub({
+      "GET /api/logs": () => ({ logs: [], nextCursor: null }),
+      "GET /api/client/logs": () => ({ logs: [], nextCursor: null }),
+    });
+    const filters = { prompt: "team", apiKeyId: "another-key", credentialId: "private-account" };
+    const wrapper = queryWrapper(makeQueryClient({ catalog: false }));
+    const admin = renderHook(() => useLogPages(filters, 20, false), { wrapper });
+    const holder = renderHook(() => useClientLogPages(filters, 20, false), { wrapper });
+    await waitFor(() =>
+      expect(admin.result.current.isSuccess && holder.result.current.isSuccess).toBe(true),
+    );
+    const operator = new URL(
+      stub.calls.find((c) => c.url.startsWith("/api/logs?"))?.url ?? "",
+      "http://local",
+    );
+    const client = new URL(
+      stub.calls.find((c) => c.url.startsWith("/api/client/logs?"))?.url ?? "",
+      "http://local",
+    );
+    expect(operator.searchParams.get("prompt")).toBe("team");
+    expect(operator.searchParams.get("apiKeyId")).toBe("another-key");
+    expect(operator.searchParams.get("credentialId")).toBe("private-account");
+    expect(client.searchParams.get("prompt")).toBe("team");
+    expect(client.searchParams.has("apiKeyId")).toBe(false);
+    expect(client.searchParams.has("credentialId")).toBe(false);
+  });
   test("useCredentials unwraps the envelope", async () => {
     createFetchStub({ "GET /api/credentials": () => ({ credentials: [credential()] }) });
     const { result } = renderHook(() => useCredentials(), { wrapper: queryWrapper() });
@@ -103,6 +132,7 @@ describe("mutations", () => {
     const create = renderHook(() => useCreateKey(), { wrapper });
     create.result.current.mutate({
       label: "ci",
+      prompts: { ids: [], inheritGlobal: true },
       modelAllowlist: null,
       limits: {},
       bodyLoggingOptOut: false,
