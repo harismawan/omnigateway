@@ -409,6 +409,8 @@ export type Timers = {
 };
 
 export type DeliverDeps = {
+  /** Synchronous admission after encode/gzip, immediately before transport. */
+  beforeSend?: () => void;
   transport: Transport;
   /** The batch deadline and the pass's cancellation; an abort propagates as its reason. */
   signal: AbortSignal;
@@ -441,6 +443,7 @@ export async function deliver(
     body = Bun.gzipSync(new TextEncoder().encode(text));
     headers["content-encoding"] = "gzip";
   }
+  deps.beforeSend?.();
 
   const request = new AbortController();
   const onAbort = (): void => request.abort(deps.signal.reason);

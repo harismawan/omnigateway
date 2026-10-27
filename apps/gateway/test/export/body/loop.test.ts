@@ -1,6 +1,134 @@
 import { afterEach, expect, test } from "bun:test";
 import { destination, row, stateOf, T0, type World, world } from "../harness.ts";
 
+test("oversized metadata is dropped without blocking later rows, with gates off or segmented bodies", async () => {
+  for (const enabled of [false, true]) {
+    const w = setup(1500);
+    w.settings.bodyLoggingEnabled = enabled;
+    const first = w.rows[0];
+    if (first) first.traceMetadata = { large: "x".repeat(5000) };
+    artifact(w, "large ".repeat(2000));
+    w.rows.push(row("later", T0 - 19000, { apiKeyId: "key" }));
+    await w.loop.start();
+    await w.settle();
+    expect((await stateOf(w)).cursorId).toBe("later");
+    expect((await stateOf(w)).droppedTotal).toBe(1);
+    expect((await stateOf(w)).lastError).toBe("dropped 1 of 2: record-too-large");
+    expect(w.sent.flatMap((s) => s.ids)).toEqual(["later"]);
+  }
+});
+
+test("body opt-in retains bounded metadata batching and flushes multiple rows before pending", async () => {
+  const w = setup(1000000);
+  w.settings.bodyLoggingEnabled = false;
+  w.rows.splice(0);
+  for (let n = 0; n < 100; n++) w.rows.push(row(`r${n}`, T0 - 20000 + n, { apiKeyId: "key" }));
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(1);
+  expect(w.sent[0]?.ids).toHaveLength(100);
+  const pending = setup();
+  const first = pending.rows[0];
+  if (first) first.bodyState = "pending";
+  pending.rows.unshift(row("m1", T0 - 22000), row("m2", T0 - 21000));
+  await pending.loop.start();
+  await pending.settle();
+  expect(pending.sent.map((s) => s.ids)).toEqual([["m1", "m2"]]);
+});
+
+test("elapsed deadline blocks bodies after awaited snapshot even without timer callbacks", async () => {
+  const w = setup();
+  artifact(w, "secret");
+  let reads = 0;
+  w.beforeSnapshot = async () => {
+    if (++reads === 2) w.clock.now += 61000;
+  };
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(0);
+  expect((await stateOf(w)).cursorId).toBe("");
+});
+
+test("database-only gate flip during awaited destination snapshot prevents body send", async () => {
+  const w = setup();
+  artifact(w, "secret");
+  let reads = 0;
+  w.beforeSnapshot = async () => {
+    if (++reads === 2) w.settings.bodyLoggingEnabled = false;
+  };
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(0);
+  expect((await stateOf(w)).cursorId).toBe("");
+});
+
+test("inline and segmented receiver rejections keep bounded safe dropped summaries", async () => {
+  for (const type of ["elasticsearch", "otlp"] as const)
+    for (const large of [false, true]) {
+      const w = setup(5000);
+      const d = w.destinations[0];
+      if (!d) throw new Error("missing destination");
+      d.type = type;
+      d.config =
+        type === "elasticsearch"
+          ? { url: "https://es.test", auth: "none" }
+          : { endpoint: "https://collector.test", signal: "logs" };
+      artifact(w, large ? "hello ".repeat(3000) : "small");
+      w.answer = () =>
+        type === "elasticsearch"
+          ? Response.json({
+              errors: true,
+              items: [
+                {
+                  index: {
+                    status: 400,
+                    error: { type: "mapper_parsing_exception", reason: "secret receiver text" },
+                  },
+                },
+              ],
+            })
+          : Response.json({
+              partialSuccess: { rejectedLogRecords: "1", errorMessage: "secret receiver text" },
+            });
+      await w.loop.start();
+      await w.settle();
+      const state = await stateOf(w);
+      expect(state.cursorId).toBe("body");
+      expect(state.droppedTotal).toBe(1);
+      expect(state.lastError).toBe(
+        type === "elasticsearch" ? "dropped 1 of 1: mapper_parsing_exception" : "dropped 1 of 1",
+      );
+      expect(w.logger.lines.join("\n")).not.toContain("secret receiver text");
+    }
+});
+
+test("segmented metadata rejection reason survives accepted body segments", async () => {
+  const w = setup(1500);
+  const d = w.destinations[0];
+  if (!d) throw new Error("missing destination");
+  d.type = "elasticsearch";
+  d.config = { url: "https://es.test", auth: "none" };
+  artifact(w, "large ".repeat(3000));
+  let calls = 0;
+  w.answer = () =>
+    Response.json({
+      errors: ++calls === 1,
+      items: [
+        {
+          index: {
+            status: calls === 1 ? 400 : 201,
+            ...(calls === 1
+              ? { error: { type: "mapper_parsing_exception", reason: "never repeat" } }
+              : {}),
+          },
+        },
+      ],
+    });
+  await w.loop.start();
+  await w.settle();
+  expect((await stateOf(w)).lastError).toBe("dropped 1 of 1: mapper_parsing_exception");
+});
+
 const worlds: World[] = [];
 afterEach(async () => {
   for (const w of worlds.splice(0)) {

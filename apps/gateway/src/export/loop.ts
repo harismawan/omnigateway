@@ -702,7 +702,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         }
       } catch (error) {
         if (signal.aborted) return;
-        if (deadline.signal.aborted || error instanceof CommitTimeoutError) {
+        if (error === DEADLINE || deadline.signal.aborted || error instanceof CommitTimeoutError) {
           await retryable(h, rt, epoch, DEADLINE_SUMMARY, null, null);
           return;
         }
@@ -733,13 +733,15 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     rows: RequestLog[],
     batch: Batch,
     commit: (next: CommitNext, batch: Batch) => Promise<boolean>,
+    metadataOnly = false,
   ): Promise<"continue" | "stop" | Exclude<DeliveryOutcome, { kind: "ok" }>> {
     if (
       rt.destination.includeBodies &&
+      !metadataOnly &&
       deps.exportBodiesAllowed &&
       !(rt.destination.type === "otlp" && rt.destination.config.signal === "traces")
     ) {
-      return sendBodyRows(h, rt, sender, rows, batch, commit);
+      return sendBodyRows(h, rt, epoch, sender, rows, batch, commit);
     }
     const signal = batch.signal;
     const labels = await guard(h.reader.keyLabels(), signal);
@@ -763,6 +765,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         signal,
         timers,
         now: deps.now,
+        beforeSend: () => checkDeadline(batch),
       });
       if (outcome.kind !== "ok") return outcome;
       const last = rows[cut.start + cut.parts.length - 1];
@@ -815,6 +818,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
   async function sendBodyRows(
     h: Handles,
     rt: Runtime,
+    epoch: number,
     sender: Sender,
     rows: RequestLog[],
     batch: Batch,
@@ -822,9 +826,37 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
   ): Promise<"continue" | "stop" | Exclude<DeliveryOutcome, { kind: "ok" }>> {
     const signal = batch.signal;
     const labels = await guard(h.reader.keyLabels(), signal);
+    const metadataRows: RequestLog[] = [];
+    const flush = async () => {
+      if (!metadataRows.length) return "continue" as const;
+      const outcome = await sendRows(h, rt, epoch, sender, metadataRows, batch, commit, true);
+      metadataRows.length = 0;
+      return outcome;
+    };
+    let droppedRecords = 0;
+    const dropReasons: string[] = [];
+    const dropOversized = async (row: RequestLog) => {
+      if (!(await commit({ ...cursorOf(row), droppedDelta: 1 }, batch))) return false;
+      rt.counters.recordsDropped++;
+      droppedRecords++;
+      dropReasons.push(OVERSIZED_REASON);
+      await h.state.recordError(
+        rt.destination.generation,
+        epoch,
+        droppedSummary(droppedRecords, rows.length, dropReasons) ?? OVERSIZED_REASON,
+        deps.now(),
+      );
+      return true;
+    };
     for (const row of rows) {
       signal.throwIfAborted();
       const allowed = await bodyAllowed(h, row, signal);
+      if (!allowed) {
+        metadataRows.push(row);
+        continue;
+      }
+      const flushed = await flush();
+      if (flushed !== "continue") return flushed;
       if (allowed && row.bodyState === "pending" && sharedNow() - (row.completedAt ?? 0) < 60_000)
         return "stop";
       const record = buildRecord(row, {
@@ -854,6 +886,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
             !current.destination.enabled
           )
             return "stop";
+          if (!(await bodyAllowed(h, row, signal))) return "stop";
           const client = attached.client;
           const inline =
             client && sender.rawPart ? sender.rawPart(record, client) : sender.part(record);
@@ -865,6 +898,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               signal,
               timers,
               now: deps.now,
+              beforeSend: () => checkDeadline(batch),
             });
           } else if (client && sender.bodySegment) {
             // Refuse impossible metadata caps before building segment slices.
@@ -873,8 +907,10 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               ...record,
               body: { state: record.body?.state ?? "included", parts: { request: 1, response: 1 } },
             };
-            if (requestBytes(sender, sender.part(base)) > cap)
-              return { kind: "failed", status: 413, error: "metadata exceeds request limit" };
+            if (requestBytes(sender, sender.part(base)) > cap) {
+              if (!(await dropOversized(row))) return "stop";
+              break;
+            }
             const request = bodyCuts(sender, record, "request", client.request, cap);
             const response = bodyCuts(sender, record, "response", client.response, cap);
             record.body = {
@@ -882,16 +918,20 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               parts: { request: request.length, response: response.length },
             };
             const metadata = sender.part(record);
-            if (requestBytes(sender, metadata) > cap)
-              return { kind: "failed", status: 413, error: "metadata exceeds request limit" };
+            if (requestBytes(sender, metadata) > cap) {
+              if (!(await dropOversized(row))) return "stop";
+              break;
+            }
             outcome = await deliver(sender, [metadata], {
               transport: deps.transport,
               signal,
               timers,
               now: deps.now,
+              beforeSend: () => checkDeadline(batch),
             });
             if (outcome.kind === "ok") {
               anyDropped = outcome.dropped > 0;
+              dropReasons.push(...outcome.reasons);
               outer: for (const [part, cuts] of [
                 ["request", request],
                 ["response", response],
@@ -910,19 +950,27 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
                     !current.destination.enabled
                   )
                     return "stop";
+                  if (!(await bodyAllowed(h, row, signal))) return "stop";
                   const encoded = sender.bodySegment(record, part, cuts[n] ?? "", n, cuts.length);
                   outcome = await deliver(encoded.sender, [encoded.part], {
                     transport: deps.transport,
                     signal,
                     timers,
                     now: deps.now,
+                    beforeSend: () => checkDeadline(batch),
                   });
-                  if (outcome.kind === "ok") anyDropped ||= outcome.dropped > 0;
+                  if (outcome.kind === "ok") {
+                    anyDropped ||= outcome.dropped > 0;
+                    dropReasons.push(...outcome.reasons);
+                  }
                   if (outcome.kind !== "ok") break outer;
                 }
               }
             }
-          } else return { kind: "failed", status: 413, error: "metadata exceeds request limit" };
+          } else {
+            if (!(await dropOversized(row))) return "stop";
+            break;
+          }
           if (outcome.status === 413 && !halved) {
             halved = true;
             cap = Math.max(1, Math.floor(cap / 2));
@@ -947,6 +995,16 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           rt.counters.recordsSent += anyDropped || outcome.dropped ? 0 : 1;
           rt.counters.recordsDropped += anyDropped || outcome.dropped ? 1 : 0;
           rt.counters.batchesOk++;
+          if (anyDropped || outcome.dropped) {
+            droppedRecords++;
+            dropReasons.push(...outcome.reasons);
+            await h.state.recordError(
+              rt.destination.generation,
+              epoch,
+              droppedSummary(droppedRecords, rows.length, dropReasons) ?? "record dropped",
+              deps.now(),
+            );
+          }
           succeeded(rt);
           break;
         }
@@ -954,7 +1012,12 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         attached.release();
       }
     }
-    return "continue";
+    return flush();
+  }
+
+  function checkDeadline(batch: Batch): void {
+    batch.signal.throwIfAborted();
+    if (deps.now() >= batch.deadlineAt) throw DEADLINE;
   }
 
   function succeeded(rt: Runtime): void {
