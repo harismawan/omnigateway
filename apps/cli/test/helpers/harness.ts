@@ -131,6 +131,7 @@ export async function cli(
     connect?: (store: Store) => ConnectFlows;
     foreground?: RunOptions["foreground"];
     setupFs?: RunOptions["setupFs"];
+    promptInput?: { readFile(path: string): Promise<string>; readStdin(): Promise<string> };
     env?: Record<string, string | undefined>;
     now?: () => number;
   },
@@ -142,6 +143,14 @@ export async function cli(
     isTty: false,
     ...(input.now === undefined ? {} : { now: input.now }),
     prompt: input.prompt ?? silentPrompt,
+    promptInput: input.promptInput ?? {
+      readFile: async () => {
+        throw new Error("unexpected prompt file read");
+      },
+      readStdin: async () => {
+        throw new Error("unexpected prompt stdin read");
+      },
+    },
     ...(input.service === undefined ? {} : { service: () => input.service?.deps as ServiceDeps }),
     ...(input.connect === undefined ? {} : { connect: input.connect }),
     ...(input.foreground === undefined ? {} : { foreground: input.foreground }),

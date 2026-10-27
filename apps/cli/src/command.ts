@@ -21,6 +21,11 @@ export type CommandEnv = {
   ctx: Context;
   writer: Writer;
   prompt: Prompt;
+  /** Literal prompt text; unlike terminal questions/secrets, never trims indentation. */
+  promptInput: {
+    readFile(path: string): Promise<string>;
+    readStdin(): Promise<string>;
+  };
   /** Filesystem effects used only by generated client setup commands. */
   setupFs: SetupFs;
   /** Built on demand: most commands never touch the process. */

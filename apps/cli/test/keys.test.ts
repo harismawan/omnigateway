@@ -8,6 +8,71 @@ import { cli, makeRoot, openStore } from "./helpers/harness.ts";
 
 type ListedKey = { id: string; label: string; limits: LimitConfig | null };
 
+test("keys prompts requires --ids, replaces the whole assignment and preserves other key fields", async () => {
+  const root = makeRoot();
+  const created = await cli(
+    [
+      "keys",
+      "create",
+      "--label",
+      "assigned",
+      "--smart-routing",
+      "--no-bodies",
+      "--policy",
+      "Keep private",
+      "--allow",
+      "model",
+      "--limit",
+      "concurrency=2",
+      "--json",
+    ],
+    { root },
+  );
+  const { id } = JSON.parse(created.out) as { id: string };
+  const store = await openStore(root);
+  await store.prompts.create({
+    id: "team",
+    name: "Team",
+    text: "rules",
+    description: null,
+    note: null,
+    activate: false,
+  });
+  const before = await store.keys.get(id);
+  if (before === null) throw new Error("created key missing");
+  for (const flags of [[], ["--no-global"]]) {
+    const refused = await cli(["keys", "prompts", id, ...flags], { root });
+    expect(refused.code).toBe(2);
+    expect(refused.err).toContain("--ids");
+    expect(await store.keys.get(id)).toEqual(before);
+  }
+  const assigned = await cli(
+    ["keys", "prompts", id, "--ids", "team,ponytail-lite", "--no-global", "--json"],
+    { root },
+  );
+  expect(assigned.code).toBe(0);
+  expect(JSON.parse(assigned.out)).toMatchObject({
+    id,
+    prompts: { ids: ["team", "ponytail-lite"], inheritGlobal: false },
+  });
+  expect(await store.keys.get(id)).toEqual({
+    ...before,
+    prompts: { ids: ["team", "ponytail-lite"], inheritGlobal: false },
+  });
+  const unchanged = await store.keys.get(id);
+  for (const ids of ["missing", "team,team", "ponytail-lite,ponytail-full", "team,", "UPPER"]) {
+    expect((await cli(["keys", "prompts", id, "--ids", ids], { root })).code).toBe(1);
+    expect(await store.keys.get(id)).toEqual(unchanged);
+  }
+  expect((await cli(["keys", "prompts", "missing", "--ids", ""], { root })).code).toBe(1);
+  expect((await cli(["keys", "prompts", id, "--ids", ""], { root })).code).toBe(0);
+  expect(await store.keys.get(id)).toEqual({
+    ...before,
+    prompts: { ids: [], inheritGlobal: true },
+  });
+  store.close();
+});
+
 async function limitsOf(root: string, label: string): Promise<LimitConfig | null> {
   const listed = await cli(["keys", "list", "--json"], { root });
   const body = JSON.parse(listed.out) as { keys: ListedKey[] };

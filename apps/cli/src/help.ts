@@ -9,6 +9,7 @@ const GROUPS: ReadonlyArray<{ title: string; prefixes: readonly string[] }> = [
   { title: "Accounts", prefixes: ["connect", "credentials "] },
   { title: "Models", prefixes: ["models "] },
   { title: "Keys", prefixes: ["keys "] },
+  { title: "Prompts", prefixes: ["prompts "] },
   { title: "Plugins", prefixes: ["plugin "] },
   { title: "Log export", prefixes: ["export "] },
   { title: "Configuration", prefixes: ["settings ", "admin ", "db "] },
