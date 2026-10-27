@@ -1,0 +1,14 @@
+{
+  "name": "@omni/prompts",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts",
+    "./catalog": "./src/catalog.ts"
+  },
+  "dependencies": {
+    "@omni/ir": "workspace:*",
+    "@omni/ponytail": "workspace:*"
+  }
+}
