@@ -57,6 +57,45 @@ test("reader lifetime cancels a stalled raw client and bounds admission to one s
   f.host.stop();
 });
 
+test("progressing raw download renews inactivity beyond thirty seconds", async () => {
+  const clock = fakeTimers();
+  const f = fixture(undefined, clock);
+  await f.host.start();
+  const opening = f.host.readRaw("req", "client.request");
+  const message = f.sent.at(-1);
+  if (message?.type !== "readRaw") throw new Error("missing read");
+  f.message({ type: "raw-ready", ref: message.ref, found: true });
+  const stream = await opening;
+  if (!stream) throw new Error("missing stream");
+  const reader = stream.getReader();
+  // The decode budget ends at readiness; stream inactivity starts afresh.
+  for (let i = 0; i < 4; i++) {
+    await clock.advance(20_000);
+    const next = reader.read();
+    f.message({
+      type: "raw-chunk",
+      ref: message.ref,
+      bytes: new Uint8Array([65 + i]).buffer,
+      last: i === 3,
+    });
+    expect((await next).value).toEqual(new Uint8Array([65 + i]));
+  }
+  expect((await reader.read()).done).toBe(true);
+  expect(f.sent.some((m) => m.type === "read-cancel")).toBe(false);
+  f.host.stop();
+});
+
+test("decode admission timeout remains bounded independently of stream inactivity", async () => {
+  const clock = fakeTimers();
+  const f = fixture(undefined, clock);
+  await f.host.start();
+  const result = f.host.read("stalled-decode").catch((error: unknown) => error);
+  await clock.advance(30_000);
+  expect(await result).toMatchObject({ message: "body reader unavailable" });
+  expect(f.sent.at(-1)?.type).toBe("read-cancel");
+  f.host.stop();
+});
+
 test("sustained overflow retains no captures or messages, even with a blocked failure write", async () => {
   let finishFailure = () => {};
   const blocked = new Promise<void>((resolve) => {

@@ -1248,6 +1248,66 @@ test("raw body download is exact JSON, no-store, and requires an admin session",
   }
 });
 
+test("HTTP preview streams every escaped part without encoding or decoding bodies on main", async () => {
+  const { store, root, call } = await bodyHarness();
+  const text = "\u0000".repeat(400_000);
+  const pair = { request: text, response: text, truncated: false };
+  await store.bodies.put(
+    bodyArtifact({
+      client: pair,
+      attempts: [1, 2, 3].map((attempt) => ({
+        ...pair,
+        attempt,
+        provider: "test",
+        streamChunks: null,
+      })),
+    }),
+  );
+  const stringify = JSON.stringify;
+  const parse = JSON.parse;
+  const responseJson = Response.json;
+  const decrypt = crypto.subtle.decrypt;
+  try {
+    JSON.stringify = ((value: unknown, ...rest: unknown[]) => {
+      if (value && typeof value === "object" && "parts" in value)
+        throw new Error("main encoded preview");
+      const result = stringify(value, ...(rest as []));
+      if (result && Buffer.byteLength(result) > 1024 * 1024)
+        throw new Error("main encoded large body");
+      return result;
+    }) as typeof JSON.stringify;
+    JSON.parse = ((value: string) => {
+      if (Buffer.byteLength(value) > 1024 * 1024) throw new Error("main parsed large body");
+      return parse(value);
+    }) as typeof JSON.parse;
+    Response.json = (() => {
+      throw new Error("main Response.json");
+    }) as typeof Response.json;
+    crypto.subtle.decrypt = () => {
+      throw new Error("main decrypt");
+    };
+    store.bodies.get = () => {
+      throw new Error("main envelope fetch");
+    };
+    const response = await call("GET", `/api/requests/${BODY_REQUEST_ID}/body`);
+    expect(response.status).toBe(200);
+    const body = parse(await response.text()) as BodyPreview;
+    expect(body.parts).toHaveLength(9);
+    for (const part of body.parts.slice(0, 8)) {
+      expect(part.preview).toBe(stringify(text).slice(0, 1024 * 1024));
+      expect(part.sizeBytes).toBe(2_400_002);
+      expect(part.previewTruncated).toBe(true);
+    }
+  } finally {
+    JSON.stringify = stringify;
+    JSON.parse = parse;
+    Response.json = responseJson;
+    crypto.subtle.decrypt = decrypt;
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * The most sensitive thing this gateway serves. There is no unauthenticated
  * form of this route, and a caller without a session learns nothing about

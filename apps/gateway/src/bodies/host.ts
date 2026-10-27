@@ -1,4 +1,4 @@
-import type { BodyPart, BodyPreview } from "@omni/control";
+import type { BodyPart } from "@omni/control";
 import { GatewayError, type Logger } from "@omni/ir";
 import type { BodyRepo } from "@omni/store/types";
 import type { CapturedParts } from "../bodyCapture.ts";
@@ -23,7 +23,7 @@ export type BodyWriterHost = {
   /** Five-second writer grace; unknown DB outcomes are left for recovery. */
   drain(): Promise<void>;
   generation(): number;
-  read(requestId: string): Promise<BodyPreview>;
+  read(requestId: string): Promise<ReadableStream<Uint8Array>>;
   readRaw(requestId: string, part: BodyPart): Promise<ReadableStream<Uint8Array> | null>;
 };
 type DropReason = "budget" | "backlog" | "writer_crash" | "restore";
@@ -99,12 +99,17 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   let nextRef = 0;
   let read: {
     ref: number;
-    resolve(value: BodyPreview | ReadableStream<Uint8Array> | null): void;
+    resolve(value: ReadableStream<Uint8Array> | null): void;
     reject(error: Error): void;
     controller?: ReadableStreamDefaultController<Uint8Array>;
     pulled?: () => void;
     timer: unknown;
   } | null = null;
+  function renewRead(): void {
+    if (!read) return;
+    deps.timers.clearTimeout(read.timer);
+    read.timer = deps.timers.setTimeout(cancelRead, 30_000);
+  }
   function cancelRead(): void {
     if (!read) return;
     const current = read;
@@ -125,12 +130,9 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     if (!read || read.ref !== message.ref) return true;
     const current = read;
     if (message.type === "read-error") cancelRead();
-    else if (message.type === "read-result") {
-      read = null;
-      deps.timers.clearTimeout(current.timer);
-      current.resolve(message.preview);
-    } else if (message.type === "raw-ready") {
-      if (!message.found) {
+    else if (message.type === "raw-ready" || message.type === "preview-ready") {
+      renewRead();
+      if (message.type === "raw-ready" && !message.found) {
         read = null;
         deps.timers.clearTimeout(current.timer);
         current.resolve(null);
@@ -143,6 +145,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
               },
               pull() {
                 if (read !== current) return;
+                renewRead();
                 // Keep the underlying pull pending until its transferred chunk
                 // arrives: many concurrent reader.read() calls still send one credit.
                 return new Promise<void>((resolve) => {
@@ -162,6 +165,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
           ),
         );
     } else if (message.type === "raw-chunk") {
+      renewRead();
       current.controller?.enqueue(new Uint8Array(message.bytes));
       if (message.last) {
         current.controller?.close();
@@ -176,7 +180,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   function requestRead(
     requestId: string,
     part?: BodyPart,
-  ): Promise<BodyPreview | ReadableStream<Uint8Array> | null> {
+  ): Promise<ReadableStream<Uint8Array> | null> {
     if (read || !accepting || draining || worker.state() !== "running")
       return Promise.reject(new GatewayError("OVERLOADED", "body reader unavailable"));
     return new Promise((resolve, reject) => {
@@ -388,7 +392,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     }
   }
   return {
-    read: (id) => requestRead(id) as Promise<BodyPreview>,
+    read: (id) => requestRead(id) as Promise<ReadableStream<Uint8Array>>,
     readRaw: (id, part) => requestRead(id, part) as Promise<ReadableStream<Uint8Array> | null>,
     start: () => worker.start(),
     enqueue(parts, capturedGeneration = parts.generation ?? generation) {

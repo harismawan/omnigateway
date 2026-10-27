@@ -365,12 +365,25 @@ test("every route admits exactly the principals it names, and refuses the rest",
         // question this table is asking.
         if (response.status === 401) refusals.push(`${label} -> 401`);
       } else {
-        if (response.status !== 401) wrongGrants.push(`${label} -> ${response.status}`);
+        const expected = route.path.includes("/body/raw?") && who === "viewer" ? 403 : 401;
+        if (response.status !== expected)
+          wrongGrants.push(`${label} -> ${response.status} (expected ${expected})`);
       }
     }
   }
 
   expect({ wrongGrants, refusals }).toEqual({ wrongGrants: [], refusals: [] });
+});
+
+test("raw body alone distinguishes authenticated viewers from anonymous callers", async () => {
+  const { call } = await matrix();
+  expect(
+    (await call("GET", "/api/requests/m1/body/raw?part=client.request", "viewer")).status,
+  ).toBe(403);
+  expect((await call("GET", "/api/requests/m1/body/raw?part=client.request", "none")).status).toBe(
+    401,
+  );
+  expect((await call("GET", "/api/requests/m1/body", "viewer")).status).toBe(401);
 });
 
 /**

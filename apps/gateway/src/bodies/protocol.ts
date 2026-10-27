@@ -1,4 +1,4 @@
-import type { BodyPart, BodyPreview } from "@omni/control";
+import type { BodyPart } from "@omni/control";
 import type { ProviderId } from "@omni/ir";
 import type { BodyPublication } from "@omni/store/types";
 
@@ -44,7 +44,7 @@ export type MainMessage =
   | { type: "pause"; publications?: string[] }
   | { type: "resume" | "stop" };
 export type WorkerMessage =
-  | { type: "read-result"; ref: number; preview: BodyPreview }
+  | { type: "preview-ready"; ref: number }
   | { type: "raw-ready"; ref: number; found: boolean }
   | { type: "raw-chunk"; ref: number; bytes: ArrayBuffer; last: boolean }
   | { type: "read-error"; ref: number }

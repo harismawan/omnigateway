@@ -210,6 +210,38 @@ test("--json bounds the preview while --json --full returns the whole serialized
   expect(whole.parts[0]?.previewTruncated).toBe(false);
 });
 
+test("multi-attempt escaped artifacts work in text, full and JSON modes", async () => {
+  const root = await installation();
+  const text = "\u0000".repeat(400_000);
+  const pair = { request: text, response: text, truncated: false };
+  await capture(
+    root,
+    artifact({
+      client: pair,
+      attempts: [1, 2, 3].map((attempt) => ({
+        ...pair,
+        attempt,
+        provider: "test",
+        streamChunks: null,
+      })),
+    }),
+  );
+  for (const flags of [[], ["--full"], ["--json"], ["--json", "--full"]]) {
+    const result = await cli(["bodies", REQUEST_ID, ...flags], { root });
+    expect(result.code).toBe(0);
+    if (flags.includes("--json")) {
+      const body = JSON.parse(result.out) as {
+        parts: Array<{ preview: string; previewTruncated: boolean }>;
+      };
+      expect(body.parts).toHaveLength(9);
+      expect(body.parts[0]?.preview).toBe(
+        JSON.stringify(text).slice(0, flags.includes("--full") ? undefined : 1024 * 1024),
+      );
+      expect(body.parts[0]?.previewTruncated).toBe(!flags.includes("--full"));
+    } else expect(result.out).toContain("ATTEMPT 3");
+  }
+});
+
 /**
  * The three absences are three different answers, and an operator acts on each
  * differently. None of them is a crash.

@@ -31,7 +31,6 @@ import {
   quotaHistory,
   quotaRefreshSchema,
   readConsole,
-  readRequestBody,
   redeemResetSchema,
   removeCredential,
   removeModel,
@@ -54,6 +53,7 @@ import type { Invalidator } from "../stream/broadcaster.ts";
 import type { ConsoleFleet } from "../stream/consoleFleet.ts";
 import {
   apiErrorHandler,
+  principalOf,
   readCookie,
   readJson,
   readJsonRecord,
@@ -815,9 +815,18 @@ export function adminRoutes(deps: AdminDeps) {
         await requireAdmin(request, deps.admin);
         const reader = deps.bodyWriter;
         if (!reader) throw new GatewayError("OVERLOADED", "body reader unavailable");
-        return readRequestBody(deps.store, params.id, (id) => reader.read(id));
+        return new Response(await reader.read(params.id), {
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+          },
+        });
       })
       .get("/api/requests/:id/body/raw", async ({ request, params, query }) => {
+        // Endpoint-specific contract; other admin guards deliberately stay 401.
+        if ((await principalOf(request, deps.admin))?.kind === "viewer") {
+          return new Response(null, { status: 403, headers: { "cache-control": "no-store" } });
+        }
         await requireAdmin(request, deps.admin);
         if (typeof query.part !== "string" || !isBodyPart(query.part))
           throw new GatewayError("BAD_REQUEST", "invalid body part");

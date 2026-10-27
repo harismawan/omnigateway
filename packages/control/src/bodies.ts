@@ -63,6 +63,7 @@ export function previewBody(
   requestId: string,
   bodyState: RequestLog["bodyState"],
   read: BodyRead | null,
+  full = false,
 ): BodyPreview {
   const result: BodyPreview = {
     requestId,
@@ -73,18 +74,25 @@ export function previewBody(
     at: read?.row.at ?? null,
     parts: [],
   };
-  let replyBytes = 0;
   if (read?.artifact)
     for (const [part, value] of bodyParts(read.artifact)) {
       const json = JSON.stringify(value ?? null);
       const sizeBytes = Buffer.byteLength(json);
+      if (full) {
+        result.parts.push({
+          part,
+          sizeBytes,
+          preview: json,
+          previewTruncated: false,
+          omitted: omission(value),
+        });
+        continue;
+      }
       // Inspect at most 1 MiB code units, then trim by bytes without allocating the full part.
       const bytes = new TextEncoder().encode(json.slice(0, BODY_PREVIEW_BYTES));
       let end = Math.min(bytes.length, BODY_PREVIEW_BYTES);
       if (end < bytes.length) while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end--;
       const preview = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end));
-      replyBytes += Buffer.byteLength(JSON.stringify(preview)) + 1024;
-      if (replyBytes > 8 * BODY_PREVIEW_BYTES) throw new Error("body preview reply exceeds 8 MiB");
       result.parts.push({
         part,
         sizeBytes,

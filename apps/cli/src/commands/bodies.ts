@@ -1,4 +1,4 @@
-import { bodyParts, previewBody, type RequestBodyRead } from "@omni/control";
+import { previewBody, type RequestBodyRead } from "@omni/control";
 import type { BodyArtifact, BodyDetailState } from "@omni/store";
 import { boolFlag, requirePositional } from "../args.ts";
 import { type Command, provider } from "../command.ts";
@@ -171,17 +171,15 @@ export const bodies: Command = {
       store.bodies.get(requestId),
       store.usage.get(requestId),
     ]);
-    const read = previewBody(requestId, log?.bodyState ?? null, decoded);
     const artifact = decoded?.artifact ?? null;
-    if (boolFlag(args.values, "full") && artifact) {
-      for (const [part, value] of bodyParts(artifact)) {
-        const item = read.parts.find((p) => p.part === part);
-        if (item) {
-          item.preview = JSON.stringify(value ?? null);
-          item.previewTruncated = false;
-        }
-      }
-    }
+    const fullOutput = boolFlag(args.values, "full");
+    // Text summaries and --full never build bounded previews first.
+    const read = previewBody(
+      requestId,
+      log?.bodyState ?? null,
+      ctx.json ? decoded : decoded ? { ...decoded, artifact: null } : null,
+      fullOutput,
+    );
 
     // The whole read rather than the bare artifact: `detailState` is the answer
     // whenever the artifact is null, and a script handed only the artifact could

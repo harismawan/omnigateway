@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { BodyPreview } from "@omni/control";
 import { noopLogger } from "@omni/ir";
 import { createStore, deriveKey } from "@omni/store";
 import { requestLog } from "@omni/testkit";
@@ -52,7 +53,7 @@ test("real worker decrypts previews off-main and streams exact JSON with bounded
     store.bodies.get = () => {
       throw new Error("main read envelope");
     };
-    const preview = await host.read("read");
+    const preview = parse(await new Response(await host.read("read")).text()) as BodyPreview;
     expect(preview.parts[0]?.sizeBytes).toBe(Buffer.byteLength(json));
     expect(preview.parts[0]?.previewTruncated).toBe(true);
     expect(Buffer.byteLength(preview.parts[0]?.preview ?? "")).toBeLessThanOrEqual(1024 * 1024);
@@ -98,13 +99,17 @@ test("real worker decrypts previews off-main and streams exact JSON with bounded
     await expect(host.read("read")).rejects.toThrow("unavailable");
     if (!cancel) throw new Error("raw part missing");
     await cancel.cancel();
-    expect((await host.read("read")).detailState).toBe("ready");
+    expect(
+      (parse(await new Response(await host.read("read")).text()) as BodyPreview).detailState,
+    ).toBe("ready");
     const paused = await host.readRaw("read", "client.request");
     await host.pause();
     if (!paused) throw new Error("raw part missing");
     await expect(paused.getReader().read()).rejects.toThrow("unavailable");
     await host.resume(true);
-    expect((await host.read("read")).detailState).toBe("ready");
+    expect(
+      (parse(await new Response(await host.read("read")).text()) as BodyPreview).detailState,
+    ).toBe("ready");
   } finally {
     JSON.parse = parse;
     crypto.subtle.decrypt = decrypt;
@@ -150,17 +155,10 @@ test("the actual worker previews legacy hex artifacts and old omission markers",
     encryptionKey: "legacy-reader",
   });
   try {
-    const response = Promise.withResolvers<import("../../src/bodies/protocol.ts").WorkerMessage>();
-    worker.onMessage((m) => {
-      if ("ref" in m) response.resolve(m);
-    });
-    worker.post({ type: "read", ref: 1, requestId: "legacy" });
-    const message = await response.promise;
-    expect(message.type).toBe("read-result");
-    if (message.type !== "read-result") throw new Error("no preview");
-    expect(message.preview.parts[0]?.omitted).toEqual(marker);
-    expect(message.preview.parts[1]?.preview).toBe('"old response"');
-    expect(message.preview.truncated).toBe(true);
+    const preview = await workerPreview(worker, "legacy");
+    expect(preview.parts[0]?.omitted).toEqual(marker);
+    expect(preview.parts[1]?.preview).toBe('"old response"');
+    expect(preview.truncated).toBe(true);
   } finally {
     worker.terminate();
     store.close();
@@ -212,18 +210,32 @@ test("near-cap legacy envelope decoding stays in the bounded real-worker read sl
     encryptionKey: "legacy-cap",
   });
   try {
-    const reply = Promise.withResolvers<import("../../src/bodies/protocol.ts").WorkerMessage>();
-    worker.onMessage((message) => reply.resolve(message));
-    worker.post({ type: "read", requestId: "large", ref: 1 });
-    const message = await reply.promise;
-    expect(message.type).toBe("read-result");
-    if (message.type !== "read-result") throw new Error("no preview");
-    expect(message.preview.parts[0]?.sizeBytes).toBe(60 * 1024 * 1024 + 2);
-    expect(message.preview.parts[0]?.previewTruncated).toBe(true);
-    expect(Buffer.byteLength(message.preview.parts[0]?.preview ?? "")).toBe(1024 * 1024);
+    const preview = await workerPreview(worker, "large");
+    expect(preview.parts[0]?.sizeBytes).toBe(60 * 1024 * 1024 + 2);
+    expect(preview.parts[0]?.previewTruncated).toBe(true);
+    expect(Buffer.byteLength(preview.parts[0]?.preview ?? "")).toBe(1024 * 1024);
   } finally {
     worker.terminate();
     store.close();
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+function workerPreview(
+  worker: ReturnType<typeof spawnBodyWriter>,
+  requestId: string,
+): Promise<BodyPreview> {
+  return new Promise((resolve, reject) => {
+    let text = "";
+    const decoder = new TextDecoder();
+    worker.onMessage((m) => {
+      if (m.type === "preview-ready") worker.post({ type: "read-pull", ref: 1 });
+      else if (m.type === "raw-chunk") {
+        text += decoder.decode(m.bytes, { stream: !m.last });
+        if (m.last) resolve(JSON.parse(text) as BodyPreview);
+        else worker.post({ type: "read-pull", ref: 1 });
+      } else if (m.type === "read-error") reject(new Error("worker read failed"));
+    });
+    worker.post({ type: "read", requestId, ref: 1 });
+  });
+}

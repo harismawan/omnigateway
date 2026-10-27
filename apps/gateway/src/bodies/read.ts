@@ -95,12 +95,11 @@ export function createBodyReader(deps: {
           }
           if (message.type === "read") {
             const preview = previewBody(message.requestId, log?.bodyState ?? null, read);
-            // Bound reply cloning even for artifacts with thousands of tiny attempts.
-            if (Buffer.byteLength(JSON.stringify(preview)) > 8 * BODY_SLICE_BYTES)
-              throw new Error("preview too large");
+            raw = { ref: message.ref, text: JSON.stringify(preview), offset: 0 };
+            expire();
             active = null;
             activeRef = null;
-            deps.post({ type: "read-result", ref: message.ref, preview });
+            deps.post({ type: "preview-ready", ref: message.ref });
           } else {
             const pair = read?.artifact
               ? [...bodyParts(read.artifact)].find(([part]) => part === message.part)

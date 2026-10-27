@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { BodyPreview } from "@omni/control";
 import { createPostgresStore, deriveKey } from "@omni/store";
 import type { WorkerMessage } from "../../src/bodies/protocol.ts";
 import { spawnBodyWriter } from "../../src/bodies/spawn.ts";
@@ -31,9 +32,14 @@ test.skipIf(!url)(
     try {
       worker.post({ type: "read", requestId: id, ref: 1 });
       const first = await reply.promise;
-      expect(first.type).toBe("read-result");
-      if (first.type === "read-result")
-        expect(first.preview.parts[0]?.preview).toBe('{"text":"postgres"}');
+      expect(first.type).toBe("preview-ready");
+      reply = Promise.withResolvers<WorkerMessage>();
+      worker.post({ type: "read-pull", ref: 1 });
+      const encoded = await reply.promise;
+      expect(encoded.type).toBe("raw-chunk");
+      if (encoded.type !== "raw-chunk") throw new Error("no preview bytes");
+      const preview = JSON.parse(new TextDecoder().decode(encoded.bytes)) as BodyPreview;
+      expect(preview.parts[0]?.preview).toBe('{"text":"postgres"}');
       reply = Promise.withResolvers<WorkerMessage>();
       worker.post({ type: "pause" });
       expect((await reply.promise).type).toBe("paused");
