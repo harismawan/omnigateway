@@ -567,6 +567,21 @@ describe("SettingsBoard", () => {
       expect(body.ponytailMode).toBe("ultra");
     });
   });
+
+  test("unrelated settings saves retain fetched prompt assignments", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({
+      "GET /api/settings": () => ({ settings: { ...settings, prompts: ["team"] } }),
+      "PUT /api/settings": () => ({ ok: true }),
+    });
+    renderWithProviders(<SettingsBoard />);
+    await user.click(await screen.findByRole("switch", { name: "Enable RTK compression" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body)).prompts).toEqual(["team"]);
+    });
+  });
   test("the classifier model and timeout load, save, and clear to null", async () => {
     const user = userEvent.setup();
     const stub = stubSettings({

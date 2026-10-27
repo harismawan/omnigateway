@@ -207,6 +207,21 @@ forEachStore((backend) => {
       }),
     ).rejects.toMatchObject({ kind: "version-missing" });
     expect(await store.prompts.get("invalid")).toBeNull();
+    const changes: string[] = [];
+    store.routing.subscribe((change) => changes.push(change.type));
+    const original = row.versions[0];
+    if (!original) throw new Error("missing fixture version");
+    const duplicate = { ...original, promptId: "broken" };
+    await expect(
+      store.prompts.importRow({
+        ...row,
+        id: "broken",
+        activeVersion: null,
+        versions: [duplicate, duplicate],
+      }),
+    ).rejects.toThrow();
+    expect(await store.prompts.get("broken")).toBeNull();
+    expect(changes).toEqual([]);
     await expect(store.prompts.importRow(row)).rejects.toMatchObject({ kind: "exists" });
   });
 
