@@ -425,6 +425,7 @@ function stallingAdapters(): Readonly<Partial<Record<ProviderId, ProviderAdapter
 test("records a cancelled non-streaming request as 499, keeping what routing resolved", async () => {
   const logger = captureLogger("info");
   const { app, raw, store } = await harness(EVENTS, { logger, adapters: stallingAdapters() });
+  await store.config.putSettings({ ponytailMode: "lite" });
 
   const controller = new AbortController();
   const response = app.handle(
@@ -457,6 +458,7 @@ test("records a cancelled non-streaming request as 499, keeping what routing res
       state: "done",
       status: 499,
       errorCode: "interrupted",
+      prompts: ["ponytail-lite@v4.9.0"],
       requestedModel: "fast",
       resolvedProvider: "anthropic",
       resolvedModel: "claude-opus-4",

@@ -302,6 +302,7 @@ export function snapshot(parts: {
 
   return {
     credentials: parts.credentials ?? [],
+    prompts: new Map(),
     health: new Map((parts.health ?? []).map((h) => [healthKey(h.credentialId, h.model), h])),
     quota: quotaMap,
     models: new Map((parts.models ?? []).map((m) => [m.id, m])),

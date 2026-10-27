@@ -1,6 +1,7 @@
 import type { ChatRequest } from "@omni/ir";
 import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import type {
+  ActivePrompt,
   CredentialHealth,
   CredentialView,
   QuotaWindow,
@@ -23,6 +24,7 @@ export type Snapshot = {
   /** Keyed by credential id. */
   quota: ReadonlyMap<string, QuotaWindow[]>;
   models: ReadonlyMap<string, VirtualModel>;
+  prompts: ReadonlyMap<string, ActivePrompt>;
   settings: Settings;
   builtAt: number;
 };

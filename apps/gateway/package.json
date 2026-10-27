@@ -12,6 +12,7 @@
     "@omni/coord": "workspace:*",
     "@omni/ir": "workspace:*",
     "@omni/ponytail": "workspace:*",
+    "@omni/prompts": "workspace:*",
     "@omnigateway/plugin-api": "workspace:*",
     "@omni/providers": "workspace:*",
     "@omni/ratelimit": "workspace:*",

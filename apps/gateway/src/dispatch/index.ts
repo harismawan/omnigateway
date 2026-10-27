@@ -13,7 +13,7 @@ import {
   type StreamEvent,
   safeToken,
 } from "@omni/ir";
-import { injectPonytail, ponytailNotes } from "@omni/ponytail";
+import { injectPrompts, promptNotes, type ResolvedPrompt } from "@omni/prompts";
 import type { HttpClient, ProviderAdapter } from "@omni/providers";
 import type { ProviderDescriptors } from "@omni/providers/descriptors";
 import {
@@ -74,6 +74,8 @@ export type DispatchDeps = {
   coord: Coord;
   refresh: (credential: CredentialView) => Promise<CredentialSecrets>;
   logger?: Logger;
+  /** Synchronously retains applied IDs before routing or adapter setup can fail. */
+  onPrompts?: (state: { prompts: readonly string[]; notes: readonly string[] }) => void;
   /** Called when an attempt selects its target, before outbound work starts. */
   onRoute?: (target: {
     provider: ProviderId;
@@ -113,7 +115,7 @@ export type DispatchOutcome = {
  */
 export type DispatchOptions = {
   /**
-   * Whether the operator's request transforms — RTK and the ponytail ruleset —
+   * Whether the operator's request transforms — RTK and managed prompts —
    * run on this request. Defaults to `true`.
    *
    * `false` for exactly two callers: the guardrail classifier
@@ -125,6 +127,9 @@ export type DispatchOptions = {
    * who built it.
    */
   requestTransforms?: boolean;
+  /** Already resolved by the authenticated caller; absent means no prompts. */
+  prompts?: readonly ResolvedPrompt[];
+  promptResolutionNotes?: readonly string[];
   /**
    * Whether this request may reach only a local-only model — a configured
    * virtual model whose every target is on `custom`. Defaults to `false`.
@@ -317,21 +322,21 @@ export async function dispatch(
     const transformed = transformRequest(request, {
       enabled: transforms && snapshot.settings.rtkEnabled,
     });
-    // Both transforms run once here, ahead of routing, so every attempt of a
-    // failover sends the same bytes. Their order is not load-bearing — RTK
-    // rewrites tool results and ponytail appends to the system prompt — and is
-    // fixed only so the recorded degradations read the same way every time.
-    const lazy = injectPonytail(transformed.request, {
-      mode: transforms ? snapshot.settings.ponytailMode : "off",
-    });
-    dispatchRequest = lazy.request;
-    noteDegradations(ponytailNotes(lazy.report));
+    // Resolve outside dispatch and inject once, so all failover attempts share bytes.
+    const injected = injectPrompts(transformed.request, transforms ? (options.prompts ?? []) : []);
+    dispatchRequest = injected.request;
+    log.prompts = injected.report.applied.map(({ id, version }) => `${id}@${version}`);
+    if (transforms) {
+      noteDegradations(options.promptResolutionNotes ?? []);
+      noteDegradations(promptNotes(injected.report));
+    }
     log.rtkApplied = transformed.report.applied;
     log.rtkFilterHits = transformed.report.filterHits;
     log.rtkOriginalCodeUnits = transformed.report.originalCodeUnits;
     log.rtkCompressedCodeUnits = transformed.report.compressedCodeUnits;
     log.rtkEstimatedTokensSaved = transformed.report.estimatedTokensSaved;
     log.rtkFilters = transformed.report.filters;
+    deps.onPrompts?.({ prompts: log.prompts, notes: log.degradations });
     checkCancellation();
     if (options.localOnly === true) {
       const local = localOnlyModel(dispatchRequest.model, snapshot, deps.providers);

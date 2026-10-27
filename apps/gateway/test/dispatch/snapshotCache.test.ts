@@ -26,6 +26,39 @@ async function seedRoutingStore() {
   return store;
 }
 
+test("snapshot caches active prompt rows and reloads activation, metadata and pruning", async () => {
+  const store = await seedRoutingStore();
+  await store.prompts.create({
+    id: "team",
+    name: "Team",
+    description: null,
+    text: "first",
+    note: null,
+    activate: true,
+  });
+  const read = store.prompts.listActive.bind(store.prompts);
+  let reads = 0;
+  store.prompts.listActive = async () => {
+    reads++;
+    return read();
+  };
+  const cache = createRoutingSnapshotCache(store);
+  const first = await cache.get(100);
+  expect(first.prompts.get("team")?.text).toBe("first");
+  expect(await cache.get(101)).toBe(first);
+  expect(reads).toBe(1);
+  await store.prompts.saveVersion("team", { text: "second", note: null, activate: true });
+  expect((await cache.get(200)).prompts.get("team")?.version).toBe(2);
+  await store.prompts.update("team", { name: "Renamed", description: "metadata" });
+  expect((await cache.get(300)).prompts.get("team")?.name).toBe("Renamed");
+  for (let i = 0; i < 100; i++)
+    await store.prompts.saveVersion("team", { text: `draft ${i}`, note: null, activate: false });
+  expect((await cache.get(400)).prompts.get("team")?.text).toBe("second");
+  expect(first.prompts.get("team")?.name).toBe("Team");
+  cache.close();
+  store.close();
+});
+
 test("unchanged reads reuse one routing snapshot build", async () => {
   const store = await seedRoutingStore();
   const listRouting = store.credentials.listRouting.bind(store.credentials);
@@ -229,6 +262,17 @@ test("another SQLite connection invalidates cache before next read", async () =>
   });
 
   expect((await cache.get(200)).models.has("external")).toBe(true);
+  await second.prompts.create({
+    id: "team",
+    name: "Team",
+    description: null,
+    text: "remote text",
+    note: null,
+    activate: true,
+  });
+  expect((await cache.get(300)).prompts.get("team")?.text).toBe("remote text");
+  await second.prompts.update("team", { name: "Remote rename", description: null });
+  expect((await cache.get(400)).prompts.get("team")?.name).toBe("Remote rename");
   cache.close();
   first.close();
   second.close();
@@ -383,6 +427,31 @@ test.skipIf(pg === undefined || pg === "")(
     await cache.get(300);
     expect(builds).toBeGreaterThan(before);
 
+    const sibling = await createPostgresStore({
+      url,
+      encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
+    });
+    await sibling.prompts.create({
+      id: "team",
+      name: "Team",
+      description: null,
+      text: "remote first",
+      note: null,
+      activate: true,
+    });
+    await settle();
+    expect((await cache.get(400)).prompts.get("team")?.text).toBe("remote first");
+    await sibling.prompts.saveVersion("team", {
+      text: "remote second",
+      note: null,
+      activate: true,
+    });
+    await settle();
+    expect((await cache.get(500)).prompts.get("team")?.text).toBe("remote second");
+    await sibling.prompts.update("team", { name: "Remote rename", description: null });
+    await settle();
+    expect((await cache.get(600)).prompts.get("team")?.name).toBe("Remote rename");
+    sibling.close();
     cache.close();
     store.close();
   },

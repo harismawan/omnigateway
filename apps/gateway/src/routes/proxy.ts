@@ -12,9 +12,17 @@ import {
   noopLogger,
   type StreamEvent,
 } from "@omni/ir";
-import { injectPonytail } from "@omni/ponytail";
+import {
+  builtinPrompts,
+  injectPrompts,
+  type PromptResolution,
+  type ResolvedPrompt,
+  resolvePrompts,
+} from "@omni/prompts";
+import type { PromptAssignment } from "@omni/prompts/catalog";
 import type { HeadroomByDimension } from "@omni/ratelimit";
-import type { ApiKey } from "@omni/store";
+import type { Snapshot } from "@omni/router";
+import type { ApiKey, NewRequestLog } from "@omni/store";
 import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
 import { ApiKeyRateLimiter, RateLimitExceeded } from "../auth/rateLimit.ts";
@@ -473,6 +481,17 @@ async function bodyCollectorFor(
 /** The response header naming the gateway's id for a request. */
 export const REQUEST_ID_HEADER = "x-omni-request-id";
 
+/** One immutable effective list shared by the main dispatch and any local reroute. */
+function requestPrompts(snapshot: Snapshot, assignment: PromptAssignment): PromptResolution {
+  const active = new Map<string, ResolvedPrompt>(snapshot.prompts);
+  for (const prompt of builtinPrompts()) active.set(prompt.id, prompt);
+  const resolved = resolvePrompts(snapshot.settings.prompts, assignment, active);
+  return Object.freeze({
+    prompts: Object.freeze(resolved.prompts.map((prompt) => Object.freeze({ ...prompt }))),
+    notes: Object.freeze([...resolved.notes]),
+  });
+}
+
 async function handle(
   deps: ResolvedProxyDeps,
   rateLimiter: ApiKeyRateLimiter,
@@ -500,6 +519,13 @@ async function handle(
   // `credential_id`, `attempts` and the rtk columns from whatever log it is
   // handed, so a blank one erases the attribution the pending row already held.
   let outcome: Awaited<ReturnType<typeof dispatch>> | null = null;
+  let appliedPrompts: { prompts: string[]; notes: string[] } = { prompts: [], notes: [] };
+  const retainPrompts = (log: NewRequestLog): void => {
+    log.prompts = [...appliedPrompts.prompts];
+    for (const note of appliedPrompts.notes) {
+      if (!log.degradations.includes(note)) log.degradations.push(note);
+    }
+  };
   // Null whenever capture is off, which is every request on an installation
   // that never opted in. Both live out here so the terminal catch can record
   // the error body it renders and still write through the same one-shot path.
@@ -702,6 +728,8 @@ async function handle(
       }
       throw error;
     }
+    const promptSnapshot = await deps.snapshots.get(deps.now());
+    const resolved = requestPrompts(promptSnapshot, key.prompts);
     let began = false;
     // One dispatch closure for the request as sent and for a rerouted copy. The
     // pending row it writes names `requestedModel` — the client's — either way.
@@ -722,6 +750,9 @@ async function handle(
           // to leak or to look a request up in.
           ...(captured === null ? {} : { http: captured.wrap(deps.http) }),
           trace,
+          onPrompts(state) {
+            appliedPrompts = { prompts: [...state.prompts], notes: [...state.notes] };
+          },
           async onRoute(target) {
             if (began) {
               await routeLog(deps.store, requestId, target, deps.logger, deps.broadcaster);
@@ -736,6 +767,8 @@ async function handle(
               resolvedModel: target.model,
               credentialId: target.credentialId,
             });
+            log.prompts = [...appliedPrompts.prompts];
+            log.degradations = [...appliedPrompts.notes];
             if (traced !== null) applyTrace(log, traced);
             if (captured !== null) log.bodyState = "pending";
             await beginLog(deps.store, log, keyId, deps.logger, deps.broadcaster);
@@ -743,7 +776,7 @@ async function handle(
         },
         request.signal,
         requestId,
-        options,
+        { ...options, prompts: resolved.prompts, promptResolutionNotes: resolved.notes },
       );
     const run = (): Promise<DispatchOutcome> => runWith(chatRequest);
     // After admission, so the checks run inside the key's concurrency slot and
@@ -752,9 +785,8 @@ async function handle(
     // before either existed: no classifier call, and dispatch awaited before the
     // head.
     //
-    // Settings are read once, and only for a key carrying the flag, so a key
-    // without it makes no read it did not make before.
-    const settings = key.smartRouting ? (await deps.snapshots.get(deps.now())).settings : null;
+    // Screening sees client IR only, but shares this request's settings snapshot.
+    const settings = key.smartRouting ? promptSnapshot.settings : null;
     const smartRouting = settings?.smartRouterEnabled === true;
     const policy = key.guardrailPolicy;
     // The classifier calls are never admitted, so their model's override is
@@ -851,6 +883,8 @@ async function handle(
     outcome = dispatched;
     const log = async (cancelled = false, failure?: unknown): Promise<void> => {
       const completed = dispatched.log();
+      // A screening wrapper can exist before its inner dispatch returns an outcome.
+      retainPrompts(completed);
       const wasCancelled = cancelled || request.signal.aborted;
       // The client hung up, so the response in the artifact is whatever had
       // already gone out rather than a whole one. Known here rather than
@@ -1014,6 +1048,7 @@ async function handle(
     // target the pending row recorded instead of overwriting it with nulls.
     const completed =
       outcome?.log() ?? newCompletedRequestLog(requestId, startedAt, { requestedModel, status: 0 });
+    retainPrompts(completed);
     completed.status = cancelled ? 499 : HTTP_STATUS[gatewayError.code];
     completed.errorCode = cancelled ? "interrupted" : gatewayError.code;
     completed.durationMs = deps.now() - startedAt;
@@ -1170,8 +1205,9 @@ export function proxyRoutes(deps: ProxyDeps) {
           // be added by hand — a count that omitted it would under-report by
           // the whole prompt on every call while the real request paid for it,
           // and this number is what a client paces its compaction with.
-          const { settings } = await dispatchDeps.snapshots.get(deps.now());
-          const counted = injectPonytail(chatRequest, { mode: settings.ponytailMode }).request;
+          const snapshot = await dispatchDeps.snapshots.get(deps.now());
+          const resolved = requestPrompts(snapshot, key.prompts);
+          const counted = injectPrompts(chatRequest, resolved.prompts).request;
           // No request-log row: nothing was dispatched and no tokens were spent,
           // so a row here would be counted by every usage aggregate. That is
           // also why no degradation is recorded for the injection above.

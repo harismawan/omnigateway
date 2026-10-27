@@ -156,6 +156,7 @@ for (const c of CASES) {
           classifier: c.classifier,
           ...(c.unconfigured === true ? { settings: { guardrailModel: null } } : {}),
         });
+        await h.store.config.putSettings({ ponytailMode: "lite" });
         const res = await h.call(surface, { stream });
         const text = await res.text();
 
@@ -190,11 +191,13 @@ for (const c of CASES) {
         expect(parent?.errorCode).toBe(c.code);
         expect(parent?.degradations).toContain(c.note);
         expect(parent?.requestedModel).toBe("fast");
+        expect(parent?.prompts).toEqual(c.code === null ? ["ponytail-lite@v4.9.0"] : []);
 
         const classifier = await rowOf(h, "req_2");
         if (c.classified) {
           expect(classifier?.apiKeyId).toBe(h.keyId);
           expect(classifier?.requestedModel).toBe("judge");
+          expect(classifier?.prompts).toEqual([]);
           expect(classifier?.degradations).toEqual(["guardrail:classifier"]);
         } else {
           expect(classifier).toBeUndefined();
@@ -728,7 +731,8 @@ for (const stream of [false, true]) {
         snapshots: {
           get: async (now) => {
             reads++;
-            if (reads === 1) throw new Error("LEAKED-STORE-TEXT");
+            // The authenticated request captures prompts before the judge reads settings.
+            if (reads === 2) throw new Error("LEAKED-STORE-TEXT");
             return real.get(now);
           },
         },
@@ -973,11 +977,11 @@ test("a timeout that fires before the classifier is routed is still recorded as 
     settings: { guardrailTimeoutMs: 5 },
     deps: {
       snapshots: {
-        // The judge's own read is first; the classifier dispatch's is second,
+        // Prompt capture is first, judge settings second, classifier dispatch third,
         // and is held past the timeout.
         get: async (now) => {
           reads++;
-          if (reads === 2) await Bun.sleep(40);
+          if (reads === 3) await Bun.sleep(40);
           return real.get(now);
         },
       },

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { memoryCoord } from "@omni/coord";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
+import { builtinPrompts, type ResolvedPrompt } from "@omni/prompts";
 import {
   anthropicAdapter,
   codecAdapter,
@@ -315,10 +316,13 @@ test("requestTransforms: false sends the request untouched with RTK and ponytail
     deps(store, adapter),
     new AbortController().signal,
     "a",
+    { prompts: builtinPrompts().filter((p) => p.id === "ponytail-full") },
   );
   await drain(transformed.events);
   const untouched = await dispatch(input, deps(store, adapter), new AbortController().signal, "b", {
     requestTransforms: false,
+    prompts: builtinPrompts(),
+    promptResolutionNotes: ["prompt:missing"],
   });
   await drain(untouched.events);
 
@@ -331,6 +335,8 @@ test("requestTransforms: false sends the request untouched with RTK and ponytail
   expect(received[1]).toEqual(input);
   expect(untouched.log().rtkApplied).toBe(false);
   expect(untouched.log().rtkFilters).toEqual([]);
+  expect(untouched.log().prompts).toEqual([]);
+  expect(untouched.log().degradations).not.toContain("prompt:missing");
   expect(untouched.log().degradations.some((d) => d.startsWith("ponytail:"))).toBe(false);
   store.close();
 });
@@ -3196,6 +3202,7 @@ const UNMARKED_PREFIX: ChatRequest = {
 async function wireFor(
   store: Store,
   request: ChatRequest = UNMARKED_PREFIX,
+  prompts: readonly ResolvedPrompt[] = [],
 ): Promise<{ body: string; degradations: string[] }> {
   let sent = "";
   const outcome = await dispatch(
@@ -3218,6 +3225,7 @@ async function wireFor(
     },
     new AbortController().signal,
     "req_autocache",
+    { prompts },
   );
   await drain(outcome.events);
   return { body: sent, degradations: outcome.log().degradations };
@@ -3264,7 +3272,11 @@ test("auto-cache marks the ponytail block when the client marked nothing", async
   const store = await seeded(1);
   await store.config.putSettings({ ponytailMode: "full" });
 
-  const { body, degradations } = await wireFor(store);
+  const { body, degradations } = await wireFor(
+    store,
+    UNMARKED_PREFIX,
+    builtinPrompts().filter((p) => p.id === "ponytail-full"),
+  );
 
   // The ruleset is last, so the system-tier breakpoint lands on it and the
   // ruleset is inside the cached prefix rather than trailing it.
@@ -3282,7 +3294,11 @@ test("auto-cache still declines when the client marked its own prompt", async ()
   const store = await seeded(1);
   await store.config.putSettings({ ponytailMode: "full" });
 
-  const { body, degradations } = await wireFor(store, MARKED_PREFIX);
+  const { body, degradations } = await wireFor(
+    store,
+    MARKED_PREFIX,
+    builtinPrompts().filter((p) => p.id === "ponytail-full"),
+  );
 
   // The caller's own marker moved onto the ruleset, TTL intact, and the count
   // is unchanged — so `estimateCachedInputTokens` stays non-zero and auto-cache
@@ -3294,7 +3310,7 @@ test("auto-cache still declines when the client marked its own prompt", async ()
   // One breakpoint in, one breakpoint out — the caller's, relocated.
   expect(system.filter((block) => block.marker !== undefined)).toHaveLength(1);
   expect(degradations).not.toContain("anthropic:cache-breakpoint-added");
-  expect(degradations).toContain("ponytail:cache-marker-moved");
+  expect(degradations).toContain("prompt:cache-marker-moved");
   store.close();
 });
 
@@ -3871,6 +3887,7 @@ test("appends the ponytail ruleset once and sends identical system content on fa
     deps(store, adapter),
     new AbortController().signal,
     "req_p",
+    { prompts: builtinPrompts().filter((p) => p.id === "ponytail-full") },
   );
   await drain(outcome.events);
 
@@ -3881,8 +3898,10 @@ test("appends the ponytail ruleset once and sends identical system content on fa
   store.close();
 });
 
-test("leaves the request alone and records nothing when ponytail is off", async () => {
+test("direct dispatch without explicit prompts ignores even enabled global ponytail settings", async () => {
   const store = await seeded(1);
+  // Direct dispatch never silently re-resolves settings, even with a global alias on.
+  await store.config.putSettings({ ponytailMode: "full" });
   const adapter = stubAdapter(() => textStream("ok"));
   const seen: string[] = [];
   systemSent(adapter, seen);
@@ -3922,11 +3941,12 @@ test("records a moved cache breakpoint separately from the level", async () => {
     deps(store, adapter),
     new AbortController().signal,
     "req_m",
+    { prompts: builtinPrompts().filter((p) => p.id === "ponytail-lite") },
   );
   await drain(outcome.events);
 
   expect(outcome.log().degradations).toContain("ponytail:lite");
-  expect(outcome.log().degradations).toContain("ponytail:cache-marker-moved");
+  expect(outcome.log().degradations).toContain("prompt:cache-marker-moved");
   store.close();
 });
 
