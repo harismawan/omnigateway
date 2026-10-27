@@ -280,7 +280,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
     } finally {
       reader.releaseLock();
     }
-    if (options.captureStreamChunks) recordFrames(entry, entry.responseChunks.join(""));
+    if (options.captureStreamChunks && storing()) recordFrames(entry, entry.responseChunks.join(""));
   };
 
   const recordFrames = (entry: Attempt, text: string): void => {
@@ -431,6 +431,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
     },
 
     take(error) {
+      if (taken) throw new Error("body capture already taken");
       const reservedBytes = held;
       const parts: CapturedParts = {
         requestId: options.requestId,
@@ -454,6 +455,16 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
       };
       taken = true;
       held = 0;
+      clientRequest = null;
+      clientResponse = null;
+      responseBytes = 0;
+      for (const entry of attempts) {
+        entry.request = null;
+        entry.responseChunks = [];
+        entry.frames = null;
+      }
+      attempts.length = 0;
+      drains.length = 0;
       return parts;
     },
   };

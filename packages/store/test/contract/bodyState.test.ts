@@ -185,6 +185,7 @@ forEachStore((backend) => {
       // The refusal removes only what no published state protects: the body a
       // `ready` row points at is still there to read.
       expect((await s.bodies.get("twice"))?.row.detailState).toBe("ready");
+      expect((await s.bodies.get("twice"))?.row.sha256).toBe(first.row.sha256);
     }
   });
 

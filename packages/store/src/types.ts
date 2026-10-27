@@ -1346,7 +1346,7 @@ export interface BodyRepo {
    * pointer in one upsert, before `publish` moves the state. SQLite throws —
    * its pointer row is written by `publish` on the main connection alone.
    */
-  writeRow(row: BodyPublication & { bytes: Uint8Array }): Promise<void>;
+  writeRow(row: BodyPublication & { bytes: Uint8Array }): Promise<boolean>;
 }
 
 /**

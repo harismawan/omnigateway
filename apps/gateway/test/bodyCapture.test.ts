@@ -9,6 +9,20 @@ import {
 } from "../src/bodyCapture.ts";
 
 const encoder = new TextEncoder();
+
+test("take transfers ownership only once, including while a drain is live", async () => {
+  const { collector, budget } = collectorWith();
+  collector.captureRequest("held");
+  collector.frame("frame");
+  const parts = collector.take(null);
+  expect(() => collector.take(null)).toThrow("already taken");
+  collector.captureResponse("late");
+  collector.frame("late");
+  expect(parts.client).toEqual({ request: "held", response: ["frame"], truncated: false });
+  expect(budget.held()).toBe(parts.reservedBytes);
+  budget.release(parts.reservedBytes);
+  expect(budget.held()).toBe(0);
+});
 const bytesOf = (text: string): number => Buffer.byteLength(text);
 
 function collectorWith(overrides: Partial<BodyCollectorOptions> = {}) {

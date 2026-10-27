@@ -145,7 +145,15 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
       if (!isSafeRequestId(row.requestId)) {
         throw new Error("request id is not safe to use as an artifact path segment");
       }
-      await upsert({ ...row, detailState: "ready" }, row.bytes);
+      const inserted = await sql.unsafe(
+        `INSERT INTO request_bodies
+           (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated, bytes)
+         SELECT $1,$2,$3,$4,$5,'ready',$6,$7
+          WHERE EXISTS (SELECT 1 FROM request_logs WHERE id = $1 AND body_state = 'pending')
+         ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
+        [row.requestId, row.at, row.relPath, row.sizeBytes, row.sha256, row.truncated, row.bytes],
+      );
+      return inserted.length > 0;
     },
 
     /**
@@ -159,17 +167,18 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
       return sql.begin(async (tx) => {
         const moved = (
           await tx.unsafe(
-            "UPDATE request_logs SET body_state = $1 WHERE id = $2 AND body_state = 'pending'",
-            [row.omitted ? "omitted" : "ready", row.requestId],
+            `UPDATE request_logs SET body_state = $1 WHERE id = $2 AND body_state = 'pending'
+               AND EXISTS (SELECT 1 FROM request_bodies WHERE request_id = $2 AND sha256 = $3)`,
+            [row.omitted ? "omitted" : "ready", row.requestId, row.sha256],
           )
         ).count;
         if (moved > 0) return true;
         await tx.unsafe(
           `DELETE FROM request_bodies
-            WHERE request_id = $1
+            WHERE request_id = $1 AND sha256 = $2
               AND NOT EXISTS (SELECT 1 FROM request_logs
                                WHERE id = $1 AND body_state IN ('ready', 'omitted'))`,
-          [row.requestId],
+          [row.requestId, row.sha256],
         );
         return false;
       });
