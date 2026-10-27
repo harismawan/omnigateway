@@ -33,6 +33,30 @@ test("a shutdown stops the loops, then the server, then closes the store, and ex
   expect(logger.lines.some((line) => line.includes("reason=SIGTERM"))).toBe(true);
 });
 
+test("connection deadline and escalation cannot close the database before writer publications settle", async () => {
+  for (const force of [false, true]) {
+    const gate = Promise.withResolvers<void>();
+    let drains = 0;
+    const f = deps({
+      stopServer: () => new Promise<void>(() => {}),
+      stopDeadlineMs: 1,
+      drain: () => {
+        drains++;
+        return gate.promise;
+      },
+    });
+    f.shutdown("SIGTERM");
+    if (force) f.shutdown("SIGTERM");
+    await Bun.sleep(10);
+    expect(f.events).not.toContain("store");
+    expect(drains).toBe(1);
+    gate.resolve();
+    await Bun.sleep(5);
+    expect(f.events.slice(-2)).toEqual(["store", `exit:${force ? 1 : 0}`]);
+    expect(f.events.filter((e) => e === "store")).toHaveLength(1);
+  }
+});
+
 test("a second request while one is in progress force-exits", async () => {
   const { events, shutdown } = deps({
     stopServer: () =>

@@ -492,7 +492,6 @@ async function main(): Promise<void> {
       // Posts `stop` and does not wait: the worker abandons its batch
       // uncommitted, and is terminated with the process if it is still there.
       () => exportWorker.stop(),
-      () => bodyWriter?.stop(),
       () => pluginEvents.stop(),
       // Before `stopServer`, and that ordering is the point rather than tidiness.
       // `app.stop()` is called without `true`, so it drains rather than severs:
@@ -514,6 +513,7 @@ async function main(): Promise<void> {
     stopServer: async () => {
       await app.stop();
     },
+    drain: () => bodyWriter?.drain() ?? Promise.resolve(),
     closeStore: () => store.close(),
     exit: (code) => process.exit(code),
   });

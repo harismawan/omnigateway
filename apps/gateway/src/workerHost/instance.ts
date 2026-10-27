@@ -57,7 +57,7 @@ export type WorkerHost<In, Out = unknown> = {
   pause(ack: (message: Out) => boolean): Promise<void>;
   resume(swapped: boolean): Promise<void>;
   halt(): Promise<void>;
-  stop(): void;
+  stop(terminate?: boolean): void;
   /** Stop serving without making shutdown final (e.g. no destinations). */
   idle(): Promise<void>;
   /** Explicit owner-policy change clears the death storm/backoff history. */
@@ -332,12 +332,15 @@ export function createWorkerHost<In, Out>(deps: WorkerHostDeps<In, Out>): Worker
         setState("halted");
         if (instance !== null) stopWorker(instance);
       }),
-    stop() {
+    stop(terminate = false) {
       if (stopped()) return;
       cancelRestart();
       const instance = retire();
       state = "stopped";
-      if (instance !== null) stopWorker(instance);
+      if (instance !== null) {
+        if (terminate) instance.worker.terminate();
+        else stopWorker(instance);
+      }
     },
     state: () => state,
     restarts: () => restarts,

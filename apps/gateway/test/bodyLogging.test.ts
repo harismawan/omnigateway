@@ -158,7 +158,7 @@ type HarnessOptions = {
   keys?: Array<{ label: string; bodyLoggingOptOut?: boolean }>;
   /** Short enough that ordinary upstream silence produces a keepalive comment. */
   keepaliveMs?: number;
-  bodyWriter?: Pick<BodyWriterHost, "enqueue">;
+  bodyWriter?: Pick<BodyWriterHost, "enqueue"> & Partial<Pick<BodyWriterHost, "generation">>;
   captureBudget?: import("../src/bodies/budget.ts").CaptureBudget;
 };
 
@@ -881,6 +881,46 @@ test("settles a successful delayed provider tail in background without delaying 
   const artifact = await artifactOf(store, "req_1");
   expect(String(artifact.attempts[0]?.response)).toContain("trailing_marker");
   await cleanup(store, root);
+});
+
+test("background settlement retains the collection generation across a database swap", async () => {
+  const tail = Promise.withResolvers<void>();
+  const http: HttpClient = async () => ({
+    status: 200,
+    headers: new Headers({ "content-type": "text/event-stream" }),
+    body: new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const frame of ANTHROPIC_FRAMES) controller.enqueue(new TextEncoder().encode(frame));
+        await tail.promise;
+        controller.close();
+      },
+    }),
+    text: async () => ANTHROPIC_FRAMES.join(""),
+  });
+  let generation = 4;
+  const arrived: Array<number | undefined> = [];
+  const budget = createCaptureBudget(1024 * 1024);
+  const f = await harness({
+    allowed: true,
+    settings: CAPTURE_ON,
+    http,
+    captureBudget: budget,
+    bodyWriter: {
+      generation: () => generation,
+      enqueue(parts) {
+        arrived.push(parts.generation);
+        budget.release(parts.reservedBytes);
+      },
+    },
+  });
+  expect((await f.call(ASK)).status).toBe(200);
+  expect(arrived).toEqual([]);
+  generation++;
+  tail.resolve();
+  await until("old capture handoff", async () => arrived.length === 1);
+  expect(arrived).toEqual([4]);
+  expect(budget.held()).toBe(0);
+  await cleanup(f.store, f.root);
 });
 
 // ---------------------------------------------------------------------------

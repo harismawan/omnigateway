@@ -1,10 +1,11 @@
-import { access, mkdir, open, rename, unlink } from "node:fs/promises";
+import { access, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { BodyArtifact, BodyOmission, BodyRepo } from "@omni/store/types";
 import {
   ARTIFACT_SCHEMA_VERSION,
   prepareArtifact,
   relPathFor,
+  STAGING_DIRNAME,
   sealArtifact,
   stagingPathFor,
 } from "../../../../packages/store/src/bodies/artifact.ts";
@@ -37,6 +38,7 @@ export function createBodyWriter(deps: Deps) {
   const publications = new Map<string, (accepted: boolean | null) => void>();
   let chain = Promise.resolve();
   let paused = false;
+  let resuming: Promise<void> | undefined;
 
   function artifact(meta: BodyMeta, assembly: Assembly | undefined): BodyArtifact {
     const text = (part: string): string | null => {
@@ -183,6 +185,7 @@ export function createBodyWriter(deps: Deps) {
         return;
       }
       if (message.type === "part") {
+        if (resuming !== undefined) await resuming;
         if (paused) return;
         let assembly = assemblies.get(message.requestId);
         if (assembly === undefined) {
@@ -208,6 +211,7 @@ export function createBodyWriter(deps: Deps) {
         return;
       }
       if (message.type === "meta") {
+        if (resuming !== undefined) await resuming;
         if (paused) return;
         let assembly = assemblies.get(message.requestId);
         assemblies.delete(message.requestId);
@@ -234,7 +238,21 @@ export function createBodyWriter(deps: Deps) {
         await chain;
         await deps.close?.();
         if (message.type === "pause") deps.post({ type: "paused" });
-      } else if (message.type === "resume") paused = false;
+      } else if (message.type === "resume") {
+        // Pause ACK (or actual old-thread close) precedes resume. No live write
+        // owns staging now; remove even fresh remnants of the replaced DB.
+        resuming = (async () => {
+          await chain;
+          if (deps.dir !== null) {
+            const dir = join(deps.dir, STAGING_DIRNAME);
+            const files = await readdir(dir, { withFileTypes: true }).catch(() => []);
+            for (const file of files) if (file.isFile()) await unlink(join(dir, file.name));
+          }
+          paused = false;
+        })();
+        await resuming;
+        resuming = undefined;
+      }
     },
   };
 }

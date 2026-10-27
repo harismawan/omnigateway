@@ -4,6 +4,7 @@ import { createCaptureBudget } from "../../src/bodies/budget.ts";
 import { createBodyWriterHost } from "../../src/bodies/host.ts";
 import type { MainMessage, WorkerMessage } from "../../src/bodies/protocol.ts";
 import type { CapturedParts } from "../../src/bodyCapture.ts";
+import type { Timers } from "../../src/workerHost/instance.ts";
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const parts = (id = "req", text = "hello"): CapturedParts => ({
@@ -72,26 +73,33 @@ test("sustained overflow retains no captures or messages, even with a blocked fa
   f.host.stop();
 });
 
-function fixture(fail?: () => Promise<void>) {
+function fixture(fail?: () => Promise<void>, timers?: Timers) {
   const budget = createCaptureBudget(256 * 1024 * 1024);
   const sent: MainMessage[] = [];
   let message = (_m: WorkerMessage) => {};
-  let exit = () => {};
+  const exits: Array<() => void> = [];
+  let terminated = 0;
+  let spawned = 0;
   const failed: string[] = [];
   const published: string[] = [];
   const dropped: string[] = [];
   let yields = 0;
   const host = createBodyWriterHost({
-    spawn: () => ({
-      post: (m) => sent.push(m),
-      onMessage: (fn) => {
-        message = fn;
-      },
-      onExit: (fn) => {
-        exit = fn;
-      },
-      terminate: () => {},
-    }),
+    spawn: () => {
+      spawned++;
+      return {
+        post: (m) => sent.push(m),
+        onMessage: (fn) => {
+          message = fn;
+        },
+        onExit: (fn) => {
+          exits.push(fn);
+        },
+        terminate: () => {
+          terminated++;
+        },
+      };
+    },
     bodies: {
       publish: async (r) => {
         published.push(r.requestId);
@@ -105,7 +113,10 @@ function fixture(fail?: () => Promise<void>) {
     budget,
     logger: noopLogger,
     now: Date.now,
-    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+    timers: timers ?? {
+      setTimeout,
+      clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    },
     yield: async () => {
       yields++;
       await tick();
@@ -120,10 +131,150 @@ function fixture(fail?: () => Promise<void>) {
     published,
     dropped,
     message: (m: WorkerMessage) => message(m),
-    exit: () => exit(),
+    exit: () => {
+      for (const exit of [...exits]) exit();
+    },
+    terminated: () => terminated,
+    spawned: () => spawned,
     yields: () => yields,
   };
 }
+
+test("restore drops queued captures and fences both stale ACKs and late old captures", async () => {
+  const f = fixture();
+  await f.host.start();
+  const oldGeneration = f.host.generation();
+  for (const id of ["old", "queued"]) {
+    const p = parts(id);
+    f.budget.reserve(p.reservedBytes);
+    f.host.enqueue(p, oldGeneration);
+  }
+  const paused = f.host.pause();
+  await tick();
+  f.message({ type: "paused" });
+  await paused;
+  expect(f.dropped).toEqual(["restore", "restore"]);
+  expect(f.failed).toEqual(["old", "queued"]);
+  await f.host.resume(true);
+  expect(f.host.generation()).toBe(oldGeneration + 1);
+  const reused = parts("old");
+  f.budget.reserve(reused.reservedBytes);
+  f.host.enqueue(reused);
+  const late = parts("arrived_after_swap");
+  f.budget.reserve(late.reservedBytes);
+  f.host.enqueue(late, oldGeneration);
+  f.message({
+    type: "written",
+    requestId: "old",
+    generation: oldGeneration,
+    at: 1000,
+    relPath: "old-path",
+    sizeBytes: 1,
+    sha256: "old",
+    truncated: false,
+    omitted: false,
+  });
+  await tick();
+  expect(f.published).toEqual([]);
+  expect(f.sent.some((m) => "requestId" in m && m.requestId === "arrived_after_swap")).toBe(false);
+  expect(f.failed).not.toContain("arrived_after_swap"); // Never mutate a restored row with this id.
+  expect(f.dropped).toEqual(["restore", "restore", "restore"]);
+  f.host.stop();
+  expect(f.budget.held()).toBe(0);
+});
+
+function clock() {
+  const scheduled = new Map<object, { fn: () => void; ms: number }>();
+  return {
+    timers: {
+      setTimeout(fn: () => void, ms: number) {
+        const key = {};
+        scheduled.set(key, { fn, ms });
+        return key;
+      },
+      clearTimeout(key: unknown) {
+        scheduled.delete(key as object);
+      },
+    },
+    fire(ms: number) {
+      const item = [...scheduled].find(([, value]) => value.ms === ms);
+      if (item === undefined) throw new Error(`no ${ms} ms timer`);
+      scheduled.delete(item[0]);
+      item[1].fn();
+    },
+  };
+}
+
+test("pause timeout terminates, refuses without actual close, and never reopens beside that thread", async () => {
+  const c = clock();
+  const f = fixture(undefined, c.timers);
+  await f.host.start();
+  const pausing = f.host.pause();
+  const refused = pausing.catch((error: unknown) => error);
+  await tick();
+  c.fire(5000);
+  await tick();
+  expect(f.terminated()).toBe(1);
+  c.fire(5000);
+  expect(await refused).toMatchObject({ message: expect.stringContaining("nothing was restored") });
+  await f.host.resume(false);
+  expect(f.spawned()).toBe(1);
+  f.exit();
+  await tick();
+  expect(f.spawned()).toBe(2);
+  f.host.stop();
+});
+
+test("shutdown gives unwritten entries five seconds then counts and terminates them", async () => {
+  const c = clock();
+  const f = fixture(undefined, c.timers);
+  await f.host.start();
+  for (const id of ["one", "two"]) {
+    const p = parts(id);
+    f.budget.reserve(p.reservedBytes);
+    f.host.enqueue(p);
+  }
+  const draining = f.host.drain();
+  await tick();
+  expect(f.dropped).toEqual([]);
+  expect(f.terminated()).toBe(0);
+  c.fire(5000);
+  await draining;
+  expect(f.dropped).toEqual(["writer_crash", "writer_crash"]);
+  expect(f.terminated()).toBe(1);
+  expect(f.budget.held()).toBe(0);
+});
+
+test("shutdown drains admitted writes and waits for main publication before returning", async () => {
+  const f = fixture();
+  await f.host.start();
+  const p = parts();
+  f.budget.reserve(p.reservedBytes);
+  f.host.enqueue(p);
+  let done = false;
+  const draining = f.host.drain().then(() => {
+    done = true;
+  });
+  await tick();
+  expect(done).toBe(false);
+  expect(f.sent.some((m) => m.type === "stop")).toBe(false);
+  f.message({
+    type: "written",
+    requestId: "req",
+    generation: 0,
+    at: 1000,
+    relPath: "path",
+    sizeBytes: 1,
+    sha256: "hash",
+    truncated: false,
+    omitted: false,
+  });
+  await draining;
+  expect(f.published).toEqual(["req"]);
+  expect(f.dropped).toEqual([]);
+  expect(f.budget.held()).toBe(0);
+  expect(f.sent.at(-1)?.type).toBe("stop");
+});
 
 test("an admitted budget omission still reaches the writer", async () => {
   const f = fixture();

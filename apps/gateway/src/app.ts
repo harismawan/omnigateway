@@ -34,7 +34,7 @@ import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { clientRoutes } from "./routes/client.ts";
 import { connectRoutes } from "./routes/connect.ts";
-import { databaseRoutes, type ExportPause } from "./routes/database.ts";
+import { databaseRoutes, type WorkerPause } from "./routes/database.ts";
 import { absentExportWorker, type ExportWorkerHandle, exportRoutes } from "./routes/export.ts";
 import { proxyRoutes, REQUEST_ID_HEADER } from "./routes/proxy.ts";
 import { streamRoutes } from "./routes/stream.ts";
@@ -185,7 +185,7 @@ export type AppDeps = {
    * configuration and the worker's requests answer 503 — every test that
    * does not care about export.
    */
-  exportWorker?: ExportWorkerHandle & Partial<ExportPause>;
+  exportWorker?: ExportWorkerHandle & Partial<WorkerPause>;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -375,7 +375,7 @@ export function createApp(deps: AppDeps) {
   channelsRef = channels;
   const capture = deps.console;
   const exportWorker = deps.exportWorker;
-  const exportPause: ExportPause | undefined =
+  const exportPause: WorkerPause | undefined =
     exportWorker?.pause === undefined ||
     exportWorker.resume === undefined ||
     exportWorker.halt === undefined
@@ -527,7 +527,10 @@ export function createApp(deps: AppDeps) {
           latch,
           snapshots,
           broadcaster,
-          ...(exportPause === undefined ? {} : { exportWorker: exportPause }),
+          workers: [
+            ...(exportPause === undefined ? [] : [exportPause]),
+            ...(deps.bodyWriter === undefined ? [] : [deps.bodyWriter]),
+          ],
           fs: deps.databaseFs ?? nodeDatabaseFs(),
           now,
           logger,

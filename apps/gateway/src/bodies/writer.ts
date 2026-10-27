@@ -34,6 +34,9 @@ const writer = createBodyWriter({
     sql = null;
   },
 });
+// New instances start only after old-thread closure. Clean abandoned staging
+// before accepting early messages too (the previous pause may have timed out).
+await writer.handle({ type: "resume" });
 function handle(message: MainMessage): void {
   void writer
     .handle(message)

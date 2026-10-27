@@ -33,6 +33,7 @@ type HarnessOptions = {
   pauseHeld?: Promise<void>;
   /** The export worker could not be quiesced: `pause` rejects. */
   pauseRefused?: true;
+  workers?: DatabaseRouteDeps["workers"];
 };
 
 /**
@@ -136,7 +137,7 @@ async function harness(options: HarnessOptions = {}) {
   const app = databaseRoutes({
     store: routeStore,
     admin,
-    exportWorker,
+    workers: [exportWorker, ...(options.workers ?? [])],
     latch,
     broadcaster: {
       invalidateAll: () => {
@@ -466,6 +467,34 @@ test("a restore refused before the swap began resumes export", async () => {
   cleanup();
 });
 
+test("a successful restore resumes every worker even if a peer resume fails", async () => {
+  const steps: string[] = [];
+  const f = await harness({
+    workers: [
+      {
+        pause: async () => {},
+        halt: async () => {},
+        resume: async () => {
+          steps.push("first");
+          throw new Error("could not resume");
+        },
+      },
+      {
+        pause: async () => {},
+        halt: async () => {},
+        resume: async (swapped) => {
+          steps.push(`second:${swapped}`);
+        },
+      },
+    ],
+  });
+  const created = await f.snapshot();
+  expect((await f.call("POST", `/api/database/snapshots/${created.id}/restore`)).status).toBe(200);
+  expect(steps).toEqual(["first", "second:true"]);
+  expect(f.latch.isClosed()).toBe(false);
+  f.cleanup();
+});
+
 test("an export worker that cannot be quiesced refuses the restore: nothing swapped, latch reopened", async () => {
   const { call, snapshot, latch, store, exportSteps, cleanup } = await harness({
     pauseRefused: true,
@@ -485,8 +514,23 @@ test("an export worker that cannot be quiesced refuses the restore: nothing swap
   cleanup();
 });
 
-test("a swap that failed leaves export stopped", async () => {
+test("a swap that failed halts both workers even if one halt rejects", async () => {
+  const steps: string[] = [];
   const { call, snapshot, exportSteps, cleanup } = await harness({
+    workers: [
+      {
+        pause: async () => {
+          steps.push("pause");
+        },
+        resume: async () => {
+          steps.push("resume");
+        },
+        halt: async () => {
+          steps.push("halt");
+          throw new Error("halt failed");
+        },
+      },
+    ],
     fs: {
       rename: () => {
         throw new Error("EXDEV");
@@ -497,7 +541,45 @@ test("a swap that failed leaves export stopped", async () => {
   const restored = await call("POST", `/api/database/snapshots/${created.id}/restore`);
   expect(restored.status).toBe(500);
   expect(exportSteps).toEqual(["pause:quiesced", "halt"]);
+  expect(steps).toEqual(["pause", "halt"]);
   cleanup();
+});
+
+test("either pause refusal waits for its peer and rolls both workers back", async () => {
+  for (const exportRefuses of [true, false]) {
+    const gate = Promise.withResolvers<void>();
+    const steps: string[] = [];
+    const f = await harness({
+      ...(exportRefuses ? { pauseRefused: true } : {}),
+      workers: [
+        {
+          pause: async () => {
+            steps.push("pause");
+            await gate.promise;
+            if (!exportRefuses) throw new Error("body writer did not close");
+          },
+          resume: async (swapped) => {
+            steps.push(`resume:${swapped}`);
+          },
+          halt: async () => {
+            steps.push("halt");
+          },
+        },
+      ],
+    });
+    const created = await f.snapshot();
+    await f.store.config.putSettings({ logRetentionDays: 7 });
+    const restoring = f.call("POST", `/api/database/snapshots/${created.id}/restore`);
+    await Bun.sleep(20);
+    expect(steps).toEqual(["pause"]);
+    expect(f.exportSteps).toEqual(["pause:quiesced"]);
+    gate.resolve();
+    expect((await restoring).status).toBe(503);
+    expect(steps).toEqual(["pause", "resume:false"]);
+    expect(f.exportSteps).toEqual(["pause:quiesced", "resume"]);
+    expect((await f.store.config.getSettings()).logRetentionDays).toBe(7);
+    f.cleanup();
+  }
 });
 
 test("a second restore while the first is pausing the worker is refused, and touches nothing", async () => {

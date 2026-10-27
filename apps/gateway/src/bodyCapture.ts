@@ -39,6 +39,7 @@ export type AbandonReason = "budget";
  * whoever writes these parts releases it once the write is done or has failed.
  */
 export type CapturedParts = {
+  generation?: number;
   requestId: string;
   at: number;
   client: { request: string | null; response: string | string[] | null; truncated: boolean };
@@ -84,6 +85,7 @@ type Attempt = {
 };
 
 export type BodyCollectorOptions = {
+  generation?: number;
   /**
    * Whether raw SSE frames are retained per attempt. Off, a streaming response
    * appears only as the reassembled body, which is what almost every incident
@@ -438,6 +440,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
       const reservedBytes = held;
       const parts: CapturedParts = {
         requestId: options.requestId,
+        ...(options.generation === undefined ? {} : { generation: options.generation }),
         at: options.at,
         client: {
           request: clientRequest,

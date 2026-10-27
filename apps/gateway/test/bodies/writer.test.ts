@@ -1,12 +1,40 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { deriveKey } from "@omni/store";
 import { readArtifact } from "../../../../packages/store/src/bodies/artifact.ts";
 import type { WorkerMessage } from "../../src/bodies/protocol.ts";
 import { createBodyWriter } from "../../src/bodies/seal.ts";
 import { spawnBodyWriter } from "../../src/bodies/spawn.ts";
+
+test("resume cleans fresh stale staging only after the active write and handles quiesce", async () => {
+  const dir = await mkdtemp("/tmp/opencode/body-resume-");
+  const key = await deriveKey("resume-test");
+  const closed = Promise.withResolvers<void>();
+  let closing = false;
+  const writer = createBodyWriter({
+    dir,
+    key,
+    post: () => {},
+    close: async () => {
+      closing = true;
+      await closed.promise;
+    },
+  });
+  await mkdir(join(dir, ".staging"));
+  const path = join(dir, ".staging", "fresh.old");
+  await writeFile(path, "old database");
+  const pausing = writer.handle({ type: "pause" });
+  await Bun.sleep(1);
+  expect(closing).toBe(true);
+  expect(await readdir(join(dir, ".staging"))).toEqual(["fresh.old"]);
+  closed.resolve();
+  await pausing;
+  await writer.handle({ type: "resume" });
+  expect(await readdir(join(dir, ".staging"))).toEqual([]);
+  await rm(dir, { recursive: true, force: true });
+});
 
 test("the actual worker transport transfers and detaches slice ArrayBuffers", async () => {
   const worker = spawnBodyWriter({
@@ -35,6 +63,36 @@ test("the actual worker transport transfers and detaches slice ArrayBuffers", as
     });
   } finally {
     worker.terminate();
+  }
+});
+
+test("a paused real writer exits on stop and reports actual thread closure", async () => {
+  const root = await mkdtemp("/tmp/opencode/body-close-");
+  const worker = spawnBodyWriter({
+    databasePath: join(root, "main.sqlite"),
+    databaseUrl: null,
+    encryptionKey: "close-key",
+  });
+  const paused = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<void>();
+  worker.onMessage((m) => {
+    if (m.type === "paused") paused.resolve();
+  });
+  worker.onExit(() => closed.resolve());
+  try {
+    worker.post({ type: "pause" });
+    await paused.promise;
+    let exited = false;
+    void closed.promise.then(() => {
+      exited = true;
+    });
+    await Bun.sleep(1);
+    expect(exited).toBe(false); // ACK closes handles, not the thread.
+    worker.post({ type: "stop" });
+    await closed.promise;
+  } finally {
+    worker.terminate();
+    await rm(root, { recursive: true, force: true });
   }
 });
 

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { noopLogger } from "@omni/ir";
 import { bodiesDirFor, createPostgresStore, createStore, deriveKey } from "@omni/store";
@@ -205,7 +205,7 @@ test("partial budget abandonment disposes worker assemblies before releasing ret
   }
 });
 
-for (const mode of ["stop", "halt"] as const)
+for (const mode of ["stop", "halt", "drain", "publication-error"] as const)
   for (const committed of [false, true]) {
     test(`${mode} preserves SQLite owner while publication decision is ${committed ? "committed" : "pending"}`, async () => {
       const root = await mkdtemp("/tmp/opencode/body-owner-");
@@ -242,13 +242,20 @@ for (const mode of ["stop", "halt"] as const)
             await decision;
             if (!committed) accepted = await store.bodies.publish(row);
             done = true;
+            if (mode === "publication-error") throw new Error("reply lost after commit");
             return accepted;
           },
         },
         budget,
         logger: noopLogger,
         now: Date.now,
-        timers,
+        timers:
+          mode === "drain"
+            ? {
+                setTimeout: (fn, ms) => setTimeout(fn, ms === 5000 ? 5 : ms),
+                clearTimeout: timers.clearTimeout,
+              }
+            : timers,
       });
       try {
         await host.start();
@@ -256,11 +263,19 @@ for (const mode of ["stop", "halt"] as const)
         budget.reserve(p.reservedBytes);
         host.enqueue(p);
         await until(() => entered);
+        let drained = false;
+        let draining: Promise<void> | undefined;
         if (mode === "stop") host.stop();
-        else await host.halt();
-        await tick();
+        else if (mode === "halt") await host.halt();
+        else if (mode === "drain")
+          draining = host.drain().then(() => {
+            drained = true;
+          });
+        await Bun.sleep(15);
+        if (mode === "drain") expect(drained).toBe(false);
         decide();
         await until(() => done);
+        await draining;
         await tick();
         expect((await store.usage.get("race"))?.bodyState).toBe("ready");
         expect((await store.bodies.get("race"))?.row.detailState).toBe("ready");
@@ -276,6 +291,66 @@ for (const mode of ["stop", "halt"] as const)
       }
     });
   }
+
+test("old written ACK and late captured parts cannot publish into an actually restored SQLite DB", async () => {
+  const root = await mkdtemp("/tmp/opencode/body-restore-");
+  const key = await deriveKey("restore-body-test");
+  const path = join(root, "main.sqlite");
+  const store = await createStore({ path, encryptionKey: key });
+  const snapshot = join(root, "snapshot.sqlite");
+  const budget = createCaptureBudget(10000);
+  let held: WorkerMessage | undefined;
+  let link: ReturnType<typeof transport>;
+  const writer = createBodyWriter({
+    key,
+    dir: bodiesDirFor(path),
+    post: (m) => {
+      if (m.type === "written") held = m;
+      else link.receive(m);
+    },
+  });
+  link = transport(writer, () => {});
+  const host = createBodyWriterHost({
+    spawn: () => link.worker,
+    bodies: store.bodies,
+    budget,
+    logger: noopLogger,
+    now: Date.now,
+    timers,
+  });
+  try {
+    // Both snapshots and old runtime use this same id: row guards alone cannot fence it.
+    await store.usage.append({ ...requestLog({ id: "reused", at: 1000 }), bodyState: "pending" });
+    await store.maintenance.snapshotTo(snapshot);
+    await host.start();
+    const old = parts("reused");
+    budget.reserve(old.reservedBytes);
+    host.enqueue(old);
+    await until(() => held !== undefined);
+    await host.pause();
+    expect((await store.usage.get("reused"))?.bodyState).toBe("failed");
+    store.close();
+    await rm(`${path}-wal`, { force: true });
+    await rm(`${path}-shm`, { force: true });
+    await copyFile(snapshot, path);
+    await store.reopen();
+    await host.resume(true);
+    if (held === undefined) throw new Error("missing old acknowledgement");
+    link.receive(held);
+    const late = parts("reused");
+    late.generation = 0;
+    budget.reserve(late.reservedBytes);
+    host.enqueue(late);
+    await tick();
+    expect((await store.usage.get("reused"))?.bodyState).toBe("pending");
+    expect(await store.bodies.get("reused")).toBeNull();
+    expect(budget.held()).toBe(0);
+  } finally {
+    host.stop();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("refused publication during successful pause clears pending paths across repeated resumes", async () => {
   const root = await mkdtemp("/tmp/opencode/body-pause-refusal-");

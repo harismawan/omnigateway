@@ -69,11 +69,11 @@ export type DatabaseRouteDeps = {
    * replaces. Paused before the swap and resumed after the reopen — or halted
    * when the swap fails. Absent in tests that have no export.
    */
-  exportWorker?: ExportPause;
+  workers: WorkerPause[];
 };
 
 /** What a swap needs of the export supervisor (`exportHost/supervisor.ts`). */
-export type ExportPause = {
+export type WorkerPause = {
   /**
    * Resolves once no export worker holds a handle; rejects (a `GatewayError`)
    * when one would not exit — then nothing may be swapped.
@@ -172,7 +172,7 @@ async function swapGuarded(
   // with the latch already shut.
   const [quiesce, paused] = await Promise.all([
     deps.latch.close(deps.quiesceDeadlineMs ?? QUIESCE_DEADLINE_MS),
-    pauseExport(deps),
+    pauseWorkers(deps),
   ]);
   if (!quiesce.drained) {
     logger.warn("client requests still in flight at the quiesce deadline", {
@@ -184,7 +184,7 @@ async function swapGuarded(
     // A worker that would not exit may still hold a handle on the file: the
     // restore is refused before anything moved, so traffic and export resume.
     if (closedHere) deps.latch.open();
-    await settleExport(deps, logger, "refused");
+    await settleWorkers(deps, logger, "refused");
     throw paused;
   }
 
@@ -201,7 +201,6 @@ async function swapGuarded(
     // than inherit it. Nothing can be mid-swap here — the single-flight guard
     // in `@omni/control` refuses rather than queues, so a second operation that
     // succeeds is one that started after the first released.
-    deps.latch.open();
     logger.warn("database replaced", {
       snapshotId: result.preRestoreSnapshot.id,
       durationMs: deps.now() - startedAt,
@@ -275,14 +274,17 @@ async function swapGuarded(
     }
     // Only what this call shut. A failure that closed nothing has no business
     // opening anything.
-    if (closedHere) deps.latch.open();
+    if (outcome !== "swapped" && closedHere) deps.latch.open();
     throw error;
   } finally {
     // Last, after the session invalidation the success path owns, and never
     // throwing: nothing may sit between the swap and that comparison. The
     // worker reopens only now, after `reopen()` returned, so the main file's
     // WAL and SHM exist again before its read-only handle does.
-    await settleExport(deps, logger, outcome);
+    await settleWorkers(deps, logger, outcome);
+    // Body capture stamps its generation at collection, so admission reopens
+    // only after every worker has crossed the successful-swap fence.
+    if (outcome === "swapped") deps.latch.open();
   }
 }
 
@@ -290,31 +292,33 @@ async function swapGuarded(
 type SwapOutcome = "swapped" | "refused" | "failed";
 
 /** Step 1 for export: null once no worker holds a handle, else the refusal to throw. */
-async function pauseExport(deps: DatabaseRouteDeps): Promise<GatewayError | null> {
-  try {
-    await deps.exportWorker?.pause();
-    return null;
-  } catch (error) {
-    return error instanceof GatewayError
-      ? error
-      : new GatewayError("OVERLOADED", "export worker did not stop; nothing was restored");
-  }
+async function pauseWorkers(deps: DatabaseRouteDeps): Promise<GatewayError | null> {
+  // Wait for every pause before rolling back: a late pause must never land
+  // after its peer has already reopened against the original database.
+  const results = await Promise.allSettled(deps.workers.map((worker) => worker.pause()));
+  const refused = results.find((result) => result.status === "rejected");
+  if (refused?.status !== "rejected") return null;
+  return refused.reason instanceof GatewayError
+    ? refused.reason
+    : new GatewayError("OVERLOADED", "worker did not stop; nothing was restored");
 }
 
-async function settleExport(
+async function settleWorkers(
   deps: DatabaseRouteDeps,
   logger: Logger,
   outcome: SwapOutcome,
 ): Promise<void> {
-  const worker = deps.exportWorker;
-  if (worker === undefined) return;
-  try {
-    await (outcome === "failed" ? worker.halt() : worker.resume(outcome === "swapped"));
-  } catch (error) {
-    logger.warn("export worker not resumed after the swap", {
-      reason: describeError(error, "unknown"),
-    });
-  }
+  await Promise.all(
+    deps.workers.map(async (worker) => {
+      try {
+        await (outcome === "failed" ? worker.halt() : worker.resume(outcome === "swapped"));
+      } catch (error) {
+        logger.warn("worker not resumed after the swap", {
+          reason: describeError(error, "unknown"),
+        });
+      }
+    }),
+  );
 }
 
 /**

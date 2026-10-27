@@ -480,6 +480,12 @@ Restoring one replaces file every repo reads from, inside process reading it. Th
 
 **Quiesce latch gates client traffic, and only client traffic.** `/v1/*` refused with 503 and `retry-after`, rendered by same encoders proxy uses so SDK gets error in dialect it already parses. `/api/*` and `/health` stay live for whole operation: console is how operator watches restore and how they hear it failed, so latch covering whole server would black out dashboard at exact moment it needed and take load balancer's health check with it.
 
+Restore/import pauses both export and body workers before moving files. Every pause settles before
+rollback if either refuses; failed swaps halt both. Successful reopen advances the body generation
+before client admission resumes. Captures retain their collection generation through background
+settlement, so old parts and acknowledgements cannot publish or fail rows in the restored database.
+The quiescent writer cleans staging on resume (also before a replacement thread accepts work).
+
 What latch waits for is requests being *answered*, not streams draining. Elysia's `onAfterResponse` fires when response handed back, which for SSE is long before body ends. So wait is bounded — ten seconds — and latch stays shut for whole swap rather than only until in-flight count hits zero, because stream admitted before close still reads through handle swap is about to replace.
 
 **Sequence ordered so neither of two things making it recoverable can be skipped:** nothing closed until candidate judged, nothing swapped until undo exists.
@@ -558,6 +564,12 @@ therefore close every socket **before** server stop, with `1001` and a restart r
 console's own reconnect path expect. 4401 would be wrong here: that one tell client to stop trying.
 
 Drain bounded at five seconds. Bun stops server by letting connections finish, and shutdown asked for over HTTP arrives on one of them, so request asking for shutdown is itself reason shutdown cannot complete — gateway answered `ok` then stayed alive until second signal escalated. Signal never hits this, because shell holds no socket. On timeout process exits **0**: nonzero code would read to `Restart=on-failure` as crash and resurrect gateway operator just asked to stop.
+
+The body writer drains admitted captures concurrently for five seconds rather than discarding them
+at shutdown entry. At the deadline it terminates and counts unwritten captures. Main-connection
+publication/failure operations must settle before store close, including on escalation; this safety
+barrier can outlast the worker budget. Unknown publication decisions preserve files for reconciliation,
+not deletion. Retired-thread pending-path protection ends only on actual thread closure.
 
 Restart is not shutdown, and what it takes depends on what is watching. Capability detected rather than assumed:
 

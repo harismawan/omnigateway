@@ -17,6 +17,8 @@ export type ShutdownDeps = {
   stopLoops: readonly (() => void)[];
   stopServer: () => Promise<void>;
   closeStore: () => void;
+  /** Bounded worker grace followed by settlement of main-connection publications. */
+  drain?: () => Promise<void>;
   /** `process.exit` in the gateway, and a recorder in a test. */
   exit: (code: number) => void;
   /** How long connections have to drain before the process leaves anyway. */
@@ -51,24 +53,41 @@ const STOP_DEADLINE_MS = 5_000;
  */
 export function createShutdown(deps: ShutdownDeps): Shutdown {
   let shuttingDown = false;
+  let drained: Promise<void> | undefined;
+  let forced = false;
+  let finished = false;
 
   const exitAfterClosingStore = (code: number): void => {
+    if (finished) return;
+    finished = true;
     try {
       deps.closeStore();
     } finally {
       deps.exit(code);
     }
   };
+  const finish = (code: number): void => {
+    if (deps.drain === undefined) exitAfterClosingStore(forced ? 1 : code);
+    else {
+      drained ??= deps.drain();
+      void drained.then(
+        () => exitAfterClosingStore(forced ? 1 : code),
+        () => exitAfterClosingStore(1),
+      );
+    }
+  };
 
   return (reason, mode = "graceful") => {
     if (mode === "force" || shuttingDown) {
-      exitAfterClosingStore(1);
+      forced = true;
+      finish(1);
       return;
     }
 
     deps.logger.info("shutdown requested", { reason });
     shuttingDown = true;
     for (const stop of deps.stopLoops) stop();
+    drained = deps.drain?.();
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const abandoned = new Promise<"timeout">((resolve) => {
@@ -82,14 +101,14 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
         if (outcome === "timeout") {
           deps.logger.warn("shutdown timed out waiting for connections to drain", { reason });
         }
-        exitAfterClosingStore(0);
+        finish(0);
       },
       (error: unknown) => {
         clearTimeout(timer);
         deps.logger.error("shutdown failed", {
           reason: describeError(error, "unknown"),
         });
-        exitAfterClosingStore(1);
+        finish(1);
       },
     );
   };

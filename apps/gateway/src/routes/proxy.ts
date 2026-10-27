@@ -111,7 +111,7 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry" | "coord
    * on their own.
    */
   captureBudget?: CaptureBudget;
-  bodyWriter?: Pick<BodyWriterHost, "enqueue">;
+  bodyWriter?: Pick<BodyWriterHost, "enqueue"> & Partial<Pick<BodyWriterHost, "generation">>;
   /**
    * Announces finished requests to plugin handlers.
    *
@@ -457,9 +457,11 @@ async function bodyCollectorFor(
 ): Promise<BodyCollector | null> {
   if (deps.bodyLoggingAllowed !== true) return null;
   if (key.bodyLoggingOptOut) return null;
+  const generation = deps.bodyWriter?.generation?.() ?? 0;
   const { settings } = await deps.snapshots.get(deps.now());
   if (!settings.bodyLoggingEnabled) return null;
   return createBodyCollector({
+    generation,
     captureStreamChunks: settings.bodyLoggingCaptureStreamChunks,
     requestId,
     at,

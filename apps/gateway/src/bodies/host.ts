@@ -13,12 +13,14 @@ import {
 
 export type BodyWriterHost = {
   start(): Promise<void>;
-  enqueue(parts: CapturedParts): void;
+  enqueue(parts: CapturedParts, generation?: number): void;
   isPending(relPath: string): boolean;
   pause(): Promise<void>;
   resume(swapped: boolean): Promise<void>;
   halt(): Promise<void>;
   stop(): void;
+  /** Five-second writer grace; main database operations settle before return. */
+  drain(): Promise<void>;
   generation(): number;
 };
 type DropReason = "budget" | "backlog" | "writer_crash" | "restore";
@@ -84,6 +86,9 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   const publications = new Set<Promise<void>>();
   let generation = 0;
   let accepting = true;
+  let draining = false;
+  let drainPromise: Promise<void> | undefined;
+  let changed = () => {};
   let pumping = false;
   let failing = false;
   let dropping: DropReason = "writer_crash";
@@ -102,6 +107,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     discard(entry.parts);
     entry.slices = 0;
     entries.delete(entry.parts.requestId);
+    changed();
   }
   /** One failure write, no waiting ids: a blocked store must not become a queue. */
   function failPending(requestId: string): void {
@@ -114,23 +120,24 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     void failure.finally(() => {
       failing = false;
       publications.delete(failure);
+      changed();
     });
   }
-  function fail(entry: Entry, reason: DropReason): void {
+  function fail(entry: Entry, reason: DropReason, record = true): void {
     if (entries.get(entry.parts.requestId) !== entry) return;
     if (entry.path !== null) pending.delete(entry.path);
     release(entry);
     deps.onDropped?.(reason);
-    failPending(entry.parts.requestId);
+    if (record) failPending(entry.parts.requestId);
   }
-  const clear = (reason: DropReason): void => {
+  const clear = (reason: DropReason, record = true): void => {
     for (const entry of entries.values()) {
       // Unknown publication decisions are not refusals: preserve owner bytes
       // and sweep protection until actual thread close, without failing its row.
       if (entry.publishing) {
         deps.onDropped?.(reason);
         release(entry);
-      } else fail(entry, reason);
+      } else fail(entry, reason, record);
     }
     queue.length = 0;
   };
@@ -182,21 +189,17 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
               release(entry);
             }
           } catch {
-            deps.onDropped?.("writer_crash");
+            // A rejection is not proof that the transaction did not commit.
+            // Keep the final file; only a definite false authorizes unlink.
             failPending(message.requestId);
-            try {
-              worker.post({
-                type: "publish-result",
-                requestId: message.requestId,
-                accepted: false,
-              });
-            } catch {
-              fail(entry, "writer_crash");
-            }
+            worker.stop();
           }
         })();
         publications.add(publication);
-        void publication.finally(() => publications.delete(publication));
+        void publication.finally(() => {
+          publications.delete(publication);
+          changed();
+        });
       } else if (message.type === "discarded") {
         deps.budget.release(entry.parts.reservedBytes);
         entry.parts.reservedBytes = 0;
@@ -278,24 +281,32 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   }
   return {
     start: () => worker.start(),
-    enqueue(parts) {
+    enqueue(parts, capturedGeneration = parts.generation ?? generation) {
+      // A background collector may settle after reopen. Never fail or publish
+      // its id in the new database, even if the restored snapshot reused it.
+      if (capturedGeneration !== generation) {
+        discard(parts);
+        deps.onDropped?.("restore");
+        return;
+      }
       if (entries.has(parts.requestId)) {
         discard(parts);
         return;
       }
-      const reason = !accepting
-        ? "restore"
-        : worker.state() !== "running"
-          ? "writer_crash"
-          : entries.size >= BODY_QUEUE_LIMIT
-            ? "backlog"
-            : null;
+      const reason =
+        !accepting || draining
+          ? dropping
+          : worker.state() !== "running"
+            ? "writer_crash"
+            : entries.size >= BODY_QUEUE_LIMIT
+              ? "backlog"
+              : null;
       if (reason !== null) {
         discard(parts);
         deps.onDropped?.(reason);
         // Hard admission bound wins over an omission artifact per rejected id.
         // If this slot is busy, sweepPending eventually fails the stale row.
-        failPending(parts.requestId);
+        if (accepting) failPending(parts.requestId);
         return;
       }
       const entry: Entry = { parts, generation, slices: 0, path: null, publishing: false };
@@ -311,8 +322,13 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
       // Finish any main-connection publication before pause can delete a file
       // whose accepted result is still travelling back to the worker.
       await Promise.all(publications);
+      // At most 1000 admitted entries; serialize their failure writes without
+      // creating an overflow-id queue. All finish against the original DB.
+      for (const entry of entries.values()) {
+        if (!entry.publishing) await deps.bodies.fail(entry.parts.requestId).catch(() => {});
+      }
       await worker.pause((m) => m.type === "paused");
-      clear("restore");
+      clear("restore", false);
       await Promise.all(publications);
     },
     async resume(swapped) {
@@ -329,6 +345,33 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     stop() {
       accepting = false;
       worker.stop();
+    },
+    drain() {
+      if (drainPromise !== undefined) return drainPromise;
+      draining = true;
+      dropping = "writer_crash";
+      drainPromise = (async () => {
+        let timer: unknown;
+        await new Promise<void>((resolve) => {
+          changed = () => {
+            if (entries.size === 0 && publications.size === 0) resolve();
+          };
+          timer = deps.timers.setTimeout(() => {
+            accepting = false;
+            worker.stop(true);
+            resolve();
+          }, 5000);
+          changed();
+        });
+        deps.timers.clearTimeout(timer);
+        accepting = false;
+        worker.stop();
+        // The worker budget does not authorize closing the main connection
+        // underneath a commit (including an ambiguous post-commit rejection).
+        while (publications.size > 0) await Promise.all(publications);
+        changed = () => {};
+      })();
+      return drainPromise;
     },
     generation: () => generation,
   };
