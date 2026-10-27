@@ -78,6 +78,30 @@ test("set --bodies on|off persists and show reports the destination preference",
   }
 });
 
+for (const companion of [
+  ["--signal", "invalid"],
+  ["--max-request-bytes", "0"],
+  ["--secret-file", "-"],
+]) {
+  test(`invalid companion ${companion.join(" ")} never disables bodies or writes a revision`, async () => {
+    const root = makeRoot();
+    await cli(["export", "add", "otlp", "otel", "--endpoint", "https://otel.example"], { root });
+    await cli(["export", "set", "otel", "--bodies", "on"], { root });
+    const store = await openStore(root);
+    try {
+      const before = await store.exportDestinations.get("otel");
+      const result = await cli(["export", "set", "otel", "--bodies", "off", ...companion], {
+        root,
+        prompt: stdinPrompt('{"headers":{"authorization":42}}'),
+      });
+      expect(result.code).not.toBe(0);
+      expect(await store.exportDestinations.get("otel")).toEqual(before);
+    } finally {
+      store.close();
+    }
+  });
+}
+
 test("invalid --bodies and OTLP traces refuse before unrelated edits; off permits a trace transition", async () => {
   const root = makeRoot();
   await cli(["export", "add", "otlp", "otel", "--endpoint", "https://otel.example"], { root });

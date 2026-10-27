@@ -533,7 +533,9 @@ Coding agents resend the conversation every turn: volume tracks conversation len
 turns, and ten long-running agents can write several GB an hour. Size the SQLite volume
 or Postgres database for a day of traffic, or shorten body retention (default 1 day;
 100,000-row hard cap). The 64 MiB limit applies to the entire masked artifact, not just
-the prompt; wire capture also caps each side at 64 MiB and marks discarded tails incomplete.
+the prompt. Wire capture caps each side at 64 MiB: provider text retains a prefix;
+client SSE evicts oldest frames to retain recent ones and discards a lone oversized
+frame whole. Either loss marks capture truncated/incomplete.
 The default 512 MiB capture budget bounds accounted capture bytes; raise it if budget
 drops grow, leaving headroom for inference, workers and runtime allocations.
 Bun/Elysia defaults to a 128 MB request-body limit. For larger incoming requests,

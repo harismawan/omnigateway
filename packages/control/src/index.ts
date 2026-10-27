@@ -122,6 +122,7 @@ export {
   removeDestination,
   setDestinationBodies,
   updateDestination,
+  validateDestinationUpdate,
   type WebhookConfig,
   type WebhookSecret,
   webhookConfigSchema,

@@ -763,9 +763,12 @@ a day of captured traffic, or shorten `bodyRetentionDays`.
 Sizes here are stored-envelope bytes, not PostgreSQL table, TOAST, or WAL size.
 The 64 MiB cap applies to the entire plaintext artifact JSON after masking; no
 structural string/array/depth/key bounds cut its contents. Separately, wire capture
-discards bytes past 64 MiB per side and marks truncation; cancellation can also leave
-incomplete content. An artifact over its cap is replaced by an omission marker that
-says why (too large, or nested too deeply to serialize). The stored file is
+caps each side at 64 MiB: provider text retains a prefix, while client SSE evicts
+oldest frames to retain recent ones and discards a lone oversized frame whole.
+Loss marks truncation; cancellation can also leave incomplete content. An artifact
+over its cap is replaced by an omission marker that says why (too large, or nested
+too deeply to serialize), unless its frame still exceeds the cap after bodies and
+error are omitted: that capture fails instead. The stored file is
 larger than the plaintext. This version writes the binary envelope, `N + 38`
 bytes for a plaintext of N bytes. Earlier versions wrote a hex envelope,
 `2N + 65` bytes, under a 512 KB cap with structural bounds (long strings cut,

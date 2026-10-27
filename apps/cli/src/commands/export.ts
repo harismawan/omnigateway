@@ -7,6 +7,7 @@ import {
   removeDestination,
   setDestinationBodies,
   updateDestination,
+  validateDestinationUpdate,
 } from "@omni/control";
 import { EXPORT_DESTINATION_TYPES, type ExportDestinationType } from "@omni/store/types";
 import {
@@ -409,13 +410,17 @@ export const exportSet: Command = guarded({
       throw new UsageError("nothing to change; see omni export set --help");
     }
 
+    const input = { ...patch, ...(secret === undefined ? {} : { secret }) };
+    await validateDestinationUpdate(
+      store,
+      id,
+      input,
+      bodies === undefined ? undefined : bodies === "on",
+    );
     let updated = current;
     if (bodies === "off") updated = await setDestinationBodies(store, id, { include: false });
     if (Object.keys(patch).length > 0 || secret !== undefined) {
-      updated = await updateDestination(store, id, {
-        ...patch,
-        ...(secret === undefined ? {} : { secret }),
-      });
+      updated = await updateDestination(store, id, input);
     }
     if (bodies === "on") updated = await setDestinationBodies(store, id, { include: true });
     emit(env.ctx, env.writer, updated, () => `${updated.id} updated`);
