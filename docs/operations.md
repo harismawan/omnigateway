@@ -681,8 +681,65 @@ Read them from the console's Logs screen or:
 ```bash
 omni bodies req_550e8400-…          # the frame: state, size, one line per attempt
 omni bodies req_550e8400-… --full   # the payloads themselves
-omni bodies req_550e8400-… --json   # the artifact, for a script
+omni bodies req_550e8400-… --json   # bounded part previews, for a script
 ```
+
+`--json` returns a preview (first 1 MiB of each part's serialized JSON, full size and
+`previewTruncated`); `--full` prints complete parts. The console's **Download full part**
+streams full JSON from the body writer, admin-only. Raw downloads have a renewable
+30-second inactivity timeout, not a total download deadline; decode admission has its
+own 30-second bound. CLI decoding happens locally in the CLI process.
+
+Capture completion runs in the background: neither row completion nor the client waits
+for body persistence. Provider tails settle for at most five seconds after completion,
+or until abort, then remaining bytes are discarded. `request_logs.body_state` (wire
+`bodyState`) describes capture separately from the request's success:
+
+| State | Meaning |
+|---|---|
+| `null` | Capture not attempted (legacy rows can still have artifacts). |
+| `pending` | Capture admitted; artifact not published yet. |
+| `ready` | Artifact published. |
+| `omitted` | Published omission marker, e.g. size, nesting or capture budget. |
+| `failed` | Capture failed or abandoned; stale pending rows fail one hour after completion. |
+
+`OMNI_BODY_CAPTURE_BUDGET_BYTES` defaults to 512 MiB of accounted retained capture
+text/transfer bytes, not total process memory. Exhaustion discards capture without
+back-pressure on inference. The writer admits at most **1,000 outstanding captures**,
+including work already handed to a stalled worker. Overflow drops and counts `backlog`
+without retaining another request id or worker message: it can become `failed`/unavailable
+instead of a persisted omission artifact. Watch
+`omni_bodies_dropped_total`, labelled `reason="budget"`, `"backlog"`, `"writer_crash"`
+or `"restore"`. Budget omissions say `capture budget
+exhausted`; crashes/write failures affect capture, never inference.
+
+**Exporting captured bodies.** Enable `OMNI_EXPORT_BODIES_ALLOWED=true` at boot, both
+capture gates, and the destination's **Export bodies** switch (or `omni export set <id>
+--bodies on`). Key opt-outs always win. Gates are rechecked at send time, including
+retained artifacts; if any is off, no `body` field is sent. OTLP traces refuse bodies.
+Each inline or segmented HTTP send is admitted by one consistent database snapshot of
+settings, key policy and destination identity, checked against its prepared sender.
+This snapshot is the policy linearization point: later edits cannot retract an already
+admitted network request. Local cancellation/deadlines are checked immediately before transport.
+Only masked client request/response parts are exported, not provider attempts.
+When eligible, exported `body.state` is `included` (whole), `incomplete` (truncated),
+`omitted` (marker with reason, including `export budget`), or `unavailable` (missing,
+failed, pruned, or late). Pending bodies hold that destination's cursor for at most
+60 seconds after completion; then export sends `unavailable` and increments
+`omni_export_bodies_late_total`. Metadata-only destinations never wait. Keep lag below
+body retention, not merely log retention. Classifier requests have no artifact.
+One body globally holds the export worker's conservative reservation until its last
+segment or cancellation. The default 192 MiB export budget can omit roughly 2 MiB
+artifacts at the default Elasticsearch receiver cap: increase
+`OMNI_EXPORT_BODY_BUDGET_BYTES` to export larger bodies, with memory headroom; see the
+[reservation formula and sizing](../README.md#exporting-request-logs).
+`omni_export_bodies_omitted_total` counts export-budget omissions (not every stored
+omission marker); these counters are process-local Prometheus telemetry.
+
+Restore/import pauses both workers and fences old acknowledgements by generation.
+Unsettled publication/failure operations cause a bounded refusal rather than swapping
+under active work; retry after they settle. Graceful shutdown allows five seconds;
+forced shutdown terminates immediately and may lose captures.
 
 The bare command prints only the frame, never conversations — asking costs one
 flag. A missing artifact answers rather than errors: `not captured`, `captured,
@@ -702,16 +759,26 @@ without a settings edit. To retain the former body window, save an explicit
 `bodyRetentionDays` value before that sweep. Expiry runs on successful maintenance
 sweeps, not at an exact 24-hour access deadline. Lowering body retention deletes
 existing bodies on the next sweep without deleting still-retained request metadata. A hard **100,000-row cap** also applies, so
-capture is forensics, not an archive — size a volume against roughly 100 GB
-worst case, though most artifacts are kilobytes.
+capture is forensics, not an archive. One artifact may reach 64 MiB of JSON,
+so the theoretical worst case under the cap is terabytes; most artifacts are
+kilobytes, and body retention is what bounds a real corpus — size a volume for
+a day of captured traffic, or shorten `bodyRetentionDays`.
 
-That figure is stored-envelope bytes, not PostgreSQL table, TOAST, or WAL size.
-The 512 KB cap applies to the plaintext JSON; the stored file is larger. This
-version writes the binary envelope, `N + 38` bytes for a plaintext of N bytes.
-Earlier versions wrote a hex envelope, `2N + 65` bytes, about twice the cap at
-the limit; those artifacts stay readable, and nothing rewrites them, so a corpus
-is mixed until they expire under `bodyRetentionDays`, and the 100 GB worst case
-holds until then. A gzip codec is readable but not written
+Sizes here are stored-envelope bytes, not PostgreSQL table, TOAST, or WAL size.
+The 64 MiB cap applies to the entire plaintext artifact JSON after masking; no
+structural string/array/depth/key bounds cut its contents. Separately, wire capture
+caps each side at 64 MiB: provider text retains a prefix, while client SSE evicts
+oldest frames to retain recent ones and discards a lone oversized frame whole.
+Loss marks truncation; cancellation can also leave incomplete content. An artifact
+over its cap is replaced by an omission marker that says why (too large, or nested
+too deeply to serialize), unless its frame still exceeds the cap after bodies and
+error are omitted: that capture fails instead. The stored file is
+larger than the plaintext. This version writes the binary envelope, `N + 38`
+bytes for a plaintext of N bytes. Earlier versions wrote a hex envelope,
+`2N + 65` bytes, under a 512 KB cap with structural bounds (long strings cut,
+long arrays trimmed); those artifacts stay readable as they were written, and
+nothing rewrites them, so a corpus is mixed until they expire under
+`bodyRetentionDays`. A gzip codec is readable but not written
 ([benchmark](superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md)).
 No compression ratio is promised. `SIZE` in `omni bodies` and the console is the
 stored envelope, so it differs by format.
@@ -724,19 +791,26 @@ record it `corrupt`; a v0.13.5-or-later reader recovers the row the next time it
 reads it. Roll back only to v0.13.5 or later; v0.13.5 itself stops binary writes
 and still reads the ones written. Rolling back further is unsafe until every binary
 artifact has expired under body retention, and disabling capture does not make it
-safe. An artifact above the reader's encoded-size ceiling (`1,048,641` bytes
-for the hex envelope, `524,326` for the binary one) reads as unreadable
+safe. An artifact above the reader's encoded-size ceiling (`134,217,793` bytes
+for the hex envelope, `67,108,902` for the binary one) reads as unreadable
 without being deleted; the gateway never writes one, and it recovers on its own if
 a reader accepts it later. The row digest covers the whole stored envelope and is
 checkable without the key; GCM authentication is what decides whether a body is
 genuine.
+
+Upgrading to the version that tracks each request's body state scans
+`request_logs` once at boot to build a small partial index of bodies still
+pending. On PostgreSQL, writes to `request_logs` (and so the requests that
+log them) wait for that scan, while reads continue; on SQLite the migration
+runs before the gateway serves. Plan the upgrade for a quiet moment on a
+large log.
 
 Masking is best-effort — bearer tokens, vendor-prefixed keys, long opaque
 tokens are elided before write — a reduction in exposure, not a guarantee, and
 it costs fidelity. Treat the tree as you would the prompts themselves: encrypted
 at rest, on a volume you control, never pasted into a ticket.
 [ARCHITECTURE.md](../ARCHITECTURE.md#body-capture-forensics) documents the storage
-format, structural bounds, and masking rules.
+format, size limit, and masking rules.
 
 ## Snapshots and restore
 

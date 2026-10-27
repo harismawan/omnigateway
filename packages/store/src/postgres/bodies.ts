@@ -12,8 +12,10 @@ import type {
   BodyArtifact,
   BodyArtifactRow,
   BodyDetailState,
+  BodyPublication,
   BodyRead,
   BodyRepo,
+  BodyWritten,
 } from "../types.ts";
 import { num, type Rows } from "./db.ts";
 
@@ -75,6 +77,34 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
     ]);
   };
 
+  const upsert = async (row: BodyArtifactRow, bytes: Uint8Array): Promise<void> => {
+    // Upserting rather than inserting, so a retried write of the same request
+    // replaces its bytes instead of failing against the primary key.
+    await sql.unsafe(
+      `INSERT INTO request_bodies
+         (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated, bytes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (request_id) DO UPDATE SET
+         at = EXCLUDED.at,
+         rel_path = EXCLUDED.rel_path,
+         size_bytes = EXCLUDED.size_bytes,
+         sha256 = EXCLUDED.sha256,
+         detail_state = EXCLUDED.detail_state,
+         truncated = EXCLUDED.truncated,
+         bytes = EXCLUDED.bytes`,
+      [
+        row.requestId,
+        row.at,
+        row.relPath,
+        row.sizeBytes,
+        row.sha256,
+        row.detailState,
+        row.truncated,
+        bytes,
+      ],
+    );
+  };
+
   return {
     async put(artifact: BodyArtifact) {
       // The id is no longer a path segment here, but the rule is kept: a row
@@ -92,7 +122,7 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
       const truncated =
         prepared.artifact.client.truncated ||
         prepared.artifact.attempts.some((attempt) => attempt.truncated);
-      const row: BodyArtifactRow = {
+      const row: BodyWritten = {
         requestId: artifact.requestId,
         at: artifact.at,
         relPath,
@@ -100,33 +130,65 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
         sha256: sealed.sha256,
         detailState: "ready",
         truncated,
+        omitted: prepared.omitted,
       };
-      // Upserting rather than inserting, so a retried write of the same request
-      // replaces its bytes instead of failing against the primary key.
-      await sql.unsafe(
+      await upsert(row, sealed.bytes);
+      return row;
+    },
+
+    /**
+     * The body writer's write, from its own pool: bytes and pointer in one
+     * insert, without replacing an existing owner's bytes. The log row's state is `publish`'s to
+     * move, on the main pool, so the two writers never contend for one row.
+     */
+    async writeRow(row: BodyPublication & { bytes: Uint8Array }) {
+      if (!isSafeRequestId(row.requestId)) {
+        throw new Error("request id is not safe to use as an artifact path segment");
+      }
+      const inserted = await sql.unsafe(
         `INSERT INTO request_bodies
            (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated, bytes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         ON CONFLICT (request_id) DO UPDATE SET
-           at = EXCLUDED.at,
-           rel_path = EXCLUDED.rel_path,
-           size_bytes = EXCLUDED.size_bytes,
-           sha256 = EXCLUDED.sha256,
-           detail_state = EXCLUDED.detail_state,
-           truncated = EXCLUDED.truncated,
-           bytes = EXCLUDED.bytes`,
-        [
-          row.requestId,
-          row.at,
-          row.relPath,
-          row.sizeBytes,
-          row.sha256,
-          row.detailState,
-          row.truncated,
-          sealed.bytes,
-        ],
+         SELECT $1,$2,$3,$4,$5,'ready',$6,$7
+          WHERE EXISTS (SELECT 1 FROM request_logs WHERE id = $1 AND body_state = 'pending')
+         ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
+        [row.requestId, row.at, row.relPath, row.sizeBytes, row.sha256, row.truncated, row.bytes],
       );
-      return row;
+      return inserted.length > 0;
+    },
+
+    /**
+     * The guard on the log row, and the bytes `writeRow` put in place removed in
+     * the same transaction when it refuses: a row nobody was waiting for is a
+     * body nobody asked to keep. Unless the log row already reads `ready` or
+     * `omitted`. Digest matching keeps a duplicate/refused writer from
+     * publishing or removing another owner's bytes.
+     */
+    async publish(row: BodyPublication) {
+      return sql.begin(async (tx) => {
+        const moved = (
+          await tx.unsafe(
+            `UPDATE request_logs SET body_state = $1 WHERE id = $2 AND body_state = 'pending'
+               AND EXISTS (SELECT 1 FROM request_bodies WHERE request_id = $2 AND sha256 = $3)`,
+            [row.omitted ? "omitted" : "ready", row.requestId, row.sha256],
+          )
+        ).count;
+        if (moved > 0) return true;
+        await tx.unsafe(
+          `DELETE FROM request_bodies
+            WHERE request_id = $1 AND sha256 = $2
+              AND NOT EXISTS (SELECT 1 FROM request_logs
+                               WHERE id = $1 AND body_state IN ('ready', 'omitted'))`,
+          [row.requestId, row.sha256],
+        );
+        return false;
+      });
+    },
+
+    async fail(requestId: string) {
+      await sql.unsafe(
+        "UPDATE request_logs SET body_state = 'failed' WHERE id = $1 AND body_state = 'pending'",
+        [requestId],
+      );
     },
 
     async get(requestId: string): Promise<BodyRead | null> {

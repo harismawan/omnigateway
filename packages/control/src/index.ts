@@ -12,7 +12,15 @@ export {
   createAdminAuth,
   MIN_PASSWORD_LENGTH,
 } from "./adminAuth.ts";
-export { type RequestBodyRead, readRequestBody } from "./bodies.ts";
+export {
+  type BodyPart,
+  type BodyPreview,
+  bodyParts,
+  isBodyPart,
+  previewBody,
+  type RequestBodyRead,
+  readRequestBody,
+} from "./bodies.ts";
 export {
   type CatalogProblem,
   type CatalogProvider,
@@ -26,7 +34,7 @@ export {
   isClientVisibleDegradation,
   toClientLog,
 } from "./clientLog.ts";
-export { type Config, loadConfig } from "./config.ts";
+export { type Config, DEFAULT_BODY_CAPTURE_BUDGET_BYTES, loadConfig } from "./config.ts";
 export {
   type ConnectDeps,
   type ConnectFlows,
@@ -114,6 +122,7 @@ export {
   removeDestination,
   setDestinationBodies,
   updateDestination,
+  validateDestinationUpdate,
   type WebhookConfig,
   type WebhookSecret,
   webhookConfigSchema,

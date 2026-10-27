@@ -14,16 +14,18 @@ import {
   target,
   virtualModel,
 } from "@omni/testkit";
-import {
-  createBodyCollector,
-  createFrameSink,
-  MAX_CAPTURED_BODY_BYTES,
-} from "../src/bodyCapture.ts";
+import { createCaptureBudget } from "../src/bodies/budget.ts";
+import { type BodyWriterHost, createBodyWriterHost } from "../src/bodies/host.ts";
+import { spawnBodyWriter } from "../src/bodies/spawn.ts";
+import { createBodyCollector, MAX_CAPTURED_BODY_BYTES } from "../src/bodyCapture.ts";
 import { pruneLogs } from "../src/maintenance.ts";
 import { proxyRoutes } from "../src/routes/proxy.ts";
 
 const NOW = Date.UTC(2026, 7, 17, 12, 0, 0);
 const ENCRYPTION_KEY = "test-encryption-key-0123456789";
+const rawText = (v: string | string[] | null | undefined): string =>
+  Array.isArray(v) ? v.join("") : (v ?? "");
+const writers = new Map<Store, BodyWriterHost>();
 
 /**
  * A store on disk, because the artifact tree is derived from the database path
@@ -40,6 +42,10 @@ async function tempStore(): Promise<{ store: Store; root: string }> {
 }
 
 async function cleanup(store: Store, root: string): Promise<void> {
+  const writer = writers.get(store);
+  await writer?.pause();
+  writer?.stop();
+  writers.delete(store);
   store.close();
   await rm(root, { recursive: true, force: true });
 }
@@ -152,6 +158,8 @@ type HarnessOptions = {
   keys?: Array<{ label: string; bodyLoggingOptOut?: boolean }>;
   /** Short enough that ordinary upstream silence produces a keepalive comment. */
   keepaliveMs?: number;
+  bodyWriter?: Pick<BodyWriterHost, "enqueue"> & Partial<Pick<BodyWriterHost, "generation">>;
+  captureBudget?: import("../src/bodies/budget.ts").CaptureBudget;
 };
 
 async function harness(options: HarnessOptions = {}) {
@@ -200,6 +208,22 @@ async function harness(options: HarnessOptions = {}) {
   }
 
   let n = 0;
+  const captureBudget = options.captureBudget ?? createCaptureBudget(512 * 1024 * 1024);
+  const writer = createBodyWriterHost({
+    spawn: () =>
+      spawnBodyWriter({
+        databasePath: store.databasePath,
+        databaseUrl: null,
+        encryptionKey: ENCRYPTION_KEY,
+      }),
+    bodies: store.bodies,
+    budget: captureBudget,
+    logger: options.logger ?? captureLogger(),
+    now: () => NOW,
+    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+  });
+  await writer.start();
+  writers.set(store, writer);
   const app = proxyRoutes({
     store,
     adapters: ADAPTERS,
@@ -209,6 +233,8 @@ async function harness(options: HarnessOptions = {}) {
     refresh: async (c) => await c.secrets(),
     requestId: () => `req_${++n}`,
     bodyLoggingAllowed: options.allowed === true,
+    captureBudget,
+    bodyWriter: options.bodyWriter ?? writer,
     ...(options.logger === undefined ? {} : { logger: options.logger }),
     ...(options.keepaliveMs === undefined ? {} : { keepaliveMs: options.keepaliveMs }),
   });
@@ -232,6 +258,7 @@ const ASK = { model: "fast", max_tokens: 100, messages: [{ role: "user", content
 
 /** Reads back one stored artifact, failing loudly rather than returning null. */
 async function artifactOf(store: Store, requestId: string): Promise<BodyArtifact> {
+  await waitForBody(store, requestId);
   const read = await store.bodies.get(requestId);
   if (read === null) throw new Error(`no body row for ${requestId}`);
   if (read.artifact === null)
@@ -241,7 +268,7 @@ async function artifactOf(store: Store, requestId: string): Promise<BodyArtifact
 
 /** Polls rather than sleeping a fixed interval, which keeps a test off a guess. */
 async function until(what: string, ready: () => Promise<boolean>): Promise<void> {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 800; i++) {
     if (await ready()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -269,6 +296,132 @@ function field(value: unknown, key: string): unknown {
 }
 
 const CAPTURE_ON: Partial<Settings> = { bodyLoggingEnabled: true };
+
+test("a stalled body writer cannot delay client bytes or row completion", async () => {
+  const baseline = await harness();
+  const budget = createCaptureBudget(1024 * 1024);
+  const stalled = createBodyWriterHost({
+    spawn: () => ({ post: () => {}, onMessage: () => {}, onExit: () => {}, terminate: () => {} }),
+    bodies: { publish: async () => true, fail: async () => {} },
+    budget,
+    logger: captureLogger(),
+    now: () => NOW,
+    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+  });
+  await stalled.start();
+  const f = await harness({
+    allowed: true,
+    settings: CAPTURE_ON,
+    captureBudget: budget,
+    bodyWriter: stalled,
+  });
+  try {
+    for (const stream of [false, true]) {
+      const expected = await (await baseline.call({ ...ASK, stream })).text();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const text = await Promise.race([
+          f.call({ ...ASK, stream }).then(async (response) => {
+            expect(response.status).toBe(200);
+            return response.text();
+          }),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("writer delayed client completion")), 250);
+          }),
+        ]);
+        expect(text).toBe(expected);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await until("completed rows", async () => (await f.store.usage.get("req_2"))?.state === "done");
+    expect(budget.held()).toBeGreaterThan(0);
+    expect(budget.held()).toBeLessThanOrEqual(1024 * 1024);
+    expect((await f.store.usage.get("req_1"))?.bodyState).toBe("pending");
+    expect((await f.store.usage.get("req_2"))?.bodyState).toBe("pending");
+    expect(await f.store.bodies.get("req_1")).toBeNull();
+  } finally {
+    stalled.stop();
+    expect(budget.held()).toBe(0);
+    await cleanup(f.store, f.root);
+    await cleanup(baseline.store, baseline.root);
+  }
+});
+
+test("queue overflow and a blocked failure write cannot delay client streams or completed rows", async () => {
+  const budget = createCaptureBudget(1024 * 1024);
+  let failures = 0;
+  let backlogs = 0;
+  let overflowPosts = 0;
+  let finishFailure = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    finishFailure = resolve;
+  });
+  const stalled = createBodyWriterHost({
+    spawn: () => ({
+      post: (m) => {
+        if ("requestId" in m && m.requestId.startsWith("req_")) overflowPosts++;
+      },
+      onMessage: () => {},
+      onExit: () => {},
+      terminate: () => {},
+    }),
+    bodies: {
+      publish: async () => true,
+      fail: async () => {
+        failures++;
+        await blocked;
+      },
+    },
+    budget,
+    logger: captureLogger(),
+    now: () => NOW,
+    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+    onDropped: (reason) => {
+      if (reason === "backlog") backlogs++;
+    },
+  });
+  await stalled.start();
+  for (let i = 0; i < 1000; i++)
+    stalled.enqueue({
+      requestId: `filler_${i}`,
+      at: NOW,
+      client: { request: null, response: null, truncated: false },
+      attempts: [],
+      error: null,
+      abandoned: null,
+      reservedBytes: 0,
+    });
+  const f = await harness({
+    allowed: true,
+    settings: CAPTURE_ON,
+    captureBudget: budget,
+    bodyWriter: stalled,
+  });
+  try {
+    for (const stream of [false, true, false, true]) {
+      const response = await f.call({ ...ASK, stream });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("Hello");
+    }
+    await until(
+      "overflow rows complete",
+      async () => (await f.store.usage.get("req_4"))?.state === "done",
+    );
+    for (let i = 1; i <= 4; i++) {
+      expect((await f.store.usage.get(`req_${i}`))?.state).toBe("done");
+      expect((await f.store.usage.get(`req_${i}`))?.bodyState).toBe("pending");
+    }
+    expect(backlogs).toBe(4);
+    expect(failures).toBe(1);
+    expect(overflowPosts).toBe(0);
+    expect(budget.held()).toBe(0);
+  } finally {
+    stalled.stop();
+    finishFailure();
+    await cleanup(f.store, f.root);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Gating
@@ -609,12 +762,14 @@ test("writes a truncated artifact for a non-streaming request the client hung up
 test("marks a streamed response whose frames outgrew the sink as truncated", async () => {
   // Each delta is a single unbroken run, so masking collapses it and the stored
   // artifact stays small: this is measuring the sink's cap, not the artifact's.
-  const filler = "x".repeat(30_000);
+  // Each frame stays under the SSE decoder's own per-record ceiling, and enough
+  // of them pass the sink's cap.
+  const filler = "x".repeat(8 * 1024 * 1024);
   const huge = [
     ANTHROPIC_FRAMES[0] ?? "",
     ANTHROPIC_FRAMES[1] ?? "",
     ...Array.from(
-      { length: 20 },
+      { length: Math.ceil(MAX_CAPTURED_BODY_BYTES / filler.length) + 1 },
       () =>
         `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"${filler}"}}\n\n`,
     ),
@@ -648,45 +803,33 @@ test("marks a streamed response whose frames outgrew the sink as truncated", asy
 test("degrades a failed artifact write to a missing artifact, not a failed request", async () => {
   const logger: CaptureLogger = captureLogger("debug");
   const { store, root, call } = await harness({ allowed: true, settings: CAPTURE_ON, logger });
-  store.bodies.put = async () => {
+  store.bodies.publish = async () => {
     throw new Error("artifact volume is full");
   };
 
   const res = await call(ASK);
 
   expect(res.status).toBe(200);
-  expect(await store.bodies.get("req_1")).toBeNull();
+  await until("failed body", async () => (await store.usage.get("req_1"))?.bodyState === "failed");
   const rows = await store.usage.recent(10);
   expect(rows).toHaveLength(1);
   expect(rows[0]?.state).toBe("done");
   expect(rows[0]?.status).toBe(200);
-  expect(logger.records.some((r) => r.msg === "failed to persist request bodies")).toBe(true);
+  expect((await store.usage.get("req_1"))?.bodyState).toBe("failed");
   await cleanup(store, root);
 });
 
 /**
  * The same isolation, reached through the store's own refusal rather than a
- * stub. A frame of a few thousand attempts is over the artifact budget with
- * every body already omitted, and the binary writer will not seal it, so the
- * real `put` throws. The captured frame here has one attempt; the store is
- * handed it with thousands, because no fixture provider fails over that often.
+ * stub. A frame over the artifact budget with every body already omitted is
+ * refused, so the real `put` throws. The captured frame here is ordinary; the
+ * store is handed one whose provider name alone is past the budget, because no
+ * fixture provider produces a frame that large.
  */
-test("an artifact the writer refuses as over budget costs the request nothing", async () => {
+test("a refused publication costs the request nothing", async () => {
   const logger: CaptureLogger = captureLogger("debug");
   const { store, root, call } = await harness({ allowed: true, settings: CAPTURE_ON, logger });
-  const put = store.bodies.put;
-  store.bodies.put = (artifact) =>
-    put({
-      ...artifact,
-      attempts: Array.from({ length: 2500 }, (_, i) => ({
-        attempt: i + 1,
-        provider: "anthropic",
-        request: { prompt: "lorem ipsum dolor sit amet ".repeat(12) },
-        response: null,
-        streamChunks: null,
-        truncated: false,
-      })),
-    });
+  store.bodies.publish = async () => false;
 
   const res = await call(ASK);
 
@@ -695,8 +838,6 @@ test("an artifact the writer refuses as over budget costs the request nothing", 
   const rows = await store.usage.recent(10);
   expect(rows).toHaveLength(1);
   expect(rows[0]?.state).toBe("done");
-  const failure = logger.records.find((r) => r.msg === "failed to persist request bodies");
-  expect(failure?.fields.reason).toBe("artifact plaintext is outside the binary envelope's bounds");
   await cleanup(store, root);
 });
 
@@ -711,7 +852,11 @@ test("an artifact the writer refuses as over budget costs the request nothing", 
  * everything — which is why this stream is slow by construction rather than by
  * luck.
  */
-test("waits for the capture drains before writing the artifact", async () => {
+test("settles a successful delayed provider tail in background without delaying completion", async () => {
+  let tail = () => {};
+  const delayed = new Promise<void>((resolve) => {
+    tail = resolve;
+  });
   const encoder = new TextEncoder();
   const http: HttpClient = async () => ({
     status: 200,
@@ -719,7 +864,7 @@ test("waits for the capture drains before writing the artifact", async () => {
     body: new ReadableStream<Uint8Array>({
       async start(controller) {
         for (const frame of ANTHROPIC_FRAMES) controller.enqueue(encoder.encode(frame));
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await delayed;
         controller.enqueue(encoder.encode("event: trailing_marker\ndata: {}\n\n"));
         controller.close();
       },
@@ -729,10 +874,53 @@ test("waits for the capture drains before writing the artifact", async () => {
   const { store, root, call } = await harness({ allowed: true, settings: CAPTURE_ON, http });
 
   expect((await call(ASK)).status).toBe(200);
+  expect((await store.usage.get("req_1"))?.state).toBe("done");
+  expect(await store.bodies.get("req_1")).toBeNull();
+  tail();
 
   const artifact = await artifactOf(store, "req_1");
   expect(String(artifact.attempts[0]?.response)).toContain("trailing_marker");
   await cleanup(store, root);
+});
+
+test("background settlement retains the collection generation across a database swap", async () => {
+  const tail = Promise.withResolvers<void>();
+  const http: HttpClient = async () => ({
+    status: 200,
+    headers: new Headers({ "content-type": "text/event-stream" }),
+    body: new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const frame of ANTHROPIC_FRAMES) controller.enqueue(new TextEncoder().encode(frame));
+        await tail.promise;
+        controller.close();
+      },
+    }),
+    text: async () => ANTHROPIC_FRAMES.join(""),
+  });
+  let generation = 4;
+  const arrived: Array<number | undefined> = [];
+  const budget = createCaptureBudget(1024 * 1024);
+  const f = await harness({
+    allowed: true,
+    settings: CAPTURE_ON,
+    http,
+    captureBudget: budget,
+    bodyWriter: {
+      generation: () => generation,
+      enqueue(parts) {
+        arrived.push(parts.generation);
+        budget.release(parts.reservedBytes);
+      },
+    },
+  });
+  expect((await f.call(ASK)).status).toBe(200);
+  expect(arrived).toEqual([]);
+  generation++;
+  tail.resolve();
+  await until("old capture handoff", async () => arrived.length === 1);
+  expect(arrived).toEqual([4]);
+  expect(budget.held()).toBe(0);
+  await cleanup(f.store, f.root);
 });
 
 // ---------------------------------------------------------------------------
@@ -792,6 +980,7 @@ test("keeps an upstream credential out of every artifact", async () => {
 
   expect((await call(ASK)).status).toBe(200);
 
+  await waitForBody(store, "req_1");
   const read = await store.bodies.get("req_1");
   expect(read?.artifact).not.toBeNull();
   expect(JSON.stringify(read?.artifact)).not.toContain(secret);
@@ -807,6 +996,22 @@ test("keeps an upstream credential out of every artifact", async () => {
 // ---------------------------------------------------------------------------
 // Non-interference
 // ---------------------------------------------------------------------------
+
+/**
+ * A collector with all the budget in the world, so only the capture rules are
+ * under test — and the budget beside it, whose `held()` is how a test watches
+ * what capture has kept without taking the parts (which happens once).
+ */
+function collectorOf() {
+  const budget = createCaptureBudget(Number.MAX_SAFE_INTEGER);
+  const collector = createBodyCollector({
+    captureStreamChunks: false,
+    requestId: "req_1",
+    at: NOW,
+    budget,
+  });
+  return Object.assign(collector, { budget });
+}
 
 /** Reads a stream to a string, the way an adapter's SSE parser would. */
 async function readAll(stream: ReadableStream<Uint8Array> | null): Promise<string> {
@@ -837,7 +1042,7 @@ test("captures a zstd-encoded request as the JSON it was before compression", as
   // The OpenAI OAuth leg asks the transport to compress. Capture sits above the
   // transport, so the artifact records the JSON the codec built — readable, and
   // never the binary the socket carries.
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const seen: HttpRequest[] = [];
   const http = collector.wrap(async (req) => {
     seen.push(req);
@@ -862,23 +1067,23 @@ test("captures a zstd-encoded request as the JSON it was before compression", as
   await collector.settle();
 
   expect(seen[0]?.bodyEncoding).toBe("zstd");
-  const captured = collector.attempts()[0]?.request;
-  expect(typeof captured).toBe("object");
-  expect(captured).toEqual(JSON.parse(seen[0]?.body ?? "null"));
-  expect(captured).toMatchObject({ model: "gpt-6-astra", stream: true });
+  const captured = collector.take(null).attempts[0]?.request;
+  // The JSON text the codec built, exactly — not the zstd frame the socket carried.
+  expect(captured).toBe(seen[0]?.body ?? "missing");
+  expect(JSON.parse(captured ?? "null")).toMatchObject({ model: "gpt-6-astra", stream: true });
 });
 
 test("delivers the adapter the same bytes with capture on and off", async () => {
   const source = (): HttpClient => async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal);
 
   const bare = await readAll((await source()(fixedRequest())).body);
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const wrapped = await readAll((await collector.wrap(source())(fixedRequest())).body);
 
   expect(wrapped).toBe(bare);
   expect(wrapped).toBe(ANTHROPIC_FRAMES.join(""));
   await collector.settle();
-  expect(String(collector.attempts()[0]?.response)).toBe(bare);
+  expect(rawText(collector.take(null).attempts[0]?.response)).toBe(bare);
 });
 
 /**
@@ -892,25 +1097,30 @@ test("delivers the adapter the same bytes with capture on and off", async () => 
  */
 test("hands the adapter its first frame before the capture branch has finished", async () => {
   const controller = new AbortController();
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal, 1));
 
   const res = await http({ ...fixedRequest(), signal: controller.signal });
   const reader = res.body?.getReader();
   if (reader === undefined) throw new Error("expected a body");
 
+  let settled = false;
+  void collector.settle().then(() => {
+    settled = true;
+  });
   const first = await reader.read();
   expect(new TextDecoder().decode(first.value)).toContain("message_start");
-  // The source is still open, so nothing has finished draining. The response
-  // arrived anyway.
-  expect(collector.attempts()[0]?.response).toBe(null);
+  // The source is still open, so the capture drain has not finished. The
+  // response arrived anyway.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(settled).toBe(false);
 
   controller.abort();
   await reader.cancel().catch(() => undefined);
   await collector.settle();
   // The drain ended on the source erroring rather than on the stream ending,
   // which is exactly the truncation a cut-off response should record.
-  expect(collector.attempts()[0]?.truncated).toBe(true);
+  expect(collector.take(null).attempts[0]?.truncated).toBe(true);
 });
 
 /**
@@ -925,7 +1135,7 @@ test("hands the adapter its first frame before the capture branch has finished",
  */
 test("reports what a still-running drain has already read", async () => {
   const controller = new AbortController();
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async (req) => bodyOf(ANTHROPIC_FRAMES, req.signal, 2));
 
   const res = await http({ ...fixedRequest(), signal: controller.signal });
@@ -942,12 +1152,15 @@ test("reports what a still-running drain has already read", async () => {
   // needs to hand the capture branch its chunks is a scheduling detail, and a
   // fixed tick count is a test that passes on an idle machine and reports a
   // product bug on a loaded one. The deadline still fails if nothing arrives.
+  const sent = Buffer.byteLength(fixedRequest().body);
+  const delivered = Buffer.byteLength(ANTHROPIC_FRAMES.slice(0, 2).join(""));
   const deadline = Date.now() + 2_000;
-  while (collector.attempts()[0]?.response === null && Date.now() < deadline) {
+  while (collector.budget.held() < sent + delivered && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
 
-  const partial = String(collector.attempts()[0]?.response);
+  // Taken while the drain is still running, as a request cut off mid-stream is.
+  const partial = String(collector.take(null).attempts[0]?.response);
   expect(partial).toContain("message_start");
   // Still open, so this is genuinely a drain in flight rather than a finished one.
   expect(partial).not.toBe(ANTHROPIC_FRAMES.join(""));
@@ -968,7 +1181,7 @@ test("reports what a still-running drain has already read", async () => {
  * proves nothing about which one waits for the other.
  */
 test("delivers the adapter's stream while the capture branch is stalled", async () => {
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   let release = (): void => {};
   const stalled = new Promise<void>((resolve) => {
     release = resolve;
@@ -1001,12 +1214,12 @@ test("delivers the adapter's stream while the capture branch is stalled", async 
 
   const res = await http(fixedRequest());
   expect(await readAll(res.body)).toBe(ANTHROPIC_FRAMES.join(""));
-  // The adapter is finished and capture has not seen a byte.
-  expect(collector.attempts()[0]?.response).toBeNull();
+  // The adapter is finished and capture has kept nothing past the request.
+  expect(collector.budget.held()).toBe(Buffer.byteLength(fixedRequest().body));
 
   release();
   await collector.settle();
-  expect(String(collector.attempts()[0]?.response)).toBe(ANTHROPIC_FRAMES.join(""));
+  expect(rawText(collector.take(null).attempts[0]?.response)).toBe(ANTHROPIC_FRAMES.join(""));
 });
 
 /**
@@ -1037,7 +1250,7 @@ test("drains the capture branch past its byte cap rather than abandoning it", as
     },
   });
 
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async () => ({
     status: 200,
     headers: new Headers({ "content-type": "text/event-stream" }),
@@ -1055,10 +1268,10 @@ test("drains the capture branch past its byte cap rather than abandoning it", as
 
   expect(pulled).toBe(chunks);
   expect(closed).toBe(true);
-  const attempt = collector.attempts()[0];
+  const attempt = collector.take(null).attempts[0];
   expect(attempt?.truncated).toBe(true);
-  // Read to the end, kept to the cap: the bytes past it were dropped, not stored.
-  expect(String(attempt?.response).length).toBeLessThanOrEqual(MAX_CAPTURED_BODY_BYTES + CHUNK);
+  // Read to the end, kept to the cap in bytes: the bytes past it were dropped, not stored.
+  expect(Buffer.byteLength(rawText(attempt?.response))).toBe(MAX_CAPTURED_BODY_BYTES);
 });
 
 /**
@@ -1069,48 +1282,49 @@ test("drains the capture branch past its byte cap rather than abandoning it", as
  * see — a sink that recorded only the final frame of every stream would satisfy
  * it — and the flag is the only trace an eviction leaves anywhere.
  */
+/** The client frames a collector has taken, failing loudly if the response is not a list. */
+function framesTaken(collector: ReturnType<typeof collectorOf>): {
+  frames: string[];
+  truncated: boolean;
+} {
+  const { client } = collector.take(null);
+  if (!Array.isArray(client.response)) throw new Error("expected the client response as frames");
+  return { frames: client.response, truncated: client.truncated };
+}
+
 test("the frame sink keeps everything inside its cap and marks what it drops", () => {
-  const sink = createFrameSink();
-  for (const frame of ["first", "second", "third"]) sink.write(frame);
-  expect(sink.frames).toEqual(["first", "second", "third"]);
-  expect(sink.truncated).toBe(false);
+  const small = collectorOf();
+  for (const frame of ["first", "second", "third"]) small.frame(frame);
+  expect(framesTaken(small)).toEqual({ frames: ["first", "second", "third"], truncated: false });
 
-  // Four frames of two hundred kilobytes, against a cap of five hundred and
-  // twelve: the first two and everything before them have to go.
-  const big = "y".repeat(200_000);
-  for (let i = 0; i < 4; i++) sink.write(`${i}:${big}`);
+  // Four frames of two fifths of the cap each: the first two and everything
+  // before them have to go.
+  const sink = collectorOf();
+  const big = "y".repeat(Math.floor(MAX_CAPTURED_BODY_BYTES * 0.4));
+  for (let i = 0; i < 4; i++) sink.frame(`${i}:${big}`);
 
-  expect(sink.truncated).toBe(true);
-  expect(sink.frames.map((frame) => frame.slice(0, 2))).toEqual(["2:", "3:"]);
-  expect(sink.frames.reduce((n, frame) => n + frame.length, 0)).toBeLessThanOrEqual(
+  const { frames, truncated } = framesTaken(sink);
+  expect(truncated).toBe(true);
+  expect(frames.map((frame) => frame.slice(0, 2))).toEqual(["2:", "3:"]);
+  expect(frames.reduce((n, frame) => n + Buffer.byteLength(frame), 0)).toBeLessThanOrEqual(
     MAX_CAPTURED_BODY_BYTES,
   );
 });
 
-/**
- * The eviction loop stops at one frame rather than at none.
- *
- * A frame can be larger than the whole cap on its own — a tool result or an
- * image comes back as a single `message_delta` — and evicting it leaves the
- * sink empty, which is not a bounded record of the stream but the absence of
- * one. Keeping it is the same choice the artifact writer makes when a bounded
- * payload is still oversized: record something and say it was cut, never
- * silently record nothing.
- */
-test("the frame sink keeps a lone frame that is larger than the cap on its own", () => {
-  const sink = createFrameSink();
+/** An oversized frame is explicitly dropped without preventing terminal-frame capture. */
+test("the frame sink drops a lone oversized frame and preserves subsequent terminal frames", () => {
   const huge = `data: ${"z".repeat(MAX_CAPTURED_BODY_BYTES)}`;
-  sink.write(huge);
+  const alone = collectorOf();
+  alone.frame(huge);
+  expect(alone.budget.held()).toBe(0);
+  expect(framesTaken(alone)).toEqual({ frames: [], truncated: true });
 
-  expect(sink.frames).toEqual([huge]);
-  // Nothing was dropped, so nothing is claimed to have been.
-  expect(sink.truncated).toBe(false);
-
-  // And the next frame evicts it rather than the loop having simply given up:
-  // the cap still governs once there is more than one frame to choose between.
-  sink.write("data: after");
-  expect(sink.frames).toEqual(["data: after"]);
-  expect(sink.truncated).toBe(true);
+  const sink = collectorOf();
+  sink.frame(huge);
+  const terminal = "event: message_stop\ndata: {}";
+  sink.frame(terminal);
+  expect(sink.budget.held()).toBe(Buffer.byteLength(terminal));
+  expect(framesTaken(sink)).toEqual({ frames: [terminal], truncated: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -1250,7 +1464,7 @@ async function dropRow(root: string, requestId: string): Promise<void> {
  * set flag would make every captured body read as incomplete.
  */
 test("does not mark a buffered response under the cap as truncated", async () => {
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async () => ({
     status: 200,
     headers: new Headers(),
@@ -1262,9 +1476,9 @@ test("does not mark a buffered response under the cap as truncated", async () =>
   expect(await res.text()).toBe('{"ok":true}');
   await collector.settle();
 
-  const attempt = collector.attempts()[0];
-  // `asBody` parses JSON, so the artifact holds the object rather than the text.
-  expect(attempt?.response).toEqual({ ok: true });
+  const attempt = collector.take(null).attempts[0];
+  // The text as it arrived; parsing is the writer's, off the request path.
+  expect(rawText(attempt?.response)).toBe('{"ok":true}');
   expect(attempt?.truncated).toBe(false);
 });
 
@@ -1278,7 +1492,7 @@ test("does not mark a buffered response under the cap as truncated", async () =>
 test("reassembles a multi-byte character split across chunks", async () => {
   const text = "héllo → 世界";
   const bytes = new TextEncoder().encode(text);
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async () => ({
     status: 200,
     headers: new Headers(),
@@ -1296,7 +1510,7 @@ test("reassembles a multi-byte character split across chunks", async () => {
   await readAll(res.body);
   await collector.settle();
 
-  expect(String(collector.attempts()[0]?.response)).toBe(text);
+  expect(rawText(collector.take(null).attempts[0]?.response)).toBe(text);
 });
 
 /**
@@ -1308,7 +1522,7 @@ test("reassembles a multi-byte character split across chunks", async () => {
  * flushes nothing. Deleting the flush is invisible without a truncated tail.
  */
 test("flushes a trailing partial character when the stream ends mid-sequence", async () => {
-  const collector = createBodyCollector({ captureStreamChunks: false });
+  const collector = collectorOf();
   const http = collector.wrap(async () => ({
     status: 200,
     headers: new Headers(),
@@ -1326,5 +1540,5 @@ test("flushes a trailing partial character when the stream ends mid-sequence", a
   await readAll(res.body);
   await collector.settle();
 
-  expect(String(collector.attempts()[0]?.response)).toBe("ok�");
+  expect(rawText(collector.take(null).attempts[0]?.response)).toBe("ok�");
 });

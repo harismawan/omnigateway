@@ -68,7 +68,7 @@ export function applyTrace(log: RequestLog, trace: TraceContext): void {
 }
 
 /** {@link applyTrace} for a log built inline: returns it, and accepts no trace. */
-export function withTrace(log: RequestLog, trace: TraceContext | null): RequestLog {
+export function withTrace<T extends RequestLog>(log: T, trace: TraceContext | null): T {
   if (trace !== null) applyTrace(log, trace);
   return log;
 }

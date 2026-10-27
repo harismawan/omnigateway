@@ -79,6 +79,8 @@ export function releaseVersion(raw: string): string {
  */
 export const EXPORT_WORKER_ENTRY = "apps/gateway/src/export/worker.ts";
 export const EXPORT_WORKER_FILE = "export-worker.js";
+export const BODY_WORKER_ENTRY = "apps/gateway/src/bodies/writer.ts";
+export const BODY_WORKER_FILE = "body-worker.js";
 
 export async function bundle(
   entry: string,
@@ -127,8 +129,10 @@ export async function bundleGateway(
 ): Promise<void> {
   await bundle(entry, join(dir, "gateway.js"), version, {
     OMNI_EXPORT_WORKER: JSON.stringify(`./${EXPORT_WORKER_FILE}`),
+    OMNI_BODY_WORKER: JSON.stringify(`./${BODY_WORKER_FILE}`),
   });
   await bundle(EXPORT_WORKER_ENTRY, join(dir, EXPORT_WORKER_FILE), version);
+  await bundle(BODY_WORKER_ENTRY, join(dir, BODY_WORKER_FILE), version);
 }
 
 export async function buildPackage(version: string): Promise<string> {
@@ -155,7 +159,15 @@ export async function buildPackage(version: string): Promise<string> {
         author: "Harismawan <mail@harismawan.com>",
         type: "module",
         bin: { omni: "./bin/omni.js" },
-        files: ["bin", "gateway.js", EXPORT_WORKER_FILE, "public", "README.md", "LICENSE"],
+        files: [
+          "bin",
+          "gateway.js",
+          EXPORT_WORKER_FILE,
+          BODY_WORKER_FILE,
+          "public",
+          "README.md",
+          "LICENSE",
+        ],
         dependencies: RUNTIME_DEPENDENCIES,
         // Bun is the runtime, not just the bundler: bun:sqlite, Bun.spawn and
         // Bun.file are all load-bearing. Saying so here turns a confusing

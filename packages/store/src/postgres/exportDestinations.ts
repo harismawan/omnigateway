@@ -45,6 +45,49 @@ export function createExportDestinationRepo(sql: SQL, key: CryptoKey): ExportDes
   };
 
   return {
+    async bodyAdmission(id, keyId) {
+      const row = (
+        await sql.unsafe<
+          Rows<{
+            settings: string | null;
+            key_id: string | null;
+            opt: boolean | null;
+            generation: string | null;
+            revision: number | string | null;
+            enabled: boolean | null;
+            include_bodies: boolean | null;
+          }>
+        >(
+          `SELECT s.value AS settings, k.id AS key_id, k.body_logging_opt_out AS opt,
+        d.generation, d.revision, d.enabled, d.include_bodies
+        FROM (SELECT 1) AS anchor
+        LEFT JOIN settings s ON s.key = 'settings'
+        LEFT JOIN api_keys k ON k.id = $2
+        LEFT JOIN export_destinations d ON d.id = $1`,
+          [id, keyId],
+        )
+      )[0];
+      if (!row) throw new Error("body admission returned no row");
+      const settings: unknown = row.settings === null ? null : JSON.parse(row.settings);
+      return {
+        bodyLoggingEnabled:
+          typeof settings === "object" &&
+          settings !== null &&
+          "bodyLoggingEnabled" in settings &&
+          settings.bodyLoggingEnabled === true,
+        keyExists: row.key_id !== null,
+        keyBodyOptOut: row.opt !== false,
+        destination:
+          row.generation === null
+            ? null
+            : {
+                generation: row.generation,
+                revision: Number(row.revision),
+                enabled: row.enabled === true,
+                includeBodies: row.include_bodies === true,
+              },
+      };
+    },
     async list() {
       const rows = await sql.unsafe<Rows<DestinationRow>>(
         `SELECT ${DESTINATION_COLUMNS} FROM export_destinations ORDER BY id`,

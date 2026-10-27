@@ -1,11 +1,19 @@
 import type { Dirent } from "node:fs";
-import { type FileHandle, mkdir, open, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
+import {
+  type FileHandle,
+  mkdir,
+  open,
+  readdir,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { decrypt } from "../encryption.ts";
-import type { BodyArtifact, BodyAttempt } from "../types.ts";
-import { boundValue } from "./bound.ts";
+import type { BodyArtifact, BodyAttempt, BodyOmission } from "../types.ts";
 import { maskSecrets, maskString } from "./mask.ts";
 
 /**
@@ -16,15 +24,17 @@ import { maskSecrets, maskString } from "./mask.ts";
 export const ARTIFACT_SCHEMA_VERSION = 1;
 
 /**
- * The ceiling on one serialized artifact, applied after structural bounding.
+ * The ceiling on one serialized artifact, applied after masking.
  *
- * Bounding is per-value, so a payload can respect every one of its limits and
- * still be enormous in aggregate — eighty keys of sixty-four kilobytes each is
- * five megabytes of valid, bounded JSON. Past this the bodies are replaced by a
- * marker that records why, which is neither writing it oversized nor dropping it
- * without a trace.
+ * Nothing inside an artifact is bounded — no per-string, per-array, depth or
+ * key limit — so a body is stored whole up to this size or not at all. Past it
+ * the bodies are replaced by a marker that records why, which is neither
+ * writing it oversized nor dropping it without a trace. 64 MiB keeps every
+ * realistic body whole (Anthropic refuses requests over 32 MB) while the uint32
+ * claimed length, a Postgres `bytea` and a whole-artifact decrypt and parse all
+ * stay valid. Every reader ceiling below is derived from it, so it moves alone.
  */
-export const MAX_ARTIFACT_BYTES = 512 * 1024;
+export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
 /**
  * The row cap, which is what actually bounds disk.
@@ -37,19 +47,6 @@ export const BODY_ROW_CAP = 100_000;
 
 /** Sits beside the database file, so one directory is the whole installation. */
 export const BODIES_DIRNAME = "request_bodies";
-
-/**
- * What replaces the bodies of an artifact too large to store.
- *
- * A marker rather than silence: an operator looking at an incident needs to know
- * the difference between "capture was off" and "capture ran and this was too big
- * to keep", and those are the same absence otherwise.
- */
-export type BodyOmission = {
-  omitted: true;
-  reason: string;
-  serializedBytes: number;
-};
 
 const encoder = new TextEncoder();
 
@@ -88,6 +85,30 @@ export function relPathFor(requestId: string, at: number): string {
   return `${yyyy}/${mm}/${dd}/${requestId}.json.enc`;
 }
 
+/**
+ * Where the body writer puts an artifact until it is complete, under the bodies
+ * directory. The orphan sweep never lists it — a half-written file has no row
+ * yet by design — and removes what a crashed write left there once it is an
+ * hour old. Design: docs/superpowers/specs/2026-10-24-log-export-design.md
+ * (*SQLite staging and the orphan sweep*).
+ */
+export const STAGING_DIRNAME = ".staging";
+
+/** How long a staged file may sit before the sweep takes it as a crashed write's. */
+export const STAGING_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * `<dir>/.staging/<requestId>.<nonce>`. The nonce keeps two writes of one
+ * request — a retry after a writer restart — from sharing a file. Both become a
+ * path segment, so both are held to the request-id character set.
+ */
+export function stagingPathFor(dir: string, requestId: string, nonce: string): string {
+  if (!isSafeRequestId(requestId) || !isSafeRequestId(nonce)) {
+    throw new Error("staging name is not safe to use as a path segment");
+  }
+  return join(dir, STAGING_DIRNAME, `${requestId}.${nonce}`);
+}
+
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   // Copied into a buffer of its own because `digest` will not accept a view
   // over a possibly-shared one. The digest is over the same bytes either way,
@@ -97,14 +118,13 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 }
 
 /**
- * `truncated` is an OR, never a recomputation.
+ * `truncated` is carried, never recomputed.
  *
- * Bounding is one of two independent ways a body ends up incomplete, and it is
- * the only one visible from here. The other is the capture layer's: a client
- * that hung up mid-stream, a drain that ended on a source error, a response
- * past the byte cap. Those are facts the gateway knows and this function cannot
- * observe — a payload truncated by a disconnect is structurally unremarkable, so
- * deriving the flag from the value alone reports it as complete.
+ * Nothing here cuts a body, so the only ways one ends up incomplete are the
+ * capture layer's: a client that hung up mid-stream, a drain that ended on a
+ * source error, a response past the byte cap. Those are facts the gateway knows
+ * and this function cannot observe — a payload truncated by a disconnect is
+ * structurally unremarkable — so the incoming flag is the whole answer.
  *
  * An earlier version took only `{request, response}`, which silently discarded
  * the incoming flag and made every gateway-side truncation unrecordable.
@@ -114,21 +134,31 @@ function bodyPair(pair: { request: unknown; response: unknown; truncated?: boole
   response: unknown;
   truncated: boolean;
 } {
-  const request = boundValue(maskSecrets(pair.request));
-  const response = boundValue(maskSecrets(pair.response));
   return {
-    request: request.value,
-    response: response.value,
-    truncated: pair.truncated === true || request.truncated || response.truncated,
+    request: maskSecrets(pair.request),
+    response: maskSecrets(pair.response),
+    truncated: pair.truncated === true,
   };
 }
 
-function omission(serializedBytes: number): BodyOmission {
-  return {
-    omitted: true,
-    reason: `artifact exceeded ${MAX_ARTIFACT_BYTES} bytes after structural bounding`,
-    serializedBytes,
-  };
+/** Why `JSON.stringify` refused an artifact however small it was. */
+const NESTING_TOO_DEEP = "nesting too deep";
+
+/**
+ * The artifact as JSON, or null when the native serializer overflows its stack.
+ *
+ * Masking walks iteratively and has no depth limit; `JSON.stringify` recurses
+ * natively and does. Only a `RangeError` is turned into an answer: any other
+ * throw — a cycle, a `BigInt` — is not something a parsed body can contain, and
+ * stays the failed write it always was.
+ */
+function serialize(artifact: BodyArtifact): string | null {
+  try {
+    return JSON.stringify(artifact);
+  } catch (error) {
+    if (error instanceof RangeError) return null;
+    throw error;
+  }
 }
 
 /**
@@ -136,8 +166,8 @@ function omission(serializedBytes: number): BodyOmission {
  *
  * The attempt list, its order, and its providers are what make an artifact a
  * story rather than a blob, and they cost nothing to keep. What goes is only the
- * payloads that made it too large. The error survives here because it is the one
- * field an operator opening an oversized artifact is most likely to be after.
+ * payloads that could not be stored. The error survives here because it is the
+ * one field an operator opening an omitted artifact is most likely to be after.
  */
 function omitBodies(artifact: BodyArtifact, marker: BodyOmission): BodyArtifact {
   return {
@@ -157,64 +187,83 @@ function omitBodies(artifact: BodyArtifact, marker: BodyOmission): BodyArtifact 
 }
 
 /**
- * Masks, bounds, and if necessary omits — the whole of what has to happen to a
- * body before it may be written.
+ * Masks and, if it must, omits — the whole of what has to happen to a body
+ * before it may be written.
  *
- * Masking runs before bounding on purpose. Bounding truncates strings, and a
- * secret cut in half is a secret that may no longer match the rule that would
- * have caught it whole.
+ * Nothing is cut. A body is stored whole or replaced whole by a marker saying
+ * why, because a body with pieces missing reads as a complete one; masking runs
+ * on every string either way.
  *
- * Pure, so the bounds can be tested without a filesystem, and separate from the
+ * Pure, so the limits can be tested without a filesystem, and separate from the
  * repository so there is one place to look when asking what a stored artifact
  * has had done to it.
  */
-export function prepareArtifact(input: BodyArtifact): { artifact: BodyArtifact; json: string } {
-  const client = bodyPair(input.client);
+export type PreparedArtifact = {
+  artifact: BodyArtifact;
+  json: string;
+  /** Whether the bodies were replaced by a marker here — over budget or too deep. */
+  omitted: boolean;
+};
+
+export function prepareArtifact(input: BodyArtifact): PreparedArtifact {
   const attempts = input.attempts.map((attempt): BodyAttempt => {
     const pair = bodyPair(attempt);
-    // Frames are strings by their type, and bounding an array of strings yields
-    // an array of strings: the array is trimmed to its last frames and each
-    // frame to its own byte budget. The assertion restates that, and is the only
-    // place `boundValue`'s `unknown` result is narrowed by construction.
-    const chunks =
-      attempt.streamChunks === null ? null : boundValue(attempt.streamChunks.map(maskString));
     return {
       attempt: attempt.attempt,
       provider: attempt.provider,
       request: pair.request,
       response: pair.response,
-      streamChunks: chunks === null ? null : (chunks.value as string[]),
-      truncated: pair.truncated || (chunks?.truncated ?? false),
+      streamChunks: attempt.streamChunks === null ? null : attempt.streamChunks.map(maskString),
+      truncated: pair.truncated,
     };
   });
-  const error = boundValue(maskSecrets(input.error));
 
-  const bounded: BodyArtifact = {
+  const masked: BodyArtifact = {
     schemaVersion: ARTIFACT_SCHEMA_VERSION,
     requestId: input.requestId,
     at: input.at,
-    client,
+    client: bodyPair(input.client),
     attempts,
-    error: error.value,
+    error: maskSecrets(input.error),
   };
 
-  const json = JSON.stringify(bounded);
+  const json = serialize(masked);
+  if (json === null) {
+    return omitted(masked, { omitted: true, reason: NESTING_TOO_DEEP, serializedBytes: null });
+  }
   // `byteLength` measures without materialising the bytes: `encoder.encode`
   // allocated a whole second copy of a body that is already at the budget.
   const size = Buffer.byteLength(json);
-  if (size <= MAX_ARTIFACT_BYTES) return { artifact: bounded, json };
+  if (size <= MAX_ARTIFACT_BYTES) return { artifact: masked, json, omitted: false };
+  return omitted(masked, {
+    omitted: true,
+    reason: `artifact exceeded ${MAX_ARTIFACT_BYTES} bytes`,
+    serializedBytes: size,
+  });
+}
 
-  const marker = omission(size);
-  const omitted = omitBodies(bounded, marker);
-  const omittedJson = JSON.stringify(omitted);
-  if (Buffer.byteLength(omittedJson) <= MAX_ARTIFACT_BYTES) {
-    return { artifact: omitted, json: omittedJson };
+/**
+ * The artifact with its bodies replaced by `marker`, and then its error if the
+ * error is what still does not fit, re-checked against the budget each time.
+ *
+ * The error was worth keeping right up until it was the thing over the budget
+ * or too deep to serialize. Past both, the frame alone is too large — no
+ * gateway captures one, since it names at most a handful of attempts — and that
+ * is refused here rather than handed to a writer that would refuse it later
+ * under a less specific name. "Never written oversized" is the promise.
+ */
+function omitted(masked: BodyArtifact, marker: BodyOmission): PreparedArtifact {
+  const bodiesOmitted = omitBodies(masked, marker);
+  const kept = serialize(bodiesOmitted);
+  if (kept !== null && Buffer.byteLength(kept) <= MAX_ARTIFACT_BYTES) {
+    return { artifact: bodiesOmitted, json: kept, omitted: true };
   }
-
-  // The error was worth keeping right up until it was the thing over the
-  // budget. "Never written oversized" is the stronger promise of the two.
-  const stripped: BodyArtifact = { ...omitted, error: marker };
-  return { artifact: stripped, json: JSON.stringify(stripped) };
+  const stripped: BodyArtifact = { ...bodiesOmitted, error: marker };
+  const json = JSON.stringify(stripped);
+  if (Buffer.byteLength(json) > MAX_ARTIFACT_BYTES) {
+    throw new Error(`artifact exceeded ${MAX_ARTIFACT_BYTES} bytes with every body omitted`);
+  }
+  return { artifact: stripped, json, omitted: true };
 }
 
 /**
@@ -252,9 +301,10 @@ const CODEC_GZIP = 1;
 
 /**
  * The gzip policy the benchmark measured against raw, and which no store writes:
- * on synthetic incompressible input at the 512 KiB cap its seal cost more
- * latency than the budget allowed, though representative cap fixtures stayed
- * within it (docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md).
+ * on synthetic incompressible input at the 512 KiB cap it was measured under,
+ * its seal cost more latency than the budget allowed, though representative cap
+ * fixtures stayed within it
+ * (docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md).
  * Below the cutoff gzip is not tried, since its header and footer eat most of
  * what a small body could save. Level 1 is the cheapest native setting. A saving
  * under the minimum is not worth a decompression on every read.
@@ -278,9 +328,8 @@ type SealedArtifact = { bytes: Uint8Array; sha256: string };
 /**
  * The plaintext as the binary envelope carries it, or a refusal.
  *
- * The budget is enforced here rather than trusted from `prepareArtifact`, whose
- * last fallback does not recheck it — a frame of a few thousand attempts is over
- * budget with every body already replaced by its marker. An envelope the reader
+ * The budget is enforced here as well as in `prepareArtifact`, because a writer
+ * is handed JSON and cannot know where it came from. An envelope the reader
  * would refuse must not be one a writer makes, so `put` throws instead, before
  * anything is written. The plaintext is what is measured, never a compressed
  * form, so a body over budget is not admitted for compressing well.
@@ -406,7 +455,10 @@ export async function readArtifact(
  * A file too large to read is `corrupt` — the bytes exist — while one that cannot
  * be opened or read is `missing`, as it always was.
  */
-async function acquireArtifact(path: string): Promise<Uint8Array | ArtifactFailure> {
+export async function acquireArtifact(
+  path: string,
+  maxBytes = MAX_ENVELOPE_BYTES,
+): Promise<Uint8Array | ArtifactFailure> {
   let handle: FileHandle;
   try {
     handle = await open(path, "r");
@@ -415,7 +467,7 @@ async function acquireArtifact(path: string): Promise<Uint8Array | ArtifactFailu
   }
   try {
     const { size } = await handle.stat();
-    if (size > MAX_ENVELOPE_BYTES) return "corrupt";
+    if (size > Math.min(MAX_ENVELOPE_BYTES, maxBytes)) return "corrupt";
     const buffer = new Uint8Array(size + 1);
     let filled = 0;
     while (filled < buffer.length) {
@@ -431,7 +483,17 @@ async function acquireArtifact(path: string): Promise<Uint8Array | ArtifactFailu
   }
 }
 
-const LEGACY_HEX = /^(?:[0-9a-f]{2})*$/;
+/**
+ * Lower-case hex, any length; evenness is checked separately. Not
+ * `^(?:[0-9a-f]{2})*$`: Bun's engine gives up on that group past about four
+ * million characters and answers false, which at a 64 MiB budget would call a
+ * well-formed envelope corrupt.
+ */
+const LEGACY_HEX_CHARS = /^[0-9a-f]*$/;
+
+function isLegacyHex(text: string): boolean {
+  return text.length % 2 === 0 && LEGACY_HEX_CHARS.test(text);
+}
 const LEGACY_IV_HEX_CHARS = 24;
 const LEGACY_TAG_HEX_CHARS = 32;
 
@@ -456,9 +518,9 @@ function isLegacyStructure(text: string): boolean {
     tag !== undefined &&
     iv.length === LEGACY_IV_HEX_CHARS &&
     tag.length === LEGACY_TAG_HEX_CHARS &&
-    LEGACY_HEX.test(iv) &&
-    LEGACY_HEX.test(body) &&
-    LEGACY_HEX.test(tag)
+    isLegacyHex(iv) &&
+    isLegacyHex(body) &&
+    isLegacyHex(tag)
   );
 }
 
@@ -517,7 +579,7 @@ async function expand(codec: number, payload: Uint8Array, claimed: number): Prom
  */
 export async function gunzipArtifact(payload: Uint8Array, claimed: number): Promise<Uint8Array> {
   const result: unknown = await gunzipAsync(payload, {
-    maxOutputLength: MAX_ARTIFACT_BYTES,
+    maxOutputLength: Math.min(MAX_ARTIFACT_BYTES, claimed),
     info: true,
   });
   const inflated = inflateResult(result);
@@ -562,6 +624,46 @@ function parseBinary(bytes: Uint8Array): BinaryEnvelope | null {
     iv: own(bytes, BINARY_HEADER_BYTES, BINARY_HEADER_BYTES + BINARY_IV_BYTES),
     sealed: own(bytes, BINARY_HEADER_BYTES + BINARY_IV_BYTES),
   };
+}
+
+/** Bounded header probe; provisional until GCM authenticates the complete envelope. */
+export function artifactPlaintextLength(header: Uint8Array, size = header.length): number | null {
+  if (size > MAX_ENVELOPE_BYTES || size < 1) return null;
+  if (startsWith(header, BINARY_MAGIC)) {
+    if (header.length < 10 || size < BINARY_OVERHEAD || size > MAX_BINARY_ENVELOPE_BYTES)
+      return null;
+    const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    const claimed = view.getUint32(6, false);
+    return header[4] === BINARY_VERSION &&
+      claimed >= 1 &&
+      claimed <= MAX_ARTIFACT_BYTES &&
+      payloadFits(header[5] ?? -1, size - BINARY_OVERHEAD, claimed)
+      ? claimed
+      : null;
+  }
+  if (startsWith(header, LEGACY_PREFIX) && size >= 65 && (size - 65) % 2 === 0)
+    return (size - 65) / 2;
+  return null;
+}
+
+/** Same authentication/expansion path as operator reads, deliberately without JSON.parse. */
+export async function openArtifactText(
+  key: CryptoKey,
+  bytes: Uint8Array,
+  sha256: string | null,
+): Promise<string | null> {
+  try {
+    if (artifactPlaintextLength(bytes) === null) return null;
+    if (sha256 !== null && (await sha256Hex(bytes)) !== sha256) return null;
+    if (startsWith(bytes, BINARY_MAGIC)) {
+      const envelope = parseBinary(bytes);
+      return envelope === null ? null : await openBinary(key, envelope);
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return isLegacyStructure(text) ? await decrypt(key, text) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function openBinary(key: CryptoKey, envelope: BinaryEnvelope): Promise<string> {
@@ -675,6 +777,10 @@ export async function deleteArtifact(dir: string, relPath: string): Promise<void
  * Walked by hand rather than with a recursive `readdir` option so the traversal
  * is the same on every runtime this has to run on, and so a directory that has
  * never been created reads as an empty tree rather than an error.
+ *
+ * `.staging/` is not walked: nothing in it is an artifact yet, and a caller
+ * reconciling this list against `rel_path` would read every in-progress write
+ * as an orphan. `sweepStaged` is what clears it.
  */
 export async function listArtifacts(dir: string): Promise<string[]> {
   const out: string[] = [];
@@ -686,6 +792,7 @@ export async function listArtifacts(dir: string): Promise<string[]> {
       return;
     }
     for (const entry of entries) {
+      if (prefix === "" && entry.name === STAGING_DIRNAME) continue;
       const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
       if (entry.isDirectory()) await walk(join(current, entry.name), rel);
       else if (entry.isFile()) out.push(rel);
@@ -693,4 +800,33 @@ export async function listArtifacts(dir: string): Promise<string[]> {
   };
   await walk(dir, "");
   return out;
+}
+
+/**
+ * Removes staged files older than `STAGING_MAX_AGE_MS` at `now`, and returns
+ * how many went. A write in progress is seconds old and a crashed one stays
+ * behind forever, so age alone tells them apart: no write runs for an hour. The
+ * directory itself is kept — the writer may be about to use it.
+ */
+export async function sweepStaged(dir: string, now: number): Promise<number> {
+  const staging = join(dir, STAGING_DIRNAME);
+  let entries: Dirent[];
+  try {
+    entries = await readdir(staging, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const path = join(staging, entry.name);
+    try {
+      if (now - (await stat(path)).mtimeMs <= STAGING_MAX_AGE_MS) continue;
+      await unlink(path);
+      removed += 1;
+    } catch {
+      // Renamed or removed under the sweep: either way it is not ours to count.
+    }
+  }
+  return removed;
 }

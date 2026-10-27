@@ -6,6 +6,17 @@ import { settingsSchema } from "../src/schemas.ts";
 
 const base = { OMNI_ENCRYPTION_KEY: "a-key-that-is-long-enough-000000" };
 
+test("export body budget defaults192MiB and accepts only positive safe byte counts", () => {
+  expect(loadConfig(base).exportBodyBudgetBytes).toBe(201326592);
+  expect(loadConfig({ ...base, OMNI_EXPORT_BODY_BUDGET_BYTES: "4096" }).exportBodyBudgetBytes).toBe(
+    4096,
+  );
+  for (const value of ["0", "-1", "1.5", "no", "9007199254740992"])
+    expect(() => loadConfig({ ...base, OMNI_EXPORT_BODY_BUDGET_BYTES: value })).toThrow(
+      "OMNI_EXPORT_BODY_BUDGET_BYTES",
+    );
+});
+
 test("request deadline accepts zero and rejects negative values", () => {
   expect(
     settingsSchema.parse({ ...DEFAULT_SETTINGS, requestDeadlineMs: 0 }).requestDeadlineMs,
@@ -89,6 +100,24 @@ test("reads observability settings with off-by-default and bounded defaults", ()
   expect(configured.otlpEndpoint).toBe("https://collector.example");
   expect(configured.otlpHeaders).toBe("x-api-key=secret,tenant=one");
   expect(configured.traceSample).toBe(0.25);
+});
+
+test("the body capture budget defaults to 512 MiB and takes any positive integer", () => {
+  expect(loadConfig(base).bodyCaptureBudgetBytes).toBe(536_870_912);
+  expect(
+    loadConfig({ ...base, OMNI_BODY_CAPTURE_BUDGET_BYTES: "1048576" }).bodyCaptureBudgetBytes,
+  ).toBe(1_048_576);
+  expect(loadConfig({ ...base, OMNI_BODY_CAPTURE_BUDGET_BYTES: "1" }).bodyCaptureBudgetBytes).toBe(
+    1,
+  );
+});
+
+test("refuses a body capture budget that is not a positive integer", () => {
+  for (const value of ["0", "-1", "1.5", "512MiB", "", " 1", "1e9", "99999999999999999999"]) {
+    expect(() => loadConfig({ ...base, OMNI_BODY_CAPTURE_BUDGET_BYTES: value })).toThrow(
+      `OMNI_BODY_CAPTURE_BUDGET_BYTES must be a positive integer, got "${value}"`,
+    );
+  }
 });
 
 test("refuses invalid observability number settings", () => {

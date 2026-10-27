@@ -1,6 +1,7 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { ProviderId } from "@omni/ir";
 import { isRtkFilterId } from "@omni/rtk/catalog";
+import { readBodyState, requestedBodyState } from "../bodyStateColumn.ts";
 import { exportPageSql } from "../exportPage.ts";
 import { logPageClauses, splitPage } from "../logPage.ts";
 import {
@@ -14,8 +15,10 @@ import {
   traceValues,
 } from "../traceColumns.ts";
 import {
+  BODY_PENDING_MS,
   NODE_GRACE_MS,
   type RequestLog,
+  type RequestLogWrite,
   type RequestState,
   SESSIONS_LIMIT,
   type UsageBucket,
@@ -62,6 +65,7 @@ type Row = {
   rtk_estimated_tokens_saved: number;
   rtk_filters: string;
   completed_at: number | null;
+  body_state: string | null;
 } & TraceRow;
 
 function parseRtkFilters(raw: string): import("@omni/rtk/catalog").RtkFilterId[] {
@@ -101,6 +105,7 @@ const toLog = (r: Row): RequestLog => ({
   rtkFilters: parseRtkFilters(r.rtk_filters),
   ...readTrace(r),
   completedAt: r.completed_at,
+  bodyState: readBodyState(r.body_state),
 });
 
 /**
@@ -190,17 +195,17 @@ const COLUMNS = `(id, state, node_id, at, api_key_id, requested_model, resolved_
                   output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
                   cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
                   rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters,
-                  ${TRACE_COLUMN_NAMES.join(", ")}, completed_at)`;
+                  ${TRACE_COLUMN_NAMES.join(", ")}, completed_at, body_state)`;
 
-const PLACEHOLDERS = `(${Array.from({ length: 27 + TRACE_COLUMN_NAMES.length }, () => "?").join(",")})`;
+const PLACEHOLDERS = `(${Array.from({ length: 28 + TRACE_COLUMN_NAMES.length }, () => "?").join(",")})`;
 
 /**
  * `completed_at` is the store's, never the caller's: whatever the log carries is
  * ignored, a pending row is written without one, and a completion is stamped
  * from the application clock — SQLite is one node, so that clock is the only
- * one there is.
+ * one there is. `body_state` is the caller's only as far as `pending`.
  */
-function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryBindings[] {
+function values(log: RequestLogWrite, state: RequestState, nodeId: string): SQLQueryBindings[] {
   return [
     log.id,
     state,
@@ -230,6 +235,7 @@ function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryB
     JSON.stringify(log.rtkFilters ?? []),
     ...traceValues(log),
     state === "done" ? Date.now() : null,
+    requestedBodyState(log),
   ];
 }
 
@@ -250,6 +256,12 @@ function values(log: RequestLog, state: RequestState, nodeId: string): SQLQueryB
  * event — and the log it completes may carry neither. It hands over dispatch's
  * own log where the request got that far, and a blank one only where it did
  * not, so the fallback covers the second case rather than every case.
+ *
+ * `body_state` goes the other way: what the row holds wins, and the completing
+ * log's `pending` lands only where it holds nothing. A body published while
+ * the request was still streaming must not be put back to pending by the
+ * completion that follows, and a row begun with capture keeps it when its
+ * completing log does not say.
  */
 const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
   ON CONFLICT(id) DO UPDATE SET
@@ -277,7 +289,8 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_estimated_tokens_saved = excluded.rtk_estimated_tokens_saved,
     rtk_filters = excluded.rtk_filters,
     ${traceCompleteSet("excluded")},
-    completed_at = excluded.completed_at
+    completed_at = excluded.completed_at,
+    body_state = COALESCE(request_logs.body_state, excluded.body_state)
   WHERE request_logs.state = 'pending'`;
 
 /**
@@ -320,6 +333,16 @@ export const NARROWED_SQL = {
  */
 export const EXPORT_FROM = "request_logs INDEXED BY idx_request_logs_completed";
 
+/**
+ * `sweepPending`'s body half, `(cutoff)`: bodies still pending past their hour.
+ * Exported for the plan test in `migrations.test.ts`, for the reason
+ * `NARROWED_SQL` is — this is an `UPDATE`, so a scan would hold the writer
+ * lock, which every inference commit waits on, for the whole table. It must
+ * seek the partial `idx_request_logs_body_pending` (migration 23).
+ */
+export const FAIL_STALE_BODIES_SQL = `UPDATE request_logs SET body_state = 'failed'
+   WHERE body_state = 'pending' AND completed_at <= ?`;
+
 export function createUsageRepo(
   db: Database,
   nodeId: string,
@@ -335,7 +358,7 @@ export function createUsageRepo(
    * they summarize what the log actually says even where the upsert kept a
    * column the completing log did not carry.
    */
-  const complete = db.transaction((log: RequestLog) => {
+  const complete = db.transaction((log: RequestLogWrite) => {
     // Zero rows changed means the claim lost: the row was already done. No
     // rollup then — it was rolled up by whoever completed it.
     if (db.run(COMPLETE, values(log, "done", nodeId)).changes === 0) return;
@@ -381,7 +404,7 @@ export function createUsageRepo(
   });
 
   return {
-    async begin(log: RequestLog) {
+    async begin(log: RequestLogWrite) {
       db.run(
         `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}`,
         values(log, "pending", nodeId),
@@ -397,11 +420,15 @@ export function createUsageRepo(
       );
     },
 
-    async append(log: RequestLog) {
+    async append(log: RequestLogWrite) {
       complete(log);
     },
 
     async sweepPending(now) {
+      // Bodies an hour past completion, any node's: an acknowledgement that
+      // late is not coming. A row this sweep retires below is stamped complete
+      // now, so its body gets its own hour from here.
+      db.run(FAIL_STALE_BODIES_SQL, [now - BODY_PENDING_MS]);
       // Own rows, or rows of a node with no live heartbeat. `NOT IN` against
       // the live set rather than a join on the dead set, because a node that
       // never wrote a heartbeat has no row to join against and is dead too.
@@ -420,7 +447,14 @@ export function createUsageRepo(
         // Zero duration, not elapsed-since-start: nobody knows when the process
         // died, and a row pending across a weekend of downtime would otherwise
         // put two days into the mean latency of the day it started on.
-        complete({ ...log, status: 499, errorCode: "interrupted", durationMs: 0 });
+        // `bodyState: null` asks for nothing: the row keeps whatever it holds.
+        complete({
+          ...log,
+          status: 499,
+          errorCode: "interrupted",
+          durationMs: 0,
+          bodyState: null,
+        });
       }
       return stale.length;
     },

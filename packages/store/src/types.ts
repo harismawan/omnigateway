@@ -831,10 +831,53 @@ export type RequestLog = {
    * docs/superpowers/specs/2026-10-24-log-export-design.md (*Cursor*).
    */
   completedAt: number | null;
+  /**
+   * Whether this request's body reached the store; null when capture was not
+   * attempted. **Store-owned past `pending`**: a write may ask for `pending`
+   * (`begin`, or `append` for a request that failed before it began) and any
+   * other value on input is ignored. `append` sets it only on a row that has
+   * none, so a body that landed while the request was in flight is never put
+   * back to pending. `ready` / `omitted` are written with the pointer row by
+   * `BodyRepo.publish`, `failed` by `BodyRepo.fail` or by `sweepPending` an
+   * hour after completion. Design: docs/superpowers/specs/2026-10-24-log-export-design.md
+   * (*Capture state on the row*).
+   */
+  bodyState: BodyState | null;
 };
 
-/** The store-stamped fields of a log built outside the store — spread beside `EMPTY_TRACE`. */
-export const UNSTAMPED = { completedAt: null } as const satisfies Pick<RequestLog, "completedAt">;
+/** See `RequestLog.bodyState`. */
+export type BodyState = "pending" | "ready" | "omitted" | "failed";
+
+/**
+ * A log as `usage.begin` and `usage.append` take it. The store-owned fields
+ * are the store's: `completedAt` is not an input at all, and `bodyState` may
+ * only ask for `pending` — `ready`, `omitted` and `failed` are written by
+ * `BodyRepo.publish` / `fail` and `sweepPending`, never by a log write, so they
+ * are refused here at compile time rather than discarded at run time. (The
+ * stores still write anything but `pending` as NULL, for a caller past the
+ * type.) A `RequestLog` read back from the store is not one: re-writing it
+ * means saying what its body state is to be.
+ */
+export type RequestLogWrite = Omit<RequestLog, "bodyState" | "completedAt"> & {
+  bodyState?: "pending" | null;
+};
+
+/**
+ * A log built outside the store, before the store has stamped it: every
+ * reader's `RequestLog` and a valid `RequestLogWrite` at once, which is what
+ * the gateway hands from dispatch to `begin` / `append`. `UNSTAMPED` builds one.
+ */
+export type NewRequestLog = RequestLog & { bodyState: "pending" | null };
+
+/**
+ * The store-owned fields of a log built outside the store — spread beside
+ * `EMPTY_TRACE`. A log starts with no body state; a capturing caller overrides
+ * it with `pending`.
+ */
+export const UNSTAMPED = { completedAt: null, bodyState: null } as const satisfies Pick<
+  RequestLog,
+  "completedAt" | "bodyState"
+>;
 
 /** The trace fields of a row that carries no trace — spread into every log built without one. */
 export const EMPTY_TRACE = {
@@ -1139,8 +1182,29 @@ export type BodyDetailState = "none" | "ready" | "missing" | "corrupt";
 export type BodyPair = {
   request: unknown;
   response: unknown;
-  /** True when structural bounding altered either half. */
+  /**
+   * True when either half is not the whole body: capture stopped early, or the
+   * half is an omission marker. Artifacts written before bounding was removed
+   * also set it where bounding cut something.
+   */
   truncated: boolean;
+};
+
+/**
+ * What replaces a body the store would not keep, in place of the payload.
+ *
+ * A marker rather than silence: an operator looking at an incident needs to know
+ * the difference between "capture was off" and "capture ran and this could not
+ * be kept", and those are the same absence otherwise. Recognise one by
+ * `omitted: true` and a string `reason`, never by the reason's text: the text
+ * names the limit in force when it was written, and older artifacts carry
+ * older limits. `serializedBytes` is the size that was refused, or null when
+ * there is no size to give — a body too deeply nested to serialize has none.
+ */
+export type BodyOmission = {
+  omitted: true;
+  reason: string;
+  serializedBytes: number | null;
 };
 
 /** One provider attempt's wire pair, in dispatch order. */
@@ -1175,7 +1239,7 @@ export type BodyArtifact = {
   at: number;
   client: BodyPair;
   attempts: BodyAttempt[];
-  /** Whatever the request failed with, or null. Masked and bounded like a body. */
+  /** Whatever the request failed with, or null. Masked like a body. */
   error: unknown;
 };
 
@@ -1204,17 +1268,41 @@ export type BodyRead = {
   artifact: BodyArtifact | null;
 };
 
+/**
+ * What the body writer reports once an artifact's bytes are in place: the
+ * pointer row's fields, and whether the artifact is an omission marker (which
+ * decides `ready` or `omitted` on the log row).
+ */
+export type BodyPublication = {
+  requestId: string;
+  at: number;
+  relPath: string;
+  sizeBytes: number;
+  sha256: string;
+  truncated: boolean;
+  omitted: boolean;
+};
+
+/**
+ * What `put` wrote: the pointer row, and whether `prepareArtifact` had to
+ * replace the bodies with a marker — which only the write can know, and which
+ * decides `ready` or `omitted` when the caller publishes it.
+ */
+export type BodyWritten = BodyPublication & { detailState: BodyDetailState };
+
 export interface BodyRepo {
   /**
-   * The only write path, and the reason there is no raw one.
+   * The in-process write path, and the reason there is no raw one. (The body
+   * writer's path — `writeRow` / `publish` — takes bytes it sealed itself
+   * through the same `prepareArtifact`.)
    *
-   * Masking and structural bounding happen inside, before encryption, so no
-   * caller can write an unmasked or unbounded body even by mistake. Throws on a
+   * Masking and the size limit happen inside, before encryption, so no caller
+   * can write an unmasked or oversized body even by mistake. Throws on a
    * request id that could escape its shard directory, and propagates a failed
    * disk write: capture is the caller's to degrade, and it degrades to no
    * artifact rather than to a failed request.
    */
-  put(artifact: BodyArtifact): Promise<BodyArtifactRow>;
+  put(artifact: BodyArtifact): Promise<BodyWritten>;
   /**
    * Null when no row exists. Never throws on a bad artifact: a file that has
    * gone reads as `missing` and one that fails decryption or its digest reads as
@@ -1229,8 +1317,39 @@ export interface BodyRepo {
    * sustained traffic bounds nothing.
    */
   pruneToCap(cap?: number): Promise<number>;
-  /** Removes artifact files with no row, which a crash between the two writes leaves. */
+  /**
+   * Removes artifact files with no row, which a crash between the two writes
+   * leaves. On SQLite it never touches a file the body writer is still writing
+   * (`.staging/`, until an hour old) or one the main thread is publishing (the
+   * repo's `isPending`). Returns how many files went.
+   */
   sweepOrphans(): Promise<number>;
+  /**
+   * Records a body the writer has put in place, guarded on the log row: only a
+   * request whose `body_state` is still `pending` moves, to `omitted` or
+   * `ready`. False when it is not — never captured, already failed, already
+   * published, or no row — and then nothing is written; on SQLite the caller
+   * deletes the file it renamed, on Postgres the `bytea` row `writeRow` wrote
+   * is removed here.
+   *
+   * SQLite: the `request_bodies` upsert and the state update are **one
+   * transaction** on the main connection, so a pointer never exists without its
+   * state or the reverse. Postgres: the writer already wrote the row through
+   * `writeRow`; this moves the state, in one transaction with removing that row
+   * when the guard refuses.
+   */
+  publish(row: BodyPublication): Promise<boolean>;
+  /** `body_state = 'failed'` where it is still `pending`; anything else is left as it is. */
+  fail(requestId: string): Promise<void>;
+  /**
+   * Postgres only: the body writer's own pool writes the sealed bytes and the
+   * pointer in one insert, before `publish` moves the state. Returns false if
+   * the request is not pending or any bytes already own that request id; never
+   * replaces another write. `publish` verifies the digest before moving state.
+   * SQLite throws —
+   * its pointer row is written by `publish` on the main connection alone.
+   */
+  writeRow(row: BodyPublication & { bytes: Uint8Array }): Promise<boolean>;
 }
 
 /**
@@ -1543,7 +1662,7 @@ export interface UsageRepo {
    * Records a request that has started. Writes no rollup: a request that has
    * not finished has no tokens and no cost to accumulate.
    */
-  begin(log: RequestLog): Promise<void>;
+  begin(log: RequestLogWrite): Promise<void>;
   /** Updates routing fields on a pending row without completing or rolling it up. */
   route(
     id: string,
@@ -1555,7 +1674,7 @@ export interface UsageRepo {
    * failed before dispatch, but must run at most once per id: a second call
    * would count the same request into the rollup twice.
    */
-  append(log: RequestLog): Promise<void>;
+  append(log: RequestLogWrite): Promise<void>;
   /**
    * Completes every pending row whose owner is gone, as `interrupted`.
    *
@@ -1564,6 +1683,12 @@ export interface UsageRepo {
    * another process's rows are swept only once its heartbeat is older than
    * `NODE_GRACE_MS`, or it never wrote one. On one node this is every pending
    * row at startup, which is what it was before. Returns how many were swept.
+   *
+   * The same call fails bodies still `pending` an hour after their row
+   * completed, whoever owns the row: an acknowledgement that has not landed by
+   * then never will. Measured on `now` on SQLite, on the database clock on
+   * Postgres — the clock `completed_at` was stamped from. Not counted in the
+   * return.
    */
   sweepPending(now: number): Promise<number>;
   /**
@@ -1773,6 +1898,9 @@ export type TableStats = {
 
 /** How long a process may go without a heartbeat before its rows are retirable. */
 export const NODE_GRACE_MS = 60_000;
+
+/** How long after its row completed a body may stay `pending` before `sweepPending` fails it. */
+export const BODY_PENDING_MS = 60 * 60 * 1000;
 
 export interface MaintenanceRepo {
   stats(): Promise<DatabaseStats>;
@@ -2012,7 +2140,19 @@ export type ExportDestinationPatch = {
  * routing table, so no write here emits a `RoutingChange` (and on Postgres the
  * table carries no `bump_config_version` trigger).
  */
+export type BodyAdmissionSnapshot = {
+  bodyLoggingEnabled: boolean;
+  keyExists: boolean;
+  keyBodyOptOut: boolean;
+  destination: Pick<
+    ExportDestination,
+    "generation" | "revision" | "enabled" | "includeBodies"
+  > | null;
+};
+
 export interface ExportDestinationRepo {
+  /** One-statement policy linearization for a body send; no secrets or body data. */
+  bodyAdmission(id: string, keyId: string): Promise<BodyAdmissionSnapshot>;
   /** Every destination, by id. */
   list(): Promise<ExportDestination[]>;
   get(id: string): Promise<ExportDestination | null>;

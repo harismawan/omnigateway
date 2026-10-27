@@ -1,4 +1,4 @@
-import { type RequestBodyRead, readRequestBody } from "@omni/control";
+import { previewBody, type RequestBodyRead } from "@omni/control";
 import type { BodyArtifact, BodyDetailState } from "@omni/store";
 import { boolFlag, requirePositional } from "../args.ts";
 import { type Command, provider } from "../command.ts";
@@ -40,10 +40,9 @@ const encoder = new TextEncoder();
  * How large one stored payload is as JSON.
  *
  * Not what crossed the wire, and not the file either. The artifact holds the
- * masked, structurally bounded copy, so every count here describes the *stored*
- * payload — which is the number worth printing, because it is the one an
- * operator compares against the bounds and against the other pairs in the same
- * request. The frame's `on disk` is the third number, the stored envelope, and
+ * masked copy, so every count here describes the *stored* payload — which is
+ * the number worth printing, because it is the one an operator compares against
+ * the limit and against the other pairs in the same request. The frame's `on disk` is the third number, the stored envelope, and
  * the table says which of the three it is rather than leaving a bare size to be
  * read as a request size.
  *
@@ -167,13 +166,25 @@ export const bodies: Command = {
    */
   async run(args, { ctx, writer }) {
     const requestId = requirePositional(args, 0, "request id");
-    const read = await readRequestBody(await ctx.store(), requestId);
+    const store = await ctx.store();
+    const [decoded, log] = await Promise.all([
+      store.bodies.get(requestId),
+      store.usage.get(requestId),
+    ]);
+    const artifact = decoded?.artifact ?? null;
+    const fullOutput = boolFlag(args.values, "full");
+    // Text summaries and --full never build bounded previews first.
+    const read = previewBody(
+      requestId,
+      log?.bodyState ?? null,
+      ctx.json ? decoded : decoded ? { ...decoded, artifact: null } : null,
+      fullOutput,
+    );
 
     // The whole read rather than the bare artifact: `detailState` is the answer
     // whenever the artifact is null, and a script handed only the artifact could
     // not tell "capture was off" from "pruned" from "will not decrypt".
     emit(ctx, writer, read, () => {
-      const artifact = read.artifact;
       if (artifact === null) {
         const [legend, message] =
           ABSENCE[read.detailState === "ready" ? "corrupt" : read.detailState];
@@ -194,7 +205,7 @@ export const bodies: Command = {
         paint(
           ctx,
           "dim",
-          "REQUEST and RESPONSE are the stored payload, after masking and bounding; neither is the size sent over the wire",
+          "REQUEST and RESPONSE are the stored payload, after masking; neither is the size sent over the wire",
         ),
       ];
 
@@ -222,7 +233,7 @@ export const bodies: Command = {
       if (boolFlag(args.values, "full")) {
         lines.push("", full(ctx, artifact));
       } else {
-        lines.push("", "bodies withheld; pass --full to print them, --json for the artifact");
+        lines.push("", "bodies withheld; pass --full to print them, --json for the preview");
       }
 
       return lines.join("\n");

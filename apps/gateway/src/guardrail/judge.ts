@@ -9,7 +9,7 @@ import {
   RETRYABLE,
   type StreamEvent,
 } from "@omni/ir";
-import type { RequestLog } from "@omni/store";
+import type { NewRequestLog } from "@omni/store";
 import { type DispatchDeps, type DispatchOutcome, dispatch } from "../dispatch/index.ts";
 import {
   beginLog,
@@ -169,7 +169,7 @@ async function callClassifier(
     (e): e is Extract<StreamEvent, { type: "error" }> => e.type === "error",
   );
 
-  const log: RequestLog =
+  const log: NewRequestLog =
     outcome?.log() ??
     newCompletedRequestLog(id, at, { requestedModel: input.request.model, status: 0 });
   if (!log.degradations.includes(CLASSIFIER_NOTE)) log.degradations.push(CLASSIFIER_NOTE);
@@ -411,7 +411,7 @@ export function screenFirst(opts: {
   let inner: DispatchOutcome | null = null;
   let route: "local" | "external" | null = null;
   let notes: readonly string[] = [];
-  const noted = (log: RequestLog): RequestLog => {
+  const noted = (log: NewRequestLog): NewRequestLog => {
     for (const note of notes) if (!log.degradations.includes(note)) log.degradations.push(note);
     return log;
   };

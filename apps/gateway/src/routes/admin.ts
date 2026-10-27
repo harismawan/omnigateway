@@ -16,6 +16,7 @@ import {
   exportFilename,
   exportLogs,
   getSettings,
+  isBodyPart,
   listCredentials,
   listKeys,
   listModels,
@@ -30,7 +31,6 @@ import {
   quotaHistory,
   quotaRefreshSchema,
   readConsole,
-  readRequestBody,
   redeemResetSchema,
   removeCredential,
   removeModel,
@@ -53,6 +53,7 @@ import type { Invalidator } from "../stream/broadcaster.ts";
 import type { ConsoleFleet } from "../stream/consoleFleet.ts";
 import {
   apiErrorHandler,
+  principalOf,
   readCookie,
   readJson,
   readJsonRecord,
@@ -81,6 +82,7 @@ export type AdminDeps = {
    * settable here — that is the whole point of the second key.
    */
   bodyLoggingAllowed?: boolean;
+  onBodyGatesChanged?: (enabled: boolean) => void;
   /**
    * The fixed offset the daily usage buckets are cut on, in minutes east of UTC.
    *
@@ -137,6 +139,7 @@ export type AdminDeps = {
    * dispatch's own default is.
    */
   providers?: ProviderDescriptors;
+  bodyWriter?: Pick<import("../bodies/host.ts").BodyWriterHost, "read" | "readRaw">;
 };
 
 /**
@@ -684,6 +687,7 @@ export function adminRoutes(deps: AdminDeps) {
       .put("/api/settings", async ({ request }) => {
         await requireAdmin(request, deps.admin);
         await putSettings(deps.store, await readJson(request));
+        deps.onBodyGatesChanged?.((await deps.store.config.getSettings()).bodyLoggingEnabled);
         changed("res:settings");
         return { ok: true };
       })
@@ -811,7 +815,33 @@ export function adminRoutes(deps: AdminDeps) {
        */
       .get("/api/requests/:id/body", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
-        return readRequestBody(deps.store, params.id);
+        const reader = deps.bodyWriter;
+        if (!reader) throw new GatewayError("OVERLOADED", "body reader unavailable");
+        return new Response(await reader.read(params.id), {
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+          },
+        });
+      })
+      .get("/api/requests/:id/body/raw", async ({ request, params, query }) => {
+        // Endpoint-specific contract; other admin guards deliberately stay 401.
+        if ((await principalOf(request, deps.admin))?.kind === "viewer") {
+          return new Response(null, { status: 403, headers: { "cache-control": "no-store" } });
+        }
+        await requireAdmin(request, deps.admin);
+        if (typeof query.part !== "string" || !isBodyPart(query.part))
+          throw new GatewayError("BAD_REQUEST", "invalid body part");
+        if (!deps.bodyWriter) throw new GatewayError("OVERLOADED", "body reader unavailable");
+        const stream = await deps.bodyWriter.readRaw(params.id, query.part);
+        if (stream === null) return new Response(null, { status: 404 });
+        return new Response(stream, {
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "content-disposition": `attachment; filename="body-${query.part}.json"`,
+            "cache-control": "no-store",
+          },
+        });
       })
 
       /**

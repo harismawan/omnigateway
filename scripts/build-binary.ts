@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const EXPORT_WORKER_ENTRY = "apps/gateway/src/export/worker.ts";
+const BODY_WORKER_ENTRY = "apps/gateway/src/bodies/writer.ts";
 
 /**
  * The gateway executable: the server, and the export worker it starts with
@@ -17,8 +18,9 @@ export async function buildGatewayBinary(
   root: string,
   entry = "apps/gateway/src/index.ts",
 ): Promise<void> {
-  await buildBinary([entry, EXPORT_WORKER_ENTRY], outfile, root, {
+  await buildBinary([entry, EXPORT_WORKER_ENTRY, BODY_WORKER_ENTRY], outfile, root, {
     OMNI_EXPORT_WORKER: JSON.stringify(`./${EXPORT_WORKER_ENTRY}`),
+    OMNI_BODY_WORKER: JSON.stringify(`./${BODY_WORKER_ENTRY}`),
   });
 }
 

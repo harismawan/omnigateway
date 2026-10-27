@@ -155,7 +155,7 @@ export function ExportBoard() {
     ? "Reading export destinations…"
     : destinations.length === 0
       ? "Nothing is exported. Add a destination to send each completed request's log record to Elasticsearch, a webhook, or an OTLP collector."
-      : `${destinations.filter((d) => d.enabled).length} of ${destinations.length} destination${destinations.length === 1 ? "" : "s"} enabled. Bodies are never exported.`;
+      : `${destinations.filter((d) => d.enabled).length} of ${destinations.length} destination${destinations.length === 1 ? "" : "s"} enabled. Body export requires explicit opt-in and all privacy gates.`;
 
   return (
     <>
@@ -194,7 +194,7 @@ export function ExportBoard() {
         ) : destinations.length === 0 ? (
           <Empty
             legend="No destinations"
-            message="Each destination receives every completed request's metadata — model, tokens, cost, timing, errors — never prompts or responses."
+            message="Send completed request metadata — model, tokens, cost, timing, errors. Masked client bodies are optional and gated."
             action={
               isAdmin ? (
                 <Button
@@ -233,6 +233,7 @@ export function ExportBoard() {
                         <Td $mono>{d.id}</Td>
                         <Td>
                           <Chip>{d.type}</Chip>
+                          <Faint>{d.includeBodies ? "bodies on (gated)" : "bodies off"}</Faint>
                         </Td>
                         <Td>
                           <Stack $gap={0.5}>

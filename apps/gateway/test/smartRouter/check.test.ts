@@ -3,7 +3,7 @@ import { memoryCoord } from "@omni/coord";
 import { type ChatRequest, GatewayError, type StreamEvent } from "@omni/ir";
 import type { AdapterRequest, AdapterResult, HttpClient, ProviderAdapter } from "@omni/providers";
 import { buildSnapshot } from "@omni/router";
-import type { RequestLog, Settings, Store } from "@omni/store";
+import type { NewRequestLog, RequestLog, Settings, Store } from "@omni/store";
 import {
   type CaptureLogger,
   captureLogger,
@@ -482,7 +482,7 @@ test("the warning line carries no segment text and no policy", async () => {
  * last.
  */
 test("the check row names the first call's provider request id", () => {
-  const call = (upstreamRequestId: string | null, routed = true): RequestLog =>
+  const call = (upstreamRequestId: string | null, routed = true): NewRequestLog =>
     requestLog({ id: "x", upstreamRequestId, resolvedProvider: routed ? "custom" : null });
   const status = { status: 200, errorCode: null };
   expect(

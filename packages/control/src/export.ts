@@ -172,6 +172,7 @@ export const elasticsearchConfigSchema = z
   .object({
     url: baseUrlSchema,
     index: indexPatternSchema.default(DEFAULT_INDEX_PATTERN),
+    bodyIndex: indexPatternSchema.default("omni-bodies-{yyyy.MM.dd}"),
     auth: z.enum(["apiKey", "basic", "none"]),
     flavor: z.enum(["elasticsearch", "opensearch"]).default("elasticsearch"),
   })
@@ -480,6 +481,36 @@ export async function updateDestination(
   input: unknown,
 ): Promise<DestinationSummary> {
   const current = await existing(store, id);
+  const patch = await destinationPatch(store, current, input);
+  const updated = await store.exportDestinations.update(id, patch);
+  if (updated === null) throw bad(NO_SUCH);
+  return summarize(updated);
+}
+
+/** Read-only preflight for callers composing a config edit and the separate bodies operation. */
+export async function validateDestinationUpdate(
+  store: Store,
+  id: string,
+  input: unknown,
+  includeBodies?: boolean,
+): Promise<void> {
+  const current = await existing(store, id);
+  const effective = { ...current, includeBodies: includeBodies ?? current.includeBodies };
+  const patch = await destinationPatch(store, effective, input);
+  if (
+    effective.includeBodies &&
+    current.type === "otlp" &&
+    (patch.config ?? current.config).signal === "traces"
+  )
+    throw bad(TRACES_BODIES);
+}
+
+async function destinationPatch(
+  store: Store,
+  current: ExportDestination,
+  input: unknown,
+): Promise<ExportDestinationPatch> {
+  const id = current.id;
   const patch: ExportDestinationPatch = {};
 
   switch (current.type) {
@@ -518,9 +549,7 @@ export async function updateDestination(
     }
   }
 
-  const updated = await store.exportDestinations.update(id, patch);
-  if (updated === null) throw bad(NO_SUCH);
-  return summarize(updated);
+  return patch;
 }
 
 /** The store patch from a parsed edit: present fields only, the secret serialised. */
@@ -544,8 +573,7 @@ function commonPatch(body: {
 
 /**
  * Turns body export on or off. Off is always allowed. On is refused for an
- * OTLP traces destination — a span has nowhere to carry a body — and, until
- * body export ships, for every destination.
+ * OTLP traces destination. Runtime capture and export gates still bind sends.
  */
 export async function setDestinationBodies(
   store: Store,
@@ -556,9 +584,8 @@ export async function setDestinationBodies(
   const current = await existing(store, id);
   if (include) {
     if (current.type === "otlp" && current.config.signal === "traces") throw bad(TRACES_BODIES);
-    throw bad("body export is not available yet");
   }
-  const updated = await store.exportDestinations.update(id, { includeBodies: false });
+  const updated = await store.exportDestinations.update(id, { includeBodies: include });
   if (updated === null) throw bad(NO_SUCH);
   return summarize(updated);
 }

@@ -20,6 +20,7 @@ import { ADAPTERS, type HttpClient, nodeHttpClient, type ProviderAdapter } from 
 import type { RoutingChange, Store } from "@omni/store";
 import { Elysia } from "elysia";
 import { ApiKeyRateLimiter } from "./auth/rateLimit.ts";
+import type { CaptureBudget } from "./bodies/budget.ts";
 import { createLoadRegistry, type LoadRegistry } from "./dispatch/loadRegistry.ts";
 import { createRoutingSnapshotCache } from "./dispatch/snapshotCache.ts";
 import { anthropicErrorBody } from "./egress/anthropic.ts";
@@ -33,7 +34,7 @@ import { createQuiesceLatch, type QuiesceLatch } from "./quiesce.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { clientRoutes } from "./routes/client.ts";
 import { connectRoutes } from "./routes/connect.ts";
-import { databaseRoutes, type ExportPause } from "./routes/database.ts";
+import { databaseRoutes, type WorkerPause } from "./routes/database.ts";
 import { absentExportWorker, type ExportWorkerHandle, exportRoutes } from "./routes/export.ts";
 import { proxyRoutes, REQUEST_ID_HEADER } from "./routes/proxy.ts";
 import { streamRoutes } from "./routes/stream.ts";
@@ -94,6 +95,14 @@ export type AppDeps = {
    * flips mid-incident, and this is the half that says they may.
    */
   bodyLoggingAllowed?: boolean;
+  exportBodiesAllowed?: boolean;
+  onBodyGatesChanged?: (enabled: boolean) => void;
+  /**
+   * The process-wide capture budget (`OMNI_BODY_CAPTURE_BUDGET_BYTES`). Built
+   * by boot, one per process; absent, the proxy routes make one at the default.
+   */
+  captureBudget?: CaptureBudget;
+  bodyWriter?: import("./bodies/host.ts").BodyWriterHost;
   /** Minutes east of UTC the daily usage buckets are cut on. See `adminRoutes`. */
   dayOffsetMinutes?: number;
   logger?: Logger;
@@ -178,7 +187,7 @@ export type AppDeps = {
    * configuration and the worker's requests answer 503 — every test that
    * does not care about export.
    */
-  exportWorker?: ExportWorkerHandle & Partial<ExportPause>;
+  exportWorker?: ExportWorkerHandle & Partial<WorkerPause>;
 };
 
 const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -368,7 +377,7 @@ export function createApp(deps: AppDeps) {
   channelsRef = channels;
   const capture = deps.console;
   const exportWorker = deps.exportWorker;
-  const exportPause: ExportPause | undefined =
+  const exportPause: WorkerPause | undefined =
     exportWorker?.pause === undefined ||
     exportWorker.resume === undefined ||
     exportWorker.halt === undefined
@@ -467,6 +476,8 @@ export function createApp(deps: AppDeps) {
           coord,
           loadRegistry,
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
+          ...(deps.captureBudget === undefined ? {} : { captureBudget: deps.captureBudget }),
+          ...(deps.bodyWriter === undefined ? {} : { bodyWriter: deps.bodyWriter }),
           ...(deps.emit === undefined ? {} : { emit: deps.emit }),
           ...(telemetry === undefined ? {} : { telemetry: telemetry }),
           broadcaster,
@@ -474,6 +485,8 @@ export function createApp(deps: AppDeps) {
       )
       .use(
         adminRoutes({
+          ...(deps.onBodyGatesChanged ? { onBodyGatesChanged: deps.onBodyGatesChanged } : {}),
+          ...(deps.bodyWriter === undefined ? {} : { bodyWriter: deps.bodyWriter }),
           store: deps.store,
           admin,
           baseUrl: deps.baseUrl,
@@ -518,7 +531,10 @@ export function createApp(deps: AppDeps) {
           latch,
           snapshots,
           broadcaster,
-          ...(exportPause === undefined ? {} : { exportWorker: exportPause }),
+          workers: [
+            ...(exportPause === undefined ? [] : [exportPause]),
+            ...(deps.bodyWriter === undefined ? [] : [deps.bodyWriter]),
+          ],
           fs: deps.databaseFs ?? nodeDatabaseFs(),
           now,
           logger,
@@ -530,6 +546,7 @@ export function createApp(deps: AppDeps) {
           store: deps.store,
           admin,
           worker: deps.exportWorker ?? absentExportWorker,
+          exportBodiesAllowed: deps.exportBodiesAllowed === true,
           broadcaster,
           logger,
         }),

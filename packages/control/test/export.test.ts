@@ -131,6 +131,7 @@ test("elasticsearch config defaults index and flavor, and refuses a bad index pa
     {
       url: "https://es.example.com",
       index: DEFAULT_INDEX_PATTERN,
+      bodyIndex: "omni-bodies-{yyyy.MM.dd}",
       auth: "none",
       flavor: "elasticsearch",
     },
@@ -145,6 +146,7 @@ test("elasticsearch config defaults index and flavor, and refuses a bad index pa
   ).toEqual({
     url: "http://10.0.0.5:9200/proxy",
     index: "team-a-{yyyy.MM.dd}",
+    bodyIndex: "omni-bodies-{yyyy.MM.dd}",
     auth: "basic",
     flavor: "opensearch",
   });
@@ -486,14 +488,13 @@ test("updateDestination keeps elasticsearch auth and secret in agreement", async
   expect(error.code).toBe("BAD_REQUEST");
 });
 
-test("setDestinationBodies: false is allowed, true is not available yet", async () => {
+test("setDestinationBodies enables and disables webhook bodies", async () => {
   const store = await memoryStore();
   await createDestination(store, webhook());
   const off = await setDestinationBodies(store, "hook", { include: false });
   expect(off.includeBodies).toBe(false);
-  const on = await refusal(setDestinationBodies(store, "hook", { include: true }));
-  expect(on.code).toBe("BAD_REQUEST");
-  expect(on.message).toBe("body export is not available yet");
+  const on = await setDestinationBodies(store, "hook", { include: true });
+  expect(on.includeBodies).toBe(true);
   for (const input of [{}, { include: "yes" }, { include: true, extra: 1 }]) {
     expect((await refusal(setDestinationBodies(store, "hook", input))).code).toBe("BAD_REQUEST");
   }

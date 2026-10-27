@@ -10,13 +10,19 @@ import type { RequestLog, TraceAgent } from "@omni/store/types";
  * order below; `metadata` keys are sorted, because the two backends' JSON
  * columns do not promise to hand them back in insertion order.
  *
- * Part 1 carries no `body` field, and no `prompts` field while no row carries
- * one. A field added here is a schema change: additive fields stay `v1`,
+ * The attachment path adds `body` only when every send-time gate holds.
+ * A field added here is a schema change: additive fields stay `v1`,
  * anything else is `v2`.
  */
 export const RECORD_SCHEMA = "omni.request_log/v1";
 
 export type RequestRecord = {
+  body?: {
+    state: "included" | "incomplete" | "omitted" | "unavailable";
+    reason?: string;
+    client?: { request: unknown; response: unknown };
+    parts?: { request: number; response: number };
+  };
   schema: typeof RECORD_SCHEMA;
   id: string;
   /** ISO 8601 UTC, millisecond precision. */
@@ -48,6 +54,17 @@ export type RequestRecord = {
   metadata: Record<string, string>;
   requestIds: { client: string | null; upstream: string | null };
 };
+
+/** Insert validated JSON spans without parsing client content into a tree. */
+export function recordJson(
+  record: RequestRecord,
+  client?: { request: string; response: string },
+): string {
+  if (!client) return JSON.stringify(record);
+  // body is emitted last by callers; no sentinel that client text could collide with.
+  const { body, ...metadata } = record;
+  return `${JSON.stringify(metadata).slice(0, -1)},"body":${JSON.stringify(body).slice(0, -1)},"client":{"request":${client.request},"response":${client.response}}}}`;
+}
 
 /**
  * What the row does not hold. `keyLabel` is looked up by the caller (the

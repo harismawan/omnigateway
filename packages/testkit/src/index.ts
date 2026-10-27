@@ -15,8 +15,8 @@ import type {
   CredentialHealth,
   CredentialSecrets,
   CredentialView,
+  NewRequestLog,
   QuotaWindow,
-  RequestLog,
   Settings,
   Store,
   Target,
@@ -252,7 +252,7 @@ export async function seedApiKey(
  * by overriding it, and a schema change breaks here once rather than in ten
  * separate literals.
  */
-export function requestLog(overrides: Partial<RequestLog> & { id: string }): RequestLog {
+export function requestLog(overrides: Partial<NewRequestLog> & { id: string }): NewRequestLog {
   return {
     state: "done",
     at: 1_000_000,

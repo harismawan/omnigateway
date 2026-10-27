@@ -67,6 +67,35 @@ function receiver(respond: () => Response): { transport: Transport; seen: Seen[]
 
 const timers = { setTimeout, clearTimeout };
 
+test("send admission runs after synchronous encoding/gzip and before transport", async () => {
+  const sender = senderOf(
+    destination({ type: "elasticsearch", config: { url: "https://es.test", auth: "none" } }),
+  );
+  const body = sender.body;
+  let elapsed = 0;
+  sender.body = (parts) => {
+    elapsed = 61000;
+    return body(parts);
+  };
+  const r = receiver(() => Response.json({ errors: false, items: [] }));
+  await expect(
+    deliver(
+      sender,
+      [sender.part(buildRecord(requestLog({ id: "deadline" }), { keyLabel: null }))],
+      {
+        transport: r.transport,
+        signal: new AbortController().signal,
+        timers,
+        now: () => elapsed,
+        beforeSend: () => {
+          if (elapsed >= 45000) throw new Error("deadline");
+        },
+      },
+    ),
+  ).rejects.toThrow("deadline");
+  expect(r.seen).toHaveLength(0);
+});
+
 function senderOf(d: ExportDestination, secret: string | null = null): Sender {
   const prepared = prepare(d, secret);
   if (!prepared.ok) throw new Error(`refused: ${prepared.error}`);

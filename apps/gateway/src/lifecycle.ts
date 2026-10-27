@@ -17,6 +17,8 @@ export type ShutdownDeps = {
   stopLoops: readonly (() => void)[];
   stopServer: () => Promise<void>;
   closeStore: () => void;
+  /** Worker grace runs alongside connections, never beyond the shutdown deadline. */
+  drain?: () => Promise<void>;
   /** `process.exit` in the gateway, and a recorder in a test. */
   exit: (code: number) => void;
   /** How long connections have to drain before the process leaves anyway. */
@@ -51,15 +53,17 @@ const STOP_DEADLINE_MS = 5_000;
  */
 export function createShutdown(deps: ShutdownDeps): Shutdown {
   let shuttingDown = false;
+  let finished = false;
 
   const exitAfterClosingStore = (code: number): void => {
+    if (finished) return;
+    finished = true;
     try {
       deps.closeStore();
     } finally {
       deps.exit(code);
     }
   };
-
   return (reason, mode = "graceful") => {
     if (mode === "force" || shuttingDown) {
       exitAfterClosingStore(1);
@@ -69,6 +73,7 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
     deps.logger.info("shutdown requested", { reason });
     shuttingDown = true;
     for (const stop of deps.stopLoops) stop();
+    const drained = deps.drain?.();
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const abandoned = new Promise<"timeout">((resolve) => {
@@ -76,7 +81,7 @@ export function createShutdown(deps: ShutdownDeps): Shutdown {
       timer.unref?.();
     });
 
-    void Promise.race([deps.stopServer(), abandoned]).then(
+    void Promise.race([Promise.all([deps.stopServer(), drained]), abandoned]).then(
       (outcome) => {
         clearTimeout(timer);
         if (outcome === "timeout") {

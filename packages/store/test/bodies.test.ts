@@ -18,12 +18,6 @@ import {
   sha256Hex,
   writeArtifact,
 } from "../src/bodies/artifact.ts";
-import {
-  boundValue,
-  DEPTH_MARKER,
-  MAX_OBJECT_KEYS,
-  MAX_STRING_BYTES,
-} from "../src/bodies/bound.ts";
 import { MASK_RULES, type MaskRule, type MaskRuleId, maskString } from "../src/bodies/mask.ts";
 import { deriveKey, encrypt } from "../src/encryption.ts";
 import { createBodyRepo } from "../src/sqlite/bodies.ts";
@@ -424,94 +418,13 @@ test("masking traverses structure and leaves object keys alone", async () => {
   await cleanup(store, root);
 });
 
-// ---------------------------------------------------------------------------
-// Structural bounds. Asserted through `prepareArtifact` and its serialized form,
-// so every case also proves the result is still parseable JSON — which is the
-// whole reason bounding is structural rather than by byte offset.
-// ---------------------------------------------------------------------------
-
-function parsedFrom(input: BodyArtifact): { artifact: BodyArtifact; roundTripped: BodyArtifact } {
-  const prepared = prepareArtifact(input);
-  const roundTripped: unknown = JSON.parse(prepared.json);
-  return { artifact: prepared.artifact, roundTripped: roundTripped as BodyArtifact };
-}
-
-test("a string past the byte budget is cut, marked, and still parses", () => {
-  // Words rather than one run of a character, so masking's length rule does not
-  // reach it first and this really is measuring the bound.
-  const long = "the quick brown fox jumps over the lazy dog ".repeat(4000);
-  expect(long.length).toBeGreaterThan(MAX_STRING_BYTES);
-
-  const { artifact: prepared, roundTripped } = parsedFrom(
-    artifact({ client: { request: { prompt: long }, response: null, truncated: false } }),
-  );
-
-  const value = (roundTripped.client.request as { prompt: string }).prompt;
-  expect(encoder.encode(value).length).toBeLessThanOrEqual(MAX_STRING_BYTES);
-  expect(value.endsWith("…[truncated]")).toBe(true);
-  expect(value.startsWith("the quick brown fox")).toBe(true);
-  expect(prepared.client.truncated).toBe(true);
-});
-
-test("an array past the item cap keeps its last items and still parses", () => {
-  const messages = Array.from({ length: 60 }, (_, i) => ({ turn: i }));
-  const { artifact: prepared, roundTripped } = parsedFrom(
-    artifact({ client: { request: { messages }, response: null, truncated: false } }),
-  );
-
-  const kept = (roundTripped.client.request as { messages: Array<{ turn: number }> }).messages;
-  expect(kept).toHaveLength(24);
-  // The *last* items, because the recent turns are what an incident is about.
-  expect(kept[0]?.turn).toBe(36);
-  expect(kept.at(-1)?.turn).toBe(59);
-  expect(prepared.client.truncated).toBe(true);
-});
-
-test("nesting past the depth limit is replaced by a marker and still parses", () => {
-  // Root is depth 1, so `l6` sits at depth 6 and survives while the object it
-  // holds sits at depth 7 and does not.
-  const deep = { l2: { l3: { l4: { l5: { l6: { l7: { leaf: "gone" } } } } } } };
-  const { artifact: prepared, roundTripped } = parsedFrom(
-    artifact({ client: { request: deep, response: null, truncated: false } }),
-  );
-
-  const l6 = ["l2", "l3", "l4", "l5", "l6"].reduce(child, roundTripped.client.request);
-  expect(child(l6, "l7")).toBe(DEPTH_MARKER);
-  // The level above it is intact, so this cut where it said it would.
-  expect(l6).toEqual({ l7: DEPTH_MARKER });
-  expect(prepared.client.truncated).toBe(true);
-});
-
-test("an object past the key cap keeps its first keys and still parses", () => {
-  const wide: Record<string, number> = {};
-  for (let i = 0; i < 200; i++) wide[`k${String(i).padStart(3, "0")}`] = i;
-
-  const { artifact: prepared, roundTripped } = parsedFrom(
-    artifact({ client: { request: wide, response: null, truncated: false } }),
-  );
-
-  const kept = roundTripped.client.request as Record<string, number>;
-  expect(Object.keys(kept)).toHaveLength(MAX_OBJECT_KEYS);
-  expect(kept.k000).toBe(0);
-  expect(kept.k079).toBe(79);
-  expect(kept.k080).toBeUndefined();
-  expect(prepared.client.truncated).toBe(true);
-});
-
-test("bounding leaves a payload inside every limit untouched", () => {
-  const payload = { messages: [{ role: "user", content: "hello" }], temperature: 0.5 };
-  const bounded = boundValue(payload);
-  expect(bounded.truncated).toBe(false);
-  expect(bounded.value).toEqual(payload);
-});
-
-test("a truncation the caller knows about survives a payload that needs no bounding", () => {
+test("a truncation the caller knows about survives preparation", () => {
   // The capture layer is the only thing that can see a client hanging up
   // mid-stream, a drain ending on a source error, or a response past the byte
   // cap. None of those leave a structural trace, so a `truncated` derived from
   // the value alone reports every one of them as a complete body. Both payloads
-  // here are small and well-formed on purpose: bounding has nothing to say, and
-  // the flag can only come from the caller.
+  // here are small and well-formed on purpose: the flag can only come from the
+  // caller.
   const prepared = prepareArtifact(
     artifact({
       client: { request: { model: "fast" }, response: { partial: true }, truncated: true },
@@ -535,38 +448,6 @@ test("a truncation the caller knows about survives a payload that needs no bound
     artifact({ client: { request: { model: "fast" }, response: { ok: true }, truncated: false } }),
   );
   expect(clean.artifact.client.truncated).toBe(false);
-});
-
-test("an artifact still oversized after bounding is written with an omission marker", () => {
-  // Eighty keys of prose, each well inside the string budget: every structural
-  // limit is respected and the total is still megabytes.
-  const wide: Record<string, string> = {};
-  for (let i = 0; i < 80; i++) wide[`k${i}`] = "lorem ipsum dolor sit amet ".repeat(400);
-
-  const prepared = prepareArtifact(
-    artifact({
-      client: { request: wide, response: wide, truncated: false },
-      attempts: [
-        {
-          attempt: 1,
-          provider: "anthropic",
-          request: wide,
-          response: wide,
-          streamChunks: null,
-          truncated: false,
-        },
-      ],
-    }),
-  );
-
-  expect(encoder.encode(prepared.json).length).toBeLessThanOrEqual(MAX_ARTIFACT_BYTES);
-  const marker = prepared.artifact.client.request as { omitted: boolean; serializedBytes: number };
-  expect(marker.omitted).toBe(true);
-  expect(marker.serializedBytes).toBeGreaterThan(MAX_ARTIFACT_BYTES);
-  // The story survives even though the payloads do not.
-  expect(prepared.artifact.attempts[0]?.provider).toBe("anthropic");
-  expect(prepared.artifact.attempts[0]?.truncated).toBe(true);
-  expect(JSON.parse(prepared.json)).toEqual(prepared.artifact);
 });
 
 // ---------------------------------------------------------------------------
@@ -923,40 +804,46 @@ test("a legacy file from the unchanged helper reads as ready through the reposit
 });
 
 /**
- * An authenticated legacy frame past 2 * MAX_ARTIFACT_BYTES + 65 stored bytes.
- *
- * `prepareArtifact`'s last fallback keeps every attempt's frame and never
- * rechecks the remaining size, so a many-attempt artifact built through the
- * store API (the gateway caps dispatch at ten attempts) comes out larger than
- * the budget it is meant to honour. Built once per file: it is megabytes of
- * encrypted hex.
+ * The legacy layout, sealed with WebCrypto and hexed by `Buffer`: byte for byte
+ * what the credential helper writes, at a speed that makes a ceiling-sized
+ * fixture affordable. The helper hexes through an array of two-character
+ * strings, which at 64 MiB is seconds and gigabytes; it is still what seals
+ * every small fixture above, and the first test below pins that the two agree.
  */
-const oversizedLegacy = (async () => {
-  const attempts = Array.from({ length: 6000 }, (_, i) => ({
-    attempt: i + 1,
-    provider: "anthropic",
-    request: { model: "fast" },
-    response: { ok: true },
-    streamChunks: null,
-    truncated: false,
-  }));
-  const prepared = prepareArtifact(
-    artifact({
-      client: { request: { model: "fast" }, response: { ok: true }, truncated: false },
-      attempts,
-    }),
+async function legacySealFast(json: string): Promise<Uint8Array> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, tagLength: 128 },
+      await legacyKey,
+      encoder.encode(json),
+    ),
   );
-  const bytes = await legacySeal(prepared.json);
-  return { prepared, bytes, digest: await sha256Hex(bytes) };
-})();
+  const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+  const body = hex(sealed.subarray(0, -16));
+  return encoder.encode(`enc:v1:${hex(iv)}:${body}:${hex(sealed.subarray(-16))}`);
+}
 
-test("an oversized but authenticated legacy frame is a real fixture past the proposed ceiling", async () => {
-  const { prepared, bytes } = await oversizedLegacy;
-  // Pins the premise: the unchanged preparer really does emit past the budget,
-  // and the legacy envelope really is exactly 2N + 65 bytes.
-  expect(Buffer.byteLength(prepared.json)).toBeGreaterThan(MAX_ARTIFACT_BYTES);
-  expect(bytes.length).toBe(2 * Buffer.byteLength(prepared.json) + 65);
-  expect(bytes.length).toBeGreaterThan(2 * MAX_ARTIFACT_BYTES + 65);
+test("the fast legacy seal writes what the credential helper writes", async () => {
+  const json = prepareArtifact(LEGACY_INPUT).json;
+  const fast = await legacySealFast(json);
+  const helper = await legacySeal(json);
+  // Same layout and length; the IVs differ, so the bytes cannot be compared.
+  expect(fast.length).toBe(helper.length);
+  expect(
+    decoder
+      .decode(fast)
+      .split(":")
+      .map((part) => part.length),
+  ).toEqual(
+    decoder
+      .decode(helper)
+      .split(":")
+      .map((part) => part.length),
+  );
+  const read = await decodeArtifact(await legacyKey, fast, await sha256Hex(fast));
+  expect(read.ok).toBe(true);
+  if (read.ok) expect(read.artifact).toEqual(prepareArtifact(LEGACY_INPUT).artifact);
 });
 
 /** The read ceiling every envelope answers to, restated rather than imported. */
@@ -991,26 +878,52 @@ function paddedJson(n: number): string {
   return `{"pad":"${"x".repeat(n - 10)}"}`;
 }
 
-test("an oversized legacy frame is corrupt, rejected before any digest or decryption", async () => {
+/**
+ * Bytes that pass every check the legacy reader makes before its digest — the
+ * prefix, a 24-hex IV, lower-case body hex, a 32-hex tag — at any length, so
+ * the ceiling is the only thing left to refuse them. Zeros rather than
+ * ciphertext: past the ceiling nothing may look further, so nothing need be
+ * sealed, and at 128 MiB sealing is seconds of the credential helper's hexing.
+ */
+function legacyShaped(length: number): Uint8Array {
+  const bytes = new Uint8Array(length).fill(0x30);
+  bytes.set(encoder.encode("enc:v1:"), 0);
+  bytes[7 + 24] = 0x3a;
+  bytes[length - 33] = 0x3a;
+  return bytes;
+}
+
+test("a legacy envelope past the read ceiling is corrupt before any digest or decryption", async () => {
   // The ruling: a legacy envelope past 2 * MAX_ARTIFACT_BYTES + 65 is not one a
-  // supported writer produced, and its size alone is the verdict.
-  const { bytes, digest } = await oversizedLegacy;
-  for (const expected of [digest, null]) {
-    const seen = await decodeUnwatched(bytes, expected);
-    expect(seen).toEqual({ read: CORRUPT, digests: 0, decrypts: 0 });
+  // supported writer produced, and its size alone is the verdict. At the
+  // ceiling the same shape is digested, so it was the size that turned the
+  // larger one away.
+  const atCeiling = legacyShaped(GLOBAL_CEILING);
+  expect(await decodeUnwatched(atCeiling, "0".repeat(64))).toEqual({
+    read: CORRUPT,
+    digests: 1,
+    decrypts: 0,
+  });
+  for (const past of [legacyShaped(GLOBAL_CEILING + 1), legacyShaped(GLOBAL_CEILING + 2)]) {
+    for (const expected of [await sha256Hex(past), null]) {
+      expect(await decodeUnwatched(past, expected)).toEqual({
+        read: CORRUPT,
+        digests: 0,
+        decrypts: 0,
+      });
+    }
   }
 });
 
-test("a legacy envelope exactly at the read ceiling decodes; the next size up is corrupt", async () => {
-  const atCeiling = await legacySeal(paddedJson(MAX_ARTIFACT_BYTES));
-  expect(atCeiling.length).toBe(GLOBAL_CEILING);
-  const read = await decodeArtifact(await legacyKey, atCeiling, await sha256Hex(atCeiling));
+test("a legacy envelope with more hex than one regex pass can hold still decodes", async () => {
+  // Eight million characters of body hex: past where Bun's engine gives up on
+  // a repeated two-character group and answers false, so a structure check
+  // written that way calls a well-formed envelope corrupt.
+  const json = paddedJson(4 * 1024 * 1024);
+  const bytes = await legacySealFast(json);
+  const read = await decodeArtifact(await legacyKey, bytes, await sha256Hex(bytes));
   expect(read.ok).toBe(true);
-
-  const past = await legacySeal(paddedJson(MAX_ARTIFACT_BYTES + 1));
-  expect(past.length).toBe(GLOBAL_CEILING + 2);
-  const seen = await decodeUnwatched(past, null);
-  expect(seen).toEqual({ read: CORRUPT, digests: 0, decrypts: 0 });
+  if (read.ok) expect(JSON.stringify(read.artifact)).toBe(json);
 });
 
 /** Writes `bytes` under a fresh bodies directory, for the acquisition tests. */
@@ -1025,10 +938,13 @@ async function plantFile(
 }
 
 test("an artifact file past the ceiling is corrupt, not missing, and is never read whole", async () => {
-  const { bytes, digest } = await oversizedLegacy;
-  const planted = await plantFile(bytes);
+  const planted = await plantFile(await legacySeal(prepareArtifact(LEGACY_INPUT).json));
+  const path = join(planted.dir, planted.rel);
   try {
-    expect(await readArtifact(await legacyKey, planted.dir, planted.rel, digest)).toEqual({
+    // One byte past the ceiling, as a hole: the size on the handle is the
+    // verdict, so nothing of it is read.
+    await truncate(path, GLOBAL_CEILING + 1);
+    expect(await readArtifact(await legacyKey, planted.dir, planted.rel, null)).toEqual({
       ok: false,
       failure: "corrupt",
     });
@@ -1040,7 +956,7 @@ test("an artifact file past the ceiling is corrupt, not missing, and is never re
     // allocated for it. The old whole-file read reported this as `missing`.
     // Kept well under ext4's 16 TiB file-size limit, so the truncate itself is
     // portable.
-    await truncate(join(planted.dir, planted.rel), 2 ** 36);
+    await truncate(path, 2 ** 36);
     expect(await readArtifact(await legacyKey, planted.dir, planted.rel, null)).toEqual({
       ok: false,
       failure: "corrupt",
@@ -1050,8 +966,9 @@ test("an artifact file past the ceiling is corrupt, not missing, and is never re
   }
 });
 
-test("an artifact file exactly at the ceiling is read, and an absent one is missing", async () => {
-  const atCeiling = await legacySeal(paddedJson(MAX_ARTIFACT_BYTES));
+test("an artifact file exactly at the binary ceiling is read, and an absent one is missing", async () => {
+  const atCeiling = await binarySeal(encoder.encode(paddedJson(MAX_ARTIFACT_BYTES)));
+  expect(atCeiling.length).toBe(BINARY_CEILING);
   const planted = await plantFile(atCeiling);
   try {
     const read = await readArtifact(
@@ -1069,20 +986,21 @@ test("an artifact file exactly at the ceiling is read, and an absent one is miss
   }
 });
 
-test("an oversized legacy file reads as corrupt through the repository", async () => {
+test("a legacy file past the ceiling reads as corrupt through the repository", async () => {
   const root = join(tmpdir(), `omni-bodies-${crypto.randomUUID()}`);
   await mkdir(root, { recursive: true });
   const dbPath = join(root, "omnigateway.db");
   const dir = bodiesDirFor(dbPath);
   const db = openDb(dbPath);
   const repo = createBodyRepo(db, await legacyKey, dir);
-  const { bytes, digest } = await oversizedLegacy;
+  const bytes = await legacySeal(prepareArtifact(LEGACY_INPUT).json);
   const relPath = relPathFor(LEGACY_INPUT.requestId, LEGACY_INPUT.at);
   await writeArtifact(dir, relPath, bytes);
+  await truncate(join(dir, relPath), GLOBAL_CEILING + 1);
   db.run(
     `INSERT INTO request_bodies (request_id, at, rel_path, size_bytes, sha256, detail_state, truncated)
      VALUES (?,?,?,?,?,?,?)`,
-    [LEGACY_INPUT.requestId, LEGACY_INPUT.at, relPath, bytes.length, digest, "ready", 0],
+    [LEGACY_INPUT.requestId, LEGACY_INPUT.at, relPath, GLOBAL_CEILING + 1, null, "ready", 0],
   );
 
   const read = await repo.get(LEGACY_INPUT.requestId);
@@ -1614,11 +1532,12 @@ test("the codec comes from the authenticated header, never from the payload's sh
 });
 
 /**
- * Sixteen mebibytes of zeros gzips to about sixteen kilobytes; thirty of those
- * members fit under the binary ceiling and stand for 480 MiB. Building it costs
- * one compression, and inflating it unbounded would cost half a gigabyte.
+ * One byte more than the budget, of zeros, gzips to about sixty-five kilobytes;
+ * thirty of those members fit under the binary ceiling and stand for nearly two
+ * gibibytes. Building it costs one compression, and inflating it unbounded
+ * would cost the whole of that.
  */
-const BOMB_MEMBER = gz(new Uint8Array(16 * 1024 * 1024));
+const BOMB_MEMBER = gz(new Uint8Array(MAX_ARTIFACT_BYTES + 1));
 const BOMB = concat(...Array.from({ length: 30 }, () => BOMB_MEMBER));
 
 test("an authenticated gzip bomb is stopped inside bounded decompression", async () => {

@@ -1,81 +1,91 @@
 import type { ProviderId } from "@omni/ir";
 import type { HttpClient, HttpResponse } from "@omni/providers";
-import { type BodyAttempt, type BodyPair, MAX_ARTIFACT_BYTES } from "@omni/store";
+import { MAX_ARTIFACT_BYTES } from "@omni/store";
+import type { CaptureBudget } from "./bodies/budget.ts";
 
 /**
- * How much of one wire body is kept in memory before the rest is discarded.
+ * How many UTF-8 bytes of one side are kept in memory before the rest is
+ * discarded: the client request, the client response (or its frames), and
+ * each attempt's request and response.
  *
  * Derived from the artifact ceiling rather than picked: `prepareArtifact`
  * replaces every body with an omission marker once the serialized artifact
  * passes `MAX_ARTIFACT_BYTES`, so bytes captured past that point cannot reach
- * disk in any form — they can only make the artifact large enough to be thrown
- * away wholesale. The cap is per body rather than per artifact because the
- * collector cannot know how many attempts are still to come, and a per-attempt
- * bound is the only one it can enforce as the bytes arrive.
+ * disk in any form. The cap is per side rather than per artifact because the
+ * collector cannot know how many attempts are still to come.
  *
  * Capping does not mean stopping: the capture branch of a tee that is not read
  * to the end backs the source up until the adapter's branch stalls, so bytes
  * past the cap are read and dropped rather than left in the pipe.
  *
- * A soft bound, not an accounting one. The streaming path measures the bytes it
- * read; the two buffered paths cut a string at this many code units, which is
- * never fewer bytes than it says. The hard bound on what is stored is the
- * structural bounding inside `bodies.put`, and it runs on everything captured
- * here whatever this let through.
- *
- * Reusing the artifact ceiling as a per-body cap means the two numbers are not
- * the same bound. `MAX_ARTIFACT_BYTES` bounds one file on disk; this bounds each
- * of the client response and every attempt's request and response held in memory
- * at once, so peak per-request capture is roughly `MAX_ARTIFACT_BYTES` times
- * attempts plus one, not `MAX_ARTIFACT_BYTES`. A failover across three providers
- * on a large response is therefore megabytes live per captured request, which is
- * the number to reason about when capture is on under load — not the artifact
- * that eventually lands.
+ * Bytes, not code units, on every path, so the number means what the budget
+ * below and the artifact ceiling mean. Peak per-request capture is therefore
+ * this times attempts plus one — which is why the global budget exists.
  */
 export const MAX_CAPTURED_BODY_BYTES = MAX_ARTIFACT_BYTES;
+
+/** Why a capture was given up on. Only the budget, here; the body writer adds its own. */
+export type AbandonReason = "budget";
+
+/**
+ * One request's capture, as text, handed to whatever writes it.
+ *
+ * Raw strings and nothing parsed: the client request is the text the route
+ * read, the client response the JSON it sent (or the frames it streamed), and
+ * every wire body the text that crossed the transport. Parsing, masking and
+ * serializing are the writer's, so none of it happens on the request path.
+ *
+ * `reservedBytes` is held against the capture budget on the writer's behalf:
+ * whoever writes these parts releases it once the write is done or has failed.
+ */
+export type CapturedParts = {
+  generation?: number;
+  requestId: string;
+  at: number;
+  client: { request: string | null; response: string | string[] | null; truncated: boolean };
+  attempts: Array<{
+    attempt: number;
+    provider: ProviderId;
+    request: string | null;
+    response: string | string[] | null;
+    streamChunks: string[] | null;
+    captureStreamChunks?: boolean;
+    truncated: boolean;
+  }>;
+  /** What the request failed with — code and status only — or null. */
+  error: unknown;
+  /** Set when capture was given up on; every body above is then null. */
+  abandoned: AbandonReason | null;
+  reservedBytes: number;
+};
 
 /**
  * One outbound wire call, filled in as it happens.
  *
- * Mutable on purpose. A drain that is still running when the artifact is
- * written — a hung upstream, a stream cut off by a disconnect — has already
- * recorded everything it read, so the artifact holds a partial response instead
- * of nothing at all.
+ * Mutable on purpose. A drain that is still running when the parts are taken —
+ * a hung upstream, a stream cut off by a disconnect — has already recorded
+ * everything it read, so the artifact holds a partial response instead of
+ * nothing at all.
  */
 type Attempt = {
   attempt: number;
   provider: ProviderId;
-  request: unknown;
+  request: string | null;
   /**
-   * Raw response text as it arrived, held as the decoded segments rather than
-   * one accumulating string. Joined at read time by `textOf`.
-   *
-   * Per-chunk `+=` is only tolerable because JavaScriptCore represents the
-   * result as a rope; a chunk array joined once is strictly cheaper and does
-   * not rest on an engine representation detail. Joining at read time rather
-   * than at the end of the drain is what keeps the partial-artifact guarantee
-   * above: a drain still running has its segments in here, and `textOf` sees
-   * exactly what it has read so far.
+   * Response text as it arrived, held as the decoded segments rather than one
+   * accumulating string, and joined only when the parts are taken — which is
+   * what lets a drain still running contribute exactly what it has read.
    */
   responseChunks: string[];
   /** Set once anything responded, so an attempt that never answered stays null. */
   responded: boolean;
+  draining: boolean;
   frames: string[] | null;
   truncated: boolean;
 };
 
-/**
- * What an attempt has read so far, as one string.
- *
- * Called at most twice per attempt — once when a drain finishes and once when
- * the artifact is assembled — so the join is paid on the same order as the old
- * final concatenation, and never per chunk.
- */
-function textOf(entry: Attempt): string {
-  return entry.responseChunks.join("");
-}
-
 export type BodyCollectorOptions = {
+  generation?: number;
   /**
    * Whether raw SSE frames are retained per attempt. Off, a streaming response
    * appears only as the reassembled body, which is what almost every incident
@@ -83,6 +93,12 @@ export type BodyCollectorOptions = {
    * debug stream framing itself and the most expensive thing this can store.
    */
   captureStreamChunks: boolean;
+  requestId: string;
+  at: number;
+  /** The process-wide budget every byte kept here is reserved against. */
+  budget: CaptureBudget;
+  /** Told once, when a reservation is refused and the capture is abandoned. */
+  onAbandoned?: (reason: AbandonReason) => void;
 };
 
 export type BodyCollector = {
@@ -93,92 +109,106 @@ export type BodyCollector = {
    * runs the transport it ran before this existed.
    */
   wrap(http: HttpClient): HttpClient;
+  /** The request text exactly as it arrived at `/v1/*`, before anything parsed it. */
+  captureRequest(text: string): void;
+  /** The serialized body the client was sent; replaces whatever was recorded before. */
+  captureResponse(text: string): void;
   /**
-   * The client-facing pair. Filled in by the route: the request as it was
-   * parsed at `/v1/*`, before RTK, and the response the gateway returned.
+   * One frame written to a streaming client. The most recent are kept: an
+   * incident is about how a stream ended, so the head is evicted to stay under
+   * the cap, never the terminal frame — and the eviction marks the client side
+   * truncated, because the frames left behind are well-formed and would
+   * otherwise read as a complete short response. A frame larger than the whole
+   * cap is discarded with truncation rather than retained partially.
    */
-  client: BodyPair;
-  /** The wire pairs, in the order the calls went out. */
-  attempts(): BodyAttempt[];
+  frame(frame: string): void;
+  /** The client side is incomplete for a reason only the route knows — a hang-up. */
+  markTruncated(): void;
+  readonly abandoned: AbandonReason | null;
   /** Resolves once every capture drain has finished or failed. */
-  settle(): Promise<void>;
-};
-
-/** JSON where it parses, the raw text otherwise: a body is whatever was sent. */
-function asBody(text: string): unknown {
-  if (text.length === 0) return null;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return text;
-  }
-}
-
-/**
- * Splits a reassembled SSE body into its records.
- *
- * Network chunk boundaries fall anywhere, including mid-field, so the frames a
- * reader wants are not the chunks that arrived — they are the blank-line
- * separated records, which only exist once the body is reassembled. A body that
- * is not SSE splits into a single element, which is the honest answer for it.
- */
-function framesOf(text: string): string[] {
-  return text
-    .replaceAll("\r\n", "\n")
-    .split("\n\n")
-    .filter((frame) => frame.length > 0);
-}
-
-export type FrameSink = {
-  /** The retained frames, oldest first. Live: the route holds this array. */
-  frames: string[];
+  settle(options?: { signal?: AbortSignal; timeoutMs: number }): Promise<void>;
   /**
-   * Whether anything was dropped to stay inside the cap.
-   *
-   * Read by the route on the way into the artifact, because the sink is the
-   * only thing that can see this: the frames it kept are well-formed and end on
-   * the terminal event, so an artifact whose head was evicted is structurally
-   * indistinguishable from a short response. `message_start` carries the
-   * upstream message id, the model, and the input token count, and losing it
-   * silently is how a partial record comes to read as a complete one.
+   * The parts, once. The collector's reservation moves to them, and nothing
+   * arriving afterwards is stored or reserved.
    */
-  truncated: boolean;
-  write(frame: string): void;
+  take(error: unknown): CapturedParts;
 };
 
+const encoder = new TextEncoder();
+
+/** UTF-8 length without materialising the bytes. */
+function utf8Bytes(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
 /**
- * A bounded home for the frames the gateway writes to a streaming client.
+ * `text` cut to at most `max` UTF-8 bytes on a character boundary.
  *
- * A stream has no rendered body to record, so the frames are the response, and
- * a long one produces thousands of them. The most recent are kept, matching
- * what `MAX_ARRAY_ITEMS` does to an array on the way into an artifact: an
- * incident is about how a stream ended, and keeping the head would reliably
- * discard the terminal frame in favour of the first token.
+ * The cut is decoded back from bytes rather than taken with `slice`, because a
+ * slice can share the storage of the whole original — keeping alive exactly the
+ * bytes the cap exists to drop.
  */
-export function createFrameSink(): FrameSink {
-  const frames: string[] = [];
-  let bytes = 0;
-  const sink: FrameSink = {
-    frames,
-    truncated: false,
-    write(frame: string): void {
-      frames.push(frame);
-      bytes += frame.length;
-      while (bytes > MAX_CAPTURED_BODY_BYTES && frames.length > 1) {
-        bytes -= (frames.shift() ?? "").length;
-        // Closes over `sink` rather than using `this`: the route hands `write`
-        // to the SSE writer as a bare function, so there is no receiver.
-        sink.truncated = true;
-      }
-    },
-  };
-  return sink;
+function fitted(text: string, max: number): { text: string; bytes: number; cut: boolean } {
+  const bytes = utf8Bytes(text);
+  if (bytes <= max) return { text, bytes, cut: false };
+  const room = new Uint8Array(max);
+  // `encodeInto` stops before a character that would not fit whole.
+  const { written } = encoder.encodeInto(text, room);
+  return { text: new TextDecoder().decode(room.subarray(0, written)), bytes: written, cut: true };
 }
 
 export function createBodyCollector(options: BodyCollectorOptions): BodyCollector {
+  const { budget } = options;
   const attempts: Attempt[] = [];
   const drains: Promise<void>[] = [];
-  const client: BodyPair = { request: null, response: null, truncated: false };
+  let clientRequest: string | null = null;
+  let clientResponse: string | string[] | null = null;
+  /** What the client response holds, in bytes — the text's, or the frames' together. */
+  let responseBytes = 0;
+  let clientTruncated = false;
+  let abandoned: AbandonReason | null = null;
+  let taken = false;
+  /** Everything this collector has reserved and not given back. */
+  let held = 0;
+
+  const storing = (): boolean => abandoned === null && !taken;
+
+  /**
+   * Gives every buffer up and every byte back.
+   *
+   * The attempt list survives without its bodies: which providers were tried,
+   * in what order, is the frame an omission marker keeps.
+   */
+  const abandon = (reason: AbandonReason): void => {
+    abandoned = reason;
+    budget.release(held);
+    held = 0;
+    clientRequest = null;
+    clientResponse = null;
+    responseBytes = 0;
+    for (const entry of attempts) {
+      entry.request = null;
+      entry.responseChunks = [];
+      entry.frames = null;
+    }
+    options.onAbandoned?.(reason);
+  };
+
+  /** Reserves `bytes` for storing, or abandons. False means do not store them. */
+  const reserve = (bytes: number): boolean => {
+    if (!storing()) return false;
+    if (!budget.reserve(bytes)) {
+      abandon("budget");
+      return false;
+    }
+    held += bytes;
+    return true;
+  };
+
+  const release = (bytes: number): void => {
+    budget.release(bytes);
+    held -= bytes;
+  };
 
   /**
    * Reads a tee branch to the end and records what it saw.
@@ -187,13 +217,14 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
    *
    * - It never stops early. A tee whose second branch is abandoned buffers for
    *   it until the first branch stalls, which would turn body logging into a
-   *   latency bug under load, so the loop keeps reading past the cap and throws
-   *   the bytes away instead of leaving them in the pipe.
+   *   latency bug under load, so the loop keeps reading past the cap — and past
+   *   an abandoned capture — and throws the bytes away instead of leaving them
+   *   in the pipe.
    * - It never throws. A capture failure — a decode error, a source that died
    *   mid-stream — degrades to a partial artifact, and nothing here is on the
    *   path the client's bytes travel.
-   * - It records as it goes, so a drain still running when the artifact is
-   *   written contributes what it had.
+   * - It records as it goes, so a drain still running when the parts are taken
+   *   contributes what it had.
    *
    * Termination is the transport's, not this loop's: the request signal aborts
    * on every way a request can end, `nodeHttpClient` destroys the socket, and
@@ -201,32 +232,45 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
    * clean up.
    */
   const drain = async (stream: ReadableStream<Uint8Array>, entry: Attempt): Promise<void> => {
+    entry.draining = true;
     const reader = stream.getReader();
     const decoder = new TextDecoder();
-    let bytes = 0;
+    let kept = 0;
+    let full = false;
+    const retain = (text: string): void => {
+      // Invalid input can expand into replacement characters. Count the UTF-8
+      // text we keep, not the source bytes (including text from the final flush).
+      const part = fitted(text, MAX_CAPTURED_BODY_BYTES - kept);
+      if (part.cut) {
+        full = true;
+        entry.truncated = true;
+      }
+      if (part.bytes === 0 || !reserve(part.bytes)) return;
+      kept += part.bytes;
+      entry.responseChunks.push(part.text);
+    };
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done === true) break;
         if (value === undefined) continue;
         entry.responded = true;
-        if (bytes >= MAX_CAPTURED_BODY_BYTES) {
+        if (full) {
           entry.truncated = true;
           continue;
         }
-        bytes += value.byteLength;
-        entry.responseChunks.push(decoder.decode(value, { stream: true }));
-        if (bytes > MAX_CAPTURED_BODY_BYTES) entry.truncated = true;
+        if (!storing()) continue;
+        retain(decoder.decode(value, { stream: true }));
       }
-      entry.responseChunks.push(decoder.decode());
+      if (!full && storing()) retain(decoder.decode());
     } catch {
       // Whatever broke, it broke on the capture branch. The adapter's branch is
       // a separate reader over a separate queue and is untouched by this.
       entry.truncated = true;
     } finally {
+      entry.draining = false;
       reader.releaseLock();
     }
-    if (options.captureStreamChunks) entry.frames = framesOf(textOf(entry));
   };
 
   /**
@@ -239,7 +283,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
    * whichever the adapter reaches for is the one that captures, and the other
    * never runs.
    */
-  const captureResponse = (res: HttpResponse, entry: Attempt): HttpResponse => {
+  const captureWireResponse = (res: HttpResponse, entry: Attempt): HttpResponse => {
     let forAdapter: ReadableStream<Uint8Array> | null | undefined;
     return {
       status: res.status,
@@ -262,18 +306,76 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
       },
       text: async () => {
         const text = await res.text();
+        if (!storing()) return text;
         entry.responded = true;
-        const kept = text.slice(0, MAX_CAPTURED_BODY_BYTES);
-        entry.responseChunks = [kept];
-        if (kept.length < text.length) entry.truncated = true;
-        if (options.captureStreamChunks) entry.frames = framesOf(kept);
+        const kept = fitted(text, MAX_CAPTURED_BODY_BYTES);
+        if (kept.cut) entry.truncated = true;
+        if (reserve(kept.bytes)) {
+          entry.responseChunks = [kept.text];
+        }
         return text;
       },
     };
   };
 
+  /** Drops whatever client response is held and gives its bytes back. */
+  const dropResponse = (): void => {
+    release(responseBytes);
+    responseBytes = 0;
+    clientResponse = null;
+  };
+
   return {
-    client,
+    get abandoned() {
+      return abandoned;
+    },
+
+    captureRequest(text) {
+      if (!storing()) return;
+      const kept = fitted(text, MAX_CAPTURED_BODY_BYTES);
+      if (!reserve(kept.bytes)) return;
+      clientRequest = kept.text;
+      if (kept.cut) clientTruncated = true;
+    },
+
+    captureResponse(text) {
+      if (!storing()) return;
+      dropResponse();
+      const kept = fitted(text, MAX_CAPTURED_BODY_BYTES);
+      if (!reserve(kept.bytes)) return;
+      clientResponse = kept.text;
+      responseBytes = kept.bytes;
+      if (kept.cut) clientTruncated = true;
+    },
+
+    frame(frame) {
+      if (!storing()) return;
+      if (!Array.isArray(clientResponse)) {
+        dropResponse();
+        clientResponse = [];
+      }
+      const frames = clientResponse;
+      const bytes = utf8Bytes(frame);
+      if (bytes > MAX_CAPTURED_BODY_BYTES) {
+        clientTruncated = true;
+        return;
+      }
+      // Evicted before the new frame is reserved, so a stream at its cap
+      // holds the cap and not the cap plus one frame.
+      while (frames.length > 0 && responseBytes + bytes > MAX_CAPTURED_BODY_BYTES) {
+        const evicted = utf8Bytes(frames.shift() ?? "");
+        release(evicted);
+        responseBytes -= evicted;
+        clientTruncated = true;
+      }
+      if (!reserve(bytes)) return;
+      frames.push(frame);
+      responseBytes += bytes;
+    },
+
+    markTruncated() {
+      clientTruncated = true;
+    },
 
     wrap(http: HttpClient): HttpClient {
       return async (req) => {
@@ -288,40 +390,89 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
         // makes a second HTTP call inside one dispatch attempt and gets its own
         // entry here, because for forensics the two calls are two different
         // things that went to the provider.
+        const kept = storing() ? fitted(req.body, MAX_CAPTURED_BODY_BYTES) : null;
         const entry: Attempt = {
           attempt: attempts.length + 1,
           provider: req.provider,
-          request:
-            req.body.length > MAX_CAPTURED_BODY_BYTES
-              ? req.body.slice(0, MAX_CAPTURED_BODY_BYTES)
-              : asBody(req.body),
+          request: null,
           responseChunks: [],
           responded: false,
+          draining: false,
           frames: null,
-          truncated: req.body.length > MAX_CAPTURED_BODY_BYTES,
+          truncated: kept?.cut === true,
         };
         // Recorded before the call, so a transport that throws still leaves the
         // request that was attempted in the artifact.
         attempts.push(entry);
+        if (kept !== null && reserve(kept.bytes)) entry.request = kept.text;
         const res = await http(req);
-        return captureResponse(res, entry);
+        return captureWireResponse(res, entry);
       };
     },
 
-    attempts(): BodyAttempt[] {
-      return attempts.map((entry) => ({
-        attempt: entry.attempt,
-        provider: entry.provider,
-        request: entry.request,
-        response: entry.responded ? asBody(textOf(entry)) : null,
-        streamChunks: entry.frames,
-        truncated: entry.truncated,
-      }));
+    async settle(options): Promise<void> {
+      // `drain` never rejects, so this is a join rather than an error path.
+      if (options === undefined) {
+        await Promise.all(drains);
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let abort = () => {};
+      const interrupted = new Promise<void>((resolve) => {
+        abort = () => {
+          clientTruncated = true;
+          resolve();
+        };
+        timer = setTimeout(abort, options.timeoutMs);
+        if (options.signal?.aborted) abort();
+        else options.signal?.addEventListener("abort", abort, { once: true });
+      });
+      try {
+        await Promise.race([Promise.all(drains), interrupted]);
+      } finally {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", abort);
+      }
     },
 
-    async settle(): Promise<void> {
-      // `drain` never rejects, so this is a join rather than an error path.
-      await Promise.all(drains);
+    take(error) {
+      if (taken) throw new Error("body capture already taken");
+      const reservedBytes = held;
+      const parts: CapturedParts = {
+        requestId: options.requestId,
+        ...(options.generation === undefined ? {} : { generation: options.generation }),
+        at: options.at,
+        client: {
+          request: clientRequest,
+          response: Array.isArray(clientResponse) ? [...clientResponse] : clientResponse,
+          truncated: clientTruncated,
+        },
+        attempts: attempts.map((entry) => ({
+          attempt: entry.attempt,
+          provider: entry.provider,
+          request: entry.request,
+          response: entry.responded && abandoned === null ? entry.responseChunks : null,
+          streamChunks: entry.frames,
+          captureStreamChunks: options.captureStreamChunks,
+          truncated: entry.truncated || entry.draining,
+        })),
+        error,
+        abandoned,
+        reservedBytes,
+      };
+      taken = true;
+      held = 0;
+      clientRequest = null;
+      clientResponse = null;
+      responseBytes = 0;
+      for (const entry of attempts) {
+        entry.request = null;
+        entry.responseChunks = [];
+        entry.frames = null;
+      }
+      attempts.length = 0;
+      drains.length = 0;
+      return parts;
     },
   };
 }

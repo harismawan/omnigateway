@@ -7,6 +7,7 @@ import {
   DEFAULT_SETTINGS,
   type ExportDestination,
   type ExportPageQuery,
+  type NewRequestLog,
   type RequestLog,
   type Settings,
 } from "@omni/store/types";
@@ -94,11 +95,17 @@ export function destination(over: Partial<ExportDestination> = {}): ExportDestin
 }
 
 /** A done row completed at `completedAt`. */
-export function row(id: string, completedAt: number, over: Partial<RequestLog> = {}): RequestLog {
+export function row(
+  id: string,
+  completedAt: number,
+  over: Partial<NewRequestLog> = {},
+): RequestLog {
   return requestLog({ id, at: completedAt - 100, completedAt, ...over });
 }
 
 export type World = {
+  bodies: Map<string, string>;
+  optOut: Set<string>;
   clock: FakeClock;
   rows: RequestLog[];
   destinations: ExportDestination[];
@@ -126,6 +133,8 @@ export type World = {
   beforeGetLog: () => Promise<void>;
   /** Runs before every settings read; a test holds a commit's prerequisite with it. */
   beforeSettings: () => Promise<void>;
+  /** Immediately before the single-statement body-send policy snapshot. */
+  beforeAdmission: () => Promise<void>;
   /** Runs before every configuration read; a test holds a tick with it. */
   beforeDestinations: () => Promise<void>;
   /** Runs before every cursor read; a test makes it hang to reach the batch deadline. */
@@ -153,6 +162,8 @@ export function world(
     statePath?: string;
     reader?: Pick<World, "rows" | "destinations" | "settings" | "secrets" | "labels">;
     clock?: FakeClock;
+    bodies?: boolean;
+    budget?: number;
   } = {},
 ): World & { statePath: string } {
   const clock = (opts.clock as ReturnType<typeof fakeClock> | undefined) ?? fakeClock(T0);
@@ -160,6 +171,8 @@ export function world(
   const statePath = opts.statePath ?? join(dir, "export.db");
   const shared = opts.reader;
   const w = {
+    bodies: new Map<string, string>(),
+    optOut: new Set<string>(),
     clock,
     rows: shared?.rows ?? [...(opts.rows ?? [])],
     destinations: shared?.destinations ?? [...(opts.destinations ?? [destination()])],
@@ -173,6 +186,7 @@ export function world(
     beforePage: async () => {},
     beforeDestinations: async () => {},
     beforeSettings: async () => {},
+    beforeAdmission: async () => {},
     beforeGetLog: async () => {},
     beforeSnapshot: async () => {},
     beforeClaim: async () => {},
@@ -183,6 +197,37 @@ export function world(
   w.statePath = statePath;
 
   const reader: ExportReader = {
+    bodyAdmission: async (id, keyId) => {
+      await w.beforeAdmission();
+      const d = w.destinations.find((d) => d.id === id);
+      return {
+        bodyLoggingEnabled: w.settings.bodyLoggingEnabled,
+        keyExists: true,
+        keyBodyOptOut: w.optOut.has(keyId),
+        destination: d
+          ? {
+              generation: d.generation,
+              revision: d.revision,
+              enabled: d.enabled,
+              includeBodies: d.includeBodies,
+            }
+          : null,
+      };
+    },
+    bodyProbe: async (id) => {
+      const text = w.bodies.get(id);
+      return text === undefined
+        ? null
+        : { encryptedBytes: Buffer.byteLength(text), plaintextBytes: Buffer.byteLength(text) };
+    },
+    bodyEnvelope: async (id) => {
+      const text = w.bodies.get(id);
+      return text === undefined
+        ? null
+        : { bytes: new TextEncoder().encode(text), sha256: null, truncated: false };
+    },
+    bodyText: async (envelope) => new TextDecoder().decode(envelope.bytes),
+    keyBodyOptOut: async (id) => w.optOut.has(id),
     destinations: async () => {
       await w.beforeDestinations();
       return w.destinations.map((d) => ({ ...d }));
@@ -279,6 +324,9 @@ export function world(
     await w.settle();
   };
   w.loop = createExportLoop({
+    exportBodiesAllowed: opts.bodies === true,
+    gates: { bodyLoggingAllowed: opts.bodies === true, bodyLoggingEnabled: opts.bodies === true },
+    ...(opts.budget === undefined ? {} : { bodyBudgetBytes: opts.budget }),
     open: async () => {
       w.opens += 1;
       const real = openSqliteExportState(statePath);

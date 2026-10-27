@@ -36,6 +36,109 @@ forEachStore((backend) => {
     for (const handle of opened.splice(0)) await handle.close();
   };
 
+  test("reads artifact header before allocation, authenticated text and missing key fail closed", async () => {
+    const s = await backend.fresh();
+    try {
+      await s.bodies.put({
+        schemaVersion: 1,
+        requestId: "artifact",
+        at: 1000,
+        client: { request: { hello: "world" }, response: null, truncated: true },
+        attempts: [],
+        error: null,
+      });
+      const r = await readerFor(s);
+      const probe = await r.bodyProbe("artifact");
+      const envelope = await r.bodyEnvelope("artifact");
+      expect(probe?.encryptedBytes).toBe(envelope?.bytes.length);
+      expect(probe?.plaintextBytes).toBeGreaterThan(100);
+      expect(envelope?.truncated).toBe(true);
+      expect(envelope && (await r.bodyText(envelope))).toContain('"hello":"world"');
+      expect(await r.bodyEnvelope("artifact", 1)).toBeNull();
+      if (envelope) expect(await r.bodyText(envelope, 1)).toBeNull();
+      expect(await r.bodyProbe("absent")).toBeNull();
+      expect(await r.bodyEnvelope("absent")).toBeNull();
+      expect(await r.keyBodyOptOut("absent")).toBe(true);
+    } finally {
+      await done();
+    }
+  });
+
+  test("body admission snapshots current policy and sender identity without secrets", async () => {
+    const s = await backend.fresh();
+    try {
+      const d = await s.exportDestinations.create({
+        id: "admit",
+        type: "webhook",
+        config: { url: "https://hooks.test" },
+        startFrom: "oldest",
+        includeBodies: true,
+        secret: "private",
+      });
+      await s.keys.create({
+        id: "k",
+        label: "key",
+        prefix: "omni_k",
+        hash: "hash",
+        modelAllowlist: null,
+        limits: {},
+        bodyLoggingOptOut: false,
+        expiresAt: null,
+        guardrailPolicy: null,
+        smartRouting: false,
+      });
+      const r = await readerFor(s);
+      const expected = {
+        bodyLoggingEnabled: false,
+        keyExists: true,
+        keyBodyOptOut: false,
+        destination: {
+          generation: d.generation,
+          revision: d.revision,
+          enabled: true,
+          includeBodies: true,
+        },
+      };
+      expect(await r.bodyAdmission("admit", "k")).toEqual(expected);
+      expect(await s.exportDestinations.bodyAdmission("admit", "k")).toEqual(expected);
+      await s.keys.create({
+        id: "opted-out",
+        label: "private",
+        prefix: "omni_private",
+        hash: "private-hash",
+        modelAllowlist: null,
+        limits: {},
+        bodyLoggingOptOut: true,
+        expiresAt: null,
+        guardrailPolicy: null,
+        smartRouting: false,
+      });
+      expect((await r.bodyAdmission("admit", "opted-out")).keyBodyOptOut).toBe(true);
+      await s.config.putSettings({ bodyLoggingEnabled: true });
+      const edited = await s.exportDestinations.update("admit", {
+        secret: "replacement",
+        includeBodies: false,
+        enabled: false,
+      });
+      if (!edited) throw new Error("missing edited destination");
+      expect(await r.bodyAdmission("admit", "missing")).toEqual({
+        bodyLoggingEnabled: true,
+        keyExists: false,
+        keyBodyOptOut: true,
+        destination: {
+          generation: d.generation,
+          revision: edited.revision,
+          enabled: false,
+          includeBodies: false,
+        },
+      });
+      await s.exportDestinations.remove("admit");
+      expect((await r.bodyAdmission("admit", "k")).destination).toBeNull();
+    } finally {
+      await done();
+    }
+  });
+
   test("reads destinations, their secret, settings, key labels and rows", async () => {
     const s = await backend.fresh();
     try {
@@ -138,11 +241,16 @@ forEachStore((backend) => {
         const r = openSqliteExportReader(s.databasePath, await deriveKey(SECRET), () => 0);
         opened.push(r);
         expect(Object.keys(r).sort()).toEqual([
+          "bodyAdmission",
+          "bodyEnvelope",
+          "bodyProbe",
+          "bodyText",
           "close",
           "destinationWithSecret",
           "destinations",
           "exportPage",
           "getLog",
+          "keyBodyOptOut",
           "keyLabels",
           "now",
           "settings",

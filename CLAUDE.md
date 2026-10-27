@@ -651,6 +651,11 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Snapshot is database alone. `request_bodies/` excluded; after restore, body rows and artifact
   files disagree until `sweepOrphans` reconcile. Snapshot still carry encrypted credentials and
   API-key hashes; downloads `no-store`.
+- Gateway capture adds no body parse/serialization on the main thread: reuse the necessary IR
+  request parse and already serialized client response; artifact decode/masking/sealing and HTTP
+  preview encoding stay in `bodies/writer.ts`. Writer never writes the main SQLite file: host
+  publishes pointer + state on its connection. Pins: `test/bodies/{writer,host}.test.ts`,
+  `test/export/boundary.test.ts`, `test/bodyLogging.test.ts` (under `apps/gateway`).
 - Body `put` write `OGBA` raw (`sealArtifact`), read legacy/raw/gzip; roll back only to >= v0.13.5
   (older reader call binary `corrupt`). Pins: writer-format + mixed-corpus tests in store
   `test/contract/bodies.test.ts`. `MAX_ENVELOPE_BYTES` caps pre-read; binary `+38` (`parseBinary`).
@@ -680,6 +685,8 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   Design + rest: `ARCHITECTURE.md#log-export`.
 - Main thread reach export only via `export/spawn.ts` + `export/protocol.ts`. Pin:
   `apps/gateway/test/export/boundary.test.ts`.
+- Body send policy linearizes at `exportDestinations.bodyAdmission`'s single statement,
+  never alternating settings/key/destination reads. See `ARCHITECTURE.md#log-export`.
 - Plugin ordering traps, both silent when reversed: channel registry build **before**
   `loadPlugins` in `apps/gateway/src/index.ts`; route's `close` read `registry.topics(id)`
   **before** `registry.remove(id)`. Tables, migrations, events, channels, externals, asset

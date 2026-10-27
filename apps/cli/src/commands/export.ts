@@ -5,7 +5,9 @@ import {
   getDestination,
   listDestinations,
   removeDestination,
+  setDestinationBodies,
   updateDestination,
+  validateDestinationUpdate,
 } from "@omni/control";
 import { EXPORT_DESTINATION_TYPES, type ExportDestinationType } from "@omni/store/types";
 import {
@@ -259,7 +261,7 @@ export const exportShow: Command = guarded({
               ? `default (${formatBytes(DEFAULT_MAX_REQUEST_BYTES[d.type])})`
               : formatBytes(d.maxRequestBytes),
           ],
-          ["bodies", "off (body export is available in a later release)"],
+          ["bodies", d.includeBodies ? "on (send-time privacy gates apply)" : "off"],
           ["created", formatTime(d.createdAt)],
           ["updated", formatTime(d.updatedAt)],
         ]),
@@ -340,6 +342,7 @@ export const exportSet: Command = guarded({
     "export set <id> [--enable|--disable] [--secret-file <path>|- | --clear-secret]",
     "  [--filter-key ID ...] [--filter-model M ...] [--failed-only | --all-requests]",
     "  [--max-request-bytes N|default] and the type's own flags, as for export add",
+    "  [--bodies on|off] (OTLP traces cannot export bodies; send-time privacy gates still apply)",
     "  (webhook: --header replaces the plain headers, --clear-headers removes them)",
     "",
     "Config flags are applied over the stored config. A filter flag writes the filter whole.",
@@ -355,11 +358,16 @@ export const exportSet: Command = guarded({
     "clear-secret": { type: "boolean" },
     "clear-headers": { type: "boolean" },
     "all-requests": { type: "boolean" },
+    bodies: { type: "string" },
     "max-request-bytes": { type: "string" },
   },
   async run(args, env) {
     const id = requirePositional(args, 0, "destination id");
     const enable = boolFlag(args.values, "enable");
+    const bodies = stringFlag(args.values, "bodies");
+    if (bodies !== undefined && bodies !== "on" && bodies !== "off") {
+      throw new UsageError("--bodies takes on or off");
+    }
     const disable = boolFlag(args.values, "disable");
     if (enable && disable) throw new UsageError("pass one of --enable or --disable");
     const secretSource = stringFlag(args.values, "secret-file");
@@ -382,6 +390,14 @@ export const exportSet: Command = guarded({
     const config = configFlags(args, current.type);
     const maxRequestBytes = maxRequestBytesFlag(args);
 
+    if (
+      bodies === "on" &&
+      current.type === "otlp" &&
+      (config.signal ?? current.config.signal) === "traces"
+    ) {
+      throw new UsageError("OTLP traces cannot export bodies; use OTLP logs");
+    }
+
     const patch = {
       ...(Object.keys(config).length === 0 ? {} : { config: { ...current.config, ...config } }),
       ...(enable ? { enabled: true } : disable ? { enabled: false } : {}),
@@ -390,14 +406,23 @@ export const exportSet: Command = guarded({
       ...(clearSecret ? { secret: null } : {}),
     };
     const secret = secretSource === undefined ? undefined : await readSecret(env, secretSource);
-    if (Object.keys(patch).length === 0 && secret === undefined) {
+    if (Object.keys(patch).length === 0 && secret === undefined && bodies === undefined) {
       throw new UsageError("nothing to change; see omni export set --help");
     }
 
-    const updated = await updateDestination(store, id, {
-      ...patch,
-      ...(secret === undefined ? {} : { secret }),
-    });
+    const input = { ...patch, ...(secret === undefined ? {} : { secret }) };
+    await validateDestinationUpdate(
+      store,
+      id,
+      input,
+      bodies === undefined ? undefined : bodies === "on",
+    );
+    let updated = current;
+    if (bodies === "off") updated = await setDestinationBodies(store, id, { include: false });
+    if (Object.keys(patch).length > 0 || secret !== undefined) {
+      updated = await updateDestination(store, id, input);
+    }
+    if (bodies === "on") updated = await setDestinationBodies(store, id, { include: true });
     emit(env.ctx, env.writer, updated, () => `${updated.id} updated`);
   },
 });

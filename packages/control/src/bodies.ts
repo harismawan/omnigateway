@@ -1,64 +1,118 @@
-import type { BodyArtifact, BodyDetailState, Store } from "@omni/store";
+import type {
+  BodyArtifact,
+  BodyDetailState,
+  BodyOmission,
+  BodyRead,
+  RequestLog,
+  Store,
+} from "@omni/store/types";
 
-/**
- * What one request's captured bodies look like to an operator.
- *
- * Deliberately not `BodyRead` from the store. That type carries `relPath` and
- * `sha256`, which describe where the gateway put a file and how it checks it —
- * internal layout that a console has no use for and that an error page should
- * never be able to quote back. What is left is the artifact and the four facts a
- * reader needs to interpret its absence.
- */
-export type RequestBodyRead = {
+export type BodyPart =
+  | "client.request"
+  | "client.response"
+  | `attempt.${number}.request`
+  | `attempt.${number}.response`
+  | "error";
+export type BodyPreview = {
   requestId: string;
-  /**
-   * Why there is or is not an artifact. `none` means capture never ran for this
-   * request; `missing` and `corrupt` mean it did and the file has since gone or
-   * stopped being readable. Those are answers, not failures — a file tree and a
-   * table that are not written together will drift — so the caller renders the
-   * state rather than a 500.
-   */
   detailState: BodyDetailState;
-  /** True when structural bounding or a mid-stream disconnect cut something. */
   truncated: boolean;
-  /** Bytes as stored, which are ciphertext. Zero when nothing was written. */
   sizeBytes: number;
-  /** When the artifact was filed, or null when there is no row at all. */
   at: number | null;
-  artifact: BodyArtifact | null;
+  bodyState: RequestLog["bodyState"];
+  parts: Array<{
+    part: BodyPart;
+    sizeBytes: number;
+    preview: string;
+    previewTruncated: boolean;
+    omitted: BodyOmission | null;
+  }>;
 };
+export type RequestBodyRead = BodyPreview;
+export const BODY_PREVIEW_BYTES = 1024 * 1024;
 
-/**
- * Reads one request's captured bodies.
- *
- * An admin operation rather than a route handler's business: it is the same
- * question whether it is asked over HTTP or, later, from the CLI, and the rule
- * that a missing or undecryptable artifact is reported rather than raised
- * belongs with the operation, not with one caller's error mapping.
- *
- * A request that was never captured is not an error either. Capture is off by
- * default, so "no row" is the ordinary answer for almost every request on almost
- * every installation, and answering 404 would make the ordinary case look broken.
- */
-export async function readRequestBody(store: Store, requestId: string): Promise<RequestBodyRead> {
-  const read = await store.bodies.get(requestId);
-  if (read === null) {
-    return {
-      requestId,
-      detailState: "none",
-      truncated: false,
-      sizeBytes: 0,
-      at: null,
-      artifact: null,
-    };
+export function isBodyPart(part: string): part is BodyPart {
+  return /^(?:client\.(?:request|response)|attempt\.\d+\.(?:request|response)|error)$/.test(part);
+}
+
+/** Serialization is shared by the writer and the CLI, never called by HTTP handlers. */
+export function* bodyParts(artifact: BodyArtifact): Generator<[BodyPart, unknown]> {
+  yield ["client.request", artifact.client.request];
+  yield ["client.response", artifact.client.response];
+  for (const attempt of artifact.attempts) {
+    yield [`attempt.${attempt.attempt}.request`, attempt.request];
+    yield [`attempt.${attempt.attempt}.response`, attempt.response];
   }
+  yield ["error", artifact.error];
+}
 
-  return {
-    requestId: read.row.requestId,
-    detailState: read.row.detailState,
-    truncated: read.row.truncated,
-    sizeBytes: read.row.sizeBytes,
-    at: read.row.at,
-    artifact: read.artifact,
+function omission(value: unknown): BodyOmission | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  return v.omitted === true && typeof v.reason === "string"
+    ? {
+        omitted: true,
+        reason: v.reason,
+        serializedBytes: typeof v.serializedBytes === "number" ? v.serializedBytes : null,
+      }
+    : null;
+}
+
+/** First bytes of serialized JSON; a partial UTF-8 code point is never included. */
+export function previewBody(
+  requestId: string,
+  bodyState: RequestLog["bodyState"],
+  read: BodyRead | null,
+  full = false,
+): BodyPreview {
+  const result: BodyPreview = {
+    requestId,
+    bodyState,
+    detailState: read?.row.detailState ?? "none",
+    truncated: read?.row.truncated ?? false,
+    sizeBytes: read?.row.sizeBytes ?? 0,
+    at: read?.row.at ?? null,
+    parts: [],
   };
+  if (read?.artifact)
+    for (const [part, value] of bodyParts(read.artifact)) {
+      const json = JSON.stringify(value ?? null);
+      const sizeBytes = Buffer.byteLength(json);
+      if (full) {
+        result.parts.push({
+          part,
+          sizeBytes,
+          preview: json,
+          previewTruncated: false,
+          omitted: omission(value),
+        });
+        continue;
+      }
+      // Inspect at most 1 MiB code units, then trim by bytes without allocating the full part.
+      const bytes = new TextEncoder().encode(json.slice(0, BODY_PREVIEW_BYTES));
+      let end = Math.min(bytes.length, BODY_PREVIEW_BYTES);
+      if (end < bytes.length) while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end--;
+      const preview = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end));
+      result.parts.push({
+        part,
+        sizeBytes,
+        preview,
+        previewTruncated: end < sizeBytes,
+        omitted: omission(value),
+      });
+    }
+  return result;
+}
+
+export type BodyDecoder = (requestId: string) => Promise<BodyPreview>;
+
+/** Gateway injects the host; the local CLI decodes in its own process. */
+export async function readRequestBody(
+  store: Store,
+  requestId: string,
+  decode?: BodyDecoder,
+): Promise<BodyPreview> {
+  if (decode) return decode(requestId);
+  const [read, log] = await Promise.all([store.bodies.get(requestId), store.usage.get(requestId)]);
+  return previewBody(requestId, log?.bodyState ?? null, read);
 }

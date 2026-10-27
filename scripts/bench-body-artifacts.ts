@@ -4,8 +4,11 @@
  * `legacy` (`enc:v1:` hex, today's writer), `binary-raw` and `binary-auto`
  * (the `OGBA` envelope, without and with the gzip policy).
  *
- * Every mode seals the same `prepareArtifact` output — masking, bounding and the
- * omission budget run unchanged — so only the envelope differs. `binary-raw` is
+ * Every mode seals the same `prepareArtifact` output — masking and the omission
+ * budget run unchanged — so only the envelope differs. The fixture classes were
+ * sized for the 512 KiB budget the published results were measured under; at
+ * today's 64 MiB budget the near-cap and omission-marker classes sit far under
+ * it, so they no longer exercise what their names say. `binary-raw` is
  * `sealArtifact`, the writer both stores call. `binary-auto` is
  * `sealArtifactWithGzip`, the policy measured and not chosen. `legacy` is built
  * here from the credential helper, as every release before the binary writer
@@ -470,7 +473,7 @@ function body(
       };
     }
     case "omission-marker": {
-      // Every string fits its own bound and the sum does not fit the artifact's.
+      // Sized to pass the 512 KiB budget the benchmark was written for.
       const big = prose(r, 60_000);
       const messages = Array.from({ length: 10 }, (_, i) => ({
         role: i % 2 ? "assistant" : "user",
@@ -515,7 +518,7 @@ const inputCache = new Map<string, BodyArtifact>();
 
 /**
  * The pre-mask input for one class and variant, the same in every process.
- * Near-cap classes shrink in steps until the bounded artifact fits under the
+ * Near-cap classes shrink in steps until the prepared artifact fits under the
  * budget, so they stay near the cap instead of tipping into an omission.
  */
 function inputFor(cls: FixtureClass, variant: number): BodyArtifact {

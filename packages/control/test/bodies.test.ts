@@ -66,8 +66,8 @@ test("a captured request reads back as its artifact", async () => {
     expect(read.detailState).toBe("ready");
     expect(read.at).toBe(AT);
     expect(read.sizeBytes).toBeGreaterThan(0);
-    expect(read.artifact?.client.request).toEqual({ model: "fast" });
-    expect(read.artifact?.attempts[0]?.provider).toBe("anthropic");
+    expect(read.parts[0]?.preview).toBe('{"model":"fast"}');
+    expect(read.parts[2]?.part).toBe("attempt.1.request");
   } finally {
     await cleanup(store, root);
   }
@@ -83,7 +83,7 @@ test("a request that was never captured reads as none rather than failing", asyn
   try {
     const read = await readRequestBody(store, "req_never-captured");
     expect(read.detailState).toBe("none");
-    expect(read.artifact).toBeNull();
+    expect(read.parts).toEqual([]);
     expect(read.at).toBeNull();
     expect(read.sizeBytes).toBe(0);
   } finally {
@@ -99,7 +99,7 @@ test("a row whose artifact was deleted underneath it reads as missing", async ()
 
     const read = await readRequestBody(store, REQUEST_ID);
     expect(read.detailState).toBe("missing");
-    expect(read.artifact).toBeNull();
+    expect(read.parts).toEqual([]);
     // The metadata survives the artifact: an operator still learns that this
     // request was captured and roughly how large it was.
     expect(read.at).toBe(AT);
@@ -117,7 +117,7 @@ test("a row whose artifact no longer decrypts reads as corrupt", async () => {
 
     const read = await readRequestBody(store, REQUEST_ID);
     expect(read.detailState).toBe("corrupt");
-    expect(read.artifact).toBeNull();
+    expect(read.parts).toEqual([]);
   } finally {
     await cleanup(store, root);
   }
@@ -154,7 +154,7 @@ test("a bounded artifact carries its truncation forward to the reader", async ()
 
     const read = await readRequestBody(store, REQUEST_ID);
     expect(read.truncated).toBe(true);
-    expect(read.artifact?.client.truncated).toBe(true);
+    expect(read.parts[0]?.preview).toBe('{"model":"fast"}');
   } finally {
     await cleanup(store, root);
   }

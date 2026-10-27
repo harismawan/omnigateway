@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { RUNTIME_DEPENDENCIES, releaseVersion, runtimeDependencies } from "../build-npm.ts";
@@ -190,11 +190,11 @@ test("the bundled CLI names that same version in doctor --json", () => {
  *
  * `spawnExportWorker` starts it with `new Worker(url)`, which no bundler
  * follows, so a package carrying only `gateway.js` boots fine and has no
- * worker the moment a destination exists. The probe spawns it the way the
+ * worker the moment a destination exists. The probe spawns both workers the way the
  * server does, from the same `bundleGateway` the release runs; the control
  * bundles the probe alone and must fail, or this test proves nothing.
  */
-test("the bundled gateway can start its export worker", () => {
+test("the bundled gateway can start both workers and detects either missing entry", () => {
   const dir = mkdtempSync(join(tmpdir(), "omni-export-worker-npm-"));
   dirs.push(dir);
   const db = join(dir, "omnigateway.db");
@@ -215,21 +215,36 @@ test("the bundled gateway can start its export worker", () => {
   expect(run.stdout.toString().trim()).toBe(
     JSON.stringify({ type: "previewResult", ref: "probe", ok: false, error: "no such request" }),
   );
+  expect(run.exitCode).toBe(0);
 
-  // The control: the server bundled without its worker beside it.
+  // Isolate each missing entry. Omitting both races their onExit callbacks,
+  // proving only that whichever thread happened to exit first was absent.
   const alone = join(dir, "alone");
   const bare = Bun.spawnSync(
     [
       "bun",
       "-e",
       `const { bundle } = await import(${JSON.stringify(join(root, "scripts/build-npm.ts"))});
-       await bundle(${JSON.stringify(probe)}, ${JSON.stringify(join(alone, "gateway.js"))}, "1.2.3");`,
+       await bundle(${JSON.stringify(probe)}, ${JSON.stringify(join(alone, "gateway.js"))}, "1.2.3", {
+         OMNI_EXPORT_WORKER: JSON.stringify("./export-worker.js"),
+         OMNI_BODY_WORKER: JSON.stringify("./body-worker.js"),
+       });`,
     ],
     { cwd: root },
   );
   expect(bare.exitCode).toBe(0);
+  copyFileSync(join(out, "body-worker.js"), join(alone, "body-worker.js"));
   const missing = Bun.spawnSync(["bun", "--no-install", join(alone, "gateway.js"), db], {
     cwd: dir,
   });
   expect(missing.stdout.toString().trim()).toBe("worker died");
+  expect(missing.exitCode).toBe(1);
+
+  rmSync(join(alone, "body-worker.js"));
+  copyFileSync(join(out, "export-worker.js"), join(alone, "export-worker.js"));
+  const missingBody = Bun.spawnSync(["bun", "--no-install", join(alone, "gateway.js"), db], {
+    cwd: dir,
+  });
+  expect(missingBody.stdout.toString().trim()).toBe("body writer died");
+  expect(missingBody.exitCode).toBe(1);
 }, 60_000);

@@ -8,7 +8,7 @@ import {
   type StreamEvent,
 } from "@omni/ir";
 import { localOnlyModel } from "@omni/router";
-import type { RequestLog } from "@omni/store";
+import type { NewRequestLog } from "@omni/store";
 import {
   type DispatchDeps,
   type DispatchOutcome,
@@ -107,7 +107,7 @@ async function callSegment(
     stop: AbortSignal;
     timeoutMs: number;
   },
-): Promise<{ result: CallResult; log: RequestLog | null }> {
+): Promise<{ result: CallResult; log: NewRequestLog | null }> {
   const id = deps.requestId();
   const timeout = new AbortController();
   const timer = setTimeout(
@@ -279,7 +279,7 @@ export async function checkConfidentiality(
   const startedAt = deps.now();
   const stop = new AbortController();
   /** Each call's log, indexed by call order, so the row names the first call's target. */
-  const logs: Array<RequestLog | undefined> = [];
+  const logs: Array<NewRequestLog | undefined> = [];
   /** The first call to settle with a confidential or a failure. Set once. */
   const state: { decided: { kind: "confidential" } | { kind: "failed"; failure: Failure } | null } =
     { decided: null };
@@ -386,9 +386,9 @@ export function checkRow(
   now: number,
   classifier: string,
   calls: number,
-  logs: readonly RequestLog[],
+  logs: readonly NewRequestLog[],
   status: { status: number; errorCode: string | null },
-): RequestLog {
+): NewRequestLog {
   const routed = logs.find((log) => log.resolvedProvider !== null);
   const sum = (
     field: "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "costUsd",

@@ -5,6 +5,7 @@ import type {
   BodyArtifact,
   BodyAttempt,
   BodyDetailState,
+  BodyOmission,
   BodyPair,
   Credential,
   CredentialHealth,
@@ -44,6 +45,7 @@ export type {
   BodyArtifact,
   BodyAttempt,
   BodyDetailState,
+  BodyOmission,
   BodyPair,
   Credential,
   CredentialHealth,
@@ -533,20 +535,24 @@ export type RequestBodyResponse = {
   /** `none` is "never captured"; `missing` and `corrupt` are "captured, then lost". */
   detailState: BodyDetailState;
   truncated: boolean;
-  /** Bytes as stored, which are ciphertext, so roughly twice the plaintext. */
+  /** Stored encrypted envelope bytes, not the plaintext part sizes. */
   sizeBytes: number;
   at: number | null;
-  artifact: BodyArtifact | null;
+  bodyState: RequestLog["bodyState"];
+  parts: Array<{
+    part: BodyPart;
+    sizeBytes: number;
+    preview: string;
+    previewTruncated: boolean;
+    omitted: BodyOmission | null;
+  }>;
 };
-
-/**
- * The marker that replaced a body too large to keep.
- *
- * Written by the store in place of the payload, so an artifact that reads as
- * `ready` can still have nothing in it. Recognised structurally because the
- * bodies either side of it are `unknown` by design.
- */
-export type BodyOmission = { omitted: true; reason: string; serializedBytes: number };
+export type BodyPart =
+  | "client.request"
+  | "client.response"
+  | `attempt.${number}.request`
+  | `attempt.${number}.response`
+  | "error";
 
 /** Which agent a generated configuration is for. */
 export type SetupClient = "claude" | "opencode";
@@ -988,11 +994,18 @@ export type ExportWorkerState =
 export type ExportWorkerView = { state: ExportWorkerState; restarts: number };
 
 export type ExportDestinationsResponse = {
+  exportBodiesAllowed: boolean;
   destinations: ExportDestinationView[];
   worker: ExportWorkerView;
 };
 
 export type ExportDestinationResponse = { destination: ExportDestinationView };
+
+/** GET /api/export/destinations/:id only; mutation replies carry no gate or worker. */
+export type ExportDestinationStatusResponse = ExportDestinationResponse & {
+  exportBodiesAllowed: boolean;
+  worker: ExportWorkerView;
+};
 
 /**
  * A create body. `secret` is the type's secret object; the gateway's schema

@@ -5,12 +5,6 @@ export {
   bodiesDirFor,
   MAX_ARTIFACT_BYTES,
 } from "./bodies/artifact.ts";
-export {
-  MAX_ARRAY_ITEMS,
-  MAX_DEPTH,
-  MAX_OBJECT_KEYS,
-  MAX_STRING_BYTES,
-} from "./bodies/bound.ts";
 export * from "./encryption.ts";
 export { createPostgresStore } from "./postgres/store.ts";
 export { createBodyRepo } from "./sqlite/bodies.ts";
@@ -41,6 +35,7 @@ export function openStore(
     logger?: Logger;
     nodeId?: string;
     dayOffsetMinutes?: number;
+    isPending?: (relPath: string) => boolean;
   } & ({ url: string; path?: undefined } | { path: string; url?: undefined }),
 ): Promise<Store> {
   return opts.url === undefined ? sqlite(opts) : postgres(opts);

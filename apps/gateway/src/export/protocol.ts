@@ -20,6 +20,7 @@ import type { ExportDestinationType } from "@omni/store/types";
 
 /** What the worker is started with: `new Worker(url, { workerData: init })`. */
 export type WorkerInit = {
+  bodyBudgetBytes?: number;
   /** SQLite main file. Exactly one of `databasePath` and `databaseUrl` is set. */
   databasePath: string | null;
   /** Postgres URL (cluster mode). */
@@ -31,20 +32,20 @@ export type WorkerInit = {
   /** This process's identity: the lease holder, and `nodeId` on every record. */
   nodeId: string;
   logLevel: "debug" | "info" | "warn" | "error";
-  /** `OMNI_EXPORT_BODIES_ALLOWED`. Carried for part 2; part 1 sends no bodies. */
+  /** Boot-only `OMNI_EXPORT_BODIES_ALLOWED` opt-in. */
   exportBodiesAllowed: boolean;
   gates: BodyGates;
 };
 
-/** The body-capture gates the worker cannot read for itself. Unused until body export ships. */
-export type BodyGates = { bodyLoggingAllowed: boolean };
+/** Environment gate and settings-change cancellation notification. Settings are also read at send. */
+export type BodyGates = { bodyLoggingAllowed: boolean; bodyLoggingEnabled?: boolean };
 
 // --- main → worker -------------------------------------------------------
 
 export type MainMessage =
   /** Wake now and re-read configuration (it is also re-read every tick). */
   | { type: "destinationsChanged" }
-  /** New body-capture gate values. Accepted and ignored in part 1. */
+  /** Update privacy gates and cancel active body passes before further sends. */
   | { type: "gatesChanged"; gates: BodyGates }
   /** *Send test*: one synthetic record to destination `id`; answered by `testResult`. */
   | { type: "test"; ref: string; id: string }
@@ -97,6 +98,8 @@ export type DestinationCounters = {
   batchesRetry: number;
   batchesFailed: number;
   gapWarnings: number;
+  bodiesLate?: number;
+  bodiesBudget?: number;
 };
 
 export type DestinationStatus = {

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { OAUTH_PROVIDERS, seedBuiltinOAuth } from "@omni/control";
 import { createLogger, GatewayError } from "@omni/ir";
-import type { RequestLog, Store } from "@omni/store";
+import type { NewRequestLog, RequestLogWrite, Store } from "@omni/store";
 import {
   beginLog,
   finishLog,
@@ -15,18 +15,18 @@ import type { Invalidator } from "../src/stream/broadcaster.ts";
 /** A store that records appends, and can be told to fail one. */
 function stubStore(opts: { failAppend?: boolean; failBegin?: boolean; failRoute?: boolean } = {}): {
   store: Store;
-  appends: RequestLog[];
-  begins: RequestLog[];
+  appends: RequestLogWrite[];
+  begins: RequestLogWrite[];
 } {
-  const appends: RequestLog[] = [];
-  const begins: RequestLog[] = [];
+  const appends: RequestLogWrite[] = [];
+  const begins: RequestLogWrite[] = [];
   const store = {
     usage: {
-      async append(log: RequestLog) {
+      async append(log: RequestLogWrite) {
         if (opts.failAppend === true) throw new Error("disk full");
         appends.push(log);
       },
-      async begin(log: RequestLog) {
+      async begin(log: RequestLogWrite) {
         if (opts.failBegin === true) throw new Error("disk full");
         begins.push(log);
       },
@@ -38,7 +38,7 @@ function stubStore(opts: { failAppend?: boolean; failBegin?: boolean; failRoute?
   return { store, appends, begins };
 }
 
-function pending(over: Partial<RequestLog> = {}): Omit<RequestLog, "state"> {
+function pending(over: Partial<NewRequestLog> = {}): Omit<NewRequestLog, "state"> {
   return {
     ...newCompletedRequestLog("req_1", 1_000, { requestedModel: "fast", status: 0 }),
     ...over,
@@ -51,7 +51,7 @@ function recorder(): Invalidator & { topics: string[] } {
   return { topics, invalidate: (topic) => void topics.push(topic) };
 }
 
-function completed(over: Partial<RequestLog> = {}): RequestLog {
+function completed(over: Partial<NewRequestLog> = {}): NewRequestLog {
   return {
     ...newCompletedRequestLog("req_1", 1_000, { requestedModel: "fast", status: 200 }),
     inputTokens: 10,

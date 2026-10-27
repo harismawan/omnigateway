@@ -3,6 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  BodyPreview,
   CatalogProvider as ServerCatalogProvider,
   SmartRouterModelStatus as ServerSmartRouterModelStatus,
 } from "@omni/control";
@@ -13,7 +14,7 @@ import {
   type QuotaRefreshRequest,
   type QuotaRefreshResult,
 } from "@omni/control";
-import { GatewayError } from "@omni/ir";
+import { GatewayError, noopLogger } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import {
   type BodyArtifact,
@@ -35,8 +36,15 @@ import {
 import type {
   CatalogProvider as ConsoleCatalogProvider,
   SmartRouterModelStatus as ConsoleSmartRouterModelStatus,
+  RequestBodyResponse,
 } from "../../../dashboard/src/api/types.ts";
+import { createCaptureBudget } from "../../src/bodies/budget.ts";
+import { createBodyWriterHost } from "../../src/bodies/host.ts";
+import { spawnBodyWriter } from "../../src/bodies/spawn.ts";
+import type { WorkerInit } from "../../src/export/protocol.ts";
+import { createExportSupervisor } from "../../src/exportHost/supervisor.ts";
 import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
+import { fakeTimers, fakeWorker, flush } from "../exportHost/fakes.ts";
 
 /**
  * The console's mirror, pinned to the server's own type.
@@ -65,9 +73,77 @@ const _consoleAcceptsServerStatus: ConsoleSmartRouterModelStatus =
   {} as ServerSmartRouterModelStatus;
 const _serverAcceptsConsoleStatus: ServerSmartRouterModelStatus =
   {} as ConsoleSmartRouterModelStatus;
+const _consoleAcceptsBody: RequestBodyResponse = {} as BodyPreview;
+const _serverAcceptsBody: BodyPreview = {} as RequestBodyResponse;
 
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;
+
+test.each(["idle", "paused", "recovering"] as const)(
+  "settings commit and invalidate with real %s export supervisor; next owner gets latest gates",
+  async (state) => {
+    const clock = fakeTimers();
+    const workers: ReturnType<typeof fakeWorker>[] = [];
+    const inits: WorkerInit[] = [];
+    let count = state === "idle" ? 0 : 1;
+    const supervisor = createExportSupervisor({
+      init: {
+        databasePath: "/tmp/none.db",
+        databaseUrl: null,
+        encryptionKey: "k".repeat(32),
+        redisUrl: null,
+        nodeId: "test",
+        logLevel: "info",
+        exportBodiesAllowed: true,
+        gates: { bodyLoggingAllowed: true, bodyLoggingEnabled: false },
+      },
+      spawn(init) {
+        inits.push(structuredClone(init));
+        const worker = fakeWorker();
+        workers.push(worker);
+        return worker;
+      },
+      readDestinations: async () => ({ count, revision: String(count) }),
+      timers: clock,
+      now: () => clock.now,
+      logger: noopLogger,
+    });
+    try {
+      await supervisor.start();
+      if (state === "paused") await supervisor.pause();
+      if (state === "recovering") workers[0]?.die();
+      await flush();
+      const h = await harness({
+        bodyLoggingAllowed: true,
+        onBodyGatesChanged: (enabled) =>
+          supervisor.gatesChanged({ bodyLoggingAllowed: true, bodyLoggingEnabled: enabled }),
+      });
+      const response = await h.call("PUT", "/api/settings", {
+        ...(await h.store.config.getSettings()),
+        logRetentionDays: 7,
+        bodyLoggingEnabled: true,
+      });
+      expect(response.status).toBe(200);
+      expect((await h.store.config.getSettings()).logRetentionDays).toBe(7);
+      expect(h.topics).toContain("res:settings");
+      if (state === "idle") {
+        count = 1;
+        await supervisor.destinationsChanged();
+      }
+      if (state === "recovering") await clock.advance(1000);
+      if (state === "paused") {
+        await supervisor.resume(false);
+        expect(workers[0]?.posted).toContainEqual({
+          type: "gatesChanged",
+          gates: { bodyLoggingAllowed: true, bodyLoggingEnabled: true },
+        });
+      } else expect(inits.at(-1)?.gates.bodyLoggingEnabled).toBe(true);
+      h.store.close();
+    } finally {
+      supervisor.stop();
+    }
+  },
+);
 
 type HarnessOptions = {
   configured?: boolean;
@@ -89,6 +165,8 @@ type HarnessOptions = {
   logger?: AdminDeps["logger"];
   /** The process's quota operation, for the one route that drives it. */
   quota?: AdminDeps["quota"];
+  bodyWriter?: AdminDeps["bodyWriter"];
+  onBodyGatesChanged?: AdminDeps["onBodyGatesChanged"];
 };
 
 async function harness({
@@ -101,6 +179,8 @@ async function harness({
   consoleFleet,
   logger,
   quota,
+  bodyWriter,
+  onBodyGatesChanged,
 }: HarnessOptions = {}) {
   const store = provided ?? (await memoryStore());
   const admin = createAdminAuth(store, { now: () => now, sessionTtlMs: SESSION_TTL_MS });
@@ -123,6 +203,8 @@ async function harness({
   const topics: string[] = [];
 
   const app = adminRoutes({
+    ...(onBodyGatesChanged ? { onBodyGatesChanged } : {}),
+    ...(bodyWriter === undefined ? {} : { bodyWriter }),
     store,
     admin,
     baseUrl: "http://localhost:9000",
@@ -800,6 +882,24 @@ test("settings round-trip and reject an unknown weight", async () => {
   ).toBe(400);
 });
 
+test("settings changes resend current body gates only after a successful write", async () => {
+  const gates: boolean[] = [];
+  const h = await harness({ onBodyGatesChanged: (enabled) => gates.push(enabled) });
+  const current = (await (await h.call("GET", "/api/settings")).json()) as {
+    settings: Record<string, unknown>;
+  };
+  expect(
+    (await h.call("PUT", "/api/settings", { ...current.settings, bodyLoggingEnabled: true }))
+      .status,
+  ).toBe(200);
+  expect(gates).toEqual([true]);
+  expect(
+    (await h.call("PUT", "/api/settings", { ...current.settings, bodyLoggingEnabled: "invalid" }))
+      .status,
+  ).toBe(400);
+  expect(gates).toEqual([true]);
+});
+
 /**
  * The console draws its daily charts on this, so `/api/settings` reporting the
  * wrong one shifts every day boundary on the operator's screen away from the
@@ -1136,7 +1236,29 @@ async function bodyHarness(): Promise<{
     path: join(root, "omnigateway.db"),
     encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
   });
-  const { call } = await harness({ store });
+  const host = createBodyWriterHost({
+    spawn: () =>
+      spawnBodyWriter({
+        databasePath: join(root, "omnigateway.db"),
+        databaseUrl: null,
+        encryptionKey: "test-secret-value-for-unit-tests",
+      }),
+    bodies: store.bodies,
+    budget: createCaptureBudget(1024),
+    logger: noopLogger,
+    now: Date.now,
+    timers: {
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    },
+  });
+  await host.start();
+  const close = store.close.bind(store);
+  store.close = () => {
+    host.stop();
+    close();
+  };
+  const { call } = await harness({ store, bodyWriter: host });
   return { store, root, dir: join(root, "request_bodies"), call };
 }
 
@@ -1167,7 +1289,7 @@ type BodyResponse = {
   truncated: boolean;
   sizeBytes: number;
   at: number | null;
-  artifact: BodyArtifact | null;
+  parts: Array<{ part: string; preview: string }>;
 };
 
 test("a captured request's bodies are served decrypted to an admin", async () => {
@@ -1179,9 +1301,98 @@ test("a captured request's bodies are served decrypted to an admin", async () =>
     expect(response.status).toBe(200);
     const body = (await response.json()) as BodyResponse;
     expect(body.detailState).toBe("ready");
-    expect(body.artifact?.client.request).toEqual({ model: "fast" });
-    expect(body.artifact?.attempts[0]?.provider).toBe("anthropic");
+    expect(body.parts[0]?.preview).toBe('{"model":"fast"}');
+    expect(body.parts[2]?.part).toBe("attempt.1.request");
   } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("raw body download is exact JSON, no-store, and requires an admin session", async () => {
+  const { store, root, call } = await bodyHarness();
+  try {
+    await store.bodies.put(bodyArtifact());
+    const path = `/api/requests/${BODY_REQUEST_ID}/body/raw?part=client.request`;
+    const response = await call("GET", path);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(response.headers.get("content-disposition")).toContain("attachment");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).toBe('{"model":"fast"}');
+    const cancelled = await call("GET", path);
+    if (!cancelled.body) throw new Error("raw stream missing");
+    await cancelled.body.cancel();
+    expect(await (await call("GET", path)).text()).toBe('{"model":"fast"}');
+    expect((await call("GET", path, undefined, false)).status).toBe(401);
+    expect((await call("GET", `/api/requests/${BODY_REQUEST_ID}/body/raw?part=bad`)).status).toBe(
+      400,
+    );
+    expect(
+      (await call("GET", `/api/requests/${BODY_REQUEST_ID}/body/raw?part=attempt.9.request`))
+        .status,
+    ).toBe(404);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HTTP preview streams every escaped part without encoding or decoding bodies on main", async () => {
+  const { store, root, call } = await bodyHarness();
+  const text = "\u0000".repeat(400_000);
+  const pair = { request: text, response: text, truncated: false };
+  await store.bodies.put(
+    bodyArtifact({
+      client: pair,
+      attempts: [1, 2, 3].map((attempt) => ({
+        ...pair,
+        attempt,
+        provider: "test",
+        streamChunks: null,
+      })),
+    }),
+  );
+  const stringify = JSON.stringify;
+  const parse = JSON.parse;
+  const responseJson = Response.json;
+  const decrypt = crypto.subtle.decrypt;
+  try {
+    JSON.stringify = ((value: unknown, ...rest: unknown[]) => {
+      if (value && typeof value === "object" && "parts" in value)
+        throw new Error("main encoded preview");
+      const result = stringify(value, ...(rest as []));
+      if (result && Buffer.byteLength(result) > 1024 * 1024)
+        throw new Error("main encoded large body");
+      return result;
+    }) as typeof JSON.stringify;
+    JSON.parse = ((value: string) => {
+      if (Buffer.byteLength(value) > 1024 * 1024) throw new Error("main parsed large body");
+      return parse(value);
+    }) as typeof JSON.parse;
+    Response.json = (() => {
+      throw new Error("main Response.json");
+    }) as typeof Response.json;
+    crypto.subtle.decrypt = () => {
+      throw new Error("main decrypt");
+    };
+    store.bodies.get = () => {
+      throw new Error("main envelope fetch");
+    };
+    const response = await call("GET", `/api/requests/${BODY_REQUEST_ID}/body`);
+    expect(response.status).toBe(200);
+    const body = parse(await response.text()) as BodyPreview;
+    expect(body.parts).toHaveLength(9);
+    for (const part of body.parts.slice(0, 8)) {
+      expect(part.preview).toBe(stringify(text).slice(0, 1024 * 1024));
+      expect(part.sizeBytes).toBe(2_400_002);
+      expect(part.previewTruncated).toBe(true);
+    }
+  } finally {
+    JSON.stringify = stringify;
+    JSON.parse = parse;
+    Response.json = responseJson;
+    crypto.subtle.decrypt = decrypt;
     store.close();
     await rm(root, { recursive: true, force: true });
   }
@@ -1216,7 +1427,7 @@ test("a request that was never captured answers none rather than 404", async () 
     expect(response.status).toBe(200);
     const body = (await response.json()) as BodyResponse;
     expect(body.detailState).toBe("none");
-    expect(body.artifact).toBeNull();
+    expect(body.parts).toEqual([]);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -1233,7 +1444,7 @@ test("an artifact deleted underneath its row answers missing rather than 500", a
     expect(response.status).toBe(200);
     const body = (await response.json()) as BodyResponse;
     expect(body.detailState).toBe("missing");
-    expect(body.artifact).toBeNull();
+    expect(body.parts).toEqual([]);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -1250,7 +1461,7 @@ test("an artifact that no longer decrypts answers corrupt rather than 500", asyn
     expect(response.status).toBe(200);
     const body = (await response.json()) as BodyResponse;
     expect(body.detailState).toBe("corrupt");
-    expect(body.artifact).toBeNull();
+    expect(body.parts).toEqual([]);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

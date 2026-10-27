@@ -169,8 +169,8 @@ export function formatUsd(value: number): string {
  * A size on disk or on the wire, e.g. `0 B`, `3.1 KB`, `1.2 MB`.
  *
  * One decimal rather than a rounded figure, because the numbers this prints are
- * read against stated caps — 512 KB for one artifact, 64 KB for one string — and
- * "512 KB" against "511.8 KB" is the difference between bounded and bounding.
+ * read against a stated cap — 64 MiB for one artifact — and "64.0 MB" against
+ * "63.9 MB" is the difference between kept and omitted.
  * Bytes below a kilobyte stay bytes: `0 B` for a half that never happened has to
  * be visibly nothing, not `0.0 KB`.
  */

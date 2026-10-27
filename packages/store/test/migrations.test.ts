@@ -37,7 +37,14 @@ import keyGuardrail019 from "../src/sqlite/migrations/019_key_guardrail.sql" wit
 import keySmartRouting020 from "../src/sqlite/migrations/020_key_smart_routing.sql" with {
   type: "text",
 };
-import { createUsageRepo, EXPORT_FROM, NARROWED_SQL } from "../src/sqlite/usage.ts";
+import requestTrace021 from "../src/sqlite/migrations/021_request_trace.sql" with { type: "text" };
+import logExport022 from "../src/sqlite/migrations/022_log_export.sql" with { type: "text" };
+import {
+  createUsageRepo,
+  EXPORT_FROM,
+  FAIL_STALE_BODIES_SQL,
+  NARROWED_SQL,
+} from "../src/sqlite/usage.ts";
 
 type TableRow = { name: string };
 
@@ -63,6 +70,8 @@ const SQL_BY_ID = [
   modelWindowIndex018,
   keyGuardrail019,
   keySmartRouting020,
+  requestTrace021,
+  logExport022,
 ];
 
 /**
@@ -110,7 +119,7 @@ test("openDb applies migrations and records them", () => {
   }
   const applied = db.query<{ id: number }, []>("SELECT id FROM migrations").all();
   expect(applied.map((row) => row.id)).toEqual([
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
   ]);
   // 013 drops the two measurement columns; a row is decisions only.
   const healthColumns = db
@@ -397,6 +406,52 @@ test("migration 22 indexes completion, and the export read walks it in order", (
   db.close();
 });
 
+/**
+ * Migration 23 adds `body_state` with no backfill: a row logged before it never
+ * had its capture tracked, so it reads "not attempted" — never a guessed
+ * `ready` an export would go looking for, nor a `pending` one it would wait on.
+ */
+test("migration 23 leaves every request log that predates it with no body state", async () => {
+  const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
+  legacyDb(path, 23);
+
+  const legacy = new Database(path);
+  legacy.run(
+    `INSERT INTO request_logs (id, state, at, api_key_id, requested_model, attempts, status,
+                               input_tokens, output_tokens, cache_read_tokens,
+                               cache_write_tokens, duration_ms, cost_usd, completed_at)
+     VALUES ('done', 'done', 1, 'k1', 'fast', 1, 200, 1, 1, 0, 0, 1, 0, 2),
+            ('inflight', 'pending', 1, 'k1', 'fast', 0, 0, 0, 0, 0, 0, 0, 0, NULL)`,
+  );
+  legacy.close();
+
+  const db = openDb(path);
+  const usage = createUsageRepo(db, "node-test");
+  expect((await usage.get("done"))?.bodyState).toBeNull();
+  expect((await usage.get("inflight"))?.bodyState).toBeNull();
+  // And the hourly sweep, which runs at boot, finds nothing to fail among them.
+  await usage.sweepPending(Date.now());
+  expect((await usage.get("done"))?.bodyState).toBeNull();
+  db.close();
+});
+
+/**
+ * The hourly body sweep is an `UPDATE`, so a scan holds the writer lock every
+ * inference commit waits on for the length of the whole log. It must seek the
+ * partial index, which holds only the bodies in flight.
+ */
+test("migration 23 indexes pending bodies, and the body sweep seeks it", () => {
+  const db = openDb(":memory:");
+  const plan = db
+    .query<{ detail: string }, [number]>(`EXPLAIN QUERY PLAN ${FAIL_STALE_BODIES_SQL}`)
+    .all(0)
+    .map((row) => row.detail)
+    .join(" ");
+  expect(plan).toContain("idx_request_logs_body_pending");
+  expect(plan).not.toMatch(/\bSCAN request_logs\b/);
+  db.close();
+});
+
 test("migration 9 indexes request logs by key first, so a per-key window scan starts at the key", () => {
   const db = openDb(":memory:");
   // Composite order is the whole point: `(at DESC, api_key_id)` would not let a
@@ -552,7 +607,7 @@ test("openDb is idempotent across reopen", () => {
   const path = `/tmp/omni-test-${crypto.randomUUID()}.db`;
   openDb(path).close();
   const db = openDb(path);
-  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(22);
+  expect(db.query<{ id: number }, []>("SELECT id FROM migrations").all()).toHaveLength(23);
   db.close();
 });
 

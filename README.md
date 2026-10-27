@@ -399,6 +399,11 @@ Use `--db <path>` to point one command somewhere else.
 | `omni db vacuum` | rewrite the database, reclaiming the pages deletion left free |
 | `omni db clear-bodies` | delete every captured request and response body; the requests stay logged |
 
+Body JSON output (`omni bodies <id> --json`) contains a preview: the first 1 MiB of
+each part's serialized JSON, its full byte size, and `previewTruncated`. Add `--full`
+to print whole parts instead. The admin console shows the same previews and offers
+**Download full part** for the complete JSON. Body reads/downloads remain admin-only.
+
 Two worth knowing:
 
 `omni models dry-run fast` shows exactly where a request would go and why —
@@ -430,7 +435,9 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](docs/operations.md#recording-bodies) |
-| `OMNI_EXPORT_BODIES_ALLOWED` | No | unset | Reserved for exporting captured bodies to [log export](#exporting-request-logs) destinations, which is not available yet; export sends metadata only |
+| `OMNI_BODY_CAPTURE_BUDGET_BYTES` | No | `536870912` (512 MiB) | Retained capture-text and transfer-copy byte budget across in-flight/queued requests, not a process RSS ceiling. Exhaustion abandons capture without changing the response; admitted omissions say `capture budget exhausted`, counted in `omni_bodies_dropped_total{reason="budget"}` |
+| `OMNI_EXPORT_BODIES_ALLOWED` | No | unset | Boot opt-in for captured client body export; capture gates and destination opt-in must also hold |
+| `OMNI_EXPORT_BODY_BUDGET_BYTES` | No | `201326592` | Export-worker body allocation budget (192 MiB), one body at a time; conservative reservations can omit large bodies |
 | `OMNI_METRICS_TOKEN` | No | unset | Registers authenticated `GET /metrics`; unset means no route |
 | `OMNI_METRICS_MAX_SERIES` | No | `5000` | Series cap before new `api_key_id` values fold to `other` |
 | `OMNI_OTLP_ENDPOINT` | No | unset | Enables OTLP/HTTP span export to `<endpoint>/v1/traces` |
@@ -499,11 +506,45 @@ sent raise the gap warning. One documented limit: a completion whose write commi
 10 seconds after its timestamp can be passed over
 ([details](docs/operations.md#log-export)).
 
-**Metadata only.** A record is the row's metadata: timestamps, key id and label, requested and
+**Records.** A record is the row's metadata: timestamps, key id and label, requested and
 resolved model, provider, account id, status, error code, tokens, cost, latency, RTK figures,
 session, turn, agent, tags, metadata and request ids, as JSON with
-`"schema": "omni.request_log/v1"`. Body export is not available yet; the per-destination switch
-exists and is refused, and `OMNI_EXPORT_BODIES_ALLOWED` is reserved for it.
+`"schema": "omni.request_log/v1"`. Captured bodies additionally require the boot
+opt-in, both capture gates, a non-opted-out key and destination `includeBodies`.
+Only masked client request/response content leaves the store, never provider
+attempts. OTLP traces cannot enable bodies. Body-bearing OTLP logs use the complete JSON
+record as their inline string body; metadata-only logs retain the short title.
+Each HTTP send uses one consistent policy/destination snapshot for admission;
+later edits cannot retract an already-admitted send. Each segment is admitted anew
+([details](docs/operations.md#recording-bodies)).
+
+Bodies fit inline or follow as size-bounded segments. One body globally reserves
+decode buffers, worst-case UTF-16 strings, encoding trials and gzip workspace before
+the full artifact is read. The default 192 MiB budget can omit artifacts above
+approximately 2 MiB with Elasticsearch's default cap; raise
+`OMNI_EXPORT_BODY_BUDGET_BYTES` for larger artifacts (stored cap: 64 MiB).
+This accounts body allocations, not total process RSS or GC arenas.
+The conservative up-front reservation is
+`max(8E + 8P + 65536, 32P + 12S + 1048576 + 8M)` bytes, with
+`S = min(cap, 6P + 4M + 4096)`: `E` is encrypted envelope bytes, `P` plaintext artifact
+bytes, `M` encoded metadata bytes and `cap` the effective destination `maxRequestBytes`.
+This is a pinned-runtime allocation estimate, not a proof of native allocator peaks.
+
+**Sizing captured bodies.** A full 1M-token prompt is roughly 4–5 MB of JSON; each
+provider attempt also stores its request and response, so failover can double it.
+Coding agents resend the conversation every turn: volume tracks conversation length ×
+turns, and ten long-running agents can write several GB an hour. Size the SQLite volume
+or Postgres database for a day of traffic, or shorten body retention (default 1 day;
+100,000-row hard cap). The 64 MiB limit applies to the entire masked artifact, not just
+the prompt. Wire capture caps each side at 64 MiB: provider text retains a prefix;
+client SSE evicts oldest frames to retain recent ones and discards a lone oversized
+frame whole. Either loss marks capture truncated/incomplete.
+The default 512 MiB capture budget bounds accounted capture bytes; raise it if budget
+drops grow, leaving headroom for inference, workers and runtime allocations.
+Bun/Elysia defaults to a 128 MB request-body limit. For larger incoming requests,
+set `maxRequestBodySize` (bytes) in `apps/gateway/src/index.ts`'s `app.listen({...})`
+options, rebuild/redeploy, and adjust your reverse proxy too. There is no dedicated
+Omni environment setting for this server option; raising it does not raise the artifact cap.
 
 Add destinations on the console's **Export** page or with `omni export`. Up to ten; ids are
 `[a-z0-9-]{1,40}`. Secrets — API keys, passwords, secret headers, the webhook signing secret —
@@ -517,6 +558,8 @@ omni export add webhook hook --url https://hooks.example.com/omni --secret-file 
 omni export add otlp collector --endpoint http://otel:4318 --signal logs --start-from oldest
 omni export list                   # type, state, target, secret set / not set, filter
 omni export set es --filter-key key_ci --failed-only   # the filter is written whole
+omni export set es --bodies on      # preference only; all privacy gates must hold
+omni export set es --bodies off
 ```
 
 - **Start position.** `--start-from now` (the default) exports what completes from creation on;
@@ -529,7 +572,8 @@ omni export set es --filter-key key_ci --failed-only   # the filter is written w
   installations and refuses on a Postgres (cluster) one: use the console there.
 
 Rows go out 10–15 seconds after the request completes, in batches of at most 500 records or
-5 MiB. Lag, failures, the retention-gap warning, skip-to-now and what a restore does to export
+5 MiB for metadata-only batches; body-bearing rows are delivered individually and may
+use larger size-bounded requests. Lag, failures, the retention-gap warning, skip-to-now and what a restore does to export
 are in [docs/operations.md](docs/operations.md#log-export).
 
 **Elasticsearch / OpenSearch.** `_bulk` to `<url>/_bulk`, gzipped, one `index` action per row
@@ -577,6 +621,24 @@ PUT _index_template/omni-logs
 `metadata` keys are caller-supplied, hence `flattened` (OpenSearch: `flat_object`) rather than
 one mapped field per key. `dynamic: false` keeps any field added to the schema later in
 `_source` without mapping it.
+
+Segmented bodies use config `bodyIndex` (default `omni-bodies-{yyyy.MM.dd}`), stable
+`_id` = `<requestId>:<part>:<n>`. Keep their text in `_source`, not the search index:
+
+```
+PUT _index_template/omni-bodies
+{
+  "index_patterns": ["omni-bodies-*"],
+  "template": { "mappings": { "dynamic": false, "properties": {
+    "requestId": { "type": "keyword" }, "apiKeyId": { "type": "keyword" },
+    "at": { "type": "date" }, "part": { "type": "keyword" },
+    "segment": { "type": "integer" }, "segments": { "type": "integer" },
+    "text": { "type": "text", "index": false }
+  } } }
+}
+```
+
+Inline bodies remain in the metadata index's `_source` with the template above.
 
 **Webhook.** `POST` to the URL exactly as configured, uncompressed, with
 `{"schema":"omni.request_log/v1","records":[…]}`. Any 2xx accepts the batch; the response body is

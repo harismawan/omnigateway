@@ -126,8 +126,8 @@ test("a truncated artifact says so rather than reading as complete", async () =>
  * Every byte count this command prints names what it measured.
  *
  * Three different numbers are in play — what crossed the wire, what was stored
- * after masking and structural bounding, and the encrypted file — and only the
- * last two are recorded anywhere. The gap is not marginal: a payload made mostly
+ * after masking, and the encrypted file — and only the last two are recorded
+ * anywhere. The gap is not marginal: a payload made mostly
  * of one long opaque token is stored as an elision. A bare `69 B` beside a
  * request is therefore read as a request size and is wrong, so the frame says
  * `on disk` and the table says what its columns are.
@@ -143,7 +143,7 @@ test("the byte counts say what they measured rather than reading as request size
   // The table's figures are the stored payload, and the caption says so in the
   // columns' own words so it cannot be read as being about the frame.
   expect(result.out).toContain("REQUEST and RESPONSE are the stored payload");
-  expect(result.out).toContain("after masking and bounding");
+  expect(result.out).toContain("after masking");
   expect(result.out).toContain("neither is the size sent over the wire");
 });
 
@@ -171,7 +171,7 @@ test("--full names which side of RTK each payload it prints sits on", async () =
   expect(result.out).toContain("ATTEMPT 1 anthropic REQUEST (post-RTK)");
 });
 
-test("--json emits the artifact", async () => {
+test("--json emits the shared preview", async () => {
   const root = await installation();
   await capture(root);
 
@@ -179,14 +179,67 @@ test("--json emits the artifact", async () => {
   expect(result.code).toBe(0);
   const body = JSON.parse(result.out) as {
     detailState: string;
-    artifact: BodyArtifact | null;
+    parts: Array<{ part: string; preview: string }>;
   };
   expect(body.detailState).toBe("ready");
-  expect(body.artifact?.schemaVersion).toBe(1);
-  expect(body.artifact?.attempts[0]?.provider).toBe("anthropic");
+  expect(body.parts[0]?.part).toBe("client.request");
+  expect(body.parts[2]?.part).toBe("attempt.1.request");
   // The whole artifact, not a summary of it: `--json` is the scripting contract
   // and a script asked for the bodies.
   expect(result.out).toContain(MARKER);
+});
+
+test("--json bounds the preview while --json --full returns the whole serialized part", async () => {
+  const root = await installation();
+  const text = "é🙂 ".repeat(200_000);
+  await capture(
+    root,
+    artifact({ client: { request: text, response: null, truncated: false }, attempts: [] }),
+  );
+  const json = JSON.stringify(text);
+  const preview = await cli(["bodies", REQUEST_ID, "--json"], { root });
+  const read = JSON.parse(preview.out) as {
+    parts: Array<{ sizeBytes: number; preview: string; previewTruncated: boolean }>;
+  };
+  expect(read.parts[0]?.sizeBytes).toBe(Buffer.byteLength(json));
+  expect(read.parts[0]?.previewTruncated).toBe(true);
+  expect(Buffer.byteLength(read.parts[0]?.preview ?? "")).toBeLessThanOrEqual(1024 * 1024);
+  const full = await cli(["bodies", REQUEST_ID, "--json", "--full"], { root });
+  const whole = JSON.parse(full.out) as typeof read;
+  expect(whole.parts[0]?.preview).toBe(json);
+  expect(whole.parts[0]?.previewTruncated).toBe(false);
+});
+
+test("multi-attempt escaped artifacts work in text, full and JSON modes", async () => {
+  const root = await installation();
+  const text = "\u0000".repeat(400_000);
+  const pair = { request: text, response: text, truncated: false };
+  await capture(
+    root,
+    artifact({
+      client: pair,
+      attempts: [1, 2, 3].map((attempt) => ({
+        ...pair,
+        attempt,
+        provider: "test",
+        streamChunks: null,
+      })),
+    }),
+  );
+  for (const flags of [[], ["--full"], ["--json"], ["--json", "--full"]]) {
+    const result = await cli(["bodies", REQUEST_ID, ...flags], { root });
+    expect(result.code).toBe(0);
+    if (flags.includes("--json")) {
+      const body = JSON.parse(result.out) as {
+        parts: Array<{ preview: string; previewTruncated: boolean }>;
+      };
+      expect(body.parts).toHaveLength(9);
+      expect(body.parts[0]?.preview).toBe(
+        JSON.stringify(text).slice(0, flags.includes("--full") ? undefined : 1024 * 1024),
+      );
+      expect(body.parts[0]?.previewTruncated).toBe(!flags.includes("--full"));
+    } else expect(result.out).toContain("ATTEMPT 3");
+  }
 });
 
 /**

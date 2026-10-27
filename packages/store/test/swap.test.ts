@@ -2,20 +2,47 @@ import { expect, test } from "bun:test";
 import { mkdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bodiesDirFor, relPathFor, writeArtifact } from "../src/bodies/artifact.ts";
 import { deriveKey } from "../src/encryption.ts";
+import { openStore } from "../src/index.ts";
 import { createStore } from "../src/sqlite/store.ts";
 import {
   type ApiKeyInput,
   EMPTY_TRACE,
-  type RequestLog,
+  type NewRequestLog,
   type Store,
   UNSTAMPED,
 } from "../src/types.ts";
 
 const SECRET = "test-secret-value-for-unit-tests";
 
+test("openStore preserves the pending publication callback across reopen", async () => {
+  const root = `/tmp/opencode/body-pending-${crypto.randomUUID()}`;
+  await mkdir(root, { recursive: true });
+  const path = join(root, "main.sqlite");
+  const rel = relPathFor("pending", Date.now());
+  let protectedPath = true;
+  const store = await openStore({
+    path,
+    encryptionKey: await deriveKey(SECRET),
+    isPending: (candidate) => protectedPath && candidate === rel,
+  });
+  try {
+    await writeArtifact(bodiesDirFor(path), rel, new Uint8Array([1]));
+    expect(await store.bodies.sweepOrphans()).toBe(0);
+    store.close();
+    await store.reopen();
+    expect(await store.bodies.sweepOrphans()).toBe(0);
+    protectedPath = false;
+    expect(await store.bodies.sweepOrphans()).toBe(1);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /** A complete row, so a schema change breaks here once rather than in each test. */
-function logRow(id: string, at: number, apiKeyId: string | null): RequestLog {
+function logRow(id: string, at: number, apiKeyId: string | null): NewRequestLog {
   return {
     id,
     state: "done",

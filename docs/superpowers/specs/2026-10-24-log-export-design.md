@@ -393,13 +393,19 @@ still `pending` an hour after completion as `failed`.
   `omni_export_bodies_late_total` is counted. Destinations without `include_bodies` never wait.
 - **What is exported:** the client request and response (the pre-RTK client view, masked at
   capture). Provider attempts and stream chunks stay in the store.
-- **Gates, checked at send time for every record** — turning one off stops body export immediately,
-  even for artifacts captured earlier and still retained:
+- **Gates, checked at admission for every HTTP send**, even for artifacts captured earlier
+  and still retained:
   1. `OMNI_BODY_LOGGING_ALLOWED` and `settings.bodyLoggingEnabled`, as currently set;
   2. the row's key is not `bodyLoggingOptOut`;
   3. **`OMNI_EXPORT_BODIES_ALLOWED=true` at boot** — new, so a console admin alone cannot start
      sending prompt content to a third-party system;
-  4. the destination's `include_bodies` is on, set only by an admin.
+   4. the destination's `include_bodies` is on, set only by an admin.
+  One database statement snapshots settings, key existence/opt-out and destination
+  generation/revision/enabled/include-bodies after encoding. This is the policy linearization
+  point; the identity must match the prepared sender (including its config/secret revision).
+  Boot gates and local cancellation/deadline checks follow synchronously before transport.
+  A subsequent database edit cannot retract an already-admitted send. Every segment and replay
+  takes a new admission snapshot; cross-node changes need no local notification.
 - If any gate fails, the record carries no `body` field. When all hold, `body.state` is:
   - `"included"` — the artifact was read and is whole;
   - `"incomplete"` — read, but the artifact or the client side is `truncated` (client hung up, stream
@@ -425,6 +431,9 @@ documents**, joined by request id:
   batches.
 - **OTLP logs:** one LogRecord per part segment, body as the string value, request id and part as
   attributes. **OTLP traces** destinations cannot enable bodies (the API refuses it).
+  Inline body-bearing records use the complete JSON request record as
+  `LogRecord.body.stringValue`, retaining metadata attributes. Metadata-only records
+  retain their existing short title string.
 
 **Segmenting by encoded size.** Each destination has `maxRequestBytes` — the limit on the final
 encoded HTTP request, envelope and escaping included (defaults: Elasticsearch 90 MiB under its
@@ -451,17 +460,32 @@ worker-wide **body budget of 192 MiB** shared by all destinations, and admits on
     validated hex (`(envelope length − 65) / 2`, the AES-GCM plaintext being ciphertext minus tag),
     which bounds the plaintext exactly; these were written under the 512 KiB cap, so they are small.
 
-  The reservation is then `ciphertext + P` for decrypt and gunzip,
-  `2 × P` for the client text extracted as UTF-16 strings, and `maxRequestBytes` for one encoded
-  segment. The parsed tree is never built for export: the client request and response are extracted
+  **Implementation ruling (2026-10-27):** the previous formula undercounted simultaneous
+  strings, WebCrypto copies and gzip buffers. Reserve
+  `max(8E + 8P + 65536, 32P + 12S + 1048576 + 8M)` bytes, where `E` is envelope
+  bytes, `M` encoded metadata size, and `S = min(maxRequestBytes, 6P + 4M + 4096)`.
+  The decode branch covers envelope/decrypt/legacy-hex copies, expanded UTF-8,
+  worst-case UTF-16 source/client spans and scanner stack. The export branch covers
+  inline composition, nested OTLP quoting, retained slices, encoding trials, UTF-8,
+  incompressible gzip overhead and native workspace. Trials examine at most
+  `maxRequestBytes` code units; encoded segment arrays are never retained. This
+  accounts body allocations, not total RSS or GC arenas.
+  This is a conservative estimate for the pinned runtime, not a proof about all
+  native allocator internals. The real three-destination large-pipeline probe
+  records heap/external growth against a post-fixture GC baseline, wire-buffer
+  sizes, concurrent decodes, cancellation and replay; runtime upgrades must recheck
+  that evidence. Released attachments clear client references before slot handoff.
+  The parsed tree is never built for export: the client request and response are extracted
   by a streaming JSON scanner over the decrypted text that copies out only the two client fields, so
   no node-heavy object graph exists to under-estimate.
 - If that reservation exceeds the whole budget, the body is exported with `body.state: "omitted"`,
   reason `export budget`, counted — never partially sent. With the defaults this is an artifact over
-  ~40 MiB of plaintext on an Elasticsearch destination; operators exporting bodies that large raise
+  approximately 2 MiB of plaintext on a default Elasticsearch destination (less with
+  large metadata, more with a smaller receiver cap); operators exporting larger bodies raise
   `OMNI_EXPORT_BODY_BUDGET_BYTES`.
-- The decrypt/gunzip buffers are released as soon as the client text is extracted; the reservation
-  shrinks to the text plus one segment and is released entirely after the last segment is accepted.
+- Decode references leave scope after extraction. Keep the conservative reservation
+  without shrinking until the last segment is accepted or the pass ends; early release
+  must not rely on GC timing.
 - A batch never holds more than one record's body: rows with bodies are sent body by body (metadata
   for the rows before it go first in their own batch).
 - A pass checks for cancellation (lease loss, pause, stop) between segments and releases the
