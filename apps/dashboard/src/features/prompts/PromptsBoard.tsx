@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ApiError } from "../../api/client.ts";
 import { usePrompt, usePrompts, useStatus } from "../../api/queries.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import { Button } from "../../ui/Button.tsx";
@@ -26,6 +27,12 @@ export function PromptsBoard({
   const detail = usePrompt(creating ? "" : (selectedId ?? ""));
   const status = useStatus();
   const disabled = status.data?.principal?.kind !== "admin";
+  // BAD_REQUEST is the validated detail endpoint's missing-prompt response.
+  // A failed refetch retains data, but that cache must not outrank deletion.
+  const missing =
+    detail.isError &&
+    detail.error instanceof ApiError &&
+    (detail.error.status === 404 || detail.error.code === "BAD_REQUEST");
   const select = (nextId?: string, nextVersion?: string) => {
     setCreating(false);
     if (onSelect) {
@@ -85,15 +92,25 @@ export function PromptsBoard({
               onRemoved={() => select()}
             />
           ) : selectedId ? (
-            detail.data ? (
-              <PromptEditor
-                key={`${selectedId}@${selectedVersion ?? "current"}`}
-                detail={detail.data}
-                {...(selectedVersion === undefined ? {} : { version: selectedVersion })}
-                disabled={disabled}
-                onSaved={select}
-                onRemoved={() => select()}
-              />
+            missing ? (
+              <p role="status">Version unavailable</p>
+            ) : detail.data ? (
+              <>
+                {detail.isError ? (
+                  <p role="alert">
+                    Refresh failed. Showing the last fetched version; editing is disabled until a
+                    successful refresh.
+                  </p>
+                ) : null}
+                <PromptEditor
+                  key={`${selectedId}@${selectedVersion ?? "current"}`}
+                  detail={detail.data}
+                  {...(selectedVersion === undefined ? {} : { version: selectedVersion })}
+                  disabled={disabled || detail.isError}
+                  onSaved={select}
+                  onRemoved={() => select()}
+                />
+              </>
             ) : detail.isError ? (
               <p role="status">
                 {selectedVersion === undefined

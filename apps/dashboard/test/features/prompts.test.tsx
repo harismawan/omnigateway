@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useSetKeyPrompts } from "../../src/api/queries.ts";
 import { RailNav } from "../../src/components/RailNav.tsx";
@@ -46,6 +46,168 @@ function stubPrompts() {
   });
 }
 describe("Prompt Management", () => {
+  test("loaded historical detail is hidden after authoritative deletion, even with cached data", async () => {
+    const stub = stubPrompts();
+    const { client } = renderWithRouter(<PromptsBoard id="team" version="1" />);
+    await screen.findByDisplayValue("Original instructions");
+    stub.set("GET /api/prompts/team", () => ({
+      status: 400,
+      body: { error: { code: "BAD_REQUEST", message: "no such prompt" } },
+    }));
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["prompts"] });
+    });
+    await waitFor(() => expect(client.getQueryState(["prompts", "team"])?.status).toBe("error"));
+    await waitFor(() => expect(screen.queryByDisplayValue("Original instructions")).toBeNull());
+    expect(screen.getByText("Version unavailable")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save as draft" })).toBeNull();
+  });
+  test("transient historical refresh failure retains exact cached draft read-only and recovers", async () => {
+    const stub = stubPrompts();
+    const user = userEvent.setup();
+    const { client } = renderWithRouter(<PromptsBoard id="team" version="1" />);
+    const text = await screen.findByLabelText("Prompt text");
+    await user.type(text, " local");
+    stub.set("GET /api/prompts/team", () => ({
+      status: 503,
+      body: { error: { code: "INTERNAL", message: "temporary failure" } },
+    }));
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["prompts"] });
+    });
+    expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).value).toBe(
+      "Original instructions local",
+    );
+    await waitFor(() =>
+      expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).readOnly).toBe(true),
+    );
+    expect(screen.getByRole("button", { name: "Save as draft" }).hasAttribute("disabled")).toBe(
+      true,
+    );
+    expect(screen.getByText(/Refresh failed/)).toBeTruthy();
+    stub.set("GET /api/prompts/team", () => team);
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["prompts"] });
+    });
+    await waitFor(() =>
+      expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).readOnly).toBe(false),
+    );
+    expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).value).toBe(
+      "Original instructions local",
+    );
+  });
+  test("remote refresh synchronizes clean text and metadata", async () => {
+    const stub = stubPrompts();
+    const { client } = renderWithRouter(<PromptsBoard id="team" />);
+    await screen.findByDisplayValue(currentText);
+    stub.set("GET /api/prompts/team", () => ({
+      ...team,
+      name: "Remote name",
+      description: "Remote description",
+      activeVersion: 4,
+      versions: [{ version: 4, text: "Remote text", note: null, createdAt: 4 }, ...team.versions],
+    }));
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["prompts"] });
+    });
+    await screen.findByRole("button", { name: "Version 4" });
+    expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).value).toBe("Remote text");
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Remote name");
+    await waitFor(() =>
+      expect((screen.getByLabelText("Description") as HTMLTextAreaElement).value).toBe(
+        "Remote description",
+      ),
+    );
+  });
+  test("remote refresh preserves dirty fields and notes, flags conflicts, and still updates clean fields", async () => {
+    const stub = stubPrompts();
+    const user = userEvent.setup();
+    const { client } = renderWithRouter(<PromptsBoard id="team" />);
+    await screen.findByDisplayValue(currentText);
+    await user.type(screen.getByLabelText("Name"), " local");
+    await user.type(screen.getByLabelText("Prompt text"), " local");
+    await user.type(screen.getByLabelText("Change note"), "unsaved note");
+    stub.set("GET /api/prompts/team", () => ({
+      ...team,
+      name: "Remote name",
+      description: "Remote description",
+      activeVersion: 4,
+      versions: [{ version: 4, text: "Remote text", note: null, createdAt: 4 }, ...team.versions],
+    }));
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["prompts"] });
+    });
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Team rules local");
+    expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).value).toBe(
+      `${currentText} local`,
+    );
+    await waitFor(() =>
+      expect((screen.getByLabelText("Description") as HTMLTextAreaElement).value).toBe(
+        "Remote description",
+      ),
+    );
+    expect(screen.getByDisplayValue("unsaved note")).toBeTruthy();
+    expect(screen.getByText(/Changed remotely: Name, Prompt text/)).toBeTruthy();
+  });
+  for (const operation of ["create", "version", "metadata"] as const) {
+    test(`pending ${operation} locks fields until the submitted snapshot is acknowledged`, async () => {
+      const stub = stubPrompts();
+      let release: (value: Record<string, unknown>) => void = () => {
+        throw new Error("request not started");
+      };
+      const path =
+        operation === "create"
+          ? "POST /api/prompts"
+          : operation === "version"
+            ? "POST /api/prompts/team/versions"
+            : "PUT /api/prompts/team";
+      stub.set(
+        path,
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+      const user = userEvent.setup();
+      renderWithRouter(<PromptsBoard {...(operation === "create" ? {} : { id: "team" })} />);
+      if (operation === "create") {
+        await user.click(await screen.findByRole("button", { name: "New prompt" }));
+        await user.type(screen.getByLabelText("ID"), "team");
+        await user.type(screen.getByLabelText("Name"), "Team rules");
+        await user.type(screen.getByLabelText("Description"), "Shared rules");
+        await user.type(screen.getByLabelText("Prompt text"), currentText);
+      } else await screen.findByDisplayValue(currentText);
+      await user.click(
+        screen.getByRole("button", {
+          name: operation === "metadata" ? "Save metadata" : "Save as draft",
+        }),
+      );
+      await waitFor(() =>
+        expect(stub.calls.some((c) => `${c.init?.method} ${c.url}` === path)).toBe(true),
+      );
+      for (const label of ["Name", "Description", "Prompt text", "Change note"]) {
+        expect((screen.getByLabelText(label) as HTMLInputElement).readOnly).toBe(true);
+        await user.type(screen.getByLabelText(label), " later edits");
+      }
+      if (operation === "create")
+        expect((screen.getByLabelText("ID") as HTMLInputElement).readOnly).toBe(true);
+      await act(async () => {
+        release(
+          operation === "version"
+            ? { promptId: "team", version: 4, text: currentText, note: null, createdAt: 4 }
+            : team,
+        );
+      });
+      await waitFor(() =>
+        expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).readOnly).toBe(false),
+      );
+      expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).value).toBe(currentText);
+      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Team rules");
+      expect((screen.getByLabelText("Description") as HTMLTextAreaElement).value).toBe(
+        "Shared rules",
+      );
+    });
+  }
   test("rail puts Prompt Management after Keys before Usage", async () => {
     stubPrompts();
     renderWithRouter(<RailNav />);
@@ -185,13 +347,25 @@ describe("Prompt Management", () => {
       body: { error: { code: "INTERNAL", message: "Save failed" } },
     }));
     const user = userEvent.setup();
-    renderWithRouter(<PromptsBoard />);
+    const { client } = renderWithRouter(<PromptsBoard />);
     await user.click(await screen.findByRole("button", { name: "New prompt" }));
     await user.type(screen.getByLabelText("ID"), "new-rules");
     await user.type(screen.getByLabelText("Name"), "New rules");
     await user.type(screen.getByLabelText("Prompt text"), "New text");
     await user.click(screen.getByRole("button", { name: "Save and activate" }));
     await screen.findByRole("button", { name: "Version 1" });
+    await screen.findByText(/Refresh failed/);
+    stub.set("GET /api/prompts/new-rules", () => ({
+      ...team,
+      id: "new-rules",
+      versions: [{ version: 1, text: "New text", note: null, createdAt: 1 }],
+    }));
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["prompts"] });
+    });
+    await waitFor(() =>
+      expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).readOnly).toBe(false),
+    );
     await user.type(screen.getByLabelText("Prompt text"), " retry");
     await user.click(screen.getByRole("button", { name: "Save as draft" }));
     expect(await screen.findByText("Save failed")).toBeTruthy();

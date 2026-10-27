@@ -26,6 +26,24 @@ type Props = {
   onRemoved: () => void;
 };
 
+/** Rebase clean fields only; keep conflicting local edits until explicitly replaced. */
+function useSyncedField(remote: string) {
+  const [field, setField] = useState({ value: remote, baseline: remote, conflict: false });
+  if (remote !== field.baseline) {
+    const dirty = field.value !== field.baseline;
+    setField({
+      value: dirty ? field.value : remote,
+      baseline: remote,
+      conflict: dirty && field.value !== remote,
+    });
+  }
+  return [
+    field.value,
+    (value: string) => setField((previous) => ({ ...previous, value })),
+    field.conflict && field.value !== remote,
+  ] as const;
+}
+
 export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: Props) {
   const selected =
     version === undefined
@@ -33,9 +51,11 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
       : detail?.versions.find((v) => String(v.version) === version);
   const [id, setId] = useState(detail?.id ?? "");
   const [persistedId, setPersistedId] = useState(detail?.id);
-  const [name, setName] = useState(detail?.name ?? "");
-  const [description, setDescription] = useState(detail?.description ?? "");
-  const [text, setText] = useState(selected?.text ?? "");
+  const [name, setName, nameConflict] = useSyncedField(detail?.name ?? "");
+  const [description, setDescription, descriptionConflict] = useSyncedField(
+    detail?.description ?? "",
+  );
+  const [text, setText, textConflict] = useSyncedField(selected?.text ?? "");
   const [note, setNote] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -51,7 +71,12 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
   const duplicate = useDuplicatePrompt();
   const remove = useRemovePrompt();
   const client = useQueryClient();
-  const readonly = disabled || detail?.builtin === true;
+  const readonly = disabled || busy || detail?.builtin === true;
+  const conflicts = [
+    nameConflict ? "Name" : null,
+    descriptionConflict ? "Description" : null,
+    textConflict ? "Prompt text" : null,
+  ].filter((field) => field !== null);
   const unavailable = version !== undefined && selected === undefined;
   const run = async (action: () => Promise<void>) => {
     if (disabled || busy) return;
@@ -125,6 +150,12 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
   if (unavailable) return <p role="status">Version unavailable</p>;
   return (
     <Stack $gap={3}>
+      {conflicts.length ? (
+        <p role="alert">
+          Changed remotely: {conflicts.join(", ")}. Your unsaved changes are preserved; review
+          before saving.
+        </p>
+      ) : null}
       {unavailable ? (
         <p role="status">Version unavailable</p>
       ) : (
@@ -136,6 +167,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
                   {...props}
                   value={id}
                   disabled={disabled || persistedId !== undefined}
+                  readOnly={busy}
                   maxLength={40}
                   onChange={(e) => setId(e.target.value)}
                 />
@@ -201,7 +233,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
                   <Input
                     {...props}
                     value={note}
-                    readOnly={disabled}
+                    readOnly={disabled || busy}
                     maxLength={200}
                     onChange={(e) => setNote(e.target.value)}
                   />
@@ -255,6 +287,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
                   <Input
                     {...props}
                     value={copyId}
+                    readOnly={disabled || busy}
                     maxLength={40}
                     onChange={(e) => setCopyId(e.target.value)}
                   />
@@ -265,6 +298,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
                   <Input
                     {...props}
                     value={copyName}
+                    readOnly={disabled || busy}
                     maxLength={80}
                     onChange={(e) => setCopyName(e.target.value)}
                   />
@@ -296,7 +330,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
           {detail.versions.map((v) => (
             <Stack $gap={1} key={v.version}>
               <Row $gap={1} $wrap>
-                <Button onClick={() => onSaved(detail.id, String(v.version))}>
+                <Button disabled={busy} onClick={() => onSaved(detail.id, String(v.version))}>
                   Version {v.version}
                 </Button>
                 <span>
