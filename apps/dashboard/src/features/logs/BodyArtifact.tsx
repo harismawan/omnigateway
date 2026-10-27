@@ -152,6 +152,19 @@ function BodyBlock({ title, stage, value, requestId }: BodyBlockProps) {
 }
 
 function Artifact({ body }: { body: RequestBodyResponse }) {
+  if (body.bodyState === "pending" || body.bodyState === "failed") {
+    const pending = body.bodyState === "pending";
+    return (
+      <Stack $gap={1}>
+        <Legend>{pending ? "Capture pending" : "Capture failed"}</Legend>
+        <Note>
+          {pending
+            ? "The body writer has not published this capture yet. This panel checks again automatically while open."
+            : "Body capture was attempted, but the writer could not publish an artifact. The body is unavailable."}
+        </Note>
+      </Stack>
+    );
+  }
   if (body.parts.length === 0) {
     const absence = ABSENCE[body.detailState === "ready" ? "corrupt" : body.detailState];
     return (

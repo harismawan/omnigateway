@@ -627,10 +627,9 @@ export function useLogSessions(
 /**
  * One request's captured bodies.
  *
- * Fetched only while a row is expanded, and never polled: an artifact is written
- * once, at the end of the request, and nothing rewrites it afterwards. It is
- * also the largest and most sensitive thing this console can ask for, which is
- * reason enough not to put it on a two-second timer beside the log itself.
+ * Only active pending captures poll (one second, foreground only). Publication
+ * is asynchronous after request completion; terminal previews are large and
+ * stay outside general log churn. Errors stop polling and expose manual retry.
  *
  * `enabled` is false with no row open, so closing the modal stops the fetch
  * rather than leaving a request in flight for a body nobody is looking at.
@@ -641,7 +640,8 @@ export function useRequestBody(requestId: string | null): UseQueryResult<Request
     enabled: requestId !== null,
     queryFn: ({ signal }) =>
       get<RequestBodyResponse>(`/api/requests/${encodeURIComponent(requestId ?? "")}/body`, signal),
-    refetchInterval: false,
+    refetchInterval: (query) =>
+      query.state.status !== "error" && query.state.data?.bodyState === "pending" ? 1_000 : false,
   });
 }
 

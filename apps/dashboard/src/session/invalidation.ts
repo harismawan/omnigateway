@@ -27,11 +27,9 @@ export const CONSOLE_TOPIC = "stream:console";
  * ## Why `res:logs` carries a predicate
  *
  * `queryKeys.requestBody(id)` is `["logs", "body", id]`, which is under the
- * `["logs"]` prefix and is not a log listing. A captured body is written once at
- * the end of a request and never rewritten, and its query is disabled unless a
- * row is open — so invalidating it means refetching the largest and most
- * sensitive thing this console can ask for, on the hottest topic in the system,
- * for a body that cannot have changed. The predicate excludes it by name.
+ * `["logs"]` prefix and is not a log listing. Pending captures poll only while
+ * open until asynchronous publication is terminal. Terminal previews are large
+ * and immutable, so the hottest topic excludes body queries by name.
  */
 export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
   /**
