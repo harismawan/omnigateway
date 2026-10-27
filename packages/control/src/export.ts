@@ -172,6 +172,7 @@ export const elasticsearchConfigSchema = z
   .object({
     url: baseUrlSchema,
     index: indexPatternSchema.default(DEFAULT_INDEX_PATTERN),
+    bodyIndex: indexPatternSchema.default("omni-bodies-{yyyy.MM.dd}"),
     auth: z.enum(["apiKey", "basic", "none"]),
     flavor: z.enum(["elasticsearch", "opensearch"]).default("elasticsearch"),
   })
@@ -556,9 +557,8 @@ export async function setDestinationBodies(
   const current = await existing(store, id);
   if (include) {
     if (current.type === "otlp" && current.config.signal === "traces") throw bad(TRACES_BODIES);
-    throw bad("body export is not available yet");
   }
-  const updated = await store.exportDestinations.update(id, { includeBodies: false });
+  const updated = await store.exportDestinations.update(id, { includeBodies: include });
   if (updated === null) throw bad(NO_SUCH);
   return summarize(updated);
 }

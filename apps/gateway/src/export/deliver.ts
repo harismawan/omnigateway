@@ -20,6 +20,7 @@ import {
   BULK_CONTENT_TYPE,
   BULK_ENVELOPE,
   bulkPart,
+  indexName,
   OTHER_ERROR_TYPE,
   readBulkResponse,
   retryableStatus,
@@ -29,11 +30,12 @@ import {
   OTLP_PATHS,
   type OtlpSignal,
   otlpBody,
+  otlpBodyPart,
   otlpPart,
   readOtlpResponse,
 } from "./encoders/otlp.ts";
 import { sign, WEBHOOK_ENVELOPE, webhookBody, webhookPart } from "./encoders/webhook.ts";
-import type { RequestRecord } from "./record.ts";
+import { type RequestRecord, recordJson } from "./record.ts";
 
 /**
  * One destination's delivery: from its stored row and opened secret to the
@@ -131,6 +133,15 @@ export class IndexRefusedError extends Error {
 }
 
 export type Sender = {
+  maxRequestBytes?: number;
+  rawPart?: (record: RequestRecord, client: { request: string; response: string }) => string;
+  bodySegment?: (
+    record: RequestRecord,
+    part: "request" | "response",
+    text: string,
+    n: number,
+    of: number,
+  ) => { sender: Sender; part: string };
   type: ExportDestination["type"];
   url: string;
   /** Lower-case names. Secret values live here and nowhere else. */
@@ -194,6 +205,44 @@ function limitsFor(d: ExportDestination): BatchLimits {
  * a destination is never sent with partial credentials.
  */
 export function prepare(d: ExportDestination, secretText: string | null): Prepared {
+  const result = prepareMetadata(d, secretText);
+  if (!result.ok) return result;
+  const sender = result.sender;
+  sender.maxRequestBytes = d.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES[d.type];
+  sender.rawPart = (record, client) => {
+    const json = recordJson(record, client);
+    if (d.type === "webhook") return json;
+    if (d.type === "elasticsearch") return `${sender.part(record).split("\n")[0]}\n${json}\n`;
+    return otlpPart(record, "logs", json);
+  };
+  sender.bodySegment = (record, part, text, n, of) => {
+    if (d.type === "webhook")
+      return {
+        sender: {
+          ...sender,
+          gzip: false,
+          body: (parts) => parts.join(""),
+          headers: {
+            ...sender.headers,
+            "x-omni-request-id": record.id,
+            "x-omni-body-part": part,
+            "x-omni-body-segment": String(n),
+            "x-omni-body-segments": String(of),
+          },
+        },
+        part: text,
+      };
+    if (d.type === "otlp") return { sender, part: otlpBodyPart(record, part, text, n, of) };
+    const config = elasticsearchConfigSchema.parse(d.config);
+    return {
+      sender,
+      part: `${JSON.stringify({ index: { _index: indexName(config.bodyIndex, Date.parse(record.at)), _id: `${record.id}:${part}:${n}` } })}\n${JSON.stringify({ requestId: record.id, apiKeyId: record.apiKey.id, at: record.at, part, segment: n, segments: of, text })}\n`,
+    };
+  };
+  return result;
+}
+
+function prepareMetadata(d: ExportDestination, secretText: string | null): Prepared {
   if (d.filterMalformed) return refuse(REFUSALS.filter);
   const secret = secretJson(secretText);
   if (secret === UNREADABLE) return refuse(REFUSALS.secret);

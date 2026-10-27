@@ -203,8 +203,35 @@ function envelope(signal: OtlpSignal): BatchEnvelope {
 }
 
 /** One span or log record, encoded. */
-export function otlpPart(record: RequestRecord, signal: OtlpSignal): string {
-  return JSON.stringify(signal === "traces" ? span(record) : logRecord(record));
+export function otlpPart(record: RequestRecord, signal: OtlpSignal, raw?: string): string {
+  return JSON.stringify(
+    signal === "traces"
+      ? span(record)
+      : { ...logRecordObject(record), ...(raw ? { body: str(raw) } : {}) },
+  );
+}
+
+function logRecordObject(record: RequestRecord): Record<string, unknown> {
+  return logRecord(record) as Record<string, unknown>;
+}
+
+export function otlpBodyPart(
+  record: RequestRecord,
+  part: string,
+  text: string,
+  n: number,
+  of: number,
+): string {
+  return JSON.stringify({
+    timeUnixNano: nanos(Date.parse(record.at)),
+    body: str(text),
+    attributes: [
+      { key: "omni.request.id", value: str(record.id) },
+      { key: "omni.body.part", value: str(part) },
+      { key: "omni.body.segment", value: num(n) },
+      { key: "omni.body.segments", value: num(of) },
+    ],
+  });
 }
 
 /** The request body from parts already encoded by {@link otlpPart}, as the batcher cut them. */

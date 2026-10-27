@@ -37,6 +37,8 @@ const COUNTERS: ReadonlyArray<{
   { key: "batchesRetry", name: "omni_export_batches_total", outcome: "retry" },
   { key: "batchesFailed", name: "omni_export_batches_total", outcome: "failed" },
   { key: "gapWarnings", name: "omni_export_gap_warnings_total" },
+  { key: "bodiesLate", name: "omni_export_bodies_late_total" },
+  { key: "bodiesBudget", name: "omni_export_bodies_omitted_total" },
 ];
 
 const PER_DESTINATION: readonly MetricName[] = [
@@ -44,6 +46,8 @@ const PER_DESTINATION: readonly MetricName[] = [
   "omni_export_batches_total",
   "omni_export_lag_seconds",
   "omni_export_gap_warnings_total",
+  "omni_export_bodies_late_total",
+  "omni_export_bodies_omitted_total",
 ];
 
 export function createExportMetrics(registry: MetricRegistry): ExportMetrics {
@@ -67,7 +71,7 @@ export function createExportMetrics(registry: MetricRegistry): ExportMetrics {
           const labels =
             outcome === undefined ? { destination: d.id } : { destination: d.id, outcome };
           // Touched even at zero, so every outcome series exists from the first status.
-          registry.add(name, labels, Math.max(0, d.counters[key] - (last?.[key] ?? 0)));
+          registry.add(name, labels, Math.max(0, (d.counters[key] ?? 0) - (last?.[key] ?? 0)));
         }
         if (d.lagMs === null) {
           registry.drop("omni_export_lag_seconds", (labels) => labels.destination === d.id);

@@ -994,6 +994,7 @@ export type ExportWorkerState =
 export type ExportWorkerView = { state: ExportWorkerState; restarts: number };
 
 export type ExportDestinationsResponse = {
+  exportBodiesAllowed: boolean;
   destinations: ExportDestinationView[];
   worker: ExportWorkerView;
 };

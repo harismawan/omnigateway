@@ -20,6 +20,7 @@ import type { ExportDestinationType } from "@omni/store/types";
 
 /** What the worker is started with: `new Worker(url, { workerData: init })`. */
 export type WorkerInit = {
+  bodyBudgetBytes?: number;
   /** SQLite main file. Exactly one of `databasePath` and `databaseUrl` is set. */
   databasePath: string | null;
   /** Postgres URL (cluster mode). */
@@ -37,7 +38,7 @@ export type WorkerInit = {
 };
 
 /** The body-capture gates the worker cannot read for itself. Unused until body export ships. */
-export type BodyGates = { bodyLoggingAllowed: boolean };
+export type BodyGates = { bodyLoggingAllowed: boolean; bodyLoggingEnabled?: boolean };
 
 // --- main → worker -------------------------------------------------------
 
@@ -97,6 +98,8 @@ export type DestinationCounters = {
   batchesRetry: number;
   batchesFailed: number;
   gapWarnings: number;
+  bodiesLate?: number;
+  bodiesBudget?: number;
 };
 
 export type DestinationStatus = {

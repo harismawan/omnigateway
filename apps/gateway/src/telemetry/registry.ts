@@ -19,6 +19,8 @@ export type MetricName =
   | "omni_export_batches_total"
   | "omni_export_lag_seconds"
   | "omni_export_gap_warnings_total"
+  | "omni_export_bodies_late_total"
+  | "omni_export_bodies_omitted_total"
   | "omni_export_worker_restarts_total"
   | "omni_bodies_dropped_total"
   | "omni_build_info";
@@ -90,6 +92,14 @@ const DEFINITIONS: Readonly<
   },
   omni_export_gap_warnings_total: {
     help: "Times a destination fell within a day of log retention.",
+    type: "counter",
+  },
+  omni_export_bodies_late_total: {
+    help: "Pending bodies exported unavailable after sixty seconds.",
+    type: "counter",
+  },
+  omni_export_bodies_omitted_total: {
+    help: "Bodies omitted by the export memory budget.",
     type: "counter",
   },
   omni_export_worker_restarts_total: {

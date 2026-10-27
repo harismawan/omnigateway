@@ -95,6 +95,8 @@ export type AppDeps = {
    * flips mid-incident, and this is the half that says they may.
    */
   bodyLoggingAllowed?: boolean;
+  exportBodiesAllowed?: boolean;
+  onBodyGatesChanged?: (enabled: boolean) => void;
   /**
    * The process-wide capture budget (`OMNI_BODY_CAPTURE_BUDGET_BYTES`). Built
    * by boot, one per process; absent, the proxy routes make one at the default.
@@ -483,6 +485,7 @@ export function createApp(deps: AppDeps) {
       )
       .use(
         adminRoutes({
+          ...(deps.onBodyGatesChanged ? { onBodyGatesChanged: deps.onBodyGatesChanged } : {}),
           ...(deps.bodyWriter === undefined ? {} : { bodyWriter: deps.bodyWriter }),
           store: deps.store,
           admin,
@@ -543,6 +546,7 @@ export function createApp(deps: AppDeps) {
           store: deps.store,
           admin,
           worker: deps.exportWorker ?? absentExportWorker,
+          exportBodiesAllowed: deps.exportBodiesAllowed === true,
           broadcaster,
           logger,
         }),

@@ -361,7 +361,11 @@ async function main(): Promise<void> {
       nodeId,
       logLevel: config.logLevel,
       exportBodiesAllowed: config.exportBodiesAllowed,
-      gates: { bodyLoggingAllowed: config.bodyLoggingAllowed },
+      bodyBudgetBytes: config.exportBodyBudgetBytes,
+      gates: {
+        bodyLoggingAllowed: config.bodyLoggingAllowed,
+        bodyLoggingEnabled: (await store.config.getSettings()).bodyLoggingEnabled,
+      },
     },
     spawn: spawnExportWorker,
     readDestinations: async () => {
@@ -408,6 +412,12 @@ async function main(): Promise<void> {
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
     pluginUi: loadedPlugins.plugins,
     exportWorker,
+    exportBodiesAllowed: config.exportBodiesAllowed,
+    onBodyGatesChanged: (enabled) =>
+      exportWorker.gatesChanged({
+        bodyLoggingAllowed: config.bodyLoggingAllowed,
+        bodyLoggingEnabled: enabled,
+      }),
     // Only when something could receive one. `finishLog` builds the payload
     // before calling this, so passing it unconditionally would allocate a
     // RequestCompleted on every authenticated request of every install — and

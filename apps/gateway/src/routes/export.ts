@@ -38,6 +38,7 @@ export type ExportWorkerHandle = Pick<
 >;
 
 export type ExportRouteDeps = {
+  exportBodiesAllowed?: boolean;
   store: Store;
   admin: AdminAuth;
   worker: ExportWorkerHandle;
@@ -143,13 +144,18 @@ export function exportRoutes(deps: ExportRouteDeps) {
         await requireReader(request, deps.admin);
         return {
           destinations: (await listDestinations(deps.store)).map(view),
+          exportBodiesAllowed: deps.exportBodiesAllowed === true,
           worker: worker(),
         };
       })
 
       .get("/api/export/destinations/:id", async ({ request, params }) => {
         await requireReader(request, deps.admin);
-        return { destination: view(await getDestination(deps.store, params.id)), worker: worker() };
+        return {
+          destination: view(await getDestination(deps.store, params.id)),
+          worker: worker(),
+          exportBodiesAllowed: deps.exportBodiesAllowed === true,
+        };
       })
 
       .post("/api/export/destinations", async ({ request }) => {

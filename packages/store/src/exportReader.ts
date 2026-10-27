@@ -1,6 +1,15 @@
 import { Database } from "bun:sqlite";
+import { open } from "node:fs/promises";
+import { join } from "node:path";
 import { noopLogger } from "@omni/ir";
 import type { SQL } from "bun";
+import {
+  acquireArtifact,
+  artifactPlaintextLength,
+  bodiesDirFor,
+  MAX_ENVELOPE_BYTES,
+  openArtifactText,
+} from "./bodies/artifact.ts";
 import { createConfigRepo as pgConfig } from "./postgres/config.ts";
 import type { Rows } from "./postgres/db.ts";
 import { createExportDestinationRepo as pgDestinations } from "./postgres/exportDestinations.ts";
@@ -28,6 +37,16 @@ import type { ExportDestination, ExportPageQuery, RequestLog, Settings } from ".
  * root: the gateway pins that only the export worker imports it.
  */
 export type ExportReader = {
+  bodyProbe(id: string): Promise<{ encryptedBytes: number; plaintextBytes: number } | null>;
+  bodyEnvelope(
+    id: string,
+    maxBytes?: number,
+  ): Promise<{ bytes: Uint8Array; sha256: string | null; truncated: boolean } | null>;
+  bodyText(
+    envelope: { bytes: Uint8Array; sha256: string | null },
+    expectedPlaintextBytes?: number,
+  ): Promise<string | null>;
+  keyBodyOptOut(id: string): Promise<boolean>;
   /** Every destination, by id, never with its secret. */
   destinations(): Promise<ExportDestination[]>;
   /**
@@ -78,6 +97,50 @@ export function openSqliteExportReader(
   const destinations = createExportDestinationRepo(db, key);
   let closed = false;
   return {
+    async bodyProbe(id) {
+      const row = db
+        .query<{ rel_path: string | null }, [string]>(
+          "SELECT rel_path FROM request_bodies WHERE request_id = ?",
+        )
+        .get(id);
+      if (!row?.rel_path) return null;
+      const file = await open(join(bodiesDirFor(path), row.rel_path), "r").catch(() => null);
+      if (!file) return null;
+      try {
+        const { size } = await file.stat();
+        const header = new Uint8Array(10);
+        await file.read(header, 0, 10, 0);
+        const plaintextBytes = artifactPlaintextLength(header, size);
+        return plaintextBytes === null ? null : { encryptedBytes: size, plaintextBytes };
+      } finally {
+        await file.close();
+      }
+    },
+    async bodyEnvelope(id, maxBytes = MAX_ENVELOPE_BYTES) {
+      const row = db
+        .query<{ rel_path: string | null; sha256: string | null; truncated: number }, [string]>(
+          "SELECT rel_path, sha256, truncated FROM request_bodies WHERE request_id = ?",
+        )
+        .get(id);
+      if (!row?.rel_path) return null;
+      const bytes = await acquireArtifact(join(bodiesDirFor(path), row.rel_path), maxBytes);
+      return bytes instanceof Uint8Array
+        ? { bytes, sha256: row.sha256, truncated: Boolean(row.truncated) }
+        : null;
+    },
+    bodyText: (envelope, expected) =>
+      expected !== undefined && artifactPlaintextLength(envelope.bytes) !== expected
+        ? Promise.resolve(null)
+        : openArtifactText(key, envelope.bytes, envelope.sha256),
+    async keyBodyOptOut(id) {
+      return (
+        db
+          .query<{ opt: number }, [string]>(
+            "SELECT body_logging_opt_out AS opt FROM api_keys WHERE id = ?",
+          )
+          .get(id)?.opt !== 0
+      );
+    },
     destinations: () => destinations.list(),
     destinationWithSecret: (id) => destinations.openWithSecret(id),
     settings: () => config.getSettings(),
@@ -102,6 +165,41 @@ export function createPostgresExportReader(sql: SQL, key: CryptoKey): ExportRead
   const keys = pgKeys(sql, noopLogger);
   const destinations = pgDestinations(sql, key);
   return {
+    async bodyProbe(id) {
+      const row = (
+        await sql.unsafe<Rows<{ header: Uint8Array; size: number | string }>>(
+          "SELECT substring(bytes from 1 for 10) AS header, octet_length(bytes) AS size FROM request_bodies WHERE request_id = $1",
+          [id],
+        )
+      )[0];
+      if (!row?.header) return null;
+      const plaintextBytes = artifactPlaintextLength(row.header, Number(row.size));
+      return plaintextBytes === null ? null : { encryptedBytes: Number(row.size), plaintextBytes };
+    },
+    async bodyEnvelope(id, maxBytes = MAX_ENVELOPE_BYTES) {
+      const row = (
+        await sql.unsafe<
+          Rows<{ bytes: Uint8Array | null; sha256: string | null; truncated: boolean }>
+        >(
+          "SELECT CASE WHEN octet_length(bytes) <= $2 THEN bytes ELSE NULL END AS bytes, sha256, truncated FROM request_bodies WHERE request_id = $1",
+          [id, Math.min(maxBytes, MAX_ENVELOPE_BYTES)],
+        )
+      )[0];
+      return row?.bytes ? { bytes: row.bytes, sha256: row.sha256, truncated: row.truncated } : null;
+    },
+    bodyText: (envelope, expected) =>
+      expected !== undefined && artifactPlaintextLength(envelope.bytes) !== expected
+        ? Promise.resolve(null)
+        : openArtifactText(key, envelope.bytes, envelope.sha256),
+    async keyBodyOptOut(id) {
+      const row = (
+        await sql.unsafe<Rows<{ opt: boolean }>>(
+          "SELECT body_logging_opt_out AS opt FROM api_keys WHERE id = $1",
+          [id],
+        )
+      )[0];
+      return row?.opt !== false;
+    },
     destinations: () => destinations.list(),
     destinationWithSecret: (id) => destinations.openWithSecret(id),
     settings: () => config.getSettings(),

@@ -104,6 +104,8 @@ export function row(
 }
 
 export type World = {
+  bodies: Map<string, string>;
+  optOut: Set<string>;
   clock: FakeClock;
   rows: RequestLog[];
   destinations: ExportDestination[];
@@ -158,6 +160,8 @@ export function world(
     statePath?: string;
     reader?: Pick<World, "rows" | "destinations" | "settings" | "secrets" | "labels">;
     clock?: FakeClock;
+    bodies?: boolean;
+    budget?: number;
   } = {},
 ): World & { statePath: string } {
   const clock = (opts.clock as ReturnType<typeof fakeClock> | undefined) ?? fakeClock(T0);
@@ -165,6 +169,8 @@ export function world(
   const statePath = opts.statePath ?? join(dir, "export.db");
   const shared = opts.reader;
   const w = {
+    bodies: new Map<string, string>(),
+    optOut: new Set<string>(),
     clock,
     rows: shared?.rows ?? [...(opts.rows ?? [])],
     destinations: shared?.destinations ?? [...(opts.destinations ?? [destination()])],
@@ -188,6 +194,20 @@ export function world(
   w.statePath = statePath;
 
   const reader: ExportReader = {
+    bodyProbe: async (id) => {
+      const text = w.bodies.get(id);
+      return text === undefined
+        ? null
+        : { encryptedBytes: Buffer.byteLength(text), plaintextBytes: Buffer.byteLength(text) };
+    },
+    bodyEnvelope: async (id) => {
+      const text = w.bodies.get(id);
+      return text === undefined
+        ? null
+        : { bytes: new TextEncoder().encode(text), sha256: null, truncated: false };
+    },
+    bodyText: async (envelope) => new TextDecoder().decode(envelope.bytes),
+    keyBodyOptOut: async (id) => w.optOut.has(id),
     destinations: async () => {
       await w.beforeDestinations();
       return w.destinations.map((d) => ({ ...d }));
@@ -284,6 +304,9 @@ export function world(
     await w.settle();
   };
   w.loop = createExportLoop({
+    exportBodiesAllowed: opts.bodies === true,
+    gates: { bodyLoggingAllowed: opts.bodies === true, bodyLoggingEnabled: opts.bodies === true },
+    ...(opts.budget === undefined ? {} : { bodyBudgetBytes: opts.budget }),
     open: async () => {
       w.opens += 1;
       const real = openSqliteExportState(statePath);

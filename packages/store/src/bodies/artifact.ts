@@ -455,7 +455,10 @@ export async function readArtifact(
  * A file too large to read is `corrupt` — the bytes exist — while one that cannot
  * be opened or read is `missing`, as it always was.
  */
-async function acquireArtifact(path: string): Promise<Uint8Array | ArtifactFailure> {
+export async function acquireArtifact(
+  path: string,
+  maxBytes = MAX_ENVELOPE_BYTES,
+): Promise<Uint8Array | ArtifactFailure> {
   let handle: FileHandle;
   try {
     handle = await open(path, "r");
@@ -464,7 +467,7 @@ async function acquireArtifact(path: string): Promise<Uint8Array | ArtifactFailu
   }
   try {
     const { size } = await handle.stat();
-    if (size > MAX_ENVELOPE_BYTES) return "corrupt";
+    if (size > Math.min(MAX_ENVELOPE_BYTES, maxBytes)) return "corrupt";
     const buffer = new Uint8Array(size + 1);
     let filled = 0;
     while (filled < buffer.length) {
@@ -576,7 +579,7 @@ async function expand(codec: number, payload: Uint8Array, claimed: number): Prom
  */
 export async function gunzipArtifact(payload: Uint8Array, claimed: number): Promise<Uint8Array> {
   const result: unknown = await gunzipAsync(payload, {
-    maxOutputLength: MAX_ARTIFACT_BYTES,
+    maxOutputLength: Math.min(MAX_ARTIFACT_BYTES, claimed),
     info: true,
   });
   const inflated = inflateResult(result);
@@ -621,6 +624,46 @@ function parseBinary(bytes: Uint8Array): BinaryEnvelope | null {
     iv: own(bytes, BINARY_HEADER_BYTES, BINARY_HEADER_BYTES + BINARY_IV_BYTES),
     sealed: own(bytes, BINARY_HEADER_BYTES + BINARY_IV_BYTES),
   };
+}
+
+/** Bounded header probe; provisional until GCM authenticates the complete envelope. */
+export function artifactPlaintextLength(header: Uint8Array, size = header.length): number | null {
+  if (size > MAX_ENVELOPE_BYTES || size < 1) return null;
+  if (startsWith(header, BINARY_MAGIC)) {
+    if (header.length < 10 || size < BINARY_OVERHEAD || size > MAX_BINARY_ENVELOPE_BYTES)
+      return null;
+    const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    const claimed = view.getUint32(6, false);
+    return header[4] === BINARY_VERSION &&
+      claimed >= 1 &&
+      claimed <= MAX_ARTIFACT_BYTES &&
+      payloadFits(header[5] ?? -1, size - BINARY_OVERHEAD, claimed)
+      ? claimed
+      : null;
+  }
+  if (startsWith(header, LEGACY_PREFIX) && size >= 65 && (size - 65) % 2 === 0)
+    return (size - 65) / 2;
+  return null;
+}
+
+/** Same authentication/expansion path as operator reads, deliberately without JSON.parse. */
+export async function openArtifactText(
+  key: CryptoKey,
+  bytes: Uint8Array,
+  sha256: string | null,
+): Promise<string | null> {
+  try {
+    if (artifactPlaintextLength(bytes) === null) return null;
+    if (sha256 !== null && (await sha256Hex(bytes)) !== sha256) return null;
+    if (startsWith(bytes, BINARY_MAGIC)) {
+      const envelope = parseBinary(bytes);
+      return envelope === null ? null : await openBinary(key, envelope);
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return isLegacyStructure(text) ? await decrypt(key, text) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function openBinary(key: CryptoKey, envelope: BinaryEnvelope): Promise<string> {

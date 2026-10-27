@@ -99,6 +99,9 @@ const loop = createExportLoop({
   post: (message) => self.postMessage(message),
   logger,
   nodeId: init.nodeId,
+  exportBodiesAllowed: init.exportBodiesAllowed,
+  gates: init.gates,
+  bodyBudgetBytes: init.bodyBudgetBytes ?? 201326592,
 });
 
 const KNOWN: ReadonlySet<string> = new Set(MAIN_MESSAGE_TYPES);

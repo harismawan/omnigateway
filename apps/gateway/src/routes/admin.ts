@@ -82,6 +82,7 @@ export type AdminDeps = {
    * settable here — that is the whole point of the second key.
    */
   bodyLoggingAllowed?: boolean;
+  onBodyGatesChanged?: (enabled: boolean) => void;
   /**
    * The fixed offset the daily usage buckets are cut on, in minutes east of UTC.
    *
@@ -686,6 +687,7 @@ export function adminRoutes(deps: AdminDeps) {
       .put("/api/settings", async ({ request }) => {
         await requireAdmin(request, deps.admin);
         await putSettings(deps.store, await readJson(request));
+        deps.onBodyGatesChanged?.((await deps.store.config.getSettings()).bodyLoggingEnabled);
         changed("res:settings");
         return { ok: true };
       })

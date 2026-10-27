@@ -3,6 +3,7 @@ import type { ExportReader } from "@omni/store/exportReader";
 import type { ExportDestination, RequestLog, Settings } from "@omni/store/types";
 import { BACKOFF_MAX_MS, retryDelay } from "./backoff.ts";
 import { cutBatches, MAX_BATCH_RECORDS, OVERSIZED_REASON } from "./batch.ts";
+import { bodyCuts, createBodyAttacher, DEFAULT_BODY_BUDGET_BYTES } from "./body/attach.ts";
 import {
   type DeliveryOutcome,
   deliver,
@@ -16,6 +17,7 @@ import {
 } from "./deliver.ts";
 import { effectivePosition, type GapReason, gapReason, SETTLE_MS } from "./gap.ts";
 import type {
+  BodyGates,
   DestinationCounters,
   DestinationStatus,
   MainMessage,
@@ -97,6 +99,9 @@ export type Handles = {
 };
 
 export type LoopDeps = {
+  exportBodiesAllowed?: boolean;
+  bodyBudgetBytes?: number;
+  gates?: BodyGates;
   /** Opens fresh handles: at start and on every `resume`. */
   open(): Promise<Handles>;
   transport: Transport;
@@ -120,6 +125,7 @@ export type ExportLoop = {
 };
 
 type Runtime = {
+  bodyLimit?: number;
   destination: ExportDestination;
   running: Promise<void> | null;
   controller: AbortController | null;
@@ -191,6 +197,8 @@ const zeroCounters = (): DestinationCounters => ({
 });
 
 export function createExportLoop(deps: LoopDeps): ExportLoop {
+  const attacher = createBodyAttacher(deps.bodyBudgetBytes ?? DEFAULT_BODY_BUDGET_BYTES);
+  let gates = deps.gates ?? { bodyLoggingAllowed: false, bodyLoggingEnabled: false };
   const { logger, nodeId, timers } = deps;
   let phase: "idle" | "running" | "paused" | "stopped" = "idle";
   let handles: Handles | null = null;
@@ -419,6 +427,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         continue;
       }
       if (rt.destination.revision !== d.revision) {
+        delete rt.bodyLimit;
         // A change is told by the database's revision, never by `updatedAt`:
         // two edits in one millisecond, or from replicas with skewed clocks,
         // still differ. A pass still running holds the old snapshot — its
@@ -720,6 +729,13 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     batch: Batch,
     commit: (next: CommitNext, batch: Batch) => Promise<boolean>,
   ): Promise<"continue" | "stop" | Exclude<DeliveryOutcome, { kind: "ok" }>> {
+    if (
+      rt.destination.includeBodies &&
+      deps.exportBodiesAllowed &&
+      !(rt.destination.type === "otlp" && rt.destination.config.signal === "traces")
+    ) {
+      return sendBodyRows(h, rt, sender, rows, batch, commit);
+    }
     const signal = batch.signal;
     const labels = await guard(h.reader.keyLabels(), signal);
     const parts: string[] = [];
@@ -779,6 +795,156 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     const summary = droppedSummary(dropped, rows.length, reasons);
     if (summary !== null) {
       await h.state.recordError(rt.destination.generation, epoch, summary, deps.now());
+    }
+    return "continue";
+  }
+
+  async function bodyAllowed(h: Handles, row: RequestLog, signal: AbortSignal): Promise<boolean> {
+    if (
+      !gates.bodyLoggingAllowed ||
+      gates.bodyLoggingEnabled === false ||
+      !deps.exportBodiesAllowed ||
+      row.apiKeyId === null
+    )
+      return false;
+    const settings = await guard(h.reader.settings(), signal);
+    if (!settings.bodyLoggingEnabled) return false;
+    return !(await guard(h.reader.keyBodyOptOut(row.apiKeyId), signal));
+  }
+
+  async function sendBodyRows(
+    h: Handles,
+    rt: Runtime,
+    sender: Sender,
+    rows: RequestLog[],
+    batch: Batch,
+    commit: (next: CommitNext, batch: Batch) => Promise<boolean>,
+  ): Promise<"continue" | "stop" | Exclude<DeliveryOutcome, { kind: "ok" }>> {
+    const signal = batch.signal;
+    const labels = await guard(h.reader.keyLabels(), signal);
+    for (const row of rows) {
+      signal.throwIfAborted();
+      const allowed = await bodyAllowed(h, row, signal);
+      if (allowed && row.bodyState === "pending" && sharedNow() - (row.completedAt ?? 0) < 60_000)
+        return "stop";
+      const record = buildRecord(row, {
+        keyLabel: row.apiKeyId === null ? null : (labels.get(row.apiKeyId) ?? null),
+        nodeId,
+      });
+      const attached = allowed
+        ? await attacher.attach(h.reader, row, record, sender, signal)
+        : { record, release() {}, client: undefined };
+      try {
+        if (allowed && row.bodyState === "pending")
+          rt.counters.bodiesLate = (rt.counters.bodiesLate ?? 0) + 1;
+        if (record.body?.reason === "export budget")
+          rt.counters.bodiesBudget = (rt.counters.bodiesBudget ?? 0) + 1;
+        let cap = rt.bodyLimit ?? sender.maxRequestBytes ?? sender.limits.bytes;
+        let halved = rt.bodyLimit !== undefined;
+        for (;;) {
+          if (allowed && !(await bodyAllowed(h, row, signal))) return "stop";
+          // Fresh configuration is checked immediately before every HTTP send,
+          // not only on the next poll/message. Never pair its secret with the
+          // old sender; a changed revision cancels this snapshot instead.
+          const current = await guard(h.reader.destinationWithSecret(rt.destination.id), signal);
+          if (
+            !current ||
+            current.destination.generation !== rt.destination.generation ||
+            current.destination.revision !== rt.destination.revision ||
+            !current.destination.enabled
+          )
+            return "stop";
+          const client = attached.client;
+          const inline =
+            client && sender.rawPart ? sender.rawPart(record, client) : sender.part(record);
+          let outcome: DeliveryOutcome;
+          let anyDropped = false;
+          if (Buffer.byteLength(sender.body([inline])) <= cap) {
+            outcome = await deliver(sender, [inline], {
+              transport: deps.transport,
+              signal,
+              timers,
+              now: deps.now,
+            });
+          } else if (client && sender.bodySegment) {
+            const request = bodyCuts(sender, record, "request", client.request, cap);
+            const response = bodyCuts(sender, record, "response", client.response, cap);
+            record.body = {
+              state: record.body?.state ?? "included",
+              parts: { request: request.length, response: response.length },
+            };
+            const metadata = sender.part(record);
+            if (Buffer.byteLength(sender.body([metadata])) > cap)
+              return { kind: "failed", status: 413, error: "metadata exceeds request limit" };
+            outcome = await deliver(sender, [metadata], {
+              transport: deps.transport,
+              signal,
+              timers,
+              now: deps.now,
+            });
+            if (outcome.kind === "ok") {
+              anyDropped = outcome.dropped > 0;
+              outer: for (const [part, cuts] of [
+                ["request", request],
+                ["response", response],
+              ] as const) {
+                for (let n = 0; n < cuts.length; n++) {
+                  signal.throwIfAborted();
+                  if (!(await bodyAllowed(h, row, signal))) return "stop";
+                  const current = await guard(
+                    h.reader.destinationWithSecret(rt.destination.id),
+                    signal,
+                  );
+                  if (
+                    !current ||
+                    current.destination.generation !== rt.destination.generation ||
+                    current.destination.revision !== rt.destination.revision ||
+                    !current.destination.enabled
+                  )
+                    return "stop";
+                  const encoded = sender.bodySegment(record, part, cuts[n] ?? "", n, cuts.length);
+                  outcome = await deliver(encoded.sender, [encoded.part], {
+                    transport: deps.transport,
+                    signal,
+                    timers,
+                    now: deps.now,
+                  });
+                  if (outcome.kind === "ok") anyDropped ||= outcome.dropped > 0;
+                  if (outcome.kind !== "ok") break outer;
+                }
+              }
+            }
+          } else return { kind: "failed", status: 413, error: "metadata exceeds request limit" };
+          if (outcome.status === 413 && !halved) {
+            halved = true;
+            cap = Math.max(1, Math.floor(cap / 2));
+            rt.bodyLimit = cap;
+            logger.warn("export request limit halved", { reason: "HTTP 413" });
+            continue;
+          }
+          if (outcome.kind !== "ok") return outcome;
+          signal.throwIfAborted();
+          if (
+            !(await commit(
+              {
+                ...cursorOf(row),
+                exportedDelta: anyDropped || outcome.dropped ? 0 : 1,
+                droppedDelta: anyDropped || outcome.dropped ? 1 : 0,
+                lastSuccessAt: deps.now(),
+              },
+              batch,
+            ))
+          )
+            return "stop";
+          rt.counters.recordsSent += anyDropped || outcome.dropped ? 0 : 1;
+          rt.counters.recordsDropped += anyDropped || outcome.dropped ? 1 : 0;
+          rt.counters.batchesOk++;
+          succeeded(rt);
+          break;
+        }
+      } finally {
+        attached.release();
+      }
     }
     return "continue";
   }
@@ -1079,7 +1245,9 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           if (phase === "running") await tick();
           return;
         case "gatesChanged":
-          // Body export is part 2; the gates mean nothing to metadata records.
+          gates = message.gates;
+          for (const rt of runtimes.values())
+            if (rt.destination.includeBodies) rt.controller?.abort(CANCELLED.changed);
           return;
         case "test":
           await reply(

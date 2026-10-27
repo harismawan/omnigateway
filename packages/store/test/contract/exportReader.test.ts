@@ -36,6 +36,32 @@ forEachStore((backend) => {
     for (const handle of opened.splice(0)) await handle.close();
   };
 
+  test("reads artifact header before allocation, authenticated text and missing key fail closed", async () => {
+    const s = await backend.fresh();
+    try {
+      await s.bodies.put({
+        schemaVersion: 1,
+        requestId: "artifact",
+        at: 1000,
+        client: { request: { hello: "world" }, response: null, truncated: true },
+        attempts: [],
+        error: null,
+      });
+      const r = await readerFor(s);
+      const probe = await r.bodyProbe("artifact");
+      const envelope = await r.bodyEnvelope("artifact");
+      expect(probe?.encryptedBytes).toBe(envelope?.bytes.length);
+      expect(probe?.plaintextBytes).toBeGreaterThan(100);
+      expect(envelope?.truncated).toBe(true);
+      expect(envelope && (await r.bodyText(envelope))).toContain('"hello":"world"');
+      expect(await r.bodyProbe("absent")).toBeNull();
+      expect(await r.bodyEnvelope("absent")).toBeNull();
+      expect(await r.keyBodyOptOut("absent")).toBe(true);
+    } finally {
+      await done();
+    }
+  });
+
   test("reads destinations, their secret, settings, key labels and rows", async () => {
     const s = await backend.fresh();
     try {
@@ -138,11 +164,15 @@ forEachStore((backend) => {
         const r = openSqliteExportReader(s.databasePath, await deriveKey(SECRET), () => 0);
         opened.push(r);
         expect(Object.keys(r).sort()).toEqual([
+          "bodyEnvelope",
+          "bodyProbe",
+          "bodyText",
           "close",
           "destinationWithSecret",
           "destinations",
           "exportPage",
           "getLog",
+          "keyBodyOptOut",
           "keyLabels",
           "now",
           "settings",

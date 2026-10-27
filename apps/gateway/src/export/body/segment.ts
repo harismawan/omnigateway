@@ -14,7 +14,9 @@ export function segments(
     let start = 0;
     do {
       let low = start;
-      let high = text.length;
+      // Every code unit costs at least one byte on every supported wire. Do
+      // not encode a whole 64 MiB field just to discover a 4 MiB receiver cap.
+      let high = Math.min(text.length, start + limitBytes);
       let best = start;
       while (low < high) {
         const middle = Math.ceil((low + high) / 2);

@@ -42,6 +42,7 @@ export type Config = {
    * omission — rather than slowing anything the client is sent.
    */
   bodyCaptureBudgetBytes: number;
+  exportBodyBudgetBytes: number;
   /** Threshold for stdout logging. Read once, at boot. */
   logLevel: LogLevel;
   /**
@@ -94,6 +95,13 @@ const SIGNED_INTEGER = /^-?\d+$/;
 
 function optionalText(value: string | undefined, fallback: string): string {
   return value?.trim() || fallback;
+}
+
+function positiveExportBudget(value: string | undefined): number {
+  if (value === undefined) return 201326592;
+  if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)
+    throw new Error("OMNI_EXPORT_BODY_BUDGET_BYTES must be a positive integer");
+  return Number(value);
 }
 
 /**
@@ -203,6 +211,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     bodyLoggingAllowed,
     exportBodiesAllowed,
     bodyCaptureBudgetBytes,
+    exportBodyBudgetBytes: positiveExportBudget(env.OMNI_EXPORT_BODY_BUDGET_BYTES),
     logFile: logFile === undefined || logFile.length === 0 ? null : logFile,
     clusterMode,
     databaseUrl: clusterMode ? (databaseUrl ?? null) : null,

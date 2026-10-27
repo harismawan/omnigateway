@@ -72,6 +72,7 @@ export type SupervisorDeps = {
 };
 
 export type ExportSupervisor = {
+  gatesChanged(gates: import("../export/protocol.ts").BodyGates): void;
   start(): Promise<void>;
   destinationsChanged(): Promise<void>;
   request<R extends ExportRequest>(request: R): Promise<ReplyOf[R["type"]]>;
@@ -268,6 +269,10 @@ export function createExportSupervisor(deps: SupervisorDeps): ExportSupervisor {
       serial(async () => {
         if (host.state() === "idle") await startIfWanted();
       }),
+    gatesChanged(gates) {
+      deps.init.gates = gates;
+      host.post({ type: "gatesChanged", gates });
+    },
     destinationsChanged: () =>
       serial(async () => {
         if (held()) return;
