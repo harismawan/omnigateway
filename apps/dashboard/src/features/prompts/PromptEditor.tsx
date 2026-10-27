@@ -28,14 +28,22 @@ type Props = {
 };
 
 /** Rebase clean fields only; keep conflicting local edits until explicitly replaced. */
-function useSyncedField(remote: string) {
-  const [field, setField] = useState({ value: remote, baseline: remote, conflict: false });
-  if (remote !== field.baseline) {
+function useSyncedField(remote: string, selection?: string) {
+  const [field, setField] = useState({
+    value: remote,
+    baseline: remote,
+    conflict: false,
+    selection,
+  });
+  if (selection !== field.selection) {
+    setField({ value: remote, baseline: remote, conflict: false, selection });
+  } else if (remote !== field.baseline) {
     const dirty = field.value !== field.baseline;
     setField({
       value: dirty ? field.value : remote,
       baseline: remote,
       conflict: dirty && field.value !== remote,
+      selection,
     });
   }
   return [
@@ -56,8 +64,9 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
   const [description, setDescription, descriptionConflict] = useSyncedField(
     detail?.description ?? "",
   );
-  const [text, setText, textConflict] = useSyncedField(selected?.text ?? "");
-  const [note, setNote] = useState("");
+  // Metadata belongs to the prompt, but explicit history navigation replaces the text draft.
+  const [text, setText, textConflict] = useSyncedField(selected?.text ?? "", version ?? "current");
+  const [note, setNote] = useSyncedField("", version ?? "current");
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);

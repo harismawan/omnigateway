@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../../api/client.ts";
 import { usePrompt, usePrompts, useStatus } from "../../api/queries.ts";
 import { PageHead } from "../../components/Rack.tsx";
@@ -22,8 +22,25 @@ export function PromptsBoard({
 }) {
   const [selection, setSelection] = useState<{ id?: string; version?: string } | null>(null);
   const [creating, setCreating] = useState(false);
+  const [newDraft, setNewDraft] = useState(0);
+  const [navigating, setNavigating] = useState(false);
   const selectedId = selection === null ? id : selection.id;
   const selectedVersion = selection === null ? version : selection.version;
+  // Every editor selection owns its completion callbacks. An old server write may
+  // still succeed, but must not navigate over a newer local or routed draft.
+  const identity = JSON.stringify([creating, newDraft, selectedId, selectedVersion, id, version]);
+  const ownership = useRef({ identity, token: {} });
+  if (ownership.current.identity !== identity) ownership.current = { identity, token: {} };
+  const token = ownership.current.token;
+  const route = useRef({ id, version, creating });
+  route.current = { id, version, creating };
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const library = usePrompts();
   const detail = usePrompt(creating ? "" : (selectedId ?? ""));
   const status = useStatus();
@@ -35,8 +52,25 @@ export function PromptsBoard({
     detail.error instanceof ApiError &&
     (detail.error.status === 404 || detail.error.code === "BAD_REQUEST");
   const select = async (nextId?: string, nextVersion?: string) => {
+    if (!mounted.current || ownership.current.token !== token) return;
+    ownership.current = { identity, token: {} };
     if (onSelect) {
-      await onSelect(nextId, nextVersion);
+      setNavigating(true);
+      try {
+        await onSelect(nextId, nextVersion);
+      } finally {
+        if (mounted.current) setNavigating(false);
+      }
+      if (!mounted.current) return;
+      if (
+        ownership.current.token !== token &&
+        !(
+          route.current.id === nextId &&
+          route.current.version === nextVersion &&
+          route.current.creating === creating
+        )
+      )
+        return;
       setCreating(false);
       setSelection(null);
     } else {
@@ -58,8 +92,10 @@ export function PromptsBoard({
         <Module legend="Library">
           <Stack $gap={2}>
             <Button
-              disabled={disabled}
+              disabled={disabled || navigating}
               onClick={() => {
+                ownership.current = { identity: "new", token: {} };
+                setNewDraft((draft) => draft + 1);
                 setCreating(true);
               }}
             >
@@ -70,7 +106,9 @@ export function PromptsBoard({
               .sort((a, b) => Number(b.builtin) - Number(a.builtin))
               .map((entry) => (
                 <Row $gap={2} $wrap key={entry.id}>
-                  <Button onClick={() => select(entry.id)}>{entry.name}</Button>
+                  <Button disabled={navigating} onClick={() => select(entry.id)}>
+                    {entry.name}
+                  </Button>
                   {entry.builtin ? <Chip>built-in</Chip> : null}
                   <span>
                     {entry.activeVersion === null
@@ -89,7 +127,7 @@ export function PromptsBoard({
         <Module legend="Editor / history">
           {creating ? (
             <PromptEditor
-              key="new"
+              key={`new-${newDraft}`}
               disabled={disabled}
               onSaved={select}
               onRemoved={() => select()}
@@ -106,7 +144,7 @@ export function PromptsBoard({
                   </p>
                 ) : null}
                 <PromptEditor
-                  key={`${selectedId}@${selectedVersion ?? "current"}`}
+                  key={selectedId}
                   detail={detail.data}
                   {...(selectedVersion === undefined ? {} : { version: selectedVersion })}
                   disabled={disabled || detail.isError}
