@@ -53,11 +53,13 @@ export type WorkerHostDeps<In, Out> = {
 
 export type WorkerHost<In, Out = unknown> = {
   start(): Promise<void>;
-  post(message: In): void;
+  post(message: In, duringPause?: boolean): void;
   pause(ack: (message: Out) => boolean): Promise<void>;
   resume(swapped: boolean): Promise<void>;
   halt(): Promise<void>;
   stop(terminate?: boolean): void;
+  /** Retire a faulty owner; restart with backoff only after its actual close. */
+  recover(): Promise<void>;
   /** Stop serving without making shutdown final (e.g. no destinations). */
   idle(): Promise<void>;
   /** Explicit owner-policy change clears the death storm/backoff history. */
@@ -90,6 +92,7 @@ export function createWorkerHost<In, Out>(deps: WorkerHostDeps<In, Out>): Worker
   let deaths: number[] = [];
   let restarts = 0;
   let pauseWaiter: { ack: (message: Out) => boolean; done: () => void } | null = null;
+  let recovering: Instance<In, Out> | null = null;
 
   const stopped = (): boolean => state === "stopped";
   const held = (): boolean => state === "paused" || state === "halted" || stopped();
@@ -167,6 +170,10 @@ export function createWorkerHost<In, Out>(deps: WorkerHostDeps<In, Out>): Worker
         if (state === "running") died(instance.startedAt);
       }
       deps.onExit?.();
+      if (recovering === instance) {
+        recovering = null;
+        if (state === "stopping") died(instance.startedAt);
+      }
       if (wasRetiring && retiring.size === 0 && state === "stopping") {
         void serial(async () => {
           if (state === "stopping") await startIfWanted();
@@ -248,8 +255,8 @@ export function createWorkerHost<In, Out>(deps: WorkerHostDeps<In, Out>): Worker
       serial(async () => {
         if (state === "idle") spawn();
       }),
-    post(message) {
-      if (state !== "running" || current === null) {
+    post(message, duringPause = false) {
+      if ((state !== "running" && !(duringPause && state === "paused")) || current === null) {
         throw new GatewayError("OVERLOADED", `${name} not running`);
       }
       current.worker.post(message);
@@ -331,6 +338,16 @@ export function createWorkerHost<In, Out>(deps: WorkerHostDeps<In, Out>): Worker
         const instance = retire();
         setState("halted");
         if (instance !== null) stopWorker(instance);
+      }),
+    recover: () =>
+      serial(async () => {
+        if (held()) return;
+        cancelRestart();
+        const instance = retire();
+        if (instance === null) return;
+        recovering = instance;
+        setState("stopping");
+        stopWorker(instance);
       }),
     stop(terminate = false) {
       if (stopped()) return;

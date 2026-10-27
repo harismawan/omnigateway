@@ -1,4 +1,4 @@
-import type { Logger } from "@omni/ir";
+import { GatewayError, type Logger } from "@omni/ir";
 import type { BodyRepo } from "@omni/store/types";
 import type { CapturedParts } from "../bodyCapture.ts";
 import { createWorkerHost, type HostedWorker, type Timers } from "../workerHost/instance.ts";
@@ -19,7 +19,7 @@ export type BodyWriterHost = {
   resume(swapped: boolean): Promise<void>;
   halt(): Promise<void>;
   stop(): void;
-  /** Five-second writer grace; main database operations settle before return. */
+  /** Five-second writer grace; unknown DB outcomes are left for recovery. */
   drain(): Promise<void>;
   generation(): number;
 };
@@ -86,12 +86,14 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   const publications = new Set<Promise<void>>();
   let generation = 0;
   let accepting = true;
+  let lifecycleEpoch = 0;
   let draining = false;
   let drainPromise: Promise<void> | undefined;
   let changed = () => {};
   let pumping = false;
   let failing = false;
   let dropping: DropReason = "writer_crash";
+  const pauseMessage: Extract<MainMessage, { type: "pause" }> = { type: "pause" };
   const yieldTurn = deps.yield ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
 
   function discard(parts: CapturedParts): void {
@@ -113,8 +115,9 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   function failPending(requestId: string): void {
     if (failing) return;
     failing = true;
+    const startedGeneration = generation;
     const failure = Promise.resolve()
-      .then(() => deps.bodies.fail(requestId))
+      .then(() => (startedGeneration === generation ? deps.bodies.fail(requestId) : undefined))
       .catch(() => {});
     publications.add(failure);
     void failure.finally(() => {
@@ -144,8 +147,8 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   const worker = createWorkerHost<MainMessage, WorkerMessage>({
     ...deps,
     name: "body writer",
-    lifecycle: { pause: { type: "pause" }, resume: { type: "resume" }, stop: { type: "stop" } },
-    onUnavailable: () => clear(dropping),
+    lifecycle: { pause: pauseMessage, resume: { type: "resume" }, stop: { type: "stop" } },
+    onUnavailable: () => clear(dropping, accepting || draining),
     onExit: () => pending.clear(),
     onMessage(message) {
       if (message.type === "paused") return;
@@ -183,16 +186,18 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
             if (entries.get(message.requestId) !== entry || generation !== message.generation)
               return;
             // Refused files remain protected until the worker confirms deletion.
-            worker.post({ type: "publish-result", requestId: message.requestId, accepted });
+            worker.post({ type: "publish-result", requestId: message.requestId, accepted }, true);
             if (accepted) {
               if (entry.path !== null) pending.delete(entry.path);
               release(entry);
             }
           } catch {
+            if (generation !== message.generation || entries.get(message.requestId) !== entry)
+              return;
             // A rejection is not proof that the transaction did not commit.
             // Keep the final file; only a definite false authorizes unlink.
             failPending(message.requestId);
-            worker.stop();
+            await worker.recover();
           }
         })();
         publications.add(publication);
@@ -317,38 +322,82 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     },
     isPending: (path) => pending.has(path),
     async pause() {
+      ++lifecycleEpoch;
       accepting = false;
       dropping = "restore";
-      // Finish any main-connection publication before pause can delete a file
-      // whose accepted result is still travelling back to the worker.
-      await Promise.all(publications);
-      // At most 1000 admitted entries; serialize their failure writes without
-      // creating an overflow-id queue. All finish against the original DB.
-      for (const entry of entries.values()) {
-        if (!entry.publishing) await deps.bodies.fail(entry.parts.requestId).catch(() => {});
+      pauseMessage.publications = [...entries.values()]
+        .filter((e) => e.publishing)
+        .map((e) => e.parts.requestId);
+      // Arm worker quiescence immediately, independent of a stalled main DB.
+      const quiescing = worker.pause((m) => m.type === "paused");
+      let expired = false;
+      let timer: unknown;
+      const barrier = (async () => {
+        // Timed-out operations stay tracked: every retry must wait for them.
+        await Promise.all(publications);
+        for (const entry of entries.values()) {
+          if (expired) return;
+          if (!entry.publishing) {
+            const failure = Promise.resolve()
+              .then(() => deps.bodies.fail(entry.parts.requestId))
+              .catch(() => {});
+            publications.add(failure);
+            await failure;
+            publications.delete(failure);
+          }
+        }
+      })();
+      const bounded = Promise.race([
+        barrier,
+        new Promise<void>((_resolve, reject) => {
+          timer = deps.timers.setTimeout(() => {
+            expired = true;
+            reject(
+              new GatewayError(
+                "OVERLOADED",
+                "body database operations did not settle; nothing was restored",
+              ),
+            );
+          }, 5000);
+        }),
+      ]);
+      void barrier.finally(() => deps.timers.clearTimeout(timer));
+      try {
+        const results = await Promise.allSettled([quiescing, bounded]);
+        for (const result of results) if (result.status === "rejected") throw result.reason;
+      } finally {
+        expired = true;
+        deps.timers.clearTimeout(timer);
+        clear("restore", false);
       }
-      await worker.pause((m) => m.type === "paused");
-      clear("restore", false);
-      await Promise.all(publications);
     },
     async resume(swapped) {
+      const resumed = ++lifecycleEpoch;
+      if (swapped && publications.size > 0) {
+        throw new GatewayError("OVERLOADED", "body database operations still pending");
+      }
       if (swapped) generation++;
       await worker.resume(swapped);
-      accepting = true;
-      dropping = "writer_crash";
+      if (resumed === lifecycleEpoch) {
+        accepting = true;
+        dropping = "writer_crash";
+      }
     },
     async halt() {
+      ++lifecycleEpoch;
       accepting = false;
       clear("restore");
       await worker.halt();
     },
     stop() {
+      ++lifecycleEpoch;
       accepting = false;
       worker.stop();
     },
     drain() {
       if (drainPromise !== undefined) return drainPromise;
       draining = true;
+      ++lifecycleEpoch;
       dropping = "writer_crash";
       drainPromise = (async () => {
         let timer: unknown;
@@ -366,9 +415,8 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
         deps.timers.clearTimeout(timer);
         accepting = false;
         worker.stop();
-        // The worker budget does not authorize closing the main connection
-        // underneath a commit (including an ambiguous post-commit rejection).
-        while (publications.size > 0) await Promise.all(publications);
+        // Unknown decisions survive as files/pending rows for reconciliation;
+        // bookkeeping cannot keep the process alive past its shutdown budget.
         changed = () => {};
       })();
       return drainPromise;

@@ -231,8 +231,19 @@ for (const mode of ["stop", "halt", "drain", "publication-error"] as const)
         post: (m) => link.receive(m),
       });
       link = transport(writer, () => {});
+      let spawns = 0;
       host = createBodyWriterHost({
-        spawn: () => link.worker,
+        spawn: () => {
+          if (spawns++ > 0) {
+            const replacement = createBodyWriter({
+              key,
+              dir: bodiesDirFor(store.databasePath),
+              post: (m) => link.receive(m),
+            });
+            link = transport(replacement, () => {});
+          }
+          return link.worker;
+        },
         bodies: {
           fail: store.bodies.fail,
           publish: async (row) => {
@@ -242,7 +253,8 @@ for (const mode of ["stop", "halt", "drain", "publication-error"] as const)
             await decision;
             if (!committed) accepted = await store.bodies.publish(row);
             done = true;
-            if (mode === "publication-error") throw new Error("reply lost after commit");
+            if (mode === "publication-error" && row.requestId === "race")
+              throw new Error("reply lost after commit");
             return accepted;
           },
         },
@@ -250,9 +262,9 @@ for (const mode of ["stop", "halt", "drain", "publication-error"] as const)
         logger: noopLogger,
         now: Date.now,
         timers:
-          mode === "drain"
+          mode === "drain" || mode === "publication-error"
             ? {
-                setTimeout: (fn, ms) => setTimeout(fn, ms === 5000 ? 5 : ms),
+                setTimeout: (fn, ms) => setTimeout(fn, ms === 5000 ? 5 : ms === 1000 ? 1 : ms),
                 clearTimeout: timers.clearTimeout,
               }
             : timers,
@@ -272,7 +284,7 @@ for (const mode of ["stop", "halt", "drain", "publication-error"] as const)
             drained = true;
           });
         await Bun.sleep(15);
-        if (mode === "drain") expect(drained).toBe(false);
+        if (mode === "drain") expect(drained).toBe(true);
         decide();
         await until(() => done);
         await draining;
@@ -280,9 +292,28 @@ for (const mode of ["stop", "halt", "drain", "publication-error"] as const)
         expect((await store.usage.get("race"))?.bodyState).toBe("ready");
         expect((await store.bodies.get("race"))?.row.detailState).toBe("ready");
         expect(host.isPending("1970/01/01/race.json.enc")).toBe(true);
+        expect(spawns).toBe(1);
         link.exit();
         expect(host.isPending("1970/01/01/race.json.enc")).toBe(false);
         expect(budget.held()).toBe(0);
+        if (mode === "publication-error") {
+          await until(() => spawns === 2);
+          await store.usage.append({
+            ...requestLog({ id: "recovered", at: 1000 }),
+            bodyState: "pending",
+          });
+          const next = parts("recovered");
+          budget.reserve(next.reservedBytes);
+          host.enqueue(next);
+          for (
+            let i = 0;
+            i < 100 && (await store.usage.get("recovered"))?.bodyState === "pending";
+            i++
+          )
+            await tick();
+          expect((await store.bodies.get("recovered"))?.row.detailState).toBe("ready");
+          expect((await store.bodies.get("race"))?.row.detailState).toBe("ready");
+        }
       } finally {
         decide();
         host.stop();

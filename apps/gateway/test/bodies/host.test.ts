@@ -73,7 +73,7 @@ test("sustained overflow retains no captures or messages, even with a blocked fa
   f.host.stop();
 });
 
-function fixture(fail?: () => Promise<void>, timers?: Timers) {
+function fixture(fail?: () => Promise<void>, timers?: Timers, publish?: () => Promise<boolean>) {
   const budget = createCaptureBudget(256 * 1024 * 1024);
   const sent: MainMessage[] = [];
   let message = (_m: WorkerMessage) => {};
@@ -103,7 +103,7 @@ function fixture(fail?: () => Promise<void>, timers?: Timers) {
     bodies: {
       publish: async (r) => {
         published.push(r.requestId);
-        return true;
+        return publish === undefined ? true : publish();
       },
       fail: async (id) => {
         failed.push(id);
@@ -222,6 +222,125 @@ test("pause timeout terminates, refuses without actual close, and never reopens 
   f.exit();
   await tick();
   expect(f.spawned()).toBe(2);
+  f.host.stop();
+});
+
+test("restore starts pause immediately and retries cannot bypass a timed-out database barrier", async () => {
+  const c = clock();
+  const blocked = Promise.withResolvers<void>();
+  const f = fixture(() => blocked.promise, c.timers);
+  await f.host.start();
+  for (const id of ["first", "must_not_run_late"]) {
+    const p = parts(id);
+    f.budget.reserve(p.reservedBytes);
+    f.host.enqueue(p);
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const paused = f.host.pause().catch((e: unknown) => e);
+    await tick();
+    expect(f.sent.some((m) => m.type === "pause")).toBe(true);
+    f.message({ type: "paused" });
+    c.fire(5000);
+    expect(await paused).toMatchObject({ message: expect.stringContaining("database") });
+    await f.host.resume(false);
+  }
+  expect(f.failed).toEqual(["first"]);
+  blocked.resolve();
+  await tick();
+  expect(f.failed).toEqual(["first"]); // Timed-out sweep cannot continue later.
+  const recovered = f.host.pause();
+  await tick();
+  f.message({ type: "paused" });
+  await recovered;
+  await f.host.resume(true);
+  expect(f.host.generation()).toBe(1);
+  f.host.stop();
+});
+
+test("a publication barrier stays bounded across repeated refused restores", async () => {
+  const c = clock();
+  const blocked = Promise.withResolvers<boolean>();
+  const f = fixture(undefined, c.timers, () => blocked.promise);
+  await f.host.start();
+  const p = parts();
+  f.budget.reserve(p.reservedBytes);
+  f.host.enqueue(p);
+  await tick();
+  f.message({
+    type: "written",
+    requestId: "req",
+    generation: 0,
+    at: 1000,
+    relPath: "path",
+    sizeBytes: 1,
+    sha256: "hash",
+    truncated: false,
+    omitted: false,
+  });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const paused = f.host.pause().catch((error: unknown) => error);
+    await tick();
+    f.message({ type: "paused" });
+    c.fire(5000);
+    expect(await paused).toMatchObject({ message: expect.stringContaining("database") });
+    await f.host.resume(false);
+  }
+  blocked.reject(new Error("late old failure"));
+  await tick();
+  expect(f.failed).toEqual([]); // Retired publication cannot schedule new DB work.
+  const paused = f.host.pause();
+  await tick();
+  f.message({ type: "paused" });
+  await paused;
+  await f.host.resume(true);
+  f.host.stop();
+});
+
+test("publication rejection retires recoverably and replacement waits for actual close", async () => {
+  const c = clock();
+  let first = true;
+  const f = fixture(undefined, c.timers, async () => {
+    if (first) {
+      first = false;
+      throw new Error("reply lost");
+    }
+    return true;
+  });
+  await f.host.start();
+  const p = parts();
+  f.budget.reserve(p.reservedBytes);
+  f.host.enqueue(p);
+  await tick();
+  const written = {
+    type: "written",
+    requestId: "req",
+    generation: 0,
+    at: 1000,
+    relPath: "path",
+    sizeBytes: 1,
+    sha256: "hash",
+    truncated: false,
+    omitted: false,
+  } as const;
+  f.message({ type: "publishing", requestId: "req", generation: 0, relPath: "path" });
+  f.message(written);
+  await tick();
+  expect(f.host.isPending("path")).toBe(true);
+  expect(f.spawned()).toBe(1);
+  f.exit();
+  await tick();
+  c.fire(1000);
+  await tick();
+  expect(f.spawned()).toBe(2);
+  expect(f.host.isPending("path")).toBe(false);
+  const next = parts("next");
+  f.budget.reserve(next.reservedBytes);
+  f.host.enqueue(next);
+  await tick();
+  f.message({ ...written, requestId: "next" });
+  await tick();
+  expect(f.published).toEqual(["req", "next"]);
+  expect(f.budget.held()).toBe(0);
   f.host.stop();
 });
 

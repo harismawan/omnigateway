@@ -39,6 +39,8 @@ export function createBodyWriter(deps: Deps) {
   let chain = Promise.resolve();
   let paused = false;
   let resuming: Promise<void> | undefined;
+  let epoch = 0;
+  let lifecycle = Promise.resolve();
 
   function artifact(meta: BodyMeta, assembly: Assembly | undefined): BodyArtifact {
     const text = (part: string): string | null => {
@@ -185,8 +187,9 @@ export function createBodyWriter(deps: Deps) {
         return;
       }
       if (message.type === "part") {
+        const admitted = epoch;
         if (resuming !== undefined) await resuming;
-        if (paused) return;
+        if (paused || admitted !== epoch) return;
         let assembly = assemblies.get(message.requestId);
         if (assembly === undefined) {
           assembly = { generation: message.generation, parts: new Map() };
@@ -211,8 +214,9 @@ export function createBodyWriter(deps: Deps) {
         return;
       }
       if (message.type === "meta") {
+        const admitted = epoch;
         if (resuming !== undefined) await resuming;
-        if (paused) return;
+        if (paused || admitted !== epoch) return;
         let assembly = assemblies.get(message.requestId);
         assemblies.delete(message.requestId);
         if (message.abandoned !== null) {
@@ -224,34 +228,46 @@ export function createBodyWriter(deps: Deps) {
             generation: message.generation,
           });
         }
-        chain = chain.then(() => (paused ? undefined : write(message, assembly)));
+        chain = chain.then(() =>
+          paused || admitted !== epoch ? undefined : write(message, assembly),
+        );
         return chain;
       }
       if (message.type === "pause" || message.type === "stop") {
+        ++epoch;
         paused = true;
         assemblies.clear();
         // Abandon the current staged/publication wait before closing handles.
         for (const approval of approvals.values()) approval.resolve();
         // A main-connection commit may have happened but not replied. Unknown
         // disposition preserves the final file; orphan sweep reconciles later.
-        for (const resolve of publications.values()) resolve(null);
-        await chain;
-        await deps.close?.();
-        if (message.type === "pause") deps.post({ type: "paused" });
+        for (const [id, resolve] of publications) {
+          if (message.type !== "pause" || !message.publications?.includes(id)) resolve(null);
+        }
+        lifecycle = lifecycle.then(async () => {
+          await chain;
+          await deps.close?.();
+          if (message.type === "pause") deps.post({ type: "paused" });
+        });
+        await lifecycle;
       } else if (message.type === "resume") {
+        const resumed = ++epoch;
+        paused = true;
         // Pause ACK (or actual old-thread close) precedes resume. No live write
         // owns staging now; remove even fresh remnants of the replaced DB.
-        resuming = (async () => {
+        const cleanup = lifecycle.then(async () => {
           await chain;
           if (deps.dir !== null) {
             const dir = join(deps.dir, STAGING_DIRNAME);
             const files = await readdir(dir, { withFileTypes: true }).catch(() => []);
             for (const file of files) if (file.isFile()) await unlink(join(dir, file.name));
           }
-          paused = false;
-        })();
-        await resuming;
-        resuming = undefined;
+          if (epoch === resumed) paused = false;
+        });
+        lifecycle = cleanup;
+        resuming = cleanup;
+        await cleanup;
+        if (resuming === cleanup) resuming = undefined;
       }
     },
   };

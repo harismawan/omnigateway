@@ -4,9 +4,55 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { deriveKey } from "@omni/store";
 import { readArtifact } from "../../../../packages/store/src/bodies/artifact.ts";
-import type { WorkerMessage } from "../../src/bodies/protocol.ts";
+import type { BodyMeta, WorkerMessage } from "../../src/bodies/protocol.ts";
 import { createBodyWriter } from "../../src/bodies/seal.ts";
 import { spawnBodyWriter } from "../../src/bodies/spawn.ts";
+
+test("a newer pause fences pending resume cleanup and waiting admission until valid recovery", async () => {
+  const replies: WorkerMessage[] = [];
+  let writes = 0;
+  const writer = createBodyWriter({
+    dir: null,
+    key: await deriveKey("overlap"),
+    bodies: {
+      writeRow: async () => {
+        writes++;
+        return false;
+      },
+    },
+    post: (m) => replies.push(m),
+  });
+  const resume = writer.handle({ type: "resume" });
+  const waitingPart = writer.handle({
+    type: "part",
+    requestId: "old",
+    generation: 0,
+    part: "client.request",
+    seq: 0,
+    last: true,
+    bytes: new TextEncoder().encode("old").buffer,
+  });
+  const meta: BodyMeta = {
+    type: "meta",
+    requestId: "old",
+    generation: 0,
+    at: 1000,
+    error: null,
+    client: { truncated: false, responseFrames: false },
+    attempts: [],
+    abandoned: null,
+  };
+  const waitingMeta = writer.handle(meta);
+  const pause = writer.handle({ type: "pause" });
+  await Promise.all([resume, waitingPart, waitingMeta, pause]);
+  expect(replies).toEqual([{ type: "paused" }]);
+  await writer.handle(meta);
+  expect(writes).toBe(0);
+  await writer.handle({ type: "resume" });
+  await writer.handle({ ...meta, requestId: "new", generation: 1 });
+  expect(writes).toBe(1);
+  expect(replies.at(-1)).toEqual({ type: "unowned", requestId: "new", generation: 1 });
+});
 
 test("resume cleans fresh stale staging only after the active write and handles quiesce", async () => {
   const dir = await mkdtemp("/tmp/opencode/body-resume-");

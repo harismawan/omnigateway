@@ -37,7 +37,8 @@ export type MainMessage =
   | BodyMeta
   | { type: "publish-ok"; requestId: string; relPath: string }
   | { type: "publish-result"; requestId: string; accepted: boolean }
-  | { type: "pause" | "resume" | "stop" };
+  | { type: "pause"; publications?: string[] }
+  | { type: "resume" | "stop" };
 export type WorkerMessage =
   | { type: "slice-ack"; requestId: string; generation: number; bytes: number }
   | { type: "publishing"; requestId: string; generation: number; relPath: string }
