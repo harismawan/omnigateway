@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { createPrompt, type PromptView, putSettings } from "@omni/control";
 import { parse } from "../src/args.ts";
 import { keysPrompts } from "../src/commands/keys.ts";
+import { promptsCreate, promptsSave } from "../src/commands/prompts.ts";
 import { settingsSet } from "../src/commands/settings.ts";
 import { CliError, createContext } from "../src/context.ts";
 import { run } from "../src/run.ts";
@@ -76,6 +77,73 @@ test("prompt parser errors never echo dash-prefixed bodies or unknown options", 
 function input(text: string) {
   return { readFile: async (_path: string) => text, readStdin: async () => text };
 }
+
+test("create and save reject duplicate file sources before input or store effects", async () => {
+  const root = makeRoot();
+  await seed(root);
+  const store = await openStore(root);
+  try {
+    const before = await store.prompts.get("team");
+    for (const verb of ["create", "save"]) {
+      for (const flags of [
+        ["--file", "first", "--file", "second"],
+        ["--file=first", "--file=-"],
+        ["--file", "-", "--file=second"],
+        ["--file=-", "--file", "-"],
+      ]) {
+        let effects = 0;
+        const forbidden = async () => {
+          effects++;
+          return "unintended body";
+        };
+        const command = verb === "create" ? promptsCreate : promptsSave;
+        const argv = [
+          verb === "create" ? "new" : "team",
+          ...(verb === "create" ? ["--name", "New"] : []),
+          ...flags,
+        ];
+        const unexpected = () => {
+          effects++;
+          throw new Error("unexpected effect");
+        };
+        const ctx = createContext(parse([]), { env: {}, cwd: root });
+        await expect(
+          command.run(parse(argv, command.options), {
+            ctx: { ...ctx, store: unexpected },
+            writer: capture().writer,
+            prompt: silentPrompt,
+            promptInput: { readFile: unexpected, readStdin: unexpected },
+            setupFs: { homeDir: root, cwd: root, read: unexpected, write: unexpected },
+            service: unexpected,
+            connect: unexpected,
+            connectable: unexpected,
+            foreground: unexpected,
+          }),
+        ).rejects.toThrow("provide only one --file source");
+        const result = await cli(
+          [
+            "prompts",
+            verb,
+            verb === "create" ? "new" : "team",
+            ...(verb === "create" ? ["--name", "New"] : []),
+            ...flags,
+          ],
+          {
+            root,
+            promptInput: { readFile: forbidden, readStdin: forbidden },
+          },
+        );
+        expect(result.code).toBe(2);
+        expect(effects).toBe(0);
+        expect(result.out + result.err).not.toContain("unintended body");
+        expect(await store.prompts.get("team")).toEqual(before);
+        expect(await store.prompts.get("new")).toBeNull();
+      }
+    }
+  } finally {
+    store.close();
+  }
+});
 
 async function seed(root: string, id = "team", text = "private prompt body") {
   const store = await openStore(root);

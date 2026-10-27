@@ -112,6 +112,9 @@ forEachStore((backend) => {
     expect((await store.prompts.get("team"))?.versions[1]?.text).toBe("  conventions");
     await store.prompts.remove("team");
     expect(await store.prompts.get("team")).toBeNull();
+    const recreated = await store.prompts.create({ ...prompt(), text: "new incarnation" });
+    expect(recreated.activeVersion).toBe(1);
+    expect(recreated.versions.map((v) => v.text)).toEqual(["new incarnation"]);
   });
 
   test("pruning retains active v1, monotone numbering and sibling allocation", async () => {

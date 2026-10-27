@@ -8,7 +8,14 @@ import {
   removePrompt,
   savePromptVersion,
 } from "@omni/control";
-import { boolFlag, type Parsed, requirePositional, stringFlag, UsageError } from "../args.ts";
+import {
+  boolFlag,
+  listFlag,
+  type Parsed,
+  requirePositional,
+  stringFlag,
+  UsageError,
+} from "../args.ts";
 import type { Command, CommandEnv } from "../command.ts";
 import { CliError } from "../context.ts";
 import { emit, fields, table } from "../output.ts";
@@ -27,7 +34,9 @@ function version(raw: string): number {
 }
 
 async function readText(args: Parsed, env: CommandEnv): Promise<string> {
-  const file = stringFlag(args.values, "file");
+  const files = listFlag(args.values, "file") ?? [];
+  if (files.length > 1) throw new UsageError("provide only one --file source");
+  const file = files[0];
   try {
     return file === undefined || file === "-"
       ? await env.promptInput.readStdin()
@@ -121,7 +130,11 @@ export const promptsCreate: Command = {
   usage: "prompts create <id> --name <name> [--file <path>|--file -] [--draft]",
   summary: "Create a prompt from file or stdin",
   help: INPUT_HELP,
-  options: { name: { type: "string" }, file: { type: "string" }, draft: { type: "boolean" } },
+  options: {
+    name: { type: "string" },
+    file: { type: "string", multiple: true },
+    draft: { type: "boolean" },
+  },
   async run(args, env) {
     positionals(args, 1);
     const id = requirePositional(args, 0, "prompt id");
@@ -143,7 +156,11 @@ export const promptsSave: Command = {
   usage: "prompts save <id> [--file <path>|--file -] [--note <note>] [--draft]",
   summary: "Save a new immutable version, activating unless --draft",
   help: INPUT_HELP,
-  options: { file: { type: "string" }, note: { type: "string" }, draft: { type: "boolean" } },
+  options: {
+    file: { type: "string", multiple: true },
+    note: { type: "string" },
+    draft: { type: "boolean" },
+  },
   async run(args, env) {
     positionals(args, 1);
     const id = requirePositional(args, 0, "prompt id");

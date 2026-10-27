@@ -21,70 +21,76 @@ const NOW = 1_000_000;
 
 test("HTTP prompt filters reach console pages/downloads and client own projection", async () => {
   const h = await harness();
-  const promptText = "PRIVATE OPERATOR PROMPT TEXT MUST NOT LEAVE LIBRARY";
-  await h.store.prompts.create({
-    id: "team",
-    name: "Team policy",
-    description: null,
-    text: promptText,
-    note: null,
-    activate: true,
-  });
-  const mine = await seedApiKey(h.store, { label: "mine" });
-  const theirs = await seedApiKey(h.store, { label: "theirs" });
-  const admin = await h.loginAdmin();
-  const client = await h.login(mine.raw);
-  for (const [id, prompt, apiKeyId] of [
-    ["team-v1", "team@1", mine.key.id],
-    ["team-extra", "team-extra@2", mine.key.id],
-    ["other-team", "other-team@3", mine.key.id],
-    ["team-v11", "team@11", mine.key.id],
-    ["foreign", "team@1", theirs.key.id],
-  ] as const) {
-    await h.store.usage.append(requestLog({ id, at: NOW, prompts: [prompt], apiKeyId }));
+  try {
+    const promptText = "PRIVATE OPERATOR PROMPT TEXT MUST NOT LEAVE LIBRARY";
+    await h.store.prompts.create({
+      id: "team",
+      name: "Team policy",
+      description: null,
+      text: promptText,
+      note: null,
+      activate: true,
+    });
+    const mine = await seedApiKey(h.store, { label: "mine" });
+    const theirs = await seedApiKey(h.store, { label: "theirs" });
+    const admin = await h.loginAdmin();
+    const client = await h.login(mine.raw);
+    for (const [id, prompt, apiKeyId] of [
+      ["team-v1", "team@1", mine.key.id],
+      ["team-extra", "team-extra@2", mine.key.id],
+      ["other-team", "other-team@3", mine.key.id],
+      ["team-v11", "team@11", mine.key.id],
+      ["foreign", "team@1", theirs.key.id],
+    ] as const) {
+      await h.store.usage.append(requestLog({ id, at: NOW, prompts: [prompt], apiKeyId }));
+    }
+    const consolePage = (await (await h.api("/api/logs?prompt=team", admin)).json()) as {
+      logs: { id: string }[];
+    };
+    expect(consolePage.logs.map((log: { id: string }) => log.id).sort()).toEqual([
+      "foreign",
+      "team-v1",
+      "team-v11",
+    ]);
+    const own = (await (await h.api("/api/client/logs?prompt=team", client)).json()) as {
+      logs: { id: string; prompts: string[] }[];
+    };
+    expect(own.logs.map((log: { id: string }) => log.id).sort()).toEqual(["team-v1", "team-v11"]);
+    expect(own.logs.map((log: { prompts: string[] }) => log.prompts).sort()).toEqual([
+      ["team@1"],
+      ["team@11"],
+    ]);
+    expect(JSON.stringify(own)).not.toContain("credentialId");
+    expect(JSON.stringify(own)).not.toContain(promptText);
+    expect(JSON.stringify(consolePage)).not.toContain(promptText);
+    const download = await h.api(
+      `/api/logs/export?prompt=team&since=0&until=${NOW}&format=jsonl`,
+      admin,
+    );
+    expect(download.status).toBe(200);
+    const rows = (await download.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(rows.map((row) => row.id).sort()).toEqual(["foreign", "team-v1", "team-v11"]);
+    expect(rows.every((row) => Array.isArray(row.prompts))).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain(promptText);
+    expect(
+      (await (await h.api("/api/logs?prompt=deleted-prompt", admin)).json()) as unknown,
+    ).toMatchObject({ logs: [] });
+    for (const prompt of ["", "team@1", "Team", "team_extra", "ponytail-fake"]) {
+      const query = `prompt=${encodeURIComponent(prompt)}`;
+      expect((await h.api(`/api/logs?${query}`, admin)).status).toBe(400);
+      expect((await h.api(`/api/client/logs?${query}`, client)).status).toBe(400);
+      expect((await h.api(`/api/logs/export?${query}&since=0&until=${NOW}`, admin)).status).toBe(
+        400,
+      );
+    }
+    // Client downloads remain absent: no new read surface is introduced here.
+    expect((await h.api("/api/client/logs/export?prompt=team", client)).status).toBe(404);
+  } finally {
+    h.store.close();
   }
-  const consolePage = (await (await h.api("/api/logs?prompt=team", admin)).json()) as {
-    logs: { id: string }[];
-  };
-  expect(consolePage.logs.map((log: { id: string }) => log.id).sort()).toEqual([
-    "foreign",
-    "team-v1",
-    "team-v11",
-  ]);
-  const own = (await (await h.api("/api/client/logs?prompt=team", client)).json()) as {
-    logs: { id: string; prompts: string[] }[];
-  };
-  expect(own.logs.map((log: { id: string }) => log.id).sort()).toEqual(["team-v1", "team-v11"]);
-  expect(own.logs.map((log: { prompts: string[] }) => log.prompts).sort()).toEqual([
-    ["team@1"],
-    ["team@11"],
-  ]);
-  expect(JSON.stringify(own)).not.toContain("credentialId");
-  expect(JSON.stringify(own)).not.toContain(promptText);
-  expect(JSON.stringify(consolePage)).not.toContain(promptText);
-  const download = await h.api(
-    `/api/logs/export?prompt=team&since=0&until=${NOW}&format=jsonl`,
-    admin,
-  );
-  expect(download.status).toBe(200);
-  const rows = (await download.text())
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(rows.map((row) => row.id).sort()).toEqual(["foreign", "team-v1", "team-v11"]);
-  expect(rows.every((row) => Array.isArray(row.prompts))).toBe(true);
-  expect(JSON.stringify(rows)).not.toContain(promptText);
-  expect(
-    (await (await h.api("/api/logs?prompt=deleted-prompt", admin)).json()) as unknown,
-  ).toMatchObject({ logs: [] });
-  for (const prompt of ["", "team@1", "Team", "team_extra", "ponytail-fake"]) {
-    const query = `prompt=${encodeURIComponent(prompt)}`;
-    expect((await h.api(`/api/logs?${query}`, admin)).status).toBe(400);
-    expect((await h.api(`/api/client/logs?${query}`, client)).status).toBe(400);
-    expect((await h.api(`/api/logs/export?${query}&since=0&until=${NOW}`, admin)).status).toBe(400);
-  }
-  // Client downloads remain absent: no new read surface is introduced here.
-  expect((await h.api("/api/client/logs/export?prompt=team", client)).status).toBe(404);
 });
 
 test("an already-open holder reads only its current effective policies, never library/history/another key", async () => {

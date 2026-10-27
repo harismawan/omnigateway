@@ -1,5 +1,6 @@
 import { GatewayError } from "@omni/ir";
-import type { Store } from "@omni/store";
+import { MAX_PROMPT_VERSIONS, MAX_USER_PROMPTS } from "@omni/prompts/catalog";
+import type { PromptDetail, Store } from "@omni/store";
 
 /** How many request rows travel per read. */
 const PAGE = 1_000;
@@ -12,6 +13,8 @@ export type CopyCounts = {
   /** Rows skipped because they were still pending, or carried no completion. */
   skippedPending: number;
   exportDestinations: number;
+  prompts: number;
+  promptVersions: number;
 };
 
 export type CopyReport = {
@@ -44,19 +47,21 @@ export const NOT_CARRIED = [
  * a merge, and a merge has no right answer for a duplicate key.
  */
 export async function copyStore(source: Store, target: Store): Promise<CopyReport> {
-  const [keys, models, credentials, hash, destinations] = await Promise.all([
+  const [keys, models, credentials, hash, destinations, prompts] = await Promise.all([
     target.keys.list(),
     target.config.listModels(),
     target.credentials.list(),
     target.config.getAdminPasswordHash(),
     target.exportDestinations.list(),
+    target.prompts.list(),
   ]);
   if (
     keys.length > 0 ||
     models.length > 0 ||
     credentials.length > 0 ||
     hash !== null ||
-    destinations.length > 0
+    destinations.length > 0 ||
+    prompts.length > 0
   ) {
     throw new GatewayError("CONFLICT", "the target already holds data; copy into an empty store");
   }
@@ -73,6 +78,33 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
     }
   }
 
+  // Read and validate every retained history before writing anything. Ordinary
+  // saves would renumber pruned histories and change timestamps/active pointers.
+  const library: PromptDetail[] = [];
+  const parents = await source.prompts.list();
+  const ids = new Set<string>();
+  for (const parent of parents) {
+    const detail = await source.prompts.get(parent.id);
+    if (
+      parents.length > MAX_USER_PROMPTS ||
+      ids.has(parent.id) ||
+      detail === null ||
+      detail.id !== parent.id ||
+      detail.versions.length === 0 ||
+      detail.versions.length > MAX_PROMPT_VERSIONS ||
+      (detail.activeVersion !== null &&
+        !detail.versions.some((v) => v.version === detail.activeVersion)) ||
+      new Set(detail.versions.map((v) => v.version)).size !== detail.versions.length ||
+      detail.versions.some(
+        (v) => v.promptId !== detail.id || !Number.isSafeInteger(v.version) || v.version <= 0,
+      )
+    ) {
+      throw new GatewayError("BAD_REQUEST", "source prompt history is unreadable; repair it first");
+    }
+    ids.add(detail.id);
+    library.push(detail);
+  }
+
   const counts: CopyCounts = {
     credentials: 0,
     apiKeys: 0,
@@ -80,11 +112,20 @@ export async function copyStore(source: Store, target: Store): Promise<CopyRepor
     requestLogs: 0,
     skippedPending: 0,
     exportDestinations: 0,
+    prompts: 0,
+    promptVersions: 0,
   };
 
   // Configuration first, so a copy that fails part-way through the logs leaves
   // an installation that can at least be logged into and route.
   const settings = await source.config.getSettings();
+  // Assignment writers check existence transactionally, so library must arrive
+  // before either global settings or imported keys can reference it.
+  for (const detail of library) {
+    await target.prompts.importRow(detail);
+    counts.prompts++;
+    counts.promptVersions += detail.versions.length;
+  }
   await target.config.putSettings(settings);
   const adminHash = await source.config.getAdminPasswordHash();
   if (adminHash !== null) await target.config.setAdminPasswordHash(adminHash);

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createStore, deriveKey } from "@omni/store";
+import { createStore, deriveKey, type PromptDetail, type Store } from "@omni/store";
 import {
   memoryStore,
   requestLog,
@@ -53,6 +53,8 @@ test("copies configuration, credentials, keys and completed logs into an empty s
     requestLogs: 1,
     skippedPending: 1,
     exportDestinations: 1,
+    prompts: 0,
+    promptVersions: 0,
   });
   expect(report.notCarried.length).toBeGreaterThan(0);
 
@@ -101,6 +103,139 @@ test("copies configuration, credentials, keys and completed logs into an empty s
   await expect(copyStore(source, target_)).rejects.toThrow("already holds data");
   source.close();
   target_.close();
+});
+
+// Active v1 survives pruning; the next save must continue from v102, not the
+// retained count. Deliberately distinct timestamps catch save/activate rebuilds.
+function retained(id = "team"): PromptDetail {
+  return {
+    id,
+    name: "Team rules",
+    description: "Retained history",
+    activeVersion: 1,
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_102,
+    versions: [...Array.from({ length: 99 }, (_, i) => 102 - i), 1].map((version) => ({
+      promptId: id,
+      version,
+      text: `  rules ${version}`,
+      note: `note ${version}`,
+      createdAt: 1_700_000_000_000 + version,
+    })),
+  };
+}
+
+async function promptCopy(source: Store, target_: Store) {
+  const sourceDetail = retained();
+  await source.prompts.importRow(sourceDetail);
+  await source.prompts.create({
+    id: "draft",
+    name: "Draft",
+    description: null,
+    text: "draft text",
+    note: null,
+    activate: false,
+  });
+  await source.config.putSettings({ prompts: ["team", "ponytail-lite"] });
+  const { key } = await seedApiKey(source, {
+    prompts: { ids: ["draft", "team"], inheritGlobal: false },
+  });
+  await source.usage.append(
+    requestLog({ id: "historical", apiKeyId: key.id, prompts: ["team@2", "deleted@1"] }),
+  );
+  const report = await copyStore(source, target_);
+  const copied = await target_.prompts.get("team");
+  expect(copied?.versions).toEqual(sourceDetail.versions);
+  expect(copied?.activeVersion).toBe(1);
+  expect(copied).toEqual(sourceDetail);
+  expect(await target_.prompts.get("draft")).toEqual(await source.prompts.get("draft"));
+  expect(report.counts.prompts).toBe(2);
+  expect(report.counts.promptVersions).toBe(101);
+  expect((await target_.config.getSettings()).prompts).toEqual(["team", "ponytail-lite"]);
+  expect((await target_.keys.get(key.id))?.prompts).toEqual(key.prompts);
+  expect((await target_.usage.get("historical"))?.prompts).toEqual(["team@2", "deleted@1"]);
+  expect(await target_.prompts.assignments("team")).toEqual({ global: true, keyIds: [key.id] });
+  expect(
+    (await target_.prompts.saveVersion("team", { text: "next", note: null, activate: false }))
+      .version,
+  ).toBe(103);
+}
+
+async function promptOnlyTarget(source: Store, target_: Store) {
+  await target_.prompts.importRow(retained());
+  await source.config.setAdminPasswordHash("must-not-arrive");
+  const before = await target_.config.getSettings();
+  await expect(copyStore(source, target_)).rejects.toThrow("already holds data");
+  expect(await target_.config.getAdminPasswordHash()).toBeNull();
+  expect(await target_.config.getSettings()).toEqual(before);
+  expect(await target_.prompts.get("team")).toEqual(retained());
+}
+
+for (const direction of ["sqlite→sqlite", "sqlite→postgres", "postgres→sqlite"] as const) {
+  for (const scenario of [promptCopy, promptOnlyTarget]) {
+    test.skipIf(direction.includes("postgres") && !process.env.OMNI_TEST_DATABASE_URL)(
+      `${direction} ${scenario.name}: exact history/counts or prompt-only target preflight`,
+      async () => {
+        const openPg = async () => {
+          const { SQL } = await import("bun");
+          const { createPostgresStore } = await import("@omni/store");
+          const url = process.env.OMNI_TEST_DATABASE_URL as string;
+          const admin = new SQL({ url, max: 1 });
+          try {
+            await admin.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+          } finally {
+            await admin.close();
+          }
+          return createPostgresStore({
+            url,
+            encryptionKey: await deriveKey("test-encryption-key-0123456789"),
+          });
+        };
+        const source = direction.startsWith("postgres") ? await openPg() : await memoryStore();
+        const target_ = direction.endsWith("postgres") ? await openPg() : await memoryStore();
+        try {
+          await scenario(source, target_);
+        } finally {
+          source.close();
+          target_.close();
+        }
+      },
+    );
+  }
+}
+
+test("invalid or vanished source history refuses before any target write", async () => {
+  const source = await memoryStore();
+  const target_ = await memoryStore();
+  try {
+    await source.prompts.importRow(retained("a-valid"));
+    await source.prompts.importRow(retained());
+    await source.config.setAdminPasswordHash("must-not-arrive");
+    const row = retained();
+    for (const detail of [
+      null,
+      { ...row, activeVersion: 2 },
+      { ...row, versions: [] },
+      { ...row, versions: [...row.versions, ...row.versions] },
+      { ...row, versions: row.versions.map((v) => ({ ...v, promptId: "wrong" })) },
+      { ...row, versions: row.versions.map((v) => ({ ...v, version: 1 })) },
+      { ...row, versions: row.versions.map((v) => ({ ...v, version: -1 })) },
+    ]) {
+      const unreadable = {
+        ...source,
+        prompts: {
+          ...source.prompts,
+          get: async (id: string) => (id === "team" ? detail : source.prompts.get(id)),
+        },
+      };
+      await expect(copyStore(unreadable, target_)).rejects.toThrow("source prompt history");
+      expect(await target_.config.getAdminPasswordHash()).toBeNull();
+      expect(await target_.prompts.list()).toEqual([]);
+    }
+  } finally {
+    source.close();
+    target_.close();
+  }
 });
 
 /**

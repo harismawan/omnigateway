@@ -567,6 +567,16 @@ describe("restoreSnapshot", () => {
     expect(result.counts).toEqual({ settings: 1 });
   });
 
+  test("preview and restore include user prompt and retained-version counts unchanged", async () => {
+    const counts = { settings: 1, prompts: 2, prompt_versions: 101 };
+    const d = deps({
+      files,
+      inspect: { ok: true, quickCheck: "ok", tables: Object.keys(counts), counts },
+    });
+    expect((await previewRestore(d, id)).snapshot).toEqual(counts);
+    expect((await restoreSnapshot(d, id)).counts).toEqual(counts);
+  });
+
   test("leaves the restored snapshot on disk, so the same one can be used twice", async () => {
     const d = deps({ files });
     await restoreSnapshot(d, id);

@@ -353,6 +353,12 @@ None. The hardware-paragraph trade under *The text* is recorded as a decision, n
 
 ## History
 
+- 2026-10-27 implementation: [Prompt Management](2026-10-24-prompt-management-design.md)
+  generalizes the append stage with versioned user prompts and read-only ponytail built-ins.
+  `ponytailMode` remains a locked, mirrored global-assignment alias for upgrade/rollback;
+  user/per-key prompts fail open on older builds. This records implementation evolution,
+  not new operator approval of the earlier decisions.
+
 Moved here from `CLAUDE.md` on 2026-09-03.
 
 The header first said the vendored text was v4.8.2, read off a release page rather than the

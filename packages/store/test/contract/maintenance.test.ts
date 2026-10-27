@@ -40,6 +40,8 @@ forEachStore((backend) => {
     const names = tables.map((t) => t.name);
     expect(names).toContain("migrations");
     expect(names).toContain("request_logs");
+    expect(names).toContain("prompts");
+    expect(names).toContain("prompt_versions");
     expect(names.some((n) => n.startsWith("sqlite_"))).toBe(false);
     for (const t of tables) expect(t.bytes).toBeGreaterThan(0);
     expect(tables.map((t) => t.bytes)).toEqual(
@@ -65,8 +67,24 @@ forEachStore((backend) => {
     expect(s.databasePath).not.toContain(":omni@");
     if (backend.name === "postgres") expect(s.databasePath).toContain("***");
     await s.config.setAdminPasswordHash("h");
+    await s.prompts.create({
+      id: "team",
+      name: "Team",
+      description: null,
+      text: "active",
+      note: "first",
+      activate: true,
+    });
+    await s.prompts.saveVersion("team", { text: "draft", note: "second", activate: false });
+    const detail = await s.prompts.get("team");
+    const prompts = s.prompts;
+    const get = prompts.get;
     await s.reopen();
     expect(await s.config.getAdminPasswordHash()).toBe("h");
+    expect(await get("team")).toEqual(detail);
+    expect((await prompts.listActive())[0]?.text).toBe("active");
+    await prompts.activate("team", 2);
+    expect((await prompts.listActive())[0]?.text).toBe("draft");
     if (backend.name === "postgres") {
       await expect(s.maintenance.vacuum()).rejects.toThrow("use pg_dump");
       await expect(s.maintenance.snapshotTo("/tmp/x")).rejects.toThrow("use pg_dump");
