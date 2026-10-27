@@ -681,8 +681,61 @@ Read them from the console's Logs screen or:
 ```bash
 omni bodies req_550e8400-…          # the frame: state, size, one line per attempt
 omni bodies req_550e8400-… --full   # the payloads themselves
-omni bodies req_550e8400-… --json   # the artifact, for a script
+omni bodies req_550e8400-… --json   # bounded part previews, for a script
 ```
+
+`--json` returns a preview (first 1 MiB of each part's serialized JSON, full size and
+`previewTruncated`); `--full` prints complete parts. The console's **Download full part**
+streams full JSON from the body writer, admin-only. Raw downloads have a renewable
+30-second inactivity timeout, not a total download deadline; decode admission has its
+own 30-second bound. CLI decoding happens locally in the CLI process.
+
+Capture completion runs in the background: neither row completion nor the client waits
+for body persistence. Provider tails settle for at most five seconds after completion,
+or until abort, then remaining bytes are discarded. `request_logs.body_state` (wire
+`bodyState`) describes capture separately from the request's success:
+
+| State | Meaning |
+|---|---|
+| `null` | Capture not attempted (legacy rows can still have artifacts). |
+| `pending` | Capture admitted; artifact not published yet. |
+| `ready` | Artifact published. |
+| `omitted` | Published omission marker, e.g. size, nesting or capture budget. |
+| `failed` | Capture failed or abandoned; stale pending rows fail one hour after completion. |
+
+`OMNI_BODY_CAPTURE_BUDGET_BYTES` defaults to 512 MiB of accounted retained capture
+text/transfer bytes, not total process memory. Exhaustion discards capture without
+back-pressure on inference. The writer admits at most **1,000 outstanding captures**,
+including work already handed to a stalled worker. Overflow drops and counts `backlog`
+without retaining another request id or worker message: it can become `failed`/unavailable
+instead of a persisted omission artifact. Watch
+`omni_bodies_dropped_total`, labelled `reason="budget"`, `"backlog"`, `"writer_crash"`
+or `"restore"`. Budget omissions say `capture budget
+exhausted`; crashes/write failures affect capture, never inference.
+
+**Exporting captured bodies.** Enable `OMNI_EXPORT_BODIES_ALLOWED=true` at boot, both
+capture gates, and the destination's **Export bodies** switch (or `omni export set <id>
+--bodies on`). Key opt-outs always win. Gates are rechecked at send time, including
+retained artifacts; if any is off, no `body` field is sent. OTLP traces refuse bodies.
+Only masked client request/response parts are exported, not provider attempts.
+When eligible, exported `body.state` is `included` (whole), `incomplete` (truncated),
+`omitted` (marker with reason, including `export budget`), or `unavailable` (missing,
+failed, pruned, or late). Pending bodies hold that destination's cursor for at most
+60 seconds after completion; then export sends `unavailable` and increments
+`omni_export_bodies_late_total`. Metadata-only destinations never wait. Keep lag below
+body retention, not merely log retention. Classifier requests have no artifact.
+One body globally holds the export worker's conservative reservation until its last
+segment or cancellation. The default 192 MiB export budget can omit roughly 2 MiB
+artifacts at the default Elasticsearch receiver cap: increase
+`OMNI_EXPORT_BODY_BUDGET_BYTES` to export larger bodies, with memory headroom; see the
+[reservation formula and sizing](../README.md#exporting-request-logs).
+`omni_export_bodies_omitted_total` counts export-budget omissions (not every stored
+omission marker); these counters are process-local Prometheus telemetry.
+
+Restore/import pauses both workers and fences old acknowledgements by generation.
+Unsettled publication/failure operations cause a bounded refusal rather than swapping
+under active work; retry after they settle. Graceful shutdown allows five seconds;
+forced shutdown terminates immediately and may lose captures.
 
 The bare command prints only the frame, never conversations — asking costs one
 flag. A missing artifact answers rather than errors: `not captured`, `captured,
@@ -708,8 +761,10 @@ kilobytes, and body retention is what bounds a real corpus — size a volume for
 a day of captured traffic, or shorten `bodyRetentionDays`.
 
 Sizes here are stored-envelope bytes, not PostgreSQL table, TOAST, or WAL size.
-The 64 MiB cap applies to the plaintext JSON after masking; nothing inside a
-body is cut, so a body is kept whole or replaced by an omission marker that
+The 64 MiB cap applies to the entire plaintext artifact JSON after masking; no
+structural string/array/depth/key bounds cut its contents. Separately, wire capture
+discards bytes past 64 MiB per side and marks truncation; cancellation can also leave
+incomplete content. An artifact over its cap is replaced by an omission marker that
 says why (too large, or nested too deeply to serialize). The stored file is
 larger than the plaintext. This version writes the binary envelope, `N + 38`
 bytes for a plaintext of N bytes. Earlier versions wrote a hex envelope,

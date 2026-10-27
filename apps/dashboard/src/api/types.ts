@@ -1001,6 +1001,12 @@ export type ExportDestinationsResponse = {
 
 export type ExportDestinationResponse = { destination: ExportDestinationView };
 
+/** GET /api/export/destinations/:id only; mutation replies carry no gate or worker. */
+export type ExportDestinationStatusResponse = ExportDestinationResponse & {
+  exportBodiesAllowed: boolean;
+  worker: ExportWorkerView;
+};
+
 /**
  * A create body. `secret` is the type's secret object; the gateway's schema
  * judges it, so it is typed loosely here rather than restating three schemas.

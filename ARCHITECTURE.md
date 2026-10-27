@@ -455,6 +455,13 @@ One artifact holds client pair and every wire pair together, so failover inciden
 
 ### Body capture forensics
 
+Capture must not add a second parse or serialization of request/response trees on the
+gateway thread. Ingress still performs the necessary IR parse; non-streaming egress
+serializes its response once for HTTP and capture reuses that text. The body writer
+owns artifact parsing, masking, serialization, sealing and admin preview HTTP encoding.
+It never writes the main SQLite file: only the host's main connection publishes the
+pointer and `body_state`. Its SQLite read handles are read-only/query-only.
+
 `finishLog` schedules background capture completion without awaiting drains or persistence. Normal provider tails settle before one-shot handoff to `bodies/host.ts`; cancellation or five seconds after completion ends retention and subsequent drain bytes are discarded. The shared capture budget covers retained text and transferred encode copies until slice/write acknowledgements; transfer slices are at most 1 MiB with an event-loop yield between them. Partial budget abandonment keeps its original reservation until the worker immediately disposes the assembly and acknowledges `discarded`, even behind a blocked write. The dedicated `bodies/writer.ts` alone parses, masks, serializes and seals, one artifact at a time. SQLite files are fsynced under `.staging`, then renamed only after the host protects the final path from orphan sweeps; the main connection publishes pointer and body state atomically. Refused publications stay protected until worker cleanup. Stop/halt never invent refusal for an undecided publication: owner files survive, with pending paths protected until actual thread close. PostgreSQL uses a worker pool of two and write-once byte ownership, with digest-checked publication on the main pool; an `unowned` loser releases its capture without failing another owner's row. Generic `workerHost/instance.ts` owns close-confirmed restart/backoff and bounded lifecycle waits; body acknowledgements are generation-fenced. Writer failures affect capture, never inference.
 
 The host admits at most 1,000 outstanding captures, including ones already handed to a stalled worker. Overflow drops all capture references/reservations and counts `backlog` once, without a worker message or retained id. Best-effort body-state failure uses one concurrent write and no waiting queue; when occupied, the existing stale-pending sweep eventually fails the row. Overflow can therefore be unavailable/failed rather than a persisted backlog omission artifact. Admitted captures abandoned by the byte budget still produce omission artifacts.
@@ -618,6 +625,22 @@ Export worker is a stopper too, and the one that does not wait: `stopLoops` post
 Restart is watched rather than timed. Console polls `/health` — its one documented exception to reading `/api/*` only, for reason given under [the console and the CLI](#the-console-and-the-cli) — until gateway stops answering, then until it answers again, and only then reloads. Page reloading on fixed delay would land either before process went or while still starting, and operator reads both as failed restart. Shutdown has no second half to watch, so rail says so and stops.
 
 ## Log export
+
+**Body attachments** (`export/body/`). Send-time capture/environment/destination gates
+and key opt-outs decide whether an additive `body` exists. Pending captures hold a
+destination for ≤60 seconds after completion, then become counted `unavailable` records.
+The read-only artifact reader never writes `detail_state`. Export scans client fields
+from decrypted JSON without building an artifact tree. A global semaphore admits one
+body across all destinations, holding its reservation through the last segment or
+cancellation. With envelope bytes `E`, plaintext `P`, encoded metadata `M`, and effective
+receiver cap `cap`, reserve up front
+`max(8E + 8P + 65536, 32P + 12S + 1048576 + 8M)`,
+`S = min(cap, 6P + 4M + 4096)`. This conservative pinned-runtime allocation estimate
+is not an RSS/GC ceiling. The 192 MiB default can omit ~2 MiB artifacts on default ES;
+larger exports require a larger budget. No early shrink depends on GC timing.
+Bodies fit inline or segment deterministically by encoded size; preceding metadata
+flushes separately. OTLP traces refuse bodies; only body-bearing OTLP logs use full
+record JSON as the inline string body, while metadata-only logs retain their title.
 
 Ships every completed `request_logs` row to operator's own store — Elasticsearch/OpenSearch `_bulk`, JSON webhook, OTLP logs or traces — durably and at least once. Operator view in `README.md#exporting-request-logs` and `docs/operations.md#log-export`; design in [log export](docs/superpowers/specs/2026-10-24-log-export-design.md). Part 1 sends metadata only; bodies are part 2.
 

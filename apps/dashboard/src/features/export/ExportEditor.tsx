@@ -1,7 +1,14 @@
 import { Plus, X } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
 import styled from "styled-components";
-import { useCreateExportDestination, useUpdateExportDestination } from "../../api/queries.ts";
+import {
+  useBodyLoggingAllowed,
+  useCreateExportDestination,
+  useExportDestinations,
+  useSetExportDestinationBodies,
+  useSettings,
+  useUpdateExportDestination,
+} from "../../api/queries.ts";
 import type {
   ExportDestinationPatch,
   ExportDestinationType,
@@ -82,6 +89,7 @@ type Draft = {
   startFrom: "now" | "oldest";
   url: string;
   index: string;
+  bodyIndex: string;
   auth: Auth;
   flavor: "elasticsearch" | "opensearch";
   headers: string;
@@ -93,6 +101,7 @@ type Draft = {
   models: string;
   failedOnly: boolean;
   maxRequestBytes: string;
+  includeBodies: boolean;
   /** Secret fields: always blank to start, never prefilled. */
   apiKey: string;
   username: string;
@@ -125,6 +134,7 @@ function draftOf(editing: ExportDestinationView | null): Draft {
     startFrom: "now",
     url: str(c.url),
     index: str(c.index, DEFAULT_INDEX),
+    bodyIndex: str(c.bodyIndex, "omni-bodies-{yyyy.MM.dd}"),
     auth: auth === "basic" || auth === "none" ? auth : "apiKey",
     flavor: c.flavor === "opensearch" ? "opensearch" : "elasticsearch",
     headers: headerLines(c.headers),
@@ -136,6 +146,7 @@ function draftOf(editing: ExportDestinationView | null): Draft {
     models: editing?.filter.models?.join(", ") ?? "",
     failedOnly: editing?.filter.failedOnly === true,
     maxRequestBytes: editing?.maxRequestBytes == null ? "" : String(editing.maxRequestBytes),
+    includeBodies: editing?.includeBodies ?? false,
     apiKey: "",
     username: "",
     password: "",
@@ -206,6 +217,7 @@ function configOf(draft: Draft): Record<string, unknown> | string {
       return {
         url: draft.url.trim(),
         index: draft.index.trim(),
+        bodyIndex: draft.bodyIndex.trim(),
         auth: draft.auth,
         flavor: draft.flavor,
       };
@@ -276,9 +288,16 @@ export type ExportEditorProps = {
  * "every request". Errors are the gateway's own fixed messages, shown as is.
  */
 export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
-  const current = editing === "new" ? null : editing;
+  // Keep creation after a later bodies mutation fails: retry must not create twice.
+  const [created, setCreated] = useState<ExportDestinationView | null>(null);
+  const current = editing === "new" ? created : editing;
+  const [savedBodies, setSavedBodies] = useState(current?.includeBodies ?? false);
   const create = useCreateExportDestination();
   const update = useUpdateExportDestination();
+  const bodies = useSetExportDestinationBodies();
+  const exports = useExportDestinations();
+  const settings = useSettings();
+  const captureAllowed = useBodyLoggingAllowed();
   const [draft, setDraft] = useState<Draft>(() => draftOf(current));
   const [secretMode, setSecretMode] = useState<SecretMode>(current === null ? "replace" : "keep");
   const [filterTouched, setFilterTouched] = useState(false);
@@ -287,9 +306,29 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
   const nextRow = useRef(0);
   const bodiesId = useId();
 
-  const busy = create.isPending || update.isPending;
+  const busy = create.isPending || update.isPending || bodies.isPending;
+  const traces = draft.type === "otlp" && draft.signal === "traces";
+  const bodyGate = traces
+    ? "OTLP traces cannot export bodies. Use OTLP logs instead."
+    : settings.isError || captureAllowed.isError || exports.isError
+      ? "Cannot verify body logging gates. Reload and try again."
+      : settings.data === undefined ||
+          captureAllowed.data === undefined ||
+          exports.data === undefined
+        ? "Checking body export gates…"
+        : exports.data.exportBodiesAllowed !== true
+          ? "Set OMNI_EXPORT_BODIES_ALLOWED=true and restart the gateway."
+          : captureAllowed.data !== true
+            ? "Set OMNI_BODY_LOGGING_ALLOWED=true and restart the gateway."
+            : !settings.data.bodyLoggingEnabled
+              ? "Enable body logging in Settings before exporting bodies."
+              : null;
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
-    setDraft((previous) => ({ ...previous, [key]: value }));
+    setDraft((previous) => {
+      const next = { ...previous, [key]: value };
+      if (next.type === "otlp" && next.signal === "traces") next.includeBodies = false;
+      return next;
+    });
   const setFilter = <K extends "keysScope" | "keys" | "modelsScope" | "models" | "failedOnly">(
     key: K,
     value: Draft[K],
@@ -308,7 +347,7 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
 
   const fail = (error: unknown) => setProblem(describeError(error));
 
-  const submit = () => {
+  const submit = async () => {
     setProblem(null);
     const config = configOf(draft);
     if (typeof config === "string") return setProblem(config);
@@ -318,11 +357,14 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
     if (typeof secret === "string") return setProblem(secret);
     const filter = filterOf(draft);
     if (typeof filter === "string") return setProblem(filter);
+    if (draft.includeBodies && !savedBodies && bodyGate !== null) {
+      return setProblem(bodyGate);
+    }
 
-    if (current === null) {
-      if (draft.id.trim().length === 0) return setProblem("Give the destination an ID.");
-      create.mutate(
-        {
+    try {
+      if (current === null) {
+        if (draft.id.trim().length === 0) return setProblem("Give the destination an ID.");
+        const result = await create.mutateAsync({
           id: draft.id.trim(),
           type: draft.type,
           startFrom: draft.startFrom,
@@ -331,25 +373,37 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
           filter,
           maxRequestBytes,
           ...(secret === null ? {} : { secret }),
-        },
-        { onSuccess: () => onOpenChange(false), onError: fail },
-      );
-      return;
-    }
+        });
+        setCreated(result.destination);
+        setSecretMode("keep");
+        if (draft.includeBodies)
+          await bodies.mutateAsync({ id: result.destination.id, include: true });
+        onOpenChange(false);
+        return;
+      }
 
-    if (secretMode === "replace" && secret === null) {
-      return setProblem("Enter the new secret, or use Clear secret to remove it.");
+      if (secretMode === "replace" && secret === null) {
+        return setProblem("Enter the new secret, or use Clear secret to remove it.");
+      }
+      const patch: ExportDestinationPatch = {
+        config,
+        ...(filterTouched ? { filter } : {}),
+        maxRequestBytes,
+        ...(secretMode === "keep" ? {} : { secret: secretMode === "clear" ? null : secret }),
+      };
+      // Control refuses traces while the stored preference is on: disable first.
+      if (savedBodies && !draft.includeBodies) {
+        await bodies.mutateAsync({ id: current.id, include: false });
+        setSavedBodies(false);
+      }
+      await update.mutateAsync({ id: current.id, patch });
+      if (!savedBodies && draft.includeBodies) {
+        await bodies.mutateAsync({ id: current.id, include: true });
+      }
+      onOpenChange(false);
+    } catch (error) {
+      fail(error);
     }
-    const patch: ExportDestinationPatch = {
-      config,
-      ...(filterTouched ? { filter } : {}),
-      maxRequestBytes,
-      ...(secretMode === "keep" ? {} : { secret: secretMode === "clear" ? null : secret }),
-    };
-    update.mutate(
-      { id: current.id, patch },
-      { onSuccess: () => onOpenChange(false), onError: fail },
-    );
   };
 
   const secretInput = (
@@ -457,7 +511,7 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
       title={current === null ? "Add an export destination" : `Edit ${current.id}`}
       description={
         current === null
-          ? "Every completed request's log record — never its prompt or response — is sent here."
+          ? "Send completed request metadata here. Masked client bodies require a separate opt-in."
           : undefined
       }
       width="600px"
@@ -588,6 +642,18 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
                 />
               )}
             </Field>
+            <Field
+              label="Body index"
+              hint="Segmented body documents; {yyyy.MM.dd} uses the request's UTC day."
+            >
+              {(props) => (
+                <Input
+                  {...props}
+                  value={draft.bodyIndex}
+                  onChange={(event) => set("bodyIndex", event.target.value)}
+                />
+              )}
+            </Field>
             <Field label="Authentication">
               {(props) => (
                 <Select
@@ -713,14 +779,18 @@ export function ExportEditor({ editing, onOpenChange }: ExportEditorProps) {
           <Row $gap={2}>
             <Toggle
               id={bodiesId}
-              checked={false}
-              onCheckedChange={() => {}}
+              checked={draft.includeBodies}
+              onCheckedChange={(include) => set("includeBodies", include)}
               label="Export bodies"
-              disabled
+              disabled={busy || bodyGate !== null}
             />
             <Switch htmlFor={bodiesId}>Export bodies</Switch>
           </Row>
-          <Note>Body export is available in a later release; only metadata is sent.</Note>
+          {bodyGate === null ? null : <Note>{bodyGate}</Note>}
+          <Note>
+            Exports masked client requests and responses. Key opt-outs always apply; provider
+            attempts stay local. Gates are checked again at send time.
+          </Note>
         </Group>
 
         {problem === null ? null : <Problem role="alert">{problem}</Problem>}

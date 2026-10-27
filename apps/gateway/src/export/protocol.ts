@@ -45,7 +45,7 @@ export type BodyGates = { bodyLoggingAllowed: boolean; bodyLoggingEnabled?: bool
 export type MainMessage =
   /** Wake now and re-read configuration (it is also re-read every tick). */
   | { type: "destinationsChanged" }
-  /** New body-capture gate values. Accepted and ignored in part 1. */
+  /** Update privacy gates and cancel active body passes before further sends. */
   | { type: "gatesChanged"; gates: BodyGates }
   /** *Send test*: one synthetic record to destination `id`; answered by `testResult`. */
   | { type: "test"; ref: string; id: string }

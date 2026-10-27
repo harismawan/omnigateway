@@ -4,10 +4,12 @@ import userEvent from "@testing-library/user-event";
 import type {
   ExportDestinationView,
   ExportWorkerState,
+  SettingsResponse,
   StatusResponse,
 } from "../../src/api/types.ts";
 import { ExportBoard } from "../../src/features/export/ExportBoard.tsx";
 import { createFetchStub, type StubHandler } from "../helpers/fetchStub.ts";
+import { settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
 import { choose } from "../helpers/select.ts";
 
@@ -56,15 +58,24 @@ function stubExport(
     destinations?: ExportDestinationView[];
     state?: ExportWorkerState;
     status?: StatusResponse;
+    exportBodiesAllowed?: boolean;
+    bodyLoggingAllowed?: boolean;
+    bodyLoggingEnabled?: boolean;
   } = {},
   overrides: Record<string, StubHandler> = {},
 ) {
   return createFetchStub({
     "GET /api/status": () => input.status ?? ADMIN,
     "GET /api/export/destinations": () => ({
+      exportBodiesAllowed: input.exportBodiesAllowed ?? true,
       destinations: input.destinations ?? [destination()],
       worker: { state: input.state ?? "running", restarts: 0 },
     }),
+    "GET /api/settings": () =>
+      ({
+        settings: { ...settings, bodyLoggingEnabled: input.bodyLoggingEnabled ?? true },
+        bodyLoggingAllowed: input.bodyLoggingAllowed ?? true,
+      }) satisfies Pick<SettingsResponse, "settings" | "bodyLoggingAllowed">,
     ...overrides,
   });
 }
@@ -348,6 +359,39 @@ describe("ExportBoard", () => {
         secret: { username: "elastic", password: "pw" },
       }),
     );
+  });
+
+  test("editing Elasticsearch preserves its custom body index", async () => {
+    const user = userEvent.setup();
+    const es = destination({
+      type: "elasticsearch",
+      config: {
+        url: "https://es:9200",
+        auth: "none",
+        index: "logs",
+        bodyIndex: "private-bodies-{yyyy.MM.dd}",
+        flavor: "elasticsearch",
+      },
+    });
+    const stub = stubExport(
+      { destinations: [es] },
+      {
+        "PUT /api/export/destinations/hook": () => ({ destination: es }),
+      },
+    );
+    renderWithProviders(<ExportBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit hook" }));
+    const dialog = await screen.findByRole("dialog");
+    expect((within(dialog).getByLabelText("Body index") as HTMLInputElement).value).toBe(
+      "private-bodies-{yyyy.MM.dd}",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(bodyOf(stub, "PUT", "/api/export/destinations/hook")).toMatchObject({
+        config: { bodyIndex: "private-bodies-{yyyy.MM.dd}" },
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   test("a refusal from the gateway is shown as it was returned and keeps the dialog open", async () => {
@@ -637,19 +681,224 @@ describe("ExportBoard", () => {
     }
   });
 
-  test("the bodies switch is shown off and disabled, as a later release", async () => {
+  test("all gates allow opting in and out, and the list reflects the stored preference", async () => {
     const user = userEvent.setup();
-    stubExport();
+    const stub = stubExport(
+      { destinations: [destination({ includeBodies: true })] },
+      {
+        "PUT /api/export/destinations/hook": () => ({
+          destination: destination({ includeBodies: true }),
+        }),
+        "PUT /api/export/destinations/hook/bodies": () => ({ destination: destination() }),
+      },
+    );
     renderWithProviders(<ExportBoard />);
-
+    expect((await rowOf("hook")).textContent).toContain("bodies on");
     await user.click(await screen.findByRole("button", { name: "Edit hook" }));
     const dialog = await screen.findByRole("dialog");
     const bodies = within(dialog).getByRole("switch", {
       name: "Export bodies",
     }) as HTMLButtonElement;
+    await waitFor(() => expect(bodies.disabled).toBe(false));
+    expect(bodies.getAttribute("aria-checked")).toBe("true");
+    expect(within(dialog).getByText(/key.*opt.out/i)).toBeTruthy();
+    await user.click(bodies);
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(bodyOf(stub, "PUT", "/api/export/destinations/hook/bodies")).toEqual({
+        include: false,
+      }),
+    );
+  });
+
+  for (const [gate, explanation] of [
+    ["exportBodiesAllowed", /OMNI_EXPORT_BODIES_ALLOWED/],
+    ["bodyLoggingAllowed", /OMNI_BODY_LOGGING_ALLOWED/],
+    ["bodyLoggingEnabled", /Enable body logging in Settings/],
+  ] as const) {
+    test(`${gate} off disables bodies and explains the gate`, async () => {
+      const user = userEvent.setup();
+      stubExport({ [gate]: false });
+      renderWithProviders(<ExportBoard />);
+      await user.click(await screen.findByRole("button", { name: "Edit hook" }));
+      const dialog = await screen.findByRole("dialog");
+      expect(await within(dialog).findByText(explanation)).toBeTruthy();
+      const bodies = within(dialog).getByRole("switch", {
+        name: "Export bodies",
+      }) as HTMLButtonElement;
+      expect(bodies.disabled).toBe(true);
+      await user.click(bodies);
+      expect(bodies.getAttribute("aria-checked")).toBe("false");
+    });
+  }
+
+  test("settings fetch failure fails closed with an explanation", async () => {
+    const user = userEvent.setup();
+    stubExport(
+      {},
+      {
+        "GET /api/settings": () => ({
+          status: 503,
+          body: { error: { code: "OVERLOADED", message: "unavailable" } },
+        }),
+      },
+    );
+    renderWithProviders(<ExportBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit hook" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText(/Cannot verify body logging gates/)).toBeTruthy();
+    expect(
+      (within(dialog).getByRole("switch", { name: "Export bodies" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  test("editing OTLP logs with bodies on disables them before saving traces", async () => {
+    const user = userEvent.setup();
+    const otel = destination({
+      type: "otlp",
+      includeBodies: true,
+      config: { endpoint: "https://otel.example", signal: "logs" },
+    });
+    const stub = stubExport(
+      { destinations: [otel] },
+      {
+        "PUT /api/export/destinations/hook/bodies": () => ({
+          destination: { ...otel, includeBodies: false },
+        }),
+        "PUT /api/export/destinations/hook": () => ({
+          destination: {
+            ...otel,
+            includeBodies: false,
+            config: { ...otel.config, signal: "traces" },
+          },
+        }),
+      },
+    );
+    renderWithProviders(<ExportBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit hook" }));
+    const dialog = await screen.findByRole("dialog");
+    await choose(user, within(dialog).getByLabelText("Signal"), "traces");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const writes = stub.calls.filter((c) => c.init?.method === "PUT");
+    expect(writes.map((c) => c.url)).toEqual([
+      "/api/export/destinations/hook/bodies",
+      "/api/export/destinations/hook",
+    ]);
+    expect(bodyOf(stub, "PUT", "/api/export/destinations/hook/bodies")).toEqual({ include: false });
+    expect(bodyOf(stub, "PUT", "/api/export/destinations/hook")).toMatchObject({
+      config: { signal: "traces" },
+    });
+  });
+
+  test("a failed body opt-in keeps the created destination for retry without a second POST", async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    const stub = stubExport(
+      { destinations: [] },
+      {
+        "POST /api/export/destinations": () => ({ destination: destination() }),
+        "PUT /api/export/destinations/hook": () => ({ destination: destination() }),
+        "PUT /api/export/destinations/hook/bodies": () =>
+          ++attempts === 1
+            ? { status: 503, body: { error: { code: "OVERLOADED", message: "try again" } } }
+            : { destination: destination({ includeBodies: true }) },
+      },
+    );
+    renderWithProviders(<ExportBoard />);
+    await user.click(await screen.findByRole("button", { name: "Add a destination" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("ID"), "hook");
+    await user.type(within(dialog).getByLabelText("URL"), "https://receiver.example/in");
+    await user.click(within(dialog).getByRole("switch", { name: "Export bodies" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add destination" }));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("try again");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(attempts).toBe(2);
+    expect(stub.calls.filter((c) => c.init?.method === "POST")).toHaveLength(1);
+  });
+
+  test("a failed config save remembers a successful body disable before the user opts back in", async () => {
+    const user = userEvent.setup();
+    let saves = 0;
+    const stub = stubExport(
+      { destinations: [destination({ includeBodies: true })] },
+      {
+        "PUT /api/export/destinations/hook/bodies": () => ({ destination: destination() }),
+        "PUT /api/export/destinations/hook": () =>
+          ++saves === 1
+            ? {
+                status: 503,
+                body: { error: { code: "OVERLOADED", message: "config save failed" } },
+              }
+            : { destination: destination() },
+      },
+    );
+    renderWithProviders(<ExportBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit hook" }));
+    const dialog = await screen.findByRole("dialog");
+    const bodies = within(dialog).getByRole("switch", { name: "Export bodies" });
+    await user.click(bodies);
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("config save failed");
+    await user.click(bodies);
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const writes = stub.calls.filter((c) => c.url.endsWith("/bodies") && c.init?.method === "PUT");
+    expect(writes.map((c) => JSON.parse(String(c.init?.body)))).toEqual([
+      { include: false },
+      { include: true },
+    ]);
+  });
+
+  test("new destination bodies follow type and signal transitions without reviving a cleared opt-in", async () => {
+    const user = userEvent.setup();
+    const stub = stubExport(
+      { destinations: [] },
+      {
+        "POST /api/export/destinations": () => ({
+          destination: destination({
+            type: "otlp",
+            config: { endpoint: "https://otel.example", signal: "logs" },
+          }),
+        }),
+        "PUT /api/export/destinations/hook/bodies": () => ({
+          destination: destination({ includeBodies: true }),
+        }),
+      },
+    );
+    renderWithProviders(<ExportBoard />);
+    await user.click(await screen.findByRole("button", { name: "Add a destination" }));
+    const dialog = await screen.findByRole("dialog");
+    const bodies = within(dialog).getByRole("switch", {
+      name: "Export bodies",
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(bodies.disabled).toBe(false));
+    await user.click(bodies);
+    await choose(user, within(dialog).getByLabelText("Type"), "otlp");
+    await choose(user, within(dialog).getByLabelText("Signal"), "traces");
     expect(bodies.disabled).toBe(true);
     expect(bodies.getAttribute("aria-checked")).toBe("false");
-    expect(within(dialog).getByText(/available in a later release/)).toBeTruthy();
+    expect(within(dialog).getByText(/OTLP traces cannot export bodies/)).toBeTruthy();
+    await choose(user, within(dialog).getByLabelText("Type"), "webhook");
+    expect(bodies.disabled).toBe(false);
+    expect(bodies.getAttribute("aria-checked")).toBe("false");
+    await user.click(bodies);
+    await choose(user, within(dialog).getByLabelText("Type"), "otlp");
+    expect(bodies.disabled).toBe(true);
+    expect(bodies.getAttribute("aria-checked")).toBe("false");
+    await choose(user, within(dialog).getByLabelText("Signal"), "logs");
+    await user.click(bodies);
+    await user.type(within(dialog).getByLabelText("ID"), "hook");
+    await user.type(within(dialog).getByLabelText("Endpoint"), "https://otel.example");
+    await user.click(within(dialog).getByRole("button", { name: "Add destination" }));
+    await waitFor(() =>
+      expect(bodyOf(stub, "PUT", "/api/export/destinations/hook/bodies")).toEqual({
+        include: true,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   test("remove asks first, then deletes", async () => {

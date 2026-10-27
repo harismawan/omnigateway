@@ -651,6 +651,11 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Snapshot is database alone. `request_bodies/` excluded; after restore, body rows and artifact
   files disagree until `sweepOrphans` reconcile. Snapshot still carry encrypted credentials and
   API-key hashes; downloads `no-store`.
+- Gateway capture adds no body parse/serialization on the main thread: reuse the necessary IR
+  request parse and already serialized client response; artifact decode/masking/sealing and HTTP
+  preview encoding stay in `bodies/writer.ts`. Writer never writes the main SQLite file: host
+  publishes pointer + state on its connection. Pins: `test/bodies/{writer,host}.test.ts`,
+  `test/export/boundary.test.ts`, `test/bodyLogging.test.ts` (under `apps/gateway`).
 - Body `put` write `OGBA` raw (`sealArtifact`), read legacy/raw/gzip; roll back only to >= v0.13.5
   (older reader call binary `corrupt`). Pins: writer-format + mixed-corpus tests in store
   `test/contract/bodies.test.ts`. `MAX_ENVELOPE_BYTES` caps pre-read; binary `+38` (`parseBinary`).

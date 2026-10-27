@@ -152,5 +152,5 @@ Spec: *Surfaces → Console* (bodies toggle), *Docs*, *Sizing, stated in README*
 
 **Files:** Dashboard export editor/list (bodies toggle enabled only when all gates hold — read gates from `GET /api/settings` / export status; explain which gate is off; refuse for OTLP traces), `apps/cli/src/commands/export.ts` (`set <id> --bodies on|off`), README (`OMNI_EXPORT_BODIES_ALLOWED`, `OMNI_BODY_CAPTURE_BUDGET_BYTES`, `OMNI_EXPORT_BODY_BUDGET_BYTES`, 64 MiB limit, sizing paragraph, body-index ES mapping with `text` `index: false`, raising Bun's request-body limit above its 128 MB default if larger requests are expected), `docs/operations.md` (body_state, budget/backlog drops, late bodies), `ARCHITECTURE.md` (body writer, staging/publish, generation), CLAUDE.md invariants (body writer never writes the main SQLite file; main thread never parses/serializes a captured body).
 
-- [ ] Tests: dashboard toggle states per gate; CLI `--bodies`; docs claims checked against code (`check:claims`).
-- [ ] Whole-repo verification (all CI gates) and commit.
+- [x] Tests: dashboard toggle states per gate; CLI `--bodies`; docs claims checked against code (`check:claims`).
+- [x] Whole-repo verification and commit: Task9 report records Postgres-enabled root suite, dashboard, typecheck/lint/claims/dead; optional Redis contract skipped (not claimed tested).

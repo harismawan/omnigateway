@@ -20,6 +20,7 @@ type Summary = {
   hasSecret: boolean;
   maxRequestBytes: number | null;
   startAt: number;
+  includeBodies: boolean;
 };
 
 const SIGNING = '{"signingSecret":"whsec-hunter2"}';
@@ -59,6 +60,47 @@ async function storedSecret(root: string, id: string): Promise<string | null> {
     store.close();
   }
 }
+
+test("set --bodies on|off persists and show reports the destination preference", async () => {
+  const root = makeRoot();
+  await addWebhook(root);
+  for (const [value, expected] of [
+    ["on", true],
+    ["off", false],
+  ] as const) {
+    const result = await cli(["export", "set", "hook", "--bodies", value, "--json"], { root });
+    expect(result.code).toBe(0);
+    expect((JSON.parse(result.out) as Summary).includeBodies).toBe(expected);
+    const shown = await cli(["export", "show", "hook"], { root });
+    expect(shown.out).toMatch(new RegExp(`bodies\\s+${value}`));
+    const stored = await cli(["export", "show", "hook", "--json"], { root });
+    expect((JSON.parse(stored.out) as Summary).includeBodies).toBe(expected);
+  }
+});
+
+test("invalid --bodies and OTLP traces refuse before unrelated edits; off permits a trace transition", async () => {
+  const root = makeRoot();
+  await cli(["export", "add", "otlp", "otel", "--endpoint", "https://otel.example"], { root });
+  const invalid = await cli(["export", "set", "otel", "--bodies", "yes", "--disable"], { root });
+  expect(invalid.code).toBe(2);
+  expect(invalid.err).toContain("--bodies takes on or off");
+  const refused = await cli(
+    ["export", "set", "otel", "--signal", "traces", "--bodies", "on", "--disable"],
+    { root },
+  );
+  expect(refused.code).toBe(2);
+  expect(refused.err).toContain("OTLP traces");
+  expect(JSON.parse((await cli(["export", "show", "otel", "--json"], { root })).out)).toMatchObject(
+    { enabled: true, config: { signal: "logs" }, includeBodies: false },
+  );
+  expect((await cli(["export", "set", "otel", "--bodies", "on"], { root })).code).toBe(0);
+  expect(
+    (await cli(["export", "set", "otel", "--signal", "traces", "--bodies", "off"], { root })).code,
+  ).toBe(0);
+  const onTrace = await cli(["export", "set", "otel", "--bodies", "on"], { root });
+  expect(onTrace.code).toBe(2);
+  expect(onTrace.err).toContain("OTLP traces");
+});
 
 test("add webhook stores the config and a secret read from --secret-file, and never prints it", async () => {
   const root = makeRoot();

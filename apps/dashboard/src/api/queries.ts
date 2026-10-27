@@ -876,6 +876,17 @@ export function useRemoveExportDestination(): UseMutationResult<{ ok: true }, Er
   return useExportMutation((id: string) => del<{ ok: true }>(destinationPath(id)));
 }
 
+/** The preference; send-time environment, settings and key gates still apply. */
+export function useSetExportDestinationBodies(): UseMutationResult<
+  ExportDestinationResponse,
+  Error,
+  { id: string; include: boolean }
+> {
+  return useExportMutation(({ id, include }: { id: string; include: boolean }) =>
+    put<ExportDestinationResponse>(`${destinationPath(id)}/bodies`, { include }),
+  );
+}
+
 /** Sends one synthetic record through the worker. A delivery failure resolves, not rejects. */
 export function useTestExportDestination(): UseMutationResult<ExportTestResult, Error, string> {
   return useMutation({
