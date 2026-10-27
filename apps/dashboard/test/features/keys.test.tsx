@@ -4,6 +4,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { EditPromptsDialog } from "../../src/features/keys/EditPromptsDialog.tsx";
 import { KeysBoard } from "../../src/features/keys/KeysBoard.tsx";
+import { MintKeyDialog } from "../../src/features/keys/MintKeyDialog.tsx";
 import { routeTree } from "../../src/routeTree.gen.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { apiKey, model, settings } from "../helpers/fixtures.ts";
@@ -28,6 +29,8 @@ const minted = {
 function stubKeys(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
     "GET /api/status": () => ({ authenticated: true, principal: { kind: "admin" } }),
+    "GET /api/settings": () => ({ settings }),
+    "GET /api/prompts": () => promptLibrary,
     "GET /api/keys": () => ({
       keys: [
         apiKey(),
@@ -53,6 +56,101 @@ function stubKeys(overrides: Parameters<typeof createFetchStub>[0] = {}) {
 }
 
 describe("KeysBoard", () => {
+  test("mint preview defaults to fetched globals and keeps inherited payload explicit", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/settings": () => ({
+        settings: { ...settings, prompts: ["ponytail-full", "team"] },
+      }),
+      "GET /api/prompts": () => promptLibrary,
+      "POST /api/keys": () => minted,
+    });
+    renderWithProviders(<MintKeyDialog open onOpenChange={() => {}} />);
+    const preview = await screen.findByRole("list", { name: "Effective prompts" });
+    await waitFor(() =>
+      expect(
+        within(preview)
+          .getAllByRole("listitem")
+          .map((el) => el.textContent),
+      ).toEqual(["Ponytail Full @v4.9.0", "Team @3"]),
+    );
+    expect(
+      screen.getByText(
+        "Preview only; the gateway resolves active prompts when each request arrives.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "Manage prompt texts in Prompt Management" })
+        .getAttribute("href"),
+    ).toBe("/prompts");
+    await user.click(screen.getByRole("button", { name: "Create key" }));
+    await waitFor(() =>
+      expect(
+        JSON.parse(String(stub.calls.find((c) => c.init?.method === "POST")?.init?.body)).prompts,
+      ).toEqual({ ids: [], inheritGlobal: true }),
+    );
+  });
+
+  test("mint preview preserves first-ID order, dedupes globals, and lets key builtin win before inheritance is disabled", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/settings": () => ({
+        settings: { ...settings, prompts: ["ponytail-full", "team"] },
+      }),
+      "GET /api/prompts": () => promptLibrary,
+      "POST /api/keys": () => minted,
+    });
+    renderWithProviders(<MintKeyDialog open onOpenChange={() => {}} />);
+    const preview = await screen.findByRole("list", { name: "Effective prompts" });
+    await within(preview).findByText("Team @3");
+    const names = () =>
+      within(preview)
+        .queryAllByRole("listitem")
+        .map((el) => el.textContent);
+    await choose(user, screen.getByLabelText("Add prompt"), "Team");
+    expect(names()).toEqual(["Ponytail Full @v4.9.0", "Team @3"]);
+    await choose(user, screen.getByLabelText("Add prompt"), "Ponytail Lite");
+    expect(names()).toEqual(["Team @3", "Ponytail Lite @v4.9.0"]);
+    await user.click(screen.getByRole("button", { name: "Move Ponytail Lite up" }));
+    expect(names()).toEqual(["Team @3", "Ponytail Lite @v4.9.0"]);
+    await choose(user, screen.getByLabelText("Add prompt"), "Draft (inactive draft)");
+    expect(names()).toEqual(["Team @3", "Ponytail Lite @v4.9.0"]);
+    await user.click(screen.getByRole("switch", { name: "Also apply global prompts" }));
+    expect(names()).toEqual(["Ponytail Lite @v4.9.0", "Team @3"]);
+    await user.click(screen.getByRole("button", { name: "Create key" }));
+    await waitFor(() =>
+      expect(
+        JSON.parse(String(stub.calls.find((c) => c.init?.method === "POST")?.init?.body)).prompts,
+      ).toEqual({ ids: ["ponytail-lite", "team", "draft"], inheritGlobal: false }),
+    );
+  });
+
+  for (const failed of ["settings", "prompts"]) {
+    test(`mint preview reports unavailable when ${failed} cannot be fetched`, async () => {
+      stubKeys({
+        "GET /api/settings": () => ({ settings: { ...settings, prompts: ["team"] } }),
+        "GET /api/prompts": () => promptLibrary,
+        [`GET /api/${failed}`]: () => ({
+          status: 500,
+          body: { error: { code: "INTERNAL", message: "Policy unavailable" } },
+        }),
+      });
+      renderWithProviders(<MintKeyDialog open onOpenChange={() => {}} />);
+      expect(
+        await screen.findByText(
+          "Effective preview unavailable until settings and library load successfully.",
+        ),
+      ).toBeTruthy();
+      expect((await screen.findByRole("alert")).textContent).toBe("Policy unavailable");
+      expect(screen.queryByText("No effective prompts.")).toBeNull();
+      expect(
+        screen
+          .getByRole("link", { name: "Manage prompt texts in Prompt Management" })
+          .getAttribute("href"),
+      ).toBe("/prompts");
+    });
+  }
   test("actual routed assignment link opens only the matching key dialog and closes its search target", async () => {
     installSocketStub();
     const user = userEvent.setup();
