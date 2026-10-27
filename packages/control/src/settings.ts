@@ -1,4 +1,5 @@
 import type { Settings, Store } from "@omni/store";
+import { promptOperation } from "./promptErrors.ts";
 import { parseOrThrow, settingsSchema } from "./schemas.ts";
 
 export async function getSettings(store: Store): Promise<Settings> {
@@ -7,6 +8,8 @@ export async function getSettings(store: Store): Promise<Settings> {
 
 /**
  * Saves settings, and answers with what is stored rather than with what arrived.
+ * Prompt assignments are optional for old clients; alias reconciliation belongs
+ * to the store's locked merge, never a prior control read.
  *
  * Every field the schema requires is replaced, so this is still a whole-object
  * save. Body retention, the three guardrail fields and the five smart-router
@@ -16,6 +19,7 @@ export async function getSettings(store: Store): Promise<Settings> {
  */
 export async function putSettings(store: Store, input: unknown): Promise<Settings> {
   const {
+    prompts,
     bodyRetentionDays,
     snapshotKeepLatest,
     snapshotMaxAgeDays,
@@ -34,6 +38,7 @@ export async function putSettings(store: Store, input: unknown): Promise<Setting
   // while a present `undefined` would be a write of nothing.
   const patch: Partial<Settings> = {
     ...rest,
+    ...(prompts === undefined ? {} : { prompts }),
     ...(bodyRetentionDays === undefined ? {} : { bodyRetentionDays }),
     ...(snapshotKeepLatest === undefined ? {} : { snapshotKeepLatest }),
     ...(snapshotMaxAgeDays === undefined ? {} : { snapshotMaxAgeDays }),
@@ -46,5 +51,5 @@ export async function putSettings(store: Store, input: unknown): Promise<Setting
     ...(smartRouterPolicy === undefined ? {} : { smartRouterPolicy }),
     ...(smartRouterTimeoutMs === undefined ? {} : { smartRouterTimeoutMs }),
   };
-  return store.config.putSettings(patch);
+  return promptOperation(() => store.config.putSettings(patch));
 }

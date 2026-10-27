@@ -87,6 +87,7 @@
         "@omni/coord": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/ponytail": "workspace:*",
+        "@omni/prompts": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",

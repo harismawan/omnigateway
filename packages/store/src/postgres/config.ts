@@ -1,7 +1,5 @@
-import { isPonytailMode } from "@omni/ponytail/catalog";
-import { readPromptIds } from "@omni/prompts/catalog";
 import type { SQL } from "bun";
-import { checkPromptReferences, storedPromptIds } from "../promptAssignments.ts";
+import { checkPromptReferences } from "../promptAssignments.ts";
 import type {
   ConfigRepo,
   RoutingChange,
@@ -15,6 +13,7 @@ import {
   DEFAULT_SETTINGS,
   mergeSettings,
   readGuardrailSettings,
+  readPromptSettings,
   readRetentionLoweredAt,
   readSmartRouterSettings,
 } from "../types.ts";
@@ -76,15 +75,12 @@ function parseSettings(raw: string | null): Settings {
     return {
       ...DEFAULT_SETTINGS,
       ...stored,
-      prompts: storedPromptIds(stored),
+      ...readPromptSettings(stored),
       rtkEnabled: stored.rtkEnabled === true,
       // Absence means on, decided by `DEFAULT_SETTINGS`; a malformed value
       // means off, the same answer as its neighbours.
       autoCacheEnabled:
         stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
-      // The same question its neighbours ask, put to a union instead of a
-      // boolean: anything that is not one of the four names means off.
-      ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
       bodyRetentionDays:
         Number.isInteger(stored.bodyRetentionDays) &&
         (stored.bodyRetentionDays ?? 0) >= 1 &&
@@ -176,7 +172,6 @@ export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void
         )[0]?.value;
         const current = parseSettings(raw ?? null);
         const merged = mergeSettings(current, patch, Date.now());
-        merged.prompts = readPromptIds(merged.prompts);
         checkPromptReferences(
           merged.prompts,
           current.prompts,

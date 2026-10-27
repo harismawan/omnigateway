@@ -1,7 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { isPonytailMode } from "@omni/ponytail/catalog";
-import { readPromptIds } from "@omni/prompts/catalog";
-import { checkPromptReferences, storedPromptIds } from "../promptAssignments.ts";
+import { checkPromptReferences } from "../promptAssignments.ts";
 import type {
   ConfigRepo,
   ScoringWeights,
@@ -14,6 +12,7 @@ import {
   DEFAULT_SETTINGS,
   mergeSettings,
   readGuardrailSettings,
+  readPromptSettings,
   readRetentionLoweredAt,
   readSmartRouterSettings,
 } from "../types.ts";
@@ -85,7 +84,7 @@ export function createConfigRepo(
       return {
         ...DEFAULT_SETTINGS,
         ...stored,
-        prompts: storedPromptIds(stored),
+        ...readPromptSettings(stored),
         rtkEnabled: stored.rtkEnabled === true,
         // Two different questions, kept apart. *Absence* means on, and that
         // is decided by `DEFAULT_SETTINGS` above, not here. What this line
@@ -97,9 +96,6 @@ export function createConfigRepo(
         // already have.
         autoCacheEnabled:
           stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
-        // The same question its neighbours ask, put to a union instead of a
-        // boolean: anything that is not one of the four names means off.
-        ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
         bodyRetentionDays:
           Number.isInteger(stored.bodyRetentionDays) &&
           (stored.bodyRetentionDays ?? 0) >= 1 &&
@@ -131,7 +127,6 @@ export function createConfigRepo(
   const putSettings = db.transaction((patch: Partial<Settings>): Settings => {
     const current = readSettings();
     const next = mergeSettings(current, patch, Date.now());
-    next.prompts = readPromptIds(next.prompts);
     checkPromptReferences(
       next.prompts,
       current.prompts,

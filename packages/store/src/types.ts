@@ -1,5 +1,6 @@
 import type { ProviderId } from "@omni/ir";
 import type { PonytailMode } from "@omni/ponytail/catalog";
+import { MAX_ASSIGNED_PROMPTS, readPromptIds } from "@omni/prompts/catalog";
 import type { LimitConfig } from "@omni/ratelimit/catalog";
 import type { RtkFilterId } from "@omni/rtk/catalog";
 
@@ -2339,12 +2340,53 @@ export function mergeSettings(current: Settings, patch: Partial<Settings>, now: 
   if (typeof days === "number" && days < current.logRetentionDays) {
     marker = Math.max(marker, stored + 1, now);
   }
+  const listChanged =
+    Object.hasOwn(patch, "prompts") &&
+    (patch.prompts?.length !== current.prompts.length ||
+      patch.prompts.some((id, index) => id !== current.prompts[index]));
+  const modeChanged =
+    Object.hasOwn(patch, "ponytailMode") && patch.ponytailMode !== current.ponytailMode;
+  let prompts = current.prompts;
+  if (listChanged) {
+    prompts = readPromptIds(patch.prompts);
+  } else if (modeChanged) {
+    const replacement = patch.ponytailMode === "off" ? [] : [`ponytail-${patch.ponytailMode}`];
+    const hasBuiltin = current.prompts.some((id) => id.startsWith("ponytail-"));
+    prompts = hasBuiltin
+      ? current.prompts.flatMap((id) => (id.startsWith("ponytail-") ? replacement : [id]))
+      : [...current.prompts, ...replacement];
+  }
+  if (prompts.length > MAX_ASSIGNED_PROMPTS) throw new PromptStoreError("limit");
   return {
     ...current,
     ...patch,
     weights: { ...current.weights, ...patch.weights },
     logRetentionLoweredAt: marker,
+    ...readPromptSettings({ prompts }),
   };
+}
+
+/** Explicit lists are authoritative; only absence upgrades the legacy alias. */
+export function readPromptSettings(stored: {
+  prompts?: unknown;
+  ponytailMode?: unknown;
+}): Pick<Settings, "prompts" | "ponytailMode"> {
+  const legacy = stored.ponytailMode;
+  const prompts = Object.hasOwn(stored, "prompts")
+    ? readPromptIds(stored.prompts)
+    : legacy === "lite" || legacy === "full" || legacy === "ultra"
+      ? [`ponytail-${legacy}`]
+      : [];
+  const builtin = prompts.find((id) => id.startsWith("ponytail-"));
+  const ponytailMode =
+    builtin === "ponytail-lite"
+      ? "lite"
+      : builtin === "ponytail-full"
+        ? "full"
+        : builtin === "ponytail-ultra"
+          ? "ultra"
+          : "off";
+  return { prompts, ponytailMode };
 }
 
 /** Whether a stored value is an integer inside `1..max`. */

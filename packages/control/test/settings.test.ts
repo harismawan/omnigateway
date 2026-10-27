@@ -4,6 +4,68 @@ import { memoryStore } from "@omni/testkit";
 import { settingsSchema } from "../src/schemas.ts";
 import { putSettings } from "../src/settings.ts";
 
+test("old-client omitted prompts preserve users while editing the mode", async () => {
+  const store = await memoryStore();
+  await store.prompts.create({
+    id: "team",
+    name: "Team",
+    description: null,
+    text: "Team",
+    note: null,
+    activate: true,
+  });
+  await store.config.putSettings({ prompts: ["team", "ponytail-lite"] });
+  const { prompts: _prompts, ...old } = await store.config.getSettings();
+  const saved = await putSettings(store, { ...old, ponytailMode: "full" });
+  expect(saved.prompts).toEqual(["team", "ponytail-full"]);
+  expect(saved.ponytailMode).toBe("full");
+  store.close();
+});
+
+test("whole-object aliases compare to the latest locked value without a control read", async () => {
+  const store = await memoryStore();
+  const stale = await putSettings(store, { ...DEFAULT_SETTINGS, prompts: ["ponytail-lite"] });
+  await store.config.putSettings({ prompts: ["ponytail-full"] });
+  const noRead = {
+    ...store,
+    config: {
+      ...store.config,
+      getSettings: async () => {
+        throw new Error("control must not read/check/write");
+      },
+    },
+  };
+  // Both fields differ from latest, so the stale explicit list wins, not ultra.
+  expect(await putSettings(noRead, { ...stale, ponytailMode: "ultra" })).toMatchObject({
+    prompts: ["ponytail-lite"],
+    ponytailMode: "lite",
+  });
+  store.close();
+});
+
+test("global assignments reject malformed lists rather than normalizing API writes", async () => {
+  const store = await memoryStore();
+  try {
+    for (const prompts of [
+      null,
+      ["ponytail-nope"],
+      ["a", "a"],
+      ["ponytail-full", "ponytail-lite"],
+      ["a", "b", "c", "d", "e", "f"],
+    ]) {
+      await expect(putSettings(store, { ...DEFAULT_SETTINGS, prompts })).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+      });
+    }
+    await expect(
+      putSettings(store, { ...DEFAULT_SETTINGS, prompts: ["missing"] }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect((await store.config.getSettings()).prompts).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
+
 /**
  * Snapshot retention is written by its own operation, not by the settings form.
  *

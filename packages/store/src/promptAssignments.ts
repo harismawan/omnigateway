@@ -1,5 +1,5 @@
-import { readPromptAssignment, readPromptIds } from "@omni/prompts/catalog";
-import { type PromptAssignments, PromptStoreError } from "./types.ts";
+import { readPromptAssignment } from "@omni/prompts/catalog";
+import { type PromptAssignments, PromptStoreError, readPromptSettings } from "./types.ts";
 
 export function parsePromptJson(raw: string | null): unknown {
   try {
@@ -11,12 +11,7 @@ export function parsePromptJson(raw: string | null): unknown {
 
 /** Absence alone upgrades the legacy alias; an explicit malformed list stays empty. */
 export function storedPromptIds(stored: { prompts?: unknown; ponytailMode?: unknown }): string[] {
-  if (Object.hasOwn(stored, "prompts")) return readPromptIds(stored.prompts);
-  return stored.ponytailMode === "lite" ||
-    stored.ponytailMode === "full" ||
-    stored.ponytailMode === "ultra"
-    ? [`ponytail-${stored.ponytailMode}`]
-    : [];
+  return readPromptSettings(stored).prompts;
 }
 
 /** Explicit stored references only; never effective inheritance or usable-key filtering. */

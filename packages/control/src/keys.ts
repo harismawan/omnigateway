@@ -10,12 +10,14 @@ import {
 } from "@omni/ratelimit/catalog";
 import type { ApiKey, Store, UsageSums } from "@omni/store";
 import { generateApiKey, hashApiKey } from "@omni/store";
+import { promptOperation } from "./promptErrors.ts";
 import {
   keyCreateSchema,
   keyExpirySchema,
   keyGuardrailSchema,
   keyLimitsSchema,
   keyModelsSchema,
+  keyPromptsSchema,
   keySmartRoutingSchema,
   parseOrThrow,
 } from "./schemas.ts";
@@ -229,27 +231,37 @@ export async function createKey(store: Store, input: unknown): Promise<CreatedKe
   const body = parseOrThrow(keyCreateSchema, input);
 
   const raw = generateApiKey();
-  const created = await store.keys.create({
-    id: crypto.randomUUID(),
-    label: body.label,
-    prefix: raw.slice(0, 12),
-    hash: await hashApiKey(raw),
-    modelAllowlist: body.modelAllowlist,
-    limits: body.limits,
-    // Settable only at creation. A key handed to a client on the promise that
-    // its payloads are never retained must not become capturable later by an
-    // edit the client cannot see, and there is no patch route to make one.
-    bodyLoggingOptOut: body.bodyLoggingOptOut,
-    // Null unless asked for, which is what every key minted before this field
-    // existed carries and what the great majority should keep carrying.
-    expiresAt: body.expiresAt,
-    // Null unless asked for: no guardrail, and no classifier call per request.
-    guardrailPolicy: body.guardrailPolicy,
-    // Off unless asked for: no confidentiality judgement per request.
-    smartRouting: body.smartRouting,
-  });
+  const hash = await hashApiKey(raw);
+  const created = await promptOperation(() =>
+    store.keys.create({
+      id: crypto.randomUUID(),
+      label: body.label,
+      prefix: raw.slice(0, 12),
+      hash,
+      modelAllowlist: body.modelAllowlist,
+      limits: body.limits,
+      // Settable only at creation. A key handed to a client on the promise that
+      // its payloads are never retained must not become capturable later by an
+      // edit the client cannot see, and there is no patch route to make one.
+      bodyLoggingOptOut: body.bodyLoggingOptOut,
+      // Null unless asked for, which is what every key minted before this field
+      // existed carries and what the great majority should keep carrying.
+      expiresAt: body.expiresAt,
+      // Null unless asked for: no guardrail, and no classifier call per request.
+      guardrailPolicy: body.guardrailPolicy,
+      // Off unless asked for: no confidentiality judgement per request.
+      smartRouting: body.smartRouting,
+      prompts: body.prompts,
+    }),
+  );
 
   return { id: created.id, label: created.label, prefix: created.prefix, key: raw };
+}
+
+export async function setKeyPrompts(store: Store, id: string, input: unknown): Promise<void> {
+  const body = parseOrThrow(keyPromptsSchema, input);
+  if ((await store.keys.get(id)) === null) throw new GatewayError("BAD_REQUEST", "no such api key");
+  return promptOperation(() => store.keys.setPrompts(id, body));
 }
 
 /**
