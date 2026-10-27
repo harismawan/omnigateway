@@ -124,7 +124,7 @@ export type BodyCollector = {
   markTruncated(): void;
   readonly abandoned: AbandonReason | null;
   /** Resolves once every capture drain has finished or failed. */
-  settle(): Promise<void>;
+  settle(options?: { signal?: AbortSignal; timeoutMs: number }): Promise<void>;
   /**
    * The parts, once. The collector's reservation moves to them, and nothing
    * arriving afterwards is stored or reserved.
@@ -408,9 +408,29 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
       };
     },
 
-    async settle(): Promise<void> {
+    async settle(options): Promise<void> {
       // `drain` never rejects, so this is a join rather than an error path.
-      await Promise.all(drains);
+      if (options === undefined) {
+        await Promise.all(drains);
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let abort = () => {};
+      const interrupted = new Promise<void>((resolve) => {
+        abort = () => {
+          clientTruncated = true;
+          resolve();
+        };
+        timer = setTimeout(abort, options.timeoutMs);
+        if (options.signal?.aborted) abort();
+        else options.signal?.addEventListener("abort", abort, { once: true });
+      });
+      try {
+        await Promise.race([Promise.all(drains), interrupted]);
+      } finally {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", abort);
+      }
     },
 
     take(error) {

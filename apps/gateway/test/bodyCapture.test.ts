@@ -9,6 +9,44 @@ import {
 
 const encoder = new TextEncoder();
 
+for (const cancellation of [false, true])
+  test(`background settle bounds a ${cancellation ? "cancelled" : "stalled"} drain without leaking reservations`, async () => {
+    const { collector, budget } = collectorWith();
+    let source: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        source = controller;
+      },
+    });
+    const response = await collector.wrap(async () => ({
+      status: 200,
+      headers: new Headers(),
+      body: stream,
+      text: async () => "",
+    }))(wireRequest("request"));
+    const reader = response.body?.getReader();
+    source?.enqueue(encoder.encode("early"));
+    await reader?.read();
+    await Bun.sleep(0);
+    const signal = new AbortController();
+    const settling = collector.settle({
+      signal: signal.signal,
+      timeoutMs: cancellation ? 10000 : 5,
+    });
+    if (cancellation) signal.abort();
+    await settling;
+    const parts = collector.take(null);
+    expect(parts.client.truncated).toBe(true);
+    const held = budget.held();
+    source?.enqueue(encoder.encode("late"));
+    source?.close();
+    await reader?.read();
+    expect(budget.held()).toBe(held);
+    expect(rawText(parts.attempts[0]?.response)).toBe("early");
+    budget.release(parts.reservedBytes);
+    expect(budget.held()).toBe(0);
+  });
+
 test("take transfers ownership only once, including while a drain is live", async () => {
   const { collector, budget } = collectorWith();
   collector.captureRequest("held");

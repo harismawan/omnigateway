@@ -298,6 +298,7 @@ function field(value: unknown, key: string): unknown {
 const CAPTURE_ON: Partial<Settings> = { bodyLoggingEnabled: true };
 
 test("a stalled body writer cannot delay client bytes or row completion", async () => {
+  const baseline = await harness();
   const budget = createCaptureBudget(1024 * 1024);
   const stalled = createBodyWriterHost({
     spawn: () => ({ post: () => {}, onMessage: () => {}, onExit: () => {}, terminate: () => {} }),
@@ -316,10 +317,22 @@ test("a stalled body writer cannot delay client bytes or row completion", async 
   });
   try {
     for (const stream of [false, true]) {
-      const response = await f.call({ ...ASK, stream });
-      const text = await response.text();
-      expect(response.status).toBe(200);
-      expect(text).toContain("Hello");
+      const expected = await (await baseline.call({ ...ASK, stream })).text();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const text = await Promise.race([
+          f.call({ ...ASK, stream }).then(async (response) => {
+            expect(response.status).toBe(200);
+            return response.text();
+          }),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("writer delayed client completion")), 250);
+          }),
+        ]);
+        expect(text).toBe(expected);
+      } finally {
+        clearTimeout(timer);
+      }
     }
     await until("completed rows", async () => (await f.store.usage.get("req_2"))?.state === "done");
     expect(budget.held()).toBeGreaterThan(0);
@@ -331,6 +344,7 @@ test("a stalled body writer cannot delay client bytes or row completion", async 
     stalled.stop();
     expect(budget.held()).toBe(0);
     await cleanup(f.store, f.root);
+    await cleanup(baseline.store, baseline.root);
   }
 });
 
@@ -838,7 +852,11 @@ test("a refused publication costs the request nothing", async () => {
  * everything — which is why this stream is slow by construction rather than by
  * luck.
  */
-test("takes a partial capture without waiting for a live drain", async () => {
+test("settles a successful delayed provider tail in background without delaying completion", async () => {
+  let tail = () => {};
+  const delayed = new Promise<void>((resolve) => {
+    tail = resolve;
+  });
   const encoder = new TextEncoder();
   const http: HttpClient = async () => ({
     status: 200,
@@ -846,7 +864,7 @@ test("takes a partial capture without waiting for a live drain", async () => {
     body: new ReadableStream<Uint8Array>({
       async start(controller) {
         for (const frame of ANTHROPIC_FRAMES) controller.enqueue(encoder.encode(frame));
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await delayed;
         controller.enqueue(encoder.encode("event: trailing_marker\ndata: {}\n\n"));
         controller.close();
       },
@@ -856,9 +874,12 @@ test("takes a partial capture without waiting for a live drain", async () => {
   const { store, root, call } = await harness({ allowed: true, settings: CAPTURE_ON, http });
 
   expect((await call(ASK)).status).toBe(200);
+  expect((await store.usage.get("req_1"))?.state).toBe("done");
+  expect(await store.bodies.get("req_1")).toBeNull();
+  tail();
 
   const artifact = await artifactOf(store, "req_1");
-  expect(String(artifact.attempts[0]?.response)).not.toContain("trailing_marker");
+  expect(String(artifact.attempts[0]?.response)).toContain("trailing_marker");
   await cleanup(store, root);
 });
 

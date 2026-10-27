@@ -605,8 +605,9 @@ async function handle(
        * Hands off one request's raw capture without waiting for the writer.
        *
        * Handed to `finishLog`, which is the single site that runs once per
-       * request id on both the success and the error path. Live drains keep
-       * discarding after `take`; neither they nor persistence delay completion.
+       * request id on both the success and the error path. Successful drains
+       * settle in background, bounded to five seconds after completion. On
+       * cancellation/timeout, take detaches buffers and live drains discard.
        *
        * `client.request` is the payload as it arrived, before RTK; every
        * `attempts[].request` is what actually went to a provider, after it.
@@ -626,7 +627,11 @@ async function handle(
        * `failed`. Parsing, masking, sealing and file I/O belong to the worker;
        * its host publishes the pointer/state transaction on the main connection.
        */
-      writeBodies = (completed) => {
+      writeBodies = async (completed) => {
+        await captured.settle({
+          signal: request.signal,
+          timeoutMs: completed.errorCode === "interrupted" ? 0 : 5000,
+        });
         const parts = captured.take(
           // The code and status only. Everything a message could add here, the
           // artifact's own bodies already hold in their original form.
