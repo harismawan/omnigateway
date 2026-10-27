@@ -860,6 +860,33 @@ describe("LogsBoard", () => {
     expect(within(dialog).queryByText(/RTK filters ran/)).toBeNull();
   });
 
+  test("body preview reports its full size, truncation and full-part download", async () => {
+    const user = userEvent.setup();
+    stubLogs({
+      "GET /api/requests/req-ok/body": () =>
+        requestBody({
+          requestId: "req-ok",
+          parts: [
+            {
+              part: "client.request",
+              preview: '{"text":"prefix',
+              sizeBytes: 2_000_000,
+              previewTruncated: true,
+              omitted: null,
+            },
+          ],
+        }),
+    });
+    renderWithProviders(<LogsBoard />);
+    await user.click(await screen.findByText("fast"));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText('{"text":"prefix')).toBeTruthy();
+    expect(within(dialog).getByText("2,000,000 bytes")).toBeTruthy();
+    expect(within(dialog).getByText(/Preview truncated/)).toBeTruthy();
+    const link = within(dialog).getByRole("link", { name: "Download full part" });
+    expect(link.getAttribute("href")).toBe("/api/requests/req-ok/body/raw?part=client.request");
+  });
+
   /**
    * Three absences that mean three different things, and an operator acts on
    * each differently. Rendering any of them as a blank panel or as a crash sends

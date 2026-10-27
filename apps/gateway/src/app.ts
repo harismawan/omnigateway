@@ -483,6 +483,7 @@ export function createApp(deps: AppDeps) {
       )
       .use(
         adminRoutes({
+          ...(deps.bodyWriter === undefined ? {} : { bodyWriter: deps.bodyWriter }),
           store: deps.store,
           admin,
           baseUrl: deps.baseUrl,

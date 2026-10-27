@@ -399,6 +399,11 @@ Use `--db <path>` to point one command somewhere else.
 | `omni db vacuum` | rewrite the database, reclaiming the pages deletion left free |
 | `omni db clear-bodies` | delete every captured request and response body; the requests stay logged |
 
+Body JSON output (`omni bodies <id> --json`) contains a preview: the first 1 MiB of
+each part's serialized JSON, its full byte size, and `previewTruncated`. Add `--full`
+to print whole parts instead. The admin console shows the same previews and offers
+**Download full part** for the complete JSON. Body reads/downloads remain admin-only.
+
 Two worth knowing:
 
 `omni models dry-run fast` shows exactly where a request would go and why —

@@ -388,15 +388,53 @@ export function bodyArtifact(patch: Partial<BodyArtifact> = {}): BodyArtifact {
   };
 }
 
-export function requestBody(patch: Partial<RequestBodyResponse> = {}): RequestBodyResponse {
+export function requestBody(
+  patch: Partial<RequestBodyResponse> & { artifact?: BodyArtifact | null } = {},
+): RequestBodyResponse {
+  const { artifact = bodyArtifact(), ...wire } = patch;
+  const values: Array<[RequestBodyResponse["parts"][number]["part"], unknown]> = artifact
+    ? [
+        ["client.request", artifact.client.request],
+        ["client.response", artifact.client.response],
+        ...artifact.attempts.flatMap(
+          (a): Array<[RequestBodyResponse["parts"][number]["part"], unknown]> => [
+            [`attempt.${a.attempt}.request`, a.request],
+            [`attempt.${a.attempt}.response`, a.response],
+          ],
+        ),
+        ["error", artifact.error],
+      ]
+    : [];
   return {
     requestId: "req-1",
     detailState: "ready",
     truncated: false,
     sizeBytes: 2_048,
     at: NOW - 60_000,
-    artifact: bodyArtifact(),
-    ...patch,
+    bodyState: null,
+    parts: values.map(([part, value]) => {
+      const preview = JSON.stringify(value);
+      const marker = value as {
+        omitted?: boolean;
+        reason?: string;
+        serializedBytes?: number | null;
+      } | null;
+      return {
+        part,
+        preview,
+        sizeBytes: new TextEncoder().encode(preview).length,
+        previewTruncated: false,
+        omitted:
+          marker?.omitted === true && typeof marker.reason === "string"
+            ? {
+                omitted: true,
+                reason: marker.reason,
+                serializedBytes: marker.serializedBytes ?? null,
+              }
+            : null,
+      };
+    }),
+    ...wire,
   };
 }
 

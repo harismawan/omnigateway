@@ -535,11 +535,24 @@ export type RequestBodyResponse = {
   /** `none` is "never captured"; `missing` and `corrupt` are "captured, then lost". */
   detailState: BodyDetailState;
   truncated: boolean;
-  /** Bytes as stored, which are ciphertext, so roughly twice the plaintext. */
+  /** Stored encrypted envelope bytes, not the plaintext part sizes. */
   sizeBytes: number;
   at: number | null;
-  artifact: BodyArtifact | null;
+  bodyState: RequestLog["bodyState"];
+  parts: Array<{
+    part: BodyPart;
+    sizeBytes: number;
+    preview: string;
+    previewTruncated: boolean;
+    omitted: BodyOmission | null;
+  }>;
 };
+export type BodyPart =
+  | "client.request"
+  | "client.response"
+  | `attempt.${number}.request`
+  | `attempt.${number}.response`
+  | "error";
 
 /** Which agent a generated configuration is for. */
 export type SetupClient = "claude" | "opencode";

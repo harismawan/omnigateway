@@ -145,6 +145,7 @@ const ROUTES: ReadonlyArray<{
   // Metadata is readable by a reader; the payload behind it is not. A viewer
   // may diagnose an installation without being handed every prompt in it.
   { method: "GET", path: "/api/requests/m1/body", allow: ["admin"] },
+  { method: "GET", path: "/api/requests/m1/body/raw?part=client.request", allow: ["admin"] },
 
   // Mutations, and the operator alone.
   { method: "POST", path: "/api/keys", allow: ["admin"], body: { label: "x" } },

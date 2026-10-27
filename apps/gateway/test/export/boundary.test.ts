@@ -51,6 +51,7 @@ test("body sealing and the writer entry stay off the main-thread graph", () => {
     const graph = graphOf(entry);
     expect(graph.has("apps/gateway/src/bodies/seal.ts")).toBe(false);
     expect(graph.has("apps/gateway/src/bodies/writer.ts")).toBe(false);
+    expect(graph.has("apps/gateway/src/bodies/read.ts")).toBe(false);
   }
   expect(graphOf("apps/gateway/src/bodies/writer.ts").has("apps/gateway/src/bodies/seal.ts")).toBe(
     true,

@@ -63,7 +63,7 @@ export function createBodyRepo(
   db: Database,
   key: CryptoKey,
   dir: string,
-  opts: { isPending?: (relPath: string) => boolean; now?: () => number } = {},
+  opts: { isPending?: (relPath: string) => boolean; now?: () => number; readonly?: boolean } = {},
 ): BodyRepo {
   const isPending = opts.isPending ?? (() => false);
   const now = opts.now ?? Date.now;
@@ -87,6 +87,7 @@ export function createBodyRepo(
   };
 
   const recordState = (requestId: string, state: BodyDetailState): void => {
+    if (opts.readonly) return;
     db.run("UPDATE request_bodies SET detail_state = ? WHERE request_id = ?", [state, requestId]);
   };
 

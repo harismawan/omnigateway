@@ -1,3 +1,4 @@
+import type { BodyPart, BodyPreview } from "@omni/control";
 import { GatewayError, type Logger } from "@omni/ir";
 import type { BodyRepo } from "@omni/store/types";
 import type { CapturedParts } from "../bodyCapture.ts";
@@ -22,6 +23,8 @@ export type BodyWriterHost = {
   /** Five-second writer grace; unknown DB outcomes are left for recovery. */
   drain(): Promise<void>;
   generation(): number;
+  read(requestId: string): Promise<BodyPreview>;
+  readRaw(requestId: string, part: BodyPart): Promise<ReadableStream<Uint8Array> | null>;
 };
 type DropReason = "budget" | "backlog" | "writer_crash" | "restore";
 type Entry = {
@@ -93,6 +96,99 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   let pumping = false;
   let failing = false;
   let dropping: DropReason = "writer_crash";
+  let nextRef = 0;
+  let read: {
+    ref: number;
+    resolve(value: BodyPreview | ReadableStream<Uint8Array> | null): void;
+    reject(error: Error): void;
+    controller?: ReadableStreamDefaultController<Uint8Array>;
+    pulled?: () => void;
+    timer: unknown;
+  } | null = null;
+  function cancelRead(): void {
+    if (!read) return;
+    const current = read;
+    read = null;
+    deps.timers.clearTimeout(current.timer);
+    const error = new GatewayError("OVERLOADED", "body reader unavailable");
+    current.reject(error);
+    current.controller?.error(error);
+    current.pulled?.();
+    try {
+      worker.post({ type: "read-cancel", ref: current.ref }, true);
+    } catch {
+      // Death/retirement already owns disposal; never prevent capture cleanup.
+    }
+  }
+  function readMessage(message: WorkerMessage): boolean {
+    if (!("ref" in message)) return false;
+    if (!read || read.ref !== message.ref) return true;
+    const current = read;
+    if (message.type === "read-error") cancelRead();
+    else if (message.type === "read-result") {
+      read = null;
+      deps.timers.clearTimeout(current.timer);
+      current.resolve(message.preview);
+    } else if (message.type === "raw-ready") {
+      if (!message.found) {
+        read = null;
+        deps.timers.clearTimeout(current.timer);
+        current.resolve(null);
+      } else
+        current.resolve(
+          new ReadableStream<Uint8Array>(
+            {
+              start(controller) {
+                current.controller = controller;
+              },
+              pull() {
+                if (read !== current) return;
+                // Keep the underlying pull pending until its transferred chunk
+                // arrives: many concurrent reader.read() calls still send one credit.
+                return new Promise<void>((resolve) => {
+                  current.pulled = resolve;
+                  worker.post({ type: "read-pull", ref: current.ref });
+                });
+              },
+              cancel() {
+                if (read !== current) return;
+                read = null;
+                current.pulled?.();
+                deps.timers.clearTimeout(current.timer);
+                worker.post({ type: "read-cancel", ref: current.ref });
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+        );
+    } else if (message.type === "raw-chunk") {
+      current.controller?.enqueue(new Uint8Array(message.bytes));
+      if (message.last) {
+        current.controller?.close();
+        read = null;
+        deps.timers.clearTimeout(current.timer);
+      }
+      current.pulled?.();
+      delete current.pulled;
+    }
+    return true;
+  }
+  function requestRead(
+    requestId: string,
+    part?: BodyPart,
+  ): Promise<BodyPreview | ReadableStream<Uint8Array> | null> {
+    if (read || !accepting || draining || worker.state() !== "running")
+      return Promise.reject(new GatewayError("OVERLOADED", "body reader unavailable"));
+    return new Promise((resolve, reject) => {
+      const ref = ++nextRef;
+      read = { ref, resolve, reject, timer: deps.timers.setTimeout(cancelRead, 30_000) };
+      worker.post(
+        part === undefined
+          ? { type: "read", ref, requestId }
+          : { type: "readRaw", ref, requestId, part },
+      );
+    });
+  }
   const pauseMessage: Extract<MainMessage, { type: "pause" }> = { type: "pause" };
   const yieldTurn = deps.yield ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
 
@@ -148,10 +244,15 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     ...deps,
     name: "body writer",
     lifecycle: { pause: pauseMessage, resume: { type: "resume" }, stop: { type: "stop" } },
-    onUnavailable: () => clear(dropping, accepting || draining),
+    onUnavailable: () => {
+      cancelRead();
+      clear(dropping, accepting || draining);
+    },
     onExit: () => pending.clear(),
     onMessage(message) {
+      if (readMessage(message)) return;
       if (message.type === "paused") return;
+      if (!("requestId" in message)) return;
       const entry = entries.get(message.requestId);
       if (
         entry === undefined ||
@@ -287,6 +388,8 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     }
   }
   return {
+    read: (id) => requestRead(id) as Promise<BodyPreview>,
+    readRaw: (id, part) => requestRead(id, part) as Promise<ReadableStream<Uint8Array> | null>,
     start: () => worker.start(),
     enqueue(parts, capturedGeneration = parts.generation ?? generation) {
       // A background collector may settle after reopen. Never fail or publish
@@ -324,6 +427,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     },
     isPending: (path) => pending.has(path),
     async pause() {
+      cancelRead();
       ++lifecycleEpoch;
       accepting = false;
       dropping = "restore";
@@ -389,12 +493,14 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
       }
     },
     async halt() {
+      cancelRead();
       ++lifecycleEpoch;
       accepting = false;
       clear("restore");
       await worker.halt();
     },
     stop() {
+      cancelRead();
       ++lifecycleEpoch;
       accepting = false;
       worker.stop();
@@ -402,6 +508,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     drain() {
       if (drainPromise !== undefined) return drainPromise;
       draining = true;
+      cancelRead();
       ++lifecycleEpoch;
       dropping = "writer_crash";
       drainPromise = (async () => {

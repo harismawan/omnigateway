@@ -18,6 +18,45 @@ const parts = (id = "req", text = "hello"): CapturedParts => ({
   reservedBytes: Buffer.byteLength(text),
 });
 
+test("reader death rejects its single pending reply without skipping capture cleanup", async () => {
+  const f = fixture();
+  await f.host.start();
+  const reading = f.host.read("read");
+  const rejected = reading.catch((error: unknown) => error);
+  await expect(f.host.read("overflow")).rejects.toThrow("unavailable");
+  const p = parts("captured");
+  f.budget.reserve(p.reservedBytes);
+  f.host.enqueue(p);
+  f.exit();
+  expect(await rejected).toMatchObject({ message: "body reader unavailable" });
+  expect(f.budget.held()).toBe(0);
+  expect(f.dropped).toEqual(["writer_crash"]);
+  f.host.stop();
+});
+
+test("reader lifetime cancels a stalled raw client and bounds admission to one slot", async () => {
+  const clock = fakeTimers();
+  const f = fixture(undefined, clock);
+  await f.host.start();
+  const opening = f.host.readRaw("req", "client.request");
+  const message = f.sent.at(-1);
+  if (message?.type !== "readRaw") throw new Error("no read request");
+  f.message({ type: "raw-ready", ref: message.ref, found: true });
+  const stream = await opening;
+  if (!stream) throw new Error("no stream");
+  expect(f.sent.some((m) => m.type === "read-pull")).toBe(false);
+  const consuming = stream.getReader();
+  const pending = Array.from({ length: 10 }, () => consuming.read().catch(() => undefined));
+  await tick();
+  expect(f.sent.filter((m) => m.type === "read-pull")).toHaveLength(1);
+  await expect(f.host.read("overflow")).rejects.toThrow("unavailable");
+  await clock.advance(30_000);
+  expect(f.sent.at(-1)).toEqual({ type: "read-cancel", ref: message.ref });
+  await Promise.all(pending);
+  await expect(consuming.read()).rejects.toThrow("unavailable");
+  f.host.stop();
+});
+
 test("sustained overflow retains no captures or messages, even with a blocked failure write", async () => {
   let finishFailure = () => {};
   const blocked = new Promise<void>((resolve) => {

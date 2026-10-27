@@ -1,4 +1,4 @@
-import { type RequestBodyRead, readRequestBody } from "@omni/control";
+import { bodyParts, previewBody, type RequestBodyRead } from "@omni/control";
 import type { BodyArtifact, BodyDetailState } from "@omni/store";
 import { boolFlag, requirePositional } from "../args.ts";
 import { type Command, provider } from "../command.ts";
@@ -166,13 +166,27 @@ export const bodies: Command = {
    */
   async run(args, { ctx, writer }) {
     const requestId = requirePositional(args, 0, "request id");
-    const read = await readRequestBody(await ctx.store(), requestId);
+    const store = await ctx.store();
+    const [decoded, log] = await Promise.all([
+      store.bodies.get(requestId),
+      store.usage.get(requestId),
+    ]);
+    const read = previewBody(requestId, log?.bodyState ?? null, decoded);
+    const artifact = decoded?.artifact ?? null;
+    if (boolFlag(args.values, "full") && artifact) {
+      for (const [part, value] of bodyParts(artifact)) {
+        const item = read.parts.find((p) => p.part === part);
+        if (item) {
+          item.preview = JSON.stringify(value ?? null);
+          item.previewTruncated = false;
+        }
+      }
+    }
 
     // The whole read rather than the bare artifact: `detailState` is the answer
     // whenever the artifact is null, and a script handed only the artifact could
     // not tell "capture was off" from "pruned" from "will not decrypt".
     emit(ctx, writer, read, () => {
-      const artifact = read.artifact;
       if (artifact === null) {
         const [legend, message] =
           ABSENCE[read.detailState === "ready" ? "corrupt" : read.detailState];
@@ -193,7 +207,7 @@ export const bodies: Command = {
         paint(
           ctx,
           "dim",
-          "REQUEST and RESPONSE are the stored payload, after masking and bounding; neither is the size sent over the wire",
+          "REQUEST and RESPONSE are the stored payload, after masking; neither is the size sent over the wire",
         ),
       ];
 
@@ -221,7 +235,7 @@ export const bodies: Command = {
       if (boolFlag(args.values, "full")) {
         lines.push("", full(ctx, artifact));
       } else {
-        lines.push("", "bodies withheld; pass --full to print them, --json for the artifact");
+        lines.push("", "bodies withheld; pass --full to print them, --json for the preview");
       }
 
       return lines.join("\n");

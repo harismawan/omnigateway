@@ -3,6 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  BodyPreview,
   CatalogProvider as ServerCatalogProvider,
   SmartRouterModelStatus as ServerSmartRouterModelStatus,
 } from "@omni/control";
@@ -13,7 +14,7 @@ import {
   type QuotaRefreshRequest,
   type QuotaRefreshResult,
 } from "@omni/control";
-import { GatewayError } from "@omni/ir";
+import { GatewayError, noopLogger } from "@omni/ir";
 import { PROVIDER_DESCRIPTORS } from "@omni/providers/descriptors";
 import {
   type BodyArtifact,
@@ -35,7 +36,11 @@ import {
 import type {
   CatalogProvider as ConsoleCatalogProvider,
   SmartRouterModelStatus as ConsoleSmartRouterModelStatus,
+  RequestBodyResponse,
 } from "../../../dashboard/src/api/types.ts";
+import { createCaptureBudget } from "../../src/bodies/budget.ts";
+import { createBodyWriterHost } from "../../src/bodies/host.ts";
+import { spawnBodyWriter } from "../../src/bodies/spawn.ts";
 import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
 
 /**
@@ -65,6 +70,8 @@ const _consoleAcceptsServerStatus: ConsoleSmartRouterModelStatus =
   {} as ServerSmartRouterModelStatus;
 const _serverAcceptsConsoleStatus: ServerSmartRouterModelStatus =
   {} as ConsoleSmartRouterModelStatus;
+const _consoleAcceptsBody: RequestBodyResponse = {} as BodyPreview;
+const _serverAcceptsBody: BodyPreview = {} as RequestBodyResponse;
 
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;
@@ -89,6 +96,7 @@ type HarnessOptions = {
   logger?: AdminDeps["logger"];
   /** The process's quota operation, for the one route that drives it. */
   quota?: AdminDeps["quota"];
+  bodyWriter?: AdminDeps["bodyWriter"];
 };
 
 async function harness({
@@ -101,6 +109,7 @@ async function harness({
   consoleFleet,
   logger,
   quota,
+  bodyWriter,
 }: HarnessOptions = {}) {
   const store = provided ?? (await memoryStore());
   const admin = createAdminAuth(store, { now: () => now, sessionTtlMs: SESSION_TTL_MS });
@@ -123,6 +132,7 @@ async function harness({
   const topics: string[] = [];
 
   const app = adminRoutes({
+    ...(bodyWriter === undefined ? {} : { bodyWriter }),
     store,
     admin,
     baseUrl: "http://localhost:9000",
@@ -1136,7 +1146,29 @@ async function bodyHarness(): Promise<{
     path: join(root, "omnigateway.db"),
     encryptionKey: await deriveKey("test-secret-value-for-unit-tests"),
   });
-  const { call } = await harness({ store });
+  const host = createBodyWriterHost({
+    spawn: () =>
+      spawnBodyWriter({
+        databasePath: join(root, "omnigateway.db"),
+        databaseUrl: null,
+        encryptionKey: "test-secret-value-for-unit-tests",
+      }),
+    bodies: store.bodies,
+    budget: createCaptureBudget(1024),
+    logger: noopLogger,
+    now: Date.now,
+    timers: {
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    },
+  });
+  await host.start();
+  const close = store.close.bind(store);
+  store.close = () => {
+    host.stop();
+    close();
+  };
+  const { call } = await harness({ store, bodyWriter: host });
   return { store, root, dir: join(root, "request_bodies"), call };
 }
 
@@ -1167,7 +1199,7 @@ type BodyResponse = {
   truncated: boolean;
   sizeBytes: number;
   at: number | null;
-  artifact: BodyArtifact | null;
+  parts: Array<{ part: string; preview: string }>;
 };
 
 test("a captured request's bodies are served decrypted to an admin", async () => {
@@ -1179,8 +1211,37 @@ test("a captured request's bodies are served decrypted to an admin", async () =>
     expect(response.status).toBe(200);
     const body = (await response.json()) as BodyResponse;
     expect(body.detailState).toBe("ready");
-    expect(body.artifact?.client.request).toEqual({ model: "fast" });
-    expect(body.artifact?.attempts[0]?.provider).toBe("anthropic");
+    expect(body.parts[0]?.preview).toBe('{"model":"fast"}');
+    expect(body.parts[2]?.part).toBe("attempt.1.request");
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("raw body download is exact JSON, no-store, and requires an admin session", async () => {
+  const { store, root, call } = await bodyHarness();
+  try {
+    await store.bodies.put(bodyArtifact());
+    const path = `/api/requests/${BODY_REQUEST_ID}/body/raw?part=client.request`;
+    const response = await call("GET", path);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(response.headers.get("content-disposition")).toContain("attachment");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).toBe('{"model":"fast"}');
+    const cancelled = await call("GET", path);
+    if (!cancelled.body) throw new Error("raw stream missing");
+    await cancelled.body.cancel();
+    expect(await (await call("GET", path)).text()).toBe('{"model":"fast"}');
+    expect((await call("GET", path, undefined, false)).status).toBe(401);
+    expect((await call("GET", `/api/requests/${BODY_REQUEST_ID}/body/raw?part=bad`)).status).toBe(
+      400,
+    );
+    expect(
+      (await call("GET", `/api/requests/${BODY_REQUEST_ID}/body/raw?part=attempt.9.request`))
+        .status,
+    ).toBe(404);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -1216,7 +1277,7 @@ test("a request that was never captured answers none rather than 404", async () 
     expect(response.status).toBe(200);
     const body = (await response.json()) as BodyResponse;
     expect(body.detailState).toBe("none");
-    expect(body.artifact).toBeNull();
+    expect(body.parts).toEqual([]);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -1233,7 +1294,7 @@ test("an artifact deleted underneath its row answers missing rather than 500", a
     expect(response.status).toBe(200);
     const body = (await response.json()) as BodyResponse;
     expect(body.detailState).toBe("missing");
-    expect(body.artifact).toBeNull();
+    expect(body.parts).toEqual([]);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -1250,7 +1311,7 @@ test("an artifact that no longer decrypts answers corrupt rather than 500", asyn
     expect(response.status).toBe(200);
     const body = (await response.json()) as BodyResponse;
     expect(body.detailState).toBe("corrupt");
-    expect(body.artifact).toBeNull();
+    expect(body.parts).toEqual([]);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

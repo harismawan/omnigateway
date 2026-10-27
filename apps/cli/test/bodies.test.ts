@@ -143,7 +143,7 @@ test("the byte counts say what they measured rather than reading as request size
   // The table's figures are the stored payload, and the caption says so in the
   // columns' own words so it cannot be read as being about the frame.
   expect(result.out).toContain("REQUEST and RESPONSE are the stored payload");
-  expect(result.out).toContain("after masking and bounding");
+  expect(result.out).toContain("after masking");
   expect(result.out).toContain("neither is the size sent over the wire");
 });
 
@@ -171,7 +171,7 @@ test("--full names which side of RTK each payload it prints sits on", async () =
   expect(result.out).toContain("ATTEMPT 1 anthropic REQUEST (post-RTK)");
 });
 
-test("--json emits the artifact", async () => {
+test("--json emits the shared preview", async () => {
   const root = await installation();
   await capture(root);
 
@@ -179,14 +179,35 @@ test("--json emits the artifact", async () => {
   expect(result.code).toBe(0);
   const body = JSON.parse(result.out) as {
     detailState: string;
-    artifact: BodyArtifact | null;
+    parts: Array<{ part: string; preview: string }>;
   };
   expect(body.detailState).toBe("ready");
-  expect(body.artifact?.schemaVersion).toBe(1);
-  expect(body.artifact?.attempts[0]?.provider).toBe("anthropic");
+  expect(body.parts[0]?.part).toBe("client.request");
+  expect(body.parts[2]?.part).toBe("attempt.1.request");
   // The whole artifact, not a summary of it: `--json` is the scripting contract
   // and a script asked for the bodies.
   expect(result.out).toContain(MARKER);
+});
+
+test("--json bounds the preview while --json --full returns the whole serialized part", async () => {
+  const root = await installation();
+  const text = "é🙂 ".repeat(200_000);
+  await capture(
+    root,
+    artifact({ client: { request: text, response: null, truncated: false }, attempts: [] }),
+  );
+  const json = JSON.stringify(text);
+  const preview = await cli(["bodies", REQUEST_ID, "--json"], { root });
+  const read = JSON.parse(preview.out) as {
+    parts: Array<{ sizeBytes: number; preview: string; previewTruncated: boolean }>;
+  };
+  expect(read.parts[0]?.sizeBytes).toBe(Buffer.byteLength(json));
+  expect(read.parts[0]?.previewTruncated).toBe(true);
+  expect(Buffer.byteLength(read.parts[0]?.preview ?? "")).toBeLessThanOrEqual(1024 * 1024);
+  const full = await cli(["bodies", REQUEST_ID, "--json", "--full"], { root });
+  const whole = JSON.parse(full.out) as typeof read;
+  expect(whole.parts[0]?.preview).toBe(json);
+  expect(whole.parts[0]?.previewTruncated).toBe(false);
 });
 
 /**

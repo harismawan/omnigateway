@@ -4,10 +4,11 @@ import { bodiesDirFor } from "../../../../packages/store/src/bodies/artifact.ts"
 import { deriveKey } from "../../../../packages/store/src/encryption.ts";
 import { createBodyRepo } from "../../../../packages/store/src/postgres/bodies.ts";
 import type { BodyWriterInit, MainMessage, WorkerMessage } from "./protocol.ts";
+import { createBodyReader } from "./read.ts";
 import { createBodyWriter } from "./seal.ts";
 
 declare const self: {
-  postMessage(message: WorkerMessage): void;
+  postMessage(message: WorkerMessage, transfer?: ArrayBuffer[]): void;
   onmessage: ((event: MessageEvent<MainMessage>) => void) | null;
 };
 
@@ -19,6 +20,12 @@ self.onmessage = (event) => {
 const key = await deriveKey(init.encryptionKey);
 // SQL reconnects lazily after pause closes the small pool.
 let sql: SQL | null = null;
+const reader = createBodyReader({
+  path: init.databasePath,
+  key,
+  sql: () => (sql ??= new SQL({ url: init.databaseUrl ?? "", max: 2 })),
+  post: (message) => self.postMessage(message, message.type === "raw-chunk" ? [message.bytes] : []),
+});
 const writer = createBodyWriter({
   key,
   dir: init.databasePath === null ? null : bodiesDirFor(init.databasePath),
@@ -38,8 +45,15 @@ const writer = createBodyWriter({
 // before accepting early messages too (the previous pause may have timed out).
 await writer.handle({ type: "resume" });
 function handle(message: MainMessage): void {
-  void writer
-    .handle(message)
+  if (message.type === "resume") reader.resume();
+  if (message.type.startsWith("read")) {
+    reader.handle(message);
+    return;
+  }
+  void (async () => {
+    if (message.type === "pause" || message.type === "stop") await reader.close();
+    await writer.handle(message);
+  })()
     .then(() => {
       if (message.type === "stop") process.exit(0);
     })

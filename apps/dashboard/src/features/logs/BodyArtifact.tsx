@@ -1,15 +1,9 @@
 import styled from "styled-components";
 import { useRequestBody } from "../../api/queries.ts";
-import type {
-  BodyAttempt,
-  BodyDetailState,
-  BodyOmission,
-  RequestBodyResponse,
-} from "../../api/types.ts";
-import { formatCount } from "../../lib/format.ts";
+import type { BodyDetailState, RequestBodyResponse } from "../../api/types.ts";
 import { Chip } from "../../ui/Chip.tsx";
 import { Module } from "../../ui/Panel.tsx";
-import { Legend, Row, Stack } from "../../ui/primitives.ts";
+import { Legend, Stack } from "../../ui/primitives.ts";
 import { Failure, SkeletonRows } from "../../ui/States.tsx";
 
 /**
@@ -102,33 +96,13 @@ const Payload = styled.pre`
   word-break: break-word;
 `;
 
-/**
- * Recognises the marker the store writes in place of a body it would not keep.
- *
- * Structural rather than typed: both halves of a pair are `unknown` by design,
- * because a body is whatever the client or the provider sent. This is the one
- * shape the gateway itself puts there, and telling it apart from a payload that
- * merely happens to have an `omitted` field is not worth more than checking
- * that the reason came with it. The reason's text is shown, never matched:
- * artifacts written under an older limit carry an older reason.
- */
-function asOmission(value: unknown): BodyOmission | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  if (record.omitted !== true || typeof record.reason !== "string") return null;
-  const bytes = record.serializedBytes;
-  return {
-    omitted: true,
-    reason: record.reason,
-    serializedBytes: typeof bytes === "number" ? bytes : null,
-  };
-}
-
+/** Worker-supplied preview and omission metadata; never parse a partial JSON prefix. */
 type BodyBlockProps = {
   title: string;
   /** Which side of RTK this payload sits on, or absent where RTK cannot apply. */
   stage?: "pre-RTK" | "post-RTK";
-  value: unknown;
+  value: RequestBodyResponse["parts"][number];
+  requestId: string;
 };
 
 /**
@@ -138,13 +112,21 @@ type BodyBlockProps = {
  * are different payloads whenever an RTK filter fired, and a reader who assumes
  * otherwise will read a compressed tool result as what their client sent.
  */
-function BodyBlock({ title, stage, value }: BodyBlockProps) {
-  const omitted = asOmission(value);
+function BodyBlock({ title, stage, value, requestId }: BodyBlockProps) {
+  const omitted = value.omitted;
   return (
     <Figure>
       <Caption>
+        {value.part.startsWith("attempt.") ? <Chip>Attempt {value.part.split(".")[1]}</Chip> : null}
         <Heading>{title}</Heading>
         {stage === undefined ? null : <Chip>{stage}</Chip>}
+        <span>{BYTES.format(value.sizeBytes)} bytes</span>
+        <a
+          href={`/api/requests/${encodeURIComponent(requestId)}/body/raw?part=${encodeURIComponent(value.part)}`}
+          download
+        >
+          Download full part
+        </a>
       </Caption>
       {omitted !== null ? (
         <Note>
@@ -155,39 +137,22 @@ function BodyBlock({ title, stage, value }: BodyBlockProps) {
           The payload was replaced by this marker rather than written oversized or dropped without a
           trace.
         </Note>
-      ) : value === null || value === undefined ? (
+      ) : value.preview === "null" ? (
         <Note>Nothing was recorded for this half — it never happened, or never completed.</Note>
       ) : (
-        <Payload>{JSON.stringify(value, null, 2)}</Payload>
+        <>
+          <Payload>{value.preview}</Payload>
+          {value.previewTruncated ? (
+            <Note>Preview truncated — download the full part to read more.</Note>
+          ) : null}
+        </>
       )}
     </Figure>
   );
 }
 
-function AttemptSection({ attempt }: { attempt: BodyAttempt }) {
-  return (
-    <Stack $gap={2}>
-      <Row $gap={2} $wrap>
-        <Legend as="h3">
-          Attempt {attempt.attempt} · {attempt.provider}
-        </Legend>
-        {attempt.truncated ? <Chip $tone="warn">truncated</Chip> : null}
-      </Row>
-      <BodyBlock title="Request sent to the provider" stage="post-RTK" value={attempt.request} />
-      <BodyBlock title="Response from the provider" value={attempt.response} />
-      {attempt.streamChunks === null ? null : (
-        <BodyBlock
-          title={`Raw stream frames (${formatCount(attempt.streamChunks.length)})`}
-          value={attempt.streamChunks}
-        />
-      )}
-    </Stack>
-  );
-}
-
 function Artifact({ body }: { body: RequestBodyResponse }) {
-  const artifact = body.artifact;
-  if (artifact === null) {
+  if (body.parts.length === 0) {
     const absence = ABSENCE[body.detailState === "ready" ? "corrupt" : body.detailState];
     return (
       <Stack $gap={1}>
@@ -201,7 +166,7 @@ function Artifact({ body }: { body: RequestBodyResponse }) {
     <Stack $gap={3}>
       {/* One paragraph, no inline markup: it is read as a sentence and the
           border already carries the emphasis. */}
-      {artifact.attempts.length === 0 ? null : (
+      {!body.parts.some((p) => p.part.startsWith("attempt.")) ? null : (
         <Caveat>
           The client request below is what arrived at the gateway. Each attempt request is what went
           upstream after RTK filters ran, so the two are not the same payload — compare them to see
@@ -209,26 +174,32 @@ function Artifact({ body }: { body: RequestBodyResponse }) {
         </Caveat>
       )}
 
-      <Stack $gap={2}>
-        <Row $gap={2} $wrap>
-          <Legend as="h3">Client</Legend>
-          {artifact.client.truncated ? <Chip $tone="warn">truncated</Chip> : null}
-        </Row>
-        <BodyBlock
-          title="Request from the client"
-          stage="pre-RTK"
-          value={artifact.client.request}
-        />
-        <BodyBlock title="Response returned to the client" value={artifact.client.response} />
-      </Stack>
-
-      {artifact.attempts.map((attempt) => (
-        <AttemptSection key={`${attempt.attempt}-${attempt.provider}`} attempt={attempt} />
-      ))}
-
-      {artifact.error === null || artifact.error === undefined ? null : (
-        <BodyBlock title="Error" value={artifact.error} />
-      )}
+      {body.parts
+        .filter((p) => p.part !== "error" || p.preview !== "null")
+        .map((value) => (
+          <BodyBlock
+            key={value.part}
+            requestId={body.requestId}
+            value={value}
+            title={
+              value.part === "client.request"
+                ? "Request from the client"
+                : value.part === "client.response"
+                  ? "Response returned to the client"
+                  : value.part === "error"
+                    ? "Error"
+                    : value.part.endsWith("request")
+                      ? "Request sent to the provider"
+                      : "Response from the provider"
+            }
+            {...(value.part.endsWith("request")
+              ? {
+                  stage:
+                    value.part === "client.request" ? ("pre-RTK" as const) : ("post-RTK" as const),
+                }
+              : {})}
+          />
+        ))}
     </Stack>
   );
 }
