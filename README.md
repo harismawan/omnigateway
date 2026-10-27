@@ -436,7 +436,8 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
 | `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](docs/operations.md#recording-bodies) |
 | `OMNI_BODY_CAPTURE_BUDGET_BYTES` | No | `536870912` (512 MiB) | Most bytes body capture may hold across all in-flight requests. A request that would pass it keeps its response untouched and has its body recorded as omitted (`capture budget exhausted`), counted in `omni_bodies_dropped_total{reason="budget"}` |
-| `OMNI_EXPORT_BODIES_ALLOWED` | No | unset | Reserved for exporting captured bodies to [log export](#exporting-request-logs) destinations, which is not available yet; export sends metadata only |
+| `OMNI_EXPORT_BODIES_ALLOWED` | No | unset | Boot opt-in for captured client body export; capture gates and destination opt-in must also hold |
+| `OMNI_EXPORT_BODY_BUDGET_BYTES` | No | `201326592` | Export-worker body allocation budget (192 MiB), one body at a time; conservative reservations can omit large bodies |
 | `OMNI_METRICS_TOKEN` | No | unset | Registers authenticated `GET /metrics`; unset means no route |
 | `OMNI_METRICS_MAX_SERIES` | No | `5000` | Series cap before new `api_key_id` values fold to `other` |
 | `OMNI_OTLP_ENDPOINT` | No | unset | Enables OTLP/HTTP span export to `<endpoint>/v1/traces` |
@@ -505,11 +506,21 @@ sent raise the gap warning. One documented limit: a completion whose write commi
 10 seconds after its timestamp can be passed over
 ([details](docs/operations.md#log-export)).
 
-**Metadata only.** A record is the row's metadata: timestamps, key id and label, requested and
+**Records.** A record is the row's metadata: timestamps, key id and label, requested and
 resolved model, provider, account id, status, error code, tokens, cost, latency, RTK figures,
 session, turn, agent, tags, metadata and request ids, as JSON with
-`"schema": "omni.request_log/v1"`. Body export is not available yet; the per-destination switch
-exists and is refused, and `OMNI_EXPORT_BODIES_ALLOWED` is reserved for it.
+`"schema": "omni.request_log/v1"`. Captured bodies additionally require the boot
+opt-in, both capture gates, a non-opted-out key and destination `includeBodies`.
+Only masked client request/response content leaves the store, never provider
+attempts. OTLP traces cannot enable bodies. Enabled OTLP logs use the complete JSON
+record as their inline string body; metadata-only logs retain the short title.
+
+Bodies fit inline or follow as size-bounded segments. One body globally reserves
+decode buffers, worst-case UTF-16 strings, encoding trials and gzip workspace before
+the full artifact is read. The default 192 MiB budget can omit artifacts above
+approximately 2 MiB with Elasticsearch's default cap; raise
+`OMNI_EXPORT_BODY_BUDGET_BYTES` for larger artifacts (stored cap: 64 MiB).
+This accounts body allocations, not total process RSS or GC arenas.
 
 Add destinations on the console's **Export** page or with `omni export`. Up to ten; ids are
 `[a-z0-9-]{1,40}`. Secrets — API keys, passwords, secret headers, the webhook signing secret —

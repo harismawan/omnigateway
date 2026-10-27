@@ -94,3 +94,27 @@ test("budget refusal never allocates whole envelope or invokes decoder", async (
   result.release();
   expect(attacher.held()).toBe(0);
 });
+
+test("artifact decoder failure exports unavailable and releases its reservation", async () => {
+  const attacher = createBodyAttacher(192 * 1024 * 1024);
+  const p = prepare(destination(), null);
+  if (!p.ok) throw new Error(p.error);
+  const reader = {
+    bodyProbe: async () => ({ encryptedBytes: 100, plaintextBytes: 100 }),
+    bodyEnvelope: async () => {
+      throw new Error("missing file");
+    },
+  } as unknown as ExportReader;
+  const log = row("r", T0);
+  log.bodyState = "ready";
+  const result = await attacher.attach(
+    reader,
+    log,
+    buildRecord(log, { keyLabel: null }),
+    p.sender,
+    new AbortController().signal,
+  );
+  expect(result.record.body).toEqual({ state: "unavailable" });
+  result.release();
+  expect(attacher.held()).toBe(0);
+});

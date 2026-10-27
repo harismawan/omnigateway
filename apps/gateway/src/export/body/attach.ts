@@ -43,7 +43,13 @@ export function createBodyAttacher(limit: number) {
           record.body = { state: "omitted", reason: "export budget" };
           return { record, release: slot.release };
         }
-        const extracted = await extract(reader, row.id, probe, signal);
+        let extracted: Awaited<ReturnType<typeof extract>>;
+        try {
+          extracted = await extract(reader, row.id, probe, signal);
+        } catch {
+          signal.throwIfAborted();
+          return { record, release: slot.release };
+        }
         if (!extracted) return { record, release: slot.release };
         record.body = { state: extracted.truncated ? "incomplete" : "included" };
         if (extracted.reason !== null) record.body = { state: "omitted", reason: extracted.reason };
@@ -116,6 +122,14 @@ export function bodyCuts(
   return segments(text, cap, (segment, n, of) => {
     const encoded = sender.bodySegment?.(record, part, segment, n, of);
     if (!encoded) throw new Error("body encoder missing");
-    return Buffer.byteLength(encoded.sender.body([encoded.part]));
+    return requestBytes(encoded.sender, encoded.part);
   });
+}
+
+/** zlib compressBound-style headroom, including the gzip wrapper. */
+export function requestBytes(sender: Sender, part: string): number {
+  const bytes = Buffer.byteLength(sender.body([part]));
+  return sender.gzip
+    ? bytes + Math.ceil(bytes / 4096) + Math.ceil(bytes / 16384) + Math.ceil(bytes / 33554432) + 64
+    : bytes;
 }

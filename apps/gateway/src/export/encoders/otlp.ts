@@ -1,5 +1,5 @@
 import type { BatchEnvelope } from "../batch.ts";
-import { RECORD_SCHEMA, type RequestRecord } from "../record.ts";
+import { RECORD_SCHEMA, type RequestRecord, recordJson } from "../record.ts";
 
 /**
  * OTLP/HTTP JSON encoding of exported records, as `logs` or `traces`.
@@ -204,10 +204,11 @@ function envelope(signal: OtlpSignal): BatchEnvelope {
 
 /** One span or log record, encoded. */
 export function otlpPart(record: RequestRecord, signal: OtlpSignal, raw?: string): string {
+  const inline = raw ?? (record.body === undefined ? undefined : recordJson(record));
   return JSON.stringify(
     signal === "traces"
       ? span(record)
-      : { ...logRecordObject(record), ...(raw ? { body: str(raw) } : {}) },
+      : { ...logRecordObject(record), ...(inline ? { body: str(inline) } : {}) },
   );
 }
 

@@ -3,7 +3,12 @@ import type { ExportReader } from "@omni/store/exportReader";
 import type { ExportDestination, RequestLog, Settings } from "@omni/store/types";
 import { BACKOFF_MAX_MS, retryDelay } from "./backoff.ts";
 import { cutBatches, MAX_BATCH_RECORDS, OVERSIZED_REASON } from "./batch.ts";
-import { bodyCuts, createBodyAttacher, DEFAULT_BODY_BUDGET_BYTES } from "./body/attach.ts";
+import {
+  bodyCuts,
+  createBodyAttacher,
+  DEFAULT_BODY_BUDGET_BYTES,
+  requestBytes,
+} from "./body/attach.ts";
 import {
   type DeliveryOutcome,
   deliver,
@@ -859,7 +864,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
             client && sender.rawPart ? sender.rawPart(record, client) : sender.part(record);
           let outcome: DeliveryOutcome;
           let anyDropped = false;
-          if (Buffer.byteLength(sender.body([inline])) <= cap) {
+          if (requestBytes(sender, inline) <= cap) {
             outcome = await deliver(sender, [inline], {
               transport: deps.transport,
               signal,
@@ -874,7 +879,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               parts: { request: request.length, response: response.length },
             };
             const metadata = sender.part(record);
-            if (Buffer.byteLength(sender.body([metadata])) > cap)
+            if (requestBytes(sender, metadata) > cap)
               return { kind: "failed", status: 413, error: "metadata exceeds request limit" };
             outcome = await deliver(sender, [metadata], {
               transport: deps.transport,

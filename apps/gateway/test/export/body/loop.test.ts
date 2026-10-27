@@ -124,3 +124,81 @@ test("gate flip between segments cancels uncommitted record and never sends rema
   expect((await stateOf(w)).cursorId).toBe("body");
   expect(w.sent.at(-1)?.body).not.toContain("secret");
 });
+
+test("partial delivery replays metadata and stable segments before advancing cursor", async () => {
+  const w = setup(1300);
+  artifact(w, "hello ".repeat(1000));
+  let bodyPosts = 0;
+  w.answer = (req) =>
+    new Response(null, {
+      status: req.headers["x-omni-body-part"] && ++bodyPosts === 2 ? 503 : 200,
+    });
+  await w.loop.start();
+  await w.settle();
+  expect((await stateOf(w)).cursorId).toBe("");
+  const first = w.sent.find((s) => s.headers["x-omni-body-part"]);
+  if (!first) throw new Error("expected first body segment");
+  await w.advance(5000);
+  expect((await stateOf(w)).cursorId).toBe("body");
+  expect(
+    w.sent
+      .filter(
+        (s) =>
+          s.headers["x-omni-body-part"] === first?.headers["x-omni-body-part"] &&
+          s.headers["x-omni-body-segment"] === "0",
+      )
+      .map((s) => s.body),
+  ).toEqual([first.body, first.body]);
+});
+
+test("metadata before a pending body is sent first without overtaking that cursor", async () => {
+  const w = setup();
+  const body = w.rows[0];
+  if (body) body.bodyState = "pending";
+  w.rows.unshift(row("metadata", T0 - 21000, { apiKeyId: "key" }));
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent.map((s) => s.ids)).toEqual([["metadata"]]);
+  expect((await stateOf(w)).cursorId).toBe("metadata");
+});
+
+test("destination edit between segments stops old snapshot without committing", async () => {
+  const w = setup(1300);
+  artifact(w, "hello ".repeat(1000));
+  w.answer = (req) => {
+    if (req.headers["x-omni-body-part"]) {
+      const d = w.destinations[0];
+      if (d) d.revision++;
+    }
+    return new Response(null, { status: 200 });
+  };
+  await w.loop.start();
+  await w.settle();
+  expect((await stateOf(w)).cursorId).toBe("");
+  expect(w.sent.filter((s) => s.headers["x-omni-body-part"])).toHaveLength(1);
+});
+
+test("capture settings flipped mid-pass remove bodies from subsequent records", async () => {
+  const w = setup();
+  artifact(w, { secret: "first" });
+  const second = row("second", T0 - 19000, { apiKeyId: "key" });
+  second.bodyState = "ready";
+  w.rows.push(second);
+  w.bodies.set(
+    "second",
+    JSON.stringify({
+      schemaVersion: 1,
+      requestId: "second",
+      client: { request: "never-send", response: null, truncated: false },
+    }),
+  );
+  w.answer = () => {
+    w.settings.bodyLoggingEnabled = false;
+    return new Response(null, { status: 200 });
+  };
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent.map((s) => s.ids)).toEqual([["body"], ["second"]]);
+  expect(w.sent[1]?.body).not.toContain("never-send");
+  expect(JSON.parse(w.sent[1]?.body ?? "").records[0].body).toBeUndefined();
+});

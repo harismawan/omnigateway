@@ -135,7 +135,7 @@ test("create, edit, bodies and remove go through control, announce res:export an
   const edited = await h.call("PUT", "/api/export/destinations/hook", { enabled: false });
   expect((edited.body.destination as { enabled: boolean }).enabled).toBe(false);
   const bodies = await h.call("PUT", "/api/export/destinations/hook/bodies", { include: true });
-  expect(bodies.status).toBe(400);
+  expect(bodies.status).toBe(200);
   expect(
     await h.call("PUT", "/api/export/destinations/hook/bodies", { include: false }),
   ).toMatchObject({
@@ -143,7 +143,10 @@ test("create, edit, bodies and remove go through control, announce res:export an
   });
 
   const list = await h.call("GET", "/api/export/destinations");
-  expect(list.body).toMatchObject({ worker: { state: "idle", restarts: 0 } });
+  expect(list.body).toMatchObject({
+    worker: { state: "idle", restarts: 0 },
+    exportBodiesAllowed: false,
+  });
   expect(JSON.stringify(list.body)).not.toContain("shh-very-secret");
   expect((await h.call("GET", "/api/export/destinations/hook")).status).toBe(200);
 
@@ -152,12 +155,12 @@ test("create, edit, bodies and remove go through control, announce res:export an
     body: { ok: true },
   });
   expect((await h.call("GET", "/api/export/destinations/hook")).status).toBe(400);
-  expect(h.changes()).toBe(4);
-  expect(h.invalidated.filter((t) => t === "res:export")).toHaveLength(4);
+  expect(h.changes()).toBe(5);
+  expect(h.invalidated.filter((t) => t === "res:export")).toHaveLength(5);
 
   // A refused write announces nothing.
   expect((await h.call("POST", "/api/export/destinations", { id: "BAD" })).status).toBe(400);
-  expect(h.changes()).toBe(4);
+  expect(h.changes()).toBe(5);
 });
 
 test("reads carry the worker's latest status for the destination's own generation", async () => {

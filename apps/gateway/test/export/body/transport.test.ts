@@ -20,6 +20,8 @@ test("OTLP body-enabled inline is the complete JSON record; metadata title stays
     client: { request: { hello: "😀" }, response: [1, true] },
   });
   expect(decoded.attributes).toEqual(JSON.parse(p.sender.part(record)).attributes);
+  record.body = { state: "omitted", reason: "export budget" };
+  expect(JSON.parse(JSON.parse(p.sender.part(record)).body.stringValue).body).toEqual(record.body);
 });
 
 test("ES and OTLP body segments use stable IDs/attributes and actual escaping-aware encoded bounds", () => {
@@ -44,6 +46,9 @@ test("ES and OTLP body segments use stable IDs/attributes and actual escaping-aw
       const encoded = p.sender.bodySegment?.(record, "request", cut, n, cuts.length);
       if (!encoded) throw new Error("missing encoder");
       expect(Buffer.byteLength(encoded.sender.body([encoded.part]))).toBeLessThanOrEqual(1300);
+      expect(
+        Bun.gzipSync(new TextEncoder().encode(encoded.sender.body([encoded.part]))).length,
+      ).toBeLessThanOrEqual(1300);
       if (type === "elasticsearch") {
         const [action, source] = encoded.part
           .trim()

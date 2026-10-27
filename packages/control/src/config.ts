@@ -32,7 +32,7 @@ export type Config = {
   /**
    * `OMNI_EXPORT_BODIES_ALLOWED`: the third, export-specific key for sending
    * captured bodies to export destinations. Read at boot and handed to the
-   * export worker; body export itself ships in a later release.
+   * export worker; runtime capture and destination gates remain mandatory.
    */
   exportBodiesAllowed: boolean;
   /**

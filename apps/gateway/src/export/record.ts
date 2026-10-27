@@ -10,8 +10,8 @@ import type { RequestLog, TraceAgent } from "@omni/store/types";
  * order below; `metadata` keys are sorted, because the two backends' JSON
  * columns do not promise to hand them back in insertion order.
  *
- * Part 1 carries no `body` field, and no `prompts` field while no row carries
- * one. A field added here is a schema change: additive fields stay `v1`,
+ * The attachment path adds `body` only when every send-time gate holds.
+ * A field added here is a schema change: additive fields stay `v1`,
  * anything else is `v2`.
  */
 export const RECORD_SCHEMA = "omni.request_log/v1";

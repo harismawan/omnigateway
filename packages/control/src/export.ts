@@ -545,8 +545,7 @@ function commonPatch(body: {
 
 /**
  * Turns body export on or off. Off is always allowed. On is refused for an
- * OTLP traces destination — a span has nowhere to carry a body — and, until
- * body export ships, for every destination.
+ * OTLP traces destination. Runtime capture and export gates still bind sends.
  */
 export async function setDestinationBodies(
   store: Store,

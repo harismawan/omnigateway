@@ -19,6 +19,11 @@ export function pipelineReservation(
 ): number {
   const trial = Math.min(cap, 6 * plain + 4 * metadata + 4096);
   const decode = 8 * encrypted + Math.ceil(8 * plain) + 65536;
+  // 32P: <=2P retained source, <=2P client spans, <=2P segment
+  // slices, <=2P candidate slice, <=4P raw composition, <=12P
+  // nested OTLP quoted inline output, with 8P flattening/headroom.
+  // 12S covers concurrent trial output, one delivered encoded string,
+  // UTF-8 bytes, compressed bound, signing and transport ownership.
   const encode = 32 * plain + 12 * trial + 1024 * 1024 + 8 * metadata;
   return Math.max(decode, encode);
 }
