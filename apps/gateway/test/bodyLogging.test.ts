@@ -334,6 +334,81 @@ test("a stalled body writer cannot delay client bytes or row completion", async 
   }
 });
 
+test("queue overflow and a blocked failure write cannot delay client streams or completed rows", async () => {
+  const budget = createCaptureBudget(1024 * 1024);
+  let failures = 0;
+  let backlogs = 0;
+  let overflowPosts = 0;
+  let finishFailure = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    finishFailure = resolve;
+  });
+  const stalled = createBodyWriterHost({
+    spawn: () => ({
+      post: (m) => {
+        if ("requestId" in m && m.requestId.startsWith("req_")) overflowPosts++;
+      },
+      onMessage: () => {},
+      onExit: () => {},
+      terminate: () => {},
+    }),
+    bodies: {
+      publish: async () => true,
+      fail: async () => {
+        failures++;
+        await blocked;
+      },
+    },
+    budget,
+    logger: captureLogger(),
+    now: () => NOW,
+    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+    onDropped: (reason) => {
+      if (reason === "backlog") backlogs++;
+    },
+  });
+  await stalled.start();
+  for (let i = 0; i < 1000; i++)
+    stalled.enqueue({
+      requestId: `filler_${i}`,
+      at: NOW,
+      client: { request: null, response: null, truncated: false },
+      attempts: [],
+      error: null,
+      abandoned: null,
+      reservedBytes: 0,
+    });
+  const f = await harness({
+    allowed: true,
+    settings: CAPTURE_ON,
+    captureBudget: budget,
+    bodyWriter: stalled,
+  });
+  try {
+    for (const stream of [false, true, false, true]) {
+      const response = await f.call({ ...ASK, stream });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("Hello");
+    }
+    await until(
+      "overflow rows complete",
+      async () => (await f.store.usage.get("req_4"))?.state === "done",
+    );
+    for (let i = 1; i <= 4; i++) {
+      expect((await f.store.usage.get(`req_${i}`))?.state).toBe("done");
+      expect((await f.store.usage.get(`req_${i}`))?.bodyState).toBe("pending");
+    }
+    expect(backlogs).toBe(4);
+    expect(failures).toBe(1);
+    expect(overflowPosts).toBe(0);
+    expect(budget.held()).toBe(0);
+  } finally {
+    stalled.stop();
+    finishFailure();
+    await cleanup(f.store, f.root);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Gating
 // ---------------------------------------------------------------------------

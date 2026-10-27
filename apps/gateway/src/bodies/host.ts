@@ -79,26 +79,43 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
   let generation = 0;
   let accepting = true;
   let pumping = false;
+  let failing = false;
   let dropping: DropReason = "writer_crash";
   const yieldTurn = deps.yield ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
 
+  function discard(parts: CapturedParts): void {
+    deps.budget.release(parts.reservedBytes);
+    parts.reservedBytes = 0;
+    parts.client.request = null;
+    parts.client.response = null;
+    parts.attempts.length = 0;
+    parts.error = null;
+  }
   function release(entry: Entry): void {
-    deps.budget.release(entry.parts.reservedBytes + entry.slices);
-    entry.parts.reservedBytes = 0;
+    deps.budget.release(entry.slices);
+    discard(entry.parts);
     entry.slices = 0;
     entries.delete(entry.parts.requestId);
-    entry.parts.client.request = null;
-    entry.parts.client.response = null;
-    entry.parts.attempts.length = 0;
+  }
+  /** One failure write, no waiting ids: a blocked store must not become a queue. */
+  function failPending(requestId: string): void {
+    if (failing) return;
+    failing = true;
+    const failure = Promise.resolve()
+      .then(() => deps.bodies.fail(requestId))
+      .catch(() => {});
+    publications.add(failure);
+    void failure.finally(() => {
+      failing = false;
+      publications.delete(failure);
+    });
   }
   function fail(entry: Entry, reason: DropReason): void {
     if (entries.get(entry.parts.requestId) !== entry) return;
     if (entry.path !== null) pending.delete(entry.path);
     release(entry);
     deps.onDropped?.(reason);
-    const failure = deps.bodies.fail(entry.parts.requestId).catch(() => {});
-    publications.add(failure);
-    void failure.finally(() => publications.delete(failure));
+    failPending(entry.parts.requestId);
   }
   const clear = (reason: DropReason): void => {
     for (const entry of entries.values()) fail(entry, reason);
@@ -141,7 +158,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
             }
           } catch {
             deps.onDropped?.("writer_crash");
-            void deps.bodies.fail(message.requestId).catch(() => {});
+            failPending(message.requestId);
             try {
               worker.post({
                 type: "publish-result",
@@ -235,40 +252,26 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     start: () => worker.start(),
     enqueue(parts) {
       if (entries.has(parts.requestId)) {
-        deps.budget.release(parts.reservedBytes);
+        discard(parts);
+        return;
+      }
+      const reason = !accepting
+        ? "restore"
+        : worker.state() !== "running"
+          ? "writer_crash"
+          : entries.size >= BODY_QUEUE_LIMIT
+            ? "backlog"
+            : null;
+      if (reason !== null) {
+        discard(parts);
+        deps.onDropped?.(reason);
+        // Hard admission bound wins over an omission artifact per rejected id.
+        // If this slot is busy, sweepPending eventually fails the stale row.
+        failPending(parts.requestId);
         return;
       }
       const entry: Entry = { parts, generation, slices: 0, path: null };
       entries.set(parts.requestId, entry);
-      if (!accepting) {
-        fail(entry, "restore");
-        return;
-      }
-      if (worker.state() !== "running") {
-        fail(entry, "writer_crash");
-        return;
-      }
-      if (entries.size > BODY_QUEUE_LIMIT) {
-        deps.budget.release(parts.reservedBytes);
-        parts.reservedBytes = 0;
-        parts.client.request = null;
-        parts.client.response = null;
-        for (const a of parts.attempts) {
-          a.request = null;
-          a.response = null;
-          a.streamChunks = null;
-        }
-        deps.onDropped?.("backlog");
-        void Promise.resolve().then(() => {
-          if (entries.get(parts.requestId) !== entry) return;
-          try {
-            worker.post({ ...meta(parts, entry.generation), abandoned: "backlog" });
-          } catch {
-            fail(entry, "writer_crash");
-          }
-        });
-        return;
-      }
       queue.push(entry);
       // No encoding, parsing, or worker messaging on the request's stack.
       void Promise.resolve().then(pump);

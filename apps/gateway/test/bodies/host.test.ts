@@ -16,26 +16,63 @@ const parts = (id = "req", text = "hello"): CapturedParts => ({
   reservedBytes: Buffer.byteLength(text),
 });
 
-test("queue past 1000 drops captured bytes as backlog omission metadata", async () => {
-  const f = fixture();
+test("sustained overflow retains no captures or messages, even with a blocked failure write", async () => {
+  let finishFailure = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    finishFailure = resolve;
+  });
+  const f = fixture(() => blocked);
   await f.host.start();
-  for (let i = 0; i < 1001; i++) {
+  for (let i = 0; i < 1000; i++) {
     const p = parts(`req_${i}`);
     f.budget.reserve(p.reservedBytes);
     f.host.enqueue(p);
   }
-  expect(f.dropped).toEqual(["backlog"]);
-  await Promise.resolve();
-  expect(f.sent.find((m) => m.type === "meta" && m.requestId === "req_1000")).toMatchObject({
-    abandoned: "backlog",
-  });
+  for (let wave = 0; wave < 10; wave++) {
+    for (let i = 0; i < 1000; i++) {
+      const p = parts(`overflow_${wave}_${i}`);
+      p.client.response = ["frame"];
+      p.attempts = [
+        {
+          attempt: 1,
+          provider: "anthropic",
+          request: "wire",
+          response: ["reply"],
+          streamChunks: ["frame"],
+          truncated: false,
+        },
+      ];
+      p.error = { payload: "must not be retained" };
+      f.budget.reserve(p.reservedBytes);
+      f.host.enqueue(p);
+      expect(p).toMatchObject({
+        reservedBytes: 0,
+        client: { request: null, response: null },
+        attempts: [],
+        error: null,
+      });
+    }
+    await tick();
+    expect(f.failed).toHaveLength(1);
+    expect(f.sent.some((m) => "requestId" in m && m.requestId.startsWith("overflow_"))).toBe(false);
+    expect(f.dropped).toHaveLength((wave + 1) * 1000);
+    expect(f.dropped.every((reason) => reason === "backlog")).toBe(true);
+  }
   // The first five-byte encode is also held until the stalled worker acks it.
-  expect(f.budget.held()).toBe(5005);
-  f.host.stop();
+  expect(f.budget.held()).toBeLessThanOrEqual(10000);
+  f.exit();
+  // Crash visits exactly the 1000 admitted entries, never any overflow bookkeeping.
+  expect(f.dropped.filter((reason) => reason === "writer_crash")).toHaveLength(1000);
+  await tick();
+  expect(f.failed).toHaveLength(1);
   expect(f.budget.held()).toBe(0);
+  finishFailure();
+  await tick();
+  expect(f.failed).toHaveLength(1); // No deferred queue of rejected ids.
+  f.host.stop();
 });
 
-function fixture() {
+function fixture(fail?: () => Promise<void>) {
   const budget = createCaptureBudget(256 * 1024 * 1024);
   const sent: MainMessage[] = [];
   let message = (_m: WorkerMessage) => {};
@@ -62,6 +99,7 @@ function fixture() {
       },
       fail: async (id) => {
         failed.push(id);
+        await fail?.();
       },
     },
     budget,
@@ -86,6 +124,20 @@ function fixture() {
     yields: () => yields,
   };
 }
+
+test("an admitted budget omission still reaches the writer", async () => {
+  const f = fixture();
+  await f.host.start();
+  const p = parts("budget", "");
+  p.abandoned = "budget";
+  f.host.enqueue(p);
+  await tick();
+  expect(f.sent).toEqual([
+    expect.objectContaining({ type: "meta", requestId: "budget", abandoned: "budget" }),
+  ]);
+  expect(f.dropped).toEqual([]);
+  f.host.stop();
+});
 
 test("enqueue returns immediately; slices are bounded, yielded, and reserved until acknowledgements", async () => {
   const f = fixture();
