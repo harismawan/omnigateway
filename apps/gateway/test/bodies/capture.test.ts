@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -259,7 +259,7 @@ test("concurrent long streams never hold more than the budget, and each is aband
 });
 
 /**
- * "Not slowed", measured without a clock.
+ * No future-input dependency, and no capture-only timed waits after setup.
  *
  * Release only enough upstream frames to produce the next client event, then
  * wait for that event before releasing any more. A capture that buffers until
@@ -268,6 +268,10 @@ test("concurrent long streams never hold more than the budget, and each is aband
  *
  * Authentication and setup may wait on real I/O for arbitrarily many idle
  * turns. Silence is not evidence that an upstream frame reached the route.
+ * Only after the first three client events prove real setup/commit complete
+ * do we freeze timers. An event-loop checkpoint drains the available frame's
+ * promise/stream jobs; if delivery needs a timer, advancing it records that
+ * virtual delay. Unlike the old quiet heuristic, this never measures setup I/O.
  */
 test("a stream whose capture is abandoned delivers each client event before more upstream input", async () => {
   const frames = anthropicFrames(12, 16 * KIB);
@@ -278,6 +282,7 @@ test("a stream whose capture is abandoned delivers each client event before more
   ): Promise<{
     log: string[];
     bytes: string;
+    deliveryWaits: number[];
     store: Store;
     cleanup: () => Promise<void>;
   }> {
@@ -289,6 +294,9 @@ test("a stream whose capture is abandoned delivers each client event before more
     });
     const log: string[] = [];
     const chunks: string[] = [];
+    const deliveryWaits: number[] = [];
+    // Keep this checkpoint real while Bun.sleep/setTimeout use the virtual clock.
+    const checkpoint = setImmediate;
     const pending = h.call({ ...ASK, stream: true });
     let delivered = 0;
     let changed = Promise.withResolvers<void>();
@@ -326,10 +334,23 @@ test("a stream whose capture is abandoned delivers each client event before more
       // Dispatch commits on the first text delta, not message_start alone.
       for (let i = 0; i < 3; i++) release(i);
       await received(3);
-      // Each remaining text delta and block stop must arrive without later input.
-      for (let i = 3; i < frames.length - 2; i++) {
-        release(i);
-        await received(i + 1);
+      jest.useFakeTimers({ now: NOW });
+      try {
+        // Every available delta/block stop must arrive at the current virtual
+        // instant, before later input, not after a capture-only sleep/timer.
+        for (let i = 3; i < frames.length - 2; i++) {
+          const at = Date.now();
+          release(i);
+          await new Promise<void>((resolve) => checkpoint(resolve));
+          for (let steps = 0; delivered < i + 1 && steps < 20; steps++) {
+            jest.advanceTimersToNextTimer();
+            await new Promise<void>((resolve) => checkpoint(resolve));
+          }
+          expect(delivered).toBe(i + 1);
+          deliveryWaits.push(Date.now() - at);
+        }
+      } finally {
+        jest.useRealTimers();
       }
       // The decoder emits terminal usage/stop together on message_stop.
       release(frames.length - 2);
@@ -337,7 +358,7 @@ test("a stream whose capture is abandoned delivers each client event before more
       upstream.release();
       await received(frames.length);
       await reading;
-      return { log, bytes: chunks.join(""), store: h.store, cleanup: h.cleanup };
+      return { log, bytes: chunks.join(""), deliveryWaits, store: h.store, cleanup: h.cleanup };
     } catch (error) {
       while (!upstream.done()) upstream.release();
       upstream.release();
@@ -354,6 +375,9 @@ test("a stream whose capture is abandoned delivers each client event before more
   try {
     expect(captured.bytes).toBe(bare.bytes);
     expect(captured.log).toEqual(bare.log);
+    // Twelve measured frames: eleven remaining text deltas and block stop.
+    expect(bare.deliveryWaits).toEqual(Array(12).fill(0));
+    expect(captured.deliveryWaits).toEqual(bare.deliveryWaits);
     // Every delta reached the client before the next upstream release.
     const deltas = bare.log.filter((line) => line === "client content_block_delta").length;
     expect(deltas).toBe(12);

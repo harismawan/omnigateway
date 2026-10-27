@@ -126,3 +126,91 @@ Expected diagnostics: history negative fixture prints `missing-base`; memory sub
 `EXPORT_MEMORY_EVIDENCE`; dashboard negative fixtures print React act warnings and deliberate
 route errors including `catalog unavailable`. Dashboard build retains its existing AppShell
 code-splitting warning. None is a failing assertion or new lint/typecheck diagnostic.
+
+## Review follow-up: restore deterministic delivery timing coverage
+
+Review: `ci-fix-review.md`, Important finding against `4021d202`. Worker fix approved and
+unchanged. Scope of this follow-up is only `capture.test.ts` plus this report; no production
+changes, subagents, or push. The earlier handshake was insufficient to detect capture-only
+pacing: slowing delivery also slowed each later release, preserving both transcripts.
+
+### Reproduce the reviewer's negative control
+
+Full executed preload, saved at `/tmp/opencode/pr278-review-delay.ts`:
+
+```js
+const originalTee = ReadableStream.prototype.tee;
+let delayed = 0;
+ReadableStream.prototype.tee = function (...args) {
+  const [adapter, capture] = originalTee.apply(this, args);
+  return [adapter.pipeThrough(new TransformStream({
+    async transform(chunk, controller) {
+      delayed++;
+      await Bun.sleep(50);
+      if (delayed === 17) console.error("REVIEW_PROBE: all 17 captured upstream frames delayed 50ms each");
+      controller.enqueue(chunk);
+    },
+  })), capture];
+};
+```
+
+Exact command (both before and after the test change):
+
+```sh
+bun test --preload /tmp/opencode/pr278-review-delay.ts apps/gateway/test/bodies/capture.test.ts -t 'before more upstream input'
+```
+
+- **Before:** 1 pass, 0 fail, 9 assertions; diagnostic confirms all 17 captured frames delayed.
+  `/tmp/opencode/pr278-review-delay-before.log` (1103 ms). This confirms the review finding,
+  not a passing fault-sensitivity result.
+- **After:** 0 pass, 1 fail. Bytes and handshake transcripts still match; the new timing assertion
+  fails with twelve **50** values against twelve **0** values, not a watchdog/global deadline.
+  `/tmp/opencode/pr278-timing-delay-red.log`. Repeated on final code: **10/10 fail**, always
+  the timing equality (`pr278-timing-final-repeat-delay.log`). The diagnostic still confirms all
+  17 frames pass through the delayed adapter branch. The preload is not committed.
+
+### Test change and deterministic boundary
+
+- Keep the existing handshake, exact bytes/transcript, budget exhaustion/omission, reservation,
+  and uncaptured absence assertions.
+- Real authentication, store/settings reads, request setup, and stream commit run with real
+  timers. Receiving the first three client events is the explicit setup-complete barrier;
+  no number of quiet turns can satisfy it.
+- Only then enable Bun's built-in fake timers at `NOW`. They control `setTimeout` **and
+  `Bun.sleep`**, as verified by the exact reviewer preload, without mocking production methods.
+  Capture a real `setImmediate` checkpoint before installing fake timers. After releasing each
+  remaining available delta/block-stop frame, that checkpoint lets runnable stream/promise jobs
+  drain without advancing virtual time. All upstream data needed for that event is already
+  available; fixture/store setup cannot still be pending on this path.
+- If the event waits on a timer, advance to that timer and record the virtual elapsed time.
+  Twelve measurements cover the eleven remaining deltas and block stop, including the frame
+  that exhausts the budget and the abandoned remainder. Assert bare values are twelve zeros
+  and captured values exactly equal bare. No elapsed wall-clock threshold decides success;
+  slowing CI does not advance this clock. The bounded timer-advance loop detects a stream that
+  never supplies its next event; it is not an allowed latency budget.
+- Restore real timers in `finally` before terminal usage/stop, stream completion, artifact
+  publication, or writer cleanup. Preserve the original real-time deadlock watchdog outside
+  the measured window. No production seam is necessary. Startup and terminal bookkeeping are
+  deliberately outside the timing comparison, not claimed to have zero latency.
+
+### Final follow-up verification
+
+Bun **1.4.4**. Logs in `/tmp/opencode/`.
+
+| Exact command / experiment | Result / log |
+|---|---|
+| `bun test apps/gateway/test/bodies/capture.test.ts -t 'before more upstream input'`, 30 independent processes | **30/30 pass**, each 35 assertions; `pr278-timing-final-repeat-normal.log` |
+| Same command with `--preload /tmp/opencode/pr278-delay-digest.ts`, 30 independent processes | **30/30 pass** despite the real 20 ms captured-authentication delay; `pr278-timing-final-repeat-auth.log` |
+| Same command with `--preload /tmp/opencode/pr278-review-delay.ts`, 10 independent processes | **10/10 fail** at the new timing assertion; `pr278-timing-final-repeat-delay.log` |
+| Service prefix above + `bun test apps/gateway/test/bodies apps/gateway/test/bodyLogging.test.ts scripts/test/build-npm.test.ts scripts/test/build-binary.test.ts` | **101 pass / 0 fail**, 10 files, 10,692 assertions; `pr278-timing-covering-final.log` |
+| `bun run typecheck` | Core 736 files + dashboard 211 files clean; `pr278-timing-typecheck-green.log` |
+| `bun run lint` | 964 files, no diagnostics/fixes; `pr278-timing-lint-final.log` |
+| `bun run check:claims` | No stale claims; `pr278-timing-claims.log` |
+| `bun run check:dead` | No dead exports; existing `state`/`note` exclusions; `pr278-timing-dead.log` |
+
+An initial typecheck found that Bun's runtime `jest.now()` is not declared in its pinned types
+(`pr278-timing-typecheck.log`). Replaced it with typed `Date.now()`, which reads the same fake
+clock; all final repetitions, covering tests, and checks above follow that correction.
+Per request, no redundant whole-suite run: prior full-suite evidence remains above, and this
+test-only follow-up runs all body tests and both build packaging suites plus checks. Graphify
+remains unavailable. No known open scoped finding; remote CI remains unrun/unpushed.
