@@ -1,4 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useSetKeyPrompts } from "../../src/api/queries.ts";
@@ -46,6 +53,79 @@ function stubPrompts() {
   });
 }
 describe("Prompt Management", () => {
+  test("save keeps fields locked through delayed routed selection commit", async () => {
+    const stub = stubPrompts();
+    stub.set("POST /api/prompts/team/versions", () => ({
+      promptId: "team",
+      version: 4,
+      text: currentText,
+      note: null,
+      createdAt: 4,
+    }));
+    let release: () => void = () => {
+      throw new Error("navigation not started");
+    };
+    let started = false;
+    const root = createRootRoute({
+      beforeLoad: async ({ location }) => {
+        if (location.searchStr.includes("version")) {
+          started = true;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+      },
+      pendingMs: 60_000,
+    });
+    const route = createRoute({
+      getParentRoute: () => root,
+      path: "/",
+      validateSearch: (search: Record<string, unknown>): { version?: string } =>
+        typeof search.version === "string" ? { version: search.version } : {},
+      component: Page,
+    });
+    function Page() {
+      // Test router is deliberately separate from the app's registered route tree.
+      const search = route.useSearch() as { version?: string };
+      const navigate = route.useNavigate();
+      return (
+        <PromptsBoard
+          id="team"
+          {...search}
+          onSelect={(_id, version) => navigate({ search: version ? { version } : {} })}
+        />
+      );
+    }
+    const router = createRouter({
+      routeTree: root.addChildren([route]),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    renderWithProviders(<RouterProvider router={router as never} />);
+    const user = userEvent.setup();
+    await screen.findByDisplayValue(currentText);
+    await user.click(screen.getByRole("button", { name: "Save as draft" }));
+    await waitFor(() => expect(started).toBe(true));
+    expect(router.state.status).toBe("pending");
+    for (const label of ["Name", "Description", "Prompt text", "Change note"]) {
+      expect((screen.getByLabelText(label) as HTMLInputElement).readOnly).toBe(true);
+      await user.type(screen.getByLabelText(label), " later edits");
+    }
+    expect(screen.queryByText("Saved.")).toBeNull();
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => expect(router.state.status).toBe("idle"));
+    await waitFor(() =>
+      expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).readOnly).toBe(false),
+    );
+    expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).value).toBe(currentText);
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Team rules");
+    expect(router.state.location.search).toEqual({ version: "4" });
+    await user.type(screen.getByLabelText("Prompt text"), " accepted after commit");
+    expect((screen.getByLabelText("Prompt text") as HTMLTextAreaElement).value).toBe(
+      `${currentText} accepted after commit`,
+    );
+  });
   test("loaded historical detail is hidden after authoritative deletion, even with cached data", async () => {
     const stub = stubPrompts();
     const { client } = renderWithRouter(<PromptsBoard id="team" version="1" />);

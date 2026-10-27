@@ -18,7 +18,7 @@ function PromptsPage() {
     <PromptsBoard
       {...search}
       onSelect={(id, version) =>
-        void navigate({ search: { ...(id ? { id } : {}), ...(version ? { version } : {}) } })
+        navigate({ search: { ...(id ? { id } : {}), ...(version ? { version } : {}) } })
       }
     />
   );

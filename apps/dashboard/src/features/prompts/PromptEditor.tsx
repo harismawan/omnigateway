@@ -22,7 +22,8 @@ type Props = {
   detail?: PromptView;
   version?: string;
   disabled: boolean;
-  onSaved: (id: string, version?: string) => void;
+  /** Resolves only after the selected ID/version has committed. */
+  onSaved: (id: string, version?: string) => Promise<void>;
   onRemoved: () => void;
 };
 
@@ -110,7 +111,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
           queryFn: async () => result,
           gcTime: 300_000,
         });
-        onSaved(result.id, String(result.versions[0]?.version ?? "1"));
+        await onSaved(result.id, String(result.versions[0]?.version ?? "1"));
       } else {
         const result = await saveVersion.mutateAsync({ id: persistedId, ...input });
         client.setQueryData<PromptView>(queryKeys.prompt(persistedId), (previous) =>
@@ -125,7 +126,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
               }
             : previous,
         );
-        onSaved(persistedId, String(result.version));
+        await onSaved(persistedId, String(result.version));
       }
     });
   const chars = text.trimEnd().length;
@@ -318,7 +319,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
                       queryFn: async () => result,
                       gcTime: 300_000,
                     });
-                    onSaved(result.id);
+                    await onSaved(result.id);
                   })
                 }
               >
@@ -344,7 +345,7 @@ export function PromptEditor({ detail, version, disabled, onSaved, onRemoved }: 
                     onClick={() =>
                       void run(async () => {
                         await activate.mutateAsync({ id: detail.id, version: Number(v.version) });
-                        onSaved(detail.id, String(v.version));
+                        await onSaved(detail.id, String(v.version));
                       })
                     }
                   >

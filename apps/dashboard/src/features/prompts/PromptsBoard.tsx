@@ -17,7 +17,8 @@ export function PromptsBoard({
 }: {
   id?: string;
   version?: string;
-  onSelect?: (id?: string, version?: string) => void;
+  /** Routed callers must return navigation completion, not discard its promise. */
+  onSelect?: (id?: string, version?: string) => Promise<void>;
 }) {
   const [selection, setSelection] = useState<{ id?: string; version?: string } | null>(null);
   const [creating, setCreating] = useState(false);
@@ -33,16 +34,18 @@ export function PromptsBoard({
     detail.isError &&
     detail.error instanceof ApiError &&
     (detail.error.status === 404 || detail.error.code === "BAD_REQUEST");
-  const select = (nextId?: string, nextVersion?: string) => {
-    setCreating(false);
+  const select = async (nextId?: string, nextVersion?: string) => {
     if (onSelect) {
-      onSelect(nextId, nextVersion);
+      await onSelect(nextId, nextVersion);
+      setCreating(false);
       setSelection(null);
-    } else
+    } else {
+      setCreating(false);
       setSelection({
         ...(nextId ? { id: nextId } : {}),
         ...(nextVersion ? { version: nextVersion } : {}),
       });
+    }
   };
   return (
     <>
