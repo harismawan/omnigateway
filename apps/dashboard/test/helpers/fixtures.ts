@@ -301,6 +301,7 @@ export function clientLog(patch: Partial<ClientRequestLog> = {}): ClientRequestL
     durationMs: row.durationMs,
     costUsd: row.costUsd,
     degradations: row.degradations,
+    prompts: row.prompts,
     rtkApplied: row.rtkApplied,
     rtkEstimatedTokensSaved: row.rtkEstimatedTokensSaved,
     sessionId: row.sessionId,

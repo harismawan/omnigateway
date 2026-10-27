@@ -14,8 +14,9 @@ import { RECORD_SCHEMA, type RequestRecord, recordJson } from "../record.ts";
  * (`gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.system`,
  * `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, plus
  * `gen_ai.operation.name = "chat"`), the session as `session.id`, and every
- * other record field under `omni.*`. A null field and an empty list are left
- * out, never sent empty. `gen_ai.usage.input_tokens` is the whole prompt —
+ * other record field under `omni.*`. Nulls and empty lists are omitted except
+ * `omni.prompts`, whose empty array explicitly records no applied prompts.
+ * `gen_ai.usage.input_tokens` is the whole prompt —
  * the convention counts cached tokens in it — while `omni.tokens.*` keep the
  * row's disjoint classes.
  *
@@ -122,6 +123,7 @@ function attributes(record: RequestRecord): KeyValue[] {
   put("omni.ttft_ms", record.ttftMs === null ? null : num(record.ttftMs));
   put("omni.duration_ms", num(record.durationMs));
   put("omni.degradations", strings(record.degradations));
+  put("omni.prompts", list(record.prompts));
   put("omni.rtk.applied", { boolValue: rtk.applied });
   put("omni.rtk.filter_hits", num(rtk.filterHits));
   put("omni.rtk.original_code_units", num(rtk.originalCodeUnits));

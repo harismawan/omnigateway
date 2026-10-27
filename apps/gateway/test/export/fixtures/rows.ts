@@ -38,6 +38,7 @@ export const SUCCESS: RequestLog = requestLog({
   durationMs: 2350,
   costUsd: 0.081234,
   degradations: ["anthropic:cache-breakpoint-added"],
+  prompts: ["ponytail-full@v4.9.0", "team@11"],
   rtkApplied: true,
   rtkFilterHits: 3,
   rtkOriginalCodeUnits: 9000,

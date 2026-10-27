@@ -32,6 +32,8 @@ test("each action names the request id as _id and the row's UTC start day as _in
     index: { _index: "omni-logs-2026.10.24", _id: SUCCESS.id },
   });
   expect(JSON.parse(lines[1] ?? "")).toEqual(records[0]);
+  expect(JSON.parse(lines[1] ?? "").prompts).toEqual(["ponytail-full@v4.9.0", "team@11"]);
+  expect(JSON.parse(lines[3] ?? "").prompts).toEqual([]);
   expect(JSON.parse(lines[2] ?? "")).toEqual({
     index: { _index: "omni-logs-2026.10.25", _id: FAILURE.id },
   });

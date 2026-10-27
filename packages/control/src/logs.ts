@@ -9,7 +9,7 @@ import {
 } from "@omni/store";
 import { z } from "zod";
 import { ALL, readsNothing, type Scope, scopeKey } from "./principal.ts";
-import { parseOrThrow, providerIdSchema } from "./schemas.ts";
+import { parseOrThrow, promptIdSchema, providerIdSchema } from "./schemas.ts";
 import { logLimit } from "./usage.ts";
 
 /**
@@ -89,6 +89,7 @@ const logFilterSchema = z
     turn: z.string().min(1).max(256).optional(),
     agent: z.enum(TRACE_AGENTS).optional(),
     tag: z.string().min(1).max(64).optional(),
+    prompt: promptIdSchema.optional(),
   })
   .strict();
 
@@ -111,13 +112,14 @@ export type LogFilterInput = {
   turn?: string | undefined;
   agent?: string | undefined;
   tag?: string | undefined;
+  prompt?: string | undefined;
 };
 
 /** Drops keys a caller did not send, so `.strict()` sees absence rather than `undefined`. */
 function present(input: LogFilterInput): Record<string, string | number> {
   const out: Record<string, string | number> = {};
   for (const [key, value] of Object.entries(input)) {
-    if (value === undefined || value === "") continue;
+    if (value === undefined || (value === "" && key !== "prompt")) continue;
     out[key] = typeof value === "boolean" ? String(value) : value;
   }
   return out;
@@ -214,6 +216,7 @@ function toQuery(input: LogFilterInput, scope: Scope): RequestLogQuery {
     ...(filters.turn === undefined ? {} : { turnId: filters.turn }),
     ...(filters.agent === undefined ? {} : { agent: filters.agent }),
     ...(filters.tag === undefined ? {} : { tag: filters.tag }),
+    ...(filters.prompt === undefined ? {} : { promptId: filters.prompt }),
   };
 }
 
@@ -282,6 +285,7 @@ const EXPORT_COLUMNS: ReadonlyArray<keyof RequestLog> = [
   "durationMs",
   "costUsd",
   "degradations",
+  "prompts",
   "rtkApplied",
   "rtkFilterHits",
   "rtkOriginalCodeUnits",

@@ -79,6 +79,7 @@ test("the client shape is an allowlist, so a new store column does not ship by d
       "cacheWriteTokens",
       "costUsd",
       "degradations",
+      "prompts",
       "durationMs",
       "errorCode",
       "id",
@@ -100,6 +101,17 @@ test("the client shape is an allowlist, so a new store column does not ship by d
       "clientRequestId",
     ].sort(),
   );
+});
+
+test("client projection carries only copied ordered applied IDs, including an empty list", () => {
+  for (const prompts of [[], ["ponytail-full@v4.9.0", "team@11"]]) {
+    const row = requestLog({ id: "r", prompts: [...prompts] });
+    const projected = toClientLog(row);
+    expect(projected).toHaveProperty("prompts", prompts);
+    row.prompts.push("later@2");
+    expect(projected).toHaveProperty("prompts", prompts);
+    expect(JSON.stringify(projected)).not.toContain("promptText");
+  }
 });
 
 test("what the client is entitled to is still there", () => {

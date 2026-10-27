@@ -211,7 +211,7 @@ const MAX_INSTANT = 8_640_000_000_000_000;
  */
 const guardrailPolicySchema = z.string().trim().min(1).max(GUARDRAIL_POLICY_MAX_CHARS);
 
-const promptIdSchema = z.string().refine(isPromptId, "invalid prompt id");
+export const promptIdSchema = z.string().refine(isPromptId, "invalid prompt id");
 const userPromptIdSchema = promptIdSchema.refine(
   (id) => !id.startsWith("ponytail-"),
   "reserved prompt id",

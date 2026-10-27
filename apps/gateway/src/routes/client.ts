@@ -169,6 +169,7 @@ export function clientRoutes(deps: ClientDeps) {
             turn: query.turn,
             agent: query.agent,
             tag: query.tag,
+            prompt: query.prompt,
           },
           scopeOf({ kind: "client", apiKeyId }),
         );

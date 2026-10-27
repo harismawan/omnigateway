@@ -93,6 +93,12 @@ export function logPageClauses(
   if (query.tag !== undefined) {
     clauses.push(`${position}(tags, ${bind(JSON.stringify(query.tag))}) > 0`);
   }
+  // Include the opening JSON quote and the version boundary: `team` must
+  // match every `team@version`, never `other-team` or `team-extra`.
+  if (query.promptId !== undefined) {
+    const prefix = JSON.stringify(`${query.promptId}@`).slice(0, -1);
+    clauses.push(`${position}(prompts, ${bind(prefix)}) > 0`);
+  }
 
   // The typed filters match substrings, because an exact match on a name nobody
   // recalls exactly is a filter that answers "no such traffic" for every

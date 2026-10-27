@@ -8,6 +8,7 @@ import {
   EXPORT_CONTENT_TYPE,
   encodeLogCursor,
   exportFilename,
+  exportHeader,
   exportLogs,
   exportRow,
   getLog,
@@ -212,6 +213,7 @@ test("every accepted filter reaches the store query", async () => {
     turn: "t1",
     agent: "claude-code",
     tag: "team-a",
+    prompt: "team",
   });
 
   expect(spy.queries.at(-1)).toEqual({
@@ -232,6 +234,7 @@ test("every accepted filter reaches the store query", async () => {
     turnId: "t1",
     agent: "claude-code",
     tag: "team-a",
+    promptId: "team",
   });
 });
 
@@ -240,6 +243,82 @@ test("an unknown agent is refused rather than matching nothing", async () => {
   await expect(pageLogs(store, { agent: "cursor" })).rejects.toMatchObject({
     code: "BAD_REQUEST",
   });
+});
+
+test("prompt filters reject blank, versioned and invalid IDs before any read", async () => {
+  const { store } = await seeded();
+  const spy = spying(store);
+  for (const prompt of [
+    "",
+    " ",
+    "team@1",
+    "Team",
+    "team_extra",
+    'team"',
+    "x".repeat(41),
+    "ponytail-fake",
+  ]) {
+    await expect(pageLogs(spy.store, { prompt })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      exportLogs(spy.store, { prompt, since: 0, until: NOW }).next(),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  }
+  expect(spy.queries).toEqual([]);
+});
+
+test("prompt filtering stays exact through pages, downloads and own or empty scope", async () => {
+  const { store, mine, theirs } = await seeded();
+  for (const [id, prompt, apiKeyId] of [
+    ["team-v1", "team@1", mine.key.id],
+    ["team-extra", "team-extra@2", mine.key.id],
+    ["other-team", "other-team@3", mine.key.id],
+    ["team-v11", "team@11", mine.key.id],
+    ["foreign", "team@1", theirs.key.id],
+  ] as const) {
+    await store.usage.append(requestLog({ id, at: NOW, prompts: [prompt], apiKeyId }));
+  }
+  const own = scopeOf({ kind: "client", apiKeyId: mine.key.id });
+  const page = await pageLogs(store, { prompt: "team", apiKeyId: theirs.key.id }, own);
+  expect(page.logs.map((log) => log.id).sort()).toEqual(["team-v1", "team-v11"]);
+  const lines: string[] = [];
+  for await (const line of exportLogs(
+    store,
+    { prompt: "team", since: 0, until: NOW, format: "jsonl" },
+    own,
+  )) {
+    if (line) lines.push(line);
+  }
+  expect(lines.map((line) => JSON.parse(line).id).sort()).toEqual(["team-v1", "team-v11"]);
+  expect(lines.map((line) => JSON.parse(line).prompts).sort()).toEqual([["team@1"], ["team@11"]]);
+  const spy = spying(store);
+  expect(await pageLogs(spy.store, { prompt: "team" }, scopeOf(MACHINE))).toEqual({
+    logs: [],
+    nextCursor: null,
+  });
+  for await (const _ of exportLogs(
+    spy.store,
+    { prompt: "team", since: 0, until: NOW },
+    scopeOf(MACHINE),
+  )) {
+    /* header only */
+  }
+  expect(spy.queries).toEqual([]);
+});
+
+test("CSV and JSONL explicitly carry ordered applied prompt IDs, including empty arrays", () => {
+  const columns = exportHeader("csv").trimEnd().split(",");
+  expect(columns).toContain("prompts");
+  for (const prompts of [[], ["ponytail-full@v4.9.0", "team@11"]]) {
+    const row = requestLog({ id: "r", prompts });
+    expect(JSON.parse(exportRow("jsonl", row)).prompts).toEqual(prompts);
+    // Split only outside quoted CSV cells, then undo RFC 4180 quoting.
+    const cells = exportRow("csv", row)
+      .trimEnd()
+      .split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+    const cell = cells[columns.indexOf("prompts")] ?? "";
+    const json = cell.startsWith('"') ? cell.slice(1, -1).replaceAll('""', '"') : cell;
+    expect(JSON.parse(json)).toEqual(prompts);
+  }
 });
 
 test("a client reads only its own rows, and a key filter cannot widen that", async () => {

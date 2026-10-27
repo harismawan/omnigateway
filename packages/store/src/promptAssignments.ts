@@ -1,4 +1,4 @@
-import { readPromptAssignment } from "@omni/prompts/catalog";
+import { isPromptId, readPromptAssignment } from "@omni/prompts/catalog";
 import { type PromptAssignments, PromptStoreError, readPromptSettings } from "./types.ts";
 
 export function parsePromptJson(raw: string | null): unknown {
@@ -47,5 +47,13 @@ export function checkPromptReferences(
 /** Applied ids are forensic strings, not assignment ids (which omit versions). */
 export function readAppliedPrompts(raw: string): string[] {
   const parsed = parsePromptJson(raw);
-  return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((entry): entry is string => {
+    if (typeof entry !== "string") return false;
+    const [id, version, extra] = entry.split("@");
+    if (!isPromptId(id) || version === undefined || extra !== undefined) return false;
+    return id.startsWith("ponytail-")
+      ? /^v\d+\.\d+\.\d+$/.test(version)
+      : /^[1-9]\d*$/.test(version);
+  });
 }

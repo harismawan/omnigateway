@@ -15,12 +15,13 @@ test("a row with every nullable field null keeps the same shape, nulls in place"
   await golden("record-failure.json", JSON.stringify(buildRecord(FAILURE, { keyLabel: null })));
 });
 
-test("the record carries the schema name and never a body or prompts field", () => {
+test("the v1 record carries applied prompt IDs, never prompt texts or an implicit body", () => {
   const record = buildRecord(SUCCESS, { keyLabel: LABEL });
   expect(RECORD_SCHEMA).toBe("omni.request_log/v1");
   expect(record.schema).toBe(RECORD_SCHEMA);
   expect(Object.keys(record)).not.toContain("body");
-  expect(Object.keys(record)).not.toContain("prompts");
+  expect(record).toHaveProperty("prompts", ["ponytail-full@v4.9.0", "team@11"]);
+  expect(buildRecord(FAILURE, { keyLabel: null })).toHaveProperty("prompts", []);
 });
 
 test("a key label is never attached to a row with no key", () => {
@@ -49,16 +50,19 @@ test("the record shares no array or object with the row it was built from", () =
     id: "r",
     tags: ["t"],
     degradations: ["d"],
+    prompts: ["team@3"],
     rtkFilters: ["grep"],
     traceMetadata: {},
   });
   const record = buildRecord(row, { keyLabel: null });
   row.tags.push("later");
   row.degradations.push("later");
+  row.prompts.push("later@1");
   row.rtkFilters.push("git-diff");
   row.traceMetadata.k = "later";
   expect(record.tags).toEqual(["t"]);
   expect(record.degradations).toEqual(["d"]);
+  expect(record).toHaveProperty("prompts", ["team@3"]);
   expect(record.rtk.filters).toEqual(["grep"]);
   expect(record.metadata).toEqual({});
 });

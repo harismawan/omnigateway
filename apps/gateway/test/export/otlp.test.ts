@@ -50,6 +50,19 @@ test("the logs body matches its golden file", async () => {
   await golden("otlp-logs.json", encodeOtlp(records, "logs"));
 });
 
+test("OTLP logs and traces carry ordered applied IDs as omni.prompts, including empty arrays", () => {
+  for (const signal of ["logs", "traces"] as const) {
+    for (const row of [SUCCESS, FAILURE]) {
+      const record = buildRecord(row, { keyLabel: null });
+      const part = JSON.parse(otlpPart(record, signal));
+      expect(attrs(part.attributes)["omni.prompts"]).toEqual({
+        arrayValue: { values: row.prompts.map((stringValue) => ({ stringValue })) },
+      });
+      expect(JSON.stringify(part)).not.toContain("promptText");
+    }
+  }
+});
+
 test("a span carries the GenAI attributes under their exact semantic-convention names", () => {
   const span = attrs(traces().spans[0]?.attributes ?? []);
   expect(span["gen_ai.request.model"]).toEqual({ stringValue: "smart" });

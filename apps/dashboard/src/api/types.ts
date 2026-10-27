@@ -104,6 +104,7 @@ export type ClientRequestLog = {
   durationMs: number;
   costUsd: number;
   degradations: string[];
+  prompts: string[];
   rtkApplied: boolean;
   rtkEstimatedTokensSaved: number;
   /** The trace the key holder's own client sent. */
