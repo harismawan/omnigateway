@@ -257,6 +257,7 @@ export async function createStore(opts: {
     },
 
     exportDestinations: {
+      bodyAdmission: (id, keyId) => handle.exportDestinations.bodyAdmission(id, keyId),
       list: () => handle.exportDestinations.list(),
       get: (id) => handle.exportDestinations.get(id),
       create: (input) => handle.exportDestinations.create(input),

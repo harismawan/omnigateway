@@ -815,6 +815,33 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     return !(await guard(h.reader.keyBodyOptOut(row.apiKeyId), signal));
   }
 
+  const BODY_DENIED = Symbol("body admission denied");
+
+  async function admitBody(h: Handles, rt: Runtime, row: RequestLog, batch: Batch): Promise<void> {
+    if (row.apiKeyId === null) throw BODY_DENIED;
+    const policy = await guard(
+      h.reader.bodyAdmission(rt.destination.id, row.apiKeyId),
+      batch.signal,
+    );
+    const d = policy.destination;
+    if (
+      !policy.bodyLoggingEnabled ||
+      !policy.keyExists ||
+      policy.keyBodyOptOut ||
+      !d ||
+      d.generation !== rt.destination.generation ||
+      d.revision !== rt.destination.revision ||
+      !d.enabled ||
+      !d.includeBodies
+    )
+      throw BODY_DENIED;
+  }
+
+  function checkBodyDeadline(batch: Batch): void {
+    checkDeadline(batch);
+    if (!gates.bodyLoggingAllowed || !deps.exportBodiesAllowed) throw BODY_DENIED;
+  }
+
   async function sendBodyRows(
     h: Handles,
     rt: Runtime,
@@ -874,19 +901,6 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
         let cap = rt.bodyLimit ?? sender.maxRequestBytes ?? sender.limits.bytes;
         let halved = rt.bodyLimit !== undefined;
         for (;;) {
-          if (allowed && !(await bodyAllowed(h, row, signal))) return "stop";
-          // Fresh configuration is checked immediately before every HTTP send,
-          // not only on the next poll/message. Never pair its secret with the
-          // old sender; a changed revision cancels this snapshot instead.
-          const current = await guard(h.reader.destinationWithSecret(rt.destination.id), signal);
-          if (
-            !current ||
-            current.destination.generation !== rt.destination.generation ||
-            current.destination.revision !== rt.destination.revision ||
-            !current.destination.enabled
-          )
-            return "stop";
-          if (!(await bodyAllowed(h, row, signal))) return "stop";
           const client = attached.client;
           const inline =
             client && sender.rawPart ? sender.rawPart(record, client) : sender.part(record);
@@ -898,7 +912,8 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               signal,
               timers,
               now: deps.now,
-              beforeSend: () => checkDeadline(batch),
+              admit: () => admitBody(h, rt, row, batch),
+              beforeSend: () => checkBodyDeadline(batch),
             });
           } else if (client && sender.bodySegment) {
             // Refuse impossible metadata caps before building segment slices.
@@ -927,7 +942,8 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               signal,
               timers,
               now: deps.now,
-              beforeSend: () => checkDeadline(batch),
+              admit: () => admitBody(h, rt, row, batch),
+              beforeSend: () => checkBodyDeadline(batch),
             });
             if (outcome.kind === "ok") {
               anyDropped = outcome.dropped > 0;
@@ -938,26 +954,14 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               ] as const) {
                 for (let n = 0; n < cuts.length; n++) {
                   signal.throwIfAborted();
-                  if (!(await bodyAllowed(h, row, signal))) return "stop";
-                  const current = await guard(
-                    h.reader.destinationWithSecret(rt.destination.id),
-                    signal,
-                  );
-                  if (
-                    !current ||
-                    current.destination.generation !== rt.destination.generation ||
-                    current.destination.revision !== rt.destination.revision ||
-                    !current.destination.enabled
-                  )
-                    return "stop";
-                  if (!(await bodyAllowed(h, row, signal))) return "stop";
                   const encoded = sender.bodySegment(record, part, cuts[n] ?? "", n, cuts.length);
                   outcome = await deliver(encoded.sender, [encoded.part], {
                     transport: deps.transport,
                     signal,
                     timers,
                     now: deps.now,
-                    beforeSend: () => checkDeadline(batch),
+                    admit: () => admitBody(h, rt, row, batch),
+                    beforeSend: () => checkBodyDeadline(batch),
                   });
                   if (outcome.kind === "ok") {
                     anyDropped ||= outcome.dropped > 0;
@@ -1008,6 +1012,9 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           succeeded(rt);
           break;
         }
+      } catch (error) {
+        if (error === BODY_DENIED) return "stop";
+        throw error;
       } finally {
         attached.release();
       }

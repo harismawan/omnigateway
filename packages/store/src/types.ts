@@ -2140,7 +2140,19 @@ export type ExportDestinationPatch = {
  * routing table, so no write here emits a `RoutingChange` (and on Postgres the
  * table carries no `bump_config_version` trigger).
  */
+export type BodyAdmissionSnapshot = {
+  bodyLoggingEnabled: boolean;
+  keyExists: boolean;
+  keyBodyOptOut: boolean;
+  destination: Pick<
+    ExportDestination,
+    "generation" | "revision" | "enabled" | "includeBodies"
+  > | null;
+};
+
 export interface ExportDestinationRepo {
+  /** One-statement policy linearization for a body send; no secrets or body data. */
+  bodyAdmission(id: string, keyId: string): Promise<BodyAdmissionSnapshot>;
   /** Every destination, by id. */
   list(): Promise<ExportDestination[]>;
   get(id: string): Promise<ExportDestination | null>;

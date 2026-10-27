@@ -64,6 +64,68 @@ forEachStore((backend) => {
     }
   });
 
+  test("body admission snapshots current policy and sender identity without secrets", async () => {
+    const s = await backend.fresh();
+    try {
+      const d = await s.exportDestinations.create({
+        id: "admit",
+        type: "webhook",
+        config: { url: "https://hooks.test" },
+        startFrom: "oldest",
+        includeBodies: true,
+        secret: "private",
+      });
+      await s.keys.create({
+        id: "k",
+        label: "key",
+        prefix: "omni_k",
+        hash: "hash",
+        modelAllowlist: null,
+        limits: {},
+        bodyLoggingOptOut: false,
+        expiresAt: null,
+        guardrailPolicy: null,
+        smartRouting: false,
+      });
+      const r = await readerFor(s);
+      const expected = {
+        bodyLoggingEnabled: false,
+        keyExists: true,
+        keyBodyOptOut: false,
+        destination: {
+          generation: d.generation,
+          revision: d.revision,
+          enabled: true,
+          includeBodies: true,
+        },
+      };
+      expect(await r.bodyAdmission("admit", "k")).toEqual(expected);
+      expect(await s.exportDestinations.bodyAdmission("admit", "k")).toEqual(expected);
+      await s.config.putSettings({ bodyLoggingEnabled: true });
+      const edited = await s.exportDestinations.update("admit", {
+        secret: "replacement",
+        includeBodies: false,
+        enabled: false,
+      });
+      if (!edited) throw new Error("missing edited destination");
+      expect(await r.bodyAdmission("admit", "missing")).toEqual({
+        bodyLoggingEnabled: true,
+        keyExists: false,
+        keyBodyOptOut: true,
+        destination: {
+          generation: d.generation,
+          revision: edited.revision,
+          enabled: false,
+          includeBodies: false,
+        },
+      });
+      await s.exportDestinations.remove("admit");
+      expect((await r.bodyAdmission("admit", "k")).destination).toBeNull();
+    } finally {
+      await done();
+    }
+  });
+
   test("reads destinations, their secret, settings, key labels and rows", async () => {
     const s = await backend.fresh();
     try {
@@ -166,6 +228,7 @@ forEachStore((backend) => {
         const r = openSqliteExportReader(s.databasePath, await deriveKey(SECRET), () => 0);
         opened.push(r);
         expect(Object.keys(r).sort()).toEqual([
+          "bodyAdmission",
           "bodyEnvelope",
           "bodyProbe",
           "bodyText",

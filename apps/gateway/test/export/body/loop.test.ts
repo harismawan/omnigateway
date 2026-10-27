@@ -1,6 +1,84 @@
 import { afterEach, expect, test } from "bun:test";
 import { destination, row, sharedLease, stateOf, T0, type World, world } from "../harness.ts";
 
+test.each([false, true])(
+  "consistent admission closes both review interleavings (segmented=%s)",
+  async (segmented) => {
+    for (const mode of ["destination", "settings"] as const) {
+      const w = setup(segmented ? 1500 : 5000);
+      artifact(w, segmented ? "PRIVATE".repeat(2000) : "PRIVATE");
+      let changed = false;
+      const change = () => {
+        changed = true;
+        if (mode === "settings") w.settings.bodyLoggingEnabled = false;
+        else {
+          const d = w.destinations[0];
+          if (d) {
+            d.revision++;
+            d.config = { url: "https://replacement.test/in" };
+          }
+        }
+      };
+      // The historical final settings/key awaits, without a local notification.
+      let settingsReads = 0;
+      w.beforeSettings = async () => {
+        if (mode === "destination" && ++settingsReads === 5) change();
+      };
+      const has = w.optOut.has.bind(w.optOut);
+      let keyReads = 0;
+      w.optOut.has = (id) => {
+        if (mode === "settings" && ++keyReads === 3) change();
+        return has(id);
+      };
+      // Replacement linearization boundary: edits committed before admission
+      // must be visible together, regardless of earlier prerequisite ordering.
+      w.beforeAdmission = async () => {
+        if (!changed) change();
+      };
+      await w.loop.start();
+      await w.settle();
+      expect(changed).toBe(true);
+      expect(w.sent).toHaveLength(0);
+      expect((await stateOf(w)).cursorId).toBe("");
+    }
+  },
+);
+
+test.each([
+  "settings",
+  "key",
+  "revision",
+  "generation",
+  "enabled",
+  "includeBodies",
+  "removed",
+] as const)(
+  "every segment takes a fresh admission snapshot after DB-only %s change",
+  async (mode) => {
+    const w = setup(1500);
+    artifact(w, "PRIVATE".repeat(2000));
+    w.answer = (req) => {
+      if (req.headers["x-omni-body-part"]) {
+        const d = w.destinations[0];
+        if (mode === "settings") w.settings.bodyLoggingEnabled = false;
+        if (mode === "key") w.optOut.add("key");
+        if (mode === "removed") w.destinations.length = 0;
+        if (d) {
+          if (mode === "revision") d.revision++;
+          if (mode === "generation") d.generation = "replacement";
+          if (mode === "enabled") d.enabled = false;
+          if (mode === "includeBodies") d.includeBodies = false;
+        }
+      }
+      return new Response(null, { status: 200 });
+    };
+    await w.loop.start();
+    await w.settle();
+    expect(w.sent.filter((s) => s.headers["x-omni-body-part"])).toHaveLength(1);
+    expect((await stateOf(w)).cursorId).toBe("");
+  },
+);
+
 test("oversized metadata is dropped without blocking later rows, with gates off or segmented bodies", async () => {
   for (const enabled of [false, true]) {
     const w = setup(1500);
@@ -54,9 +132,8 @@ test.each([false, true])(
       if (log) log.bodyState = "ready";
     }
     artifact(w, "secret");
-    let reads = 0;
-    w.beforeSnapshot = async () => {
-      if (++reads === 2) w.clock.now += 61000;
+    w.beforeAdmission = async () => {
+      w.clock.now += 61000;
     };
     await w.loop.start();
     await w.settle();
@@ -65,17 +142,41 @@ test.each([false, true])(
   },
 );
 
-test("database-only gate flip during awaited destination snapshot prevents body send", async () => {
+test("database-only gate flip before admission prevents body send", async () => {
   const w = setup();
   artifact(w, "secret");
-  let reads = 0;
-  w.beforeSnapshot = async () => {
-    if (++reads === 2) w.settings.bodyLoggingEnabled = false;
+  w.beforeAdmission = async () => {
+    w.settings.bodyLoggingEnabled = false;
   };
   await w.loop.start();
   await w.settle();
   expect(w.sent).toHaveLength(0);
   expect((await stateOf(w)).cursorId).toBe("");
+});
+
+test("local cancellation during admission still blocks transport synchronously", async () => {
+  const w = setup();
+  artifact(w, "PRIVATE");
+  w.beforeAdmission = async () => {
+    await w.loop.handle({ type: "gatesChanged", gates: { bodyLoggingAllowed: false } });
+  };
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent).toHaveLength(0);
+  expect((await stateOf(w)).cursorId).toBe("");
+});
+
+test("database policy enable does not require a local gates notification", async () => {
+  const w = setup();
+  artifact(w, "PRIVATE");
+  await w.loop.handle({
+    type: "gatesChanged",
+    gates: { bodyLoggingAllowed: true, bodyLoggingEnabled: false },
+  });
+  await w.loop.start();
+  await w.settle();
+  expect(w.sent[0]?.body).toContain("PRIVATE");
+  expect((await stateOf(w)).cursorId).toBe("body");
 });
 
 test("inline and segmented receiver rejections keep bounded safe dropped summaries", async () => {

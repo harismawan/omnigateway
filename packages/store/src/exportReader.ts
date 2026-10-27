@@ -19,7 +19,13 @@ import { createConfigRepo } from "./sqlite/config.ts";
 import { createExportDestinationRepo } from "./sqlite/exportDestinations.ts";
 import { createKeyRepo } from "./sqlite/keys.ts";
 import { createUsageRepo } from "./sqlite/usage.ts";
-import type { ExportDestination, ExportPageQuery, RequestLog, Settings } from "./types.ts";
+import type {
+  BodyAdmissionSnapshot,
+  ExportDestination,
+  ExportPageQuery,
+  RequestLog,
+  Settings,
+} from "./types.ts";
 
 /**
  * What the export worker reads from the main database, and nothing else: no
@@ -37,6 +43,8 @@ import type { ExportDestination, ExportPageQuery, RequestLog, Settings } from ".
  * root: the gateway pins that only the export worker imports it.
  */
 export type ExportReader = {
+  /** One database statement: the policy linearization point for each body send. */
+  bodyAdmission(id: string, keyId: string): Promise<BodyAdmissionSnapshot>;
   bodyProbe(id: string): Promise<{ encryptedBytes: number; plaintextBytes: number } | null>;
   bodyEnvelope(
     id: string,
@@ -97,6 +105,7 @@ export function openSqliteExportReader(
   const destinations = createExportDestinationRepo(db, key);
   let closed = false;
   return {
+    bodyAdmission: (id, keyId) => destinations.bodyAdmission(id, keyId),
     async bodyProbe(id) {
       const row = db
         .query<{ rel_path: string | null }, [string]>(
@@ -165,6 +174,7 @@ export function createPostgresExportReader(sql: SQL, key: CryptoKey): ExportRead
   const keys = pgKeys(sql, noopLogger);
   const destinations = pgDestinations(sql, key);
   return {
+    bodyAdmission: (id, keyId) => destinations.bodyAdmission(id, keyId),
     async bodyProbe(id) {
       const row = (
         await sql.unsafe<Rows<{ header: Uint8Array; size: number | string }>>(

@@ -717,6 +717,10 @@ exhausted`; crashes/write failures affect capture, never inference.
 capture gates, and the destination's **Export bodies** switch (or `omni export set <id>
 --bodies on`). Key opt-outs always win. Gates are rechecked at send time, including
 retained artifacts; if any is off, no `body` field is sent. OTLP traces refuse bodies.
+Each inline or segmented HTTP send is admitted by one consistent database snapshot of
+settings, key policy and destination identity, checked against its prepared sender.
+This snapshot is the policy linearization point: later edits cannot retract an already
+admitted network request. Local cancellation/deadlines are checked immediately before transport.
 Only masked client request/response parts are exported, not provider attempts.
 When eligible, exported `body.state` is `included` (whole), `incomplete` (truncated),
 `omitted` (marker with reason, including `export budget`), or `unavailable` (missing,

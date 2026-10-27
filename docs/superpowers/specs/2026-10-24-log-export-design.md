@@ -393,13 +393,19 @@ still `pending` an hour after completion as `failed`.
   `omni_export_bodies_late_total` is counted. Destinations without `include_bodies` never wait.
 - **What is exported:** the client request and response (the pre-RTK client view, masked at
   capture). Provider attempts and stream chunks stay in the store.
-- **Gates, checked at send time for every record** — turning one off stops body export immediately,
-  even for artifacts captured earlier and still retained:
+- **Gates, checked at admission for every HTTP send**, even for artifacts captured earlier
+  and still retained:
   1. `OMNI_BODY_LOGGING_ALLOWED` and `settings.bodyLoggingEnabled`, as currently set;
   2. the row's key is not `bodyLoggingOptOut`;
   3. **`OMNI_EXPORT_BODIES_ALLOWED=true` at boot** — new, so a console admin alone cannot start
      sending prompt content to a third-party system;
-  4. the destination's `include_bodies` is on, set only by an admin.
+   4. the destination's `include_bodies` is on, set only by an admin.
+  One database statement snapshots settings, key existence/opt-out and destination
+  generation/revision/enabled/include-bodies after encoding. This is the policy linearization
+  point; the identity must match the prepared sender (including its config/secret revision).
+  Boot gates and local cancellation/deadline checks follow synchronously before transport.
+  A subsequent database edit cannot retract an already-admitted send. Every segment and replay
+  takes a new admission snapshot; cross-node changes need no local notification.
 - If any gate fails, the record carries no `body` field. When all hold, `body.state` is:
   - `"included"` — the artifact was read and is whole;
   - `"incomplete"` — read, but the artifact or the client side is `truncated` (client hung up, stream

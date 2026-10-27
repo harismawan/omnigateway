@@ -133,6 +133,8 @@ export type World = {
   beforeGetLog: () => Promise<void>;
   /** Runs before every settings read; a test holds a commit's prerequisite with it. */
   beforeSettings: () => Promise<void>;
+  /** Immediately before the single-statement body-send policy snapshot. */
+  beforeAdmission: () => Promise<void>;
   /** Runs before every configuration read; a test holds a tick with it. */
   beforeDestinations: () => Promise<void>;
   /** Runs before every cursor read; a test makes it hang to reach the batch deadline. */
@@ -184,6 +186,7 @@ export function world(
     beforePage: async () => {},
     beforeDestinations: async () => {},
     beforeSettings: async () => {},
+    beforeAdmission: async () => {},
     beforeGetLog: async () => {},
     beforeSnapshot: async () => {},
     beforeClaim: async () => {},
@@ -194,6 +197,23 @@ export function world(
   w.statePath = statePath;
 
   const reader: ExportReader = {
+    bodyAdmission: async (id, keyId) => {
+      await w.beforeAdmission();
+      const d = w.destinations.find((d) => d.id === id);
+      return {
+        bodyLoggingEnabled: w.settings.bodyLoggingEnabled,
+        keyExists: true,
+        keyBodyOptOut: w.optOut.has(keyId),
+        destination: d
+          ? {
+              generation: d.generation,
+              revision: d.revision,
+              enabled: d.enabled,
+              includeBodies: d.includeBodies,
+            }
+          : null,
+      };
+    },
     bodyProbe: async (id) => {
       const text = w.bodies.get(id);
       return text === undefined

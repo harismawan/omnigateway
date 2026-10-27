@@ -409,6 +409,8 @@ export type Timers = {
 };
 
 export type DeliverDeps = {
+  /** Optional consistent policy admission after encoding; before local synchronous checks. */
+  admit?: () => Promise<void>;
   /** Synchronous admission after encode/gzip, immediately before transport. */
   beforeSend?: () => void;
   transport: Transport;
@@ -443,6 +445,7 @@ export async function deliver(
     body = Bun.gzipSync(new TextEncoder().encode(text));
     headers["content-encoding"] = "gzip";
   }
+  if (deps.admit) await deps.admit();
   deps.beforeSend?.();
 
   const request = new AbortController();
