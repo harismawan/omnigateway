@@ -114,7 +114,8 @@ export type BodyCollector = {
    * incident is about how a stream ended, so the head is evicted to stay under
    * the cap, never the terminal frame — and the eviction marks the client side
    * truncated, because the frames left behind are well-formed and would
-   * otherwise read as a complete short response.
+   * otherwise read as a complete short response. A frame larger than the whole
+   * cap is discarded with truncation rather than retained partially.
    */
   frame(frame: string): void;
   /** The client side is incomplete for a reason only the route knows — a hang-up. */
@@ -246,6 +247,18 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
     const decoder = new TextDecoder();
     let kept = 0;
     let full = false;
+    const retain = (text: string): void => {
+      // Invalid input can expand into replacement characters. Count the UTF-8
+      // text we keep, not the source bytes (including text from the final flush).
+      const part = fitted(text, MAX_CAPTURED_BODY_BYTES - kept);
+      if (part.cut) {
+        full = true;
+        entry.truncated = true;
+      }
+      if (part.bytes === 0 || !reserve(part.bytes)) return;
+      kept += part.bytes;
+      entry.responseChunks.push(part.text);
+    };
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -256,20 +269,10 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
           entry.truncated = true;
           continue;
         }
-        let chunk = value;
-        if (kept + chunk.byteLength > MAX_CAPTURED_BODY_BYTES) {
-          chunk = chunk.subarray(0, MAX_CAPTURED_BODY_BYTES - kept);
-          full = true;
-          entry.truncated = true;
-        }
-        if (!reserve(chunk.byteLength)) continue;
-        kept += chunk.byteLength;
-        entry.responseChunks.push(decoder.decode(chunk, { stream: true }));
+        if (!storing()) continue;
+        retain(decoder.decode(value, { stream: true }));
       }
-      // Not after a cut: the decoder may hold the first bytes of a character
-      // the cap split, and flushing would record a replacement character for
-      // what is really the cut.
-      if (!full && storing()) entry.responseChunks.push(decoder.decode());
+      if (!full && storing()) retain(decoder.decode());
     } catch {
       // Whatever broke, it broke on the capture branch. The adapter's branch is
       // a separate reader over a separate queue and is untouched by this.
@@ -369,9 +372,12 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
       }
       const frames = clientResponse;
       const bytes = utf8Bytes(frame);
+      if (bytes > MAX_CAPTURED_BODY_BYTES) {
+        clientTruncated = true;
+        return;
+      }
       // Evicted before the new frame is reserved, so a stream at its cap
-      // holds the cap and not the cap plus one frame. A lone frame larger than
-      // the cap is still kept: something cut beats nothing at all.
+      // holds the cap and not the cap plus one frame.
       while (frames.length > 0 && responseBytes + bytes > MAX_CAPTURED_BODY_BYTES) {
         const evicted = utf8Bytes(frames.shift() ?? "");
         release(evicted);

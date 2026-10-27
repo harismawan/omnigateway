@@ -168,6 +168,51 @@ test("drains a wire response past the cap, keeping exactly the cap in bytes", as
   expect(parts.reservedBytes).toBeLessThanOrEqual(MAX_CAPTURED_BODY_BYTES + 2);
 });
 
+test("caps malformed decoded UTF-8 text rather than its smaller source bytes", async () => {
+  const { collector, budget } = collectorWith();
+  // Each invalid byte becomes a three-byte replacement character. The source
+  // is below the cap, but its decoded text crosses it.
+  const piece = new Uint8Array(1024 * 1024).fill(0xff);
+  const count = Math.ceil(MAX_CAPTURED_BODY_BYTES / (piece.length * 3));
+  const source = streamed(Array.from({ length: count }, () => piece));
+  const res = await collector.wrap(async () => source.response)(wireRequest(""));
+  const reader = res.body?.getReader();
+  if (reader === undefined) throw new Error("expected a body");
+  await reader.read();
+  await collector.settle();
+
+  expect(source.pulled()).toBe(count);
+  const parts = collector.take(null);
+  const text = parts.attempts[0]?.response ?? "";
+  expect(bytesOf(text)).toBe(MAX_CAPTURED_BODY_BYTES - 1);
+  expect(text.endsWith("\uFFFD")).toBe(true);
+  expect(parts.attempts[0]?.truncated).toBe(true);
+  expect(parts.reservedBytes).toBe(bytesOf(text));
+  expect(budget.held()).toBe(parts.reservedBytes);
+  budget.release(parts.reservedBytes);
+});
+
+test("decoder flush cannot push retained text past the side cap", async () => {
+  const { collector, budget } = collectorWith();
+  const source = streamed([
+    encoder.encode("x".repeat(MAX_CAPTURED_BODY_BYTES - 2)),
+    new Uint8Array([0xe2, 0x82]),
+  ]);
+  const res = await collector.wrap(async () => source.response)(wireRequest(""));
+  const reader = res.body?.getReader();
+  if (reader === undefined) throw new Error("expected a body");
+  await reader.read();
+  await collector.settle();
+
+  const parts = collector.take(null);
+  expect(bytesOf(parts.attempts[0]?.response ?? "")).toBe(MAX_CAPTURED_BODY_BYTES - 2);
+  expect(parts.attempts[0]?.response?.endsWith("x")).toBe(true);
+  expect(parts.attempts[0]?.truncated).toBe(true);
+  expect(parts.reservedBytes).toBe(MAX_CAPTURED_BODY_BYTES - 2);
+  expect(budget.held()).toBe(parts.reservedBytes);
+  budget.release(parts.reservedBytes);
+});
+
 test("a buffered wire response past the cap is cut in bytes and marked", async () => {
   const { collector } = collectorWith();
   const text = "ü".repeat(MAX_CAPTURED_BODY_BYTES / 2 + 1);
@@ -201,18 +246,119 @@ test("the frame sink evicts by bytes, keeping the most recent frames under the c
   expect(parts.reservedBytes).toBe(bytesOf(frames[0] ?? ""));
 });
 
-test("the frame sink keeps a lone frame larger than the cap rather than nothing", () => {
-  const { collector } = collectorWith();
-  const huge = `data: ${"z".repeat(MAX_CAPTURED_BODY_BYTES)}`;
+test("the frame sink discards an oversized frame with explicit truncation and no reservation", () => {
+  const { collector, budget } = collectorWith({
+    budget: createCaptureBudget(MAX_CAPTURED_BODY_BYTES),
+  });
+  // Code units fit, UTF-8 bytes do not.
+  const huge = `a${"é".repeat(MAX_CAPTURED_BODY_BYTES / 2)}`;
   collector.frame(huge);
   const parts = collector.take(null);
-  expect(parts.client.response).toEqual([huge]);
-  expect(parts.client.truncated).toBe(false);
+  expect(parts.client.response).toEqual([]);
+  expect(parts.client.truncated).toBe(true);
+  expect(parts.abandoned).toBeNull();
+  expect(parts.reservedBytes).toBe(0);
+  expect(budget.held()).toBe(0);
+});
+
+test("an exact-cap frame fits and subsequent terminal frames survive oversized frames", () => {
+  const { collector, budget } = collectorWith();
+  collector.frame("x".repeat(MAX_CAPTURED_BODY_BYTES));
+  expect(budget.held()).toBe(MAX_CAPTURED_BODY_BYTES);
+  collector.frame("y".repeat(MAX_CAPTURED_BODY_BYTES + 1));
+  expect(budget.held()).toBeLessThanOrEqual(MAX_CAPTURED_BODY_BYTES);
+  collector.frame("event: message_stop\ndata: {}");
+
+  const parts = collector.take(null);
+  expect(parts.client.response).toEqual(["event: message_stop\ndata: {}"]);
+  expect(parts.client.truncated).toBe(true);
+  expect(parts.reservedBytes).toBe(bytesOf("event: message_stop\ndata: {}"));
+  expect(budget.held()).toBe(parts.reservedBytes);
+  budget.release(parts.reservedBytes);
 });
 
 // ---------------------------------------------------------------------------
 // The budget
 // ---------------------------------------------------------------------------
+
+test.each([
+  { name: "malformed bytes", chunks: [[0xff, 0xff, 0xff, 0xff]], text: "����", bytes: 12 },
+  {
+    name: "split code point",
+    chunks: [
+      [0xf0, 0x9f],
+      [0x98, 0x80],
+    ],
+    text: "😀",
+    bytes: 4,
+  },
+  { name: "split malformed sequence", chunks: [[0xe2], [0x28, 0xa1]], text: "�(�", bytes: 7 },
+  { name: "incomplete final sequence", chunks: [[0xe2], [0x82]], text: "�", bytes: 3 },
+])("reserves retained decoded text including $name", async ({ chunks, text, bytes }) => {
+  const { collector, budget } = collectorWith({ budget: createCaptureBudget(bytes) });
+  const source = streamed(chunks.map((chunk) => new Uint8Array(chunk)));
+  const res = await collector.wrap(async () => source.response)(wireRequest(""));
+  const adapterBytes = new Uint8Array(await new Response(res.body).arrayBuffer());
+  await collector.settle();
+
+  expect(adapterBytes).toEqual(new Uint8Array(chunks.flat()));
+  const parts = collector.take(null);
+  expect(parts.abandoned).toBeNull();
+  expect(parts.attempts[0]?.response).toBe(text);
+  expect(parts.attempts[0]?.truncated).toBe(false);
+  expect(parts.reservedBytes).toBe(bytes);
+  expect(bytesOf(parts.attempts[0]?.response ?? "")).toBe(parts.reservedBytes);
+  expect(budget.held()).toBe(bytes);
+  budget.release(parts.reservedBytes);
+  expect(budget.held()).toBe(0);
+});
+
+test("malformed UTF-8 budget refusal still drains without changing adapter bytes", async () => {
+  const { collector, budget, dropped } = collectorWith({ budget: createCaptureBudget(8) });
+  const chunks = [
+    new Uint8Array([0xff, 0xff, 0xff, 0xff]),
+    encoder.encode("a"),
+    encoder.encode("b"),
+  ];
+  const source = streamed(chunks);
+  const res = await collector.wrap(async () => source.response)(wireRequest(""));
+  const reader = res.body?.getReader();
+  if (reader === undefined) throw new Error("expected a body");
+  const first = await reader.read();
+  await collector.settle();
+
+  expect(source.pulled()).toBe(3);
+  expect(collector.abandoned).toBe("budget");
+  expect(dropped).toEqual(["budget"]);
+  expect(budget.held()).toBe(0);
+  const received = [...(first.value ?? [])];
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    received.push(...next.value);
+  }
+  expect(new Uint8Array(received)).toEqual(new Uint8Array(chunks.flatMap((chunk) => [...chunk])));
+  const parts = collector.take(null);
+  expect(parts.attempts[0]?.response).toBeNull();
+  expect(parts.reservedBytes).toBe(0);
+});
+
+test("decoder flush reserves its replacement text or abandons at the budget", async () => {
+  const { collector, budget, dropped } = collectorWith({ budget: createCaptureBudget(3) });
+  const source = streamed([encoder.encode("a"), new Uint8Array([0xe2, 0x82])]);
+  const res = await collector.wrap(async () => source.response)(wireRequest(""));
+  expect(new Uint8Array(await new Response(res.body).arrayBuffer())).toEqual(
+    new Uint8Array([0x61, 0xe2, 0x82]),
+  );
+  await collector.settle();
+
+  const parts = collector.take(null);
+  expect(parts.abandoned).toBe("budget");
+  expect(parts.attempts[0]?.response).toBeNull();
+  expect(parts.reservedBytes).toBe(0);
+  expect(budget.held()).toBe(0);
+  expect(dropped).toEqual(["budget"]);
+});
 
 test("reserves every kept byte against the budget as it arrives", async () => {
   const { collector, budget } = collectorWith({ captureStreamChunks: true });
