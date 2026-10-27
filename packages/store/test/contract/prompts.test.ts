@@ -1,8 +1,11 @@
 import { Database } from "bun:sqlite";
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { SQL } from "bun";
 import { deriveKey } from "../../src/encryption.ts";
 import { createPostgresExportReader, openSqliteExportReader } from "../../src/exportReader.ts";
+import type { PromptRow } from "../../src/promptRow.ts";
+import { openDb } from "../../src/sqlite/db.ts";
+import { createPromptRepo } from "../../src/sqlite/prompts.ts";
 import type { ApiKeyInput, PromptCreate, PromptDetail } from "../../src/types.ts";
 import { exec, forEachStore, logRow } from "./harness.ts";
 
@@ -27,6 +30,16 @@ const key = (id: string): ApiKeyInput => ({
   smartRouting: false,
 });
 const save = { text: "next", note: "draft", activate: false };
+
+async function waitForPromptWaiters(sql: SQL, count: number): Promise<void> {
+  for (let i = 0; i < 1000; i++) {
+    const rows = await sql.unsafe<{ n: string }[]>(
+      `SELECT COUNT(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid = (hashtext('omni:prompt-management')::bigint & 4294967295)::oid`,
+    );
+    if (Number(rows[0]?.n) >= count) return;
+  }
+  throw new Error("management-lock waiter never appeared");
+}
 
 forEachStore((backend) => {
   test("library drafts, metadata, immutable versions and rollback", async () => {
@@ -92,13 +105,28 @@ forEachStore((backend) => {
       sibling.prompts.saveVersion("team", save),
     ]);
     expect(versions.map((v) => v.version).sort((a, b) => a - b)).toEqual([102, 103]);
-    await Promise.allSettled([
-      store.prompts.activate("team", 4),
-      sibling.prompts.saveVersion("team", { ...save, activate: true }),
+    const before = await store.prompts.get("team");
+    if (!before) throw new Error("missing prompt before race");
+    const target = before?.versions.findLast((v) => v.version !== before.activeVersion)?.version;
+    if (target === undefined) throw new Error("missing retained nonactive version");
+    expect(before?.versions.some((v) => v.version === target)).toBe(true);
+    const [activation, pruning] = await Promise.allSettled([
+      store.prompts.activate("team", target),
+      sibling.prompts.saveVersion("team", save),
     ]);
+    expect(pruning.status).toBe("fulfilled");
+    if (activation.status === "rejected") {
+      expect(activation.reason).toMatchObject({ kind: "version-missing" });
+    }
     const final = (await store.prompts.get("team")) as PromptDetail;
     expect(final.versions).toHaveLength(100);
     expect(final.versions.some((v) => v.version === final.activeVersion)).toBe(true);
+    expect(final.activeVersion).toBe(
+      activation.status === "fulfilled" ? target : before.activeVersion,
+    );
+    expect(final.versions.some((v) => v.version === target)).toBe(
+      activation.status === "fulfilled",
+    );
   });
 
   test("concurrent creates at 49 enforce cap", async () => {
@@ -286,6 +314,65 @@ forEachStore((backend) => {
   });
 
   if (backend.name === "postgres") {
+    for (const first of ["activation", "pruning"] as const) {
+      test(`oldest retained activation versus pruning: ${first} wins management lock`, async () => {
+        const store = await backend.fresh();
+        const sibling = await backend.sibling();
+        await store.prompts.create(prompt());
+        for (let i = 0; i < 99; i++) await store.prompts.saveVersion("team", save);
+        const before = await store.prompts.get("team");
+        const target = before?.versions.findLast(
+          (v) => v.version !== before.activeVersion,
+        )?.version;
+        if (target === undefined) throw new Error("missing retained nonactive version");
+        expect(before?.versions).toHaveLength(100);
+        expect(target).toBe(2);
+        expect(before?.versions.some((v) => v.version === target)).toBe(true);
+        const sql = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string });
+        const conn = await sql.reserve();
+        try {
+          await conn.unsafe("BEGIN");
+          await conn.unsafe("SELECT pg_advisory_xact_lock(hashtext($1))", [
+            "omni:prompt-management",
+          ]);
+          const activate = () => Promise.allSettled([store.prompts.activate("team", target)]);
+          const prune = () => Promise.allSettled([sibling.prompts.saveVersion("team", save)]);
+          const leading = first === "activation" ? activate() : prune();
+          await waitForPromptWaiters(sql, 1);
+          const trailing = first === "activation" ? prune() : activate();
+          await waitForPromptWaiters(sql, 2);
+          await conn.unsafe("COMMIT");
+          const [leadingResult] = await leading;
+          const [trailingResult] = await trailing;
+          const activation = first === "activation" ? leadingResult : trailingResult;
+          const pruning = first === "pruning" ? leadingResult : trailingResult;
+          expect(pruning).toMatchObject({ status: "fulfilled", value: { version: 101 } });
+          if (first === "activation") {
+            expect(activation).toMatchObject({
+              status: "fulfilled",
+              value: { activeVersion: target },
+            });
+          } else {
+            expect(activation).toMatchObject({
+              status: "rejected",
+              reason: { kind: "version-missing" },
+            });
+          }
+          const final = await store.prompts.get("team");
+          expect(final?.versions).toHaveLength(100);
+          expect(final?.activeVersion).toBe(
+            first === "activation" ? target : before?.activeVersion,
+          );
+          expect(final?.versions.some((v) => v.version === final.activeVersion)).toBe(true);
+          expect(final?.versions.some((v) => v.version === target)).toBe(first === "activation");
+        } finally {
+          await conn.unsafe("ROLLBACK");
+          conn.release();
+          await sql.close();
+        }
+      });
+    }
+
     for (const writer of ["global", "create", "import", "setter"] as const) {
       test(`management lock precedes ${writer} row/config locks and arbitrates both race orders`, async () => {
         const store = await backend.fresh();
@@ -293,15 +380,6 @@ forEachStore((backend) => {
         const k = await store.keys.create(key("k"));
         const sql = new SQL({ url: process.env.OMNI_TEST_DATABASE_URL as string });
         const conn = await sql.reserve();
-        const waitForQueued = async (count: number) => {
-          for (let i = 0; i < 1000; i++) {
-            const rows = await sql.unsafe<{ n: string }[]>(
-              `SELECT COUNT(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid = (hashtext('omni:prompt-management')::bigint & 4294967295)::oid`,
-            );
-            if (Number(rows[0]?.n) >= count) return;
-          }
-          throw new Error("management-lock waiter never appeared");
-        };
         const write = () => {
           const prompts = { ids: ["team"], inheritGlobal: false };
           return writer === "global"
@@ -321,7 +399,7 @@ forEachStore((backend) => {
           ]);
           await conn.unsafe("DELETE FROM prompts WHERE id = 'team'");
           const pending = Promise.allSettled([write()]);
-          await waitForQueued(1);
+          await waitForPromptWaiters(sql, 1);
           await conn.unsafe("COMMIT");
           expect((await pending)[0]).toMatchObject({
             status: "rejected",
@@ -336,9 +414,9 @@ forEachStore((backend) => {
             "omni:prompt-management",
           ]);
           const assigned = Promise.allSettled([write()]);
-          await waitForQueued(1);
+          await waitForPromptWaiters(sql, 1);
           const deleted = Promise.allSettled([store.prompts.remove("team")]);
-          await waitForQueued(2);
+          await waitForPromptWaiters(sql, 2);
           await conn.unsafe("COMMIT");
           expect((await assigned)[0]?.status).toBe("fulfilled");
           expect((await deleted)[0]).toMatchObject({
@@ -354,6 +432,38 @@ forEachStore((backend) => {
       });
     }
   } else {
+    test("detail keeps one SQLite snapshot across a sibling save and prune between SELECTs", async () => {
+      const store = await backend.fresh();
+      await store.prompts.create(prompt());
+      for (let i = 0; i < 99; i++) await store.prompts.saveVersion("team", save);
+      const readDb = openDb(store.databasePath);
+      const writeDb = openDb(store.databasePath);
+      const reader = createPromptRepo(readDb, () => {});
+      const writer = createPromptRepo(writeDb, () => {});
+      const statement = readDb.query<PromptRow, [string]>("SELECT * FROM prompts WHERE id = ?");
+      const get = statement.get.bind(statement);
+      let committed: ReturnType<typeof writer.saveVersion> | undefined;
+      const boundary = spyOn(statement, "get").mockImplementation((id) => {
+        const row = get(id);
+        // SQLite repo mutations commit synchronously before their Promise is returned.
+        committed = writer.saveVersion("team", { ...save, activate: true });
+        return row;
+      });
+      try {
+        const detail = await reader.get("team");
+        expect(boundary).toHaveBeenCalledTimes(1);
+        expect((await committed)?.version).toBe(101);
+        expect((await writer.get("team"))?.activeVersion).toBe(101);
+        expect(detail?.activeVersion).toBe(1);
+        expect(detail?.versions.some((v) => v.version === detail.activeVersion)).toBe(true);
+        expect(detail?.versions[0]?.version).toBe(100);
+      } finally {
+        boundary.mockRestore();
+        readDb.close();
+        writeDb.close();
+      }
+    });
+
     test("retained forwarders survive snapshot replacement and reopen", async () => {
       const store = await backend.fresh();
       await store.prompts.create(prompt());
@@ -377,6 +487,7 @@ forEachStore((backend) => {
 
     test("raw SQLite immediate transactions exclude a sibling writer", async () => {
       const store = await backend.fresh();
+      await store.prompts.create(prompt());
       const first = new Database(store.databasePath);
       const second = new Database(store.databasePath);
       try {
@@ -387,6 +498,14 @@ forEachStore((backend) => {
         ).toThrow();
         expect(() =>
           second.transaction(() => second.run("UPDATE api_keys SET prompts = NULL")).immediate(),
+        ).toThrow();
+        expect(() =>
+          second.transaction(() => second.run("UPDATE prompts SET active_version = 1")).immediate(),
+        ).toThrow();
+        expect(() =>
+          second
+            .transaction(() => second.run("DELETE FROM prompt_versions WHERE version = 1"))
+            .immediate(),
         ).toThrow();
       } finally {
         first.run("ROLLBACK");

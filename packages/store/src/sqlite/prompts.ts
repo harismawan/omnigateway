@@ -69,8 +69,12 @@ export function createPromptRepo(db: Database, emit: (change: RoutingChange) => 
       return db.query<PromptRow, []>("SELECT * FROM prompts ORDER BY id").all().map(toPrompt);
     },
     async get(id) {
-      const row = parent(id);
-      return row ? { ...toPrompt(row), versions: versions(id) } : null;
+      // A sibling process can commit to WAL between these SELECTs even though
+      // this call is synchronous. Hold one read snapshot across metadata/history.
+      return db.transaction(() => {
+        const row = parent(id);
+        return row ? { ...toPrompt(row), versions: versions(id) } : null;
+      })();
     },
     async listActive() {
       return db
