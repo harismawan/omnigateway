@@ -694,7 +694,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
           await commit({ ...cursorOfPosition(position), caughtUpThrough: settled }, batch);
           return;
         }
-        const outcome = await sendRows(h, rt, epoch, sender, rows, batch, commit);
+        const outcome = await sendRows(h, rt, epoch, sender, d, rows, batch, commit);
         if (outcome === "stop") return;
         if (outcome !== "continue") {
           await settle(h, rt, epoch, outcome);
@@ -730,6 +730,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     rt: Runtime,
     epoch: number,
     sender: Sender,
+    preparedDestination: ExportDestination,
     rows: RequestLog[],
     batch: Batch,
     commit: (next: CommitNext, batch: Batch) => Promise<boolean>,
@@ -741,7 +742,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
       deps.exportBodiesAllowed &&
       !(rt.destination.type === "otlp" && rt.destination.config.signal === "traces")
     ) {
-      return sendBodyRows(h, rt, epoch, sender, rows, batch, commit);
+      return sendBodyRows(h, rt, epoch, sender, preparedDestination, rows, batch, commit);
     }
     const signal = batch.signal;
     const labels = await guard(h.reader.keyLabels(), signal);
@@ -808,6 +809,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
   }
 
   async function bodyAllowed(h: Handles, row: RequestLog, signal: AbortSignal): Promise<boolean> {
+    // Cheap preflight for bounded metadata batching, never transport admission.
     if (!gates.bodyLoggingAllowed || !deps.exportBodiesAllowed || row.apiKeyId === null)
       return false;
     const settings = await guard(h.reader.settings(), signal);
@@ -817,20 +819,22 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
 
   const BODY_DENIED = Symbol("body admission denied");
 
-  async function admitBody(h: Handles, rt: Runtime, row: RequestLog, batch: Batch): Promise<void> {
+  async function admitBody(
+    h: Handles,
+    prepared: ExportDestination,
+    row: RequestLog,
+    batch: Batch,
+  ): Promise<void> {
     if (row.apiKeyId === null) throw BODY_DENIED;
-    const policy = await guard(
-      h.reader.bodyAdmission(rt.destination.id, row.apiKeyId),
-      batch.signal,
-    );
+    const policy = await guard(h.reader.bodyAdmission(prepared.id, row.apiKeyId), batch.signal);
     const d = policy.destination;
     if (
       !policy.bodyLoggingEnabled ||
       !policy.keyExists ||
       policy.keyBodyOptOut ||
       !d ||
-      d.generation !== rt.destination.generation ||
-      d.revision !== rt.destination.revision ||
+      d.generation !== prepared.generation ||
+      d.revision !== prepared.revision ||
       !d.enabled ||
       !d.includeBodies
     )
@@ -847,6 +851,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     rt: Runtime,
     epoch: number,
     sender: Sender,
+    preparedDestination: ExportDestination,
     rows: RequestLog[],
     batch: Batch,
     commit: (next: CommitNext, batch: Batch) => Promise<boolean>,
@@ -856,7 +861,17 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
     const metadataRows: RequestLog[] = [];
     const flush = async () => {
       if (!metadataRows.length) return "continue" as const;
-      const outcome = await sendRows(h, rt, epoch, sender, metadataRows, batch, commit, true);
+      const outcome = await sendRows(
+        h,
+        rt,
+        epoch,
+        sender,
+        preparedDestination,
+        metadataRows,
+        batch,
+        commit,
+        true,
+      );
       metadataRows.length = 0;
       return outcome;
     };
@@ -912,7 +927,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               signal,
               timers,
               now: deps.now,
-              admit: () => admitBody(h, rt, row, batch),
+              admit: () => admitBody(h, preparedDestination, row, batch),
               beforeSend: () => checkBodyDeadline(batch),
             });
           } else if (client && sender.bodySegment) {
@@ -942,7 +957,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               signal,
               timers,
               now: deps.now,
-              admit: () => admitBody(h, rt, row, batch),
+              admit: () => admitBody(h, preparedDestination, row, batch),
               beforeSend: () => checkBodyDeadline(batch),
             });
             if (outcome.kind === "ok") {
@@ -960,7 +975,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
                     signal,
                     timers,
                     now: deps.now,
-                    admit: () => admitBody(h, rt, row, batch),
+                    admit: () => admitBody(h, preparedDestination, row, batch),
                     beforeSend: () => checkBodyDeadline(batch),
                   });
                   if (outcome.kind === "ok") {

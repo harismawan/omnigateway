@@ -685,6 +685,8 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
   Design + rest: `ARCHITECTURE.md#log-export`.
 - Main thread reach export only via `export/spawn.ts` + `export/protocol.ts`. Pin:
   `apps/gateway/test/export/boundary.test.ts`.
+- Body send policy linearizes at `exportDestinations.bodyAdmission`'s single statement,
+  never alternating settings/key/destination reads. See `ARCHITECTURE.md#log-export`.
 - Plugin ordering traps, both silent when reversed: channel registry build **before**
   `loadPlugins` in `apps/gateway/src/index.ts`; route's `close` read `registry.topics(id)`
   **before** `registry.remove(id)`. Tables, migrations, events, channels, externals, asset

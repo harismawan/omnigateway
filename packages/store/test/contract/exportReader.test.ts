@@ -101,6 +101,19 @@ forEachStore((backend) => {
       };
       expect(await r.bodyAdmission("admit", "k")).toEqual(expected);
       expect(await s.exportDestinations.bodyAdmission("admit", "k")).toEqual(expected);
+      await s.keys.create({
+        id: "opted-out",
+        label: "private",
+        prefix: "omni_private",
+        hash: "private-hash",
+        modelAllowlist: null,
+        limits: {},
+        bodyLoggingOptOut: true,
+        expiresAt: null,
+        guardrailPolicy: null,
+        smartRouting: false,
+      });
+      expect((await r.bodyAdmission("admit", "opted-out")).keyBodyOptOut).toBe(true);
       await s.config.putSettings({ bodyLoggingEnabled: true });
       const edited = await s.exportDestinations.update("admit", {
         secret: "replacement",

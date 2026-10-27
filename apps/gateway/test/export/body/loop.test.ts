@@ -1,46 +1,49 @@
 import { afterEach, expect, test } from "bun:test";
 import { destination, row, sharedLease, stateOf, T0, type World, world } from "../harness.ts";
 
-test.each([false, true])(
-  "consistent admission closes both review interleavings (segmented=%s)",
-  async (segmented) => {
-    for (const mode of ["destination", "settings"] as const) {
-      const w = setup(segmented ? 1500 : 5000);
-      artifact(w, segmented ? "PRIVATE".repeat(2000) : "PRIVATE");
-      let changed = false;
-      const change = () => {
-        changed = true;
-        if (mode === "settings") w.settings.bodyLoggingEnabled = false;
-        else {
-          const d = w.destinations[0];
-          if (d) {
-            d.revision++;
-            d.config = { url: "https://replacement.test/in" };
-          }
+test.each([
+  [false, "destination"],
+  [false, "settings"],
+  [true, "destination"],
+  [true, "settings"],
+] as const)(
+  "consistent admission closes review interleaving (segmented=%s, mode=%s)",
+  async (segmented, mode) => {
+    const w = setup(segmented ? 1500 : 5000);
+    artifact(w, segmented ? "PRIVATE".repeat(2000) : "PRIVATE");
+    let changed = false;
+    const change = () => {
+      changed = true;
+      if (mode === "settings") w.settings.bodyLoggingEnabled = false;
+      else {
+        const d = w.destinations[0];
+        if (d) {
+          d.revision++;
+          d.config = { url: "https://replacement.test/in" };
         }
-      };
-      // The historical final settings/key awaits, without a local notification.
-      let settingsReads = 0;
-      w.beforeSettings = async () => {
-        if (mode === "destination" && ++settingsReads === 5) change();
-      };
-      const has = w.optOut.has.bind(w.optOut);
-      let keyReads = 0;
-      w.optOut.has = (id) => {
-        if (mode === "settings" && ++keyReads === 3) change();
-        return has(id);
-      };
-      // Replacement linearization boundary: edits committed before admission
-      // must be visible together, regardless of earlier prerequisite ordering.
-      w.beforeAdmission = async () => {
-        if (!changed) change();
-      };
-      await w.loop.start();
-      await w.settle();
-      expect(changed).toBe(true);
-      expect(w.sent).toHaveLength(0);
-      expect((await stateOf(w)).cursorId).toBe("");
-    }
+      }
+    };
+    // The historical final settings/key awaits, without a local notification.
+    let settingsReads = 0;
+    w.beforeSettings = async () => {
+      if (mode === "destination" && ++settingsReads === 5) change();
+    };
+    const has = w.optOut.has.bind(w.optOut);
+    let keyReads = 0;
+    w.optOut.has = (id) => {
+      if (mode === "settings" && ++keyReads === 3) change();
+      return has(id);
+    };
+    // Replacement linearization boundary: edits committed before admission
+    // must be visible together, regardless of earlier prerequisite ordering.
+    w.beforeAdmission = async () => {
+      if (!changed) change();
+    };
+    await w.loop.start();
+    await w.settle();
+    expect(changed).toBe(true);
+    expect(w.sent).toHaveLength(0);
+    expect((await stateOf(w)).cursorId).toBe("");
   },
 );
 

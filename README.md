@@ -514,6 +514,9 @@ opt-in, both capture gates, a non-opted-out key and destination `includeBodies`.
 Only masked client request/response content leaves the store, never provider
 attempts. OTLP traces cannot enable bodies. Body-bearing OTLP logs use the complete JSON
 record as their inline string body; metadata-only logs retain the short title.
+Each HTTP send uses one consistent policy/destination snapshot for admission;
+later edits cannot retract an already-admitted send. Each segment is admitted anew
+([details](docs/operations.md#recording-bodies)).
 
 Bodies fit inline or follow as size-bounded segments. One body globally reserves
 decode buffers, worst-case UTF-16 strings, encoding trials and gzip workspace before

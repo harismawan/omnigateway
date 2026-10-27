@@ -629,6 +629,11 @@ Restart is watched rather than timed. Console polls `/health` — its one docume
 **Body attachments** (`export/body/`). Send-time capture/environment/destination gates
 and key opt-outs decide whether an additive `body` exists. Pending captures hold a
 destination for ≤60 seconds after completion, then become counted `unavailable` records.
+After encoding, each body-bearing HTTP send uses one statement to snapshot current
+settings/key policy and destination generation/revision/enabled/include-bodies. Matching
+the prepared sender's identity is the admission linearization point; later database edits
+cannot retract that send. Local cancellation, boot gates and deadline are checked
+synchronously before transport. Each segment/replay is admitted independently.
 The read-only artifact reader never writes `detail_state`. Export scans client fields
 from decrypted JSON without building an artifact tree. A global semaphore admits one
 body across all destinations, holding its reservation through the last segment or
