@@ -6,6 +6,7 @@
  * `build-binary.test.ts`; never shipped.
  */
 import { createStore, deriveKey } from "@omni/store";
+import { spawnBodyWriter } from "../../../src/bodies/spawn.ts";
 import { spawnExportWorker } from "../../../src/export/spawn.ts";
 
 const KEY = "export-worker-probe-encryption-key";
@@ -22,6 +23,27 @@ const worker = spawnExportWorker({
   exportBodiesAllowed: false,
   gates: { bodyLoggingAllowed: false },
 });
+const bodyWriter = spawnBodyWriter({ databasePath, databaseUrl: null, encryptionKey: KEY });
+let exportReply: unknown;
+let bodyPaused = false;
+function finish(): void {
+  if (exportReply === undefined || !bodyPaused) return;
+  console.log(JSON.stringify(exportReply));
+  clearTimeout(timer);
+  worker.terminate();
+  bodyWriter.terminate();
+  process.exit(0);
+}
+bodyWriter.onExit(() => {
+  console.log("body writer died");
+  process.exit(1);
+});
+bodyWriter.onMessage((message) => {
+  if (message.type !== "paused") return;
+  bodyPaused = true;
+  finish();
+});
+bodyWriter.post({ type: "pause" });
 const timer = setTimeout(() => {
   console.log("timeout");
   process.exit(2);
@@ -32,9 +54,7 @@ worker.onExit(() => {
 });
 worker.onMessage((message) => {
   if (message.type !== "previewResult") return;
-  console.log(JSON.stringify(message));
-  clearTimeout(timer);
-  worker.terminate();
-  process.exit(0);
+  exportReply = message;
+  finish();
 });
 worker.post({ type: "preview", ref: "probe", requestId: "req_missing" });

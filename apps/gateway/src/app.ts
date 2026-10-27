@@ -100,6 +100,7 @@ export type AppDeps = {
    * by boot, one per process; absent, the proxy routes make one at the default.
    */
   captureBudget?: CaptureBudget;
+  bodyWriter?: import("./bodies/host.ts").BodyWriterHost;
   /** Minutes east of UTC the daily usage buckets are cut on. See `adminRoutes`. */
   dayOffsetMinutes?: number;
   logger?: Logger;
@@ -474,6 +475,7 @@ export function createApp(deps: AppDeps) {
           loadRegistry,
           bodyLoggingAllowed: deps.bodyLoggingAllowed === true,
           ...(deps.captureBudget === undefined ? {} : { captureBudget: deps.captureBudget }),
+          ...(deps.bodyWriter === undefined ? {} : { bodyWriter: deps.bodyWriter }),
           ...(deps.emit === undefined ? {} : { emit: deps.emit }),
           ...(telemetry === undefined ? {} : { telemetry: telemetry }),
           broadcaster,

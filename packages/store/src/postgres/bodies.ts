@@ -138,7 +138,7 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
 
     /**
      * The body writer's write, from its own pool: bytes and pointer in one
-     * statement, as `put` writes them. The log row's state is `publish`'s to
+     * insert, without replacing an existing owner's bytes. The log row's state is `publish`'s to
      * move, on the main pool, so the two writers never contend for one row.
      */
     async writeRow(row: BodyPublication & { bytes: Uint8Array }) {
@@ -160,8 +160,8 @@ export function createBodyRepo(sql: SQL, key: CryptoKey): BodyRepo {
      * The guard on the log row, and the bytes `writeRow` put in place removed in
      * the same transaction when it refuses: a row nobody was waiting for is a
      * body nobody asked to keep. Unless the log row already reads `ready` or
-     * `omitted` — a second write of a published request upserted over the
-     * first, and deleting it would leave that state pointing at nothing.
+     * `omitted`. Digest matching keeps a duplicate/refused writer from
+     * publishing or removing another owner's bytes.
      */
     async publish(row: BodyPublication) {
       return sql.begin(async (tx) => {

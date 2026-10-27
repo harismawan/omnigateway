@@ -1343,7 +1343,10 @@ export interface BodyRepo {
   fail(requestId: string): Promise<void>;
   /**
    * Postgres only: the body writer's own pool writes the sealed bytes and the
-   * pointer in one upsert, before `publish` moves the state. SQLite throws —
+   * pointer in one insert, before `publish` moves the state. Returns false if
+   * the request is not pending or any bytes already own that request id; never
+   * replaces another write. `publish` verifies the digest before moving state.
+   * SQLite throws —
    * its pointer row is written by `publish` on the main connection alone.
    */
   writeRow(row: BodyPublication & { bytes: Uint8Array }): Promise<boolean>;

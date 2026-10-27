@@ -254,7 +254,7 @@ export async function routeLog(
  * path, a reconstructed one in the terminal catch — and the artifact records
  * whichever outcome was actually reached.
  */
-export type BodyWriter = (log: RequestLog) => Promise<void>;
+export type BodyWriter = (log: RequestLog) => void | Promise<void>;
 
 /**
  * Charges one finished request against whatever counts a key's usage.
@@ -408,7 +408,9 @@ export async function finishLog(
   }
   if (bodies !== undefined) {
     try {
-      await bodies(log);
+      void Promise.resolve(bodies(log)).catch(() => {
+        logger.warn("failed to persist request bodies", { requestId: log.id });
+      });
     } catch (error) {
       report(logger, "failed to persist request bodies", log.id, error);
     }

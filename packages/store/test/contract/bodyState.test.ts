@@ -207,6 +207,37 @@ forEachStore((backend) => {
     expect((await land(backend, s, "p")).published).toBe(false);
   });
 
+  if (backend.name === "postgres") {
+    test("concurrent byte writers have one owner; a losing digest cannot publish or delete it", async () => {
+      const s = await backend.fresh();
+      await s.usage.append(logRow({ id: "race", at: AT, bodyState: "pending" }));
+      const base = {
+        requestId: "race",
+        at: AT,
+        relPath: relPathFor("race", AT),
+        sizeBytes: 1,
+        truncated: false,
+        omitted: false,
+      };
+      const candidates = ["owner-a", "owner-b"].map((sha256) => ({
+        ...base,
+        sha256,
+        bytes: new Uint8Array([1]),
+      }));
+      const results = await Promise.all(candidates.map((row) => s.bodies.writeRow(row)));
+      expect(results.filter(Boolean)).toHaveLength(1);
+      const winner = candidates[results.indexOf(true)];
+      const loser = candidates[results.indexOf(false)];
+      if (winner === undefined || loser === undefined) throw new Error("no exclusive owner");
+      expect(await s.bodies.publish(loser)).toBe(false);
+      expect(await stateOf(s, "race")).toBe("pending");
+      expect(await s.bodies.publish(winner)).toBe(true);
+      expect((await s.bodies.get("race"))?.row.sha256).toBe(winner.sha256);
+      expect(await s.bodies.writeRow(loser)).toBe(false);
+      expect((await s.bodies.get("race"))?.row.sha256).toBe(winner.sha256);
+    });
+  }
+
   test("sweepPending fails bodies still pending an hour after completion, and only those", async () => {
     const s = await backend.fresh("node-a");
     const now = Date.now();

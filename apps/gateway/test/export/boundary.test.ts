@@ -46,6 +46,17 @@ const WORKER_ONLY = [
 /** What the main thread may import from `export/`. */
 const MAIN_ENTRIES = ["apps/gateway/src/index.ts", "apps/gateway/src/export/spawn.ts"];
 
+test("body sealing and the writer entry stay off the main-thread graph", () => {
+  for (const entry of [...MAIN_ENTRIES, "apps/gateway/src/bodies/spawn.ts"]) {
+    const graph = graphOf(entry);
+    expect(graph.has("apps/gateway/src/bodies/seal.ts")).toBe(false);
+    expect(graph.has("apps/gateway/src/bodies/writer.ts")).toBe(false);
+  }
+  expect(graphOf("apps/gateway/src/bodies/writer.ts").has("apps/gateway/src/bodies/seal.ts")).toBe(
+    true,
+  );
+});
+
 function graphOf(entry: string): Set<string> {
   const transpiler = new Bun.Transpiler({ loader: "ts" });
   const seen = new Set<string>();

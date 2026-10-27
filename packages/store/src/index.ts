@@ -35,6 +35,7 @@ export function openStore(
     logger?: Logger;
     nodeId?: string;
     dayOffsetMinutes?: number;
+    isPending?: (relPath: string) => boolean;
   } & ({ url: string; path?: undefined } | { path: string; url?: undefined }),
 ): Promise<Store> {
   return opts.url === undefined ? sqlite(opts) : postgres(opts);

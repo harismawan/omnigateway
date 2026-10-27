@@ -15,12 +15,17 @@ import {
   virtualModel,
 } from "@omni/testkit";
 import { createCaptureBudget } from "../src/bodies/budget.ts";
+import { type BodyWriterHost, createBodyWriterHost } from "../src/bodies/host.ts";
+import { spawnBodyWriter } from "../src/bodies/spawn.ts";
 import { createBodyCollector, MAX_CAPTURED_BODY_BYTES } from "../src/bodyCapture.ts";
 import { pruneLogs } from "../src/maintenance.ts";
 import { proxyRoutes } from "../src/routes/proxy.ts";
 
 const NOW = Date.UTC(2026, 7, 17, 12, 0, 0);
 const ENCRYPTION_KEY = "test-encryption-key-0123456789";
+const rawText = (v: string | string[] | null | undefined): string =>
+  Array.isArray(v) ? v.join("") : (v ?? "");
+const writers = new Map<Store, BodyWriterHost>();
 
 /**
  * A store on disk, because the artifact tree is derived from the database path
@@ -37,6 +42,10 @@ async function tempStore(): Promise<{ store: Store; root: string }> {
 }
 
 async function cleanup(store: Store, root: string): Promise<void> {
+  const writer = writers.get(store);
+  await writer?.pause();
+  writer?.stop();
+  writers.delete(store);
   store.close();
   await rm(root, { recursive: true, force: true });
 }
@@ -149,6 +158,8 @@ type HarnessOptions = {
   keys?: Array<{ label: string; bodyLoggingOptOut?: boolean }>;
   /** Short enough that ordinary upstream silence produces a keepalive comment. */
   keepaliveMs?: number;
+  bodyWriter?: Pick<BodyWriterHost, "enqueue">;
+  captureBudget?: import("../src/bodies/budget.ts").CaptureBudget;
 };
 
 async function harness(options: HarnessOptions = {}) {
@@ -197,6 +208,22 @@ async function harness(options: HarnessOptions = {}) {
   }
 
   let n = 0;
+  const captureBudget = options.captureBudget ?? createCaptureBudget(512 * 1024 * 1024);
+  const writer = createBodyWriterHost({
+    spawn: () =>
+      spawnBodyWriter({
+        databasePath: store.databasePath,
+        databaseUrl: null,
+        encryptionKey: ENCRYPTION_KEY,
+      }),
+    bodies: store.bodies,
+    budget: captureBudget,
+    logger: options.logger ?? captureLogger(),
+    now: () => NOW,
+    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+  });
+  await writer.start();
+  writers.set(store, writer);
   const app = proxyRoutes({
     store,
     adapters: ADAPTERS,
@@ -206,6 +233,8 @@ async function harness(options: HarnessOptions = {}) {
     refresh: async (c) => await c.secrets(),
     requestId: () => `req_${++n}`,
     bodyLoggingAllowed: options.allowed === true,
+    captureBudget,
+    bodyWriter: options.bodyWriter ?? writer,
     ...(options.logger === undefined ? {} : { logger: options.logger }),
     ...(options.keepaliveMs === undefined ? {} : { keepaliveMs: options.keepaliveMs }),
   });
@@ -229,6 +258,7 @@ const ASK = { model: "fast", max_tokens: 100, messages: [{ role: "user", content
 
 /** Reads back one stored artifact, failing loudly rather than returning null. */
 async function artifactOf(store: Store, requestId: string): Promise<BodyArtifact> {
+  await waitForBody(store, requestId);
   const read = await store.bodies.get(requestId);
   if (read === null) throw new Error(`no body row for ${requestId}`);
   if (read.artifact === null)
@@ -238,7 +268,7 @@ async function artifactOf(store: Store, requestId: string): Promise<BodyArtifact
 
 /** Polls rather than sleeping a fixed interval, which keeps a test off a guess. */
 async function until(what: string, ready: () => Promise<boolean>): Promise<void> {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 800; i++) {
     if (await ready()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -266,6 +296,43 @@ function field(value: unknown, key: string): unknown {
 }
 
 const CAPTURE_ON: Partial<Settings> = { bodyLoggingEnabled: true };
+
+test("a stalled body writer cannot delay client bytes or row completion", async () => {
+  const budget = createCaptureBudget(1024 * 1024);
+  const stalled = createBodyWriterHost({
+    spawn: () => ({ post: () => {}, onMessage: () => {}, onExit: () => {}, terminate: () => {} }),
+    bodies: { publish: async () => true, fail: async () => {} },
+    budget,
+    logger: captureLogger(),
+    now: () => NOW,
+    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+  });
+  await stalled.start();
+  const f = await harness({
+    allowed: true,
+    settings: CAPTURE_ON,
+    captureBudget: budget,
+    bodyWriter: stalled,
+  });
+  try {
+    for (const stream of [false, true]) {
+      const response = await f.call({ ...ASK, stream });
+      const text = await response.text();
+      expect(response.status).toBe(200);
+      expect(text).toContain("Hello");
+    }
+    await until("completed rows", async () => (await f.store.usage.get("req_2"))?.state === "done");
+    expect(budget.held()).toBeGreaterThan(0);
+    expect(budget.held()).toBeLessThanOrEqual(1024 * 1024);
+    expect((await f.store.usage.get("req_1"))?.bodyState).toBe("pending");
+    expect((await f.store.usage.get("req_2"))?.bodyState).toBe("pending");
+    expect(await f.store.bodies.get("req_1")).toBeNull();
+  } finally {
+    stalled.stop();
+    expect(budget.held()).toBe(0);
+    await cleanup(f.store, f.root);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Gating
@@ -647,19 +714,19 @@ test("marks a streamed response whose frames outgrew the sink as truncated", asy
 test("degrades a failed artifact write to a missing artifact, not a failed request", async () => {
   const logger: CaptureLogger = captureLogger("debug");
   const { store, root, call } = await harness({ allowed: true, settings: CAPTURE_ON, logger });
-  store.bodies.put = async () => {
+  store.bodies.publish = async () => {
     throw new Error("artifact volume is full");
   };
 
   const res = await call(ASK);
 
   expect(res.status).toBe(200);
-  expect(await store.bodies.get("req_1")).toBeNull();
+  await until("failed body", async () => (await store.usage.get("req_1"))?.bodyState === "failed");
   const rows = await store.usage.recent(10);
   expect(rows).toHaveLength(1);
   expect(rows[0]?.state).toBe("done");
   expect(rows[0]?.status).toBe(200);
-  expect(logger.records.some((r) => r.msg === "failed to persist request bodies")).toBe(true);
+  expect((await store.usage.get("req_1"))?.bodyState).toBe("failed");
   await cleanup(store, root);
 });
 
@@ -670,24 +737,10 @@ test("degrades a failed artifact write to a missing artifact, not a failed reque
  * store is handed one whose provider name alone is past the budget, because no
  * fixture provider produces a frame that large.
  */
-test("an artifact the store refuses as over budget costs the request nothing", async () => {
+test("a refused publication costs the request nothing", async () => {
   const logger: CaptureLogger = captureLogger("debug");
   const { store, root, call } = await harness({ allowed: true, settings: CAPTURE_ON, logger });
-  const put = store.bodies.put;
-  store.bodies.put = (artifact) =>
-    put({
-      ...artifact,
-      attempts: [
-        {
-          attempt: 1,
-          provider: "p".repeat(MAX_CAPTURED_BODY_BYTES),
-          request: null,
-          response: null,
-          streamChunks: null,
-          truncated: false,
-        },
-      ],
-    });
+  store.bodies.publish = async () => false;
 
   const res = await call(ASK);
 
@@ -696,10 +749,6 @@ test("an artifact the store refuses as over budget costs the request nothing", a
   const rows = await store.usage.recent(10);
   expect(rows).toHaveLength(1);
   expect(rows[0]?.state).toBe("done");
-  const failure = logger.records.find((r) => r.msg === "failed to persist request bodies");
-  expect(failure?.fields.reason).toBe(
-    `artifact exceeded ${MAX_CAPTURED_BODY_BYTES} bytes with every body omitted`,
-  );
   await cleanup(store, root);
 });
 
@@ -714,7 +763,7 @@ test("an artifact the store refuses as over budget costs the request nothing", a
  * everything — which is why this stream is slow by construction rather than by
  * luck.
  */
-test("waits for the capture drains before writing the artifact", async () => {
+test("takes a partial capture without waiting for a live drain", async () => {
   const encoder = new TextEncoder();
   const http: HttpClient = async () => ({
     status: 200,
@@ -734,7 +783,7 @@ test("waits for the capture drains before writing the artifact", async () => {
   expect((await call(ASK)).status).toBe(200);
 
   const artifact = await artifactOf(store, "req_1");
-  expect(String(artifact.attempts[0]?.response)).toContain("trailing_marker");
+  expect(String(artifact.attempts[0]?.response)).not.toContain("trailing_marker");
   await cleanup(store, root);
 });
 
@@ -795,6 +844,7 @@ test("keeps an upstream credential out of every artifact", async () => {
 
   expect((await call(ASK)).status).toBe(200);
 
+  await waitForBody(store, "req_1");
   const read = await store.bodies.get("req_1");
   expect(read?.artifact).not.toBeNull();
   expect(JSON.stringify(read?.artifact)).not.toContain(secret);
@@ -897,7 +947,7 @@ test("delivers the adapter the same bytes with capture on and off", async () => 
   expect(wrapped).toBe(bare);
   expect(wrapped).toBe(ANTHROPIC_FRAMES.join(""));
   await collector.settle();
-  expect(String(collector.take(null).attempts[0]?.response)).toBe(bare);
+  expect(rawText(collector.take(null).attempts[0]?.response)).toBe(bare);
 });
 
 /**
@@ -1033,7 +1083,7 @@ test("delivers the adapter's stream while the capture branch is stalled", async 
 
   release();
   await collector.settle();
-  expect(String(collector.take(null).attempts[0]?.response)).toBe(ANTHROPIC_FRAMES.join(""));
+  expect(rawText(collector.take(null).attempts[0]?.response)).toBe(ANTHROPIC_FRAMES.join(""));
 });
 
 /**
@@ -1085,7 +1135,7 @@ test("drains the capture branch past its byte cap rather than abandoning it", as
   const attempt = collector.take(null).attempts[0];
   expect(attempt?.truncated).toBe(true);
   // Read to the end, kept to the cap in bytes: the bytes past it were dropped, not stored.
-  expect(Buffer.byteLength(String(attempt?.response))).toBe(MAX_CAPTURED_BODY_BYTES);
+  expect(Buffer.byteLength(rawText(attempt?.response))).toBe(MAX_CAPTURED_BODY_BYTES);
 });
 
 /**
@@ -1292,7 +1342,7 @@ test("does not mark a buffered response under the cap as truncated", async () =>
 
   const attempt = collector.take(null).attempts[0];
   // The text as it arrived; parsing is the writer's, off the request path.
-  expect(attempt?.response).toBe('{"ok":true}');
+  expect(rawText(attempt?.response)).toBe('{"ok":true}');
   expect(attempt?.truncated).toBe(false);
 });
 
@@ -1324,7 +1374,7 @@ test("reassembles a multi-byte character split across chunks", async () => {
   await readAll(res.body);
   await collector.settle();
 
-  expect(String(collector.take(null).attempts[0]?.response)).toBe(text);
+  expect(rawText(collector.take(null).attempts[0]?.response)).toBe(text);
 });
 
 /**
@@ -1354,5 +1404,5 @@ test("flushes a trailing partial character when the stream ends mid-sequence", a
   await readAll(res.body);
   await collector.settle();
 
-  expect(String(collector.take(null).attempts[0]?.response)).toBe("ok�");
+  expect(rawText(collector.take(null).attempts[0]?.response)).toBe("ok�");
 });

@@ -46,8 +46,9 @@ export type CapturedParts = {
     attempt: number;
     provider: ProviderId;
     request: string | null;
-    response: string | null;
+    response: string | string[] | null;
     streamChunks: string[] | null;
+    captureStreamChunks?: boolean;
     truncated: boolean;
   }>;
   /** What the request failed with — code and status only — or null. */
@@ -77,6 +78,7 @@ type Attempt = {
   responseChunks: string[];
   /** Set once anything responded, so an attempt that never answered stays null. */
   responded: boolean;
+  draining: boolean;
   frames: string[] | null;
   truncated: boolean;
 };
@@ -151,21 +153,6 @@ function fitted(text: string, max: number): { text: string; bytes: number; cut: 
   // `encodeInto` stops before a character that would not fit whole.
   const { written } = encoder.encodeInto(text, room);
   return { text: new TextDecoder().decode(room.subarray(0, written)), bytes: written, cut: true };
-}
-
-/**
- * Splits a reassembled SSE body into its records.
- *
- * Network chunk boundaries fall anywhere, including mid-field, so the frames a
- * reader wants are not the chunks that arrived — they are the blank-line
- * separated records, which only exist once the body is reassembled. A body that
- * is not SSE splits into a single element, which is the honest answer for it.
- */
-function framesOf(text: string): string[] {
-  return text
-    .replaceAll("\r\n", "\n")
-    .split("\n\n")
-    .filter((frame) => frame.length > 0);
 }
 
 export function createBodyCollector(options: BodyCollectorOptions): BodyCollector {
@@ -243,6 +230,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
    * clean up.
    */
   const drain = async (stream: ReadableStream<Uint8Array>, entry: Attempt): Promise<void> => {
+    entry.draining = true;
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let kept = 0;
@@ -278,15 +266,9 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
       // a separate reader over a separate queue and is untouched by this.
       entry.truncated = true;
     } finally {
+      entry.draining = false;
       reader.releaseLock();
     }
-    if (options.captureStreamChunks && storing()) recordFrames(entry, entry.responseChunks.join(""));
-  };
-
-  const recordFrames = (entry: Attempt, text: string): void => {
-    if (!options.captureStreamChunks || !storing()) return;
-    const frames = framesOf(text);
-    if (reserve(frames.reduce((sum, frame) => sum + utf8Bytes(frame), 0))) entry.frames = frames;
   };
 
   /**
@@ -322,12 +304,12 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
       },
       text: async () => {
         const text = await res.text();
+        if (!storing()) return text;
         entry.responded = true;
         const kept = fitted(text, MAX_CAPTURED_BODY_BYTES);
         if (kept.cut) entry.truncated = true;
         if (reserve(kept.bytes)) {
           entry.responseChunks = [kept.text];
-          recordFrames(entry, kept.text);
         }
         return text;
       },
@@ -413,6 +395,7 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
           request: null,
           responseChunks: [],
           responded: false,
+          draining: false,
           frames: null,
           truncated: kept?.cut === true,
         };
@@ -445,9 +428,10 @@ export function createBodyCollector(options: BodyCollectorOptions): BodyCollecto
           attempt: entry.attempt,
           provider: entry.provider,
           request: entry.request,
-          response: entry.responded && abandoned === null ? entry.responseChunks.join("") : null,
+          response: entry.responded && abandoned === null ? entry.responseChunks : null,
           streamChunks: entry.frames,
-          truncated: entry.truncated,
+          captureStreamChunks: options.captureStreamChunks,
+          truncated: entry.truncated || entry.draining,
         })),
         error,
         abandoned,

@@ -19,7 +19,7 @@ import { Elysia } from "elysia";
 import { apiKeyHeader, authenticateApiKey } from "../auth/apiKey.ts";
 import { ApiKeyRateLimiter, RateLimitExceeded } from "../auth/rateLimit.ts";
 import { type CaptureBudget, createCaptureBudget } from "../bodies/budget.ts";
-import { toArtifact } from "../bodies/toArtifact.ts";
+import type { BodyWriterHost } from "../bodies/host.ts";
 import { type BodyCollector, createBodyCollector } from "../bodyCapture.ts";
 import {
   type DispatchDeps,
@@ -111,6 +111,7 @@ export type ProxyDeps = Omit<DispatchDeps, "snapshots" | "loadRegistry" | "coord
    * on their own.
    */
   captureBudget?: CaptureBudget;
+  bodyWriter?: Pick<BodyWriterHost, "enqueue">;
   /**
    * Announces finished requests to plugin handlers.
    *
@@ -147,6 +148,7 @@ type ResolvedProxyDeps = DispatchDeps &
     | "requestIdFor"
     | "rateLimiter"
     | "bodyLoggingAllowed"
+    | "bodyWriter"
     | "emit"
     | "broadcaster"
     | "telemetry"
@@ -600,13 +602,11 @@ async function handle(
     collector = captured;
     if (captured !== null) {
       /**
-       * Assembles and stores one request's whole story.
+       * Hands off one request's raw capture without waiting for the writer.
        *
        * Handed to `finishLog`, which is the single site that runs once per
-       * request id on both the success and the error path. `settle` waits for
-       * the capture drains here rather than anywhere on the commit path: by the
-       * time this runs the client's response is finished, so waiting costs the
-       * request nothing.
+       * request id on both the success and the error path. Live drains keep
+       * discarding after `take`; neither they nor persistence delay completion.
        *
        * `client.request` is the payload as it arrived, before RTK; every
        * `attempts[].request` is what actually went to a provider, after it.
@@ -623,13 +623,10 @@ async function handle(
        *
        * The row was begun or completed with `body_state = 'pending'`, so this
        * is also what moves it on: `ready` or `omitted` with the pointer row, or
-       * `failed`. **Transitional**: the artifact is parsed and sealed here, on
-       * the request's own thread, until the body writer takes it over. The
-       * pointer `put` writes is upserted again, identically, by `publish` on
-       * SQLite — the one transaction that moves the state with it.
+       * `failed`. Parsing, masking, sealing and file I/O belong to the worker;
+       * its host publishes the pointer/state transaction on the main connection.
        */
-      writeBodies = async (completed) => {
-        await captured.settle();
+      writeBodies = (completed) => {
         const parts = captured.take(
           // The code and status only. Everything a message could add here, the
           // artifact's own bodies already hold in their original form.
@@ -637,19 +634,11 @@ async function handle(
             ? null
             : { code: completed.errorCode, status: completed.status },
         );
-        try {
-          const written = await deps.store.bodies.put(toArtifact(parts));
-          await deps.store.bodies.publish({
-            ...written,
-            omitted: written.omitted || parts.abandoned !== null,
-          });
-        } catch (error) {
-          // Best effort: a store that refused the write may refuse this too,
-          // and then `sweepPending` fails the row an hour after completion.
-          await deps.store.bodies.fail(requestId).catch(() => undefined);
-          throw error;
-        } finally {
+        if (deps.bodyWriter === undefined) {
           deps.captureBudget.release(parts.reservedBytes);
+          void deps.store.bodies.fail(requestId).catch(() => {});
+        } else {
+          deps.bodyWriter.enqueue(parts);
         }
       };
     }

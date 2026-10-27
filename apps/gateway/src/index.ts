@@ -18,6 +18,8 @@ import { deriveKey, openStore } from "@omni/store";
 import { DASHBOARD_SDK_VERSION } from "@omnigateway/plugin-api";
 import { createApp } from "./app.ts";
 import { createCaptureBudget } from "./bodies/budget.ts";
+import { type BodyWriterHost, createBodyWriterHost } from "./bodies/host.ts";
+import { spawnBodyWriter } from "./bodies/spawn.ts";
 import { redisCoord } from "./coord/redis.ts";
 import { spawnExportWorker } from "./export/spawn.ts";
 import { createExportMetrics } from "./exportHost/metrics.ts";
@@ -148,6 +150,7 @@ async function main(): Promise<void> {
   const now = () => Date.now();
   // This process's name on every row it owns and every lease it holds.
   const nodeId = crypto.randomUUID();
+  let bodyWriter: BodyWriterHost | undefined;
   const store = await openStore({
     ...(config.clusterMode && config.databaseUrl !== null
       ? { url: config.databaseUrl }
@@ -156,6 +159,7 @@ async function main(): Promise<void> {
     logger,
     nodeId,
     dayOffsetMinutes: config.dayOffsetMinutes,
+    isPending: (path) => bodyWriter?.isPending(path) ?? false,
   });
 
   // A request still marked in-flight under a process nobody has heard from
@@ -185,6 +189,21 @@ async function main(): Promise<void> {
     logger,
   });
 
+  const captureBudget = createCaptureBudget(config.bodyCaptureBudgetBytes);
+  bodyWriter = createBodyWriterHost({
+    spawn: () =>
+      spawnBodyWriter({
+        databasePath: config.clusterMode ? null : config.databasePath,
+        databaseUrl: config.clusterMode ? config.databaseUrl : null,
+        encryptionKey: config.encryptionKey,
+      }),
+    bodies: store.bodies,
+    budget: captureBudget,
+    logger,
+    now,
+    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+    onDropped: (reason) => telemetry.registry.add("omni_bodies_dropped_total", { reason }),
+  });
   const http = nodeHttpClient({ logger, now, onResponseHead: telemetry.httpHead });
 
   // `OAUTH_PROVIDERS` is empty at this point and is filled by
@@ -383,7 +402,8 @@ async function main(): Promise<void> {
     telemetry,
     ...(config.metricsToken === null ? {} : { metricsToken: config.metricsToken }),
     bodyLoggingAllowed: config.bodyLoggingAllowed,
-    captureBudget: createCaptureBudget(config.bodyCaptureBudgetBytes),
+    captureBudget,
+    bodyWriter,
     dayOffsetMinutes: config.dayOffsetMinutes,
     plugins: loadedPlugins.plugins.map((plugin) => ({ id: plugin.id, routes: plugin.routes })),
     pluginUi: loadedPlugins.plugins,
@@ -445,6 +465,7 @@ async function main(): Promise<void> {
   // downstream should be able to observe it half-decided.
   const stopConsoleStream = startConsoleStream({ console, broadcaster, logger, now, nodeId });
   await exportWorker.start();
+  await bodyWriter.start();
 
   // Elysia defaults Bun's socket `idleTimeout` to 30 seconds, which is shorter
   // than a request is allowed to take: `requestDeadlineMs` defaults to 0, and a
@@ -471,6 +492,7 @@ async function main(): Promise<void> {
       // Posts `stop` and does not wait: the worker abandons its batch
       // uncommitted, and is terminated with the process if it is still there.
       () => exportWorker.stop(),
+      () => bodyWriter?.stop(),
       () => pluginEvents.stop(),
       // Before `stopServer`, and that ordering is the point rather than tidiness.
       // `app.stop()` is called without `true`, so it drains rather than severs:

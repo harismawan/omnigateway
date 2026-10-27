@@ -1136,17 +1136,24 @@ test("the classifier call is never captured, with body logging fully on", async 
     encryptionKey: await deriveKey("test-encryption-key-0123456789"),
   });
   try {
+    const captured: import("../../src/bodyCapture.ts").CapturedParts[] = [];
     const h = await guardrailHarness({
       store,
       settings: { bodyLoggingEnabled: true, bodyLoggingCaptureStreamChunks: true },
-      deps: { bodyLoggingAllowed: true },
+      deps: {
+        bodyLoggingAllowed: true,
+        bodyWriter: {
+          enqueue: (parts) => {
+            captured.push(parts);
+          },
+        },
+      },
     });
     expect((await h.call("anthropic")).status).toBe(200);
     expect(unwatched(h.targetCalls[0]?.http ?? transport)).not.toBe(transport);
     expect(unwatched(h.judgeCalls[0]?.http ?? (() => Promise.reject()))).toBe(transport);
-    for (let i = 0; i < 100 && (await store.bodies.get("req_1")) === null; i++) await Bun.sleep(5);
-    expect(await store.bodies.get("req_1")).not.toBeNull();
-    expect(await store.bodies.get("req_2")).toBeNull();
+    expect(captured.map((parts) => parts.requestId)).toEqual(["req_1"]);
+    expect(captured[0]?.client.request).toContain("messages");
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });

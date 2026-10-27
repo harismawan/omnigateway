@@ -2,10 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { noopLogger } from "@omni/ir";
 import { ADAPTERS, type HttpClient } from "@omni/providers";
 import { createStore, deriveKey, type Store } from "@omni/store";
 import { seedApiKey, seedCredential, target, virtualModel } from "@omni/testkit";
 import { type CaptureBudget, createCaptureBudget } from "../../src/bodies/budget.ts";
+import { createBodyWriterHost } from "../../src/bodies/host.ts";
+import { spawnBodyWriter } from "../../src/bodies/spawn.ts";
 import { proxyRoutes } from "../../src/routes/proxy.ts";
 import { createTelemetry, type Telemetry } from "../../src/telemetry/index.ts";
 
@@ -148,6 +151,21 @@ async function harness(options: {
     }),
   );
   const { raw } = await seedApiKey(store, { label: "k" });
+  const budget = options.budget ?? createCaptureBudget(512 * MIB);
+  const writer = createBodyWriterHost({
+    spawn: () =>
+      spawnBodyWriter({
+        databasePath: store.databasePath,
+        databaseUrl: null,
+        encryptionKey: "test-encryption-key-0123456789",
+      }),
+    bodies: store.bodies,
+    budget,
+    logger: noopLogger,
+    now: () => NOW,
+    timers: { setTimeout, clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+  });
+  await writer.start();
   let n = 0;
   const app = proxyRoutes({
     store,
@@ -158,7 +176,8 @@ async function harness(options: {
     refresh: async (c) => await c.secrets(),
     requestId: () => `req_${++n}`,
     bodyLoggingAllowed: options.capture,
-    ...(options.budget === undefined ? {} : { captureBudget: options.budget }),
+    bodyWriter: writer,
+    captureBudget: budget,
     ...(options.telemetry === undefined ? {} : { telemetry: options.telemetry }),
   });
   return {
@@ -172,6 +191,8 @@ async function harness(options: {
         }),
       ),
     cleanup: async () => {
+      await writer.pause();
+      writer.stop();
       store.close();
       await rm(root, { recursive: true, force: true });
     },
@@ -364,7 +385,7 @@ test("a captured request is pending while in flight and ready once its body is w
     const sent = await res.text();
 
     expect(res.status).toBe(200);
-    expect((await h.store.usage.get("req_1"))?.bodyState).toBe("ready");
+    expect(await settledState(h.store, "req_1")).toBe("ready");
     const artifact = await artifactOf(h.store, "req_1");
     // The response captured is the string the client was sent, parsed once by the writer.
     expect(artifact.client.response).toEqual(JSON.parse(sent));
@@ -379,20 +400,24 @@ test("the reservation is held until the write and released after it, even when i
   const budget = watched(64 * MIB);
   const h = await harness({ http: streaming(anthropicFrames(1, 64)), capture: true, budget });
   try {
-    const heldAtPut: number[] = [];
-    const put = h.store.bodies.put;
-    h.store.bodies.put = async (artifact) => {
-      heldAtPut.push(budget.held());
-      if (heldAtPut.length === 2) throw new Error("artifact volume is full");
-      return put(artifact);
+    const heldAtPublish: number[] = [];
+    const publish = h.store.bodies.publish;
+    h.store.bodies.publish = async (row) => {
+      heldAtPublish.push(budget.held());
+      if (heldAtPublish.length === 2) throw new Error("artifact volume is full");
+      return publish(row);
     };
 
     expect((await h.call(ASK)).status).toBe(200);
+    expect(await settledState(h.store, "req_1")).toBe("ready");
     expect((await h.call(ASK)).status).toBe(200);
+    expect(await settledState(h.store, "req_2")).toBe("failed");
 
     // Held while the write ran: at least the request text.
-    expect(heldAtPut).toHaveLength(2);
-    for (const held of heldAtPut) expect(held).toBeGreaterThanOrEqual(JSON.stringify(ASK).length);
+    expect(heldAtPublish).toHaveLength(2);
+    for (const held of heldAtPublish)
+      expect(held).toBeGreaterThanOrEqual(JSON.stringify(ASK).length);
+    for (let i = 0; i < 100 && budget.held() > 0; i++) await Bun.sleep(5);
     expect(budget.held()).toBe(0);
     expect((await h.store.usage.get("req_1"))?.bodyState).toBe("ready");
     expect((await h.store.usage.get("req_2"))?.bodyState).toBe("failed");
@@ -428,6 +453,7 @@ test("a request refused before routing is still captured, as the text that arriv
     const res = await h.call("{not json");
     expect(res.status).toBe(500);
     const sent = await res.text();
+    expect(await settledState(h.store, "req_1")).toBe("ready");
     const row = await h.store.usage.get("req_1");
     expect(row?.state).toBe("done");
     expect(row?.bodyState).toBe("ready");

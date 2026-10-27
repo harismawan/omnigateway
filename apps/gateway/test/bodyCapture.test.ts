@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import type { HttpClient, HttpRequest, HttpResponse } from "@omni/providers";
-import { type CaptureBudget, createCaptureBudget } from "../src/bodies/budget.ts";
-import { toArtifact } from "../src/bodies/toArtifact.ts";
+import { createCaptureBudget } from "../src/bodies/budget.ts";
 import {
   type BodyCollectorOptions,
   createBodyCollector,
@@ -23,7 +22,41 @@ test("take transfers ownership only once, including while a drain is live", asyn
   budget.release(parts.reservedBytes);
   expect(budget.held()).toBe(0);
 });
-const bytesOf = (text: string): number => Buffer.byteLength(text);
+
+test("a live drain discards after handoff without changing returned chunks or reserving again", async () => {
+  const { collector, budget } = collectorWith({ captureStreamChunks: true });
+  let source: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const stream = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      source = controller;
+    },
+  });
+  const response = await collector.wrap(async () => ({
+    status: 200,
+    headers: new Headers(),
+    body: stream,
+    text: async () => "",
+  }))(wireRequest("wire"));
+  const reader = response.body?.getReader();
+  source?.enqueue(encoder.encode("first"));
+  await reader?.read();
+  await Bun.sleep(0);
+  const parts = collector.take(null);
+  const held = budget.held();
+  source?.enqueue(encoder.encode("later"));
+  source?.close();
+  await reader?.read();
+  await collector.settle();
+  expect(rawText(parts.attempts[0]?.response)).toBe("first");
+  expect(parts.attempts[0]?.truncated).toBe(true);
+  expect(budget.held()).toBe(held);
+  budget.release(parts.reservedBytes);
+  expect(budget.held()).toBe(0);
+  expect(() => collector.take(null)).toThrow("already taken");
+});
+const rawText = (text: string | string[] | null | undefined): string =>
+  Array.isArray(text) ? text.join("") : (text ?? "");
+const bytesOf = (text: string | string[]): number => Buffer.byteLength(rawText(text));
 
 function collectorWith(overrides: Partial<BodyCollectorOptions> = {}) {
   const budget = overrides.budget ?? createCaptureBudget(Number.MAX_SAFE_INTEGER);
@@ -107,7 +140,7 @@ test("keeps every wire request and response as raw text", async () => {
 
   const [attempt] = collector.take(null).attempts;
   expect(attempt?.request).toBe(sent);
-  expect(attempt?.response).toBe(answer);
+  expect(rawText(attempt?.response)).toBe(answer);
   expect(attempt?.provider).toBe("anthropic");
   expect(attempt?.attempt).toBe(1);
 });
@@ -176,7 +209,7 @@ test("drains a wire response past the cap, keeping exactly the cap in bytes", as
   expect(attempt?.truncated).toBe(true);
   expect(bytesOf(attempt?.response ?? "")).toBeLessThanOrEqual(MAX_CAPTURED_BODY_BYTES);
   expect(bytesOf(attempt?.response ?? "")).toBeGreaterThan(MAX_CAPTURED_BODY_BYTES - 2);
-  expect(attempt?.response?.includes("\uFFFD")).toBe(false);
+  expect(rawText(attempt?.response).includes("\uFFFD")).toBe(false);
   // What is held is what was kept, not what was read.
   expect(parts.reservedBytes).toBe(budget.held());
   expect(parts.reservedBytes).toBeLessThanOrEqual(MAX_CAPTURED_BODY_BYTES + 2);
@@ -199,7 +232,7 @@ test("caps malformed decoded UTF-8 text rather than its smaller source bytes", a
   const parts = collector.take(null);
   const text = parts.attempts[0]?.response ?? "";
   expect(bytesOf(text)).toBe(MAX_CAPTURED_BODY_BYTES - 1);
-  expect(text.endsWith("\uFFFD")).toBe(true);
+  expect(rawText(text).endsWith("\uFFFD")).toBe(true);
   expect(parts.attempts[0]?.truncated).toBe(true);
   expect(parts.reservedBytes).toBe(bytesOf(text));
   expect(budget.held()).toBe(parts.reservedBytes);
@@ -220,7 +253,7 @@ test("decoder flush cannot push retained text past the side cap", async () => {
 
   const parts = collector.take(null);
   expect(bytesOf(parts.attempts[0]?.response ?? "")).toBe(MAX_CAPTURED_BODY_BYTES - 2);
-  expect(parts.attempts[0]?.response?.endsWith("x")).toBe(true);
+  expect(rawText(parts.attempts[0]?.response).endsWith("x")).toBe(true);
   expect(parts.attempts[0]?.truncated).toBe(true);
   expect(parts.reservedBytes).toBe(MAX_CAPTURED_BODY_BYTES - 2);
   expect(budget.held()).toBe(parts.reservedBytes);
@@ -318,7 +351,7 @@ test.each([
   expect(adapterBytes).toEqual(new Uint8Array(chunks.flat()));
   const parts = collector.take(null);
   expect(parts.abandoned).toBeNull();
-  expect(parts.attempts[0]?.response).toBe(text);
+  expect(rawText(parts.attempts[0]?.response)).toBe(text);
   expect(parts.attempts[0]?.truncated).toBe(false);
   expect(parts.reservedBytes).toBe(bytes);
   expect(bytesOf(parts.attempts[0]?.response ?? "")).toBe(parts.reservedBytes);
@@ -385,15 +418,8 @@ test("reserves every kept byte against the budget as it arrives", async () => {
   const http = collector.wrap(async () => streamed([encoder.encode(answer)]).response);
   await readAll((await http(wireRequest(wire))).body);
   await collector.settle();
-  // The response once as text and once as frames, which is the doubling the
-  // stream-chunk setting is documented to cost.
-  expect(budget.held()).toBe(
-    bytesOf(request) +
-      bytesOf(wire) +
-      bytesOf(answer) +
-      bytesOf("data: one") +
-      bytesOf("data: two"),
-  );
+  // Frames are derived in the worker, not duplicated on the main thread.
+  expect(budget.held()).toBe(bytesOf(request) + bytesOf(wire) + bytesOf(answer));
 
   collector.frame("event: x\ndata: {}");
   collector.captureResponse("{}");
@@ -401,7 +427,7 @@ test("reserves every kept byte against the budget as it arrives", async () => {
   const parts = collector.take(null);
   // The reservation moves to the parts: whoever writes them releases it.
   expect(parts.reservedBytes).toBe(total);
-  expect(parts.attempts[0]?.streamChunks).toEqual(["data: one", "data: two"]);
+  expect(parts.attempts[0]?.captureStreamChunks).toBe(true);
 });
 
 test("replacing the client response gives back the bytes of the one it replaced", () => {
@@ -471,45 +497,4 @@ test("bytes arriving after the parts were taken are neither stored nor reserved"
   expect(budget.held()).toBe(3);
   expect(parts.reservedBytes).toBe(3);
   expect(parts.client.response).toBeNull();
-});
-
-// ---------------------------------------------------------------------------
-// The transitional artifact
-// ---------------------------------------------------------------------------
-
-test("toArtifact parses JSON text and keeps anything else as the raw string", () => {
-  const { collector } = collectorWith();
-  collector.captureRequest('{"model":"fast"}');
-  collector.frame("event: a\ndata: 1");
-  const artifact = toArtifact(collector.take(null));
-  expect(artifact.schemaVersion).toBe(1);
-  expect(artifact.client.request).toEqual({ model: "fast" });
-  expect(artifact.client.response).toEqual(["event: a\ndata: 1"]);
-
-  const raw = collectorWith().collector;
-  raw.captureRequest("not json");
-  raw.captureResponse("");
-  const rawArtifact = toArtifact(raw.take(null));
-  expect(rawArtifact.client.request).toBe("not json");
-  expect(rawArtifact.client.response).toBeNull();
-});
-
-test("an abandoned capture becomes an omission that keeps the attempt frame and the error", async () => {
-  const budget: CaptureBudget = createCaptureBudget(4);
-  const { collector } = collectorWith({ budget });
-  await collector.wrap(async () => streamed([]).response)(wireRequest("too large"));
-  const artifact = toArtifact(collector.take({ code: "UPSTREAM", status: 502 }));
-  const marker = { omitted: true, reason: "capture budget exhausted", serializedBytes: null };
-  expect(artifact.client).toEqual({ request: marker, response: marker, truncated: true });
-  expect(artifact.attempts).toEqual([
-    {
-      attempt: 1,
-      provider: "anthropic",
-      request: marker,
-      response: marker,
-      streamChunks: null,
-      truncated: true,
-    },
-  ]);
-  expect(artifact.error).toEqual({ code: "UPSTREAM", status: 502 });
 });
