@@ -805,12 +805,7 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
   }
 
   async function bodyAllowed(h: Handles, row: RequestLog, signal: AbortSignal): Promise<boolean> {
-    if (
-      !gates.bodyLoggingAllowed ||
-      gates.bodyLoggingEnabled === false ||
-      !deps.exportBodiesAllowed ||
-      row.apiKeyId === null
-    )
+    if (!gates.bodyLoggingAllowed || !deps.exportBodiesAllowed || row.apiKeyId === null)
       return false;
     const settings = await guard(h.reader.settings(), signal);
     if (!settings.bodyLoggingEnabled) return false;
@@ -872,6 +867,14 @@ export function createExportLoop(deps: LoopDeps): ExportLoop {
               now: deps.now,
             });
           } else if (client && sender.bodySegment) {
+            // Refuse impossible metadata caps before building segment slices.
+            // This also avoids an unbounded count of tiny slices for a cap of1.
+            const base = {
+              ...record,
+              body: { state: record.body?.state ?? "included", parts: { request: 1, response: 1 } },
+            };
+            if (requestBytes(sender, sender.part(base)) > cap)
+              return { kind: "failed", status: 413, error: "metadata exceeds request limit" };
             const request = bodyCuts(sender, record, "request", client.request, cap);
             const response = bodyCuts(sender, record, "response", client.response, cap);
             record.body = {

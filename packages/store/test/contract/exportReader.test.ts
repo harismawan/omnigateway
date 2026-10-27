@@ -54,6 +54,8 @@ forEachStore((backend) => {
       expect(probe?.plaintextBytes).toBeGreaterThan(100);
       expect(envelope?.truncated).toBe(true);
       expect(envelope && (await r.bodyText(envelope))).toContain('"hello":"world"');
+      expect(await r.bodyEnvelope("artifact", 1)).toBeNull();
+      if (envelope) expect(await r.bodyText(envelope, 1)).toBeNull();
       expect(await r.bodyProbe("absent")).toBeNull();
       expect(await r.bodyEnvelope("absent")).toBeNull();
       expect(await r.keyBodyOptOut("absent")).toBe(true);

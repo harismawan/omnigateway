@@ -97,6 +97,7 @@ type HarnessOptions = {
   /** The process's quota operation, for the one route that drives it. */
   quota?: AdminDeps["quota"];
   bodyWriter?: AdminDeps["bodyWriter"];
+  onBodyGatesChanged?: AdminDeps["onBodyGatesChanged"];
 };
 
 async function harness({
@@ -110,6 +111,7 @@ async function harness({
   logger,
   quota,
   bodyWriter,
+  onBodyGatesChanged,
 }: HarnessOptions = {}) {
   const store = provided ?? (await memoryStore());
   const admin = createAdminAuth(store, { now: () => now, sessionTtlMs: SESSION_TTL_MS });
@@ -132,6 +134,7 @@ async function harness({
   const topics: string[] = [];
 
   const app = adminRoutes({
+    ...(onBodyGatesChanged ? { onBodyGatesChanged } : {}),
     ...(bodyWriter === undefined ? {} : { bodyWriter }),
     store,
     admin,
@@ -808,6 +811,24 @@ test("settings round-trip and reject an unknown weight", async () => {
     (await call("PUT", "/api/settings", { ...next, weights: { ...next.weights, bogus: 1 } }))
       .status,
   ).toBe(400);
+});
+
+test("settings changes resend current body gates only after a successful write", async () => {
+  const gates: boolean[] = [];
+  const h = await harness({ onBodyGatesChanged: (enabled) => gates.push(enabled) });
+  const current = (await (await h.call("GET", "/api/settings")).json()) as {
+    settings: Record<string, unknown>;
+  };
+  expect(
+    (await h.call("PUT", "/api/settings", { ...current.settings, bodyLoggingEnabled: true }))
+      .status,
+  ).toBe(200);
+  expect(gates).toEqual([true]);
+  expect(
+    (await h.call("PUT", "/api/settings", { ...current.settings, bodyLoggingEnabled: "invalid" }))
+      .status,
+  ).toBe(400);
+  expect(gates).toEqual([true]);
 });
 
 /**

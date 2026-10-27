@@ -6,6 +6,17 @@ import { settingsSchema } from "../src/schemas.ts";
 
 const base = { OMNI_ENCRYPTION_KEY: "a-key-that-is-long-enough-000000" };
 
+test("export body budget defaults192MiB and accepts only positive safe byte counts", () => {
+  expect(loadConfig(base).exportBodyBudgetBytes).toBe(201326592);
+  expect(loadConfig({ ...base, OMNI_EXPORT_BODY_BUDGET_BYTES: "4096" }).exportBodyBudgetBytes).toBe(
+    4096,
+  );
+  for (const value of ["0", "-1", "1.5", "no", "9007199254740992"])
+    expect(() => loadConfig({ ...base, OMNI_EXPORT_BODY_BUDGET_BYTES: value })).toThrow(
+      "OMNI_EXPORT_BODY_BUDGET_BYTES",
+    );
+});
+
 test("request deadline accepts zero and rejects negative values", () => {
   expect(
     settingsSchema.parse({ ...DEFAULT_SETTINGS, requestDeadlineMs: 0 }).requestDeadlineMs,

@@ -29,7 +29,13 @@ export function createBodyAttacher(limit: number) {
         record.body = { state: "unavailable" };
         if (row.bodyState === "pending" || row.bodyState === "failed")
           return { record, release: slot.release };
-        const probe = await reader.bodyProbe(row.id);
+        let probe: Awaited<ReturnType<ExportReader["bodyProbe"]>>;
+        try {
+          probe = await reader.bodyProbe(row.id);
+        } catch {
+          signal.throwIfAborted();
+          return { record, release: slot.release };
+        }
         signal.throwIfAborted();
         if (!probe) return { record, release: slot.release };
         const cap = sender.maxRequestBytes ?? sender.limits.bytes;
