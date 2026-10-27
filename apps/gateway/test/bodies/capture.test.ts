@@ -201,9 +201,6 @@ async function harness(options: {
 
 const ASK = { model: "fast", max_tokens: 100, messages: [{ role: "user", content: "hi" }] };
 
-/** Event-loop turns with nothing new before a release's window is closed. */
-const QUIET = 50;
-
 /** Waits for a request's body state to leave `pending`, which happens after its stream ends. */
 async function settledState(store: Store, id: string): Promise<string | null | undefined> {
   for (let i = 0; i < 400; i++) {
@@ -264,20 +261,15 @@ test("concurrent long streams never hold more than the budget, and each is aband
 /**
  * "Not slowed", measured without a clock.
  *
- * The upstream releases one frame at a time, and after each release the test
- * lets the event loop run until it has gone quiet — `QUIET` turns with no new
- * client bytes — writing down which client bytes arrived in that window. A
- * capture that held the client's bytes back — buffering them, waiting on its
- * own branch, pacing delivery to anything but the upstream — shows up as a
- * frame landing after a later release than it does in a run that captures
- * nothing, or not at all. The two transcripts must be identical, and the bytes
- * the client reads must be too.
+ * Release only enough upstream frames to produce the next client event, then
+ * wait for that event before releasing any more. A capture that buffers until
+ * a later frame (or EOF) deadlocks this handshake and fails, rather than being
+ * mistaken for an idle event loop. Exact transcripts and bytes must still match.
  *
- * Quiet rather than a fixed count of turns: setting capture up (a settings
- * read, the request text) costs turns before the head that are not the stream,
- * and a fixed window let them spill into the next release under load.
+ * Authentication and setup may wait on real I/O for arbitrarily many idle
+ * turns. Silence is not evidence that an upstream frame reached the route.
  */
-test("a stream whose capture is abandoned reaches the client byte-identical and on the same turns", async () => {
+test("a stream whose capture is abandoned delivers each client event before more upstream input", async () => {
   const frames = anthropicFrames(12, 16 * KIB);
 
   async function transcript(
@@ -298,25 +290,10 @@ test("a stream whose capture is abandoned reaches the client byte-identical and 
     const log: string[] = [];
     const chunks: string[] = [];
     const pending = h.call({ ...ASK, stream: true });
-    // The head needs the first frames to commit, so it lands inside a release's window.
-    let res: Response | null = null;
-    void pending.then((r) => {
-      res = r;
-    });
-    const turn = () => new Promise((resolve) => setImmediate(resolve));
-    /** Runs turns until `QUIET` pass with nothing new reaching the client (or a head). */
-    const quiet = async () => {
-      let seen = -1;
-      for (let still = 0, spent = 0; still < QUIET && spent < 10_000; spent++) {
-        const now = log.length + (res === null ? 0 : 1);
-        still = now === seen ? still + 1 : 0;
-        seen = now;
-        await turn();
-      }
-    };
+    let delivered = 0;
+    let changed = Promise.withResolvers<void>();
     const reading = (async () => {
-      while (res === null) await turn();
-      const reader = (res as Response).body?.getReader();
+      const reader = (await pending).body?.getReader();
       if (reader === undefined) throw new Error("expected a stream");
       const decoder = new TextDecoder();
       while (true) {
@@ -325,16 +302,49 @@ test("a stream whose capture is abandoned reaches the client byte-identical and 
         const text = decoder.decode(value, { stream: true });
         chunks.push(text);
         log.push(`client ${text.match(/^event: (\w+)/)?.[1] ?? "?"}`);
+        delivered++;
+        changed.resolve();
+        changed = Promise.withResolvers<void>();
       }
     })();
-    for (let i = 0; !upstream.done(); i++) {
+    const release = (i: number) => {
       log.push(`release ${i}`);
       upstream.release();
-      await quiet();
+    };
+    const received = async (count: number) => {
+      const timeout = setTimeout(
+        () => changed.reject(new Error(`client stalled before event ${count}`)),
+        2000,
+      );
+      try {
+        while (delivered < count) await changed.promise;
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+    try {
+      // Dispatch commits on the first text delta, not message_start alone.
+      for (let i = 0; i < 3; i++) release(i);
+      await received(3);
+      // Each remaining text delta and block stop must arrive without later input.
+      for (let i = 3; i < frames.length - 2; i++) {
+        release(i);
+        await received(i + 1);
+      }
+      // The decoder emits terminal usage/stop together on message_stop.
+      release(frames.length - 2);
+      release(frames.length - 1);
+      upstream.release();
+      await received(frames.length);
+      await reading;
+      return { log, bytes: chunks.join(""), store: h.store, cleanup: h.cleanup };
+    } catch (error) {
+      while (!upstream.done()) upstream.release();
+      upstream.release();
+      await reading;
+      await h.cleanup();
+      throw error;
     }
-    upstream.release();
-    await reading;
-    return { log, bytes: chunks.join(""), store: h.store, cleanup: h.cleanup };
   }
 
   const bare = await transcript(false);
@@ -344,7 +354,7 @@ test("a stream whose capture is abandoned reaches the client byte-identical and 
   try {
     expect(captured.bytes).toBe(bare.bytes);
     expect(captured.log).toEqual(bare.log);
-    // Every delta reached the client in the window its release opened.
+    // Every delta reached the client before the next upstream release.
     const deltas = bare.log.filter((line) => line === "client content_block_delta").length;
     expect(deltas).toBe(12);
 
