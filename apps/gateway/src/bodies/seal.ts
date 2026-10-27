@@ -34,7 +34,7 @@ type Deps = {
 export function createBodyWriter(deps: Deps) {
   const assemblies = new Map<string, Assembly>();
   const approvals = new Map<string, { path: string; resolve(): void }>();
-  const publications = new Map<string, (accepted: boolean) => void>();
+  const publications = new Map<string, (accepted: boolean | null) => void>();
   let chain = Promise.resolve();
   let paused = false;
 
@@ -149,15 +149,17 @@ export function createBodyWriter(deps: Deps) {
         final = target;
         staging = null;
       } else {
-        if (!(await deps.bodies?.writeRow({ ...row, bytes: sealed.bytes })))
-          throw new Error("body write refused");
+        if (!(await deps.bodies?.writeRow({ ...row, bytes: sealed.bytes }))) {
+          deps.post({ type: "unowned", requestId: meta.requestId, generation: meta.generation });
+          return;
+        }
       }
       if (paused) throw new Error("writer paused");
-      const accepted = await new Promise<boolean>((resolve) => {
+      const accepted = await new Promise<boolean | null>((resolve) => {
         publications.set(meta.requestId, resolve);
         deps.post({ type: "written", ...row });
       });
-      if (!accepted && final !== null) await unlink(final);
+      if (accepted === false && final !== null) await unlink(final);
       final = null;
       deps.post({ type: "cleaned", requestId: meta.requestId, generation: meta.generation });
     } catch {
@@ -207,8 +209,17 @@ export function createBodyWriter(deps: Deps) {
       }
       if (message.type === "meta") {
         if (paused) return;
-        const assembly = assemblies.get(message.requestId);
+        let assembly = assemblies.get(message.requestId);
         assemblies.delete(message.requestId);
+        if (message.abandoned !== null) {
+          assembly?.parts.clear();
+          assembly = undefined;
+          deps.post({
+            type: "discarded",
+            requestId: message.requestId,
+            generation: message.generation,
+          });
+        }
         chain = chain.then(() => (paused ? undefined : write(message, assembly)));
         return chain;
       }
@@ -217,7 +228,9 @@ export function createBodyWriter(deps: Deps) {
         assemblies.clear();
         // Abandon the current staged/publication wait before closing handles.
         for (const approval of approvals.values()) approval.resolve();
-        for (const resolve of publications.values()) resolve(false);
+        // A main-connection commit may have happened but not replied. Unknown
+        // disposition preserves the final file; orphan sweep reconciles later.
+        for (const resolve of publications.values()) resolve(null);
         await chain;
         await deps.close?.();
         if (message.type === "pause") deps.post({ type: "paused" });

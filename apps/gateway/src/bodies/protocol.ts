@@ -44,4 +44,6 @@ export type WorkerMessage =
   | ({ type: "written"; generation: number } & BodyPublication)
   | { type: "write-failed"; requestId: string; generation: number }
   | { type: "cleaned"; requestId: string; generation: number }
+  | { type: "discarded"; requestId: string; generation: number }
+  | { type: "unowned"; requestId: string; generation: number }
   | { type: "paused" };

@@ -22,7 +22,13 @@ export type BodyWriterHost = {
   generation(): number;
 };
 type DropReason = "budget" | "backlog" | "writer_crash" | "restore";
-type Entry = { parts: CapturedParts; generation: number; slices: number; path: string | null };
+type Entry = {
+  parts: CapturedParts;
+  generation: number;
+  slices: number;
+  path: string | null;
+  publishing: boolean;
+};
 type Deps = {
   spawn(): HostedWorker<MainMessage, WorkerMessage>;
   bodies: Pick<BodyRepo, "publish" | "fail">;
@@ -118,7 +124,14 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     failPending(entry.parts.requestId);
   }
   const clear = (reason: DropReason): void => {
-    for (const entry of entries.values()) fail(entry, reason);
+    for (const entry of entries.values()) {
+      // Unknown publication decisions are not refusals: preserve owner bytes
+      // and sweep protection until actual thread close, without failing its row.
+      if (entry.publishing) {
+        deps.onDropped?.(reason);
+        release(entry);
+      } else fail(entry, reason);
+    }
     queue.length = 0;
   };
   const worker = createWorkerHost<MainMessage, WorkerMessage>({
@@ -126,6 +139,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
     name: "body writer",
     lifecycle: { pause: { type: "pause" }, resume: { type: "resume" }, stop: { type: "stop" } },
     onUnavailable: () => clear(dropping),
+    onExit: () => pending.clear(),
     onMessage(message) {
       if (message.type === "paused") return;
       const entry = entries.get(message.requestId);
@@ -145,6 +159,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
         pending.add(message.relPath);
         worker.post({ type: "publish-ok", requestId: message.requestId, relPath: message.relPath });
       } else if (message.type === "written") {
+        entry.publishing = true;
         const publication = (async () => {
           try {
             const accepted = await deps.bodies.publish(message);
@@ -172,6 +187,11 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
         })();
         publications.add(publication);
         void publication.finally(() => publications.delete(publication));
+      } else if (message.type === "discarded") {
+        deps.budget.release(entry.parts.reservedBytes);
+        entry.parts.reservedBytes = 0;
+      } else if (message.type === "unowned") {
+        release(entry);
       } else if (message.type === "cleaned") {
         if (entry.path !== null) pending.delete(entry.path);
         release(entry);
@@ -199,8 +219,6 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
           }
           const size = Buffer.byteLength(chunk);
           if (!deps.budget.reserve(size)) {
-            deps.budget.release(p.reservedBytes);
-            p.reservedBytes = 0;
             p.abandoned = "budget";
             p.client.request = null;
             p.client.response = null;
@@ -270,7 +288,7 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
         failPending(parts.requestId);
         return;
       }
-      const entry: Entry = { parts, generation, slices: 0, path: null };
+      const entry: Entry = { parts, generation, slices: 0, path: null, publishing: false };
       entries.set(parts.requestId, entry);
       queue.push(entry);
       // No encoding, parsing, or worker messaging on the request's stack.
