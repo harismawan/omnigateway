@@ -29,3 +29,11 @@ All store commands below used `OMNI_TEST_DATABASE_URL=postgres://postgres:omni@1
 ## Self-review / concerns
 
 No control-side alias merge, no cap/existence/delete preflight replacing locked checks, no new store methods/forwarders/migrations needed. Explicit references include inactive drafts and expired/revoked keys, not inherited effective membership. `listPrompts` reads prompt details for estimates but routing remains on existing `listActive`, never histories. Public signatures match brief. Only concerns are the two named broader-suite integration gaps above; affected suites and checks pass.
+
+## Integration follow-up — DONE
+
+- Classification correction: the two failures above are **current-branch integration regressions** from Tasks 1–2, not pre-existing-main defects. Both are closed here; earlier scope deferral is superseded.
+- Smallest corrections: `Dockerfile` copies the `packages/prompts` manifest immediately after ponytail, following existing workspace manifest ordering; `apps/gateway/test/e2e/clientSurface.test.ts` includes the legitimate raw own-key `prompts` field in its exact-key fixture. No production-summary redesign, effective-summary work, HTTP/UI changes, subagents or push.
+- RED evidence: existing `task-3-suite.log` names both exact failures (missing COPY and extra legitimate prompts key).
+- GREEN: `bun test scripts/test/dockerManifests.test.ts apps/gateway/test/e2e/clientSurface.test.ts` → **29 pass, 0 fail, 152 assertions**, `task-3-integration-green.log`.
+- Checks rerun: `bun run typecheck`, `bun run lint`, `bun run check:claims`, `bun run check:dead` all exit 0; logs `task-3-integration-{types,lint,claims,dead}.log`. `git diff --check` clean. No remaining Task 3 concerns; full-root rerun deferred to final-task gate as requested.

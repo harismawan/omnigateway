@@ -230,6 +230,7 @@ test("the summary carries the key's own model overrides, and nothing beside them
       "limits",
       "modelAllowlist",
       "prefix",
+      "prompts",
       "revokedAt",
       "smartRouting",
     ].sort(),

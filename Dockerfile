@@ -16,6 +16,7 @@ COPY packages/dashboard-sdk/package.json packages/dashboard-sdk/
 COPY packages/ir/package.json packages/ir/
 COPY packages/plugin-api/package.json packages/plugin-api/
 COPY packages/ponytail/package.json packages/ponytail/
+COPY packages/prompts/package.json packages/prompts/
 COPY packages/providers/package.json packages/providers/
 COPY packages/ratelimit/package.json packages/ratelimit/
 COPY packages/router/package.json packages/router/
