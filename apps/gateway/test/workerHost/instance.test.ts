@@ -103,6 +103,26 @@ test("typed messages reach only the current worker; retiring and stale messages 
   expect(() => s.host.post({ command: "work" })).toThrow("test worker not running");
 });
 
+for (const finalFirst of [false, true]) {
+  test(`immediate stop terminates recovery's live retiring thread${finalFirst ? " after final stop" : ""}`, async () => {
+    const s = setup({ stopExits: false, terminateExits: false });
+    await s.host.start();
+    const old = s.last();
+    await s.host.recover();
+    if (finalFirst) s.host.stop();
+    expect(old.terminated).toBe(false);
+    s.host.stop(true);
+    expect(old.terminated).toBe(true);
+    expect(s.box.exits).toBe(0);
+    expect(s.host.state()).toBe("stopped");
+    old.close();
+    await s.clock.advance(60000);
+    expect(s.box.exits).toBe(1);
+    expect(s.workers).toHaveLength(1);
+    expect(s.clock.pending()).toBe(0);
+  });
+}
+
 test("restart backoff doubles to 60 seconds and a ten-minute life resets it", async () => {
   const s = setup();
   await s.host.start();

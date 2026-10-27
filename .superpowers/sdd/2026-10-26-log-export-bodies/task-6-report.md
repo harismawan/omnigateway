@@ -148,3 +148,40 @@ recover(): Promise<void>;
 No other public signature changes. `BodyWriterHost.drain()` now honors its five-second bound rather than waiting indefinitely for DB work; `ShutdownDeps.drain` is bounded by the outer process deadline and bypassed on force. `pause()` retains actual outstanding DB operations as a persistent swap barrier but bounds each attempt; `resume(true)` guards against bypassing it.
 
 Self-review: all I1–I4 verified at their actual async boundaries. No overflow metadata/ids or unbounded failure side channel introduced. Forced exit may leave pending rows/orphans, explicitly accepted by controller ruling; unknown outcome never authorizes deleting committed files. No remaining concerns identified in this round.
+
+## Fix round 2 — R1/I1 stable barrier and R2 retired-thread deadline
+
+Status: DONE. Base `ac6e91c1`. Read `task-6-rereview-1.md` in full. Only R1 and R2 changed; accepted I2–I4 behavior retained. No subagents/push.
+
+### R1 — operation-set fixed point before swap
+
+- The bounded pre-swap DB barrier now drains the actual outstanding-operation set until empty, not one initial `Promise.all` snapshot. A publication rejection that schedules `failPending` therefore cannot resolve pause while that newly added operation is still blocked. Existing five-second bound and persistent tracking across refused retries remain.
+- Publication settlement no longer awaits serialized `worker.recover()`. Recovery is independently scheduled lifecycle work, not a DB operation; DB settlement cannot depend on generic pause completing first. This avoids the publication → recovery → pause dependency cycle while preserving recoverable retirement, entry/generation guards and ambiguous-file ownership.
+- Added ACK and actual-close variants: hold publication, start pause, reject during pause, block follow-up failure, then supply pause ACK or thread-close. Both remain pending, refuse at the DB deadline, refuse a retry without advancing generation, and succeed only after the actual failure operation settles. The test does not rely on the too-late `resume(true)` guard.
+
+### R2 — immediate termination covers retired owners
+
+- `WorkerHost.stop(true)` now terminates every live retiring instance, not just a current worker. It can also escalate after an earlier final graceful `stop()`. Final state suppresses replacement; actual close still alone releases pending-path protection.
+- Body drain early completion after recovery now immediately terminates the already-retired live owner rather than leaving recovery's new five-second timer as another grace. Normal running-writer early drain retains its existing graceful stop behavior. Original deadline still calls immediate stop for all owners.
+- Added generic regressions for recovering/uncooperative threads, including immediate escalation after final graceful stop; close callback not delivered by `terminate` must remain undelivered until actual close, and no replacement starts afterward.
+- Body-host regressions use an advancing clock: recovery starts 4.9 seconds into drain, termination occurs at the original five-second deadline (not recovery's 9.9-second deadline); with immediate failure bookkeeping, early drain completion also terminates the retired owner. Both retain pending path protection until explicit close, clear timers at close, and never restart after final stop.
+
+### RED / GREEN evidence
+
+- R1 RED: `bun test apps/gateway/test/bodies/host.test.ts -t 'rejection during pause includes'` → **0 pass / 2 fail**. Both ACK and close variants unexpectedly resolved pause with follow-up fail blocked (`Expected "pending", Received "resolved"`). `/tmp/opencode/task-6-r2-R1-red.log`.
+- R1 GREEN: `bun test apps/gateway/test/bodies/host.test.ts` → exit 0. `/tmp/opencode/task-6-r2-R1-green.log`.
+- R2 RED: `bun test apps/gateway/test/bodies/host.test.ts apps/gateway/test/workerHost/instance.test.ts -t 'immediate stop terminates|late recovery cannot'` → **0 pass / 3 fail**. Original drain deadline termination count remained zero; both generic retired-thread cases reported `terminated=false`. `/tmp/opencode/task-6-r2-R2-red.log`.
+- R2 early-completion RED: `bun test apps/gateway/test/bodies/host.test.ts -t 'late recovery cannot'` after the generic fix → **1 pass / 1 fail**. Deadline variant passed; early completion still retained the uncooperative retired thread. `/tmp/opencode/task-6-r2-R2-early-red.log`.
+- R2 GREEN: `bun test apps/gateway/test/bodies/host.test.ts apps/gateway/test/workerHost apps/gateway/test/exportHost` → exit 0. `/tmp/opencode/task-6-r2-R2-green.log`.
+- Final covering GREEN: `OMNI_TEST_DATABASE_URL=postgres://postgres:omni@127.0.0.1:55433/omni bun test apps/gateway/test/bodies apps/gateway/test/bodyCapture.test.ts apps/gateway/test/bodyLogging.test.ts apps/gateway/test/lifecycle.test.ts apps/gateway/test/routes/database.test.ts apps/gateway/test/workerHost apps/gateway/test/exportHost` → **204 pass / 0 fail**, 11,217 assertions, 13 files. `/tmp/opencode/task-6-r2-cover.log`.
+- `bun run typecheck` → core 719 + dashboard 210 files, no errors. `/tmp/opencode/task-6-r2-typecheck.log`.
+- `bun run lint` → 946 files, zero diagnostics. `/tmp/opencode/task-6-r2-lint.log`.
+- `bun run check:claims` → no stale claims, 22 removed symbols. `/tmp/opencode/task-6-r2-claims.log`.
+- `bun run check:dead` → no dead exports, 202 changed files; unchanged CLI common-word notices. `/tmp/opencode/task-6-r2-dead.log`.
+- `git diff --check` clean before commit. Scoped covering checks as requested, Postgres left running; no dashboard code/types changed.
+
+### Interfaces / self-review
+
+No new or changed public signatures or protocol messages. Existing `WorkerHost.stop(terminate?: boolean): void` now honors `true` for **all live retiring instances**, including after final graceful stop. Existing `BodyWriterHost.pause(): Promise<void>` guarantees stable-empty actual DB operation tracking before success; recovery scheduling is not part of that DB barrier. Existing drain/publication-generation/ownership APIs unchanged.
+
+Self-review: reviewed actual operation additions/deletions and pause/recover serialization, not only final state checks. Timed-out attempts retain only real outstanding operations, do not gain another failure-id queue, and do not authorize swap via a post-swap check. Default shared exporter stop behavior unchanged. Immediate termination does not imply close, does not delete ambiguous bytes, and does not revive final hosts. No remaining concerns identified for R1/R2.

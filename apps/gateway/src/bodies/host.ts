@@ -197,7 +197,9 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
             // A rejection is not proof that the transaction did not commit.
             // Keep the final file; only a definite false authorizes unlink.
             failPending(message.requestId);
-            await worker.recover();
+            // Recovery is lifecycle work, not a DB operation. It can be queued
+            // behind pause; never make DB settlement depend on that pause.
+            void worker.recover().catch(() => {});
           }
         })();
         publications.add(publication);
@@ -334,7 +336,10 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
       let timer: unknown;
       const barrier = (async () => {
         // Timed-out operations stay tracked: every retry must wait for them.
-        await Promise.all(publications);
+        // Continuations can add a failure write as their publication settles.
+        // Drain the actual-operation set to empty, not just its first snapshot.
+        while (!expired && publications.size > 0) await Promise.all(publications);
+        if (expired) return;
         for (const entry of entries.values()) {
           if (expired) return;
           if (!entry.publishing) {
@@ -414,7 +419,9 @@ export function createBodyWriterHost(deps: Deps): BodyWriterHost {
         });
         deps.timers.clearTimeout(timer);
         accepting = false;
-        worker.stop();
+        // Early DB settlement after recovery can finish drain with a retired
+        // owner still alive. Do not leave that owner on a fresh grace timer.
+        worker.stop(worker.state() === "stopping");
         // Unknown decisions survive as files/pending rows for reconciliation;
         // bookkeeping cannot keep the process alive past its shutdown budget.
         changed = () => {};

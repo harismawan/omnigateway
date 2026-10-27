@@ -350,13 +350,17 @@ export function createWorkerHost<In, Out>(deps: WorkerHostDeps<In, Out>): Worker
         stopWorker(instance);
       }),
     stop(terminate = false) {
-      if (stopped()) return;
-      cancelRestart();
-      const instance = retire();
-      state = "stopped";
-      if (instance !== null) {
-        if (terminate) instance.worker.terminate();
-        else stopWorker(instance);
+      if (!stopped()) {
+        cancelRestart();
+        const instance = retire();
+        state = "stopped";
+        if (instance !== null && !terminate) stopWorker(instance);
+      }
+      // The owner's deadline also covers threads retired by recovery/idle/halt,
+      // including escalation after a graceful final stop. Keep them fenced
+      // until actual close; terminate returning never transfers ownership.
+      if (terminate) {
+        for (const instance of retiring) if (!instance.gone) instance.worker.terminate();
       }
     },
     state: () => state,

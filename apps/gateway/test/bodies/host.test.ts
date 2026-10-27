@@ -5,6 +5,7 @@ import { createBodyWriterHost } from "../../src/bodies/host.ts";
 import type { MainMessage, WorkerMessage } from "../../src/bodies/protocol.ts";
 import type { CapturedParts } from "../../src/bodyCapture.ts";
 import type { Timers } from "../../src/workerHost/instance.ts";
+import { fakeTimers } from "../exportHost/fakes.ts";
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const parts = (id = "req", text = "hello"): CapturedParts => ({
@@ -296,6 +297,72 @@ test("a publication barrier stays bounded across repeated refused restores", asy
   f.host.stop();
 });
 
+for (const quiescence of ["ack", "close"] as const) {
+  test(`rejection during pause includes its blocked failure write through ${quiescence} and retries`, async () => {
+    const c = clock();
+    const publication = Promise.withResolvers<boolean>();
+    const failure = Promise.withResolvers<void>();
+    const f = fixture(
+      () => failure.promise,
+      c.timers,
+      () => publication.promise,
+    );
+    await f.host.start();
+    const p = parts();
+    f.budget.reserve(p.reservedBytes);
+    f.host.enqueue(p);
+    await tick();
+    f.message({
+      type: "written",
+      requestId: "req",
+      generation: 0,
+      at: 1000,
+      relPath: "path",
+      sizeBytes: 1,
+      sha256: "hash",
+      truncated: false,
+      omitted: false,
+    });
+    let outcome = "pending";
+    const pausing = f.host.pause().then(
+      () => {
+        outcome = "resolved";
+      },
+      () => {
+        outcome = "refused";
+      },
+    );
+    await tick();
+    publication.reject(new Error("publication rejected during pause"));
+    await tick();
+    expect(f.failed).toEqual(["req"]);
+    if (quiescence === "ack") f.message({ type: "paused" });
+    else f.exit();
+    await tick();
+    expect(outcome).toBe("pending");
+    c.fire(5000);
+    await pausing;
+    expect(outcome).toBe("refused");
+    await f.host.resume(false);
+    const retry = f.host.pause().catch((error: unknown) => error);
+    await tick();
+    f.message({ type: "paused" });
+    c.fire(5000);
+    expect(await retry).toMatchObject({ message: expect.stringContaining("database") });
+    expect(f.host.generation()).toBe(0);
+    failure.resolve();
+    await tick();
+    const recovered = f.host.pause();
+    await tick();
+    f.message({ type: "paused" });
+    await recovered;
+    await f.host.resume(true);
+    expect(f.host.generation()).toBe(1);
+    expect(f.failed).toEqual(["req"]);
+    f.host.stop();
+  });
+}
+
 test("publication rejection retires recoverably and replacement waits for actual close", async () => {
   const c = clock();
   let first = true;
@@ -363,6 +430,59 @@ test("shutdown gives unwritten entries five seconds then counts and terminates t
   expect(f.terminated()).toBe(1);
   expect(f.budget.held()).toBe(0);
 });
+
+for (const blockedFailure of [false, true])
+  test(`late recovery cannot extend drain for a retired live owner (${blockedFailure ? "deadline" : "early completion"})`, async () => {
+    const c = fakeTimers();
+    const publication = Promise.withResolvers<boolean>();
+    const failure = Promise.withResolvers<void>();
+    const f = fixture(
+      blockedFailure ? () => failure.promise : undefined,
+      c,
+      () => publication.promise,
+    );
+    await f.host.start();
+    const p = parts();
+    f.budget.reserve(p.reservedBytes);
+    f.host.enqueue(p);
+    await tick();
+    f.message({ type: "publishing", requestId: "req", generation: 0, relPath: "path" });
+    f.message({
+      type: "written",
+      requestId: "req",
+      generation: 0,
+      at: 1000,
+      relPath: "path",
+      sizeBytes: 1,
+      sha256: "hash",
+      truncated: false,
+      omitted: false,
+    });
+    let done = false;
+    const draining = f.host.drain().then(() => {
+      done = true;
+    });
+    await c.advance(4900);
+    publication.reject(new Error("reply lost near deadline"));
+    await tick();
+    expect(f.sent.at(-1)?.type).toBe("stop");
+    if (blockedFailure) {
+      expect(f.terminated()).toBe(0);
+      expect(done).toBe(false);
+      await c.advance(99);
+      expect(f.terminated()).toBe(0);
+      await c.advance(1);
+    }
+    await draining;
+    expect(f.terminated()).toBe(1);
+    expect(f.host.isPending("path")).toBe(true); // terminate is not actual close.
+    f.exit();
+    expect(f.host.isPending("path")).toBe(false);
+    failure.resolve();
+    await c.advance(60000);
+    expect(f.spawned()).toBe(1);
+    expect(c.pending()).toBe(0);
+  });
 
 test("shutdown drains admitted writes and waits for main publication before returning", async () => {
   const f = fixture();
