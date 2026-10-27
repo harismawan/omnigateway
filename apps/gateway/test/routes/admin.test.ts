@@ -41,7 +41,10 @@ import type {
 import { createCaptureBudget } from "../../src/bodies/budget.ts";
 import { createBodyWriterHost } from "../../src/bodies/host.ts";
 import { spawnBodyWriter } from "../../src/bodies/spawn.ts";
+import type { WorkerInit } from "../../src/export/protocol.ts";
+import { createExportSupervisor } from "../../src/exportHost/supervisor.ts";
 import { type AdminDeps, adminRoutes } from "../../src/routes/admin.ts";
+import { fakeTimers, fakeWorker, flush } from "../exportHost/fakes.ts";
 
 /**
  * The console's mirror, pinned to the server's own type.
@@ -75,6 +78,72 @@ const _serverAcceptsBody: BodyPreview = {} as RequestBodyResponse;
 
 const NOW = 1_000_000;
 const SESSION_TTL_MS = 60_000;
+
+test.each(["idle", "paused", "recovering"] as const)(
+  "settings commit and invalidate with real %s export supervisor; next owner gets latest gates",
+  async (state) => {
+    const clock = fakeTimers();
+    const workers: ReturnType<typeof fakeWorker>[] = [];
+    const inits: WorkerInit[] = [];
+    let count = state === "idle" ? 0 : 1;
+    const supervisor = createExportSupervisor({
+      init: {
+        databasePath: "/tmp/none.db",
+        databaseUrl: null,
+        encryptionKey: "k".repeat(32),
+        redisUrl: null,
+        nodeId: "test",
+        logLevel: "info",
+        exportBodiesAllowed: true,
+        gates: { bodyLoggingAllowed: true, bodyLoggingEnabled: false },
+      },
+      spawn(init) {
+        inits.push(structuredClone(init));
+        const worker = fakeWorker();
+        workers.push(worker);
+        return worker;
+      },
+      readDestinations: async () => ({ count, revision: String(count) }),
+      timers: clock,
+      now: () => clock.now,
+      logger: noopLogger,
+    });
+    try {
+      await supervisor.start();
+      if (state === "paused") await supervisor.pause();
+      if (state === "recovering") workers[0]?.die();
+      await flush();
+      const h = await harness({
+        bodyLoggingAllowed: true,
+        onBodyGatesChanged: (enabled) =>
+          supervisor.gatesChanged({ bodyLoggingAllowed: true, bodyLoggingEnabled: enabled }),
+      });
+      const response = await h.call("PUT", "/api/settings", {
+        ...(await h.store.config.getSettings()),
+        logRetentionDays: 7,
+        bodyLoggingEnabled: true,
+      });
+      expect(response.status).toBe(200);
+      expect((await h.store.config.getSettings()).logRetentionDays).toBe(7);
+      expect(h.topics).toContain("res:settings");
+      if (state === "idle") {
+        count = 1;
+        await supervisor.destinationsChanged();
+      }
+      if (state === "recovering") await clock.advance(1000);
+      if (state === "paused") {
+        await supervisor.resume(false);
+        expect(workers[0]?.posted).toContainEqual({
+          type: "gatesChanged",
+          gates: { bodyLoggingAllowed: true, bodyLoggingEnabled: true },
+        });
+      } else expect(inits.at(-1)?.gates.bodyLoggingEnabled).toBe(true);
+      h.store.close();
+    } finally {
+      supervisor.stop();
+    }
+  },
+);
 
 type HarnessOptions = {
   configured?: boolean;

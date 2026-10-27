@@ -132,11 +132,16 @@ export function createExportSupervisor(deps: SupervisorDeps): ExportSupervisor {
   let latest: DestinationStatus[] = [];
   let lastKey = materialKey([]);
   let nextRef = 0;
+  let gatesPending = false;
   const pending = new Map<string, Pending>();
   const notRunning = (): GatewayError => new GatewayError("OVERLOADED", NOT_RUNNING);
 
   const host = createWorkerHost<MainMessage, WorkerMessage>({
-    spawn: () => deps.spawn(deps.init),
+    spawn: () => {
+      const worker = deps.spawn(deps.init);
+      gatesPending = false;
+      return worker;
+    },
     lifecycle: { pause: { type: "pause" }, resume: { type: "resume" }, stop: { type: "stop" } },
     timers,
     now: deps.now,
@@ -153,6 +158,11 @@ export function createExportSupervisor(deps: SupervisorDeps): ExportSupervisor {
     },
     onStateChange: (next, previous) => {
       cancelPoll();
+      // A retained paused owner does not receive another initialization.
+      if (next === "running" && previous === "paused" && gatesPending) {
+        host.post({ type: "gatesChanged", gates: deps.init.gates });
+        gatesPending = false;
+      }
       if (next !== previous) deps.onChange?.();
       if (next === "idle") schedulePoll(IDLE_RECHECK_MS);
       if (next === "down") {
@@ -271,7 +281,8 @@ export function createExportSupervisor(deps: SupervisorDeps): ExportSupervisor {
       }),
     gatesChanged(gates) {
       deps.init.gates = gates;
-      host.post({ type: "gatesChanged", gates });
+      if (host.state() === "running") host.post({ type: "gatesChanged", gates });
+      else gatesPending = true;
     },
     destinationsChanged: () =>
       serial(async () => {
