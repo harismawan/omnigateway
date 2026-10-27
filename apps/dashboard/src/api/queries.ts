@@ -57,6 +57,12 @@ import type {
   NodesResponse,
   PluginCatalogEntry,
   PluginsResponse,
+  PromptAssignment,
+  PromptCreateInput,
+  PromptLibraryEntry,
+  PromptSaveInput,
+  PromptVersionRow,
+  PromptView,
   ProviderId,
   QuotaHistoryQuery,
   QuotaHistoryResponse,
@@ -155,6 +161,8 @@ export const queryKeys = {
   credentialHealth: ["credentials", "health"] as const,
   models: ["models"] as const,
   keys: ["keys"] as const,
+  prompts: ["prompts"] as const,
+  prompt: (id: string) => ["prompts", id] as const,
   settings: ["settings"] as const,
   agentSetup: (client: SetupClient, mapping?: AgentModelMapping) =>
     ["agent-setup", client, mapping ?? null] as const,
@@ -357,6 +365,93 @@ export function useKeys(): UseQueryResult<ApiKeySummary[]> {
   return useQuery({
     queryKey: queryKeys.keys,
     queryFn: async ({ signal }) => (await get<KeysResponse>("/api/keys", signal)).keys,
+  });
+}
+
+export function usePrompts(): UseQueryResult<PromptLibraryEntry[]> {
+  return useQuery({
+    queryKey: queryKeys.prompts,
+    queryFn: ({ signal }) => get<PromptLibraryEntry[]>("/api/prompts", signal),
+  });
+}
+
+export function usePrompt(id: string): UseQueryResult<PromptView> {
+  return useQuery({
+    queryKey: queryKeys.prompt(id),
+    enabled: id !== "",
+    queryFn: ({ signal }) => get<PromptView>(`/api/prompts/${encodeURIComponent(id)}`, signal),
+  });
+}
+
+function usePromptMutation<T, V>(
+  mutationFn: (input: V) => Promise<T>,
+): UseMutationResult<T, Error, V> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.prompts }),
+  });
+}
+export function useCreatePrompt() {
+  return usePromptMutation((input: PromptCreateInput) => post<PromptView>("/api/prompts", input));
+}
+export function useUpdatePrompt() {
+  return usePromptMutation(
+    ({ id, ...input }: { id: string; name: string; description: string | null }) =>
+      put<PromptView>(`/api/prompts/${encodeURIComponent(id)}`, input),
+  );
+}
+export function useSavePromptVersion() {
+  return usePromptMutation(({ id, ...input }: PromptSaveInput & { id: string }) =>
+    post<PromptVersionRow>(`/api/prompts/${encodeURIComponent(id)}/versions`, input),
+  );
+}
+export function useActivatePromptVersion() {
+  return usePromptMutation(({ id, version }: { id: string; version: number }) =>
+    put<PromptView>(`/api/prompts/${encodeURIComponent(id)}/active`, { version }),
+  );
+}
+export function useDuplicatePrompt() {
+  return usePromptMutation(
+    ({ sourceId, ...input }: { sourceId: string; id: string; name: string }) =>
+      post<PromptView>(`/api/prompts/${encodeURIComponent(sourceId)}/duplicate`, input),
+  );
+}
+export function useRemovePrompt() {
+  return usePromptMutation((id: string) =>
+    del<{ ok: true }>(`/api/prompts/${encodeURIComponent(id)}`),
+  );
+}
+/** Shared mutation for the Task 8 key-assignment dialog; retained as its API boundary. */
+export function useSetKeyPrompts() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...input }: PromptAssignment & { id: string }) =>
+      put<{ ok: true }>(`/api/keys/${encodeURIComponent(id)}/prompts`, input),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.keys });
+      void client.invalidateQueries({ queryKey: queryKeys.prompts });
+    },
+  });
+}
+
+/** Send one alias, not a stale pair. The server reconciles against its locked settings. */
+export function useSaveGlobalPrompts() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (
+      change: { prompts: string[] } | { ponytailMode: Settings["ponytailMode"] },
+    ) => {
+      const { settings } = await get<SettingsResponse>("/api/settings");
+      const { prompts: _prompts, ...other } = settings;
+      return put<{ ok: true }>("/api/settings", { ...other, ...change });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: queryKeys.settings }),
+        client.invalidateQueries({ queryKey: queryKeys.prompts }),
+      ]);
+    },
   });
 }
 

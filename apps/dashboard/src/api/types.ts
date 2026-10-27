@@ -161,6 +161,39 @@ export type StatusResponse = {
   viewerConfigured: boolean;
 };
 
+/** Console prompt wire contract; runtime control code stays outside the dashboard. */
+export type PromptAssignment = { ids: string[]; inheritGlobal: boolean };
+export type PromptLibraryEntry = {
+  id: string;
+  name: string;
+  description: string | null;
+  builtin: boolean;
+  activeVersion: number | string | null;
+  estimatedTokens: number;
+  assignments: { global: boolean; keyIds: string[] };
+};
+export type PromptView = PromptLibraryEntry & {
+  versions: Array<{
+    version: number | string;
+    text: string;
+    note: string | null;
+    createdAt: number | null;
+  }>;
+};
+export type PromptSaveInput = { text: string; note: string | null; activate: boolean };
+export type PromptCreateInput = PromptSaveInput & {
+  id: string;
+  name: string;
+  description: string | null;
+};
+export type PromptVersionRow = {
+  promptId: string;
+  version: number;
+  text: string;
+  note: string | null;
+  createdAt: number;
+};
+
 /**
  * One provider account's window as a client sees it.
  *

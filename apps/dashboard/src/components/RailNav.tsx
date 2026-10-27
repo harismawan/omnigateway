@@ -7,6 +7,7 @@ import {
   Database,
   Gauge,
   KeyRound,
+  MessageSquareText,
   ScrollText,
   Share2,
   SlidersHorizontal,
@@ -37,6 +38,12 @@ const DESTINATIONS: Destination[] = [
   },
   { to: "/models", label: "Models", blurb: "Virtual models, targets, and routing", Icon: Boxes },
   { to: "/keys", label: "Keys", blurb: "Gateway API keys and their limits", Icon: KeyRound },
+  {
+    to: "/prompts",
+    label: "Prompt Management",
+    blurb: "System-prompt additions, versions, and where they apply",
+    Icon: MessageSquareText,
+  },
   { to: "/usage", label: "Usage", blurb: "Requests, tokens, and spend over time", Icon: Gauge },
   { to: "/logs", label: "Logs", blurb: "Recent requests, one row each", Icon: ScrollText },
   {
