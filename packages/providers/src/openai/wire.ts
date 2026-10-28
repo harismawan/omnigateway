@@ -160,7 +160,7 @@ export type WireOptions = {
   /**
    * The Codex backend is a narrower surface than `api.openai.com`: it drives
    * one product and rejects several standard Responses parameters outright.
-   * It is also the leg that presents itself as Codex 0.163.0, so everything in
+   * It is also the leg that presents itself as Codex 0.165.0, so everything in
    * the fingerprint spec happens only when this is set.
    */
   oauth: boolean;
@@ -273,6 +273,7 @@ export function toResponsesWire(
   // tool result answers the turn that asked for it even when new text follows
   // it in the same message.
   const turnOf = new WeakMap<object, number>();
+  const toolParts = new WeakSet<object>();
   let turn = -1;
   const push = (item: object): void => {
     input.push(item);
@@ -366,16 +367,21 @@ export function toResponsesWire(
           if (block.images !== undefined) {
             note("openai:tool-result-images-moved");
             for (const image of block.images) {
-              parts.push({
+              const part = {
                 type: "input_image",
                 image_url: `data:${image.mediaType};base64,${image.data}`,
-              });
+              };
+              toolParts.add(part);
+              parts.push(part);
             }
           }
           // Its files go the same way, as `input_file` data URLs, where the
           // backend takes their type.
           if (files.parts.length > 0) {
             note("openai:tool-result-files-moved");
+            for (const part of files.parts) {
+              if (part !== null && typeof part === "object") toolParts.add(part);
+            }
             parts.push(...files.parts);
           }
           if (files.text.length > 0) note("openai:tool-result-files-inlined");
@@ -543,11 +549,17 @@ export function toResponsesWire(
     threadId: key,
     input,
     turnOf,
+    toolParts,
     tools: liteTools,
     instructions,
     requestId: opts.requestId,
     startedAt: opts.startedAt,
     idSalt: salt,
+    lite,
+    effortUpdate:
+      codexModel(model).supportsReasoningEffortUpdates && isCodexEffort(body.reasoning?.effort)
+        ? body.reasoning.effort
+        : undefined,
   });
   body.input = built.input;
   // The effort actually sent, after the client's bag had its say — when it is

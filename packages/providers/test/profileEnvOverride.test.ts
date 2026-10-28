@@ -74,9 +74,9 @@ test("a malformed override falls back rather than failing the import", async () 
   expect(read.anthropicOrder).toEqual(clean.anthropicOrder);
 });
 
-test("the OpenAI profile defaults to Codex 0.163.0's TUI", async () => {
+test("the OpenAI profile defaults to Codex 0.165.0's TUI", async () => {
   const read = await readUnderEnv({});
-  expect(read.openaiHeaders.version).toBe("0.163.0");
+  expect(read.openaiHeaders.version).toBe("0.165.0");
   expect(read.openaiHeaders.originator).toBe("codex-tui");
   expect(read.openaiOriginator).toBe("codex-tui");
   expect(read.openaiSandbox).toBe("windows_elevated");

@@ -105,14 +105,14 @@ binaries; OpenAI now follows a local capture of Codex itself as noted below. `${
 | `X-Stainless-Retry-Count` | `0` |
 | `X-Stainless-Timeout` | request timeout in whole seconds |
 
-**OpenAI** — Codex `rust-v0.163.0` interactive TUI, HTTP Responses path, default
+**OpenAI** — Codex `rust-v0.165.0` interactive TUI, HTTP Responses path, default
 root thread, in wire order. Captured from the real client, not read off source:
-[Codex 0.163.0 fingerprint](2026-10-16-codex-0163-fingerprint-design.md), which also
+[current Codex fingerprint](2026-10-16-codex-0163-fingerprint-design.md#current-fingerprint--2026-10-28), which also
 covers the body (responses-lite shape, per-turn metadata) and the bump procedure.
 
 | Header | Value |
 | --- | --- |
-| `version` | `${0.163.0}` |
+| `version` | `${0.165.0}` |
 | `x-codex-beta-features` | `remote_compaction_v2` |
 | `x-codex-window-id` | OAuth only: `<thread>:0` |
 | `x-codex-turn-metadata` | OAuth only: per-turn JSON, repeated in body `client_metadata` |
@@ -127,7 +127,7 @@ covers the body (responses-lite shape, per-turn metadata) and the bump procedure
 | `authorization` | credential bearer token |
 | `chatgpt-account-id` | OAuth account only |
 | `originator` | `${codex-tui}` |
-| `user-agent` | `${codex-tui}/${0.163.0} (${Windows 10.0.26200}; ${x86_64}) ${WindowsTerminal} (${codex-tui}; ${0.163.0})` |
+| `user-agent` | `${codex-tui}/${0.165.0} (${Windows 10.0.26200}; ${x86_64}) ${WindowsTerminal} (${codex-tui}; ${0.165.0})` |
 | `host` | OAuth only: `chatgpt.com` |
 
 The originator override also supplies the User-Agent prefix and client suffix, and
@@ -156,7 +156,7 @@ Anthropic's order array is taken from OmniRoute's `CLI_FINGERPRINTS`, which
 documents it as a mitmproxy capture of the real binary. Anthropic's order is Title-Case Stainless keys alphabetically, then
 lowercase Anthropic keys alphabetically, then transport headers.
 
-OpenAI follows the order captured from Codex 0.163.0 and shown above: `host` and
+OpenAI follows the order captured from Codex 0.165.0 and shown above: `host` and
 `content-length` last, as hyper writes them on HTTP/1.1 (an earlier version put
 `host` first, standing in for HTTP/2 `:authority`). The OAuth leg sets `host`
 itself to pin that position; `content-length` is the transport's and lands last.
@@ -373,7 +373,7 @@ OMNI_ANTHROPIC_STAINLESS_ARCH=              # blank = derive from host
 OMNI_ORDER_ANTHROPIC=                       # comma-separated; blank = built-in order
 
 OMNI_UA_OPENAI=
-OMNI_OPENAI_CLI_VERSION=0.163.0
+OMNI_OPENAI_CLI_VERSION=0.165.0
 OMNI_OPENAI_ORIGINATOR=codex-tui
 OMNI_OPENAI_UA_PLATFORM=Windows 10.0.26200
 OMNI_OPENAI_UA_ARCH=x86_64

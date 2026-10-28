@@ -537,7 +537,7 @@ Worth knowing before you deploy it:
   classifier calls instead; these remain billed as token usage. See
   [Anthropic's notice guide](https://code.claude.com/docs/en/auto-mode-classifier-billing).
 - **An OpenAI OAuth (ChatGPT) target presents itself as Codex, and answers like
-  it.** Requests on that leg match Codex 0.163.0's TUI field by field, which
+  it.** Requests on that leg follow Codex 0.165.0's captured TUI shape, which
   changes model behaviour for every client routed there, Claude Code included:
   one tool call per turn (`parallel_tool_calls: false`), terser answers
   (`text.verbosity: "low"`), and a request that names no reasoning effort —

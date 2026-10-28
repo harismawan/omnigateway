@@ -1,7 +1,7 @@
 /**
- * The OpenAI OAuth leg presenting itself as Codex 0.163.0's interactive TUI.
+ * The OpenAI OAuth leg presenting itself as Codex 0.165.0's interactive TUI.
  *
- * Structure is pinned against `fixtures/codex-0.163.0.json`, which is a
+ * Structure is pinned against `fixtures/codex-0.165.0.json`, which is a
  * hand-sanitized copy of what the real client sent to a local capture server
  * (`scripts/codex-capture/`). Values are this gateway's own; what is compared
  * against the capture is names, order and the constants Codex sends.
@@ -30,7 +30,7 @@ type Fixture = {
 };
 
 const FIXTURE: Fixture = JSON.parse(
-  readFileSync(resolve(import.meta.dir, "fixtures/codex-0.163.0.json"), "utf8"),
+  readFileSync(resolve(import.meta.dir, "fixtures/codex-0.165.0.json"), "utf8"),
 );
 
 /** A thread id the client supplied: a UUID, so it passes through unchanged. */
@@ -139,7 +139,7 @@ test("headers go out in Codex's names and order, with its constants", () => {
     expect([name, header(built, name)]).toEqual([name, THREAD]);
   }
   expect(header(built, "user-agent")).toBe(
-    "codex-tui/0.163.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.163.0)",
+    "codex-tui/0.165.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.165.0)",
   );
 });
 
@@ -287,6 +287,7 @@ test("create_time and the turn start derive from the request's start", () => {
 function turnsOf(built: CodecRequest): string[] {
   return inputOf(built)
     .slice(2)
+    .filter((item) => item.type !== "configuration_update")
     .map(
       (item) =>
         (item.internal_chat_message_metadata_passthrough as { turn_id: string } | undefined)
@@ -641,13 +642,14 @@ test("model-specific metadata comes from the Codex catalog", () => {
 });
 
 /**
- * Every row of Codex 0.163.0's bundled `models.json`, as this leg sends it:
+ * Every row of Codex 0.165.0's bundled `models.json`, as this leg sends it:
  * lite or not, verbosity, the default effort, and the two `node_repl_*` flags.
  * Read off the catalog by hand, so a row edited in the table fails here.
  */
-const CATALOG_0163: [string, boolean, string, string, boolean][] = [
+const CATALOG_0165: [string, boolean, string, string, boolean][] = [
   ["gpt-6-astra", true, "low", "low", true],
   ["gpt-6.1-sol", true, "low", "low", true],
+  ["gpt-6.1-terra", true, "low", "low", true],
   ["gpt-6-sol", true, "low", "medium", true],
   ["gpt-6-luna", true, "low", "medium", false],
   ["gpt-5.6-sol", true, "low", "low", false],
@@ -659,8 +661,83 @@ const CATALOG_0163: [string, boolean, string, string, boolean][] = [
   ["codex-auto-review", true, "low", "medium", false],
 ];
 
+test("supported models carry the current effort update before the tool loop", () => {
+  for (const model of ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"]) {
+    const body = bodyOf(
+      build({ ...FOLLOW_UP, reasoning: { mode: "adaptive", effort: "high" } }, { model }),
+    );
+    const input = body.input as Record<string, unknown>[];
+    expect(input[3]).toEqual({ type: "configuration_update", reasoning: { effort: "high" } });
+    expect(input.filter((item) => item.type === "configuration_update")).toHaveLength(1);
+  }
+  for (const model of ["gpt-5.5", "gpt-6-luna", "unlisted"]) {
+    expect(
+      inputOf(build(FOLLOW_UP, { model })).some((item) => item.type === "configuration_update"),
+    ).toBe(false);
+  }
+});
+
+test("lite messages carry per-content provenance, while non-lite omits it", () => {
+  const input = inputOf(build(FOLLOW_UP));
+  expect(passthroughOf(input[1]).content_item_metadata).toEqual([
+    { provenance: { type: "harness", hook: false } },
+  ]);
+  expect(passthroughOf(input[2]).content_item_metadata).toEqual([{ provenance: { type: "user" } }]);
+  for (const item of inputOf(build(FOLLOW_UP, { model: "gpt-5.5" }))) {
+    expect(passthroughOf(item).content_item_metadata).toBeUndefined();
+  }
+});
+
+test("tool media retains its source and never moves the effort update past the tool loop", () => {
+  const built = build({
+    ...FOLLOW_UP,
+    messages: [
+      ...FOLLOW_UP.messages.slice(0, 2),
+      {
+        role: "user",
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "call_1",
+            content: "look",
+            images: [{ type: "image", mediaType: "image/png", data: "aGVsbG8=" }],
+            files: [{ type: "file", mediaType: "application/pdf", data: "JVBERi0xLjQK" }],
+          },
+        ],
+      },
+    ],
+  });
+  const input = inputOf(built);
+  expect(input[3]).toEqual({ type: "configuration_update", reasoning: { effort: "low" } });
+  const media = input.findLast((item) => item.role === "user");
+  expect(passthroughOf(media).content_item_metadata).toEqual([
+    { provenance: { type: "tool" } },
+    { provenance: { type: "tool" } },
+  ]);
+});
+
+test("effort updates honor vendor overrides and API-key requests stay on the public shape", () => {
+  const request: ChatRequest = {
+    ...FOLLOW_UP,
+    vendor: { openai: { prompt_cache_key: THREAD, reasoning: { effort: "max" } } },
+  };
+  expect(inputOf(build(request))[3]).toEqual({
+    type: "configuration_update",
+    reasoning: { effort: "max" },
+  });
+  const api = inputOf(
+    build(request, {
+      credentials: { accessToken: null, apiKey: "sk-test", providerData: {} },
+    }),
+  );
+  expect(api.some((item) => item.type === "configuration_update")).toBe(false);
+  for (const item of api) {
+    expect(item.internal_chat_message_metadata_passthrough).toBeUndefined();
+  }
+});
+
 test("every catalog row reaches the wire with its own values", () => {
-  for (const [model, lite, verbosity, effort, review] of CATALOG_0163) {
+  for (const [model, lite, verbosity, effort, review] of CATALOG_0165) {
     const built = build(FOLLOW_UP, { model });
     const body = bodyOf(built);
     const metadata = metadataOf(built);
@@ -724,7 +801,9 @@ test("a client tool choice is kept; absent, the leg sends Codex's auto", () => {
 });
 
 test("history items carry the passthrough Codex stamps on each kind", () => {
-  const input = inputOf(build(FOLLOW_UP)).slice(2);
+  const input = inputOf(build(FOLLOW_UP))
+    .slice(2)
+    .filter((item) => item.type !== "configuration_update");
   const passthrough = (i: number) =>
     input[i]?.internal_chat_message_metadata_passthrough as Record<string, unknown>;
   expect(passthrough(0).content_item_kinds).toEqual(["user.text"]);
@@ -765,11 +844,15 @@ test("content kinds follow each part, and a part Codex has no kind for drops the
         },
       ],
     }),
-  ).at(-1);
+  ).findLast((item) => item.type === "message" && item.role === "user");
   expect(moved).toMatchObject({ type: "message", role: "user" });
   const parts = (moved?.content ?? []) as { type: string }[];
   expect(parts.map((part) => part.type)).toEqual(["input_file"]);
-  expect(Object.keys(passthroughOf(moved))).toEqual(["turn_id", "create_time"]);
+  expect(Object.keys(passthroughOf(moved))).toEqual([
+    "turn_id",
+    "create_time",
+    "content_item_metadata",
+  ]);
 });
 
 test("a Codex client's own thread id lends its instant to the ids minted after it", () => {
@@ -786,7 +869,9 @@ test("a mid-conversation system turn goes as a developer message stamped like a 
     { role: "system", content: [{ type: "text", text: "operator note" }] },
   ];
   const built = build({ ...FOLLOW_UP, messages });
-  const item = inputOf(built)[3];
+  const item = inputOf(built).findLast(
+    (entry) => entry.type === "message" && entry.role === "developer",
+  );
   expect(item).toMatchObject({ type: "message", role: "developer" });
   expect(passthroughOf(item).content_item_kinds).toEqual(["user.text"]);
   expect(item?.id).toMatch(/^msg_/);
@@ -851,7 +936,9 @@ test("an empty tool list sends no additional_tools item", () => {
 });
 
 test("create_time is the start plus one microsecond per history item", () => {
-  const input = inputOf(build(FOLLOW_UP)).slice(2);
+  const input = inputOf(build(FOLLOW_UP))
+    .slice(2)
+    .filter((item) => item.type !== "configuration_update");
   const created = (i: number) => passthroughOf(input[i]).create_time;
   expect(created(0)).toBe(STARTED_AT / 1000);
   // The output is the fifth history item.

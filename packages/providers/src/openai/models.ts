@@ -3,16 +3,17 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
 /**
  * OpenAI's curated models and their list prices.
  *
- * Prices checked 2026-10-01 against OpenAI's published API pricing. Cache reads
+ * Terra prices checked 2026-10-28 against its published model page; other
+ * prices checked 2026-10-01 against OpenAI's published API pricing. Cache reads
  * keep the 90% discount on most models ($0.10/MTok on gpt-6.1-sol's $2.00 base input,
  * a 95% discount). Cache writes are billed at 1.25x the base input token rate
  * (recorded under cacheWrite5m; OpenAI does not offer a separate 1h tier).
  *
  * OpenAI prices these models in two context tiers, split at 272,000 input
  * tokens. **The figures here are the short-context tier**, because that is the
- * tier every request through an OAuth credential is billed at: the Codex
- * backend caps the window at 272,000, so it cannot reach the long tier at all.
- * An API-key deployment that routinely sends more than 272K should raise its
+ * tier used by the older Codex defaults (272,000 input tokens). Terra 6.1's
+ * Codex default is 500,000, so it can reach the long tier too.
+ * Any target that routinely sends more than 272K should raise its
  * target's prices — the long tier is roughly double on input and half again on
  * output. The bare `gpt-5.6` alias routes to Sol and is priced as Sol.
  *
@@ -25,9 +26,9 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  *
  * `oauthLimits` is the Codex backend, which an OAuth credential is routed to
  * and which is narrower than the API in context as well as in parameters: its
- * bundled catalog caps the window at 272,000 input tokens, where the API takes
- * 922,000. Output is 128,000 either way. It is stated on every entry, including
- * ones Codex may not serve at all, so that a model Codex does start serving is
+ * bundled catalog defaults to 272,000 input tokens (500,000 for Terra 6.1),
+ * where the API takes 922,000. Output is 128,000 either way. It is stated on
+ * every entry, including ones Codex may not serve at all, so a model it does start serving is
  * never advertised the API's window by default.
  */
 export const OPENAI_MODELS: ProviderModelCatalogEntry = {
@@ -49,6 +50,13 @@ export const OPENAI_MODELS: ProviderModelCatalogEntry = {
       pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite5m: 2.5, cacheWrite1h: 0 },
       limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
       oauthLimits: { contextWindow: 272_000, maxOutputTokens: 128_000 },
+    },
+    {
+      id: "gpt-6.1-terra",
+      label: "GPT-6.1 Terra",
+      pricing: { input: 1, output: 5, cacheRead: 0.05, cacheWrite5m: 1.25, cacheWrite1h: 0 },
+      limits: { contextWindow: 922_000, maxOutputTokens: 128_000 },
+      oauthLimits: { contextWindow: 500_000, maxOutputTokens: 128_000 },
     },
     {
       id: "gpt-6-sol",

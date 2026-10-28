@@ -6,6 +6,10 @@ tells you what Codex *can* send; only a capture tells you what it *does* send
 for a given model and entry point. This directory runs the real client against a
 local server that records every request byte for byte, with a synthetic login.
 
+Current measured release: **0.165.0** (2026-10-28), fixture
+`packages/providers/test/fixtures/codex-0.165.0.json`. See the design's "Current
+fingerprint" section for additions and deliberate gaps.
+
 Nothing here talks to OpenAI. The login is unsigned and fake, the server answers
 locally, and the captures never leave the machine.
 

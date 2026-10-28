@@ -1,7 +1,7 @@
 /**
  * The per-model values Codex reads from its bundled model catalog.
  *
- * Copied from `codex-rs/models-manager/models.json` at `rust-v0.163.0`, the
+ * Copied from `codex-rs/models-manager/models.json` at `rust-v0.165.0`, the
  * release the OAuth fingerprint claims. Codex chooses the request shape and
  * several defaults per model from these fields, so a request for one model has
  * to carry that model's values to look like Codex's: `use_responses_lite`,
@@ -29,12 +29,13 @@ export type CodexModel = {
    * `parallel_tool_calls` (lite always sends `false`). True on every row.
    */
   supportsParallelToolCalls: boolean;
+  supportsReasoningEffortUpdates: boolean;
 };
 
-export const CODEX_CATALOG_RELEASE = "0.163.0";
+export const CODEX_CATALOG_RELEASE = "0.165.0";
 
 /**
- * The named members of Codex 0.163.0's `ReasoningEffort` (`openai_models.rs`).
+ * The named members of Codex's `ReasoningEffort` (`openai_models.rs`).
  * The turn-metadata header carries an effort only from this set: a client's
  * bag value is free text, and the header is no place for it.
  */
@@ -66,14 +67,15 @@ const entry = (
   nodeReplAutoReviewRequired,
   nodeReplDisabled: false,
   supportsParallelToolCalls: true,
+  supportsReasoningEffortUpdates: false,
   ...over,
 });
 
 /**
  * What a model this table does not list is sent with.
  *
- * Every model in the 0.163.0 catalog but `gpt-5.5` is lite, and a non-lite
- * 0.163 request was never captured, so an unlisted id — the bare `gpt-5.6`
+ * Every model in the 0.165.0 catalog but `gpt-5.5` is lite, and a non-lite
+ * request was never captured, so an unlisted id — the bare `gpt-5.6`
  * alias, a model released after this table — takes the shape and defaults the
  * lite rows share rather than a shape nothing measured.
  */
@@ -86,8 +88,9 @@ const UNLISTED: CodexModel = entry("low", false);
  * Null-prototype, as every id-keyed table here: a model id is operator text.
  */
 const MODELS: Readonly<Record<string, CodexModel>> = Object.assign(Object.create(null), {
-  "gpt-6-astra": entry("low", true),
-  "gpt-6.1-sol": entry("low", true),
+  "gpt-6-astra": entry("low", true, { supportsReasoningEffortUpdates: true }),
+  "gpt-6.1-sol": entry("low", true, { supportsReasoningEffortUpdates: true }),
+  "gpt-6.1-terra": entry("low", true, { supportsReasoningEffortUpdates: true }),
   "gpt-6-sol": entry("medium", true),
   "gpt-6-luna": entry("medium", false),
   "gpt-5.6-sol": entry("low", false),

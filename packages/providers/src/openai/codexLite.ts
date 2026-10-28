@@ -10,9 +10,9 @@ import {
 import { OPENAI_SANDBOX } from "./profile.ts";
 
 /**
- * Codex 0.163's "responses-lite" request shape, for the OAuth leg.
+ * Codex 0.165's "responses-lite" request shape, for the OAuth leg.
  *
- * Every model in Codex's 0.163.0 catalog but `gpt-5.5` sets
+ * Every model in Codex's 0.165.0 catalog but `gpt-5.5` sets
  * `use_responses_lite`, and with it the client sends no `instructions` and no
  * `tools`: both ride inside `input` as prefix items. Non-lite keeps its tools in
  * the body but still sends base instructions here — 0.163 removed the
@@ -36,6 +36,8 @@ export type LiteInput = {
    * output `repairOrphanedCalls` adds — belongs to the item before it.
    */
   turnOf: WeakMap<object, number>;
+  /** Tool-result media may share a user message with ordinary user input. */
+  toolParts: WeakSet<object>;
   /**
    * The client's function tools in wire form, when the model is lite. A
    * non-lite model sends them in the body and its base instructions still
@@ -49,6 +51,10 @@ export type LiteInput = {
   startedAt: number | undefined;
   /** The credential's id salt, which keys every id derived here. */
   idSalt: string | undefined;
+  /** Per-content attribution is accepted only by responses-lite. */
+  lite: boolean;
+  /** Supported models receive the current effort as a history update. */
+  effortUpdate: string | undefined;
 };
 
 export type LiteResult = {
@@ -121,7 +127,14 @@ export function toLiteInput(args: LiteInput): LiteResult {
       id: `msg_${uuidV5(namespace, args.instructions)}`,
       role: "developer",
       content: [{ type: "input_text", text: args.instructions }],
-      [PASSTHROUGH]: { content_item_kinds: ["model.base_instructions"] },
+      [PASSTHROUGH]: {
+        turn_id: turnId(threadId, 0, threadAt, salt),
+        create_time: startedAt / 1000,
+        content_item_kinds: ["model.base_instructions"],
+        ...(args.lite
+          ? { content_item_metadata: [{ provenance: { type: "harness", hook: false } }] }
+          : {}),
+      },
     });
   }
 
@@ -167,6 +180,17 @@ export function toLiteInput(args: LiteInput): LiteResult {
             turn_id,
             create_time,
             ...(kinds === undefined ? {} : { content_item_kinds: kinds }),
+            ...(args.lite && Array.isArray(item.content)
+              ? {
+                  content_item_metadata: item.content.map((part: object) => ({
+                    provenance: args.toolParts.has(part)
+                      ? { type: "tool" }
+                      : role === "user"
+                        ? { type: "user" }
+                        : { type: "harness", hook: false },
+                  })),
+                }
+              : {}),
           },
         };
       }
@@ -198,6 +222,27 @@ export function toLiteInput(args: LiteInput): LiteResult {
         return item;
     }
   });
+
+  if (args.effortUpdate !== undefined) {
+    // The configuration belongs after the current user prompt, before its
+    // assistant/tool loop; historical efforts are not available in the IR.
+    let after = 0;
+    for (let i = 0; i < args.input.length; i++) {
+      const item = args.input[i] as Item;
+      if (
+        item.type === "message" &&
+        item.role === "user" &&
+        Array.isArray(item.content) &&
+        item.content.some((part: object) => !args.toolParts.has(part))
+      ) {
+        after = i + 1;
+      }
+    }
+    history.splice(after, 0, {
+      type: "configuration_update",
+      reasoning: { effort: args.effortUpdate },
+    });
+  }
 
   return {
     input: [...prefix, ...history],

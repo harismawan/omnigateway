@@ -1,11 +1,11 @@
 import { type ClientProfile, env, envOrder } from "../headers.ts";
 
 /**
- * Codex `rust-v0.163.0`, interactive TUI. Every value below was read off a
+ * Codex `rust-v0.165.0`, interactive TUI. Every value below was read off a
  * capture of the real client (`scripts/codex-capture/`), not off source alone;
  * the bump procedure is in that directory's README.
  */
-const OPENAI_CLI_VERSION = env("OMNI_OPENAI_CLI_VERSION", "0.163.0");
+const OPENAI_CLI_VERSION = env("OMNI_OPENAI_CLI_VERSION", "0.165.0");
 const OPENAI_UA_PLATFORM = env("OMNI_OPENAI_UA_PLATFORM", "Windows 10.0.26200");
 const OPENAI_UA_ARCH = env("OMNI_OPENAI_UA_ARCH", "x86_64");
 const OPENAI_UA_TERMINAL = env("OMNI_OPENAI_UA_TERMINAL", "WindowsTerminal");
@@ -39,7 +39,7 @@ export const openaiProfile: ClientProfile = {
   headers: [
     [
       "user-agent",
-      // The trailing `(codex-tui; 0.163.0)` is the app-server's client suffix:
+      // The trailing `(codex-tui; 0.165.0)` is the app-server's client suffix:
       // `clientInfo.name; clientInfo.version`, which for the TUI is the
       // originator and the release.
       env(

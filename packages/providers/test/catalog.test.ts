@@ -35,6 +35,7 @@ const EXPECTED = {
     ids: [
       "gpt-6-astra",
       "gpt-6.1-sol",
+      "gpt-6.1-terra",
       "gpt-6-sol",
       "gpt-6-luna",
       "gpt-5.6",
@@ -304,6 +305,14 @@ test("the auth a credential uses selects which window is advertised", () => {
     maxOutputTokens: 128_000,
   });
   expect(catalogLimits("openai", "gpt-5.6")).toEqual(catalogLimits("openai", "gpt-5.6", "apiKey"));
+  expect(catalogLimits("openai", "gpt-6.1-terra", "oauth")).toEqual({
+    contextWindow: 500_000,
+    maxOutputTokens: 128_000,
+  });
+  expect(catalogLimits("openai", "gpt-6.1-terra", "apiKey")).toEqual({
+    contextWindow: 922_000,
+    maxOutputTokens: 128_000,
+  });
 
   // A model stating no `oauthLimits` answers the same either way: absence means
   // one set covers both ways in, never "no limits over OAuth".
@@ -418,6 +427,13 @@ test("catalogPricing reports an unlisted model rather than guessing", () => {
     output: 10,
     cacheRead: 0.1,
     cacheWrite5m: 2.5,
+    cacheWrite1h: 0,
+  });
+  expect(catalogPricing("openai", "gpt-6.1-terra")).toEqual({
+    input: 1,
+    output: 5,
+    cacheRead: 0.05,
+    cacheWrite5m: 1.25,
     cacheWrite1h: 0,
   });
   expect(catalogPricing("openai", "gpt-6-sol")).toEqual({
