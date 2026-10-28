@@ -1,5 +1,5 @@
-import { isPonytailMode } from "@omni/ponytail/catalog";
 import type { SQL } from "bun";
+import { checkPromptReferences } from "../promptAssignments.ts";
 import type {
   ConfigRepo,
   RoutingChange,
@@ -13,10 +13,12 @@ import {
   DEFAULT_SETTINGS,
   mergeSettings,
   readGuardrailSettings,
+  readPromptSettings,
   readRetentionLoweredAt,
   readSmartRouterSettings,
 } from "../types.ts";
 import type { Conn, Rows } from "./db.ts";
+import { lockPromptManagement } from "./promptLock.ts";
 
 const SETTINGS_KEY = "settings";
 const ADMIN_HASH_KEY = "adminPasswordHash";
@@ -73,14 +75,12 @@ function parseSettings(raw: string | null): Settings {
     return {
       ...DEFAULT_SETTINGS,
       ...stored,
+      ...readPromptSettings(stored),
       rtkEnabled: stored.rtkEnabled === true,
       // Absence means on, decided by `DEFAULT_SETTINGS`; a malformed value
       // means off, the same answer as its neighbours.
       autoCacheEnabled:
         stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
-      // The same question its neighbours ask, put to a union instead of a
-      // boolean: anything that is not one of the four names means off.
-      ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
       bodyRetentionDays:
         Number.isInteger(stored.bodyRetentionDays) &&
         (stored.bodyRetentionDays ?? 0) >= 1 &&
@@ -159,6 +159,7 @@ export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void
      */
     async putSettings(patch: Partial<Settings>) {
       const next = await sql.begin(async (tx): Promise<Settings> => {
+        await lockPromptManagement(tx);
         await tx.unsafe(
           "INSERT INTO settings (key, value) VALUES ($1, '{}') ON CONFLICT (key) DO NOTHING",
           [SETTINGS_KEY],
@@ -169,7 +170,15 @@ export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void
             [SETTINGS_KEY],
           )
         )[0]?.value;
-        const merged = mergeSettings(parseSettings(raw ?? null), patch, Date.now());
+        const current = parseSettings(raw ?? null);
+        const merged = mergeSettings(current, patch, Date.now());
+        checkPromptReferences(
+          merged.prompts,
+          current.prompts,
+          new Set(
+            (await tx.unsafe<Rows<{ id: string }>>("SELECT id FROM prompts")).map((r) => r.id),
+          ),
+        );
         await writeRaw(SETTINGS_KEY, JSON.stringify(merged), tx);
         return merged;
       });
@@ -179,6 +188,20 @@ export function createConfigRepo(sql: SQL, emit: (change: RoutingChange) => void
 
     async getAdminPasswordHash() {
       return readRaw(ADMIN_HASH_KEY);
+    },
+
+    async importSettings(settings) {
+      // Restore is not alias reconciliation against unrelated target settings.
+      // Keep the same management-before-settings/config-version lock order.
+      await sql.begin(async (tx) => {
+        await lockPromptManagement(tx);
+        await writeRaw(
+          SETTINGS_KEY,
+          JSON.stringify({ ...settings, ...readPromptSettings(settings) }),
+          tx,
+        );
+      });
+      emit({ type: "settingsChanged" });
     },
 
     async setAdminPasswordHashIfAbsent(hash: string) {

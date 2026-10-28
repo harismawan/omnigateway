@@ -1,4 +1,5 @@
 import { GatewayError } from "@omni/ir";
+import { builtinPrompts, type ResolvedPrompt, resolvePrompts } from "@omni/prompts";
 import {
   type Dimension,
   type LimitConfig,
@@ -10,12 +11,14 @@ import {
 } from "@omni/ratelimit/catalog";
 import type { ApiKey, Store, UsageSums } from "@omni/store";
 import { generateApiKey, hashApiKey } from "@omni/store";
+import { promptOperation } from "./promptErrors.ts";
 import {
   keyCreateSchema,
   keyExpirySchema,
   keyGuardrailSchema,
   keyLimitsSchema,
   keyModelsSchema,
+  keyPromptsSchema,
   keySmartRoutingSchema,
   parseOrThrow,
 } from "./schemas.ts";
@@ -57,6 +60,11 @@ export type ApiKeySummary = Omit<ApiKey, "hash"> & {
    * measure against a ceiling nobody can read.
    */
   limitUsage: LimitReading[];
+};
+
+/** Effective policy text belongs only to the holder's scoped read, not listKeys. */
+export type OwnKeySummary = ApiKeySummary & {
+  effectivePrompts: Array<{ id: string; name: string; version: number | string; text: string }>;
 };
 
 /** The windows any dimension of this matrix is counted over. */
@@ -180,6 +188,7 @@ async function toSummary(store: Store, key: ApiKey, now: number): Promise<ApiKey
     // they cannot use as intended. It is the operator's text, not a secret.
     guardrailPolicy: key.guardrailPolicy,
     smartRouting: key.smartRouting,
+    prompts: key.prompts,
   };
 }
 
@@ -193,11 +202,8 @@ export async function listKeys(store: Store, now: number = Date.now()): Promise<
 /**
  * One key as its own holder sees it.
  *
- * Deliberately the same `ApiKeySummary` the operator's listing is built from,
- * produced by the same `toSummary`. A second, narrower shape for the client
- * would be a second answer to "what is safe to show about a key", and the two
- * would drift — the summary already excludes `hash` because that question was
- * settled once, here.
+ * The shared safe key projection plus only this holder's effective active
+ * policies. No library/history/assignment-count operations on this path.
  *
  * `bodyLoggingOptOut` is included and is the point: it is a promise made to
  * whoever holds this key, and the holder is exactly who should be able to
@@ -207,13 +213,38 @@ export async function readOwnKey(
   store: Store,
   apiKeyId: string,
   now: number = Date.now(),
-): Promise<ApiKeySummary> {
+): Promise<OwnKeySummary> {
   const key = await store.keys.get(apiKeyId);
   // A live session whose key vanished. Refused rather than reported empty: an
   // empty summary reads as "a key with no limits", which is the opposite of
   // what a missing key means.
   if (key === null) throw new GatewayError("AUTH", "no such api key");
-  return toSummary(store, key, now);
+  const [settings, active] = await Promise.all([
+    store.config.getSettings(),
+    store.prompts.listActive(),
+  ]);
+  const builtins = builtinPrompts();
+  const available = new Map<string, ResolvedPrompt>([
+    ...builtins.map((p): [string, ResolvedPrompt] => [p.id, p]),
+    ...active.map((p): [string, ResolvedPrompt] => [p.id, p]),
+  ]);
+  const names = new Map([
+    ...builtins.map((p): [string, string] => [
+      p.id,
+      `Ponytail ${p.id.slice("ponytail-".length).replace(/^./, (c) => c.toUpperCase())}`,
+    ]),
+    ...active.map((p): [string, string] => [p.id, p.name]),
+  ]);
+  const { prompts } = resolvePrompts(settings.prompts, key.prompts, available);
+  return {
+    ...(await toSummary(store, key, now)),
+    effectivePrompts: prompts.map(({ id, version, text }) => ({
+      id,
+      name: names.get(id) ?? id,
+      version,
+      text,
+    })),
+  };
 }
 
 export type CreatedKey = { id: string; label: string; prefix: string; key: string };
@@ -228,27 +259,37 @@ export async function createKey(store: Store, input: unknown): Promise<CreatedKe
   const body = parseOrThrow(keyCreateSchema, input);
 
   const raw = generateApiKey();
-  const created = await store.keys.create({
-    id: crypto.randomUUID(),
-    label: body.label,
-    prefix: raw.slice(0, 12),
-    hash: await hashApiKey(raw),
-    modelAllowlist: body.modelAllowlist,
-    limits: body.limits,
-    // Settable only at creation. A key handed to a client on the promise that
-    // its payloads are never retained must not become capturable later by an
-    // edit the client cannot see, and there is no patch route to make one.
-    bodyLoggingOptOut: body.bodyLoggingOptOut,
-    // Null unless asked for, which is what every key minted before this field
-    // existed carries and what the great majority should keep carrying.
-    expiresAt: body.expiresAt,
-    // Null unless asked for: no guardrail, and no classifier call per request.
-    guardrailPolicy: body.guardrailPolicy,
-    // Off unless asked for: no confidentiality judgement per request.
-    smartRouting: body.smartRouting,
-  });
+  const hash = await hashApiKey(raw);
+  const created = await promptOperation(() =>
+    store.keys.create({
+      id: crypto.randomUUID(),
+      label: body.label,
+      prefix: raw.slice(0, 12),
+      hash,
+      modelAllowlist: body.modelAllowlist,
+      limits: body.limits,
+      // Settable only at creation. A key handed to a client on the promise that
+      // its payloads are never retained must not become capturable later by an
+      // edit the client cannot see, and there is no patch route to make one.
+      bodyLoggingOptOut: body.bodyLoggingOptOut,
+      // Null unless asked for, which is what every key minted before this field
+      // existed carries and what the great majority should keep carrying.
+      expiresAt: body.expiresAt,
+      // Null unless asked for: no guardrail, and no classifier call per request.
+      guardrailPolicy: body.guardrailPolicy,
+      // Off unless asked for: no confidentiality judgement per request.
+      smartRouting: body.smartRouting,
+      prompts: body.prompts,
+    }),
+  );
 
   return { id: created.id, label: created.label, prefix: created.prefix, key: raw };
+}
+
+export async function setKeyPrompts(store: Store, id: string, input: unknown): Promise<void> {
+  const body = parseOrThrow(keyPromptsSchema, input);
+  if ((await store.keys.get(id)) === null) throw new GatewayError("BAD_REQUEST", "no such api key");
+  return promptOperation(() => store.keys.setPrompts(id, body));
 }
 
 /**

@@ -26,6 +26,7 @@ export type RunOptions = ContextOptions & {
   /** Overridden by tests, which must never spawn a process or call systemctl. */
   service?: (input: { root: string; env: Record<string, string | undefined> }) => ServiceDeps;
   prompt?: CommandEnv["prompt"];
+  promptInput?: CommandEnv["promptInput"];
   connect?: (store: Store) => ConnectFlows;
   foreground?: CommandEnv["foreground"];
   setupFs?: CommandEnv["setupFs"];
@@ -48,12 +49,14 @@ export async function run(
   // on an argv the command parser would reject.
   const wants = (...flags: string[]) => argv.some((token) => flags.includes(token));
 
-  if (wants("--version")) {
+  const resolved = resolveCommand(argv);
+  // Prompt show owns a valued --version flag; do not mistake it for the CLI
+  // release switch. Its command parser validates the value below.
+  if (wants("--version") && resolved?.name !== "prompts show") {
     writer.out(VERSION);
     return 0;
   }
 
-  const resolved = resolveCommand(argv);
   if (resolved === null) {
     const words = argv.filter((token) => !token.startsWith("-"));
     if (words.length > 0 && !wants("--help", "-h")) {
@@ -73,7 +76,12 @@ export async function run(
   try {
     args = parse(resolved.rest, resolved.command.options ?? {});
   } catch (error) {
-    writer.err(describeError(error, "could not parse arguments"));
+    // Unknown-option diagnostics quote argv, which may be mistaken prompt text.
+    writer.err(
+      resolved.name.startsWith("prompts ")
+        ? "invalid prompt command arguments"
+        : describeError(error, "could not parse arguments"),
+    );
     writer.err(`usage: omni ${resolved.command.usage}`);
     return 2;
   }
@@ -112,6 +120,13 @@ export async function run(
     ctx,
     writer,
     prompt,
+    promptInput: options.promptInput ?? {
+      readFile: (path) => Bun.file(path).text(),
+      readStdin: async () => {
+        if (prompt.isTty) throw new CliError("provide --file or pipe prompt text");
+        return Bun.stdin.text();
+      },
+    },
     setupFs: options.setupFs ?? {
       homeDir: homedir(),
       cwd: process.cwd(),
@@ -182,7 +197,13 @@ export async function run(
       writer.err(`${error.code}: ${error.message}`);
       return 1;
     }
-    writer.err(describeError(error, "unknown error"));
+    // Storage/driver errors can contain bound prompt values. Only the known
+    // control and CLI refusals above are safe on this text-bearing surface.
+    writer.err(
+      resolved.name.startsWith("prompts ")
+        ? "prompt operation failed"
+        : describeError(error, "unknown error"),
+    );
     return 1;
   } finally {
     ctx.close();

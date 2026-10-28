@@ -1,5 +1,6 @@
 import { GatewayError, safeToken } from "@omni/ir";
 import { PONYTAIL_MODES } from "@omni/ponytail/catalog";
+import { isPromptId, MAX_ASSIGNED_PROMPTS, MAX_PROMPT_TEXT_CHARS } from "@omni/prompts/catalog";
 import { PROVIDER_ID_PATTERN } from "@omni/providers/descriptors";
 import { limitConfigSchema } from "@omni/ratelimit/catalog";
 import type { UsageDimension, UsageGrain } from "@omni/store";
@@ -210,6 +211,68 @@ const MAX_INSTANT = 8_640_000_000_000_000;
  */
 const guardrailPolicySchema = z.string().trim().min(1).max(GUARDRAIL_POLICY_MAX_CHARS);
 
+export const promptIdSchema = z.string().refine(isPromptId, "invalid prompt id");
+const userPromptIdSchema = promptIdSchema.refine(
+  (id) => !id.startsWith("ponytail-"),
+  "reserved prompt id",
+);
+export const promptIdsSchema = z
+  .array(promptIdSchema)
+  .max(MAX_ASSIGNED_PROMPTS)
+  .refine((ids) => new Set(ids).size === ids.length, "duplicate prompt ids")
+  .refine(
+    (ids) => ids.filter((id) => id.startsWith("ponytail-")).length <= 1,
+    "only one built-in prompt is allowed",
+  );
+export const keyPromptsSchema = z
+  .object({ ids: promptIdsSchema, inheritGlobal: z.boolean() })
+  .strict();
+const promptNameSchema = z.string().min(1).max(80);
+const promptDescriptionSchema = z
+  .string()
+  .max(500)
+  .nullable()
+  .optional()
+  .transform((v) => v ?? null);
+const promptTextSchema = z
+  .string()
+  .transform((text) => text.trimEnd())
+  .pipe(
+    z
+      .string()
+      .min(1)
+      .max(MAX_PROMPT_TEXT_CHARS)
+      .refine((text) => text.trim() !== "", "prompt text must not be blank"),
+  );
+const promptNoteSchema = z
+  .string()
+  .max(200)
+  .nullable()
+  .optional()
+  .transform((v) => v ?? null);
+export const promptCreateSchema = z
+  .object({
+    id: userPromptIdSchema,
+    name: promptNameSchema,
+    description: promptDescriptionSchema,
+    text: promptTextSchema,
+    note: promptNoteSchema,
+    activate: z.boolean().default(true),
+  })
+  .strict();
+export const promptMetadataSchema = z
+  .object({ name: promptNameSchema, description: promptDescriptionSchema })
+  .strict();
+export const promptSaveSchema = z
+  .object({ text: promptTextSchema, note: promptNoteSchema, activate: z.boolean().default(true) })
+  .strict();
+export const promptActivateSchema = z
+  .object({ version: z.number().int().positive().safe() })
+  .strict();
+export const promptDuplicateSchema = z
+  .object({ id: userPromptIdSchema, name: promptNameSchema })
+  .strict();
+
 export const keyCreateSchema = z
   .object({
     label: z.string().min(1).default("api key"),
@@ -259,6 +322,7 @@ export const keyCreateSchema = z
      * field existed; the global `smartRouterEnabled` setting still gates it.
      */
     smartRouting: z.boolean().default(false),
+    prompts: keyPromptsSchema.default({ ids: [], inheritGlobal: true }),
   })
   .strict();
 
@@ -383,6 +447,7 @@ export const settingsSchema = z.object({
    * persists, so an operator cannot save a level the injector does not know.
    */
   ponytailMode: z.enum(PONYTAIL_MODES),
+  prompts: promptIdsSchema.optional(),
   /**
    * One half of the capture contract. `OMNI_BODY_LOGGING_ALLOWED` is the other,
    * and it is read at boot, so nothing this schema accepts can start recording

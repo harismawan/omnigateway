@@ -22,6 +22,7 @@ import keySmartRouting020 from "./migrations/020_key_smart_routing.sql" with { t
 import requestTrace021 from "./migrations/021_request_trace.sql" with { type: "text" };
 import logExport022 from "./migrations/022_log_export.sql" with { type: "text" };
 import bodyState023 from "./migrations/023_body_state.sql" with { type: "text" };
+import prompts024 from "./migrations/024_prompts.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -82,6 +83,7 @@ const MIGRATIONS: ReadonlyArray<{
   // No `after`, and no backfill in the SQL: a row older than the column never had
   // its capture tracked, so NULL ("not attempted") is the truth about it.
   { id: 23, sql: bodyState023 },
+  { id: 24, sql: prompts024 },
 ];
 
 /**

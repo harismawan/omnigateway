@@ -41,6 +41,7 @@ export type RequestRecord = {
   ttftMs: number | null;
   durationMs: number;
   degradations: string[];
+  prompts: string[];
   rtk: {
     applied: boolean;
     filterHits: number;
@@ -101,6 +102,7 @@ export function buildRecord(log: RequestLog, ctx: RecordContext): RequestRecord 
     ttftMs: log.ttftMs,
     durationMs: log.durationMs,
     degradations: [...log.degradations],
+    prompts: [...log.prompts],
     rtk: {
       applied: log.rtkApplied,
       filterHits: log.rtkFilterHits,

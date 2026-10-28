@@ -14,6 +14,7 @@ export { openDb } from "./sqlite/db.ts";
 export { createKeyRepo, generateApiKey, hashApiKey } from "./sqlite/keys.ts";
 export { createMaintenanceRepo } from "./sqlite/maintenance.ts";
 export { createPluginRepo } from "./sqlite/plugins.ts";
+export { createPromptRepo } from "./sqlite/prompts.ts";
 export { hostDayOffsetMinutes, startOfDay } from "./sqlite/rollup.ts";
 export { createStore } from "./sqlite/store.ts";
 export { createUsageRepo } from "./sqlite/usage.ts";

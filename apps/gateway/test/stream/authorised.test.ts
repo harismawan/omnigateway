@@ -17,6 +17,7 @@ const TOPICS = [
   "res:usage",
   "res:logs",
   "res:keys",
+  "res:prompts",
   "res:credentials",
   "res:models",
   "res:settings",
@@ -39,6 +40,7 @@ const TOPICS = [
  */
 const GRID: Record<string, Record<string, boolean>> = {
   admin: {
+    "res:prompts": true,
     "res:usage": true,
     "res:logs": true,
     "res:keys": true,
@@ -56,6 +58,7 @@ const GRID: Record<string, Record<string, boolean>> = {
     "": false,
   },
   viewer: {
+    "res:prompts": true,
     "res:usage": true,
     "res:logs": true,
     "res:keys": true,
@@ -73,6 +76,7 @@ const GRID: Record<string, Record<string, boolean>> = {
     "": false,
   },
   client: {
+    "res:prompts": false,
     // Two, and only two. Both are invalidation signals carrying `{ keys }`, so
     // holding one leaks nothing — the refetch goes to a scoped endpoint.
     "res:usage": true,
@@ -90,6 +94,7 @@ const GRID: Record<string, Record<string, boolean>> = {
     "": false,
   },
   machine: {
+    "res:prompts": false,
     "res:usage": false,
     "res:logs": false,
     "res:keys": false,

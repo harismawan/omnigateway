@@ -1,10 +1,14 @@
 import type { Logger } from "@omni/ir";
+import { readPromptAssignment } from "@omni/prompts/catalog";
 import { type LimitConfig, parseLimitConfig } from "@omni/ratelimit/catalog";
 import type { SQL } from "bun";
-import type { ApiKey, KeyRepo } from "../types.ts";
-import { num, numOrNull, type Rows } from "./db.ts";
+import { checkPromptReferences, parsePromptJson } from "../promptAssignments.ts";
+import type { ApiKey, KeyRepo, RoutingChange } from "../types.ts";
+import { type Conn, num, numOrNull, type Rows } from "./db.ts";
+import { lockPromptManagement } from "./promptLock.ts";
 
 type Row = {
+  prompts: string | null;
   id: string;
   label: string;
   prefix: string;
@@ -44,6 +48,7 @@ function parseLimits(id: string, raw: string, logger: Logger): LimitConfig | nul
 }
 
 const toKey = (r: Row, logger: Logger): ApiKey => ({
+  prompts: readPromptAssignment(parsePromptJson(r.prompts)),
   id: r.id,
   label: r.label,
   prefix: r.prefix,
@@ -63,13 +68,45 @@ const toKey = (r: Row, logger: Logger): ApiKey => ({
   smartRouting: r.smart_routing,
 });
 
-export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
+export function createKeyRepo(
+  sql: SQL,
+  logger: Logger,
+  emit: (change: RoutingChange) => void,
+): KeyRepo {
+  const check = async (conn: Conn, ids: string[], previous: string[] = []) =>
+    checkPromptReferences(
+      ids,
+      previous,
+      new Set((await conn.unsafe<Rows<{ id: string }>>("SELECT id FROM prompts")).map((r) => r.id)),
+    );
   const one = async (where: string, arg: string): Promise<ApiKey | null> => {
     const rows = await sql.unsafe<Rows<Row>>(`SELECT * FROM api_keys WHERE ${where} = $1`, [arg]);
     const row = rows[0];
     return row === undefined ? null : toKey(row, logger);
   };
   return {
+    async setPrompts(id, input) {
+      await sql.begin(async (tx) => {
+        await lockPromptManagement(tx);
+        const previous = (
+          await tx.unsafe<Rows<{ prompts: string | null }>>(
+            "SELECT prompts FROM api_keys WHERE id = $1 FOR UPDATE",
+            [id],
+          )
+        )[0];
+        const prompts = readPromptAssignment(input);
+        await check(
+          tx,
+          prompts.ids,
+          readPromptAssignment(parsePromptJson(previous?.prompts ?? null)).ids,
+        );
+        await tx.unsafe("UPDATE api_keys SET prompts = $1 WHERE id = $2", [
+          JSON.stringify(prompts),
+          id,
+        ]);
+      });
+      emit({ type: "promptsChanged" });
+    },
     async list() {
       const rows = await sql.unsafe<Rows<Row>>("SELECT * FROM api_keys ORDER BY created_at DESC");
       return rows.map((row) => toKey(row, logger));
@@ -84,59 +121,73 @@ export function createKeyRepo(sql: SQL, logger: Logger): KeyRepo {
 
     async create(input) {
       const now = Date.now();
-      await sql.unsafe(
-        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
+      const prompts = readPromptAssignment(input.prompts);
+      await sql.begin(async (tx) => {
+        await lockPromptManagement(tx);
+        await check(tx, prompts.ids);
+        await tx.unsafe(
+          `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
                                body_logging_opt_out, created_at, revoked_at, expires_at,
-                               guardrail_policy, smart_routing)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11)`,
-        [
-          input.id,
-          input.label,
-          input.prefix,
-          input.hash,
-          input.modelAllowlist === null ? null : JSON.stringify(input.modelAllowlist),
-          // Validated on the way in as well as on the way out, so a caller that
-          // reached past the control schema cannot write a shape no reader can
-          // parse and lock its own key out.
-          JSON.stringify(parseLimitConfig(input.limits)),
-          input.bodyLoggingOptOut,
-          now,
-          input.expiresAt,
-          input.guardrailPolicy,
-          input.smartRouting,
-        ],
-      );
-      return { ...input, createdAt: now, revokedAt: null };
+                               guardrail_policy, smart_routing, prompts)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11,$12)`,
+          [
+            input.id,
+            input.label,
+            input.prefix,
+            input.hash,
+            input.modelAllowlist === null ? null : JSON.stringify(input.modelAllowlist),
+            // Validated on the way in as well as on the way out, so a caller that
+            // reached past the control schema cannot write a shape no reader can
+            // parse and lock its own key out.
+            JSON.stringify(parseLimitConfig(input.limits)),
+            input.bodyLoggingOptOut,
+            now,
+            input.expiresAt,
+            input.guardrailPolicy,
+            input.smartRouting,
+            JSON.stringify(prompts),
+          ],
+        );
+      });
+      emit({ type: "promptsChanged" });
+      return { ...input, prompts, createdAt: now, revokedAt: null };
     },
 
-    async importRow(row) {
+    async importRow(row, mode) {
       if (row.limits === null) throw new Error(`api key ${row.id} has unreadable limits`);
-      await sql.unsafe(
-        `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
+      const prompts = readPromptAssignment(row.prompts);
+      await sql.begin(async (tx) => {
+        await lockPromptManagement(tx);
+        if (mode !== "restore") await check(tx, prompts.ids);
+        await tx.unsafe(
+          `INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits,
                                body_logging_opt_out, created_at, revoked_at, expires_at,
-                               guardrail_policy, smart_routing)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-        [
-          row.id,
-          row.label,
-          row.prefix,
-          row.hash,
-          row.modelAllowlist === null ? null : JSON.stringify(row.modelAllowlist),
-          JSON.stringify(parseLimitConfig(row.limits)),
-          row.bodyLoggingOptOut,
-          row.createdAt,
-          row.revokedAt,
-          // Carried like the dates beside it. A restore that dropped this would
-          // hand back a key outliving the expiry its operator set.
-          row.expiresAt,
-          // Likewise: a restore that dropped the policy would hand back a key
-          // freed of the purpose its operator restricted it to.
-          row.guardrailPolicy,
-          // Likewise: a restore that dropped the flag would hand back a key
-          // whose confidential requests go to the external model.
-          row.smartRouting,
-        ],
-      );
+                               guardrail_policy, smart_routing, prompts)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          [
+            row.id,
+            row.label,
+            row.prefix,
+            row.hash,
+            row.modelAllowlist === null ? null : JSON.stringify(row.modelAllowlist),
+            JSON.stringify(parseLimitConfig(row.limits)),
+            row.bodyLoggingOptOut,
+            row.createdAt,
+            row.revokedAt,
+            // Carried like the dates beside it. A restore that dropped this would
+            // hand back a key outliving the expiry its operator set.
+            row.expiresAt,
+            // Likewise: a restore that dropped the policy would hand back a key
+            // freed of the purpose its operator restricted it to.
+            row.guardrailPolicy,
+            // Likewise: a restore that dropped the flag would hand back a key
+            // whose confidential requests go to the external model.
+            row.smartRouting,
+            JSON.stringify(prompts),
+          ],
+        );
+      });
+      emit({ type: "promptsChanged" });
     },
 
     async setLimits(id: string, limits: LimitConfig) {

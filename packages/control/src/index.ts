@@ -142,12 +142,14 @@ export {
   createKey,
   type LimitReading,
   listKeys,
+  type OwnKeySummary,
   readOwnKey,
   revokeKey,
   setKeyExpiry,
   setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
+  setKeyPrompts,
   setKeySmartRouting,
 } from "./keys.ts";
 export {
@@ -254,6 +256,18 @@ export {
   scopeKey,
   scopeOf,
 } from "./principal.ts";
+export {
+  activatePromptVersion,
+  createPrompt,
+  duplicatePrompt,
+  listPrompts,
+  type PromptLibraryEntry,
+  type PromptView,
+  readPrompt,
+  removePrompt,
+  savePromptVersion,
+  updatePrompt,
+} from "./prompts.ts";
 export { type BurnEstimate, type BurnInput, burnEstimates, burnFor } from "./quota/burn.ts";
 export {
   type AccountQuotaHistoryInput,
@@ -293,8 +307,15 @@ export {
   dryRunSchema,
   grainSchema,
   keyCreateSchema,
+  keyPromptsSchema,
   modelSchema,
   parseOrThrow,
+  promptActivateSchema,
+  promptCreateSchema,
+  promptDuplicateSchema,
+  promptIdsSchema,
+  promptMetadataSchema,
+  promptSaveSchema,
   providerIdSchema,
   quotaRefreshSchema,
   redeemResetSchema,

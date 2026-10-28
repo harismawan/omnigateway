@@ -36,6 +36,7 @@ import { clientRoutes } from "./routes/client.ts";
 import { connectRoutes } from "./routes/connect.ts";
 import { databaseRoutes, type WorkerPause } from "./routes/database.ts";
 import { absentExportWorker, type ExportWorkerHandle, exportRoutes } from "./routes/export.ts";
+import { promptsRoutes } from "./routes/prompts.ts";
 import { proxyRoutes, REQUEST_ID_HEADER } from "./routes/proxy.ts";
 import { streamRoutes } from "./routes/stream.ts";
 import { type Broadcaster, createBroadcaster } from "./stream/broadcaster.ts";
@@ -318,6 +319,8 @@ export function createApp(deps: AppDeps) {
   // or quota write patches the snapshot rather than rebuilding it — a rebuild
   // per foreign request is the cost this cache exists to remove. Own writes
   // are skipped: the local subscription already applied them.
+  // promptsChanged is configuration too: remote active text/name edits must
+  // stale the held snapshot, never patch or ship prompt text in this frame.
   const ROUTING_TOPIC = "routing";
   deps.store.routing.subscribe((change) => {
     void coord.pubsub.publish(ROUTING_TOPIC, JSON.stringify({ from: nodeId, change }));
@@ -541,6 +544,7 @@ export function createApp(deps: AppDeps) {
           lifecycle: deps.lifecycle ?? absentLifecycle(),
         }),
       )
+      .use(promptsRoutes({ store: deps.store, admin, broadcaster, logger }))
       .use(
         exportRoutes({
           store: deps.store,

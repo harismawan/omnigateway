@@ -103,8 +103,11 @@ export function clientRoutes(deps: ClientDeps) {
        * installation, not this key, and the fields around it are all facts about
        * the key. Additive, so a holder reading the old shape is unaffected.
        */
-      .get("/api/client/summary", async ({ request }) => {
+      .get("/api/client/summary", async ({ request, set }) => {
         const apiKeyId = await requireClient(request, deps.admin);
+        // Policy text is private and current. The holder polls this endpoint
+        // every 10s even while LIVE; library topics remain reader-only.
+        set.headers["cache-control"] = "no-store";
         return {
           ...(await readOwnKey(deps.store, apiKeyId, now())),
           // Zero is UTC and a real answer, so it cannot stand in for "unset".
@@ -166,6 +169,7 @@ export function clientRoutes(deps: ClientDeps) {
             turn: query.turn,
             agent: query.agent,
             tag: query.tag,
+            prompt: query.prompt,
           },
           scopeOf({ kind: "client", apiKeyId }),
         );

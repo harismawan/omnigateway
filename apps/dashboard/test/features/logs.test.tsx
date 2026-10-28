@@ -13,7 +13,7 @@ import {
   requestBody,
   settings,
 } from "../helpers/fixtures.ts";
-import { renderWithProviders } from "../helpers/render.tsx";
+import { renderWithProviders, renderWithRouter } from "../helpers/render.tsx";
 import { choose } from "../helpers/select.ts";
 
 const logs = [
@@ -49,6 +49,24 @@ function stubLogs(overrides: Parameters<typeof createFetchStub>[0] = {}) {
 }
 
 describe("LogsBoard", () => {
+  test("applied prompt chips link exact historical versions and prompt terms reach the API", async () => {
+    const user = userEvent.setup();
+    const stub = stubLogs({
+      "GET /api/logs": () => ({ logs: [log({ prompts: ["team@3", "ponytail-full@v4.9.0"] })] }),
+    });
+    renderWithRouter(<LogsBoard />);
+    await user.type(await screen.findByLabelText("Models and error codes"), "prompt:team");
+    await waitFor(() => expect(stub.calls.some((c) => c.url.includes("prompt=team"))).toBe(true), {
+      timeout: 1500,
+    });
+    await user.click(await screen.findByText("fast"));
+    expect((await screen.findByRole("link", { name: "team@3" })).getAttribute("href")).toBe(
+      "/prompts?id=team&version=3",
+    );
+    expect(screen.getByRole("link", { name: "ponytail-full@v4.9.0" }).getAttribute("href")).toBe(
+      "/prompts?id=ponytail-full&version=v4.9.0",
+    );
+  });
   test("counts failures and states that bodies are not recorded", async () => {
     stubLogs();
     renderWithProviders(<LogsBoard />);

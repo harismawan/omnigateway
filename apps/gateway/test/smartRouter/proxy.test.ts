@@ -41,6 +41,53 @@ const errorBody = (surface: Surface, code: ErrorCode, message: string): unknown 
       ? responsesErrorBody(code, message)
       : openaiErrorBody(code, message);
 
+test("confidentiality and guardrail screen client text only; local reroute receives captured prompts", async () => {
+  let reads = 0;
+  const h: Harness = await smartRouterHarness({
+    classifier: "secret",
+    policy: "Only software engineering work.",
+    deps: {
+      snapshots: {
+        async get(now) {
+          if (++reads === 2) {
+            await h.store.prompts.saveVersion("operator", {
+              text: "LATER-OPERATOR-VERSION",
+              note: null,
+              activate: true,
+            });
+          }
+          return buildSnapshot(h.store, now);
+        },
+      },
+    },
+  });
+  await h.store.prompts.create({
+    id: "operator",
+    name: "Operator",
+    description: null,
+    text: "UNIQUE-OPERATOR-SENTINEL",
+    note: null,
+    activate: true,
+  });
+  await h.store.config.putSettings({ prompts: ["operator"] });
+  const response = await h.call("anthropic", {
+    body: { messages: [{ role: "user", content: "SECRET client text" }] },
+  });
+  expect(response.status).toBe(200);
+  expect(h.externalCalls).toHaveLength(0);
+  expect(h.localCalls).toHaveLength(1);
+  expect(JSON.stringify(h.localCalls[0]?.request.system)).toContain("UNIQUE-OPERATOR-SENTINEL");
+  expect(JSON.stringify(h.localCalls[0]?.request.system)).not.toContain("LATER-OPERATOR-VERSION");
+  expect(h.classifierCalls.length).toBeGreaterThan(0);
+  expect(h.localGuardrailCalls.length).toBeGreaterThan(0);
+  for (const call of [...h.classifierCalls, ...h.localGuardrailCalls]) {
+    expect(JSON.stringify(call.request)).not.toContain("UNIQUE-OPERATOR-SENTINEL");
+  }
+  const parent = await rowOf(h, "req_1");
+  expect(parent?.prompts).toEqual(["operator@1"]);
+  h.store.close();
+});
+
 /** The error a stream carried, as its surface renders it. */
 function streamError(surface: Surface, text: string): unknown {
   const all = frames(text);
@@ -861,8 +908,8 @@ test("a guardrail-only screen that throws warns with the usage policy reason", a
     deps: {
       snapshots: {
         get: async () => {
-          // The flag is off, so the route makes no read; the first is judge's.
-          if (++reads === 1) throw new Error("LEAKED-STORE-TEXT");
+          // Prompt capture precedes the guardrail's own settings read.
+          if (++reads === 2) throw new Error("LEAKED-STORE-TEXT");
           return buildSnapshot(h.store, 1_000_000);
         },
       },

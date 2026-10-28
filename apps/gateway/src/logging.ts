@@ -47,6 +47,7 @@ function requestLogDefaults(id: string, at: number): NewRequestLog {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    prompts: [],
     ...EMPTY_TRACE,
     ...UNSTAMPED,
   };

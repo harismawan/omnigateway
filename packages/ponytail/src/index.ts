@@ -4,7 +4,7 @@ import { PONYTAIL_MARKER, rulesetFor } from "./text.ts";
 
 export type { PonytailLevel, PonytailMode } from "./catalog.ts";
 export { isPonytailMode, PONYTAIL_MODES } from "./catalog.ts";
-export { PONYTAIL_MARKER } from "./text.ts";
+export { PONYTAIL_MARKER, rulesetFor } from "./text.ts";
 
 export type PonytailReport = {
   mode: PonytailMode;

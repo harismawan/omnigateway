@@ -40,7 +40,12 @@ forEachStore((backend) => {
     expect(created.revokedAt).toBeNull();
     expect(typeof created.createdAt).toBe("number");
     const found = await s.keys.findByHash(input.hash);
-    expect(found).toEqual({ ...input, createdAt: created.createdAt, revokedAt: null });
+    expect(found).toEqual({
+      ...input,
+      prompts: { ids: [], inheritGlobal: true },
+      createdAt: created.createdAt,
+      revokedAt: null,
+    });
     expect(await s.keys.get("k1")).toEqual(found);
     expect(await s.keys.findByHash("nope")).toBeNull();
     expect(await s.keys.get("nope")).toBeNull();
@@ -173,6 +178,7 @@ forEachStore((backend) => {
   test("importRow writes a row exactly as read, revocation and dates included", async () => {
     const s = await backend.fresh();
     await s.keys.importRow({
+      prompts: { ids: [], inheritGlobal: true },
       id: "k_imported",
       label: "carried",
       prefix: "omni_abcdefgh",
@@ -202,6 +208,7 @@ forEachStore((backend) => {
     expect(row?.bodyLoggingOptOut).toBe(true);
     await expect(
       s.keys.importRow({
+        prompts: { ids: [], inheritGlobal: true },
         id: "k_broken",
         label: "b",
         prefix: "p",

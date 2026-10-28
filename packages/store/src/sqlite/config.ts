@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { isPonytailMode } from "@omni/ponytail/catalog";
+import { checkPromptReferences } from "../promptAssignments.ts";
 import type {
   ConfigRepo,
   ScoringWeights,
@@ -12,6 +12,7 @@ import {
   DEFAULT_SETTINGS,
   mergeSettings,
   readGuardrailSettings,
+  readPromptSettings,
   readRetentionLoweredAt,
   readSmartRouterSettings,
 } from "../types.ts";
@@ -83,6 +84,7 @@ export function createConfigRepo(
       return {
         ...DEFAULT_SETTINGS,
         ...stored,
+        ...readPromptSettings(stored),
         rtkEnabled: stored.rtkEnabled === true,
         // Two different questions, kept apart. *Absence* means on, and that
         // is decided by `DEFAULT_SETTINGS` above, not here. What this line
@@ -94,9 +96,6 @@ export function createConfigRepo(
         // already have.
         autoCacheEnabled:
           stored.autoCacheEnabled === undefined ? true : stored.autoCacheEnabled === true,
-        // The same question its neighbours ask, put to a union instead of a
-        // boolean: anything that is not one of the four names means off.
-        ponytailMode: isPonytailMode(stored.ponytailMode) ? stored.ponytailMode : "off",
         bodyRetentionDays:
           Number.isInteger(stored.bodyRetentionDays) &&
           (stored.bodyRetentionDays ?? 0) >= 1 &&
@@ -126,7 +125,18 @@ export function createConfigRepo(
    * them and have it overwritten — which would lose `logRetentionLoweredAt`.
    */
   const putSettings = db.transaction((patch: Partial<Settings>): Settings => {
-    const next = mergeSettings(readSettings(), patch, Date.now());
+    const current = readSettings();
+    const next = mergeSettings(current, patch, Date.now());
+    checkPromptReferences(
+      next.prompts,
+      current.prompts,
+      new Set(
+        db
+          .query<{ id: string }, []>("SELECT id FROM prompts")
+          .all()
+          .map((r) => r.id),
+      ),
+    );
     writeRaw(SETTINGS_KEY, JSON.stringify(next));
     return next;
   }).immediate;
@@ -170,6 +180,15 @@ export function createConfigRepo(
       const next = putSettings(patch);
       emit({ type: "settingsChanged" });
       return next;
+    },
+
+    async importSettings(settings) {
+      // Unlike a user patch, this is a restored normalized snapshot, not a new
+      // assignment. Preserve dangling IDs and the source retention marker exactly.
+      db.transaction(() => {
+        writeRaw(SETTINGS_KEY, JSON.stringify({ ...settings, ...readPromptSettings(settings) }));
+      }).immediate();
+      emit({ type: "settingsChanged" });
     },
 
     async getAdminPasswordHash() {

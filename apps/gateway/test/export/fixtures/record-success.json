@@ -27,6 +27,7 @@
   "ttftMs": 412,
   "durationMs": 2350,
   "degradations": ["anthropic:cache-breakpoint-added"],
+  "prompts": ["ponytail-full@v4.9.0", "team@11"],
   "rtk": {
     "applied": true,
     "filterHits": 3,

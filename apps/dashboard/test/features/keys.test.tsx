@@ -1,10 +1,23 @@
 import { describe, expect, test } from "bun:test";
+import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { EditPromptsDialog } from "../../src/features/keys/EditPromptsDialog.tsx";
 import { KeysBoard } from "../../src/features/keys/KeysBoard.tsx";
+import { MintKeyDialog } from "../../src/features/keys/MintKeyDialog.tsx";
+import { routeTree } from "../../src/routeTree.gen.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { apiKey, model, settings } from "../helpers/fixtures.ts";
-import { renderWithProviders } from "../helpers/render.tsx";
+import { makeQueryClient, renderWithProviders } from "../helpers/render.tsx";
+import { choose } from "../helpers/select.ts";
+import { installSocketStub } from "../helpers/socketStub.ts";
+
+const promptLibrary = [
+  { id: "team", name: "Team", builtin: false, activeVersion: 3 },
+  { id: "draft", name: "Draft", builtin: false, activeVersion: null },
+  { id: "ponytail-full", name: "Ponytail Full", builtin: true, activeVersion: "v4.9.0" },
+  { id: "ponytail-lite", name: "Ponytail Lite", builtin: true, activeVersion: "v4.9.0" },
+];
 
 const minted = {
   id: "key-9",
@@ -15,6 +28,9 @@ const minted = {
 
 function stubKeys(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
+    "GET /api/status": () => ({ authenticated: true, principal: { kind: "admin" } }),
+    "GET /api/settings": () => ({ settings }),
+    "GET /api/prompts": () => promptLibrary,
     "GET /api/keys": () => ({
       keys: [
         apiKey(),
@@ -40,6 +56,226 @@ function stubKeys(overrides: Parameters<typeof createFetchStub>[0] = {}) {
 }
 
 describe("KeysBoard", () => {
+  test("mint preview defaults to fetched globals and keeps inherited payload explicit", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/settings": () => ({
+        settings: { ...settings, prompts: ["ponytail-full", "team"] },
+      }),
+      "GET /api/prompts": () => promptLibrary,
+      "POST /api/keys": () => minted,
+    });
+    renderWithProviders(<MintKeyDialog open onOpenChange={() => {}} />);
+    const preview = await screen.findByRole("list", { name: "Effective prompts" });
+    await waitFor(() =>
+      expect(
+        within(preview)
+          .getAllByRole("listitem")
+          .map((el) => el.textContent),
+      ).toEqual(["Ponytail Full @v4.9.0", "Team @3"]),
+    );
+    expect(
+      screen.getByText(
+        "Preview only; the gateway resolves active prompts when each request arrives.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "Manage prompt texts in Prompt Management" })
+        .getAttribute("href"),
+    ).toBe("/prompts");
+    await user.click(screen.getByRole("button", { name: "Create key" }));
+    await waitFor(() =>
+      expect(
+        JSON.parse(String(stub.calls.find((c) => c.init?.method === "POST")?.init?.body)).prompts,
+      ).toEqual({ ids: [], inheritGlobal: true }),
+    );
+  });
+
+  test("mint preview preserves first-ID order, dedupes globals, and lets key builtin win before inheritance is disabled", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/settings": () => ({
+        settings: { ...settings, prompts: ["ponytail-full", "team"] },
+      }),
+      "GET /api/prompts": () => promptLibrary,
+      "POST /api/keys": () => minted,
+    });
+    renderWithProviders(<MintKeyDialog open onOpenChange={() => {}} />);
+    const preview = await screen.findByRole("list", { name: "Effective prompts" });
+    await within(preview).findByText("Team @3");
+    const names = () =>
+      within(preview)
+        .queryAllByRole("listitem")
+        .map((el) => el.textContent);
+    await choose(user, screen.getByLabelText("Add prompt"), "Team");
+    expect(names()).toEqual(["Ponytail Full @v4.9.0", "Team @3"]);
+    await choose(user, screen.getByLabelText("Add prompt"), "Ponytail Lite");
+    expect(names()).toEqual(["Team @3", "Ponytail Lite @v4.9.0"]);
+    await user.click(screen.getByRole("button", { name: "Move Ponytail Lite up" }));
+    expect(names()).toEqual(["Team @3", "Ponytail Lite @v4.9.0"]);
+    await choose(user, screen.getByLabelText("Add prompt"), "Draft (inactive draft)");
+    expect(names()).toEqual(["Team @3", "Ponytail Lite @v4.9.0"]);
+    await user.click(screen.getByRole("switch", { name: "Also apply global prompts" }));
+    expect(names()).toEqual(["Ponytail Lite @v4.9.0", "Team @3"]);
+    await user.click(screen.getByRole("button", { name: "Create key" }));
+    await waitFor(() =>
+      expect(
+        JSON.parse(String(stub.calls.find((c) => c.init?.method === "POST")?.init?.body)).prompts,
+      ).toEqual({ ids: ["ponytail-lite", "team", "draft"], inheritGlobal: false }),
+    );
+  });
+
+  for (const failed of ["settings", "prompts"]) {
+    test(`mint preview reports unavailable when ${failed} cannot be fetched`, async () => {
+      stubKeys({
+        "GET /api/settings": () => ({ settings: { ...settings, prompts: ["team"] } }),
+        "GET /api/prompts": () => promptLibrary,
+        [`GET /api/${failed}`]: () => ({
+          status: 500,
+          body: { error: { code: "INTERNAL", message: "Policy unavailable" } },
+        }),
+      });
+      renderWithProviders(<MintKeyDialog open onOpenChange={() => {}} />);
+      expect(
+        await screen.findByText(
+          "Effective preview unavailable until settings and library load successfully.",
+        ),
+      ).toBeTruthy();
+      expect((await screen.findByRole("alert")).textContent).toBe("Policy unavailable");
+      expect(screen.queryByText("No effective prompts.")).toBeNull();
+      expect(
+        screen
+          .getByRole("link", { name: "Manage prompt texts in Prompt Management" })
+          .getAttribute("href"),
+      ).toBe("/prompts");
+    });
+  }
+  test("actual routed assignment link opens only the matching key dialog and closes its search target", async () => {
+    installSocketStub();
+    const user = userEvent.setup();
+    stubKeys({
+      "GET /api/prompts": () =>
+        promptLibrary.map((p) => ({
+          ...p,
+          estimatedTokens: 10,
+          assignments: { global: false, keyIds: [] },
+        })),
+      "GET /api/settings": () => ({ settings }),
+      "GET /api/plugins": () => ({ plugins: [] }),
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey(),
+          apiKey({
+            id: "key-2",
+            label: "CI target",
+            prompts: { ids: ["team"], inheritGlobal: false },
+          }),
+        ],
+      }),
+    });
+    const client = makeQueryClient();
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({ initialEntries: ["/prompts"] }),
+      context: { queryClient: client },
+    });
+    renderWithProviders(<RouterProvider router={router} />, { client });
+    await user.click(await screen.findByRole("link", { name: "Edit prompts for CI target" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit prompts for CI target" });
+    expect(router.state.location.search).toEqual({ editPrompts: "key-2" });
+    expect(
+      within(dialog)
+        .getByRole("switch", { name: "Also apply global prompts" })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(router.state.location.search).toEqual({});
+  });
+
+  test("viewer prompt dialog keeps selector, inheritance and save disabled", async () => {
+    const stub = stubKeys({
+      "GET /api/status": () => ({ authenticated: true, principal: { kind: "viewer" } }),
+      "GET /api/settings": () => ({ settings }),
+      "GET /api/prompts": () => promptLibrary,
+    });
+    renderWithProviders(
+      <EditPromptsDialog
+        apiKey={apiKey({ prompts: { ids: ["team"], inheritGlobal: true } })}
+        onOpenChange={() => {}}
+      />,
+    );
+    await screen.findByText("Team @3");
+    for (const name of ["Add prompt", "Remove Team", "Move Team up", "Save prompts"]) {
+      expect(
+        (
+          screen.getByRole(name === "Add prompt" ? "combobox" : "button", {
+            name,
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(true);
+    }
+    expect(
+      (screen.getByRole("switch", { name: "Also apply global prompts" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(stub.calls.some((c) => c.init?.method === "PUT")).toBe(false);
+  });
+  test("mint sends ordered prompt IDs and explicit inheritance", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/prompts": () => promptLibrary,
+      "POST /api/keys": () => minted,
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: /Create a key/ }));
+    await choose(user, screen.getByLabelText("Add prompt"), "Team");
+    await choose(user, screen.getByLabelText("Add prompt"), "Draft (inactive draft)");
+    await user.click(screen.getByRole("button", { name: "Move Draft up" }));
+    await user.click(screen.getByRole("switch", { name: "Also apply global prompts" }));
+    await user.click(screen.getByRole("button", { name: "Create key" }));
+    await waitFor(() =>
+      expect(
+        JSON.parse(String(stub.calls.find((c) => c.init?.method === "POST")?.init?.body)).prompts,
+      ).toEqual({ ids: ["draft", "team"], inheritGlobal: false }),
+    );
+  });
+
+  test("key preview dedupes global IDs, skips drafts, gives key ponytail precedence, and clears whole assignment", async () => {
+    const user = userEvent.setup();
+    const stub = stubKeys({
+      "GET /api/prompts": () => promptLibrary,
+      "GET /api/settings": () => ({
+        settings: { ...settings, prompts: ["team", "ponytail-full"] },
+      }),
+      "GET /api/keys": () => ({
+        keys: [
+          apiKey({ prompts: { ids: ["team", "draft", "ponytail-lite"], inheritGlobal: true } }),
+        ],
+      }),
+      "PUT /api/keys/key-1/prompts": () => ({ ok: true }),
+    });
+    renderWithProviders(<KeysBoard />);
+    await user.click(await screen.findByRole("button", { name: "Edit prompts for laptop" }));
+    const preview = await screen.findByRole("list", { name: "Effective prompts" });
+    expect(
+      within(preview)
+        .getAllByRole("listitem")
+        .map((el) => el.textContent),
+    ).toEqual(["Team @3", "Ponytail Lite @v4.9.0"]);
+    await user.click(screen.getByRole("switch", { name: "Also apply global prompts" }));
+    for (const name of ["Team", "Draft", "Ponytail Lite"]) {
+      await user.click(screen.getByRole("button", { name: `Remove ${name}` }));
+    }
+    expect(within(preview).queryAllByRole("listitem")).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Save prompts" }));
+    await waitFor(() =>
+      expect(
+        JSON.parse(String(stub.calls.find((c) => c.init?.method === "PUT")?.init?.body)),
+      ).toEqual({ ids: [], inheritGlobal: false }),
+    );
+  });
   test("distinguishes unrestricted, restricted, and locked-out keys", async () => {
     stubKeys();
     renderWithProviders(<KeysBoard />);
@@ -97,6 +333,7 @@ describe("KeysBoard", () => {
           // Blank means never, which is what a key that says nothing about
           // expiry has always meant.
           expiresAt: null,
+          prompts: { ids: [], inheritGlobal: true },
         }),
       );
     });

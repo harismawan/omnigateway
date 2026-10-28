@@ -27,6 +27,7 @@
   "ttftMs": null,
   "durationMs": 15,
   "degradations": [],
+  "prompts": [],
   "rtk": {
     "applied": false,
     "filterHits": 0,

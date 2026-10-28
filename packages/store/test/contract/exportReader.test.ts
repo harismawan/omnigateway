@@ -162,7 +162,9 @@ forEachStore((backend) => {
         smartRouting: false,
       });
       await s.config.putSettings({ logRetentionDays: 9 });
-      await s.usage.append(logRow({ id: "r1", apiKeyId: "k1" }));
+      await s.usage.append(
+        logRow({ id: "r1", apiKeyId: "k1", prompts: ["ponytail-full@v4.9.0", "team@11"] }),
+      );
 
       const r = await readerFor(s);
       const [hook] = await r.destinations();
@@ -179,6 +181,8 @@ forEachStore((backend) => {
         limit: 10,
       });
       expect(page.map((row) => row.id)).toEqual(["r1"]);
+      expect(page[0]?.prompts).toEqual(["ponytail-full@v4.9.0", "team@11"]);
+      expect((await r.getLog("r1"))?.prompts).toEqual(["ponytail-full@v4.9.0", "team@11"]);
       expect((await r.getLog("r1"))?.apiKeyId).toBe("k1");
       expect(await r.getLog("absent")).toBeNull();
     } finally {

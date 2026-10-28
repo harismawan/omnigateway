@@ -11,6 +11,7 @@ import requestTrace009 from "./migrations/009_request_trace.sql" with { type: "t
 import logExport010 from "./migrations/010_log_export.sql" with { type: "text" };
 import bodyState011 from "./migrations/011_body_state.sql" with { type: "text" };
 import bodyStateIndex012 from "./migrations/012_body_state_index.sql" with { type: "text" };
+import prompts013 from "./migrations/013_prompts.sql" with { type: "text" };
 
 /**
  * Anything that can run a statement: the pool, a reserved connection, or the
@@ -56,6 +57,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string }> = [
   // before the index's table scan starts; see each file's header.
   { id: 11, sql: bodyState011 },
   { id: 12, sql: bodyStateIndex012 },
+  { id: 13, sql: prompts013 },
 ];
 
 /**

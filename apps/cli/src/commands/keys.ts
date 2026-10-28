@@ -7,6 +7,7 @@ import {
   setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
+  setKeyPrompts,
   setKeySmartRouting,
 } from "@omni/control";
 // The gateway's own "may this key be used now", so the listing's label and the
@@ -804,6 +805,32 @@ export const keysRevoke: Command = {
 
     await revokeKey(await ctx.store(), id);
     emit(ctx, writer, { id, revoked: true }, () => `${id} revoked`);
+  },
+};
+
+export const keysPrompts: Command = {
+  usage: "keys prompts <id> --ids a,b [--no-global]",
+  summary: "Replace prompt assignments; --ids '' clears, --no-global disables inheritance",
+  options: { ids: { type: "string" }, "no-global": { type: "boolean" } },
+  async run(args, { ctx, writer }) {
+    if (args.positionals.length > 1) throw new UsageError("unexpected positional arguments");
+    const id = requirePositional(args, 0, "key id");
+    const ids = stringFlag(args.values, "ids");
+    if (ids === undefined) throw new UsageError("--ids is required; use --ids '' to clear");
+    const store = await ctx.store();
+    await setKeyPrompts(store, id, {
+      ids: ids === "" ? [] : ids.split(","),
+      inheritGlobal: !boolFlag(args.values, "no-global"),
+    });
+    const key = (await listKeys(store)).find((entry) => entry.id === id);
+    if (key === undefined) throw new CliError(`no api key "${id}"`);
+    emit(ctx, writer, key, () =>
+      fields([
+        ["id", key.id],
+        ["prompts", key.prompts.ids.join(",") || "none"],
+        ["inherit global", key.prompts.inheritGlobal ? "yes" : "no"],
+      ]),
+    );
   },
 };
 

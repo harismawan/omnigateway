@@ -348,6 +348,7 @@ test("usage appends, lists recent, and aggregates by model", async () => {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    prompts: [],
     ...EMPTY_TRACE,
     ...UNSTAMPED,
   };
@@ -393,6 +394,7 @@ test("prune removes logs older than the cutoff", async () => {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    prompts: [],
     ...EMPTY_TRACE,
     ...UNSTAMPED,
   };

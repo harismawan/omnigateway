@@ -12,6 +12,12 @@ import { describe, expect, test } from "bun:test";
 import { formatTerms, parseTerms } from "../../src/features/logs/LogFilterBar.tsx";
 
 describe("parseTerms", () => {
+  test("prompt term round-trips as an exact ID filter, including removal", () => {
+    expect(parseTerms("prompt:team")).toEqual({ prompt: "team" });
+    expect(formatTerms({ prompt: "team" })).toBe("prompt:team");
+    expect(parseTerms("prompt:")).toEqual({});
+    expect(parseTerms("")).toEqual({});
+  });
   test("a bare word is the model under either name, the common case", () => {
     // Not `resolvedModel`: the two columns hold different vocabularies, so a
     // bare term bound to one of them answers nothing for every name that lives

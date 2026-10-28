@@ -21,7 +21,7 @@ import { Field, Input, Textarea } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Grid, Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
-import { Autocomplete, Select } from "../../ui/Select.tsx";
+import { Autocomplete } from "../../ui/Select.tsx";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { AccessPanel } from "./AccessPanel.tsx";
@@ -200,41 +200,6 @@ const OptionName = styled.label`
   cursor: pointer;
 `;
 
-/** A card whose control is too wide to sit beside its name. */
-const Choice = styled(Option)`
-  grid-template-columns: 1fr;
-
-  ${OptionBlurb} {
-    grid-column: 1;
-  }
-`;
-
-/**
- * The mode card, wearing the same name and blurb as the switches beside it.
- *
- * `Field` is not used here even though it would associate the label for free:
- * its legend is the silkscreened uppercase one, which next to three sentence-
- * case switch names reads as a different kind of control in the same grid.
- */
-function ChoiceOption({
-  label,
-  children,
-  blurb,
-}: {
-  label: string;
-  children: (props: { id: string }) => ReactNode;
-  blurb: ReactNode;
-}) {
-  const id = useId();
-  return (
-    <Choice>
-      <OptionName htmlFor={id}>{label}</OptionName>
-      {children({ id })}
-      <OptionBlurb>{blurb}</OptionBlurb>
-    </Choice>
-  );
-}
-
 function SwitchOption({
   label,
   checked,
@@ -380,7 +345,7 @@ function toDraft(settings: Settings): Draft {
 
 function parseDraft(
   draft: Draft,
-): { ok: true; settings: Settings } | { ok: false; problem: string } {
+): { ok: true; settings: Omit<Settings, "prompts"> } | { ok: false; problem: string } {
   const weights = {} as Settings["weights"];
   for (const weight of WEIGHTS) {
     // A blank field is not zero. Reading it as zero would silently retune the
@@ -569,10 +534,13 @@ export function SettingsBoard() {
       return;
     }
     setProblem(null);
-    save.mutate(parsed.settings, {
-      onSuccess: () => setSaved(true),
-      onError: (error) => setProblem(describeError(error)),
-    });
+    save.mutate(
+      { ...parsed.settings, prompts: settings.data?.prompts ?? [] },
+      {
+        onSuccess: () => setSaved(true),
+        onError: (error) => setProblem(describeError(error)),
+      },
+    );
   };
 
   return (
@@ -703,22 +671,9 @@ export function SettingsBoard() {
                   their own. Requests that mark one are untouched.
                 </SwitchOption>
 
-                <ChoiceOption
-                  label="Lazy senior dev mode"
-                  blurb="Appends the ponytail ruleset, about 1,240 tokens, to every system prompt. A request already carrying it is left alone."
-                >
-                  {(props) => (
-                    <Select
-                      {...props}
-                      value={draft.ponytailMode ?? "off"}
-                      options={Object.entries(PONYTAIL_LEVELS).map(([mode, label]) => ({
-                        value: mode,
-                        label,
-                      }))}
-                      onValueChange={(next) => setDraft({ ...draft, ponytailMode: next })}
-                    />
-                  )}
-                </ChoiceOption>
+                <a href="/prompts">
+                  Prompt injection, including ponytail, moved to Prompt Management
+                </a>
               </Options>
             </Module>
 

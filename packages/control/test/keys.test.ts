@@ -14,8 +14,68 @@ import {
   setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
+  setKeyPrompts,
   setKeySmartRouting,
 } from "../src/keys.ts";
+
+test("prompt assignments mint with defaults, replace whole and reject invalid edits", async () => {
+  const store = await memoryStore();
+  try {
+    const plain = await createKey(store, {});
+    expect((await store.keys.get(plain.id))?.prompts).toEqual({ ids: [], inheritGlobal: true });
+    const assigned = await createKey(store, {
+      prompts: { ids: ["ponytail-full"], inheritGlobal: false },
+    });
+    expect((await listKeys(store)).find((key) => key.id === assigned.id)?.prompts).toEqual({
+      ids: ["ponytail-full"],
+      inheritGlobal: false,
+    });
+    for (const prompts of [
+      { ids: [] },
+      { ids: [], inheritGlobal: "true" },
+      { ids: ["ponytail-full", "ponytail-lite"], inheritGlobal: true },
+      { ids: [], inheritGlobal: true, extra: true },
+    ]) {
+      await expect(createKey(store, { prompts })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      await expect(setKeyPrompts(store, assigned.id, prompts)).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+      });
+    }
+    await setKeyPrompts(store, assigned.id, { ids: [], inheritGlobal: true });
+    expect((await store.keys.get(assigned.id))?.prompts).toEqual({ ids: [], inheritGlobal: true });
+    await expect(
+      createKey(store, { prompts: { ids: ["missing"], inheritGlobal: true } }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(await store.keys.list()).toHaveLength(2);
+  } finally {
+    store.close();
+  }
+});
+
+test("effective texts extend only readOwnKey, never the shared listKeys projection", async () => {
+  const store = await memoryStore();
+  try {
+    await store.prompts.create({
+      id: "team",
+      name: "Team",
+      text: "private policy",
+      description: "hidden metadata",
+      note: "history",
+      activate: true,
+    });
+    const key = await createKey(store, { prompts: { ids: ["team"], inheritGlobal: false } });
+    const own = await readOwnKey(store, key.id);
+    expect(own.effectivePrompts).toEqual([
+      { id: "team", name: "Team", version: 1, text: "private policy" },
+    ]);
+    const listed = await listKeys(store);
+    expect(listed).toHaveLength(1);
+    expect(Object.keys(listed[0] ?? {})).not.toContain("effectivePrompts");
+    expect(JSON.stringify(listed)).not.toContain("private policy");
+  } finally {
+    store.close();
+  }
+});
 
 /**
  * Limits are editable after creation; `bodyLoggingOptOut` is not.

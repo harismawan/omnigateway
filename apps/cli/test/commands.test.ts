@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { putSettings } from "@omni/control";
 import { DEFAULT_SETTINGS, openDb, type RequestLog } from "@omni/store";
 import { health, requestLog, seedCredential } from "@omni/testkit";
 import { FOLLOW_MAX_PAGES, isAfter, newerThan } from "../src/commands/usage.ts";
@@ -2217,6 +2218,50 @@ test("every settings key is reachable from settings set", async () => {
 
     expect({ key, code: result.code, err: result.err }).toMatchObject({ key, code: 0 });
   }
+});
+
+test("settings prompt lists clear explicitly and unrelated/legacy alias writes retain assignments", async () => {
+  const root = await installation();
+  const store = await openStore(root);
+  await store.prompts.create({
+    id: "team",
+    name: "Team",
+    text: "rules",
+    description: null,
+    note: null,
+    activate: true,
+  });
+  const old = await store.config.getSettings();
+  const surplus = await cli(["settings", "set", "prompts", "team", "ponytail-full"], { root });
+  expect(surplus.code).toBe(2);
+  expect(await store.config.getSettings()).toEqual(old);
+  const assigned = await cli(["settings", "set", "prompts", "team,ponytail-full", "--json"], {
+    root,
+  });
+  expect(assigned.code).toBe(0);
+  expect(JSON.parse(assigned.out)).toMatchObject({
+    settings: { prompts: ["team", "ponytail-full"], ponytailMode: "full" },
+  });
+  const shown = await cli(["settings", "get"], { root });
+  expect(shown.out).toContain("prompts");
+  expect(shown.out).toContain("team,ponytail-full");
+  expect((await cli(["settings", "set", "rtkEnabled", "true"], { root })).code).toBe(0);
+  expect((await store.config.getSettings()).prompts).toEqual(["team", "ponytail-full"]);
+  // Older callers omit the new field; control reconciles against locked stored settings.
+  const { prompts: _prompts, ...stale } = old;
+  const saved = await putSettings(store, { ...stale, rtkEnabled: false, ponytailMode: "full" });
+  expect(saved.prompts).toEqual(["team", "ponytail-full"]);
+  expect(saved.ponytailMode).toBe("full");
+  expect((await cli(["settings", "set", "ponytailMode", "lite"], { root })).code).toBe(0);
+  expect((await store.config.getSettings()).prompts).toEqual(["team", "ponytail-lite"]);
+  expect((await cli(["settings", "set", "prompts", ""], { root })).code).toBe(0);
+  expect(await store.config.getSettings()).toMatchObject({ prompts: [], ponytailMode: "off" });
+  expect((await cli(["settings", "set", "prompts"], { root })).code).toBe(2);
+  for (const value of ["team,team", "ponytail-lite,ponytail-full", "missing"]) {
+    expect((await cli(["settings", "set", "prompts", value], { root })).code).toBe(1);
+  }
+  expect((await store.config.getSettings()).prompts).toEqual([]);
+  store.close();
 });
 
 /**

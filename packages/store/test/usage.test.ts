@@ -46,6 +46,7 @@ function log(patch: Partial<NewRequestLog> & { id: string; at: number }): NewReq
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    prompts: [],
     ...EMPTY_TRACE,
     ...UNSTAMPED,
     ...patch,

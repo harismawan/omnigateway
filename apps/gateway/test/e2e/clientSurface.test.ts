@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
+import type { OwnKeySummary } from "@omni/control";
 import { hostDayOffsetMinutes, type Store } from "@omni/store";
 import {
   memoryStore,
+  requestLog,
   seedApiKey,
   seedCredential as seedCredentialRow,
   target,
@@ -16,6 +18,147 @@ import {
 } from "./upstream.ts";
 
 const NOW = 1_000_000;
+
+test("HTTP prompt filters reach console pages/downloads and client own projection", async () => {
+  const h = await harness();
+  try {
+    const promptText = "PRIVATE OPERATOR PROMPT TEXT MUST NOT LEAVE LIBRARY";
+    await h.store.prompts.create({
+      id: "team",
+      name: "Team policy",
+      description: null,
+      text: promptText,
+      note: null,
+      activate: true,
+    });
+    const mine = await seedApiKey(h.store, { label: "mine" });
+    const theirs = await seedApiKey(h.store, { label: "theirs" });
+    const admin = await h.loginAdmin();
+    const client = await h.login(mine.raw);
+    for (const [id, prompt, apiKeyId] of [
+      ["team-v1", "team@1", mine.key.id],
+      ["team-extra", "team-extra@2", mine.key.id],
+      ["other-team", "other-team@3", mine.key.id],
+      ["team-v11", "team@11", mine.key.id],
+      ["foreign", "team@1", theirs.key.id],
+    ] as const) {
+      await h.store.usage.append(requestLog({ id, at: NOW, prompts: [prompt], apiKeyId }));
+    }
+    const consolePage = (await (await h.api("/api/logs?prompt=team", admin)).json()) as {
+      logs: { id: string }[];
+    };
+    expect(consolePage.logs.map((log: { id: string }) => log.id).sort()).toEqual([
+      "foreign",
+      "team-v1",
+      "team-v11",
+    ]);
+    const own = (await (await h.api("/api/client/logs?prompt=team", client)).json()) as {
+      logs: { id: string; prompts: string[] }[];
+    };
+    expect(own.logs.map((log: { id: string }) => log.id).sort()).toEqual(["team-v1", "team-v11"]);
+    expect(own.logs.map((log: { prompts: string[] }) => log.prompts).sort()).toEqual([
+      ["team@1"],
+      ["team@11"],
+    ]);
+    expect(JSON.stringify(own)).not.toContain("credentialId");
+    expect(JSON.stringify(own)).not.toContain(promptText);
+    expect(JSON.stringify(consolePage)).not.toContain(promptText);
+    const download = await h.api(
+      `/api/logs/export?prompt=team&since=0&until=${NOW}&format=jsonl`,
+      admin,
+    );
+    expect(download.status).toBe(200);
+    const rows = (await download.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(rows.map((row) => row.id).sort()).toEqual(["foreign", "team-v1", "team-v11"]);
+    expect(rows.every((row) => Array.isArray(row.prompts))).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain(promptText);
+    expect(
+      (await (await h.api("/api/logs?prompt=deleted-prompt", admin)).json()) as unknown,
+    ).toMatchObject({ logs: [] });
+    for (const prompt of ["", "team@1", "Team", "team_extra", "ponytail-fake"]) {
+      const query = `prompt=${encodeURIComponent(prompt)}`;
+      expect((await h.api(`/api/logs?${query}`, admin)).status).toBe(400);
+      expect((await h.api(`/api/client/logs?${query}`, client)).status).toBe(400);
+      expect((await h.api(`/api/logs/export?${query}&since=0&until=${NOW}`, admin)).status).toBe(
+        400,
+      );
+    }
+    // Client downloads remain absent: no new read surface is introduced here.
+    expect((await h.api("/api/client/logs/export?prompt=team", client)).status).toBe(404);
+  } finally {
+    h.store.close();
+  }
+});
+
+test("an already-open holder reads only its current effective policies, never library/history/another key", async () => {
+  const h = await harness();
+  try {
+    for (const [id, text] of [
+      ["team", "team policy"],
+      ["private", "OTHER KEY SECRET"],
+      ["draft", "inactive"],
+    ] as const) {
+      await h.store.prompts.create({
+        id,
+        name: id,
+        text,
+        description: "not client data",
+        note: "history secret",
+        activate: id !== "draft",
+      });
+    }
+    await h.store.config.putSettings({ prompts: ["team", "draft"] });
+    const mine = await seedApiKey(h.store);
+    const theirs = await seedApiKey(h.store, {
+      prompts: { ids: ["private"], inheritGlobal: false },
+    });
+    const cookie = await h.login(mine.raw);
+    const own = async () => {
+      const response = await h.api(`/api/client/summary?apiKeyId=${theirs.key.id}`, cookie);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const summary = (await response.json()) as OwnKeySummary & { dayOffsetMinutes: number };
+      expect(summary.id).toBe(mine.key.id);
+      expect(summary.dayOffsetMinutes).toBe(420);
+      expect(JSON.stringify(summary)).not.toContain("OTHER KEY SECRET");
+      expect(JSON.stringify(summary)).not.toContain(theirs.key.id);
+      return summary;
+    };
+    const summary = await own();
+    expect(summary.effectivePrompts.map((p: { id: string }) => p.id)).toEqual(["team"]);
+    expect(summary.effectivePrompts).toEqual([
+      { id: "team", name: "team", version: 1, text: "team policy" },
+    ]);
+    const libraryResponse = await h.api("/api/prompts", cookie);
+    expect(libraryResponse.status).toBe(401);
+    expect((await h.api("/api/prompts/team", cookie)).status).toBe(401);
+    expect((await h.api("/api/keys", cookie)).status).toBe(401);
+    await h.store.prompts.update("team", { name: "renamed", description: null });
+    await h.store.prompts.saveVersion("team", {
+      text: "new active policy",
+      note: null,
+      activate: true,
+    });
+    expect((await own()).effectivePrompts).toEqual([
+      { id: "team", name: "renamed", version: 2, text: "new active policy" },
+    ]);
+    await h.store.prompts.activate("team", 1);
+    expect((await own()).effectivePrompts[0]?.text).toBe("team policy");
+    await h.store.keys.setPrompts(mine.key.id, { ids: [], inheritGlobal: false });
+    expect((await own()).effectivePrompts).toEqual([]);
+    await h.store.keys.setPrompts(mine.key.id, { ids: ["ponytail-lite"], inheritGlobal: true });
+    await h.store.config.putSettings({ prompts: ["ponytail-full", "team"] });
+    expect((await own()).effectivePrompts.map((p: { id: string }) => p.id)).toEqual([
+      "team",
+      "ponytail-lite",
+    ]);
+  } finally {
+    h.store.close();
+  }
+});
 
 /**
  * The client surface against the app that actually ships.
@@ -219,6 +362,7 @@ test("the summary carries the key's own model overrides, and nothing beside them
   });
   expect(Object.keys(summary).sort()).toEqual(
     [
+      "effectivePrompts",
       "bodyLoggingOptOut",
       "createdAt",
       "dayOffsetMinutes",
@@ -230,6 +374,7 @@ test("the summary carries the key's own model overrides, and nothing beside them
       "limits",
       "modelAllowlist",
       "prefix",
+      "prompts",
       "revokedAt",
       "smartRouting",
     ].sort(),

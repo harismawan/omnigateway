@@ -1,8 +1,8 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
 import styled from "styled-components";
-import { useCreateKey, useModels } from "../../api/queries.ts";
-import type { MintedKey } from "../../api/types.ts";
+import { useCreateKey, useModels, usePrompts, useSettings, useStatus } from "../../api/queries.ts";
+import type { MintedKey, PromptAssignment } from "../../api/types.ts";
 import { CopyValue } from "../../components/CopyValue.tsx";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Input } from "../../ui/Field.tsx";
@@ -10,6 +10,8 @@ import { Modal } from "../../ui/Modal.tsx";
 import { Legend, Mono, Row, Stack } from "../../ui/primitives.ts";
 import { describeError } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
+import { effectivePromptEntries } from "../prompts/PromptAssignments.tsx";
+import { PromptSelector } from "../prompts/PromptSelector.tsx";
 import { fromLocalInput } from "./expiry.ts";
 import { LimitFields } from "./LimitFields.tsx";
 import { draftFrom, draftToLimits, type LimitDraft } from "./limits.ts";
@@ -55,6 +57,10 @@ export type MintKeyDialogProps = {
 export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
   const models = useModels();
   const create = useCreateKey();
+  const library = usePrompts();
+  const settings = useSettings();
+  const status = useStatus();
+  const [prompts, setPrompts] = useState<PromptAssignment>({ ids: [], inheritGlobal: true });
 
   const [label, setLabel] = useState("");
   const [unrestricted, setUnrestricted] = useState(true);
@@ -65,9 +71,12 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
   const [optOut, setOptOut] = useState(false);
   const [minted, setMinted] = useState<MintedKey | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const unavailable = !library.data || !settings.data || library.isError || settings.isError;
+  const preview = effectivePromptEntries(settings.data?.prompts ?? [], prompts, library.data ?? []);
 
   const reset = () => {
     setLabel("");
+    setPrompts({ ids: [], inheritGlobal: true });
     setUnrestricted(true);
     setAllowed([]);
     setLimits(draftFrom({}));
@@ -115,6 +124,7 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
         // and what every key issued before this field existed carries. Unlike
         // the opt-out below, it is editable afterwards.
         expiresAt: expiry.at,
+        prompts,
       },
       {
         onSuccess: (key) => setMinted(key),
@@ -252,6 +262,46 @@ export function MintKeyDialog({ open, onOpenChange }: MintKeyDialogProps) {
             </Hint>
           </Stack>
 
+          <Stack $gap={2}>
+            <Legend>Prompts</Legend>
+            <Row>
+              <Toggle
+                label="Also apply global prompts"
+                checked={prompts.inheritGlobal}
+                disabled={create.isPending || status.data?.principal?.kind !== "admin"}
+                onCheckedChange={(inheritGlobal) => setPrompts({ ...prompts, inheritGlobal })}
+              />
+              Also apply global prompts
+            </Row>
+            <PromptSelector
+              library={library.data ?? []}
+              value={prompts.ids}
+              disabled={
+                create.isPending || status.data?.principal?.kind !== "admin" || library.isError
+              }
+              onChange={(ids) => setPrompts({ ...prompts, ids })}
+            />
+            <h3>Effective prompts</h3>
+            <p>Preview only; the gateway resolves active prompts when each request arrives.</p>
+            {unavailable ? (
+              <p>Effective preview unavailable until settings and library load successfully.</p>
+            ) : null}
+            <ol aria-label="Effective prompts">
+              {preview.map((p) => (
+                <li key={p.id}>
+                  {p.name} @{p.activeVersion}
+                </li>
+              ))}
+            </ol>
+            {!unavailable && preview.length === 0 ? <p>No effective prompts.</p> : null}
+            <a href="/prompts">Manage prompt texts in Prompt Management</a>
+            {library.isError ? (
+              <Problem role="alert">{describeError(library.error)}</Problem>
+            ) : null}
+            {settings.isError ? (
+              <Problem role="alert">{describeError(settings.error)}</Problem>
+            ) : null}
+          </Stack>
           {problem === null ? null : <Problem role="alert">{problem}</Problem>}
         </Stack>
       ) : (

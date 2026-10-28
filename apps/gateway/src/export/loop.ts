@@ -1499,6 +1499,7 @@ function syntheticLog(at: number): RequestLog {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    prompts: [],
     sessionId: null,
     turnId: null,
     agent: null,

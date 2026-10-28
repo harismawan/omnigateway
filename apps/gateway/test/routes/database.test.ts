@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +12,7 @@ import {
 } from "@omni/control";
 import { GatewayError } from "@omni/ir";
 import { createStore, deriveKey } from "@omni/store";
-import { virtualModel } from "@omni/testkit";
+import { requestLog, seedApiKey, virtualModel } from "@omni/testkit";
 import { createQuiesceLatch } from "../../src/quiesce.ts";
 import { type DatabaseRouteDeps, databaseRoutes } from "../../src/routes/database.ts";
 
@@ -229,6 +230,108 @@ async function harness(options: HarnessOptions = {}) {
     cleanup,
   };
 }
+
+test("snapshot restore keeps assignments, exact history and applied IDs through held forwarders", async () => {
+  const h = await harness();
+  try {
+    const prompts = h.store.prompts;
+    const get = prompts.get;
+    await prompts.create({
+      id: "team",
+      name: "Team",
+      description: "rules",
+      text: "active",
+      note: "v1",
+      activate: true,
+    });
+    await prompts.saveVersion("team", { text: "draft", note: "v2", activate: false });
+    await prompts.create({
+      id: "draft",
+      name: "Draft",
+      description: null,
+      text: "never active",
+      note: null,
+      activate: false,
+    });
+    await h.store.config.putSettings({ prompts: ["team"] });
+    const { key } = await seedApiKey(h.store, {
+      prompts: { ids: ["draft"], inheritGlobal: false },
+    });
+    await h.store.usage.append(
+      requestLog({ id: "historical", apiKeyId: key.id, prompts: ["team@1", "deleted@3"] }),
+    );
+    const original = await get("team");
+    const draft = await get("draft");
+    const snapshot = await h.snapshot();
+    await prompts.saveVersion("team", { text: "must disappear", note: null, activate: true });
+    h.clock.now++;
+    const restored = await h.call("POST", `/api/database/snapshots/${snapshot.id}/restore`);
+    expect(restored.status).toBe(200);
+    expect(await get("team")).toEqual(original);
+    expect(await get("draft")).toEqual(draft);
+    expect((await prompts.listActive()).map((p) => p.text)).toEqual(["active"]);
+    expect((await h.store.config.getSettings()).prompts).toEqual(["team"]);
+    expect((await h.store.keys.get(key.id))?.prompts).toEqual(key.prompts);
+    expect((await h.store.usage.get("historical"))?.prompts).toEqual(["team@1", "deleted@3"]);
+    await prompts.activate("team", 2);
+    expect((await prompts.listActive())[0]?.text).toBe("draft");
+    expect(
+      (await prompts.saveVersion("team", { text: "next", note: null, activate: false })).version,
+    ).toBe(3);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("pre-feature snapshot is accepted and gains empty prompt tables on restore", async () => {
+  const h = await harness();
+  try {
+    const snapshot = await h.snapshot();
+    const path = join(h.dir, "snapshots", snapshot.id);
+    const old = new Database(path);
+    try {
+      old.run("DROP TABLE prompt_versions");
+      old.run("DROP TABLE prompts");
+      old.run("ALTER TABLE api_keys DROP COLUMN prompts");
+      old.run("ALTER TABLE request_logs DROP COLUMN prompts");
+      old.run("DELETE FROM migrations WHERE id = 24");
+    } finally {
+      old.close();
+    }
+    const inspected = await h.store.maintenance.inspect(path);
+    expect(inspected.ok).toBe(true);
+    expect(inspected.tables).not.toContain("prompts");
+    await h.store.prompts.create({
+      id: "outgoing",
+      name: "Outgoing",
+      description: null,
+      text: "gone",
+      note: null,
+      activate: true,
+    });
+    const prompts = h.store.prompts;
+    h.clock.now++;
+    expect((await h.call("POST", `/api/database/snapshots/${snapshot.id}/restore`)).status).toBe(
+      200,
+    );
+    expect(await prompts.list()).toEqual([]);
+    expect((await h.store.config.getSettings()).prompts).toEqual([]);
+    const tables = (await h.store.maintenance.tables()).map((t) => t.name);
+    expect(tables).toContain("prompts");
+    expect(tables).toContain("prompt_versions");
+    await prompts.create({
+      id: "new",
+      name: "New",
+      description: null,
+      text: "works",
+      note: null,
+      activate: false,
+    });
+    expect((await prompts.get("new"))?.activeVersion).toBeNull();
+  } finally {
+    h.cleanup();
+  }
+});
 
 test("the overview reports the file, the pages, retention, and the snapshots", async () => {
   const { call, cleanup } = await harness();

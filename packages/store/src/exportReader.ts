@@ -171,7 +171,7 @@ const DB_NOW_MS = "SELECT (extract(epoch from clock_timestamp()) * 1000)::bigint
 export function createPostgresExportReader(sql: SQL, key: CryptoKey): ExportReader {
   const usage = pgUsage(sql, NO_NODE, 0);
   const config = pgConfig(sql, () => {});
-  const keys = pgKeys(sql, noopLogger);
+  const keys = pgKeys(sql, noopLogger, () => {});
   const destinations = pgDestinations(sql, key);
   return {
     bodyAdmission: (id, keyId) => destinations.bodyAdmission(id, keyId),

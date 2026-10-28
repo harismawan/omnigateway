@@ -81,6 +81,7 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
   // actually moves: the health poller writes it every ten seconds today.
   "res:credentials": { queryKey: queryKeys.credentials },
   "res:keys": { queryKey: queryKeys.keys },
+  "res:prompts": { queryKey: queryKeys.prompts },
   "res:settings": { queryKey: queryKeys.settings },
   "res:models": { queryKey: queryKeys.models },
   /**

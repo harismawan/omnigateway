@@ -372,3 +372,64 @@ CLI flag spelling; exact pruning query.
 - *Operator decision:* a dedicated **Prompt Management** page and menu entry. Designer's calls within
   it: route `/prompts`, placed after Keys; the ponytail select and the global list move there from
   Settings; per-key editing stays a Keys dialog, summarised read-only on the page.
+
+## Implementation clarifications — 2026-10-27
+
+These are controller rulings for implementation, not additional decisions attributed to the operator.
+They resolve ambiguities in the earlier draft; the later dedicated-page decision supersedes the
+earlier statement that the Settings select stays in place.
+
+- Use SQLite `024_prompts.sql`, Postgres `013_prompts.sql`, and the actual dashboard route convention
+  `apps/dashboard/src/routes/_app.prompts.tsx`. Export `rulesetFor` publicly from `@omni/ponytail`;
+  retain the vendored `v4.9.0` pin. `@omni/prompts` remains pure.
+- `PromptsReport.skipped[].reason` is `"already-present" | "over-budget"`. Resolution reports missing
+  or inactive assignments separately through the constant `prompt:missing`; injection reports only
+  what it actually applied or skipped. Budget after dedupe, including the two-character blank-line
+  separators; on the first overflow, discard that survivor and the whole remaining suffix.
+- Save text with `trimEnd()`, preserve leading whitespace, reject whitespace-only text, and measure
+  the 16,000-character limit after `trimEnd()`. Full-text dedupe uses the saved text's trimmed form.
+  Duplicating an active user prompt copies its active version; duplicating a never-active draft
+  copies its latest saved version. Copies never inherit built-in marker semantics.
+- Reconcile the two settings aliases in shared `mergeSettings`, using the stored settings read
+  inside SQLite's immediate transaction or Postgres's settings-row lock. Omitted `prompts` from
+  older clients must not erase assignments. An explicit prompts list is authoritative on read;
+  only absence triggers the legacy ponytail upgrade.
+- Persisted malformed assignment JSON normalizes to defaults, invalid IDs are skipped, duplicate
+  IDs keep their first occurrence, and only the first built-in per stored list survives. API writes
+  reject invalid shapes, IDs, limits, and multiple built-ins rather than repairing them silently.
+- Assignment counts mean explicit global-list membership and explicit key-list membership across
+  **all** keys, including expired/revoked keys; they are not counts of effective inheritance.
+  Assignment to an inactive draft still blocks deletion. Show effective lists separately.
+- Versions are immutable inserts, numbered `MAX(version) + 1` under the mutation lock. Prune the
+  oldest nonactive versions to 100 in that same transaction. Serialize the 50-prompt cap and
+  delete/assignment races. Postgres prompt deletion and every global/key assignment writer take
+  the same advisory management lock **before** settings, key, prompt, or config-version locks;
+  SQLite uses immediate transactions. Recheck assignments under that lock, not in control alone.
+  The plan's race-resolution choice is to refuse newly added references to missing user prompts
+  under that lock, while allowing an unchanged restored dangling reference to remain; if assignment
+  wins the race, deletion is refused, and if deletion wins, the new assignment is refused.
+- `listActive()` is the only prompt-text repository read used by routing-snapshot construction.
+  Request handling resolves once from a snapshot and the authenticated key, then passes the same
+  immutable resolved list into dispatch/failover; `count_tokens` uses the identical resolver and
+  injector. No version-history request-path reads. Emit local routing changes and add Postgres
+  config-version triggers for both new tables so remote nodes refresh as well.
+- `requestTransforms: false` always overrides a supplied prompt list. Screening examines only the
+  client's request; a screened request rerouted locally still receives managed prompts afterward.
+  Record **actually applied** `id@version` values, not configured/effective candidates, including
+  failures after injection. The implementation must explicitly retain injection state before model
+  resolution, carry it into the first pending route log, and use it in the route's terminal catch
+  even when dispatch throws before returning an outcome; pre-injection refusals record `[]`.
+- Carry applied IDs explicitly through the export record, OTLP attributes, CSV, JSONL, and client
+  log projection. `prompt:<id>` matches an exact ID before `@`, never an arbitrary substring.
+- The holder's own summary exposes effective names and active texts only, never the global library
+  or other keys. Client log chips are read-only and must not link into console prompt routes.
+  Targeted invalidation of the holder's own summary is permitted for policy freshness; invalidation
+  frames carry no other-key identifiers or prompt text. Preserve `Settings.prompts` when unrelated
+  Settings controls save their whole object, despite moving all prompt controls to the new page.
+- Slug recreation after deletion is allowed. Historical deleted/pruned versions display
+  **unavailable**, never fall back to current text; persisted `id@version` cannot prove incarnation
+  after slug reuse, so do not promise historical text recovery in that case.
+- Snapshots include both tables without adding them to `REQUIRED_TABLES` (old snapshots remain
+  valid and migrate on restore). Backend copy imports all retained versions with original numbers,
+  timestamps, and active pointer **before** settings/key assignments, and rejects a target already
+  containing user prompts. Do not rebuild history through ordinary save/activate operations.

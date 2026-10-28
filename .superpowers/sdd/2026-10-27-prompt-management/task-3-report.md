@@ -1,0 +1,39 @@
+# Task 3 — DONE_WITH_CONCERNS
+
+Base `b615d12d`; implementation commit `e3a0b51d` (`feat: expose prompt control and ponytail alias`). No subagents or push.
+
+## Changes / contracts
+
+- Shared `readPromptSettings(stored: { prompts?: unknown; ponytailMode?: unknown }): Pick<Settings, "prompts" | "ponytailMode">` normalizes authoritative present lists and upgrades only absent lists; both backends call it after raw parsing. Reads never persist the upgrade. Assignment readers delegate to this same helper.
+- `mergeSettings(current: Settings, patch: Partial<Settings>, now: number): Settings` compares supplied fields structurally against the locked current value. List wins when both differ; mode-only changes replace/remove in position or append. Omission preserves IDs. Alias append past five refuses transactionally (`PromptStoreError("limit")`) rather than dropping a user assignment. Existing weights/retention-marker behavior remains intact. PG management lock still precedes settings insert/row lock/config-version trigger.
+- Strict public schemas: `promptIdsSchema`, `keyPromptsSchema`, `promptCreateSchema`, `promptMetadataSchema`, `promptSaveSchema`, `promptActivateSchema`, `promptDuplicateSchema`, all exported from control root. Global prompts optional without default; per-key setter requires both fields, mint defaults to `{ ids: [], inheritGlobal: true }`. Text uses `trimEnd`, nonblank check and `MAX_PROMPT_TEXT_CHARS` after normalization; leading whitespace survives.
+- New `packages/control/src/prompts.ts` exports `listPrompts(store): Promise<PromptLibraryEntry[]>`, `readPrompt(store,id): Promise<PromptView>`, `createPrompt(store,input): Promise<PromptView>`, `updatePrompt(store,id,input): Promise<PromptView>`, `savePromptVersion(store,id,input): Promise<PromptVersion>`, `activatePromptVersion(store,id,input): Promise<PromptView>`, `duplicatePrompt(store,sourceId,input): Promise<PromptView>`, `removePrompt(store,id): Promise<void>`. All `store` arguments are `Store`, IDs are `string`, inputs are `unknown`.
+- `PromptLibraryEntry = { id: string; name: string; description: string | null; builtin: boolean; activeVersion: number | string | null; estimatedTokens: number; assignments: PromptAssignments }`. `PromptView = PromptLibraryEntry & { versions: Array<{ version: number | string; text: string; note: string | null; createdAt: number | null }> }`. Both exported from root. Store's existing `PromptVersion` is the save return type.
+- Built-ins merge in control, with fixed names, pinned version/description and null timestamp, never database rows. Mutation refuses. Duplicate copies active user text, latest never-active draft, or built-in plain text into an active v1 user prompt. Estimates use a minimal system-only `ChatRequest` with `stream: false` (active text, latest draft when never active).
+- `setKeyPrompts(store: Store, id: string, input: unknown): Promise<void>` exported from keys/root. Missing newly assigned prompts remain the store's transactional check, not preflight. New internal `promptErrors.ts` maps known repository failures to fixed safe `GatewayError` messages/codes; assignment conflicts name explicit locations with sanitized key IDs. No raw repository message or prompt text is surfaced. Settings/key mint/setter use the mapper too. Deletion performs no control get/assignment preflight.
+- Updated control package dependency/lockfile, settings/key tests, and both-backend `promptSettings.test.ts`. No HTTP/UI changes.
+
+## RED / GREEN and checks
+
+All store commands below used `OMNI_TEST_DATABASE_URL=postgres://postgres:omni@127.0.0.1:55434/omni`, dedicated disposable DB. Confirmed `SHOW server_version` = **17.11**. No skipped PG claim.
+
+- Alias RED: `bun test packages/control/test/settings.test.ts packages/store/test/contract/promptSettings.test.ts` → **12 pass, 19 fail**, wrong alias/list/mode assertions on both stores; `task-3-alias-red.log`.
+- Initial requested combined RED → **31 pass, 1 fail/1 import error**, missing control prompt workspace dependency (`task-3-red.log`). Not represented as behavioral proof. Subsequent behavior mutation check replacing trimEnd with trim and selecting latest instead of active produced **5 pass, 3 fail**, text preservation and active duplication (`task-3-behavior-red.log`); exact production restored, `git diff --exit-code` clean, then GREEN rerun.
+- Full-list alias regression RED: `bun test packages/control/test/prompts.test.ts` → **7 pass, 1 fail**, expected conflict instead resolved; `task-3-cap-red.log`.
+- Final requested GREEN: `bun test packages/control/test/prompts.test.ts packages/control/test/settings.test.ts packages/store/test/contract/promptSettings.test.ts packages/control/test/keys.test.ts packages/store/test/contract/prompts.test.ts` → **95 pass, 0 fail, 505 assertions** (`task-3-green.log`). Includes deterministic PG lock waiter barrier, concurrent first/existing settings writes, stale API/CLI-shaped writes, retention, authority/read-only upgrade, strict inputs, drafts, caps, assignment counts, error translation, no deletion preflight.
+- Wider affected suites: `bun test packages/control/test packages/store/test/contract` → **1321 pass, 0 fail**, 72 files (`task-3-affected.log`).
+- `bun run typecheck` core753/dashboard212 zero errors; `bun run lint` 982 files zero diagnostics; `bun run check:claims` no stale claims; staged `bun run check:dead` no dead exports (MAX_PROMPT_TEXT_CHARS now consumed); `git diff --cached --check` clean. Evidence `task-3-{types,lint,claims,dead}.log`.
+- Dashboard: `bun run --cwd apps/dashboard test` → **830 pass, 0 fail**, 53 files (`task-3-dashboard.log`); existing React act/route warnings present.
+- Additional full root `bun test` with dedicated PG/Redis URLs → **5770 pass, 2 fail**, 349 files (`task-3-suite.log`): Docker manifest test requires `COPY packages/prompts/package.json packages/prompts/`; clientSurface exact-key fixture lacks already-returned `prompts`. Both exist at base (Docker missing manifest; base keys.ts line183 already projects prompts). Left for controller's integration/task5/10 scope rather than silently expanding this no-HTTP/UI task. Full `test:all` remains final-task gate.
+
+## Self-review / concerns
+
+No control-side alias merge, no cap/existence/delete preflight replacing locked checks, no new store methods/forwarders/migrations needed. Explicit references include inactive drafts and expired/revoked keys, not inherited effective membership. `listPrompts` reads prompt details for estimates but routing remains on existing `listActive`, never histories. Public signatures match brief. Only concerns are the two named broader-suite integration gaps above; affected suites and checks pass.
+
+## Integration follow-up — DONE
+
+- Classification correction: the two failures above are **current-branch integration regressions** from Tasks 1–2, not pre-existing-main defects. Both are closed here; earlier scope deferral is superseded.
+- Smallest corrections: `Dockerfile` copies the `packages/prompts` manifest immediately after ponytail, following existing workspace manifest ordering; `apps/gateway/test/e2e/clientSurface.test.ts` includes the legitimate raw own-key `prompts` field in its exact-key fixture. No production-summary redesign, effective-summary work, HTTP/UI changes, subagents or push.
+- RED evidence: existing `task-3-suite.log` names both exact failures (missing COPY and extra legitimate prompts key).
+- GREEN: `bun test scripts/test/dockerManifests.test.ts apps/gateway/test/e2e/clientSurface.test.ts` → **29 pass, 0 fail, 152 assertions**, `task-3-integration-green.log`.
+- Checks rerun: `bun run typecheck`, `bun run lint`, `bun run check:claims`, `bun run check:dead` all exit 0; logs `task-3-integration-{types,lint,claims,dead}.log`. `git diff --check` clean. No remaining Task 3 concerns; full-root rerun deferred to final-task gate as requested.

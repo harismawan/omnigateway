@@ -25,6 +25,10 @@ test("the body is the schema name and the records, in order", () => {
   expect(Object.keys(body)).toEqual(["schema", "records"]);
   expect(body.schema).toBe("omni.request_log/v1");
   expect(body.records).toEqual(JSON.parse(JSON.stringify(records)));
+  expect(body.records.map((record: { prompts: string[] }) => record.prompts)).toEqual([
+    ["ponytail-full@v4.9.0", "team@11"],
+    [],
+  ]);
   expect(encodeWebhook([])).toBe('{"schema":"omni.request_log/v1","records":[]}');
 });
 

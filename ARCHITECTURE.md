@@ -121,7 +121,7 @@ sequenceDiagram
   participant Route as routes/proxy
   participant In as ingress
   participant RTK as @omni/rtk
-  participant Pony as @omni/ponytail
+  participant Prompts as @omni/prompts
   participant Router as @omni/router
   participant Disp as dispatch
   participant Cred as @omni/store
@@ -140,14 +140,14 @@ sequenceDiagram
     Disp-->>Route: PUBLIC, CONFIDENTIAL → model := local,<br/>or the request is refused
   end
   opt key carries a usage policy
-    Route->>Disp: classifier request (own id, own row,<br/>no RTK, no ponytail, no capture)
+    Route->>Disp: classifier request (own id, own row,<br/>no RTK, no managed prompts, no capture)
     Disp-->>Route: ALLOW, or the request is refused
   end
   Route->>Disp: dispatch(request, signal)<br/>(local-only when routed local)
   Disp->>RTK: filter tool results (off by default)
   RTK-->>Disp: rewritten request + savings report
-  Disp->>Pony: append ponytail ruleset (off by default)
-  Pony-->>Disp: request with ruleset last in system
+  Disp->>Prompts: append resolved managed prompts (empty by default)
+  Prompts-->>Disp: new request + applied/skipped report
   Disp->>Router: rank(snapshot, load)
   Router-->>Disp: ordered candidates + exclusion reasons
   Disp->>Log: pending row
@@ -168,7 +168,37 @@ Two details diagram flattens. Credentials decrypt at step 13, not sooner — ran
 
 **Traceability** (`apps/gateway/src/trace/extract.ts`). Right after parse, `extractTrace` reads the caller's headers (and, for Codex, the Responses `client_metadata` turn snapshot from the vendor bag) into a bounded `TraceContext`: session, turn, agent, tags, metadata, client request id. It never refuses — a malformed value is dropped and `trace:invalid` noted — and it never selects a key, route or limit. `applyTrace` stamps it on the pending row at `onRoute`, on completion, and in the terminal catch, so whichever path completes a row it carries the same context; the store's completion keeps what began when a blank log arrives. Guardrail and smart-router classifier rows get it through `withTrace`. Dispatch hands each attempt a transport from `createUpstreamRequestIdRecorder`, a decorator like body capture: each attempt clears the id, and only the newest attempt may write it, so the row's `upstreamRequestId` is the provider id of the attempt that produced the outcome and a late response from an abandoned attempt cannot overwrite it. The header parse is `upstreamRequestIdOf` in `@omni/providers`, shared with the transport's `onResponseHead`, which puts it on each `provider.http` span. The request id is minted at the app's quiesce gate for client traffic (`requestIdFor`, keyed on the `Request`), so a refusal there names it and the route answers under the same id; `x-omni-request-id` is then added in the route's one `limitHeaders()` helper, so every rendered response — head, error, stream — carries it. Design: [request traceability](docs/superpowers/specs/2026-10-24-request-traceability-design.md).
 
-`GET /v1/models` answered from routing snapshot, no provider call. `POST /v1/messages/count_tokens` estimated locally — deliberately writes no usage row. It reads the routing snapshot too, and applies the ponytail injection by hand before estimating: it never dispatches, so a count that skipped it would under-report by the whole ruleset on every call while the real request paid for it. No degradation is recorded there, because there is no row to record it on.
+`GET /v1/models` answered from routing snapshot, no provider call. `POST /v1/messages/count_tokens` estimated locally — deliberately writes no usage row. It uses the same managed-prompt resolver/injector before estimating: it never dispatches, so a count that skipped additions would under-report. No degradation is recorded there, because there is no row to record it on.
+
+**Managed prompts.** Pure `@omni/prompts` resolves global/key assignments and returns a new IR request
+with appended system text; the catalog subpath alone supplies persistence vocabulary. It composes
+the pinned `@omni/ponytail` texts rather than adding another dispatch stage. Screening runs first on
+client content; `requestTransforms: false` excludes all managed prompts from classifier requests.
+`buildSnapshot` reads user text only via `prompts.listActive()` and caches the active map alongside
+settings. Proxy adds built-ins and resolves once from that snapshot and the authenticated key; dispatch
+injects before model resolution and retries reuse the same bytes. `count_tokens` uses that same
+path. No request-path version-history lookup occurs. Missing/inactive resolution notes stay separate
+from the injection report. Applied `id@version` identifiers survive pending/terminal failure logs,
+client projections, export records, CSV/JSONL and OTLP; serializers never fetch library text.
+
+Both stores serialize prompt mutations, pruning and assignment/deletion checks: SQLite immediate
+transactions; Postgres advisory prompt-management lock before settings/key/prompt/config-version
+locks. `mergeSettings` reconciles legacy `ponytailMode` against the stored value under that lock,
+not against a stale submitted alias. Local routing events and Postgres config-version triggers on
+both prompt tables refresh snapshots across nodes. Privacy-safe prompt invalidation refreshes
+authorized console data and each holder's own summary without broadcasting texts or other key IDs.
+SQLite swap forwarders resolve the current repository per call, including held prompt methods.
+Snapshots include both prompt tables without extending the migration-001 required-table check;
+old snapshots migrate on reopen. Backend copy validates retained histories and deterministic key
+constraints before writing, imports history exactly through internal `PromptRepo.importRow` before
+global/key assignments, counts only user rows/versions, and refuses targets already holding user
+prompts. Saves/activations are not an
+import format: they would renumber pruned history and replace timestamps.
+Internal `config.importSettings` and `keys.importRow(row, "restore")` retain normalized source
+assignments, including restored dangling IDs, under the same mutation locks. They are not exposed
+to API/CLI assignment writers; normal writes still reject newly introduced missing references.
+Settings import preserves the source retention marker and explicit-list ponytail alias, not a merge
+against unrelated target settings.
 
 ## Observability
 

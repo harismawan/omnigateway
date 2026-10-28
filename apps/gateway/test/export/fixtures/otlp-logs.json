@@ -166,6 +166,21 @@
                   }
                 },
                 {
+                  "key": "omni.prompts",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "ponytail-full@v4.9.0"
+                        },
+                        {
+                          "stringValue": "team@11"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
                   "key": "omni.rtk.applied",
                   "value": {
                     "boolValue": true
@@ -368,6 +383,14 @@
                   "key": "omni.duration_ms",
                   "value": {
                     "intValue": "15"
+                  }
+                },
+                {
+                  "key": "omni.prompts",
+                  "value": {
+                    "arrayValue": {
+                      "values": []
+                    }
                   }
                 },
                 {

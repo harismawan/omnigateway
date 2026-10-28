@@ -432,6 +432,20 @@ export function ClientBoard() {
             {/* The holder's own restriction, read-only. A request refused for a
                 purpose the holder cannot read is one they cannot avoid
                 repeating; the operator's text is not a secret from them. */}
+            {(summary.data.effectivePrompts ?? []).length === 0 ? null : (
+              <Stack $gap={2}>
+                <Legend>Effective prompts</Legend>
+                {summary.data.effectivePrompts.map((prompt) => (
+                  <Stack key={prompt.id} $gap={1}>
+                    <h3>{prompt.name}</h3>
+                    <Mono>
+                      {prompt.id}@{prompt.version}
+                    </Mono>
+                    <Policy>{prompt.text}</Policy>
+                  </Stack>
+                ))}
+              </Stack>
+            )}
             {summary.data.guardrailPolicy === null ? null : (
               <Stack $gap={1}>
                 <Legend>Usage policy</Legend>

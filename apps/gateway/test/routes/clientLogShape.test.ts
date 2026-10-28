@@ -43,6 +43,7 @@ const CLIENT_LOG_FIELDS = [
   "id",
   "inputTokens",
   "outputTokens",
+  "prompts",
   "requestedModel",
   "resolvedModel",
   "resolvedProvider",

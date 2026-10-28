@@ -9,6 +9,7 @@ import type {
   KeyRepo,
   MaintenanceRepo,
   PluginRepo,
+  PromptRepo,
   RoutingChange,
   Store,
   UsageRepo,
@@ -21,6 +22,7 @@ import { createExportDestinationRepo } from "./exportDestinations.ts";
 import { createKeyRepo } from "./keys.ts";
 import { createMaintenanceRepo } from "./maintenance.ts";
 import { createPluginRepo } from "./plugins.ts";
+import { createPromptRepo } from "./prompts.ts";
 import { hostDayOffsetMinutes } from "./rollup.ts";
 import { createUsageRepo } from "./usage.ts";
 
@@ -35,6 +37,7 @@ type Handle = {
   credentials: CredentialRepo;
   config: ConfigRepo;
   keys: KeyRepo;
+  prompts: PromptRepo;
   usage: UsageRepo;
   bodies: BodyRepo;
   maintenance: MaintenanceRepo;
@@ -96,7 +99,8 @@ export async function createStore(opts: {
       config: createConfigRepo(db, emit),
       // The one repo handed the logger: an unreadable `limits` column is
       // reported rather than thrown, so this is where that trail is written.
-      keys: createKeyRepo(db, logger),
+      keys: createKeyRepo(db, logger, emit),
+      prompts: createPromptRepo(db, emit),
       usage: createUsageRepo(db, nodeId, dayOffsetMinutes),
       // Derived from the database path rather than configured. One installation
       // is one directory: an artifact tree that could be pointed elsewhere is one
@@ -158,6 +162,7 @@ export async function createStore(opts: {
       removeModel: (id) => handle.config.removeModel(id),
       getSettings: () => handle.config.getSettings(),
       putSettings: (patch) => handle.config.putSettings(patch),
+      importSettings: (settings) => handle.config.importSettings(settings),
       getAdminPasswordHash: () => handle.config.getAdminPasswordHash(),
       setAdminPasswordHashIfAbsent: (hash) => handle.config.setAdminPasswordHashIfAbsent(hash),
       setAdminPasswordHash: (hash) => handle.config.setAdminPasswordHash(hash),
@@ -165,12 +170,26 @@ export async function createStore(opts: {
       setViewerPasswordHash: (hash) => handle.config.setViewerPasswordHash(hash),
     },
 
+    prompts: {
+      list: () => handle.prompts.list(),
+      get: (id) => handle.prompts.get(id),
+      listActive: () => handle.prompts.listActive(),
+      assignments: (id) => handle.prompts.assignments(id),
+      create: (input) => handle.prompts.create(input),
+      update: (id, input) => handle.prompts.update(id, input),
+      saveVersion: (id, input) => handle.prompts.saveVersion(id, input),
+      activate: (id, version) => handle.prompts.activate(id, version),
+      remove: (id) => handle.prompts.remove(id),
+      importRow: (row) => handle.prompts.importRow(row),
+    },
+
     keys: {
+      setPrompts: (id, prompts) => handle.keys.setPrompts(id, prompts),
       list: () => handle.keys.list(),
       findByHash: (hash) => handle.keys.findByHash(hash),
       get: (id) => handle.keys.get(id),
       create: (input) => handle.keys.create(input),
-      importRow: (row) => handle.keys.importRow(row),
+      importRow: (row, mode) => handle.keys.importRow(row, mode),
       setLimits: (id, limits) => handle.keys.setLimits(id, limits),
       setModelAllowlist: (id, modelAllowlist) => handle.keys.setModelAllowlist(id, modelAllowlist),
       setExpiry: (id, expiresAt) => handle.keys.setExpiry(id, expiresAt),

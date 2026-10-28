@@ -14,6 +14,7 @@ import {
   virtualModel,
 } from "@omni/testkit";
 import { RedisClient, SQL } from "bun";
+import { createApp } from "../../src/app.ts";
 import { redisCoord } from "../../src/coord/redis.ts";
 import { proxyRoutes } from "../../src/routes/proxy.ts";
 
@@ -166,6 +167,142 @@ if (url !== undefined) suite("two replicas over two redis coords", twoRedis);
  */
 const pg = process.env.OMNI_TEST_DATABASE_URL;
 if (url !== undefined && pg !== undefined) {
+  test("prompt writes fan out across real nodes; external SQL on both tables bumps config version", async () => {
+    const sql = new SQL({ url: pg, max: 1 });
+    await sql.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    const encryptionKey = await deriveKey("test-encryption-key-0123456789");
+    const a = await createPostgresStore({ url: pg, encryptionKey });
+    const b = await createPostgresStore({ url: pg, encryptionKey });
+    const [coordA, coordB] = await twoRedis();
+    try {
+      const messages: string[] = [];
+      coordB.pubsub.subscribe("routing", (_topic, payload) => messages.push(payload));
+      await seedCredential(a, { id: "c1", provider: "anthropic" });
+      await a.config.putModel(
+        virtualModel({
+          id: "fast",
+          targets: [target({ provider: "anthropic", model: "claude-opus-4" })],
+        }),
+      );
+      const holder = await seedApiKey(a);
+      const seen: string[] = [];
+      const adapters = stubAdapters(EVENTS);
+      const adapter = adapters.anthropic;
+      if (!adapter) throw new Error("missing stub");
+      const send = adapter.send;
+      adapter.send = (opts) => {
+        seen.push(
+          opts.request.system?.map((p) => (p.type === "text" ? p.text : "")).join("\n") ?? "",
+        );
+        return send(opts);
+      };
+      const appA = createApp({
+        store: a,
+        coord: coordA,
+        nodeId: "prompt-a",
+        baseUrl: "http://localhost",
+        now: () => NOW,
+      });
+      // Pin version(): this test must fail without pubsub even though PG's
+      // independent read-behind version check can eventually rescue a node.
+      const appB = createApp({
+        store: { ...b, routing: { ...b.routing, version: () => 0 } },
+        coord: coordB,
+        nodeId: "prompt-b",
+        baseUrl: "http://localhost",
+        now: () => NOW,
+        adapters,
+      });
+      const api = (method: string, path: string, body?: unknown, cookie = "") =>
+        appA.handle(
+          new Request(`http://localhost${path}`, {
+            method,
+            headers: { "content-type": "application/json", cookie },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          }),
+        );
+      const login = await api("POST", "/api/setup", { password: "hunter2hunter2" });
+      const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+      const infer = async () => {
+        const res = await appB.handle(
+          new Request("http://localhost/v1/messages", {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${holder.raw}` },
+            body: JSON.stringify(BODY),
+          }),
+        );
+        expect(res.status).toBe(200);
+        await res.text();
+        return seen.at(-1);
+      };
+      expect(await infer()).toBe("");
+      expect(
+        (
+          await api(
+            "POST",
+            "/api/prompts",
+            { id: "team", name: "Team", text: "one", activate: true },
+            cookie,
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await api(
+            "PUT",
+            "/api/settings",
+            { ...(await a.config.getSettings()), prompts: ["team"] },
+            cookie,
+          )
+        ).status,
+      ).toBe(200);
+      const until = async (text: string) => {
+        for (let n = 0; n < 100; n++) {
+          if ((await infer()) === text) return;
+          await Bun.sleep(10);
+        }
+        expect(messages).toContainEqual(expect.stringContaining("settingsChanged"));
+        expect(seen.at(-1)).toBe(text);
+      };
+      await until("one");
+      expect(
+        (await api("POST", "/api/prompts/team/versions", { text: "two", activate: true }, cookie))
+          .status,
+      ).toBe(200);
+      await until("two");
+      expect((await api("PUT", "/api/prompts/team/active", { version: 1 }, cookie)).status).toBe(
+        200,
+      );
+      await until("one");
+      expect(
+        (
+          await api(
+            "PUT",
+            `/api/keys/${holder.key.id}/prompts`,
+            { ids: [], inheritGlobal: false },
+            cookie,
+          )
+        ).status,
+      ).toBe(200);
+      await until("");
+      // Raw writes cannot emit local events. Verify each migration trigger on
+      // its own by reading the authoritative counter before/after the write.
+      const version = async () =>
+        Number((await sql.unsafe("SELECT version FROM config_version WHERE id = 1"))[0].version);
+      for (const statement of [
+        "UPDATE prompts SET name = 'External' WHERE id = 'team'",
+        "UPDATE prompt_versions SET text = 'external text' WHERE prompt_id = 'team' AND version = 1",
+      ]) {
+        const before = await version();
+        await sql.unsafe(statement);
+        expect(await version()).toBeGreaterThan(before);
+      }
+    } finally {
+      a.close();
+      b.close();
+      await sql.close();
+    }
+  });
   suite("two replicas over redis and postgres", twoRedis, async () => {
     const admin = new SQL({ url: pg, max: 1 });
     try {

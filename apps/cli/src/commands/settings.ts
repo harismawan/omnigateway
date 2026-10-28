@@ -8,6 +8,10 @@ import { emit, fields } from "../output.ts";
 function flatten(settings: Settings): Array<readonly [string, string]> {
   const rows: Array<readonly [string, string]> = [];
   for (const [key, value] of Object.entries(settings)) {
+    if (Array.isArray(value)) {
+      rows.push([key, value.join(",")]);
+      continue;
+    }
     if (value !== null && typeof value === "object") {
       for (const [inner, innerValue] of Object.entries(value as Record<string, unknown>)) {
         rows.push([`${key}.${inner}`, String(innerValue)]);
@@ -122,9 +126,14 @@ function nullable(head: string): boolean {
 export const settingsSet: Command = {
   usage: "settings set <path> <value>",
   summary: "Change one setting, e.g. weights.cost 0.4, rtkEnabled true, or guardrailModel null",
+  help: "Set global prompt order with: omni settings set prompts a,b. Use prompts '' to clear. ponytailMode remains a compatibility alias; unrelated setting changes retain prompt assignments.",
   async run(args, { ctx, writer }) {
     const path = requirePositional(args, 0, "setting path");
-    const raw = requirePositional(args, 1, "value");
+    if (path === "prompts" && args.positionals.length > 2) {
+      throw new UsageError("unexpected positional arguments");
+    }
+    const raw =
+      path === "prompts" && args.positionals[1] === "" ? "" : requirePositional(args, 1, "value");
 
     const store = await ctx.store();
     const current = await getSettings(store);
@@ -144,13 +153,17 @@ export const settingsSet: Command = {
     // of the one somebody remembered.
     const existing = currentValue(current, head, tail);
     const value =
-      tail === undefined && nullable(head)
-        ? asNullableString(path, raw)
-        : typeof existing === "boolean"
-          ? asBoolean(path, raw)
-          : typeof existing === "string"
-            ? asString(path, raw)
-            : asNumber(path, raw);
+      head === "prompts" && tail === undefined
+        ? raw === ""
+          ? []
+          : raw.split(",")
+        : tail === undefined && nullable(head)
+          ? asNullableString(path, raw)
+          : typeof existing === "boolean"
+            ? asBoolean(path, raw)
+            : typeof existing === "string"
+              ? asString(path, raw)
+              : asNumber(path, raw);
 
     // Validation lives in the settings schema, which the write goes through:
     // this only has to place the value, not judge it.

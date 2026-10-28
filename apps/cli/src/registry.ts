@@ -38,6 +38,7 @@ import {
   keysLimits,
   keysList,
   keysModels,
+  keysPrompts,
   keysRevoke,
   keysSmartRouting,
 } from "./commands/keys.ts";
@@ -56,6 +57,15 @@ import {
   pluginUpdate,
   pluginVerify,
 } from "./commands/plugins.ts";
+import {
+  promptsActivate,
+  promptsCreate,
+  promptsDuplicate,
+  promptsList,
+  promptsRemove,
+  promptsSave,
+  promptsShow,
+} from "./commands/prompts.ts";
 import { quota, quotaRefresh, quotaReset, quotaResets } from "./commands/quota.ts";
 import {
   doctor,
@@ -125,6 +135,15 @@ export const COMMANDS: Readonly<Record<string, Command>> = {
   "keys guardrail": keysGuardrail,
   "keys smart-routing": keysSmartRouting,
   "keys revoke": keysRevoke,
+  "keys prompts": keysPrompts,
+
+  "prompts list": promptsList,
+  "prompts show": promptsShow,
+  "prompts create": promptsCreate,
+  "prompts save": promptsSave,
+  "prompts activate": promptsActivate,
+  "prompts duplicate": promptsDuplicate,
+  "prompts remove": promptsRemove,
 
   "plugin list": pluginList,
   "plugin verify": pluginVerify,

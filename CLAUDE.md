@@ -31,6 +31,8 @@ OmniGateway = Bun/TypeScript monorepo for self-hosted AI gateway:
   counter fleet must share live behind it
 - `packages/rtk`: tool-result filters, applied in dispatch before routing
 - `packages/ponytail`: vendored lazy-senior-dev ruleset, appended to system prompt in dispatch
+- `packages/prompts`: pure managed-prompt resolution/injection; store imports `/catalog` only;
+  user slugs reserve `ponytail-`. Pins: `packages/prompts/test/`, store contract `prompts.test.ts`.
 - `packages/store`: persistence + encryption; two `Store` impls, `sqlite/` (default) and
   `postgres/` (cluster), one contract suite in `test/contract/` run against both
 - `packages/testkit`: shared test fixtures
@@ -522,17 +524,22 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Refuse at auth, degrade at list. Unparseable `limits` read back as `null`, distinct from `{}`;
   `authenticateApiKey` turn it into `INTERNAL` — not `AUTH`. `keys.list()` must never throw over
   such row. Nothing may collapse that `null` into `{}`.
-- Five fields editable after minting: `limits` (`setKeyLimits`, `PUT /api/keys/:id/limits`),
+- Six fields editable after minting: `limits` (`setKeyLimits`, `PUT /api/keys/:id/limits`),
   `modelAllowlist` (`setKeyModels`, `PUT /api/keys/:id/models`), `expiresAt`
   (`setKeyExpiry`, `PUT /api/keys/:id/expiry`), `guardrailPolicy` (`setKeyGuardrail`,
   `PUT /api/keys/:id/guardrail`) and `smartRouting` (`setKeySmartRouting`,
-  `PUT /api/keys/:id/smart-routing`). All written whole, never patched —
+  `PUT /api/keys/:id/smart-routing`) and `prompts` (`setKeyPrompts`,
+  `PUT /api/keys/:id/prompts`, whole `{ids, inheritGlobal}`). All written whole, never patched —
   `{}` is how last limit go away; allowlist `null` and `[]` opposite facts, and expiry `null`
   ("never") and absent field likewise, so both schemas refuse default. Expiry take **past
   instant** — "expire it now", reversible where `revoke` not; never add `> now` guard.
   `bodyLoggingOptOut` deliberately not editable — promise to whoever hold key. Policy `null` is
   only "no guardrail"; empty after trim refused, never coerced.
   `smartRouting` take `{enabled}`; absent refused.
+- Prompt alias reconciliation (`mergeSettings`) must read stored aliases under the mutation lock;
+  omitted `prompts` preserves assignments. Postgres management advisory lock precedes settings,
+  key, prompt and config-version locks; SQLite uses immediate transactions. Pins: store contract
+  `promptSettings.test.ts`, `prompts.test.ts`; never reconcile aliases in control before locking.
 - **Usage-policy guardrail fails closed**: only a bare `ALLOW` from the classifier admits; deny,
   timeout, error, unreadable reply, unset `guardrailModel` all refuse, fixed gateway-authored
   messages, classifier text never reaches client or stdout. Judged inside the event sequence

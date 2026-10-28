@@ -46,6 +46,7 @@ export type ClientRequestLog = {
   durationMs: number;
   costUsd: number;
   degradations: string[];
+  prompts: string[];
   rtkApplied: boolean;
   rtkEstimatedTokensSaved: number;
   /**
@@ -106,6 +107,7 @@ export function toClientLog(log: RequestLog): ClientRequestLog {
     durationMs: log.durationMs,
     costUsd: log.costUsd,
     degradations: log.degradations.filter(isClientVisibleDegradation),
+    prompts: [...log.prompts],
     rtkApplied: log.rtkApplied,
     rtkEstimatedTokensSaved: log.rtkEstimatedTokensSaved,
     sessionId: log.sessionId,

@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ClientBoard } from "../../src/features/client/ClientBoard.tsx";
 import { TERM_DEBOUNCE_MS } from "../../src/features/logs/LogFilterBar.tsx";
+import { useLive } from "../../src/session/live.tsx";
 import { measureCharts } from "../helpers/chart.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import {
@@ -15,6 +16,7 @@ import {
   usageBucket,
 } from "../helpers/fixtures.ts";
 import { makeQueryClient, renderWithProviders } from "../helpers/render.tsx";
+import { installSocketStub } from "../helpers/socketStub.ts";
 
 function stub(over: Record<string, () => unknown> = {}) {
   return createFetchStub({
@@ -26,7 +28,79 @@ function stub(over: Record<string, () => unknown> = {}) {
   });
 }
 
+function LiveCadence() {
+  const { cadence } = useLive();
+  return <span data-testid="log-cadence">{String(cadence(2_000, "res:logs"))}</span>;
+}
+
 describe("client board", () => {
+  test("own policy re-polls at 10s even with LIVE pushed traffic and no other-key data", async () => {
+    const socket = installSocketStub();
+    let text = "Original own policy";
+    const fetches = stub({
+      "GET /api/client/summary": () => ({
+        ...apiKey(),
+        effectivePrompts: [{ id: "team", name: "Own rules", version: 3, text }],
+      }),
+    });
+    const view = renderWithProviders(
+      <>
+        <ClientBoard />
+        <LiveCadence />
+      </>,
+      {
+        client: makeQueryClient({ catalog: false }),
+        stream: { enabled: true },
+      },
+    );
+    await screen.findByText("Original own policy");
+    await waitFor(() => expect(socket.sockets.length).toBe(1));
+    act(() => {
+      const ws = socket.sockets[0];
+      ws?.open();
+      ws?.emit({ type: "ack", topic: "res:logs", seq: 0 });
+      ws?.emit({ type: "ack", topic: "res:usage", seq: 0 });
+    });
+    await waitFor(() => expect(screen.getByTestId("log-cadence").textContent).toBe("false"));
+    const calls = () => fetches.calls.filter((c) => c.url === "/api/client/summary").length;
+    const initial = calls();
+    text = "Updated own policy";
+    await new Promise((resolve) => setTimeout(resolve, 9_000));
+    expect(calls()).toBe(initial);
+    await waitFor(() => expect(screen.getByText("Updated own policy")).toBeTruthy(), {
+      timeout: 2_500,
+    });
+    expect(calls()).toBe(initial + 1);
+    expect(fetches.calls.every((c) => c.url.startsWith("/api/client/"))).toBe(true);
+    view.unmount();
+  }, 15_000);
+  test("own effective names/texts and applied IDs are read-only with no console requests or links", async () => {
+    const user = userEvent.setup();
+    const fetches = stub({
+      "GET /api/client/summary": () => ({
+        ...apiKey(),
+        effectivePrompts: [
+          {
+            id: "team",
+            name: "Own team rules",
+            version: 3,
+            text: "Own effective instructions",
+            builtin: false,
+          },
+        ],
+      }),
+      "GET /api/client/logs": () => ({ logs: [clientLog({ prompts: ["team@3"] })] }),
+    });
+    renderWithProviders(<ClientBoard />, { client: makeQueryClient({ catalog: false }) });
+    expect(await screen.findByText("Own team rules")).toBeTruthy();
+    expect(screen.getByText("Own effective instructions")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: /prompt/i })).toBeNull();
+    await user.click((await screen.findAllByText("fast")).at(-1) as HTMLElement);
+    expect(await within(screen.getByRole("dialog")).findByText("team@3")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "team@3" })).toBeNull();
+    expect(fetches.calls.every((c) => c.url.startsWith("/api/client/"))).toBe(true);
+    expect(document.querySelector('a[href^="/prompts"]')).toBeNull();
+  });
   /**
    * The catalog is deliberately **not** seeded here.
    *

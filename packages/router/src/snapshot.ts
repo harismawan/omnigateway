@@ -9,12 +9,13 @@ export function healthKey(credentialId: string, model: string): string {
 }
 
 export async function buildSnapshot(store: Store, now: number): Promise<Snapshot> {
-  const [credentials, healthRows, quotaRows, models, settings] = await Promise.all([
+  const [credentials, healthRows, quotaRows, models, settings, prompts] = await Promise.all([
     store.credentials.listRouting(),
     store.credentials.listHealth(),
     store.credentials.listQuota(),
     store.config.listModels(),
     store.config.getSettings(),
+    store.prompts.listActive(),
   ]);
 
   const health = new Map(healthRows.map((h) => [healthKey(h.credentialId, h.model), h]));
@@ -31,6 +32,7 @@ export async function buildSnapshot(store: Store, now: number): Promise<Snapshot
     health,
     quota,
     models: new Map(models.map((m) => [m.id, m])),
+    prompts: new Map(prompts.map((p) => [p.id, p])),
     settings,
     builtAt: now,
   };

@@ -52,6 +52,20 @@ test("res:logs reaches every limit the log board can be switched to", () => {
   for (const limit of LIMITS) expect(stale(client, queryKeys.logs(limit))).toBe(true);
 });
 
+test("prompt-filtered admin/client pages have distinct cache keys and are reached by log invalidation", () => {
+  const client = seeded();
+  const admin = queryKeys.logPages({ prompt: "team" }, 100);
+  const holder = queryKeys.clientLogPages({ prompt: "team" }, 100);
+  expect(admin).not.toEqual(queryKeys.logPages({}, 100));
+  expect(holder).not.toEqual(queryKeys.clientLogPages({}, 100));
+  expect(admin).not.toEqual(holder);
+  for (const key of [admin, holder])
+    client.setQueryData(key, { pages: [{ logs: [], nextCursor: null }], pageParams: [null] });
+  invalidateTopic(client, "res:logs");
+  expect(stale(client, admin)).toBe(true);
+  expect(stale(client, holder)).toBe(true);
+});
+
 test("res:logs leaves a captured request body alone", () => {
   // `queryKeys.requestBody` is `["logs", "body", id]` — under the same prefix
   // and not a log listing. A body is written once at the end of its request and

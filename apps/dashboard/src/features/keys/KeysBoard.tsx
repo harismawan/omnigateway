@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   ListChecks,
+  MessageSquareText,
   Plus,
   ShieldCheck,
   SlidersHorizontal,
@@ -36,6 +37,7 @@ import { EditExpiryDialog } from "./EditExpiryDialog.tsx";
 import { EditGuardrailDialog } from "./EditGuardrailDialog.tsx";
 import { EditLimitsDialog } from "./EditLimitsDialog.tsx";
 import { EditModelsDialog } from "./EditModelsDialog.tsx";
+import { EditPromptsDialog } from "./EditPromptsDialog.tsx";
 import { keyState } from "./expiry.ts";
 import { LimitMatrix } from "./LimitMatrix.tsx";
 import { describeReading, formatLimitValue, fractionOf, nearestExhaustion } from "./limits.ts";
@@ -151,7 +153,13 @@ const Inert = styled.p`
   color: ${({ theme }) => theme.color.warn};
 `;
 
-export function KeysBoard() {
+export function KeysBoard({
+  editPrompts,
+  onClosePrompts,
+}: {
+  editPrompts?: string;
+  onClosePrompts?: () => Promise<void>;
+} = {}) {
   const keys = useKeys();
   const settings = useSettings();
   const smartRouterModels = useSmartRouterModels();
@@ -163,11 +171,14 @@ export function KeysBoard() {
   const [editingModels, setEditingModels] = useState<ApiKeySummary | null>(null);
   const [editingExpiry, setEditingExpiry] = useState<ApiKeySummary | null>(null);
   const [editingPolicy, setEditingPolicy] = useState<ApiKeySummary | null>(null);
+  const [editingPrompts, setEditingPrompts] = useState<string | null>(null);
+  const [closingPrompts, setClosingPrompts] = useState(false);
   const [opened, setOpened] = useState<string | null>(null);
   const [doomed, setDoomed] = useState<ApiKeySummary | null>(null);
 
   const now = Date.now();
   const rows = keys.data ?? [];
+  const promptKey = rows.find((key) => key.id === (editingPrompts ?? editPrompts));
   // Only live keys count: a revoked key's flag changes nothing it sends.
   const inert = rows.some((key) => key.revokedAt === null && key.smartRouting)
     ? inertNotice(settings.data, smartRouterModels.data)
@@ -368,6 +379,16 @@ export function KeysBoard() {
                                   type="button"
                                   $variant="ghost"
                                   $size="sm"
+                                  aria-label={`Edit prompts for ${key.label}`}
+                                  title={`Edit prompts for ${key.label}`}
+                                  onClick={() => setEditingPrompts(key.id)}
+                                >
+                                  <MessageSquareText />
+                                </IconButton>
+                                <IconButton
+                                  type="button"
+                                  $variant="ghost"
+                                  $size="sm"
                                   aria-label={`Edit models for ${key.label}`}
                                   title={`Edit models for ${key.label}`}
                                   onClick={() => setEditingModels(key)}
@@ -459,6 +480,20 @@ export function KeysBoard() {
       </FillModule>
 
       <MintKeyDialog open={minting} onOpenChange={setMinting} />
+      {promptKey && !closingPrompts ? (
+        <EditPromptsDialog
+          key={promptKey.id}
+          apiKey={promptKey}
+          onOpenChange={(open) => {
+            if (open) return;
+            setEditingPrompts(null);
+            if (editPrompts && onClosePrompts) {
+              setClosingPrompts(true);
+              void onClosePrompts().finally(() => setClosingPrompts(false));
+            }
+          }}
+        />
+      ) : null}
 
       {/* Keyed by the row, so opening a second key starts from that key's
           matrix rather than from whatever was typed into the last one. */}

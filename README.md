@@ -480,6 +480,50 @@ the gateway is
 deliberately edited on the Database screen instead; see
 [Snapshots and restore](docs/operations.md#snapshots-and-restore) for why.
 
+## Managed prompts
+
+The console's **Prompts** page (admin/viewer readable; admin editable) manages appended system
+instructions. Create a user prompt, then **Save and activate** to apply it or **Save as draft**
+to leave the active version unchanged. Activate any retained version to roll back. Built-in
+`ponytail-lite`, `ponytail-full`, and `ponytail-ultra` are read-only, pinned to `v4.9.0`; Duplicate
+creates an editable user copy without ponytail's marker semantics. User slugs reserve `ponytail-`.
+
+Assign an ordered global list on Prompts, or a key-specific list in Keys. Keys inherit globals
+unless inheritance is disabled; globals come first, duplicate IDs apply once, and a key's built-in
+overrides the global built-in. Missing/inactive prompts are skipped with `prompt:missing`.
+Key holders can read their own effective prompt names and active texts in the client dashboard,
+not the library, history, or other keys' assignments. This is a behavioral guardrail, **not a
+sandbox**: clients can attempt to override instructions. **Do not put confidential material in a
+managed prompt.** Usage-policy and confidential-routing screening examine client content before
+these additions; they do not classify managed prompt text.
+
+Limits: 50 user prompts, 100 retained versions each, five IDs per global/key list and one built-in
+per list. Text is at most 16,000 UTF-16 code units after trailing whitespace is trimmed (leading
+whitespace stays). The effective append budget is 32,000 code units including blank-line separators;
+the first overflow drops that prompt and the remaining suffix. Appended text costs input tokens
+and changing it can invalidate provider prompt caches. Existing cache-marker counts/TTLs are
+preserved; managed prompts do not force auto-cache on.
+
+CLI equivalents use local control operations, not HTTP:
+`omni prompts create team --name Team --file rules.txt`, `omni prompts save team --draft --file -`,
+`omni prompts activate team 1`, `omni settings set prompts team`, and
+`omni keys prompts <key-id> --ids team --no-global`. Omit `--file` to pipe stdin; bodies are never
+command-line arguments. `omni prompts show team --version 1` deliberately prints that version's text.
+
+Saving beyond 100 versions prunes the oldest nonactive version; active history survives. Deletion
+is refused while explicitly assigned globally or to any key, including expired/revoked keys.
+Logs and exports retain applied `id@version` identifiers, not library texts. A deleted/pruned
+version displays **Version unavailable**, never today's active text. Slugs may be recreated;
+`id@version` has no incarnation identity, so historical text recovery after slug reuse is not
+guaranteed. SQLite snapshots and backend moves carry all retained history, original numbers,
+timestamps, active pointers and assignments; old snapshots migrate with empty prompt tables.
+
+**Upgrade/rollback:** absent `prompts` upgrades the legacy `ponytailMode` into the global built-in
+assignment. Writes keep both aliases mirrored; older clients may keep using `ponytailMode`.
+Rolling back to a build without prompt management keeps that global ponytail level, but **user
+prompts and per-key assignments stop applying (fail open)** until upgraded again. Do not rely on
+them as an enforcement boundary during rollback.
+
 ## Recording bodies, snapshots, and the database
 
 By default the gateway records no prompts and no responses; capture is opt-in

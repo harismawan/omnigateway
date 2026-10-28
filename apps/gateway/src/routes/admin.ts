@@ -40,6 +40,7 @@ import {
   setKeyGuardrail,
   setKeyLimits,
   setKeyModels,
+  setKeyPrompts,
   setKeySmartRouting,
   setupFiles,
   smartRouterModelStatus,
@@ -492,18 +493,21 @@ export function adminRoutes(deps: AdminDeps) {
         // nowhere else, so an operator who loses it must issue a new one.
         const created = await createKey(deps.store, await readJson(request));
         changed("res:keys");
+        changed("res:prompts");
         return created;
       })
 
+      .put("/api/keys/:id/prompts", async ({ request, params }) => {
+        await requireAdmin(request, deps.admin);
+        await setKeyPrompts(deps.store, params.id, await readJson(request));
+        changed("res:keys");
+        changed("res:prompts");
+        return { ok: true };
+      })
+
       /**
-       * One of the four fields on a key that are editable after minting — this
-       * one, the allowlist below, the expiry, and the usage policy after it.
-       *
-       * `bodyLoggingOptOut` has no route like this on purpose: it is a promise
-       * to whoever holds the key. A limit is the operator's own ceiling on
-       * their own installation, and a weekly spend cap that cannot be adjusted
-       * without minting a new key and redeploying every client is a cap that
-       * gets set to unlimited instead.
+       * Limits are editable after minting; bodyLoggingOptOut deliberately is
+       * not, because it is a promise to whoever holds the key.
        */
       .put("/api/keys/:id/limits", async ({ request, params }) => {
         await requireAdmin(request, deps.admin);
@@ -689,6 +693,7 @@ export function adminRoutes(deps: AdminDeps) {
         await putSettings(deps.store, await readJson(request));
         deps.onBodyGatesChanged?.((await deps.store.config.getSettings()).bodyLoggingEnabled);
         changed("res:settings");
+        changed("res:prompts");
         return { ok: true };
       })
 

@@ -6,7 +6,7 @@ import { SettingsBoard } from "../../src/features/settings/SettingsBoard.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
-import { choose, suggestionsOf } from "../helpers/select.ts";
+import { suggestionsOf } from "../helpers/select.ts";
 
 function stubSettings(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
@@ -551,20 +551,49 @@ describe("SettingsBoard", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 
-  test("picks a ponytail level and sends the setting", async () => {
+  test("relocates all prompt controls and preserves fetched prompts and mirrored mode on unrelated save", async () => {
     const user = userEvent.setup();
-    const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
+    const stub = stubSettings({
+      "GET /api/settings": () => ({
+        settings: { ...settings, prompts: ["team", "ponytail-full"], ponytailMode: "full" },
+      }),
+      "PUT /api/settings": () => ({ ok: true }),
+    });
     renderWithProviders(<SettingsBoard />);
 
-    const select = (await screen.findByLabelText("Lazy senior dev mode")) as HTMLButtonElement;
-    expect(select.value).toBe("off");
-    await choose(user, select, "ultra");
+    const link = await screen.findByRole("link", {
+      name: "Prompt injection, including ponytail, moved to Prompt Management",
+    });
+    expect(link.getAttribute("href")).toBe("/prompts");
+    expect(screen.queryByLabelText("Lazy senior dev mode")).toBeNull();
+    expect(screen.queryByLabelText("Add prompt")).toBeNull();
+    await user.clear(screen.getByLabelText("Tier"));
+    await user.type(screen.getByLabelText("Tier"), "11");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       const put = stub.calls.find((call) => call.init?.method === "PUT");
-      const body = JSON.parse(String(put?.init?.body)) as { ponytailMode: string };
-      expect(body.ponytailMode).toBe("ultra");
+      const body = JSON.parse(String(put?.init?.body)) as {
+        ponytailMode: string;
+        prompts: string[];
+      };
+      expect(body.ponytailMode).toBe("full");
+      expect(body.prompts).toEqual(["team", "ponytail-full"]);
+    });
+  });
+
+  test("unrelated settings saves retain fetched prompt assignments", async () => {
+    const user = userEvent.setup();
+    const stub = stubSettings({
+      "GET /api/settings": () => ({ settings: { ...settings, prompts: ["team"] } }),
+      "PUT /api/settings": () => ({ ok: true }),
+    });
+    renderWithProviders(<SettingsBoard />);
+    await user.click(await screen.findByRole("switch", { name: "Enable RTK compression" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const put = stub.calls.find((call) => call.init?.method === "PUT");
+      expect(JSON.parse(String(put?.init?.body)).prompts).toEqual(["team"]);
     });
   });
   test("the classifier model and timeout load, save, and clear to null", async () => {

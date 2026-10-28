@@ -67,6 +67,7 @@
         "@omni/coord": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/ponytail": "workspace:*",
+        "@omni/prompts": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
@@ -87,6 +88,7 @@
         "@omni/coord": "workspace:*",
         "@omni/ir": "workspace:*",
         "@omni/ponytail": "workspace:*",
+        "@omni/prompts": "workspace:*",
         "@omni/providers": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/router": "workspace:*",
@@ -139,6 +141,14 @@
         "@omni/ir": "workspace:*",
       },
     },
+    "packages/prompts": {
+      "name": "@omni/prompts",
+      "version": "0.0.0",
+      "dependencies": {
+        "@omni/ir": "workspace:*",
+        "@omni/ponytail": "workspace:*",
+      },
+    },
     "packages/providers": {
       "name": "@omni/providers",
       "version": "0.0.0",
@@ -179,6 +189,7 @@
       "dependencies": {
         "@omni/ir": "workspace:*",
         "@omni/ponytail": "workspace:*",
+        "@omni/prompts": "workspace:*",
         "@omni/ratelimit": "workspace:*",
         "@omni/rtk": "workspace:*",
       },
@@ -299,6 +310,8 @@
     "@omni/ir": ["@omni/ir@workspace:packages/ir"],
 
     "@omni/ponytail": ["@omni/ponytail@workspace:packages/ponytail"],
+
+    "@omni/prompts": ["@omni/prompts@workspace:packages/prompts"],
 
     "@omni/providers": ["@omni/providers@workspace:packages/providers"],
 
