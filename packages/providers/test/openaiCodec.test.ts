@@ -159,7 +159,7 @@ test("an API key goes to the public host, with no account header at all", async 
     "originator",
     "user-agent",
   ]);
-  expect(sent.headers).toContainEqual(["version", "0.163.0"]);
+  expect(sent.headers).toContainEqual(["version", "0.165.0"]);
   expect(sent.headers).toContainEqual(["authorization", "Bearer sk-oa"]);
   expect(sent.headers.some(([name]) => name === "chatgpt-account-id")).toBe(false);
   expect(sent.headers).toContainEqual(["session-id", KEY]);

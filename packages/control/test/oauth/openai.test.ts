@@ -32,16 +32,16 @@ function stubHttp(status: number, body: unknown): HttpClient & { last: () => Htt
 const pending = { verifier: "v", challenge: "c", state: "s", redirectUri: "http://localhost/cb" };
 
 // The token requests wear the shared OpenAI profile, so they move with it: the
-// 0.163.0 TUI identity, and the originator header after the protocol headers.
+// 0.165.0 TUI identity, and the originator header after the protocol headers.
 const OPENAI_TOKEN_HEADERS = [
-  ["version", "0.163.0"],
+  ["version", "0.165.0"],
   ["x-codex-beta-features", "remote_compaction_v2"],
   ["Accept", "application/json"],
   ["Content-Type", "application/x-www-form-urlencoded"],
   ["originator", "codex-tui"],
   [
     "user-agent",
-    "codex-tui/0.163.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.163.0)",
+    "codex-tui/0.165.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.165.0)",
   ],
 ] as const;
 

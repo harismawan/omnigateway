@@ -2,6 +2,47 @@
 
 Status: implemented, 2026-10-16. Builder's calls recorded under "Left to the builder".
 
+## Current fingerprint — 2026-10-28
+
+The current profile and bundled catalog are **Codex 0.165.0** (`rust-v0.165.0`,
+released 2026-10-27). The sections below retain the original 0.163.0 design/history.
+The current sanitized capture is `packages/providers/test/fixtures/codex-0.165.0.json`.
+
+Re-captured the real 0.165.0 Linux binary locally with synthetic credentials, using
+`gpt-6.1-terra` in the interactive TUI and an exec tool-loop follow-up. Headers,
+their order, top-level body fields, turn metadata and client metadata are unchanged
+apart from the version. The gateway continues to claim its Windows profile.
+
+Changes from 0.163.0:
+
+- Added `gpt-6.1-terra` to both catalogs. API prices per million tokens: input $1,
+  output $5, cache read $0.05, standard cache write $1.25. API input cap 922,000,
+  output cap 128,000; Codex default input cap 500,000. Catalog prices are the
+  short-context tier; API and OAuth Terra prompts above 272K need long-tier prices.
+  The API reasoning default
+  is medium; the bundled Codex default is low, with node REPL review required.
+- Lite developer/user messages carry `content_item_metadata`, one provenance per
+  content part (`harness` with `hook: false` for developer instructions, `user`
+  for user content, `tool` for tool-result media moved into user messages).
+  Replayed assistant messages and tool items omit this field;
+  non-lite models omit it everywhere. Base instructions also carry a turn id and
+  creation time.
+- Astra, Sol 6.1 and Terra 6.1 enable reasoning effort updates in the bundled
+  catalog. They carry `configuration_update: {reasoning: {effort}}` after the
+  current user prompt, before its assistant/tool loop. The gateway knows only the
+  current request's effort, so does not invent historical effort changes.
+
+Deliberate remaining gaps: the capture's prefix ids are UUIDv7 although this
+release's `core/src/client.rs` still constructs UUIDv5 prefix ids. Keep the existing
+deterministic UUIDv5 derivation for cache/retry stability. Client prompts/tools
+remain the client's, and replayed reasoning ids and call namespaces follow the
+existing exceptions below. No live-account acceptance probe was performed for
+this refresh: local capture establishes client shape, not backend acceptance.
+
+Sources: [model details](https://developers.openai.com/api/docs/models/gpt-6.1-terra),
+[release](https://github.com/openai/codex/releases/tag/rust-v0.165.0), and its
+[`models.json`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/models-manager/models.json).
+
 ## Intent
 
 The OpenAI OAuth leg (`chatgpt.com/backend-api/codex/responses`) presents itself as the Codex CLI.

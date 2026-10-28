@@ -32,7 +32,7 @@ function routingHint(model: string, tier: unknown): string | undefined {
  *
  * The request shape differs by credential type. An API key goes to
  * `api.openai.com` as a standard Responses request. An OAuth token goes to the
- * Codex backend presenting itself as Codex 0.163.0's interactive TUI: Codex's
+ * Codex backend presenting itself as Codex 0.165.0's interactive TUI: Codex's
  * headers in Codex's order, the responses-lite body, per-turn metadata, and a
  * zstd body — `docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md`.
  * Both are pinned in `openaiCodec.test.ts` and `openaiCodexFingerprint.test.ts`.
