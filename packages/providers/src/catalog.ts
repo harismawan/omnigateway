@@ -14,6 +14,7 @@ import { KILO_MODELS } from "./kilo/models.ts";
 import { KIMI_MODELS } from "./kimi/models.ts";
 import { MUSE_MODELS } from "./muse/models.ts";
 import { OPENAI_MODELS } from "./openai/models.ts";
+import { QODER_MODELS } from "./qoder/models.ts";
 
 export type {
   CatalogAuth,
@@ -48,6 +49,7 @@ export const PROVIDER_MODEL_CATALOG: Readonly<Record<string, ProviderModelCatalo
   grok: GROK_MODELS,
   antigravity: ANTIGRAVITY_MODELS,
   muse: MUSE_MODELS,
+  qoder: QODER_MODELS,
   custom: CUSTOM_MODELS,
 };
 

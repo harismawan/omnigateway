@@ -654,3 +654,8 @@ Both commands accept `--host`, `--port` and `--upstream` options.
 
 Releases are published to npm from a `v*` tag, with provenance attesting which
 commit produced them.
+# Qoder provider
+
+Experimental Qoder global account login, server-derived models and native streaming
+are available without installing its CLI. See [Qoder setup and limitations](docs/qoder.md).
+Live account compatibility is not yet verified; unknown prices are not free usage.

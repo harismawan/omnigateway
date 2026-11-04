@@ -34,6 +34,21 @@ import { choose, optionLabels, shownLabel, suggestionsOf } from "../helpers/sele
  */
 const CATALOG = catalogFixture();
 
+test("account model catalog unknown prices and limits never become zero or undefined strings", () => {
+  const catalog = [
+    {
+      ...CATALOG[0],
+      id: "qoder",
+      models: [{ id: "synthetic", label: "Synthetic", pricing: null, limits: {}, auth: ["oauth"] }],
+    },
+  ] as import("../../src/api/types.ts").CatalogProvider[];
+  expect(catalogPrices(catalog, "qoder", "synthetic")).toBeNull();
+  expect(catalogTokenLimits(catalog, "qoder", "synthetic")).toEqual({
+    contextWindow: "",
+    maxOutputTokens: "",
+  });
+});
+
 describe("catalog pricing defaults", () => {
   test("a new target starts at the provider's list price, not at zero", () => {
     const target = blankTarget(CATALOG, "anthropic");

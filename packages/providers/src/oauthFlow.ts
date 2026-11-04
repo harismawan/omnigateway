@@ -262,7 +262,9 @@ export type PkcePluginFlow = PluginFlowBase & { readonly kind: "pkce" };
 export type DevicePluginFlow = PluginFlowBase & {
   readonly kind: "device";
   readonly needsDeviceId: boolean;
-  begin(input: { deviceId: string } & AuthHelpers): AuthStep<AuthorizeStart>;
+  begin(
+    input: { deviceId: string; providerData?: Record<string, unknown> } & AuthHelpers,
+  ): AuthStep<AuthorizeStart>;
 };
 
 export type PluginOAuthFlow = PkcePluginFlow | DevicePluginFlow;

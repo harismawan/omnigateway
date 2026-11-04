@@ -7,6 +7,7 @@ import { kiloDescriptor } from "./kilo/descriptor.ts";
 import { kimiDescriptor } from "./kimi/descriptor.ts";
 import { museDescriptor } from "./muse/descriptor.ts";
 import { openaiDescriptor } from "./openai/descriptor.ts";
+import { qoderDescriptor } from "./qoder/descriptor.ts";
 
 // Re-exported from the leaf so a reader of one descriptor need not know that the
 // type lives next door — `packages/router` already imports the record from here.
@@ -49,6 +50,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptors = {
   grok: grokDescriptor,
   antigravity: antigravityDescriptor,
   muse: museDescriptor,
+  qoder: qoderDescriptor,
   custom: customDescriptor,
 };
 

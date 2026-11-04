@@ -687,6 +687,7 @@ test("registry includes custom provider", () => {
     "kimi",
     "muse",
     "openai",
+    "qoder",
   ]);
 });
 

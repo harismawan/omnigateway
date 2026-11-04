@@ -7,6 +7,7 @@ import { kimiOAuthFlow } from "./kimi/oauth.ts";
 import { museOAuthFlow } from "./muse/oauth.ts";
 import type { PluginOAuthFlow } from "./oauthFlow.ts";
 import { openaiOAuthFlow } from "./openai/oauth.ts";
+import { qoderOAuthFlow } from "./qoder/oauth.ts";
 
 /**
  * The five flows this repository ships, for a host to register at boot.
@@ -37,7 +38,9 @@ import { openaiOAuthFlow } from "./openai/oauth.ts";
  * sentence an operator reads, which is why the connect suite matches that line
  * by equality rather than by `toContain`.
  */
-export function builtinOAuthFlows(): ReadonlyArray<readonly [ProviderId, PluginOAuthFlow]> {
+export function builtinOAuthFlows(): ReadonlyArray<
+  readonly [ProviderId, PluginOAuthFlow, { maxRequestsPerStep: 5 }?]
+> {
   return [
     ["anthropic", anthropicOAuthFlow],
     ["openai", openaiOAuthFlow],
@@ -46,5 +49,6 @@ export function builtinOAuthFlows(): ReadonlyArray<readonly [ProviderId, PluginO
     ["grok", grokOAuthFlow],
     ["antigravity", antigravityOAuthFlow],
     ["muse", museOAuthFlow],
+    ["qoder", qoderOAuthFlow, { maxRequestsPerStep: 5 }],
   ];
 }

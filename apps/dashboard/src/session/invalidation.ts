@@ -78,7 +78,10 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
   },
   // `["credentials"]` covers `["credentials", "health"]`, which is the one that
   // actually moves: the health poller writes it every ten seconds today.
-  "res:credentials": { queryKey: queryKeys.credentials },
+  "res:credentials": {
+    predicate: (query) =>
+      query.queryKey[0] === queryKeys.credentials[0] || query.queryKey[0] === queryKeys.catalog[0],
+  },
   "res:keys": { queryKey: queryKeys.keys },
   "res:settings": { queryKey: queryKeys.settings },
   "res:models": { queryKey: queryKeys.models },

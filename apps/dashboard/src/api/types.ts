@@ -846,8 +846,8 @@ export type CatalogLimits = { contextWindow: number; maxOutputTokens: number };
 export type CatalogModel = {
   id: string;
   label: string;
-  pricing: CatalogPricing;
-  limits: CatalogLimits;
+  pricing: CatalogPricing | null;
+  limits: Partial<CatalogLimits>;
   oauthLimits?: CatalogLimits;
   /**
    * Which credential types can reach this model.

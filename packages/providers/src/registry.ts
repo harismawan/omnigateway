@@ -11,6 +11,7 @@ import { kimiAdapter } from "./kimi/index.ts";
 import { museAdapter } from "./muse/index.ts";
 import { openaiAdapter } from "./openai/index.ts";
 import { PROFILES } from "./profile.ts";
+import { qoderAdapter } from "./qoder/index.ts";
 import type { ProviderAdapter } from "./types.ts";
 
 /**
@@ -49,6 +50,7 @@ export const ADAPTERS: Readonly<Record<string, ProviderAdapter>> = {
   grok: grokAdapter,
   antigravity: antigravityAdapter,
   muse: museAdapter,
+  qoder: qoderAdapter,
   custom: customAdapter,
 };
 

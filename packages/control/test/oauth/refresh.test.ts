@@ -397,6 +397,7 @@ test("a provider that does have a refresh still reaches it", async () => {
     "kimi",
     "muse",
     "openai",
+    "qoder",
   ]);
 });
 

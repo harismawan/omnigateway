@@ -3,6 +3,35 @@ import { resolve } from "node:path";
 
 const SRC = resolve(import.meta.dir, "../src");
 
+test("Qoder CLI version and header order overrides boot in a fresh process", async () => {
+  const proc = Bun.spawn(
+    [
+      "bun",
+      "-e",
+      `import { PROFILES } from ${JSON.stringify(resolve(SRC, "profile.ts"))}; import { BODY_ORDER } from ${JSON.stringify(resolve(SRC, "body.ts"))}; console.log(JSON.stringify({profile:PROFILES.qoder,body:BODY_ORDER.qoder}));`,
+    ],
+    {
+      env: {
+        ...process.env,
+        OMNI_QODER_CLI_VERSION: "1.2.synthetic",
+        OMNI_ORDER_QODER: "Authorization,Accept",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [out, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  expect({ code, err }).toEqual({ code: 0, err: "" });
+  const result = JSON.parse(out);
+  expect(result.profile.headers).toContainEqual(["User-Agent", "qoder/1.2.synthetic"]);
+  expect(result.profile.order).toEqual(["Authorization", "Accept"]);
+  expect(result.body).toContain("model_config");
+});
+
 /**
  * Reads `PROFILES` and `BODY_ORDER` in a fresh process under a given environment.
  *

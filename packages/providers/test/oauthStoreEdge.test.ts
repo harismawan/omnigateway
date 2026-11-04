@@ -61,7 +61,7 @@ test("the package entry point has no runtime edge to the store", () => {
   // stating. `node:*` is the ordered HTTP transport, which is why
   // `descriptors.ts` and `catalog.ts` remain separate leaf subpaths. Hashing and
   // request compression now use Bun/Web built-ins, without module imports.
-  expect(graph.bare).toEqual(["@omni/ir", "node:http", "node:https", "node:stream"]);
+  expect(graph.bare).toEqual(["@omni/ir", "node:crypto", "node:http", "node:https", "node:stream"]);
 });
 
 test("every store import in this package is type-only, in source", () => {

@@ -140,3 +140,8 @@ shape and why the HTTP client is built on `node:http`.
 9. Cover streaming and non-streaming, and mutation-test the load-bearing assertions — URL selection,
    usage-token arithmetic, tool call and result round-trip, mid-conversation system placement.
    Verify each anchor fails when its behaviour is broken; a green suite is not evidence of coverage.
+Account-derived models may be emitted as bounded, normalized public
+`providerData.modelCatalog` snapshots (`packages/providers/src/accountCatalog.ts`).
+Never put tokens, vendor auth envelopes or arbitrary model URLs in that metadata.
+Refresh snapshots during authentication, not `/api/catalog` or inference; unknown
+prices are null and unknown limits absent on the control/dashboard wire.

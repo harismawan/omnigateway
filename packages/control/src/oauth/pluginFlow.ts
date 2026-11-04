@@ -159,11 +159,12 @@ async function runStep<T>(
   gen: AuthStep<T>,
   deps: OAuthDeps,
   origins: readonly string[] | undefined,
+  maxRequests: number = MAX_REQUESTS_PER_STEP,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      drive(id, step, gen, deps, origins),
+      drive(id, step, gen, deps, origins, maxRequests),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           reject(flowFailure(id, step, `did not finish within ${STEP_WALL_CLOCK_MS}ms`));
@@ -202,6 +203,7 @@ async function drive<T>(
   gen: AuthStep<T>,
   deps: OAuthDeps,
   origins: readonly string[] | undefined,
+  maxRequests: number,
 ): Promise<T> {
   let sent = 0;
   let next: IteratorResult<AuthRequest, T>;
@@ -212,8 +214,8 @@ async function drive<T>(
   }
 
   while (!next.done) {
-    if (++sent > MAX_REQUESTS_PER_STEP) {
-      throw flowFailure(id, step, `asked for more than ${MAX_REQUESTS_PER_STEP} requests`);
+    if (++sent > maxRequests) {
+      throw flowFailure(id, step, `asked for more than ${maxRequests} requests`);
     }
     // **Copied first, then only the copy is read — validation included.**
     //
@@ -359,6 +361,8 @@ export type AdapterOptions = {
    * refresh failure prints a bare code and nothing else.
    */
   trusted?: boolean;
+  /** Host-only bounded allowance for built-ins with a discovery fallback; ignored for plugins. */
+  maxRequestsPerStep?: 5;
 };
 
 export function oauthAdapter(
@@ -382,6 +386,7 @@ export function oauthAdapter(
   opts: AdapterOptions = {},
 ): OAuthProvider {
   const { origins, trusted = false } = opts;
+  const maxRequests = trusted && opts.maxRequestsPerStep === 5 ? 5 : MAX_REQUESTS_PER_STEP;
   const helpers = (deps: OAuthDeps): AuthHelpers => ({
     fail: (code, message, failOpts) =>
       new GatewayError(code, message, {
@@ -423,7 +428,15 @@ export function oauthAdapter(
     exchange: (
       input: { code: string; pending: PendingFlow; providerData?: Record<string, unknown> },
       deps: OAuthDeps,
-    ) => runStep(id, "exchange", flow.exchange({ ...input, ...helpers(deps) }), deps, origins),
+    ) =>
+      runStep(
+        id,
+        "exchange",
+        flow.exchange({ ...input, ...helpers(deps) }),
+        deps,
+        origins,
+        maxRequests,
+      ),
     refresh: (refreshToken: string, deps: OAuthDeps, providerData: Record<string, unknown>) =>
       runStep(
         id,
@@ -431,6 +444,7 @@ export function oauthAdapter(
         flow.refresh({ refreshToken, providerData, ...helpers(deps) }),
         deps,
         origins,
+        maxRequests,
       ),
     ...(flow.usage === undefined
       ? {}
@@ -496,7 +510,7 @@ export function oauthAdapter(
     ...base,
     kind: "device",
     needsDeviceId: flow.needsDeviceId === true,
-    begin: (opts: { deviceId: string }, deps: OAuthDeps) =>
+    begin: (opts: { deviceId: string; providerData?: Record<string, unknown> }, deps: OAuthDeps) =>
       runStep(id, "begin", begin({ ...opts, ...helpers(deps) }), deps, origins),
   };
 }

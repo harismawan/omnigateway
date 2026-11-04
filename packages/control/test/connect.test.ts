@@ -3,6 +3,8 @@ import { createConnectFlows, type FlowResult, type OAuthProvider } from "@omni/c
 import { GatewayError } from "@omni/ir";
 import type { HttpClient, HttpRequest } from "@omni/providers";
 import { memoryStore } from "@omni/testkit";
+import type { DevicePluginFlow } from "../../providers/src/oauthFlow.ts";
+import { oauthAdapter } from "../src/oauth/pluginFlow.ts";
 import { kiloOAuth, openaiOAuth } from "./oauth/builtins.ts";
 
 const RESULT: FlowResult = {
@@ -20,6 +22,87 @@ const RESULT: FlowResult = {
 const noHttp: HttpClient = () => {
   throw new Error("device flow reached transport");
 };
+
+test("device reconnect identity reaches authorization and exchange through oauthAdapter", async () => {
+  const seen: unknown[] = [];
+  const flow: DevicePluginFlow = {
+    kind: "device",
+    needsDeviceId: false,
+    supportsManualPaste: false,
+    // biome-ignore lint/correctness/useYield: local sentinel step deliberately needs no HTTP
+    async *start() {
+      return {
+        authorizeUrl: "",
+        pending: { verifier: "", challenge: "", state: "", redirectUri: "" },
+      };
+    },
+    // biome-ignore lint/correctness/useYield: observe metadata before any HTTP
+    async *begin(input) {
+      seen.push(input.providerData);
+      return {
+        authorizeUrl: "https://example.test/device",
+        pending: { verifier: "", challenge: "", state: "", redirectUri: "" },
+      };
+    },
+    // biome-ignore lint/correctness/useYield: observe metadata without upstream dependency
+    async *exchange(input) {
+      seen.push(input.providerData);
+      return RESULT;
+    },
+    // biome-ignore lint/correctness/useYield: unused required sentinel step
+    async *refresh() {
+      return RESULT;
+    },
+  };
+  const provider = oauthAdapter("kimi", flow);
+  const store = await memoryStore();
+  await store.credentials.create({
+    id: "stable-device",
+    provider: "kimi",
+    label: "old",
+    authType: "oauth",
+    enabled: true,
+    tier: 0,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: { machineId: "synthetic-stable" },
+    disabledReason: null,
+    disabledAt: null,
+    ...RESULT.secrets,
+  });
+  const flows = createConnectFlows({
+    store,
+    providers: { kimi: provider },
+    http: noHttp,
+    now: () => 0,
+  });
+  await flows.start("kimi");
+  expect(seen).toEqual([undefined]);
+  const reconnect = await flows.start("kimi", "new", "stable-device");
+  expect(seen[1]).toEqual({ machineId: "synthetic-stable" });
+  await flows.poll(reconnect.flowId);
+  expect(seen[2]).toEqual({ machineId: "synthetic-stable" });
+  await store.credentials.create({
+    id: "other-provider",
+    provider: "grok",
+    label: "other",
+    authType: "oauth",
+    enabled: true,
+    tier: 0,
+    weight: 1,
+    expiresAt: null,
+    accountEmail: null,
+    providerData: { machineId: "wrong" },
+    disabledReason: null,
+    disabledAt: null,
+    ...RESULT.secrets,
+  });
+  await expect(flows.start("kimi", "", "other-provider")).rejects.toThrow(
+    "invalid credential for reconnect",
+  );
+  expect(seen).toHaveLength(3);
+});
 
 test("a grok flow redirects to loopback and accepts the pasted callback url", async () => {
   const seen: { redirectUri: string | null; code: string | null } = {

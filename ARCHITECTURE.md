@@ -978,3 +978,13 @@ storage is Postgres, and its SQL is the plugin's to write for it — which is wh
 became asynchronous at plugin-api generation 3.
 
 Design: `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
+## Account-derived provider catalogs
+
+OAuth flows may store a normalized, public `providerData.modelCatalog` snapshot.
+`packages/providers/src/accountCatalog.ts` projects bounded model metadata only;
+control merges snapshots into `/api/catalog` without mutating static descriptors,
+decrypting secrets or performing upstream requests. Account changes invalidate
+the dashboard catalog. Unknown pricing is null; absent limits remain unknown.
+Qoder uses a versioned encrypted access-token bundle as the authoritative inference
+origin/auth/model input, so an immediately refreshed attempt never uses stale public
+metadata. See [Qoder](docs/qoder.md) for protocol and live-verification limits.

@@ -23,6 +23,7 @@ const IDS = [
   "grok",
   "antigravity",
   "muse",
+  "qoder",
   "custom",
 ] as const satisfies readonly ProviderId[];
 
@@ -60,6 +61,7 @@ const WRITE_OVER_INPUT_BEFORE: Readonly<Record<BuiltIn, { fiveMinute: number; on
     // which is the property that keeps the literals honest.
     antigravity: { fiveMinute: 0, oneHour: 0 },
     muse: { fiveMinute: 0, oneHour: 0 },
+    qoder: { fiveMinute: 0, oneHour: 0 },
     custom: { fiveMinute: 0, oneHour: 0 },
   };
 
@@ -74,6 +76,7 @@ const CAPABILITIES_BEFORE: Readonly<
   grok: { tools: true, images: true, reasoning: true },
   antigravity: { tools: true, images: true, reasoning: true },
   muse: { tools: true, images: true, reasoning: true },
+  qoder: { tools: true, images: true, reasoning: true },
   custom: { tools: true, images: true, reasoning: true },
 };
 
@@ -208,6 +211,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     grok: ["grok-"],
     antigravity: ["gemini-"],
     muse: ["muse-", "muse-spark"],
+    qoder: [],
     custom: [],
   };
 
@@ -230,6 +234,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     grok: "Grok",
     antigravity: "Antigravity",
     muse: "Muse",
+    qoder: "Qoder",
     custom: "OpenAI Compatible",
   };
 
@@ -242,6 +247,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     grok: "yellow",
     antigravity: "violet",
     muse: "azure",
+    qoder: "violet",
     custom: "cyan",
   };
 
@@ -254,6 +260,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     grok: { light: "oklch(0.52 0.14 125)", dark: "oklch(0.74 0.14 125)" },
     antigravity: { light: "oklch(0.52 0.14 277)", dark: "oklch(0.74 0.14 277)" },
     muse: { light: "oklch(0.55 0.23 262)", dark: "oklch(0.72 0.17 262)" },
+    qoder: { light: "oklch(0.52 0.18 300)", dark: "oklch(0.74 0.16 300)" },
     custom: { light: "oklch(0.5 0.03 258)", dark: "oklch(0.72 0.03 258)" },
   };
 
@@ -276,6 +283,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     antigravity:
       "Approve in any browser, then paste the whole URL it lands on. A code shown on its own works too.",
     muse: "Enter the code on Meta's device page. This dialog finishes on its own.",
+    qoder: "Approve Qoder in the browser. This dialog finishes on its own.",
     custom: "Enter endpoint metadata and API key.",
   };
 
@@ -288,6 +296,7 @@ describe("presentation and routing data match their pre-change fixtures", () => 
     "grok",
     "antigravity",
     "muse",
+    "qoder",
     "custom",
   ];
 
