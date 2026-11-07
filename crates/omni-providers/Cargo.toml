@@ -1,0 +1,39 @@
+[package]
+name = "omni-providers"
+description = "Provider codecs, the SSE parser and the order-preserving outbound HTTP client."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-ir = { path = "../omni-ir" }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "macros"] }
+bytes = "1"
+futures-core = "0.3"
+httparse = "1.10"
+url = "2.5"
+httpdate = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
+rustls-native-certs = "0.8"
+
+[dev-dependencies]
+serde.workspace = true
+# The deep-schema vectors nest past serde_json's default 128-level limit.
+serde_json = { workspace = true, features = ["unbounded_depth"] }
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+sha2 = "0.10"
