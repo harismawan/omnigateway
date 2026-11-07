@@ -766,6 +766,50 @@ async fn events_queued_behind_a_slow_write_go_out_with_the_next_write() {
     assert_eq!(stats.batches, 2);
 }
 
+#[test]
+fn close_keeps_the_drop_warning_interval_and_returns_the_full_total() {
+    current_thread().block_on(async {
+        let (log, _guard) = Captured::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let cfg = WriterConfig {
+            capacity: 1,
+            drop_warn_interval: Duration::from_secs(10),
+            ..config(0, 512)
+        };
+        let writer = Writer::spawn(&db, cfg).expect("spawn");
+        let handle = writer.handle();
+        let send = |n: i64| handle.send(LogEvent::Finish(done(&format!("r{n}"), T0, None, "m", n)));
+        assert!(send(0));
+        for n in 1..4 {
+            assert!(!send(n));
+        }
+        // The writer's first look warns about those three.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let warned = log.lines("events dropped");
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("dropped=3 "), "{warned:?}");
+        // Refill the channel, drop more, and close at once: well inside the
+        // 10 s interval, so no second warning — the total says it instead.
+        let mut more = 0;
+        for n in 4..20 {
+            if !send(n) {
+                more += 1;
+            }
+        }
+        assert!(more > 0, "the channel refilled");
+        let stats = writer.close().await.expect("close");
+        let warned = log.lines("events dropped");
+        assert_eq!(
+            warned.len(),
+            1,
+            "no second warning inside the interval: {warned:?}"
+        );
+        assert_eq!(stats.dropped, 3 + more);
+        assert_eq!(handle.dropped(), 3 + more);
+    });
+}
+
 /// Close arrives while the first batch is between retries on a locked
 /// database. `release_at` is when the other connection lets go.
 async fn close_during_retry(release_at: Duration) -> (Result<WriterStats, String>, WriterStats) {

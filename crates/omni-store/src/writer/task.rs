@@ -63,6 +63,8 @@ impl Default for WriterConfig {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WriterStats {
     /// Events refused because the channel was full or the writer had closed.
+    /// The full total: the rate-limited warning may not have reported the
+    /// last of them (see [`Writer::close`]).
     pub dropped: u64,
     /// Transactions committed.
     pub batches: u64,
@@ -132,14 +134,16 @@ impl DropWarner {
         (self.every / 2).max(Duration::from_millis(1))
     }
 
-    /// Warns if there are unreported drops and the interval has passed, or
-    /// regardless of the interval when `force` (the last look, on close).
-    fn check(&mut self, counters: &Counters, force: bool) {
+    /// Warns if there are unreported drops and the interval has passed. Never
+    /// two warnings inside one interval, on close included: drops a closing
+    /// writer could not yet warn about are not lost, only unwarned — they are
+    /// in `dropped`, which [`Writer::close`] returns as the full total.
+    fn check(&mut self, counters: &Counters) {
         let total = counters.dropped.load(Ordering::Relaxed);
         if total <= self.reported {
             return;
         }
-        let due = force || self.last.is_none_or(|l| l.elapsed() >= self.every);
+        let due = self.last.is_none_or(|l| l.elapsed() >= self.every);
         if !due {
             return;
         }
@@ -231,6 +235,11 @@ impl Writer {
     /// including a batch already being written (or retried) when the close
     /// arrived, whose outcome this waits for; the counters then still say how
     /// much.
+    ///
+    /// The returned `dropped` is the total ever dropped. The drop warning
+    /// keeps its minimum interval at shutdown too, so drops in the last
+    /// interval before the close may have had no warning; the caller reports
+    /// them from this.
     pub async fn close(mut self) -> Result<WriterStats, StoreError> {
         if let Some(s) = self.shutdown.take() {
             // An Err means the task already ended; the join below reports why.
@@ -338,10 +347,10 @@ async fn flush_watching(
         tokio::select! {
             biased;
             r = &mut flush => break r?,
-            _ = tick.tick() => warner.check(counters, false),
+            _ = tick.tick() => warner.check(counters),
         }
     };
-    warner.check(counters, false);
+    warner.check(counters);
     Ok(lost)
 }
 
@@ -385,7 +394,7 @@ async fn run(
                 None => break 'running,
             },
             _ = warn_tick.tick() => {
-                warner.check(&counters, false);
+                warner.check(&counters);
                 continue 'running;
             }
         };
@@ -408,7 +417,7 @@ async fn run(
                     Some(e) => batch.push(e.event),
                     None => break,
                 },
-                _ = warn_tick.tick() => warner.check(&counters, false),
+                _ = warn_tick.tick() => warner.check(&counters),
             }
         }
         let lost = flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
@@ -436,7 +445,9 @@ async fn run(
         lost_on_close +=
             flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
     }
-    warner.check(&counters, true);
+    // A last look, still rate-limited: drops inside the current interval go
+    // unwarned here and are reported by `close()`'s `dropped` total instead.
+    warner.check(&counters);
     if lost_on_close > 0 {
         return Err(StoreError::Writer(format!(
             "{lost_on_close} queued events failed to persist on close"
