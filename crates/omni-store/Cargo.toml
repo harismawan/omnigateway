@@ -16,11 +16,14 @@ omni-ir = { path = "../omni-ir" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache", "limits"] }
 indexmap = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tracing.workspace = true
 
 [dev-dependencies]
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache", "limits", "trace"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

@@ -7,8 +7,9 @@
 //! (see `num.rs`).
 
 use crate::error::StoreError;
+use rusqlite::limits::Limit;
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Transaction, params_from_iter};
+use rusqlite::{Connection, Transaction, params_from_iter};
 
 /// `usage.ts` `COLUMNS`, in its order.
 pub(crate) const LOG_COLUMNS: [&str; 26] = [
@@ -83,27 +84,35 @@ pub(crate) const UPSERT_HEALTH: &str = "INSERT INTO credential_health
    opened_at = excluded.opened_at,
    rate_limited_until = excluded.rate_limited_until";
 
+/// The most `?` one statement may bind on this connection
+/// (`SQLITE_LIMIT_VARIABLE_NUMBER`; 32766 for the bundled build).
+pub(crate) fn max_variables(conn: &Connection) -> Result<usize, StoreError> {
+    let n = conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)?;
+    Ok(usize::try_from(n).unwrap_or(0).max(1))
+}
+
 /// One table's multi-row upsert: every non-key column is set to the row
 /// given, which the batch has already computed in full.
 pub(crate) struct Upsert {
     table: &'static str,
     columns: Vec<&'static str>,
     key_len: usize,
-    /// Rows per statement, keeping the bound variables well under SQLite's
-    /// limit (32766).
-    chunk: usize,
 }
 
 impl Upsert {
     pub(crate) fn new(table: &'static str, key: &[&'static str], rest: &[&'static str]) -> Self {
         let columns: Vec<_> = key.iter().chain(rest).copied().collect();
-        let chunk = (8192 / columns.len()).max(1);
         Self {
             table,
             columns,
             key_len: key.len(),
-            chunk,
         }
+    }
+
+    /// Rows per statement under the connection's variable limit, so a full
+    /// 512-event batch of `request_logs` (26 columns) is one statement.
+    fn chunk(&self, conn: &Connection) -> Result<usize, StoreError> {
+        Ok((max_variables(conn)? / self.columns.len()).max(1))
     }
 
     fn sql(&self, rows: usize) -> String {
@@ -128,7 +137,7 @@ impl Upsert {
         tx: &Transaction<'_>,
         rows: &[Vec<SqlValue>],
     ) -> Result<(), StoreError> {
-        for chunk in rows.chunks(self.chunk) {
+        for chunk in rows.chunks(self.chunk(tx)?) {
             let mut stmt = tx.prepare_cached(&self.sql(chunk.len()))?;
             stmt.execute(params_from_iter(chunk.iter().flatten()))?;
         }
@@ -171,6 +180,8 @@ mod tests {
              output_tokens = excluded.output_tokens, cache_read_tokens = excluded.cache_read_tokens, \
              cache_write_tokens = excluded.cache_write_tokens, cost_usd = excluded.cost_usd"
         );
-        assert_eq!(u.chunk, 1024);
+        let conn = Connection::open_in_memory().expect("open");
+        assert_eq!(max_variables(&conn).expect("limit"), 32766);
+        assert_eq!(u.chunk(&conn).expect("chunk"), 32766 / 8);
     }
 }

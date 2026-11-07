@@ -7,11 +7,22 @@
  *     | bun conformance/store/usage-writer.ts
  *
  * Each event is a Rust `LogEvent` serialized as JSON (`{"type":"begin",...}`,
- * `"route"`, `"finish"`), or `{"type":"health", ...CredentialHealth}`. They go
- * through the gateway's own `beginLog` / `routeLog` / `finishLog` and the
- * store's `updateHealth`, never through a restatement of what those do.
+ * `"route"`, `"finish"`), `{"type":"breakerTransition", ...CredentialHealth}`
+ * (the row a transition persists), or `{"type":"healthMeasurement",
+ * credentialId, model, consecutiveFailures, rateLimitedUntil}` (a change to
+ * those two fields of whatever the row holds). They go through the gateway's
+ * own `beginLog` / `routeLog` / `finishLog` and the store's `updateHealth`
+ * with the router's `blankHealth`, one at a time, never through a restatement
+ * of what those do.
  */
-import { beginLog, finishLog, newCompletedRequestLog, newPendingRequestLog, routeLog } from "../../apps/gateway/src/logging.ts";
+import {
+  beginLog,
+  finishLog,
+  newCompletedRequestLog,
+  newPendingRequestLog,
+  routeLog,
+} from "../../apps/gateway/src/logging.ts";
+import { blankHealth } from "../../packages/router/src/breaker.ts";
 import { deriveKey } from "../../packages/store/src/encryption.ts";
 import { createCredentialRepo } from "../../packages/store/src/sqlite/credentials.ts";
 import { openDb } from "../../packages/store/src/sqlite/db.ts";
@@ -59,10 +70,26 @@ for (const event of input.events) {
       await finishLog(store, newCompletedRequestLog(id, at, rest), apiKeyId);
       break;
     }
-    case "health": {
+    case "breakerTransition": {
       const row = fields as unknown as CredentialHealth;
       try {
         await credentials.updateHealth(row.credentialId, row.model, () => row);
+      } catch {
+        healthFailures += 1;
+      }
+      break;
+    }
+    case "healthMeasurement": {
+      const m = fields as unknown as Pick<
+        CredentialHealth,
+        "credentialId" | "model" | "consecutiveFailures" | "rateLimitedUntil"
+      >;
+      try {
+        await credentials.updateHealth(m.credentialId, m.model, (current) => ({
+          ...(current ?? blankHealth(m.credentialId, m.model)),
+          consecutiveFailures: m.consecutiveFailures,
+          rateLimitedUntil: m.rateLimitedUntil,
+        }));
       } catch {
         healthFailures += 1;
       }

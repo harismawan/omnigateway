@@ -127,22 +127,58 @@ impl LogEvent {
     }
 }
 
-/// Anything the writer persists. Health rows ride the same batch for now; a
-/// breaker *transition* that other replicas route on is meant to take a
-/// separate immediate path, which only changes who sends [`Self::Health`].
+/// A health reading that is not a breaker decision: the failure count and the
+/// rate-limit parking. Coalesced per batch, the last per (credential, model)
+/// winning, and it never touches `breaker_state` or `opened_at` — so one that
+/// lands after a [`BreakerTransition`] in the same batch cannot carry a stale
+/// state back over it.
+///
+/// On a pair with no row yet it files one with the `blankHealth` state
+/// (`closed`, no `opened_at`), which is the row `updateHealth` writes there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthMeasurement {
+    pub credential_id: String,
+    pub model: String,
+    pub consecutive_failures: i64,
+    pub rate_limited_until: Option<i64>,
+}
+
+/// A breaker decision: the whole `credential_health` row as `updateHealth`
+/// would persist it after the transition.
+///
+/// Never coalesced: every transition is applied in order, so the row a batch
+/// leaves is the row TS leaves applying them one by one. In single mode routing
+/// reads the in-process snapshot, so riding the batch is enough; the cluster
+/// slice routes these through an immediate path instead, because other
+/// replicas route on them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakerTransition(pub CredentialHealth);
+
+/// Anything the writer persists.
 #[derive(Debug, Clone, PartialEq)]
-// Nearly every event is a `Log`; boxing it to shrink the rare `Health` would
-// cost an allocation per request for nothing.
+// Nearly every event is a `Log`; boxing it to shrink the rare health events
+// would cost an allocation per request for nothing.
 #[allow(clippy::large_enum_variant)]
 pub enum WriteEvent {
     Log(LogEvent),
-    /// The full `credential_health` row as `updateHealth` would persist it.
-    /// Coalesced per batch: the last row per (credential, model) wins.
-    Health(CredentialHealth),
+    HealthMeasurement(HealthMeasurement),
+    BreakerTransition(BreakerTransition),
 }
 
 impl From<LogEvent> for WriteEvent {
     fn from(e: LogEvent) -> Self {
         Self::Log(e)
+    }
+}
+
+impl From<HealthMeasurement> for WriteEvent {
+    fn from(e: HealthMeasurement) -> Self {
+        Self::HealthMeasurement(e)
+    }
+}
+
+impl From<BreakerTransition> for WriteEvent {
+    fn from(e: BreakerTransition) -> Self {
+        Self::BreakerTransition(e)
     }
 }

@@ -6,7 +6,8 @@ mod common;
 
 use common::{bun_available, bun_script, ts, typed_rows};
 use omni_store::writer::{
-    LogEvent, PendingLog, RequestLog, RouteTarget, WriteEvent, Writer, WriterConfig,
+    BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog, RouteTarget,
+    WriteEvent, Writer, WriterConfig,
 };
 use omni_store::{BreakerState, CredentialHealth, SqliteStore};
 use rusqlite::Connection;
@@ -68,8 +69,9 @@ fn done(id: &str, at: i64, key: Option<&str>, model: &str, n: i64) -> RequestLog
     log
 }
 
-fn health(cred: &str, model: &str, state: BreakerState, failures: i64) -> WriteEvent {
-    WriteEvent::Health(CredentialHealth {
+/// The row a breaker transition persists.
+fn transition(cred: &str, model: &str, state: BreakerState, failures: i64) -> WriteEvent {
+    BreakerTransition(CredentialHealth {
         credential_id: cred.into(),
         model: model.into(),
         breaker_state: state,
@@ -77,6 +79,45 @@ fn health(cred: &str, model: &str, state: BreakerState, failures: i64) -> WriteE
         opened_at: (failures > 0).then_some(T0 + failures),
         rate_limited_until: (failures == 2).then_some(T0 + 60_000),
     })
+    .into()
+}
+
+fn measure(cred: &str, model: &str, failures: i64, until: Option<i64>) -> WriteEvent {
+    HealthMeasurement {
+        credential_id: cred.into(),
+        model: model.into(),
+        consecutive_failures: failures,
+        rate_limited_until: until,
+    }
+    .into()
+}
+
+/// Transitions that must each be applied in order, measurements around them
+/// that must not revert their state, and one row for a credential that does
+/// not exist (the foreign key refuses it on both sides).
+fn health_sequence() -> Vec<WriteEvent> {
+    use BreakerState::{Closed, HalfOpen, Open};
+    vec![
+        // Open -> Closed for one pair: the final row is the Closed one.
+        transition("cred-1", "sonnet", Open, 3),
+        measure("cred-1", "sonnet", 4, Some(T0 + 5)),
+        transition("cred-1", "sonnet", Closed, 0),
+        // Closed -> Open -> HalfOpen, with a measurement after the last one:
+        // it keeps HalfOpen and its `opened_at`, and sets the two counters.
+        transition("cred-2", "gpt-x", Closed, 0),
+        transition("cred-2", "gpt-x", Open, 2),
+        transition("cred-2", "gpt-x", HalfOpen, 2),
+        measure("cred-2", "gpt-x", 1, None),
+        measure("cred-2", "gpt-x", 5, Some(T0 + 9)),
+        // A measurement before a transition is overwritten by it.
+        measure("cred-3", "opus", 7, Some(T0 + 1)),
+        transition("cred-3", "opus", Open, 1),
+        // A measurement on a pair with no row files a blank one.
+        measure("cred-1", "haiku", 2, Some(T0 + 60_000)),
+        // A measurement over a row that existed before the batch.
+        measure("cred-3", "seeded", 9, None),
+        transition("cred-ghost", "sonnet", Open, 3),
+    ]
 }
 
 /// Every lifecycle the gateway produces, plus the out-of-order and repeated
@@ -165,14 +206,7 @@ fn sequence() -> Vec<WriteEvent> {
         }
         push(LogEvent::Finish(l));
     }
-    // Health: overwritten, coalesced, and one for a credential that does not
-    // exist (the foreign key refuses it on both sides).
-    ev.push(health("cred-1", "sonnet", BreakerState::Closed, 1));
-    ev.push(health("cred-1", "sonnet", BreakerState::Open, 2));
-    ev.push(health("cred-2", "gpt-x", BreakerState::HalfOpen, 0));
-    ev.push(health("cred-ghost", "sonnet", BreakerState::Open, 3));
-    ev.push(health("cred-1", "sonnet", BreakerState::Closed, 0));
-    ev.push(health("cred-1", "haiku", BreakerState::Open, 2));
+    ev.extend(health_sequence());
     ev
 }
 
@@ -190,7 +224,8 @@ fn prepare(path: &Path, offset: i64) {
         .expect("credential");
     }
     conn.execute_batch(
-        "INSERT INTO usage_rollup VALUES ('key-1', 498335, 5, 1, 2, 3, 4, 0.7);
+        "INSERT INTO credential_health VALUES ('cred-3', 'seeded', 'open', 4, 1794000000000, NULL);
+         INSERT INTO usage_rollup VALUES ('key-1', 498335, 5, 1, 2, 3, 4, 0.7);
          INSERT INTO usage_daily (day, provider, credential_id, requested_model, resolved_model,
                                   api_key_id, requests, cost_usd)
               VALUES (1793923200000, 'anthropic', 'cred-1', 'sonnet', 'sonnet-upstream',
@@ -202,13 +237,20 @@ fn prepare(path: &Path, offset: i64) {
 fn event_json(e: &WriteEvent) -> serde_json::Value {
     match e {
         WriteEvent::Log(l) => serde_json::to_value(l).expect("log json"),
-        WriteEvent::Health(h) => {
+        WriteEvent::BreakerTransition(BreakerTransition(h)) => {
             let mut v = serde_json::to_value(h).expect("health json");
             v.as_object_mut()
                 .expect("object")
-                .insert("type".into(), "health".into());
+                .insert("type".into(), "breakerTransition".into());
             v
         }
+        WriteEvent::HealthMeasurement(m) => serde_json::json!({
+            "type": "healthMeasurement",
+            "credentialId": m.credential_id,
+            "model": m.model,
+            "consecutiveFailures": m.consecutive_failures,
+            "rateLimitedUntil": m.rate_limited_until,
+        }),
     }
 }
 
@@ -456,4 +498,246 @@ async fn a_quiet_writer_still_writes_within_the_interval() {
         .expect("count");
     assert_eq!(n, 1, "written by the 200 ms tick, before close");
     writer.close().await.expect("close");
+}
+
+/// Everything `tracing` emits on this thread while the guard lives.
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Captured {
+    fn install() -> (Self, tracing::subscriber::DefaultGuard) {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&buf);
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || CaptureWriter(std::sync::Arc::clone(&sink)))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        (Self(buf), tracing::subscriber::set_default(subscriber))
+    }
+
+    fn lines(&self, needle: &str) -> Vec<String> {
+        let text = String::from_utf8(self.0.lock().expect("lock").clone()).expect("utf8");
+        text.lines()
+            .filter(|l| l.contains(needle))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("lock").extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A current-thread runtime: the writer task runs on this thread (so the
+/// captured subscriber sees its events) and only when the test yields.
+fn current_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+fn migrated(dir: &Path) -> std::path::PathBuf {
+    let db = dir.join("omni.db");
+    drop(SqliteStore::open(&db, 0).expect("open"));
+    db
+}
+
+fn count(db: &Path, sql: &str) -> i64 {
+    Connection::open(db)
+        .expect("open")
+        .query_row(sql, [], |r| r.get(0))
+        .expect("count")
+}
+
+#[test]
+fn drops_warn_at_most_once_per_interval_with_the_count_since_the_last() {
+    current_thread().block_on(async {
+        let (log, _guard) = Captured::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let cfg = WriterConfig {
+            capacity: 1,
+            drop_warn_interval: Duration::from_millis(50),
+            ..config(0, 512)
+        };
+        let writer = Writer::spawn(&db, cfg).expect("spawn");
+        let handle = writer.handle();
+        let send = |n: i64| handle.send(LogEvent::Finish(done(&format!("r{n}"), T0, None, "m", n)));
+        assert!(send(0));
+        for n in 1..10 {
+            assert!(!send(n));
+        }
+        let warned = log.lines("events dropped");
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("dropped=1 "), "{warned:?}");
+        // Blocking: the writer cannot drain meanwhile.
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!send(10));
+        let warned = log.lines("events dropped");
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(warned[1].contains("dropped=9 "), "{warned:?}");
+        assert!(warned[1].contains("dropped_total=10"), "{warned:?}");
+        assert_eq!(handle.dropped(), 10);
+        writer.close().await.expect("close");
+    });
+}
+
+#[test]
+fn a_failed_batch_is_counted_reported_and_fails_close() {
+    current_thread().block_on(async {
+        let (log, _guard) = Captured::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let writer = Writer::spawn(&db, config(0, 512)).expect("spawn");
+        let handle = writer.handle();
+        // Not transient: no amount of retrying brings the table back.
+        Connection::open(&db)
+            .expect("open")
+            .execute_batch("DROP TABLE usage_rollup")
+            .expect("drop");
+        for n in 0..3 {
+            assert!(handle.send(LogEvent::Finish(done(
+                &format!("r{n}"),
+                T0,
+                Some("k"),
+                "m",
+                n
+            ))));
+        }
+        let closed = writer.close().await;
+        assert!(
+            matches!(&closed, Err(e) if e.to_string().contains("3 queued events failed")),
+            "{closed:?}"
+        );
+        let stats = handle.stats();
+        assert_eq!((stats.failed, stats.dropped, stats.batches), (3, 0, 0));
+        let errors = log.lines("failed to persist");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("ERROR") && errors[0].contains("events=3"),
+            "{errors:?}"
+        );
+        assert!(errors[0].contains("no such table"), "{errors:?}");
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM request_logs"),
+            0,
+            "rolled back"
+        );
+    });
+}
+
+/// Holds the write lock from another connection for `hold`.
+fn lock_for(db: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+    let conn = Connection::open(db).expect("open");
+    conn.execute_batch("BEGIN IMMEDIATE").expect("lock");
+    std::thread::spawn(move || {
+        std::thread::sleep(hold);
+        conn.execute_batch("COMMIT").expect("unlock");
+    })
+}
+
+#[test]
+fn a_busy_database_is_retried_with_backoff() {
+    current_thread().block_on(async {
+        let (log, _guard) = Captured::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let cfg = WriterConfig {
+            busy_timeout: Duration::from_millis(30),
+            ..config(0, 512)
+        };
+        let writer = Writer::spawn(&db, cfg).expect("spawn");
+        let handle = writer.handle();
+        // Attempts at ~0, ~130 and ~360 ms; the lock goes at 200.
+        let locker = lock_for(&db, Duration::from_millis(200));
+        assert!(handle.send(pending("p1", T0, None, "m")));
+        let stats = writer.close().await.expect("close after retry");
+        locker.join().expect("locker");
+        assert_eq!((stats.batches, stats.failed), (1, 0));
+        let retries = log.lines("busy database; retrying");
+        assert_eq!(retries.len(), 2, "{retries:?}");
+        assert!(retries[0].contains("attempt=1") && retries[1].contains("attempt=2"));
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM request_logs"), 1);
+    });
+}
+
+#[test]
+fn a_database_busy_past_the_retries_fails_the_batch() {
+    current_thread().block_on(async {
+        let (log, _guard) = Captured::install();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let cfg = WriterConfig {
+            busy_timeout: Duration::from_millis(10),
+            ..config(0, 512)
+        };
+        let writer = Writer::spawn(&db, cfg).expect("spawn");
+        let handle = writer.handle();
+        let locker = lock_for(&db, Duration::from_millis(1500));
+        assert!(handle.send(pending("p1", T0, None, "m")));
+        assert!(writer.close().await.is_err());
+        locker.join().expect("locker");
+        assert_eq!(handle.stats().failed, 1);
+        assert_eq!(log.lines("busy database; retrying").len(), 2);
+        let errors = log.lines("failed to persist");
+        assert!(
+            errors.len() == 1 && errors[0].contains("attempts=3"),
+            "{errors:?}"
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_queued_behind_a_slow_write_go_out_with_the_next_write() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path());
+    let writer = Writer::spawn(&db, config(0, 512)).expect("spawn");
+    let handle = writer.handle();
+    // The first batch closes at 200 ms and then waits on the lock until 600.
+    let locker = lock_for(&db, Duration::from_millis(600));
+    let start = std::time::Instant::now();
+    assert!(handle.send(pending("a", T0, None, "m")));
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Queued while the write is in flight: due at 450, past by the time the
+    // write finishes.
+    assert!(handle.send(pending("b", T0, None, "m")));
+    let mut seen_a = None;
+    let seen_b = loop {
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_secs(3), "never written");
+        let ids = |id: &str| {
+            count(
+                &db,
+                &format!("SELECT COUNT(*) FROM request_logs WHERE id = '{id}'"),
+            )
+        };
+        if seen_a.is_none() && ids("a") == 1 {
+            seen_a = Some(elapsed);
+        }
+        if ids("b") == 1 {
+            break elapsed;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    locker.join().expect("locker");
+    let seen_a = seen_a.expect("a before b");
+    assert!(
+        seen_a >= Duration::from_millis(590),
+        "a waited for the lock: {seen_a:?}"
+    );
+    // Measured from dequeue, b would wait another full 200 ms interval.
+    assert!(
+        seen_b - seen_a < Duration::from_millis(120),
+        "b went out with the next write: a at {seen_a:?}, b at {seen_b:?}"
+    );
+    let stats = writer.close().await.expect("close");
+    assert_eq!(stats.batches, 2);
 }

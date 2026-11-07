@@ -14,14 +14,16 @@
 //!   `UPSERT_HEALTH` statement. A row the foreign key refuses is skipped, as
 //!   the TS `updateHealth` throws and changes nothing.
 
-use super::events::{LogEvent, PendingLog, RequestLog, WriteEvent};
+use super::events::{
+    BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog, WriteEvent,
+};
 use super::num::Num;
 use super::sql::{
     self, DAILY_COUNTERS, DAILY_KEY, HOURLY_COUNTERS, HOURLY_KEY, LOG_COLUMNS, UPSERT_HEALTH,
     Upsert,
 };
 use crate::error::StoreError;
-use crate::{CredentialHealth, js, rollup};
+use crate::{js, rollup};
 use indexmap::IndexMap;
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{
@@ -45,9 +47,6 @@ const REQUESTED_MODEL: usize = 5;
 const PROVIDER: usize = 6;
 const RESOLVED_MODEL: usize = 7;
 const CREDENTIAL: usize = 8;
-
-/// Most ids bound in one `IN (…)`.
-const SELECT_CHUNK: usize = 500;
 
 type LogRow = Vec<SqlValue>;
 
@@ -138,7 +137,7 @@ impl Logs {
         let ids: Vec<&str> = ids.into_keys().collect();
         let mut rows: HashMap<String, Option<LogRow>> =
             ids.iter().map(|id| ((*id).to_owned(), None)).collect();
-        for chunk in ids.chunks(SELECT_CHUNK) {
+        for chunk in ids.chunks(sql::max_variables(tx)?) {
             let mut stmt = tx.prepare_cached(&sql::select_logs(chunk.len()))?;
             let mut found = stmt.query(params_from_iter(chunk))?;
             while let Some(r) = found.next()? {
@@ -226,7 +225,7 @@ impl Logs {
             .map(|(n, id)| (id.as_str(), n))
             .collect();
         let mut stored: Vec<(usize, LogRow)> = Vec::with_capacity(order.len());
-        for chunk in self.completed.chunks(SELECT_CHUNK) {
+        for chunk in self.completed.chunks(sql::max_variables(tx)?) {
             let mut stmt = tx.prepare_cached(&sql::select_logs(chunk.len()))?;
             let mut found = stmt.query(params_from_iter(chunk))?;
             while let Some(r) = found.next()? {
@@ -458,34 +457,78 @@ fn roll_up(
     Ok(())
 }
 
+/// `UPSERT_HEALTH` for a measurement: the two measured columns only. The
+/// inserted row's state is `blankHealth`'s.
+const UPSERT_MEASUREMENT: &str = "INSERT INTO credential_health
+   (credential_id, model, breaker_state, consecutive_failures, opened_at,
+    rate_limited_until)
+ VALUES (?, ?, 'closed', ?, NULL, ?)
+ ON CONFLICT (credential_id, model) DO UPDATE SET
+   consecutive_failures = excluded.consecutive_failures,
+   rate_limited_until = excluded.rate_limited_until";
+
+/// Applies one health statement; a foreign-key refusal (no such credential)
+/// is what `updateHealth` throws on and writes nothing for, so it undoes only
+/// itself and is counted.
+fn health_statement(
+    tx: &Transaction<'_>,
+    sql: &str,
+    params: impl rusqlite::Params,
+    refused: &mut u64,
+) -> Result<(), StoreError> {
+    match tx.prepare_cached(sql)?.execute(params) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::ConstraintViolation => {
+            *refused += 1;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Every transition in order, then the last measurement per pair that no later
+/// transition overwrote (a transition sets every column, so an earlier
+/// measurement can only ever be overwritten by it). The row left is the row
+/// applying all of them one by one leaves.
 fn write_health(tx: &Transaction<'_>, events: &[WriteEvent]) -> Result<u64, StoreError> {
-    let mut latest: IndexMap<(&str, &str), &CredentialHealth> = IndexMap::new();
+    let mut measured: IndexMap<(&str, &str), &HealthMeasurement> = IndexMap::new();
+    let mut refused = 0;
     for e in events {
-        if let WriteEvent::Health(h) = e {
-            latest.insert((&h.credential_id, &h.model), h);
+        match e {
+            WriteEvent::BreakerTransition(BreakerTransition(h)) => {
+                measured.shift_remove(&(h.credential_id.as_str(), h.model.as_str()));
+                health_statement(
+                    tx,
+                    UPSERT_HEALTH,
+                    params![
+                        h.credential_id,
+                        h.model,
+                        h.breaker_state.as_str(),
+                        h.consecutive_failures,
+                        h.opened_at,
+                        h.rate_limited_until,
+                    ],
+                    &mut refused,
+                )?;
+            }
+            WriteEvent::HealthMeasurement(m) => {
+                measured.insert((&m.credential_id, &m.model), m);
+            }
+            WriteEvent::Log(_) => {}
         }
     }
-    let mut refused = 0;
-    let mut stmt = tx.prepare_cached(UPSERT_HEALTH)?;
-    for h in latest.values() {
-        match stmt.execute(params![
-            h.credential_id,
-            h.model,
-            h.breaker_state.as_str(),
-            h.consecutive_failures,
-            h.opened_at,
-            h.rate_limited_until,
-        ]) {
-            Ok(_) => {}
-            // `updateHealth` throws on this and writes nothing; the statement
-            // alone is undone, and the batch carries on.
-            Err(rusqlite::Error::SqliteFailure(e, _))
-                if e.code == ErrorCode::ConstraintViolation =>
-            {
-                refused += 1;
-            }
-            Err(e) => return Err(e.into()),
-        }
+    for m in measured.values() {
+        health_statement(
+            tx,
+            UPSERT_MEASUREMENT,
+            params![
+                m.credential_id,
+                m.model,
+                m.consecutive_failures,
+                m.rate_limited_until
+            ],
+            &mut refused,
+        )?;
     }
     Ok(refused)
 }
@@ -521,3 +564,7 @@ pub(crate) fn write(
     tx.commit()?;
     Ok(Outcome { health_refused })
 }
+
+#[cfg(test)]
+#[path = "batch_tests.rs"]
+mod tests;
