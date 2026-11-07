@@ -22,4 +22,7 @@ pub enum StoreError {
         #[source]
         source: FieldError,
     },
+    /// The batched writer's task or connection is gone.
+    #[error("writer: {0}")]
+    Writer(String),
 }

@@ -16,6 +16,7 @@ pub mod rollup;
 mod row;
 pub mod settings;
 mod vocab;
+pub mod writer;
 
 pub use credentials::{Credential, CredentialHealth, CredentialSecrets, Secret};
 pub use error::StoreError;

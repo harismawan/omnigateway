@@ -107,6 +107,34 @@ pub fn canon(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Every row of `table`, each cell typed (`i:`/`r:`/`t:`/`null`), sorted.
+pub fn typed_rows(conn: &rusqlite::Connection, table: &str) -> Vec<Vec<String>> {
+    use rusqlite::types::ValueRef;
+    let mut stmt = conn
+        .prepare(&format!("SELECT * FROM {table}"))
+        .expect("prepare");
+    let width = stmt.column_count();
+    let mut rows: Vec<Vec<String>> = stmt
+        .query_map([], |r| {
+            (0..width)
+                .map(|i| {
+                    Ok(match r.get_ref(i)? {
+                        ValueRef::Null => "null".to_owned(),
+                        ValueRef::Integer(v) => format!("i:{v}"),
+                        ValueRef::Real(v) => format!("r:{v:?}"),
+                        ValueRef::Text(t) => format!("t:{}", String::from_utf8_lossy(t)),
+                        ValueRef::Blob(b) => format!("b:{b:?}"),
+                    })
+                })
+                .collect()
+        })
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    rows.sort();
+    rows
+}
+
 /// Absolute TS module path, for imports in a script.
 pub fn ts(rel: &str) -> String {
     repo_root().join(rel).display().to_string()
