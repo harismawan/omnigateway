@@ -10,6 +10,36 @@ import {
 } from "../../src/oauth/types.ts";
 import { anthropicOAuth, grokOAuth, kiloOAuth, kimiOAuth, openaiOAuth } from "./builtins.ts";
 
+test("only a host-trusted flow can opt into the bounded fifth OAuth request", async () => {
+  const fiveRequests: PluginOAuthFlow = {
+    ...kiloShaped,
+    async *exchange() {
+      for (let i = 0; i < 5; i++)
+        yield { url: "https://api.acme.test/probe", method: "GET", headers: [] };
+      return {
+        secrets: { accessToken: "dummy", refreshToken: null, apiKey: null, idToken: null },
+        expiresAt: null,
+        accountEmail: null,
+        providerData: {},
+      };
+    },
+  };
+  const input = { code: "", pending: { verifier: "", challenge: "", state: "", redirectUri: "" } };
+  const allowed = transport(() => ({ status: 200, body: "{}" }));
+  await oauthAdapter("acme", fiveRequests, { trusted: true, maxRequestsPerStep: 5 }).exchange(
+    input,
+    allowed.deps,
+  );
+  expect(allowed.sent).toHaveLength(5);
+  for (const options of [{}, { maxRequestsPerStep: 5 }] as const) {
+    const denied = transport(() => ({ status: 200, body: "{}" }));
+    await expect(
+      oauthAdapter("acme", fiveRequests, options).exchange(input, denied.deps),
+    ).rejects.toThrow("more than 4 requests");
+    expect(denied.sent).toHaveLength(4);
+  }
+});
+
 /**
  * The auth half of the `provider` capability, judged against what the shipped
  * flows actually do.

@@ -415,7 +415,11 @@ export function adminRoutes(deps: AdminDeps) {
         await requireReader(request, deps.admin);
         const quota = deps.quota;
         return {
-          providers: providerCatalog(reportCatalogProblem).map((provider) =>
+          providers: providerCatalog(
+            reportCatalogProblem,
+            undefined,
+            await deps.store.credentials.list(),
+          ).map((provider) =>
             quota?.hasResets(provider.id) === true ? { ...provider, quotaResets: true } : provider,
           ),
         };

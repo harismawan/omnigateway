@@ -134,4 +134,4 @@ export const PLUGIN_API_VERSION = 3;
  * advertised. `publishable.test.ts` now refuses a state where this package
  * trails the SDK.
  */
-export const DASHBOARD_SDK_VERSION = "0.1.9";
+export const DASHBOARD_SDK_VERSION = "0.1.10";

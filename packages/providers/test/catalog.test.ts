@@ -13,6 +13,7 @@ const PROVIDERS = [
   "grok",
   "antigravity",
   "muse",
+  "qoder",
   "custom",
 ] as const satisfies readonly ProviderId[];
 
@@ -123,6 +124,7 @@ const EXPECTED = {
       "muse-spark-1.2-contributor",
     ],
   },
+  qoder: { defaultModel: "", ids: [] },
   custom: { defaultModel: "", ids: [] },
 } as const;
 
@@ -141,7 +143,7 @@ test("catalog entries have non-empty unique values and exactly one default", () 
     const entry = tableEntry(PROVIDER_MODEL_CATALOG, provider, "PROVIDER_MODEL_CATALOG");
     const ids = entry.models.map((model) => model.id);
 
-    if (provider === "custom") {
+    if (provider === "custom" || provider === "qoder") {
       expect(entry.defaultModel).toBe("");
       expect(ids).toEqual([]);
       continue;
@@ -490,6 +492,7 @@ test("every provider states which credentials it can hold", () => {
     // A subscription is spent minting a Model API key, and a key made at
     // dev.meta.ai reaches the same host, so both ways in are real here.
     muse: ["apiKey", "oauth"],
+    qoder: ["oauth"],
     // The one provider with no authorization flow behind it.
     custom: ["apiKey"],
   });

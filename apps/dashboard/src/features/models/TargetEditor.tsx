@@ -289,7 +289,7 @@ export function TargetEditor({
           <Legend>Price per million tokens</Legend>
           <Spacer />
           {listed === null ? (
-            <Legend as="span">not in the catalog — price it yourself</Legend>
+            <Legend as="span">Price unavailable — enter your own rates</Legend>
           ) : (
             <Button
               type="button"

@@ -76,6 +76,19 @@ const CREDENTIAL_NEEDS: Readonly<Record<string, { accessToken?: string; projectI
   // the Cloud Code project the connect flow minted, which the codec refuses to
   // send blank.
   antigravity: { accessToken: "test-token", projectId: "projects/p-1" },
+  qoder: {
+    accessToken: JSON.stringify({
+      version: 1,
+      deviceToken: "dummy",
+      uid: "u1",
+      machineId: "synthetic",
+      encryptUserInfo: "dummy-envelope",
+      key: "wrapped",
+      issuedAt: 1700000000000,
+      origin: "https://api2.qoder.sh",
+      models: [],
+    }),
+  },
 };
 
 async function encode(

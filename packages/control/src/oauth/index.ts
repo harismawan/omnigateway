@@ -81,13 +81,13 @@ export function seedBuiltinOAuth(registry: Record<string, OAuthProvider> = OAUTH
   // `builtinOAuthFlows()` is called here, not read as a module-scope constant.
   // Six sites in this repository have been wrong by walking a provider table at
   // import time, and nothing in this migration may reintroduce one.
-  for (const [id, flow] of builtinOAuthFlows()) {
+  for (const [id, flow, limits] of builtinOAuthFlows()) {
     // Skip only what **we** installed and that is still there. A bare
     // `Object.hasOwn(registry, id)` reads as "already seeded" and also silently
     // accepts "a plugin got here first" — the case that must reach
     // `registerOAuthProvider`'s throw, which the `else` below lets it do.
     if (ours.has(id) && Object.hasOwn(registry, id)) continue;
-    registerOAuthProvider(id, oauthAdapter(id, flow, { trusted: true }), registry);
+    registerOAuthProvider(id, oauthAdapter(id, flow, { trusted: true, ...limits }), registry);
     ours.add(id);
   }
 }

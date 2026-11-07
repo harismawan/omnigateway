@@ -7,6 +7,7 @@ import { kiloProfile } from "./kilo/profile.ts";
 import { kimiProfile } from "./kimi/profile.ts";
 import { museProfile } from "./muse/profile.ts";
 import { openaiProfile } from "./openai/profile.ts";
+import { qoderProfile } from "./qoder/profile.ts";
 
 export { ANTHROPIC_CLI_VERSION, anthropicProfile } from "./anthropic/profile.ts";
 // Each profile is also re-exported under its own name, for callers that already
@@ -60,6 +61,7 @@ export const PROFILES: Readonly<Record<string, ClientProfile>> = {
   grok: grokProfile,
   antigravity: antigravityProfile,
   muse: museProfile,
+  qoder: qoderProfile,
   custom: customProfile,
 };
 

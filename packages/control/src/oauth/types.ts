@@ -155,7 +155,10 @@ export type DeviceOAuthProvider = OAuthProviderBase & {
    * Requests a device code before the operator is shown anything. Handed the
    * device id `start` minted, or `""` when `needsDeviceId` is false.
    */
-  begin(opts: { deviceId: string }, deps: OAuthDeps): Promise<AuthorizeStart>;
+  begin(
+    opts: { deviceId: string; providerData?: Record<string, unknown> },
+    deps: OAuthDeps,
+  ): Promise<AuthorizeStart>;
 };
 
 export type OAuthProvider = PkceOAuthProvider | DeviceOAuthProvider;

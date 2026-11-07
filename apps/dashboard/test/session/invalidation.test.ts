@@ -27,6 +27,7 @@ function seeded(): QueryClient {
   for (const limit of LIMITS) client.setQueryData(queryKeys.logs(limit), []);
   client.setQueryData(BODY, { requestId: "req_1" });
   client.setQueryData(queryKeys.credentials, []);
+  client.setQueryData(queryKeys.catalog, []);
   client.setQueryData(queryKeys.credentialHealth, []);
   client.setQueryData(queryKeys.keys, []);
   client.setQueryData(queryKeys.settings, {});
@@ -114,6 +115,7 @@ test("res:credentials reaches credential health, which is the part that moves", 
 
   expect(stale(client, queryKeys.credentialHealth)).toBe(true);
   expect(stale(client, queryKeys.credentials)).toBe(true);
+  expect(stale(client, queryKeys.catalog)).toBe(true);
 });
 
 test("res:usage reaches a six-element usage key", () => {

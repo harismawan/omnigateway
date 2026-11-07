@@ -74,6 +74,7 @@ export const CSS_VARIABLES = [
   "--p-grok",
   "--p-antigravity",
   "--p-muse",
+  "--p-qoder",
   "--p-custom",
 
   // Chart furniture and elevation.

@@ -872,6 +872,7 @@ test("the registry serves kilo with its canonical capabilities", () => {
     "kimi",
     "muse",
     "openai",
+    "qoder",
   ]);
   expect(entry(ADAPTERS, "kilo", "ADAPTERS").id).toBe("kilo");
   // Kilo fronts Claude, GPT and Gemini: an under-claimed `images` would drop

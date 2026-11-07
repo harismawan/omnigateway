@@ -37,7 +37,16 @@ function stubFlows(input: {
     // that the gate runs before a store is opened — and the harness overrides
     // only `connect`. The tests below that assert a refusal are therefore
     // exercising the **real** `connectableProviders`.
-    connectableIds: () => ["anthropic", "openai", "kimi", "kilo", "grok", "antigravity", "muse"],
+    connectableIds: () => [
+      "anthropic",
+      "openai",
+      "kimi",
+      "kilo",
+      "grok",
+      "antigravity",
+      "muse",
+      "qoder",
+    ],
     async start(): Promise<ConnectStart> {
       return {
         flowId: "flow-1",
@@ -190,7 +199,7 @@ test("an unknown provider is refused before a flow is started", async () => {
   // has grown a provider on the end, which is precisely the drift the list is
   // here to catch. Only equality notices both a provider added and one dropped.
   expect(result.err.split("\n")[0]).toBe(
-    "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse",
+    "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder",
   );
   expect(started).toBe(false);
 });
@@ -216,7 +225,7 @@ test("connect refuses custom, which is a provider with no flow to start", async 
 
   expect(result.code).toBe(2);
   expect(result.err.split("\n")[0]).toBe(
-    "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse",
+    "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder",
   );
   expect(started).toBe(false);
 });

@@ -335,6 +335,7 @@ export function createConnectFlows(deps: ConnectDeps) {
       if (provider === undefined) throw unconnectable();
 
       let credentialId: string | undefined;
+      let providerData: Record<string, unknown> | undefined;
       if (credentialIdInput !== undefined) {
         if (typeof credentialIdInput !== "string" || credentialIdInput.trim().length === 0) {
           throw new GatewayError("BAD_REQUEST", "invalid credential for reconnect");
@@ -349,6 +350,7 @@ export function createConnectFlows(deps: ConnectDeps) {
           throw new GatewayError("BAD_REQUEST", "invalid credential for reconnect");
         }
         credentialId = id;
+        providerData = existing.providerData;
       }
 
       const label =
@@ -361,7 +363,13 @@ export function createConnectFlows(deps: ConnectDeps) {
       const initial = await provider.start({ redirectUri }, oauthDeps);
       const start =
         provider.kind === "device"
-          ? await provider.begin({ deviceId: deviceIdFrom(provider, initial) }, oauthDeps)
+          ? await provider.begin(
+              {
+                deviceId: deviceIdFrom(provider, initial),
+                ...(providerData === undefined ? {} : { providerData }),
+              },
+              oauthDeps,
+            )
           : initial;
 
       const flowId = await flows.put({

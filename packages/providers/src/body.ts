@@ -6,6 +6,7 @@ import { kiloBodyOrder } from "./kilo/profile.ts";
 import { kimiBodyOrder } from "./kimi/profile.ts";
 import { museBodyOrder } from "./muse/profile.ts";
 import { openaiBodyOrder } from "./openai/profile.ts";
+import { qoderBodyOrder } from "./qoder/profile.ts";
 
 export type SystemBlock = {
   type: "text";
@@ -22,6 +23,7 @@ export const BODY_ORDER: Readonly<Record<string, readonly string[]>> = {
   grok: grokBodyOrder,
   antigravity: antigravityBodyOrder,
   muse: museBodyOrder,
+  qoder: qoderBodyOrder,
   custom: customBodyOrder,
 };
 

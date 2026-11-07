@@ -199,9 +199,8 @@ export const queryKeys = {
  * of `{ providers }` and the sort would be two copies of one rule.
  *
  * Held for a long time for `usePlugins`' reason: the catalog is assembled at
- * boot from the provider registry, so it cannot change under a console that
- * stays open. A restart is the one thing that moves it, and the restart watcher
- * reloads the page outright — no push topic for a value with this lifetime.
+ * boot from the provider registry plus public account snapshots. Credential
+ * changes invalidate it too: connect, refresh and removal can change models.
  */
 export const catalogQuery = queryOptions({
   queryKey: queryKeys.catalog,

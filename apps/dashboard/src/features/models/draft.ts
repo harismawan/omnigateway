@@ -156,7 +156,7 @@ export function catalogPrices(
   "costInput" | "costOutput" | "costCacheRead" | "costCacheWrite5m" | "costCacheWrite1h"
 > | null {
   const listed = modelEntry(catalog, provider, model)?.pricing;
-  if (listed === undefined) return null;
+  if (listed == null) return null;
   return {
     costInput: String(listed.input),
     costOutput: String(listed.output),
@@ -181,8 +181,8 @@ export function catalogTokenLimits(
   const listed = modelEntry(catalog, provider, model)?.limits;
   if (listed === undefined) return null;
   return {
-    contextWindow: String(listed.contextWindow),
-    maxOutputTokens: String(listed.maxOutputTokens),
+    contextWindow: listed.contextWindow === undefined ? "" : String(listed.contextWindow),
+    maxOutputTokens: listed.maxOutputTokens === undefined ? "" : String(listed.maxOutputTokens),
   };
 }
 

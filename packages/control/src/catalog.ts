@@ -1,3 +1,4 @@
+import { parsePublicModelCatalog } from "@omni/providers";
 import type { CatalogAuth, ProviderModelChoice } from "@omni/providers/catalog";
 import {
   PROVIDER_DESCRIPTORS,
@@ -54,8 +55,8 @@ export type CatalogProvider = {
 export type CatalogModel = {
   id: string;
   label: string;
-  pricing: ProviderModelChoice["pricing"];
-  limits: ProviderModelChoice["limits"];
+  pricing: ProviderModelChoice["pricing"] | null;
+  limits: Partial<ProviderModelChoice["limits"]>;
   // Same shape as `limits`, and written as the non-optional type: with
   // `exactOptionalPropertyTypes` an optional property must not also admit
   // `undefined`, and `ProviderModelChoice["oauthLimits"]` carries it.
@@ -261,6 +262,7 @@ export function providerCatalog(
   // a `finally` — a shared mutable global under a runner that interleaves test
   // files, which cost this repository a doctor test failing one run in six.
   providers: ProviderDescriptors = PROVIDER_DESCRIPTORS,
+  accounts: readonly { provider: string; providerData: Record<string, unknown> }[] = [],
 ): CatalogProvider[] {
   // `Object.entries` at call time, never the module-scope `PROVIDER_IDS`. That
   // constant is `Object.keys(...)` evaluated once at import, which is long before
@@ -311,14 +313,53 @@ export function providerCatalog(
       // had grown a second copy of that expression, thirty lines below a comment
       // saying a second copy is what put the picker and the router out of step
       // before. Sending the answer means only one of them decides.
-      models: catalog.models.map((model) => ({
-        id: model.id,
-        label: model.label,
-        pricing: model.pricing,
-        limits: model.limits,
-        ...(model.oauthLimits === undefined ? {} : { oauthLimits: model.oauthLimits }),
-        auth: model.auth ?? catalog.authTypes,
-      })),
+      models: [
+        ...catalog.models.map((model) => ({
+          id: model.id,
+          label: model.label,
+          pricing: model.pricing,
+          limits: model.limits,
+          ...(model.oauthLimits === undefined ? {} : { oauthLimits: model.oauthLimits }),
+          auth: model.auth ?? catalog.authTypes,
+        })),
+        ...accountModels(
+          id,
+          catalog.models.map((m) => m.id),
+          catalog.authTypes,
+          accounts,
+        ),
+      ],
     };
   });
+}
+
+function accountModels(
+  id: string,
+  staticIds: string[],
+  auth: readonly CatalogAuth[],
+  accounts: readonly { provider: string; providerData: Record<string, unknown> }[],
+): CatalogModel[] {
+  const grouped = new Map<
+    string,
+    NonNullable<ReturnType<typeof parsePublicModelCatalog>>["models"]
+  >();
+  for (const account of accounts) {
+    if (account.provider !== id) continue;
+    for (const row of parsePublicModelCatalog(account.providerData.modelCatalog)?.models ?? []) {
+      if (staticIds.includes(row.id)) continue;
+      const rows = grouped.get(row.id) ?? [];
+      rows.push(row);
+      grouped.set(row.id, rows);
+    }
+  }
+  return [...grouped]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, rows]) => {
+      const limits: CatalogModel["limits"] = {};
+      for (const field of ["contextWindow", "maxOutputTokens"] as const) {
+        const values = rows.map((r) => r.limits[field]);
+        if (values.every((v): v is number => v !== undefined)) limits[field] = Math.min(...values);
+      }
+      return { id: key, label: rows[0]?.name ?? key, pricing: null, limits, auth };
+    });
 }

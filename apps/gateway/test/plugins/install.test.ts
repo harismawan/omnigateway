@@ -89,6 +89,7 @@ test("boot seeds the five built-in oauth flows, in the order operators are offer
     "grok",
     "antigravity",
     "muse",
+    "qoder",
   ]);
   expect(registry.anthropic?.kind).toBe("pkce");
   expect(registry.kilo?.kind).toBe("device");
