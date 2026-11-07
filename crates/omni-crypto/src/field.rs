@@ -37,7 +37,7 @@ impl std::fmt::Debug for FieldKey {
     }
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
 pub enum FieldError {
     #[error("malformed ciphertext")]
     Malformed,

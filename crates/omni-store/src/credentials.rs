@@ -1,0 +1,177 @@
+//! Provider credentials with their secrets decrypted, and credential health,
+//! from `packages/store/src/sqlite/credentials.ts`.
+//!
+//! TS decrypts lazily, per purpose. The Rust gateway holds decrypted secrets
+//! in its snapshot instead (spec, "The request path" rule 1), so this read
+//! opens every present field once, keyed by `token_version` so a refresh is
+//! seen as a new value.
+
+use crate::error::StoreError;
+use crate::row;
+use crate::vocab::{AuthType, BreakerState, DisabledReason};
+use omni_crypto::field::{FieldError, FieldKey, decrypt};
+use rusqlite::{Connection, Row};
+use serde::Serialize;
+
+/// One secret column.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Secret {
+    /// The column is NULL.
+    Absent,
+    Present(String),
+    /// The column holds a value that does not open under this key. TS throws
+    /// at the first use of such a field; here only this credential is
+    /// affected, and its use fails rather than the whole snapshot.
+    Unreadable(FieldError),
+}
+
+impl Secret {
+    pub fn as_deref(&self) -> Option<&str> {
+        match self {
+            Self::Present(s) => Some(s),
+            Self::Absent | Self::Unreadable(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => f.write_str("Absent"),
+            Self::Present(_) => f.write_str("Present(..)"),
+            Self::Unreadable(e) => write!(f, "Unreadable({e})"),
+        }
+    }
+}
+
+/// `CredentialSecrets`, decrypted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialSecrets {
+    pub access_token: Secret,
+    pub refresh_token: Secret,
+    pub api_key: Secret,
+    pub id_token: Secret,
+}
+
+/// `Credential` plus its decrypted secrets. Serializes as TS's `Credential`
+/// (what `omni credentials list --json` prints): the secrets never serialize.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Credential {
+    pub id: String,
+    /// `ProviderId`: a validated string, open because plugins add providers.
+    pub provider: String,
+    pub label: String,
+    pub auth_type: AuthType,
+    pub enabled: bool,
+    pub tier: f64,
+    pub weight: f64,
+    /// Epoch ms, or `None` when the token does not expire.
+    pub expires_at: Option<i64>,
+    pub account_email: Option<String>,
+    /// Provider-specific durable state; an open record in TS.
+    pub provider_data: serde_json::Value,
+    pub disabled_reason: Option<DisabledReason>,
+    pub disabled_at: Option<i64>,
+    /// Derived: the refresh-token column is non-NULL.
+    pub has_refresh_token: bool,
+    /// Moves on every secret write; the snapshot's cache key for secrets.
+    pub token_version: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(skip)]
+    pub secrets: CredentialSecrets,
+}
+
+impl Credential {
+    /// `openForInference`: the access token for OAuth, the API key otherwise.
+    pub fn inference_secret(&self) -> &Secret {
+        if self.auth_type == AuthType::OAuth {
+            &self.secrets.access_token
+        } else {
+            &self.secrets.api_key
+        }
+    }
+}
+
+const T: &str = "credentials";
+
+fn open(r: &Row<'_>, key: &FieldKey, column: &'static str) -> Result<Secret, StoreError> {
+    Ok(match row::opt_text(r, T, column)? {
+        None => Secret::Absent,
+        Some(sealed) => match decrypt(key, &sealed) {
+            Ok(plain) => Secret::Present(plain),
+            Err(e) => Secret::Unreadable(e),
+        },
+    })
+}
+
+fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> {
+    Ok(Credential {
+        id: row::text(r, T, "id")?,
+        provider: row::text(r, T, "provider")?,
+        label: row::text(r, T, "label")?,
+        auth_type: AuthType::parse(&row::text(r, T, "auth_type")?),
+        enabled: row::flag(r, "enabled")?,
+        tier: row::number(r, T, "tier")?,
+        weight: row::number(r, T, "weight")?,
+        expires_at: row::opt_integer(r, T, "expires_at")?,
+        account_email: row::opt_text(r, T, "account_email")?,
+        provider_data: row::json(r, T, "provider_data")?,
+        disabled_reason: row::opt_text(r, T, "disabled_reason")?.map(|s| DisabledReason::parse(&s)),
+        disabled_at: row::opt_integer(r, T, "disabled_at")?,
+        has_refresh_token: r.get_ref("refresh_token")?.data_type() != rusqlite::types::Type::Null,
+        token_version: row::integer(r, T, "token_version")?,
+        created_at: row::integer(r, T, "created_at")?,
+        updated_at: row::integer(r, T, "updated_at")?,
+        secrets: CredentialSecrets {
+            access_token: open(r, key, "access_token")?,
+            refresh_token: open(r, key, "refresh_token")?,
+            api_key: open(r, key, "api_key")?,
+            id_token: open(r, key, "id_token")?,
+        },
+    })
+}
+
+/// `CredentialRepo.list`, ordered by tier then label, secrets decrypted.
+pub fn list(conn: &Connection, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {
+    let mut stmt = conn.prepare_cached("SELECT * FROM credentials ORDER BY tier, label")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        out.push(to_credential(r, key)?);
+    }
+    Ok(out)
+}
+
+/// `CredentialHealth`: what routing decides on for one (credential, model).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialHealth {
+    pub credential_id: String,
+    pub model: String,
+    pub breaker_state: BreakerState,
+    pub consecutive_failures: i64,
+    pub opened_at: Option<i64>,
+    pub rate_limited_until: Option<i64>,
+}
+
+const H: &str = "credential_health";
+
+/// `CredentialRepo.listHealth`.
+pub fn list_health(conn: &Connection) -> Result<Vec<CredentialHealth>, StoreError> {
+    let mut stmt = conn.prepare_cached("SELECT * FROM credential_health")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        out.push(CredentialHealth {
+            credential_id: row::text(r, H, "credential_id")?,
+            model: row::text(r, H, "model")?,
+            breaker_state: BreakerState::parse(&row::text(r, H, "breaker_state")?),
+            consecutive_failures: row::integer(r, H, "consecutive_failures")?,
+            opened_at: row::opt_integer(r, H, "opened_at")?,
+            rate_limited_until: row::opt_integer(r, H, "rate_limited_until")?,
+        });
+    }
+    Ok(out)
+}
