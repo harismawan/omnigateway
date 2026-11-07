@@ -7,7 +7,7 @@
  * by restating its algorithm here, so the file is evidence of what TS does
  * rather than of what someone believed it does.
  *
- *   bun conformance/vectors/export.ts > conformance/vectors/vectors.json
+ *   TZ=UTC bun conformance/vectors/export.ts > conformance/vectors/vectors.json
  *
  * Re-run only on purpose: a diff to `vectors.json` is a behaviour change in the
  * frozen build, which the freeze allows for bug fixes alone.
@@ -32,6 +32,7 @@ import { signAnonymous, signAuth } from "../../packages/providers/src/qoder/cryp
 import { decodeBody, encodeBody } from "../../packages/providers/src/qoder/protocol.ts";
 import { decrypt, deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
 import { hashApiKey } from "../../packages/store/src/sqlite/keys.ts";
+import { customVectors } from "./custom.ts";
 
 /** Strings chosen to break naive ports: empty, astral, lone surrogates, JSON metacharacters. */
 const AWKWARD = [
@@ -238,6 +239,8 @@ async function main(): Promise<void> {
       ],
       aes: { key: aesKey, userJson, encryptUserInfo },
     },
+    // Appended last so every section above keeps its bytes when this grows.
+    ...(await customVectors()),
   };
   process.stdout.write(`${JSON.stringify(vectors, null, 2)}\n`);
 }
