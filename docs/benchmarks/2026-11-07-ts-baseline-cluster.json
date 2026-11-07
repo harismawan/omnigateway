@@ -1,0 +1,473 @@
+{
+  "label": "ts-bun-1.4.4 cluster×2 pg17+valkey8 @ 4e524dd4",
+  "when": "2026-11-07T05:14:54.459Z",
+  "host": {
+    "cpu": "13th Gen Intel(R) Core(TM) i5-13400",
+    "cores": 8,
+    "memGb": 15,
+    "kernel": "6.12.0-211.69.1.el10_2.x86_64"
+  },
+  "config": {
+    "gateway": ["/tmp/opencode/bench/omnigateway"],
+    "cli": ["bun", "apps/cli/src/index.ts"],
+    "duration": "20s",
+    "warmup": "3s",
+    "gatewayCpus": "0-1,2-3",
+    "upstreamCpus": "5",
+    "loadCpus": "6-7",
+    "mode": "cluster",
+    "replicas": 2,
+    "cpuSets": ["0-1", "2-3"]
+  },
+  "binaryBytes": 116156592,
+  "boot": {
+    "p50Ms": 84.83719099999996,
+    "maxMs": 178.552705
+  },
+  "shutdownMs": {
+    "idleP50": 2.0122190000001865,
+    "afterLoad": 87.18531000000075
+  },
+  "idleRssMb": 116.6328125,
+  "finalRssMb": 4196.796875,
+  "dbBytesAfter": null,
+  "cliKeysList": null,
+  "scenarios": [
+    {
+      "name": "overhead-c1",
+      "what": "chat SSE, 1 chunk, one client: pure per-request overhead",
+      "concurrency": 1,
+      "requests": 7528,
+      "successRate": 1,
+      "rps": 376.21945051868613,
+      "latencyMs": {
+        "p50": 4.396385912460149,
+        "p90": 9.397677999734325,
+        "p99": 18.967485352550476,
+        "p999": 28.802717724760896,
+        "p9999": 37.37853212420298
+      },
+      "ttfbMs": {
+        "p50": 4.389103783740701,
+        "p99": 18.960226229410207
+      },
+      "status": {
+        "200": 7528
+      },
+      "errors": {},
+      "cpuSeconds": 8.71,
+      "cpuMsPerRequest": 1.1570138150903295,
+      "backingCpuMsPerRequest": 1.3805265674814027,
+      "rssStartMb": 174.51171875,
+      "rssPeakMb": 210.03515625,
+      "rssEndMb": 175.30859375,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 185.3911515128491,
+          "p50": 4.456636,
+          "p99": 19.414193
+        },
+        {
+          "rps": 190.82829900583704,
+          "p50": 4.337809,
+          "p99": 18.533183
+        }
+      ]
+    },
+    {
+      "name": "chat-stream",
+      "what": "chat SSE, 1 chunk, 64 clients: throughput",
+      "concurrency": 64,
+      "requests": 8102,
+      "successRate": 1,
+      "rps": 400.98920895737854,
+      "latencyMs": {
+        "p50": 156.72464672117997,
+        "p90": 191.05758278783017,
+        "p99": 243.3614304059492,
+        "p999": 296.4987171523081,
+        "p9999": 315.9135633691681
+      },
+      "ttfbMs": {
+        "p50": 156.71905783473213,
+        "p99": 243.35379779301405
+      },
+      "status": {
+        "200": 8102
+      },
+      "errors": {},
+      "cpuSeconds": 7.420000000000002,
+      "cpuMsPerRequest": 0.9158232535176501,
+      "backingCpuMsPerRequest": 1.1794322389533456,
+      "rssStartMb": 189.6953125,
+      "rssPeakMb": 219.06640625,
+      "rssEndMb": 208.41015625,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 198.67140940565864,
+          "p50": 158.99555800000002,
+          "p99": 236.830181
+        },
+        {
+          "rps": 202.31779955171993,
+          "p50": 154.50034100000002,
+          "p99": 249.75864
+        }
+      ]
+    },
+    {
+      "name": "anthropic-json",
+      "what": "Anthropic non-streaming, translated from chat SSE, 64 clients",
+      "concurrency": 64,
+      "requests": 4756,
+      "successRate": 1,
+      "rps": 236.29293445791217,
+      "latencyMs": {
+        "p50": 170.2998872998318,
+        "p90": 541.1566200664424,
+        "p99": 1525.6248929911692,
+        "p999": 2546.6425545782167,
+        "p9999": 2942.368431760303
+      },
+      "ttfbMs": {
+        "p50": 170.29933127039533,
+        "p99": 1525.6243938296886
+      },
+      "status": {
+        "200": 4756
+      },
+      "errors": {},
+      "cpuSeconds": 4.98,
+      "cpuMsPerRequest": 1.047098402018503,
+      "backingCpuMsPerRequest": 1.2984076955424726,
+      "rssStartMb": 184.9140625,
+      "rssPeakMb": 209.9921875,
+      "rssEndMb": 203.5,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 118.96040577125679,
+          "p50": 165.64583199999998,
+          "p99": 1466.196455
+        },
+        {
+          "rps": 117.3325286866554,
+          "p50": 175.016995,
+          "p99": 1585.8584580000002
+        }
+      ]
+    },
+    {
+      "name": "responses-stream",
+      "what": "Responses SSE, translated from chat SSE, 64 clients",
+      "concurrency": 64,
+      "requests": 8139,
+      "successRate": 1,
+      "rps": 403.9558991948707,
+      "latencyMs": {
+        "p50": 154.10445067268705,
+        "p90": 185.99360771654995,
+        "p99": 267.4989106712127,
+        "p999": 318.1711213884998,
+        "p9999": 320.8564350420199
+      },
+      "ttfbMs": {
+        "p50": 154.0965161971987,
+        "p99": 267.4894447541467
+      },
+      "status": {
+        "200": 8139
+      },
+      "errors": {},
+      "cpuSeconds": 6.789999999999996,
+      "cpuMsPerRequest": 0.8342548224597611,
+      "backingCpuMsPerRequest": 1.1713646639636321,
+      "rssStartMb": 202.2109375,
+      "rssPeakMb": 224.57421875,
+      "rssEndMb": 204.9609375,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 202.6751284848263,
+          "p50": 153.998501,
+          "p99": 271.680789
+        },
+        {
+          "rps": 201.2807707100444,
+          "p50": 154.21126299999997,
+          "p99": 263.282983
+        }
+      ]
+    },
+    {
+      "name": "agent-100k",
+      "what": "Anthropic SSE with a ~100 KiB agent transcript, 32 clients",
+      "concurrency": 32,
+      "requests": 4137,
+      "successRate": 1,
+      "rps": 206.12679964077648,
+      "latencyMs": {
+        "p50": 89.43316979453711,
+        "p90": 369.13872805124487,
+        "p99": 840.2762444321972,
+        "p999": 1084.2144376980905,
+        "p9999": 1112.2539945201836
+      },
+      "ttfbMs": {
+        "p50": 89.42756314019822,
+        "p99": 840.2704832736283
+      },
+      "status": {
+        "200": 4137
+      },
+      "errors": {},
+      "cpuSeconds": 8.63000000000001,
+      "cpuMsPerRequest": 2.0860526951897533,
+      "backingCpuMsPerRequest": 1.403952380952383,
+      "rssStartMb": 212.125,
+      "rssPeakMb": 243.8125,
+      "rssEndMb": 210.48046875,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 103.77764833513703,
+          "p50": 89.468342,
+          "p99": 810.349384
+        },
+        {
+          "rps": 102.34915130563947,
+          "p50": 89.397501,
+          "p99": 870.625636
+        }
+      ]
+    },
+    {
+      "name": "many-chunks",
+      "what": "Anthropic SSE, 2000 upstream chunks per reply, 16 clients",
+      "concurrency": 16,
+      "requests": 3545,
+      "successRate": 1,
+      "rps": 176.43592510910753,
+      "latencyMs": {
+        "p50": 86.29014199210155,
+        "p90": 126.88063775937938,
+        "p99": 158.7581531526093,
+        "p999": 188.16320294696757,
+        "p9999": 188.94669423921013
+      },
+      "ttfbMs": {
+        "p50": 82.7085712019746,
+        "p99": 156.02225537207332
+      },
+      "status": {
+        "200": 3545
+      },
+      "errors": {},
+      "cpuSeconds": 23.97,
+      "cpuMsPerRequest": 6.76163610719323,
+      "backingCpuMsPerRequest": 1.5421055007052178,
+      "rssStartMb": 233.93359375,
+      "rssPeakMb": 343.09765625,
+      "rssEndMb": 291.51171875,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 88.76545331672841,
+          "p50": 85.300484,
+          "p99": 160.052158
+        },
+        {
+          "rps": 87.67047179237913,
+          "p50": 87.291595,
+          "p99": 157.44872600000002
+        }
+      ]
+    },
+    {
+      "name": "rate-limited-key",
+      "what": "chat SSE, 1 chunk, 64 clients, key with request/token/concurrency limits",
+      "concurrency": 64,
+      "requests": 7391,
+      "successRate": 1,
+      "rps": 367.0269893530966,
+      "latencyMs": {
+        "p50": 171.5528813728859,
+        "p90": 211.59881403707212,
+        "p99": 260.94486306210257,
+        "p999": 293.8843736858341,
+        "p9999": 300.73102856271146
+      },
+      "ttfbMs": {
+        "p50": 171.54295098051685,
+        "p99": 260.93517511473414
+      },
+      "status": {
+        "200": 7391
+      },
+      "errors": {},
+      "cpuSeconds": 7.570000000000007,
+      "cpuMsPerRequest": 1.024218644297119,
+      "backingCpuMsPerRequest": 1.4037909619807885,
+      "rssStartMb": 210.484375,
+      "rssPeakMb": 231.3203125,
+      "rssEndMb": 207.17578125,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 183.32148329915674,
+          "p50": 172.230978,
+          "p99": 272.32407600000005
+        },
+        {
+          "rps": 183.7055060539399,
+          "p50": 170.87533499999998,
+          "p99": 249.574884
+        }
+      ]
+    },
+    {
+      "name": "held-streams",
+      "what": "1000 concurrent streams, 60 chunks 500 ms apart (~30 s each)",
+      "concurrency": 1000,
+      "requests": 1000,
+      "successRate": 1,
+      "rps": 32.46020144246249,
+      "latencyMs": {
+        "p50": 30734.206119,
+        "p90": 30771.4885535,
+        "p99": 30794.754982,
+        "p999": 30802.542943,
+        "p9999": 30802.542943
+      },
+      "ttfbMs": {
+        "p50": 727.1681615,
+        "p99": 785.459409
+      },
+      "status": {
+        "200": 1000
+      },
+      "errors": {},
+      "cpuSeconds": 2.6299999999999955,
+      "cpuMsPerRequest": 2.6299999999999955,
+      "backingCpuMsPerRequest": 0.5026929999999936,
+      "rssStartMb": 207.1796875,
+      "rssPeakMb": 248.6484375,
+      "rssEndMb": 250.44921875,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 16.231405902244457,
+          "p50": 30728.187629,
+          "p99": 30794.891571
+        },
+        {
+          "rps": 16.228795540218034,
+          "p50": 30740.224608999997,
+          "p99": 30794.618393
+        }
+      ]
+    },
+    {
+      "name": "client-cancel",
+      "what": "200 clients abandoning 30 s streams after 2 s",
+      "concurrency": 200,
+      "requests": 556116,
+      "successRate": 0,
+      "rps": 27780.11125444797,
+      "latencyMs": {
+        "p50": null,
+        "p90": null,
+        "p99": null,
+        "p999": null,
+        "p9999": null
+      },
+      "ttfbMs": {
+        "p50": null,
+        "p99": null
+      },
+      "status": {},
+      "errors": {
+        "Connection refused (os error 111)": 554150,
+        "Connection reset by peer (os error 104)": 1,
+        "aborted due to deadline": 126,
+        "connection closed before message completed": 200,
+        "connection error": 39,
+        "timeout": 1600
+      },
+      "cpuSeconds": -82.28999999999999,
+      "cpuMsPerRequest": -0.14797272511490406,
+      "backingCpuMsPerRequest": 0.004648517575469869,
+      "rssStartMb": 250.453125,
+      "rssPeakMb": 259.06640625,
+      "rssEndMb": 0,
+      "healthyAfter": false,
+      "crashed": 2,
+      "perReplica": [
+        {
+          "rps": 15769.716117195596,
+          "p50": null,
+          "p99": null
+        },
+        {
+          "rps": 12010.395137252372,
+          "p50": null,
+          "p99": null
+        }
+      ]
+    },
+    {
+      "name": "early-cancel",
+      "what": "64 clients abandoning 1-chunk requests after 1 ms",
+      "concurrency": 64,
+      "requests": 568889,
+      "successRate": 0,
+      "rps": 28441.3392716158,
+      "latencyMs": {
+        "p50": null,
+        "p90": null,
+        "p99": null,
+        "p999": null,
+        "p9999": null
+      },
+      "ttfbMs": {
+        "p50": null,
+        "p99": null
+      },
+      "status": {},
+      "errors": {
+        "aborted due to deadline": 49,
+        "timeout": 568840
+      },
+      "cpuSeconds": 38.879999999999995,
+      "cpuMsPerRequest": 0.06834373665161392,
+      "backingCpuMsPerRequest": 0.012391930587513558,
+      "rssStartMb": 114.69921875,
+      "rssPeakMb": 4183.22265625,
+      "rssEndMb": 4196.796875,
+      "healthyAfter": true,
+      "crashed": 0,
+      "perReplica": [
+        {
+          "rps": 14237.737677194333,
+          "p50": null,
+          "p99": null
+        },
+        {
+          "rps": 14203.601594421469,
+          "p50": null,
+          "p99": null
+        }
+      ]
+    }
+  ]
+}
