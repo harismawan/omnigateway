@@ -1,0 +1,17 @@
+[package]
+name = "omni-ir"
+description = "Provider-neutral model and JS-compatible JSON serialization."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+serde.workspace = true

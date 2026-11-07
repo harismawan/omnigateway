@@ -37,3 +37,6 @@ snapshots/
 *.bak
 *.bak[0-9]*
 k8s/secret.yaml
+
+# Rust build output
+/target/
