@@ -76,9 +76,6 @@ pub struct WriterStats {
     pub health_refused: u64,
 }
 
-/// `last_warn_ms` before any warning.
-const NEVER: u64 = u64::MAX;
-
 #[derive(Debug)]
 struct Counters {
     dropped: AtomicU64,
@@ -86,26 +83,16 @@ struct Counters {
     written: AtomicU64,
     failed: AtomicU64,
     health_refused: AtomicU64,
-    /// Drop-warning rate limit: ms since `epoch` of the last warning.
-    epoch: std::time::Instant,
-    warn_every_ms: u64,
-    last_warn_ms: AtomicU64,
-    /// `dropped` as the last warning reported it.
-    warned_dropped: AtomicU64,
 }
 
 impl Counters {
-    fn new(warn_every: Duration) -> Self {
+    fn new() -> Self {
         Self {
             dropped: AtomicU64::new(0),
             batches: AtomicU64::new(0),
             written: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             health_refused: AtomicU64::new(0),
-            epoch: std::time::Instant::now(),
-            warn_every_ms: u64::try_from(warn_every.as_millis()).unwrap_or(u64::MAX),
-            last_warn_ms: AtomicU64::new(NEVER),
-            warned_dropped: AtomicU64::new(0),
         }
     }
 
@@ -118,27 +105,51 @@ impl Counters {
             health_refused: self.health_refused.load(Ordering::Relaxed),
         }
     }
+}
 
-    /// Counts one drop, and warns if no warning went out within the interval.
-    /// Lock-free: one CAS decides which caller warns.
-    fn drop_one(&self) {
-        let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        let now = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
-        let last = self.last_warn_ms.load(Ordering::Relaxed);
-        let due = last == NEVER || now.saturating_sub(last) >= self.warn_every_ms;
-        if due
-            && self
-                .last_warn_ms
-                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            let before = self.warned_dropped.swap(total, Ordering::Relaxed);
-            tracing::warn!(
-                dropped = total.saturating_sub(before),
-                dropped_total = total,
-                "request log writer is full; events dropped"
-            );
+/// The dropped-event warning, emitted from the writer task only: the request
+/// path just bumps `dropped`, so a subscriber doing blocking output can never
+/// stall it. Checked on a tick whether or not the writer has work, and at most
+/// one warning per `every`, carrying the drops since the last one.
+struct DropWarner {
+    every: Duration,
+    last: Option<Instant>,
+    reported: u64,
+}
+
+impl DropWarner {
+    fn new(every: Duration) -> Self {
+        Self {
+            every,
+            last: None,
+            reported: 0,
         }
+    }
+
+    /// How often to look: twice per interval, so timer jitter cannot push a
+    /// due warning out by a whole interval.
+    fn tick_period(&self) -> Duration {
+        (self.every / 2).max(Duration::from_millis(1))
+    }
+
+    /// Warns if there are unreported drops and the interval has passed, or
+    /// regardless of the interval when `force` (the last look, on close).
+    fn check(&mut self, counters: &Counters, force: bool) {
+        let total = counters.dropped.load(Ordering::Relaxed);
+        if total <= self.reported {
+            return;
+        }
+        let due = force || self.last.is_none_or(|l| l.elapsed() >= self.every);
+        if !due {
+            return;
+        }
+        tracing::warn!(
+            dropped = total - self.reported,
+            dropped_total = total,
+            "request log writer is full; events dropped"
+        );
+        self.reported = total;
+        self.last = Some(Instant::now());
     }
 }
 
@@ -158,7 +169,9 @@ pub struct WriterHandle {
 
 impl WriterHandle {
     /// Queues an event. `false` means it was dropped (channel full, or the
-    /// writer closed), counted in [`Self::dropped`] and, rate-limited, warned.
+    /// writer closed) and counted in [`Self::dropped`]; the writer task warns
+    /// about it later, rate-limited. Nothing here but the `try_send` and an
+    /// atomic add.
     pub fn send(&self, event: impl Into<WriteEvent>) -> bool {
         let queued = Queued {
             at: Instant::now(),
@@ -167,7 +180,7 @@ impl WriterHandle {
         match self.tx.try_send(queued) {
             Ok(()) => true,
             Err(_) => {
-                self.counters.drop_one();
+                self.counters.dropped.fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
@@ -200,7 +213,7 @@ impl Writer {
         conn.busy_timeout(config.busy_timeout)?;
         let (tx, rx) = mpsc::channel(config.capacity.max(1));
         let (shutdown, stop) = oneshot::channel();
-        let counters = Arc::new(Counters::new(config.drop_warn_interval));
+        let counters = Arc::new(Counters::new());
         let task = tokio::spawn(run(conn, rx, stop, config, Arc::clone(&counters)));
         Ok(Self {
             handle: WriterHandle { tx, counters },
@@ -214,8 +227,10 @@ impl Writer {
     }
 
     /// Stops accepting events, writes everything already queued, and returns
-    /// the final counters. `Err` when any of that final flush failed to
-    /// persist; the counters then still say how much.
+    /// the final counters. `Err` when any of that failed to persist —
+    /// including a batch already being written (or retried) when the close
+    /// arrived, whose outcome this waits for; the counters then still say how
+    /// much.
     pub async fn close(mut self) -> Result<WriterStats, StoreError> {
         if let Some(s) = self.shutdown.take() {
             // An Err means the task already ended; the join below reports why.
@@ -307,6 +322,38 @@ impl Sink {
     }
 }
 
+/// `sink.flush`, still looking at the drop counter on the tick meanwhile: a
+/// stalled database is exactly when the channel fills, and a flush retrying a
+/// busy one can take several `busy_timeout`s.
+async fn flush_watching(
+    sink: &mut Sink,
+    batch: Vec<WriteEvent>,
+    warner: &mut DropWarner,
+    tick: &mut tokio::time::Interval,
+    counters: &Counters,
+) -> Result<u64, StoreError> {
+    let flush = sink.flush(batch);
+    tokio::pin!(flush);
+    let lost = loop {
+        tokio::select! {
+            biased;
+            r = &mut flush => break r?,
+            _ = tick.tick() => warner.check(counters, false),
+        }
+    };
+    warner.check(counters, false);
+    Ok(lost)
+}
+
+/// Whether the stop was signalled (or its sender dropped) without waiting.
+/// Only called on a receiver that has not yet completed.
+fn stop_arrived(stop: &mut oneshot::Receiver<()>) -> bool {
+    !matches!(
+        stop.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    )
+}
+
 async fn run(
     conn: Connection,
     mut rx: mpsc::Receiver<Queued>,
@@ -319,10 +366,14 @@ async fn run(
         conn: Some(conn),
         node_id: Arc::from(config.node_id.as_str()),
         day_offset_minutes: config.day_offset_minutes,
-        counters,
+        counters: Arc::clone(&counters),
     };
-    // Events lost from the flushes that run after the stop.
+    // Events lost from flushes the close waited on: any in flight when the
+    // stop arrived, and the drain after it.
     let mut lost_on_close = 0;
+    let mut warner = DropWarner::new(config.drop_warn_interval);
+    let mut warn_tick = tokio::time::interval(warner.tick_period());
+    warn_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     'running: loop {
         // Idle until the first event of the next batch, or the stop.
@@ -333,6 +384,10 @@ async fn run(
                 Some(e) => e,
                 None => break 'running,
             },
+            _ = warn_tick.tick() => {
+                warner.check(&counters, false);
+                continue 'running;
+            }
         };
         // From the oldest event's enqueue: one that queued behind a slow
         // write is already due, and goes out with the next write.
@@ -353,10 +408,13 @@ async fn run(
                     Some(e) => batch.push(e.event),
                     None => break,
                 },
+                _ = warn_tick.tick() => warner.check(&counters, false),
             }
         }
-        let lost = sink.flush(batch).await?;
-        if stopping {
+        let lost = flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
+        // A stop that arrived while this batch was being written (or retried)
+        // waited on its outcome, so its loss is the close's to report.
+        if stopping || stop_arrived(&mut stop) {
             lost_on_close += lost;
             break 'running;
         }
@@ -375,8 +433,10 @@ async fn run(
         if batch.is_empty() {
             break;
         }
-        lost_on_close += sink.flush(batch).await?;
+        lost_on_close +=
+            flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
     }
+    warner.check(&counters, true);
     if lost_on_close > 0 {
         return Err(StoreError::Writer(format!(
             "{lost_on_close} queued events failed to persist on close"

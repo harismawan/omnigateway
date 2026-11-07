@@ -7,7 +7,7 @@ mod common;
 use common::{bun_available, bun_script, ts, typed_rows};
 use omni_store::writer::{
     BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog, RouteTarget,
-    WriteEvent, Writer, WriterConfig,
+    WriteEvent, Writer, WriterConfig, WriterStats,
 };
 use omni_store::{BreakerState, CredentialHealth, SqliteStore};
 use rusqlite::Connection;
@@ -558,14 +558,14 @@ fn count(db: &Path, sql: &str) -> i64 {
 }
 
 #[test]
-fn drops_warn_at_most_once_per_interval_with_the_count_since_the_last() {
+fn drops_warn_from_the_writer_task_at_most_once_per_interval() {
     current_thread().block_on(async {
         let (log, _guard) = Captured::install();
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(dir.path());
         let cfg = WriterConfig {
             capacity: 1,
-            drop_warn_interval: Duration::from_millis(50),
+            drop_warn_interval: Duration::from_millis(300),
             ..config(0, 512)
         };
         let writer = Writer::spawn(&db, cfg).expect("spawn");
@@ -575,17 +575,39 @@ fn drops_warn_at_most_once_per_interval_with_the_count_since_the_last() {
         for n in 1..10 {
             assert!(!send(n));
         }
+        // The request path itself never warns: the writer task has not run.
+        assert_eq!(log.lines("events dropped").len(), 0);
+        assert_eq!(handle.dropped(), 9);
+        // The writer warns from its own tick (the first is at once), which
+        // opens a 300 ms window.
+        tokio::time::sleep(Duration::from_millis(80)).await;
         let warned = log.lines("events dropped");
         assert_eq!(warned.len(), 1, "{warned:?}");
-        assert!(warned[0].contains("dropped=1 "), "{warned:?}");
-        // Blocking: the writer cannot drain meanwhile.
-        std::thread::sleep(Duration::from_millis(60));
-        assert!(!send(10));
+        assert!(warned[0].contains("dropped=9 "), "{warned:?}");
+        // More drops inside the interval wait for it to pass.
+        for n in 10..13 {
+            send(n);
+        }
+        let more = handle.dropped() - 9;
+        assert!(more > 0, "the channel refilled");
+        // ~130 ms: a tick at 150 is inside the window too.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(log.lines("events dropped").len(), 1, "rate-limited");
+        // Past the window (the 300 ms tick), with the writer otherwise idle.
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let warned = log.lines("events dropped");
         assert_eq!(warned.len(), 2, "{warned:?}");
-        assert!(warned[1].contains("dropped=9 "), "{warned:?}");
-        assert!(warned[1].contains("dropped_total=10"), "{warned:?}");
-        assert_eq!(handle.dropped(), 10);
+        assert!(
+            warned[1].contains(&format!("dropped={more} ")),
+            "{warned:?}"
+        );
+        assert!(
+            warned[1].contains(&format!("dropped_total={}", 9 + more)),
+            "{warned:?}"
+        );
+        // Nothing new: no further warnings, however long the writer idles.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(log.lines("events dropped").len(), 2);
         writer.close().await.expect("close");
     });
 }
@@ -723,6 +745,8 @@ async fn events_queued_behind_a_slow_write_go_out_with_the_next_write() {
             seen_a = Some(elapsed);
         }
         if ids("b") == 1 {
+            // `a` committed first; both may have landed between two polls.
+            seen_a.get_or_insert(elapsed);
             break elapsed;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -740,4 +764,44 @@ async fn events_queued_behind_a_slow_write_go_out_with_the_next_write() {
     );
     let stats = writer.close().await.expect("close");
     assert_eq!(stats.batches, 2);
+}
+
+/// Close arrives while the first batch is between retries on a locked
+/// database. `release_at` is when the other connection lets go.
+async fn close_during_retry(release_at: Duration) -> (Result<WriterStats, String>, WriterStats) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path());
+    let cfg = WriterConfig {
+        busy_timeout: Duration::from_millis(10),
+        interval: Duration::from_millis(1),
+        ..config(0, 512)
+    };
+    let writer = Writer::spawn(&db, cfg).expect("spawn");
+    let handle = writer.handle();
+    let locker = lock_for(&db, release_at);
+    assert!(handle.send(pending("p1", T0, None, "m")));
+    // Attempts at ~1, ~110 and ~320 ms: close lands inside the first backoff
+    // with nothing else queued.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let closed = writer.close().await.map_err(|e| e.to_string());
+    locker.join().expect("locker");
+    (closed, handle.stats())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_close_during_a_retry_that_fails_returns_err() {
+    let (closed, stats) = close_during_retry(Duration::from_millis(1500)).await;
+    assert!(
+        matches!(&closed, Err(e) if e.contains("1 queued events failed")),
+        "{closed:?}"
+    );
+    assert_eq!((stats.failed, stats.batches), (1, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_close_during_a_retry_that_succeeds_returns_ok() {
+    let (closed, stats) = close_during_retry(Duration::from_millis(80)).await;
+    let closed = closed.expect("close after the retry commits");
+    assert_eq!((closed.failed, closed.batches, closed.written), (0, 1, 1));
+    assert_eq!(stats, closed);
 }
