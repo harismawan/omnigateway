@@ -769,6 +769,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "omni-dialects"
+version = "0.16.0"
+dependencies = [
+ "omni-ir",
+ "omni-ratelimit",
+ "rand",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "omni-gateway-core"
 version = "0.16.0"
 dependencies = [
