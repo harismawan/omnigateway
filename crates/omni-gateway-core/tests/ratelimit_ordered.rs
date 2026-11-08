@@ -14,6 +14,8 @@ const T0: f64 = 1_794_000_000_000.0;
 const KEY: &str = "k1";
 
 struct H {
+    /// A clone of the writer's sink sender, so a test can fill the sink.
+    sink: mpsc::Sender<Committed>,
     _dir: tempfile::TempDir,
     store: SqliteStore,
     writer: Option<Writer>,
@@ -25,21 +27,28 @@ struct H {
 }
 
 fn harness(limits: &str, sink_capacity: usize, interval: Duration) -> H {
+    harness_with(limits, sink_capacity, interval, Duration::ZERO)
+}
+
+fn harness_with(limits: &str, sink_capacity: usize, interval: Duration, seed_delay: Duration) -> H {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("omni.db");
     let store = SqliteStore::open(&path, 0).expect("store");
     let (tx, commits) = mpsc::channel(sink_capacity);
+    let sink = tx.clone();
     let writer = Writer::spawn(
         &path,
         WriterConfig {
             commit_sink: Some(tx),
             interval,
+            seed_delay,
             ..WriterConfig::default()
         },
     )
     .expect("writer");
     let handle = writer.handle();
     H {
+        sink,
         _dir: dir,
         store,
         writer: Some(writer),
@@ -134,29 +143,51 @@ async fn a_completion_committed_after_the_seed_is_counted_once_by_its_debit() {
     assert_eq!(h.tokens_used(), 60.0);
 }
 
-/// (c) many completions around several seeds, applied as they come: the
-/// window always equals the committed rows exactly.
+/// (c) A genuinely slow seed: while its read is held (150 ms), completions
+/// keep arriving and queue behind it; a live consumer applies the stream as
+/// it comes. The window equals the committed rows exactly.
 #[tokio::test(flavor = "multi_thread")]
-async fn interleaved_completions_and_seeds_total_the_row_count_exactly() {
-    let mut h = harness(
+async fn completions_around_a_slow_seed_total_the_row_count_exactly() {
+    let mut h = harness_with(
         r#"{"requests":{"5h":1000000}}"#,
         4096,
         Duration::from_millis(2),
+        Duration::from_millis(150),
     );
-    for round in 0..20 {
-        for _ in 0..(round % 7 + 1) {
-            h.finish(1);
+    let limiter = h.limiter.clone();
+    let mut commits = std::mem::replace(&mut h.commits, mpsc::channel(1).1);
+    let consumer = tokio::spawn(async move {
+        while let Some(e) = commits.recv().await {
+            limiter.apply(e);
         }
-        if round % 5 == 0 {
-            // Asks only when the previous seed has landed; the stream decides.
-            let _ = h.ask_seed();
-        }
-        if round % 3 == 0 {
-            tokio::time::sleep(Duration::from_millis(3)).await;
-            h.drain();
-        }
+    });
+    drop(h.limiter.admit(KEY, &h.limits, "fast", T0).expect("admit"));
+    // Before the seed: committed and delivered while unseeded (ignored).
+    for _ in 0..7 {
+        h.finish(1);
     }
-    h.settle().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Delivered and ignored: nothing held before the seed lands.
+    assert_eq!(h.limiter.held_debits(), 0);
+    assert_eq!(h.limiter.send_seeds(&h.handle), 2);
+    // While the seed is held: these queue and commit after the read.
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_millis(250) {
+        h.finish(1);
+        tokio::time::sleep(Duration::from_millis(7)).await;
+    }
+    h.writer
+        .take()
+        .expect("writer")
+        .close()
+        .await
+        .expect("close");
+    drop(std::mem::replace(&mut h.sink, mpsc::channel(1).0));
+    tokio::time::timeout(Duration::from_secs(2), consumer)
+        .await
+        .expect("consumer ended")
+        .expect("consumer");
+    assert_eq!(h.limiter.seeds_pending(), 0);
     let used = h
         .limiter
         .admit(KEY, &h.limits, "fast", T0 + 1.0)
@@ -166,7 +197,7 @@ async fn interleaved_completions_and_seeds_total_the_row_count_exactly() {
         .map(|r| r.used);
     #[allow(clippy::cast_precision_loss)]
     let rows = h.rows() as f64;
-    assert!(rows > 50.0);
+    assert!(rows > 30.0, "{rows}");
     assert_eq!(used, Some(rows));
 }
 
@@ -202,20 +233,42 @@ async fn a_full_sink_drops_debits_counts_them_and_never_double_counts() {
     assert_eq!(used, Some(10.0));
 }
 
-/// (e) state is bounded: no per-request bookkeeping is retained. A subject
-/// holds its buckets and the in-window row stamps, nothing keyed by request.
+/// (e) State is bounded and released: register limits, seed, debit, go
+/// idle. Per-subject state is the two windows' buckets and in-window row
+/// stamps (capped); once the rows age out of the window the stamps are
+/// gone, and no seed marker or per-request record remains.
 #[tokio::test(flavor = "multi_thread")]
-async fn completions_leave_no_per_request_state_behind_but_the_window_stamps() {
+async fn an_idle_subject_releases_its_per_request_state() {
     let mut h = harness(
         r#"{"tokens":{"5h":1000000}}"#,
         4096,
         Duration::from_millis(2),
     );
-    for _ in 0..200 {
-        h.finish(1); // before any seed: ignored, nothing held
+    assert_eq!(h.ask_seed(), 2);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    h.drain();
+    assert_eq!(h.limiter.seeds_pending(), 0);
+    for _ in 0..50 {
+        h.finish(1);
     }
     h.settle().await;
-    assert_eq!(h.limiter.held_debits(), 0);
+    // Each debit holds one stamp per long window while in the window.
+    assert_eq!(h.limiter.held_debits(), 100);
+    // A week and a minute later (idle), the 1w window still holds them...
+    let five_h = 5.0 * 3_600_000.0;
+    drop(
+        h.limiter
+            .admit(KEY, &h.limits, "fast", T0 + five_h + 60_000.0)
+            .expect("admit"),
+    );
+    assert_eq!(h.limiter.held_debits(), 50, "5h window released its stamps");
+    let week = 7.0 * 24.0 * 3_600_000.0;
+    drop(
+        h.limiter
+            .admit(KEY, &h.limits, "fast", T0 + week + 3_600_000.0)
+            .expect("admit"),
+    );
+    assert_eq!(h.limiter.held_debits(), 0, "1w window released its stamps");
     assert_eq!(h.limiter.seeds_pending(), 0);
 }
 
@@ -239,4 +292,132 @@ async fn a_seed_inside_a_batch_splits_it_at_the_seed() {
     }
     h.settle().await;
     assert_eq!(h.tokens_used(), 230.0);
+}
+
+/// (Round 3, 1a) A full, undrained sink never stalls persistence: with
+/// capacity 1 and two seeds queued, later writes still commit on time and
+/// close() completes; the seed result that found no room is counted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_sink_never_stalls_persistence() {
+    let mut h = harness(
+        r#"{"tokens":{"5h":1000000},"models":{"m2":{"tokens":{"5h":5}}}}"#,
+        1,
+        Duration::from_millis(5),
+    );
+    // Two seeds (both windows of one subject), receiver alive, never drained.
+    assert_eq!(h.ask_seed(), 2);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..5 {
+        h.finish(1);
+    }
+    // Committed within normal batch timing despite the full sink.
+    let started = std::time::Instant::now();
+    while h.rows() < 5 {
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "writes stalled behind a full sink"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = h.handle.stats();
+    assert_eq!(stats.seeds_dropped, 1, "{stats:?}");
+    let writer = h.writer.take().expect("writer");
+    tokio::time::timeout(Duration::from_secs(2), writer.close())
+        .await
+        .expect("close() completed")
+        .expect("close ok");
+}
+
+/// (Round 3, 1b) A dropped seed result behaves as a failed seed: the window
+/// stays unseeded and ignores debits; after the retry timeout a new seed is
+/// asked and installs exactly the committed total.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_seed_result_is_retried_and_installs_the_exact_total() {
+    let mut h = harness(
+        r#"{"requests":{"5h":1000000}}"#,
+        2,
+        Duration::from_millis(2),
+    );
+    drop(h.limiter.admit(KEY, &h.limits, "fast", T0).expect("admit")); // queues seeds
+    // Fill both slots ourselves, so both seed results find the sink full.
+    for _ in 0..2 {
+        h.sink
+            .try_send(Committed::Completions(Vec::new()))
+            .expect("slot");
+    }
+    h.finish(1);
+    assert_eq!(h.limiter.send_seeds(&h.handle), 2);
+    let started = std::time::Instant::now();
+    while h.handle.stats().seeds_dropped < 2 {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "seeds not dropped"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        h.limiter.seeds_pending(),
+        2,
+        "still marked, not yet timed out"
+    );
+
+    // From here a live consumer applies the stream as it comes.
+    let limiter = h.limiter.clone();
+    let mut commits = std::mem::replace(&mut h.commits, mpsc::channel(1).1);
+    let (seen_tx, mut seen) = mpsc::unbounded_channel();
+    let consumer = tokio::spawn(async move {
+        while let Some(e) = commits.recv().await {
+            let seed = matches!(e, Committed::Seed { .. });
+            limiter.apply(e);
+            if seed {
+                seen_tx.send(()).ok();
+            }
+        }
+    });
+    for _ in 0..3 {
+        h.finish(1);
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(h.limiter.held_debits(), 0, "unseeded windows ignore debits");
+    // Within the timeout the marker blocks a duplicate ask...
+    h.limiter.prepare(KEY, &h.limits, "fast", T0 + 1.0);
+    assert_eq!(h.limiter.send_seeds(&h.handle), 0);
+    // ...past it, the seed is asked again; wait until both results applied
+    // (the consumer frees the one slot between them).
+    let later = T0 + omni_gateway_core::ratelimit::SEED_TIMEOUT_MS + 1.0;
+    h.limiter.prepare(KEY, &h.limits, "fast", later);
+    assert_eq!(h.limiter.send_seeds(&h.handle), 2);
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(2), seen.recv())
+            .await
+            .expect("seed result applied");
+    }
+    for _ in 0..2 {
+        h.finish(1);
+    }
+    h.writer
+        .take()
+        .expect("writer")
+        .close()
+        .await
+        .expect("close");
+    // Our clone of the sender is the last one: drop it so the stream ends.
+    drop(std::mem::replace(&mut h.sink, mpsc::channel(1).0));
+    tokio::time::timeout(Duration::from_secs(2), consumer)
+        .await
+        .expect("consumer ended")
+        .expect("consumer");
+    assert_eq!(h.limiter.seeds_pending(), 0);
+    assert_eq!(h.handle.stats().seeds_dropped, 2, "the retry was delivered");
+    let used = h
+        .limiter
+        .admit(KEY, &h.limits, "fast", later)
+        .expect("admit")
+        .headroom
+        .requests
+        .map(|r| r.used);
+    #[allow(clippy::cast_precision_loss)]
+    let rows = h.rows() as f64;
+    assert_eq!(rows, 6.0);
+    assert_eq!(used, Some(rows));
 }

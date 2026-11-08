@@ -82,56 +82,56 @@ pub fn sum_buckets(
     Ok(rows)
 }
 
-/// Every done row's `at` and request id since `since_ms`, ascending by
-/// `at`. The first `at` is `oldestSince`; the limiter keeps the stamps so a
-/// refusal's exact reset is answered from memory, and the ids so a debit
-/// racing the seed is counted exactly once.
-pub fn done_rows(
+/// The oldest `cap` done rows' `at` since `since_ms`, ascending: bounded in
+/// SQL, instants only. The first is `oldestSince`. The limiter keeps them
+/// so a refusal's exact reset is answered from memory.
+pub fn done_stamps(
     conn: &Connection,
     api_key_id: &str,
     since_ms: i64,
     requested_model: Option<&str>,
-) -> Result<Vec<(i64, String)>, StoreError> {
-    let row = |r: &rusqlite::Row<'_>| Ok((r.get(0)?, r.get(1)?));
+    cap: usize,
+) -> Result<Vec<i64>, StoreError> {
+    let cap = i64::try_from(cap).unwrap_or(i64::MAX);
     let out = if let Some(model) = requested_model {
         let mut stmt = conn.prepare_cached(
-            "SELECT at, id FROM request_logs
+            "SELECT at FROM request_logs
               WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?
-              ORDER BY at",
+              ORDER BY at LIMIT ?",
         )?;
-        stmt.query_map(params![api_key_id, model, since_ms], row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        stmt.query_map(params![api_key_id, model, since_ms, cap], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?
     } else {
         let mut stmt = conn.prepare_cached(
-            "SELECT at, id FROM request_logs
+            "SELECT at FROM request_logs
               WHERE api_key_id = ? AND state = 'done' AND at >= ?
-              ORDER BY at",
+              ORDER BY at LIMIT ?",
         )?;
-        stmt.query_map(params![api_key_id, since_ms], row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        stmt.query_map(params![api_key_id, since_ms, cap], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?
     };
     Ok(out)
 }
 
-/// Bucket sums by start, and every retained done row's `at`.
+/// Bucket sums by start (one row per grain), and the oldest capped stamps.
 pub type SeedRead = (Vec<(i64, Counts)>, Vec<i64>);
 
 /// A long-window seed's two reads in one read transaction, so the bucket
 /// sums and the stamps describe one WAL snapshot. The writer runs it on its
-/// own connection between batches.
+/// own connection between batches. The payload is O(buckets + `stamp_cap`):
+/// bucket sums are aggregated per grain in SQL (`sumBuckets`), and stamps
+/// are limited in the query.
 pub fn seed_rows(
     conn: &Connection,
     api_key_id: &str,
     since_ms: i64,
     grain_ms: i64,
     requested_model: Option<&str>,
+    stamp_cap: usize,
 ) -> Result<SeedRead, StoreError> {
     let tx = conn.unchecked_transaction()?;
     let buckets = sum_buckets(&tx, api_key_id, since_ms, grain_ms, requested_model)?;
-    let stamps = done_rows(&tx, api_key_id, since_ms, requested_model)?
-        .into_iter()
-        .map(|(at, _)| at)
-        .collect();
+    let stamps = done_stamps(&tx, api_key_id, since_ms, requested_model, stamp_cap)?;
     tx.commit()?;
     Ok((buckets, stamps))
 }

@@ -46,12 +46,23 @@ pub struct WriterConfig {
     /// Where committed completions and seed reads go, in the order they
     /// happened (the rate limiter). `None` sends nothing.
     ///
-    /// Completions are `try_send`: a full sink drops that batch's debits,
-    /// counts them in `sink_dropped` and warns. Their rows are committed, so
-    /// the next seed of those subjects reads them; until then the windows
-    /// under-count by them. Seed results are sent with `send().await`, so
-    /// a seed is never lost: the consumer must only apply them in memory.
+    /// The writer never waits on it: everything is `try_send`.
+    ///
+    /// - A full sink drops a batch's debits (counted in `sink_dropped`).
+    ///   Their rows are committed, so the next seed of those subjects reads
+    ///   them; until then the windows under-count by them.
+    /// - A full sink drops a seed result (counted in `seeds_dropped`). The
+    ///   limiter treats it as a failed seed: the window stays unseeded, so it
+    ///   ignores debits, and is asked again after its seed timeout.
+    ///
+    /// Either is warned at most once per `drop_warn_interval`. Under a
+    /// sustained full sink long-window limits are therefore not enforced
+    /// until the limiter drains: fail-open, the direction TS takes on a
+    /// coordinator fault. `1m` and `concurrency` never depend on the sink.
     pub commit_sink: Option<mpsc::Sender<Committed>>,
+    /// Added to every seed read. Zero in production; tests use it to make a
+    /// seed slow while completions keep queuing behind it.
+    pub seed_delay: Duration,
 }
 
 impl Default for WriterConfig {
@@ -65,6 +76,7 @@ impl Default for WriterConfig {
             busy_timeout: Duration::from_secs(5),
             drop_warn_interval: Duration::from_secs(10),
             commit_sink: None,
+            seed_delay: Duration::ZERO,
         }
     }
 }
@@ -88,6 +100,8 @@ pub struct WriterStats {
     pub health_refused: u64,
     /// Committed completions the commit sink had no room for.
     pub sink_dropped: u64,
+    /// Seed results the commit sink had no room for.
+    pub seeds_dropped: u64,
 }
 
 #[derive(Debug)]
@@ -98,6 +112,7 @@ struct Counters {
     failed: AtomicU64,
     health_refused: AtomicU64,
     sink_dropped: AtomicU64,
+    seeds_dropped: AtomicU64,
 }
 
 impl Counters {
@@ -109,6 +124,7 @@ impl Counters {
             failed: AtomicU64::new(0),
             health_refused: AtomicU64::new(0),
             sink_dropped: AtomicU64::new(0),
+            seeds_dropped: AtomicU64::new(0),
         }
     }
 
@@ -120,6 +136,7 @@ impl Counters {
             failed: self.failed.load(Ordering::Relaxed),
             health_refused: self.health_refused.load(Ordering::Relaxed),
             sink_dropped: self.sink_dropped.load(Ordering::Relaxed),
+            seeds_dropped: self.seeds_dropped.load(Ordering::Relaxed),
         }
     }
 }
@@ -291,6 +308,9 @@ struct Sink {
     day_offset_minutes: i64,
     counters: Arc<Counters>,
     commit_sink: Option<mpsc::Sender<Committed>>,
+    sink_warned: Option<Instant>,
+    sink_warn_every: Duration,
+    seed_delay: Duration,
 }
 
 impl Sink {
@@ -321,13 +341,18 @@ impl Sink {
             .take()
             .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
         let q = query.clone();
+        let delay = self.seed_delay;
         let (conn, result) = tokio::task::spawn_blocking(move || {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
             let r = crate::usage::seed_rows(
                 &conn,
                 &q.api_key_id,
                 q.since_ms,
                 q.grain_ms,
                 q.requested_model.as_deref(),
+                q.stamp_cap,
             );
             (conn, r)
         })
@@ -337,15 +362,35 @@ impl Sink {
         let result = result
             .map(|(buckets, stamps)| SeedRows { buckets, stamps })
             .map_err(|e| e.to_string());
-        if let Some(sink) = &self.commit_sink {
-            // Awaited: a lost seed would leave its subject unseeded for good.
-            // A closed sink means nobody is listening; nothing to deliver.
-            sink.send(Committed::Seed { query, result }).await.ok();
+        if let Some(sink) = &self.commit_sink
+            && let Err(mpsc::error::TrySendError::Full(_)) =
+                sink.try_send(Committed::Seed { query, result })
+        {
+            // Never waited on: the limiter times the seed out and asks again.
+            let total = self.counters.seeds_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            self.warn_sink_full("seed", 1, total);
         }
         Ok(())
     }
 
-    fn deliver(&self, completions: Vec<super::events::Completion>) {
+    /// At most one sink-full warning per `drop_warn_interval`.
+    fn warn_sink_full(&mut self, what: &str, n: u64, total: u64) {
+        if self
+            .sink_warned
+            .is_some_and(|t| t.elapsed() < self.sink_warn_every)
+        {
+            return;
+        }
+        self.sink_warned = Some(Instant::now());
+        tracing::warn!(
+            dropped = n,
+            dropped_total = total,
+            kind = what,
+            "rate limiter commit sink full; dropped (long-window limits fail open until it drains)"
+        );
+    }
+
+    fn deliver(&mut self, completions: Vec<super::events::Completion>) {
         let Some(sink) = &self.commit_sink else {
             return;
         };
@@ -357,11 +402,7 @@ impl Sink {
             sink.try_send(Committed::Completions(completions))
         {
             let total = self.counters.sink_dropped.fetch_add(n, Ordering::Relaxed) + n;
-            tracing::warn!(
-                completions = n,
-                dropped_total = total,
-                "rate limiter commit sink full; long-window debits skipped (rows are committed)"
-            );
+            self.warn_sink_full("completions", n, total);
         }
     }
 
@@ -389,7 +430,7 @@ impl Sink {
             .map_err(|e| StoreError::Writer(format!("batch write panicked: {e}")))?;
             self.conn = Some(conn);
             events = back;
-            let c = &self.counters;
+            let c = Arc::clone(&self.counters);
             match result {
                 Ok(outcome) => {
                     self.deliver(outcome.completions);
@@ -472,6 +513,9 @@ async fn run(
         day_offset_minutes: config.day_offset_minutes,
         counters: Arc::clone(&counters),
         commit_sink: config.commit_sink.clone(),
+        sink_warned: None,
+        sink_warn_every: config.drop_warn_interval,
+        seed_delay: config.seed_delay,
     };
     // Events lost from flushes the close waited on: any in flight when the
     // stop arrived, and the drain after it.

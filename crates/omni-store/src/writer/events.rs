@@ -218,6 +218,8 @@ pub struct SeedQuery {
     pub tag: u8,
     /// The instant the seed was asked for, echoed back.
     pub now: f64,
+    /// Most row stamps to return (the oldest), so the payload is bounded.
+    pub stamp_cap: usize,
 }
 
 /// What a seed read: bucket sums and every retained done row's `at`.

@@ -5,7 +5,7 @@ mod common;
 
 use common::{bun_available, bun_script};
 use omni_store::SqliteStore;
-use omni_store::usage::{done_rows, sum_buckets};
+use omni_store::usage::{done_stamps, seed_rows, sum_buckets};
 use rusqlite::params;
 use serde_json::{Value, json};
 
@@ -124,16 +124,35 @@ console.log(JSON.stringify(out));
             omni_ir::jsjson::to_string(&expected["buckets"]),
             "{case}"
         );
-        let rows = done_rows(store.connection(), "k1", s, m).expect("rows");
-        assert_eq!(
-            json!(rows.first().map(|r| r.0)),
-            expected["oldest"],
-            "{case}"
-        );
-        assert!(rows.windows(2).all(|w| w[0].0 <= w[1].0));
-        assert!(
-            rows.iter().all(|r| !r.1.starts_with('p')),
-            "pending rows excluded"
-        );
+        let stamps = done_stamps(store.connection(), "k1", s, m, 1000).expect("stamps");
+        assert_eq!(json!(stamps.first()), expected["oldest"], "{case}");
+        assert!(stamps.windows(2).all(|w| w[0] <= w[1]));
     }
+}
+
+/// The seed payload is bounded in SQL: stamps are capped (oldest first,
+/// which is what an exact reset reads), and nothing per-request beyond the
+/// instant is selected.
+#[test]
+fn seed_stamps_are_capped_in_the_query_and_keep_the_oldest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::open(dir.path().join("omni.db"), 0).expect("open");
+    let c = store.connection();
+    for i in 0..50_i64 {
+        c.execute(
+            "INSERT INTO request_logs (id, at, api_key_id, requested_model, status, duration_ms)
+             VALUES (?,?,'k1','fast',200,1)",
+            params![format!("r{i}"), T0 - 1000 + (49 - i) * 10],
+        )
+        .expect("row");
+    }
+    let stamps = done_stamps(c, "k1", T0 - 5 * HOUR, None, 7).expect("stamps");
+    assert_eq!(stamps.len(), 7);
+    assert_eq!(stamps[0], T0 - 1000);
+    assert_eq!(stamps[6], T0 - 1000 + 60);
+    let (buckets, capped) = seed_rows(c, "k1", T0 - 5 * HOUR, 60_000, None, 7).expect("seed");
+    assert_eq!(capped, stamps);
+    // The aggregate still counts every row, whatever the stamp cap.
+    let total: f64 = buckets.iter().map(|(_, c)| c.requests).sum();
+    assert_eq!(total, 50.0);
 }

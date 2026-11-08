@@ -44,7 +44,7 @@ use omni_ratelimit::buckets::Counts;
 use omni_ratelimit::limits::{CountWindows, LimitConfig, LimitScope};
 use omni_ratelimit::window::SlidingWindow;
 use omni_ratelimit::{CounterSnapshot, HeadroomByDimension, Violation, Window, WindowCounter};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The long windows, in `LONG_WINDOWS` order.
@@ -65,6 +65,11 @@ pub(crate) fn long_index(window: Window) -> usize {
 
 /// How often drained rings are swept (`SWEEP_INTERVAL_MS`).
 const SWEEP_INTERVAL_MS: f64 = 1_000.0;
+
+/// How long a seed may be outstanding before it counts as failed and is
+/// asked again. Generous next to a normal round trip (one writer batch plus a
+/// read): a seed result dropped by a full sink is retried after it.
+pub const SEED_TIMEOUT_MS: f64 = 5_000.0;
 
 /// Seeds waiting for the seeder. Beyond this a subject is simply asked
 /// again at its next request.
@@ -204,7 +209,11 @@ pub(crate) struct State {
     gauges: HashMap<String, u64>,
     pub(crate) long: HashMap<String, [LongState; 2]>,
     pub(crate) pending: VecDeque<SeedJob>,
-    pub(crate) seeding: HashSet<(String, usize)>,
+    /// Seeds asked for and not yet installed, with when they were asked.
+    /// One older than [`SEED_TIMEOUT_MS`] is treated as failed (its result
+    /// was dropped by a full sink, or the writer never ran it) and may be
+    /// asked again.
+    pub(crate) seeding: HashMap<(String, usize), f64>,
     last_sweep: f64,
 }
 
@@ -227,13 +236,19 @@ impl State {
             .or_insert_with(|| [LongState::new(Window::H5), LongState::new(Window::W1)])
     }
 
-    /// Queues a seed unless one is already queued or running.
+    /// Queues a seed unless one is already queued or in flight and not yet
+    /// timed out.
     fn want_seed(&mut self, s: &Subject, window: Window, now: f64) -> bool {
         let slot = (s.id.clone(), long_index(window));
-        if self.seeding.contains(&slot) || self.pending.len() >= MAX_PENDING_SEEDS {
+        if self.pending.len() >= MAX_PENDING_SEEDS {
             return false;
         }
-        self.seeding.insert(slot);
+        if let Some(asked) = self.seeding.get(&slot)
+            && now - *asked < SEED_TIMEOUT_MS
+        {
+            return false;
+        }
+        self.seeding.insert(slot, now);
         self.pending.push_back(SeedJob {
             subject: s.id.clone(),
             key_id: s.key_id.clone(),
@@ -274,6 +289,8 @@ impl State {
         }
         for window in LONG {
             let state = &mut self.long_of(&s.id)[long_index(window)];
+            // Stamps age out with the window they describe, read or not.
+            state.trim(window, now);
             match state.buckets.sum(now) {
                 Some(sums) => {
                     // The far end of the window; corrected on a refusal.

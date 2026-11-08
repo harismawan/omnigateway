@@ -11,6 +11,7 @@
 use crate::ratelimit::{MAX_STAMPS, RateLimiter, SeedJob, grain_ms, long_index};
 use omni_ratelimit::Window;
 use omni_store::writer::{Committed, SeedQuery, SeedRows, WriterHandle};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -53,6 +54,7 @@ impl RateLimiter {
             grain_ms: grain_ms(job.window) as i64,
             tag: u8::from(long_index(job.window) == 1),
             now: job.now,
+            stamp_cap: MAX_STAMPS,
         }
     }
 
@@ -92,13 +94,23 @@ impl RateLimiter {
     #[allow(clippy::cast_precision_loss)]
     fn install(&self, query: &SeedQuery, result: Result<SeedRows, String>) {
         let window = window_of(query.tag);
-        let mut st = self.lock();
-        st.seeding
-            .remove(&(query.subject.clone(), long_index(window)));
-        let rows = match result {
-            Ok(rows) => rows,
+        let slot = (query.subject.clone(), long_index(window));
+        // Conversion before the lock: the payload is O(buckets + stamp cap)
+        // (bounded in SQL), and nothing of it needs the limiter's state.
+        let prepared = result.map(|rows| {
+            let buckets: Vec<(f64, omni_ratelimit::buckets::Counts)> = rows
+                .buckets
+                .into_iter()
+                .map(|(start, c)| (start as f64, c))
+                .collect();
+            let mut stamps: VecDeque<f64> = rows.stamps.into_iter().map(|s| s as f64).collect();
+            stamps.truncate(MAX_STAMPS);
+            (buckets, stamps)
+        });
+        let (buckets, stamps) = match prepared {
+            Ok(p) => p,
             Err(e) => {
-                drop(st);
+                self.lock().seeding.remove(&slot);
                 match &query.requested_model {
                     Some(model) => tracing::warn!(api_key_id = %query.api_key_id, model = %model,
                         reason = %e, "rate limit counters unavailable"),
@@ -108,20 +120,14 @@ impl RateLimiter {
                 return;
             }
         };
+        let mut st = self.lock();
+        st.seeding.remove(&slot);
         let state = &mut st.long_of(&query.subject)[long_index(window)];
         if state.buckets.is_seeded() {
             return;
         }
-        let buckets: Vec<(f64, omni_ratelimit::buckets::Counts)> = rows
-            .buckets
-            .into_iter()
-            .map(|(start, c)| (start as f64, c))
-            .collect();
         state.buckets.seed(query.now, &buckets);
-        state.stamps = rows.stamps.into_iter().map(|s| s as f64).collect();
-        while state.stamps.len() > MAX_STAMPS {
-            state.stamps.pop_front();
-        }
+        state.stamps = stamps;
         state.trim(window, query.now);
     }
 
@@ -174,6 +180,7 @@ impl RateLimiter {
                 q.since_ms,
                 q.grain_ms,
                 q.requested_model.as_deref(),
+                q.stamp_cap,
             )
             .map(|(buckets, stamps)| SeedRows { buckets, stamps })
             .map_err(|e| e.to_string());
