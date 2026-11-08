@@ -773,7 +773,6 @@ name = "omni-gateway-core"
 version = "0.16.0"
 dependencies = [
  "arc-swap",
- "indexmap",
  "omni-crypto",
  "omni-ir",
  "omni-ratelimit",

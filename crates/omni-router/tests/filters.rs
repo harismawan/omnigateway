@@ -337,7 +337,10 @@ fn excludes_targets_that_lack_a_required_capability() {
 fn open_health(opened_at: i64, failures: i64) -> omni_store::CredentialHealth {
     health_with("a", |h| {
         h.breaker_state = BreakerState::Open;
-        h.opened_at = Some(opened_at);
+        #[allow(clippy::cast_precision_loss)]
+        {
+            h.opened_at = Some(opened_at as f64);
+        }
         h.consecutive_failures = failures;
     })
 }
@@ -376,7 +379,7 @@ fn a_half_open_breaker_is_admitted_as_probe_territory() {
         credentials: vec![credential("a")],
         health: vec![health_with("a", |h| {
             h.breaker_state = BreakerState::HalfOpen;
-            h.opened_at = Some(1_000_000);
+            h.opened_at = Some(1_000_000.0);
             h.consecutive_failures = 3;
         })],
         ..Snap::default()
@@ -427,7 +430,9 @@ fn rate_limit_windows_exclude_until_they_pass() {
     let at = |until: i64| {
         let s = snapshot(Snap {
             credentials: vec![credential("a")],
-            health: vec![health_with("a", |h| h.rate_limited_until = Some(until))],
+            health: vec![health_with("a", |h| {
+                h.rate_limited_until = Some(until as f64)
+            })],
             ..Snap::default()
         });
         let out = eligible(&input(&r, &m, &s));

@@ -94,10 +94,12 @@ fn scenario(rng: &mut Rng) -> Scenario {
                         .clone();
                     h.opened_at = rng
                         .chance(70)
-                        .then(|| 1_000_000 - (rng.below(200_000) as i64));
-                    h.rate_limited_until = rng
-                        .chance(20)
-                        .then(|| 1_000_000 + (rng.below(20_000) as i64) - 10_000);
+                        .then(|| 1_000_000.0 - rng.below(200_000) as f64);
+                    // Fractional sometimes: a fractional Retry-After makes one.
+                    h.rate_limited_until = rng.chance(20).then(|| {
+                        1_000_000.0 + rng.below(20_000) as f64 - 10_000.0
+                            + if rng.chance(50) { 0.4 } else { 0.0 }
+                    });
                 }));
             }
             if rng.chance(30) {

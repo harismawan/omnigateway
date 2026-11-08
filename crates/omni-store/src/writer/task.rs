@@ -8,7 +8,7 @@
 //! than from when the writer got round to it.
 
 use super::batch;
-use super::events::WriteEvent;
+use super::events::{Committed, SeedQuery, SeedRows, WriteEvent};
 use crate::error::StoreError;
 use rusqlite::{Connection, ErrorCode};
 use std::path::Path;
@@ -43,6 +43,15 @@ pub struct WriterConfig {
     pub busy_timeout: Duration,
     /// At most one dropped-event warning per this long.
     pub drop_warn_interval: Duration,
+    /// Where committed completions and seed reads go, in the order they
+    /// happened (the rate limiter). `None` sends nothing.
+    ///
+    /// Completions are `try_send`: a full sink drops that batch's debits,
+    /// counts them in `sink_dropped` and warns. Their rows are committed, so
+    /// the next seed of those subjects reads them; until then the windows
+    /// under-count by them. Seed results are sent with `send().await`, so
+    /// a seed is never lost: the consumer must only apply them in memory.
+    pub commit_sink: Option<mpsc::Sender<Committed>>,
 }
 
 impl Default for WriterConfig {
@@ -55,6 +64,7 @@ impl Default for WriterConfig {
             interval: Duration::from_millis(200),
             busy_timeout: Duration::from_secs(5),
             drop_warn_interval: Duration::from_secs(10),
+            commit_sink: None,
         }
     }
 }
@@ -76,6 +86,8 @@ pub struct WriterStats {
     /// Health rows the foreign key refused: no such credential, which TS's
     /// `updateHealth` would also have thrown on.
     pub health_refused: u64,
+    /// Committed completions the commit sink had no room for.
+    pub sink_dropped: u64,
 }
 
 #[derive(Debug)]
@@ -85,6 +97,7 @@ struct Counters {
     written: AtomicU64,
     failed: AtomicU64,
     health_refused: AtomicU64,
+    sink_dropped: AtomicU64,
 }
 
 impl Counters {
@@ -95,6 +108,7 @@ impl Counters {
             written: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             health_refused: AtomicU64::new(0),
+            sink_dropped: AtomicU64::new(0),
         }
     }
 
@@ -105,6 +119,7 @@ impl Counters {
             written: self.written.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             health_refused: self.health_refused.load(Ordering::Relaxed),
+            sink_dropped: self.sink_dropped.load(Ordering::Relaxed),
         }
     }
 }
@@ -190,6 +205,13 @@ impl WriterHandle {
         }
     }
 
+    /// Queues a long-window seed read, run on the writer's connection after
+    /// every event queued before it is committed. `false` means it was not
+    /// queued (channel full or closed): ask again later. Never waits.
+    pub fn seed(&self, query: SeedQuery) -> bool {
+        self.send(WriteEvent::Seed(query))
+    }
+
     /// Events dropped so far.
     pub fn dropped(&self) -> u64 {
         self.counters.dropped.load(Ordering::Relaxed)
@@ -268,9 +290,81 @@ struct Sink {
     node_id: Arc<str>,
     day_offset_minutes: i64,
     counters: Arc<Counters>,
+    commit_sink: Option<mpsc::Sender<Committed>>,
 }
 
 impl Sink {
+    /// Writes a batch that may contain seed requests: the events before each
+    /// seed are flushed (and their completions delivered) first, then the
+    /// seed is read and its result delivered, so the sink sees one ordered
+    /// story. Returns the events lost.
+    async fn flush_ordered(&mut self, events: Vec<WriteEvent>) -> Result<u64, StoreError> {
+        let mut lost = 0;
+        let mut run = Vec::with_capacity(events.len());
+        for e in events {
+            match e {
+                WriteEvent::Seed(q) => {
+                    lost += self.flush(std::mem::take(&mut run)).await?;
+                    self.seed(q).await?;
+                }
+                other => run.push(other),
+            }
+        }
+        lost += self.flush(run).await?;
+        Ok(lost)
+    }
+
+    /// One seed read, in one read transaction on the writer's connection.
+    async fn seed(&mut self, query: SeedQuery) -> Result<(), StoreError> {
+        let conn = self
+            .conn
+            .take()
+            .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
+        let q = query.clone();
+        let (conn, result) = tokio::task::spawn_blocking(move || {
+            let r = crate::usage::seed_rows(
+                &conn,
+                &q.api_key_id,
+                q.since_ms,
+                q.grain_ms,
+                q.requested_model.as_deref(),
+            );
+            (conn, r)
+        })
+        .await
+        .map_err(|e| StoreError::Writer(format!("seed read panicked: {e}")))?;
+        self.conn = Some(conn);
+        let result = result
+            .map(|(buckets, stamps)| SeedRows { buckets, stamps })
+            .map_err(|e| e.to_string());
+        if let Some(sink) = &self.commit_sink {
+            // Awaited: a lost seed would leave its subject unseeded for good.
+            // A closed sink means nobody is listening; nothing to deliver.
+            sink.send(Committed::Seed { query, result }).await.ok();
+        }
+        Ok(())
+    }
+
+    fn deliver(&self, completions: Vec<super::events::Completion>) {
+        let Some(sink) = &self.commit_sink else {
+            return;
+        };
+        if completions.is_empty() {
+            return;
+        }
+        let n = completions.len() as u64;
+        if let Err(mpsc::error::TrySendError::Full(_)) =
+            sink.try_send(Committed::Completions(completions))
+        {
+            let total = self.counters.sink_dropped.fetch_add(n, Ordering::Relaxed) + n;
+            tracing::warn!(
+                completions = n,
+                dropped_total = total,
+                "rate limiter commit sink full; long-window debits skipped (rows are committed)"
+            );
+        }
+    }
+
     /// Writes `events` off the async threads, retrying a busy database with
     /// backoff. Returns how many events were lost (0 when it committed). Only
     /// losing the connection itself ends the writer.
@@ -298,6 +392,7 @@ impl Sink {
             let c = &self.counters;
             match result {
                 Ok(outcome) => {
+                    self.deliver(outcome.completions);
                     c.batches.fetch_add(1, Ordering::Relaxed);
                     c.written.fetch_add(n, Ordering::Relaxed);
                     c.health_refused
@@ -341,7 +436,7 @@ async fn flush_watching(
     tick: &mut tokio::time::Interval,
     counters: &Counters,
 ) -> Result<u64, StoreError> {
-    let flush = sink.flush(batch);
+    let flush = sink.flush_ordered(batch);
     tokio::pin!(flush);
     let lost = loop {
         tokio::select! {
@@ -376,6 +471,7 @@ async fn run(
         node_id: Arc::from(config.node_id.as_str()),
         day_offset_minutes: config.day_offset_minutes,
         counters: Arc::clone(&counters),
+        commit_sink: config.commit_sink.clone(),
     };
     // Events lost from flushes the close waited on: any in flight when the
     // stop arrived, and the drain after it.

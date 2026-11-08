@@ -135,12 +135,13 @@ impl LogEvent {
 ///
 /// On a pair with no row yet it files one with the `blankHealth` state
 /// (`closed`, no `opened_at`), which is the row `updateHealth` writes there.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HealthMeasurement {
     pub credential_id: String,
     pub model: String,
     pub consecutive_failures: i64,
-    pub rate_limited_until: Option<i64>,
+    /// A JS number; bound as `bun:sqlite` binds one.
+    pub rate_limited_until: Option<f64>,
 }
 
 /// A breaker decision: the whole `credential_health` row as `updateHealth`
@@ -151,7 +152,7 @@ pub struct HealthMeasurement {
 /// reads the in-process snapshot, so riding the batch is enough; the cluster
 /// slice routes these through an immediate path instead, because other
 /// replicas route on them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BreakerTransition(pub CredentialHealth);
 
 /// Anything the writer persists.
@@ -163,6 +164,8 @@ pub enum WriteEvent {
     Log(LogEvent),
     HealthMeasurement(HealthMeasurement),
     BreakerTransition(BreakerTransition),
+    /// Not persisted: a seed read, ordered with the writes around it.
+    Seed(SeedQuery),
 }
 
 impl From<LogEvent> for WriteEvent {
@@ -181,4 +184,58 @@ impl From<BreakerTransition> for WriteEvent {
     fn from(e: BreakerTransition) -> Self {
         Self::BreakerTransition(e)
     }
+}
+
+/// A completed `request_logs` row, as stored, delivered after the batch
+/// that wrote it committed. The rate limiter debits its long windows with
+/// these, in commit order (TS: "row first, then the debit").
+#[derive(Debug, Clone, PartialEq)]
+pub struct Completion {
+    /// The request id (`request_logs.id`).
+    pub id: String,
+    pub api_key_id: Option<String>,
+    pub requested_model: String,
+    /// The four disjoint token classes, summed.
+    pub tokens: f64,
+    pub cost_usd: f64,
+    /// `request_logs.at`.
+    pub at: f64,
+}
+
+/// A long-window seed the writer reads on its own connection, between
+/// batches: everything committed before it, nothing after.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeedQuery {
+    /// The limiter's subject id, echoed back.
+    pub subject: String,
+    pub api_key_id: String,
+    /// `None` for the key-wide subject.
+    pub requested_model: Option<String>,
+    /// Rows at or after this instant (ms).
+    pub since_ms: i64,
+    pub grain_ms: i64,
+    /// Opaque to the writer; echoed back (the limiter's window index).
+    pub tag: u8,
+    /// The instant the seed was asked for, echoed back.
+    pub now: f64,
+}
+
+/// What a seed read: bucket sums and every retained done row's `at`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeedRows {
+    pub buckets: Vec<(i64, omni_ratelimit::buckets::Counts)>,
+    pub stamps: Vec<i64>,
+}
+
+/// What the writer tells its commit sink, in the order it happened.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Committed {
+    /// One committed batch's completed rows.
+    Completions(Vec<Completion>),
+    /// A seed's read, taken after every completion delivered before it and
+    /// before every one delivered after it.
+    Seed {
+        query: SeedQuery,
+        result: Result<SeedRows, String>,
+    },
 }

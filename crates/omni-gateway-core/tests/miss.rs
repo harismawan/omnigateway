@@ -216,35 +216,38 @@ async fn a_rebuild_clears_negative_entries_so_a_new_key_is_found() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_key_created_by_the_cli_authenticates_within_one_refresh_even_after_a_negative() {
+    const INTERVAL: Duration = Duration::from_millis(100);
     let h = harness(MissConfig::default());
-    let refresher = h.holder.clone().spawn_refresher(
-        SqliteStore::open(&h.path, 0).expect("s"),
-        Duration::from_millis(50),
-    );
-    // Let the refresher record its starting version.
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    let refresher = h
+        .holder
+        .clone()
+        .spawn_refresher(SqliteStore::open(&h.path, 0).expect("s"), INTERVAL);
     let k = hash("sk-omni-cli");
     assert!(matches!(h.resolver.resolve(&k).await, MissResult::Absent));
+    assert_eq!(h.resolver.reads(), 1);
+    let before = h.holder.generation();
     key_row(
         &Connection::open(&h.path).expect("c"),
         "k-cli",
         "sk-omni-cli",
     );
-    let started = std::time::Instant::now();
-    let mut ok = false;
-    while started.elapsed() < Duration::from_millis(500) {
-        let found = match h.holder.load().authenticate(Some("sk-omni-cli"), 0) {
-            AuthOutcome::Ok(_) => true,
-            AuthOutcome::Miss => matches!(h.resolver.resolve(&k).await, MissResult::Found(_)),
-            AuthOutcome::Refused(e) => panic!("{e:?}"),
-        };
-        if found {
-            ok = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    let committed = std::time::Instant::now();
+    // The next poll sees the commit and swaps: at most one interval, plus
+    // the rebuild itself. Bounded at two intervals.
+    while h.holder.generation() == before {
+        assert!(
+            committed.elapsed() < 2 * INTERVAL,
+            "no rebuild within two refresh intervals"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    assert!(ok, "new key not served within ~one refresh interval");
+    // Served from the rebuilt snapshot, and the negative no longer applies.
+    assert!(matches!(
+        h.holder.load().authenticate(Some("sk-omni-cli"), 0),
+        AuthOutcome::Ok(_)
+    ));
+    assert!(matches!(h.resolver.resolve(&k).await, MissResult::Found(_)));
+    assert_eq!(h.resolver.reads(), 1, "found in the snapshot, no read");
     refresher.abort();
 }
 

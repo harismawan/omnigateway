@@ -6,6 +6,12 @@
 //!
 //! Instants and amounts are `f64` because they are JS numbers in TS, and the
 //! headroom figures reach response headers through `String(n)`.
+//!
+//! **Precondition: every counter, limit and instant is finite.** They come
+//! from integer rows, positive parsed limits and this gateway's own sums, so
+//! NaN cannot arise. TS's `Math.max(0, x)` would propagate a NaN where the
+//! `f64::max` used here clamps it to zero; that difference is unreachable
+//! under the precondition, which debug builds assert at each entry point.
 
 pub mod buckets;
 pub mod limits;
@@ -247,6 +253,16 @@ fn dimension_configured(scope: &LimitScope, dimension: Dimension) -> bool {
     }
 }
 
+fn counters_finite(c: &CounterSnapshot) -> bool {
+    let dim = |d: &DimensionCounters| {
+        [d.m1, d.h5, d.w1]
+            .into_iter()
+            .flatten()
+            .all(|w| w.used.is_finite() && w.reset_at.is_finite())
+    };
+    c.concurrency.is_finite() && dim(&c.requests) && dim(&c.tokens) && dim(&c.spend)
+}
+
 /// `lastToClear`: the latest reset, then the larger overshoot, then walk order.
 pub fn last_to_clear(violations: &[Violation]) -> Option<Violation> {
     let mut chosen: Option<Violation> = None;
@@ -270,6 +286,10 @@ pub fn last_to_clear(violations: &[Violation]) -> Option<Violation> {
 /// a window held before this request, so landing exactly on a ceiling is
 /// allowed and the next request is refused.
 pub fn evaluate(config: &LimitScope, counters: &CounterSnapshot, now: f64) -> Decision {
+    debug_assert!(
+        now.is_finite() && counters_finite(counters),
+        "non-finite rate-limit counter"
+    );
     let mut violations = Vec::new();
     let mut headroom = HeadroomByDimension::default();
 
@@ -374,12 +394,14 @@ pub fn combine_all(decisions: &[Decision]) -> Decision {
 
 /// `retryAfterMs`: never negative, zero for no violation.
 pub fn retry_after_ms(violation: Option<&Violation>, now: f64) -> f64 {
+    debug_assert!(now.is_finite() && violation.is_none_or(|v| v.reset_at.is_finite()));
     violation.map_or(0.0, |v| (v.reset_at - now).max(0.0))
 }
 
 /// `afterThisRequest` (`routes/proxy.ts`): `remaining` once the request being
 /// served is counted. Only `requests` moves; tokens and spend debit later.
 pub fn after_this_request(headroom: &HeadroomByDimension) -> HeadroomByDimension {
+    debug_assert!(headroom.requests.is_none_or(|r| r.remaining.is_finite()));
     let mut out = *headroom;
     if let Some(r) = &mut out.requests {
         r.remaining = (r.remaining - 1.0).max(0.0);
@@ -408,6 +430,7 @@ pub fn with_reset(
 /// `refusedHeadroom`: on a refusal, the refused dimension's header is the
 /// violated entry itself, so it names the same instant as `Retry-After`.
 pub fn refused_headroom(decision: &Decision, violation: &Violation) -> HeadroomByDimension {
+    debug_assert!(violation.limit.is_finite() && violation.used.is_finite());
     let mut out = decision.headroom;
     if let Some(window) = violation.window
         && violation.dimension != Dimension::Concurrency

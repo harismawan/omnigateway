@@ -9,13 +9,24 @@
 //! - `concurrency` from a gauge raised at admission and lowered when the
 //!   [`Admission`] is released or dropped (immediately; never batched);
 //! - the long windows (`5h`, `1w`) from time buckets seeded from the store
-//!   and debited by every completed request.
+//!   and debited by every completed request once its row is committed.
+//!
+//! **Ordering, not bookkeeping** (TS `rateLimit.ts`: "row first, then the
+//! debit"). The request-log writer is the only writer of `request_logs`.
+//! After each batch commits it delivers that batch's completions, and it
+//! runs every seed read on its own connection between batches, sending the
+//! result on the same ordered channel ([`RateLimiter::spawn_consumer`]). So a
+//! row committed before a seed's read is in its aggregate, and that row's
+//! debit was delivered (and ignored, the window being unseeded) before the
+//! seed; a row committed after it is debited after the seed is installed.
+//! The accepted cost: a long-window debit lags its completion by up to one
+//! writer batch (~200 ms), as TS's debit follows its row's write.
 //!
 //! Differences from TS, both deliberate:
 //!
 //! - **Seeding does not block** (spec ruling). A subject whose long window
 //!   is unseeded is admitted against the limits it can check, and a seed is
-//!   queued for the background seeder ([`RateLimiter::spawn_seeder`]). Until
+//!   asked of the request-log writer ([`RateLimiter::spawn_consumer`]). Until
 //!   it lands, a key can overshoot that window by the requests admitted
 //!   meanwhile. [`RateLimiter::preseed`] seeds every limited key at boot.
 //! - **A refusal's exact reset is read from memory.** TS asks the store for
@@ -27,16 +38,14 @@
 //! The gauge has no TTL: a slot is freed by `Drop`, so the leak TS's TTL and
 //! renewal exist to heal cannot happen.
 
+use crate::buckets::Buckets;
 use omni_ir::error::{ErrorCode, GatewayError};
-use omni_ratelimit::buckets::{Buckets, Counts};
+use omni_ratelimit::buckets::Counts;
 use omni_ratelimit::limits::{CountWindows, LimitConfig, LimitScope};
 use omni_ratelimit::window::SlidingWindow;
 use omni_ratelimit::{CounterSnapshot, HeadroomByDimension, Violation, Window, WindowCounter};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
-
-pub use crate::ratelimit_seed::SeedRead;
-use crate::ratelimit_seed::{MAX_PENDING_DEBITS, PendingDebit};
 
 /// The long windows, in `LONG_WINDOWS` order.
 const LONG: [Window; 2] = [Window::H5, Window::W1];
@@ -148,12 +157,6 @@ pub(crate) struct LongState {
     pub(crate) buckets: Buckets,
     /// Every retained completed row's `at`, ascending. Valid once seeded.
     pub(crate) stamps: VecDeque<f64>,
-    /// Debits that arrived while unseeded, reconciled at install.
-    pub(crate) pending: VecDeque<PendingDebit>,
-    /// The request ids the installed seed already counted, and until when
-    /// a late debit is checked against them.
-    pub(crate) seeded_ids: HashSet<String>,
-    pub(crate) seeded_ids_until: f64,
 }
 
 impl LongState {
@@ -161,9 +164,6 @@ impl LongState {
         Self {
             buckets: Buckets::new(grain_ms(window), window.ms()),
             stamps: VecDeque::new(),
-            pending: VecDeque::new(),
-            seeded_ids: HashSet::new(),
-            seeded_ids_until: f64::NEG_INFINITY,
         }
     }
 
@@ -484,19 +484,20 @@ impl RateLimiter {
         result.map(|_| ())
     }
 
-    /// `debit`: one completed request against the long windows, beside the
-    /// writer's `Finish` for the same `request_id`. `row_at` is the log
-    /// row's `at`; `now` stamps the bucket.
+    /// `debit`: one completed request against the long windows. Call it
+    /// only once the row is committed, in commit order: the writer delivers
+    /// committed completions to [`Self::apply`], which calls this. `row_at`
+    /// is the row's `at`; `now` stamps the bucket.
     ///
-    /// Counted exactly once whatever the interleaving with a seed: a debit
-    /// for an unseeded window is held, and the seed's install adds it only
-    /// if the rows it read did not include `request_id`.
-    #[allow(clippy::too_many_arguments)]
+    /// A window not yet seeded ignores it, exactly as TS's buckets do: the
+    /// seed that follows reads the row instead ("row first, then the
+    /// debit"). Because seeds are read on the writer's connection and
+    /// delivered on the same ordered path, a row is counted either by the
+    /// seed or by its debit, never both and never neither.
     pub fn debit(
         &self,
         key_id: &str,
         requested_model: &str,
-        request_id: &str,
         tokens: f64,
         cost_usd: f64,
         row_at: f64,
@@ -517,29 +518,11 @@ impl RateLimiter {
             }
             for window in LONG {
                 let state = &mut st.long_of(&subject)[long_index(window)];
-                if !state.buckets.is_seeded() {
-                    if state.pending.len() >= MAX_PENDING_DEBITS {
-                        state.pending.pop_front();
-                        tracing::warn!(subject = %subject, "rate limit pending debits full; oldest dropped");
-                    }
-                    state.pending.push_back(PendingDebit {
-                        request_id: request_id.to_owned(),
-                        row_at,
-                        now,
-                        delta,
-                    });
-                    continue;
+                if state.buckets.is_seeded() {
+                    state.buckets.add(now, delta);
+                    state.push_stamp(row_at);
+                    state.trim(window, now);
                 }
-                if now <= state.seeded_ids_until {
-                    if state.seeded_ids.remove(request_id) {
-                        continue;
-                    }
-                } else if !state.seeded_ids.is_empty() {
-                    state.seeded_ids = HashSet::new();
-                }
-                state.buckets.add(now, delta);
-                state.push_stamp(row_at);
-                state.trim(window, now);
             }
         }
     }

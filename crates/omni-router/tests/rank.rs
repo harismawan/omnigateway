@@ -320,7 +320,7 @@ fn weighted_selection_will_not_draw_a_failing_credential_at_full_weight() {
         health: vec![health_with("sick", |h| {
             h.consecutive_failures = 3;
             h.breaker_state = BreakerState::Open;
-            h.opened_at = Some(-9_000_000);
+            h.opened_at = Some(-9_000_000.0);
         })],
         ..Snap::default()
     });

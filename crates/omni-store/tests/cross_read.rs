@@ -219,7 +219,7 @@ fn rust_reads_a_database_the_ts_cli_wrote() {
     assert_eq!(snap.health[0].credential_id, credential_id);
     assert_eq!(snap.health[0].breaker_state, BreakerState::Open);
     assert_eq!(snap.health[0].consecutive_failures, 3);
-    assert_eq!(snap.health[0].opened_at, Some(1_794_000_000_000));
+    assert_eq!(snap.health[0].opened_at, Some(1_794_000_000_000.0));
     assert_eq!(snap.health[0].rate_limited_until, None);
 
     // Settings, as `omni settings get` reports them.

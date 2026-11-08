@@ -148,7 +148,7 @@ fn fail(
         h,
         &Failure {
             settings: &s,
-            now: 1_000_000,
+            now: 1_000_000.0,
             code,
             retry_after_ms,
             jitter,
@@ -172,8 +172,8 @@ fn success_resets_every_routing_field() {
     let next = record_success(&health_with("a", |h| {
         h.breaker_state = BreakerState::Open;
         h.consecutive_failures = 5;
-        h.opened_at = Some(999_000);
-        h.rate_limited_until = Some(1_005_000);
+        h.opened_at = Some(999_000.0);
+        h.rate_limited_until = Some(1_005_000.0);
     }));
     assert_eq!(next, health("a"));
 }
@@ -192,8 +192,8 @@ fn success_would_change_is_exactly_whether_record_success_changes_the_row() {
             health_with("a", |h| h.breaker_state = BreakerState::HalfOpen),
             true,
         ),
-        (health_with("a", |h| h.rate_limited_until = Some(1)), true),
-        (health_with("a", |h| h.opened_at = Some(1)), true),
+        (health_with("a", |h| h.rate_limited_until = Some(1.0)), true),
+        (health_with("a", |h| h.opened_at = Some(1.0)), true),
     ];
     for (h, expected) in cases {
         assert_eq!(success_would_change(Some(&h)), expected, "{h:?}");
@@ -216,7 +216,7 @@ fn hard_failures_accumulate_and_open_at_the_threshold() {
     );
     assert_eq!(third.consecutive_failures, 3);
     assert_eq!(third.breaker_state, BreakerState::Open);
-    assert_eq!(third.opened_at, Some(1_000_000));
+    assert_eq!(third.opened_at, Some(1_000_000.0));
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn a_failed_probe_and_an_auth_failure_open_immediately() {
     );
     assert_eq!(
         (probe.breaker_state, probe.opened_at),
-        (BreakerState::Open, Some(1_000_000))
+        (BreakerState::Open, Some(1_000_000.0))
     );
     let auth = fail(&health("a"), ErrorCode::Auth, None, 0.0);
     assert_eq!(
@@ -244,14 +244,14 @@ fn a_failed_probe_and_an_auth_failure_open_immediately() {
 #[test]
 fn soft_failures_park_the_credential_without_touching_the_breaker() {
     let rl = fail(&health("a"), ErrorCode::RateLimit, Some(30_000.0), 0.0);
-    assert_eq!(rl.rate_limited_until, Some(1_030_000));
+    assert_eq!(rl.rate_limited_until, Some(1_030_000.0));
     assert_eq!(
         (rl.breaker_state, rl.consecutive_failures),
         (BreakerState::Closed, 0)
     );
     assert_eq!(
         fail(&health("a"), ErrorCode::RateLimit, None, 0.0).rate_limited_until,
-        Some(1_060_000)
+        Some(1_060_000.0)
     );
     let a = fail(&health("a"), ErrorCode::RateLimit, Some(10_000.0), 0.0)
         .rate_limited_until
@@ -259,16 +259,15 @@ fn soft_failures_park_the_credential_without_touching_the_breaker() {
     let b = fail(&health("a"), ErrorCode::RateLimit, Some(10_000.0), 1.0)
         .rate_limited_until
         .expect("b");
-    assert_eq!(b - a, 2_000);
+    assert_eq!(b - a, 2_000.0);
     assert_eq!(
         fail(&health("a"), ErrorCode::QuotaExhausted, None, 0.0).rate_limited_until,
-        Some(4_600_000)
+        Some(4_600_000.0)
     );
-    // A fractional Retry-After makes a fractional JS instant; the integer
-    // column takes its ceiling, so `until > now` agrees for every integer now.
+    // A fractional Retry-After keeps its fraction, as the JS sum does.
     assert_eq!(
         fail(&health("a"), ErrorCode::RateLimit, Some(1_500.4), 0.5).rate_limited_until,
-        Some(1_002_501)
+        Some(1_000_000.0 + 1_500.4 + 1_000.0)
     );
 }
 
@@ -497,4 +496,34 @@ fn a_non_ascii_prefix_resolves_by_longest_match() {
         resolve_model("éx", empty(), &p).expect("r").targets[0].provider,
         "short"
     );
+}
+
+/// TS keeps a fractional instant: failure at 1000, Retry-After 0.4 ms, no
+/// jitter, resumes at 1000.4 — so at `now = 1000.5` the credential routes.
+#[test]
+fn a_fractional_rate_limit_instant_is_kept_as_ts_keeps_it() {
+    let s = Settings::from_json(default_settings_json());
+    let h = record_failure(
+        &health("a"),
+        &Failure {
+            settings: &s,
+            now: 1000.0,
+            code: ErrorCode::RateLimit,
+            retry_after_ms: Some(0.4),
+            jitter: 0.0,
+        },
+    );
+    assert_eq!(h.rate_limited_until, Some(1000.4));
+    let r = req();
+    let m = score_model(vec![target()]);
+    let snap = snapshot(Snap {
+        credentials: vec![credential("a")],
+        health: vec![h],
+        ..Snap::default()
+    });
+    let mut i = input(&r, &m, &snap);
+    i.now = 1000.5;
+    assert_eq!(omni_router::eligible(&i).pairs.len(), 1);
+    i.now = 1000.3;
+    assert_eq!(omni_router::eligible(&i).pairs.len(), 0);
 }

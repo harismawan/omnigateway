@@ -258,12 +258,12 @@ pub fn eligible<'a>(input: &RankInput<'a>) -> Eligible<'a> {
 
             let mut probe = false;
             if let Some(h) = snapshot.health_of(&credential.id, &target.model) {
-                if h.rate_limited_until.is_some_and(|u| u as f64 > now) {
+                if h.rate_limited_until.is_some_and(|u| u > now) {
                     drop("rateLimited".to_owned(), ExcludedKind::Account);
                     continue;
                 }
                 if h.breaker_state == BreakerState::Open {
-                    let elapsed = now - h.opened_at.map_or(now, |at| at as f64);
+                    let elapsed = now - h.opened_at.unwrap_or(now);
                     let cooldown =
                         cooldown_ms(h.consecutive_failures as f64, threshold, base_cooldown);
                     if elapsed < cooldown {

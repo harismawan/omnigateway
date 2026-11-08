@@ -60,7 +60,7 @@ impl H {
 
     /// The background seed, run now. Returns the reads it made.
     fn seed(&self) -> usize {
-        self.limiter.seed_pending(&self.store)
+        self.limiter.seed_now(&self.store)
     }
 
     /// Prepares and seeds a model's subjects, as boot pre-seeding does.
@@ -90,14 +90,13 @@ impl H {
         rollup::rebuild_rollup(self.store.connection()).expect("rollup");
     }
 
-    /// A finished request as `finishLog` completes it: row, then debit.
+    /// A finished request: its row committed, then its debit, as the
+    /// writer delivers committed completions.
     fn complete(&mut self, tokens: i64, cost: f64, model: &str) {
         let at = self.clock;
         self.row(at, tokens, cost, model);
-        let id = format!("r{}", self.rows);
         #[allow(clippy::cast_precision_loss)]
-        self.limiter
-            .debit(KEY, model, &id, tokens as f64, cost, at, at);
+        self.limiter.debit(KEY, model, tokens as f64, cost, at, at);
     }
 }
 
@@ -190,7 +189,7 @@ fn a_long_window_counts_the_seeded_sum_plus_what_has_been_debited_since() {
     h.row(T0 - 1000.0, 40, 0.0, "fast");
     h.preseed("fast");
     admits(h.admit("fast"));
-    h.limiter.debit(KEY, "fast", "r-extra", 60.0, 0.0, T0, T0);
+    h.limiter.debit(KEY, "fast", 60.0, 0.0, T0, T0);
     denied(h.admit("fast"));
 }
 
@@ -394,14 +393,32 @@ fn a_models_long_window_seeds_from_that_models_rows_and_takes_its_debits() {
 
 #[test]
 fn a_recorded_override_takes_a_debit_this_process_never_admitted() {
-    let mut h = harness(r#"{"models":{"judge":{"tokens":{"5h":40},"concurrency":5}}}"#);
-    h.preseed("judge");
-    // Fresh limiter state for the model's limits: record, never claim.
-    let fresh = RateLimiter::new();
-    fresh.record_override(KEY, &h.limits, "judge");
-    assert_eq!(fresh.in_flight(&model_subject_id(KEY, "judge")), 0);
-    h.complete(41, 0.0, "judge");
-    let refused = denied(h.admit("judge"));
+    // The guardrail's classifier: its completion is debited by a limiter
+    // that never admitted (or prepared) the model. Only `record_override`
+    // tells it the subject has a long window; without it the debit is
+    // skipped and the window under-counts.
+    let h = harness(r#"{"models":{"judge":{"tokens":{"5h":40},"concurrency":5}}}"#);
+    // The judge subject's buckets are installed directly from a seed job
+    // planned elsewhere, so this limiter has no record of the override.
+    let planner = RateLimiter::new();
+    planner.prepare(KEY, &h.limits, "judge", T0);
+    let classifier = RateLimiter::new();
+    for job in planner.take_seed_jobs() {
+        classifier.apply(omni_store::writer::Committed::Seed {
+            query: RateLimiter::seed_query(&job),
+            result: Ok(omni_store::writer::SeedRows {
+                buckets: vec![],
+                stamps: vec![],
+            }),
+        });
+    }
+    classifier.record_override(KEY, &h.limits, "judge");
+    assert_eq!(classifier.in_flight(&model_subject_id(KEY, "judge")), 0);
+    classifier.debit(KEY, "judge", 41.0, 0.0, T0, T0);
+    let refused = match classifier.admit(KEY, &h.limits, "judge", T0) {
+        Ok(_) => panic!("41 tokens debited against a 40 ceiling must refuse"),
+        Err(e) => e,
+    };
     assert_eq!(refused.headroom.tokens.map(|t| t.used), Some(41.0));
 }
 
@@ -556,32 +573,6 @@ fn a_refusals_header_for_the_refused_dimension_names_the_refusing_window() {
     );
 }
 
-/// The seeder task: a queued seed lands without the caller running it.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_background_seeder_runs_queued_seeds() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("omni.db");
-    let mut h = harness(r#"{"tokens":{"5h":1}}"#);
-    // Use a file the seeder can open independently.
-    h._dir = dir;
-    h.store = SqliteStore::open(&path, 0).expect("store");
-    h.row(T0 - 1000.0, 5000, 0.0, "fast");
-    let seeder = h
-        .limiter
-        .spawn_seeder(SqliteStore::open(&path, 0).expect("seeder store"));
-    admits(h.admit("fast"));
-    for _ in 0..100 {
-        if h.limiter.seeds_pending() == 0 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert_eq!(h.limiter.seeds_pending(), 0);
-    denied(h.admit("fast"));
-    seeder.abort();
-}
-
-/// The exact reset reads rows debited after the seed, not only seeded ones.
 #[test]
 fn a_refusals_reset_counts_rows_debited_after_the_seed() {
     let mut h = harness(r#"{"requests":{"5h":2}}"#);
@@ -594,99 +585,4 @@ fn a_refusals_reset_counts_rows_debited_after_the_seed() {
     let refused = denied(h.admit("fast"));
     // The oldest debited row (T0 + 1h) ages out 5h later.
     assert_eq!(refused.retry_after_ms, 3.0 * HOUR);
-}
-
-// ---- seed boundary: every completion counted exactly once, whatever the
-// interleaving of the seed's read, its install, the row and its debit.
-
-/// A seed split into its three phases, so a test can interleave them.
-fn seed_phased(h: &mut H, between_read_and_install: impl FnOnce(&mut H)) {
-    let jobs = h.limiter.take_seed_jobs();
-    assert!(!jobs.is_empty());
-    let reads: Vec<_> = jobs
-        .into_iter()
-        .map(|job| {
-            let read = h.limiter.read_seed(&h.store, &job);
-            (job, read)
-        })
-        .collect();
-    between_read_and_install(h);
-    for (job, read) in reads {
-        h.limiter.install_seed(&job, read);
-    }
-}
-
-fn tokens_used(h: &H) -> f64 {
-    admitted(h.admit("fast"))
-        .headroom
-        .tokens
-        .map_or(-1.0, |t| t.used)
-}
-
-#[test]
-fn a_completion_between_the_seed_read_and_its_install_is_counted_once() {
-    let mut h = harness(r#"{"tokens":{"5h":100000}}"#);
-    h.row(T0 - 1000.0, 40, 0.0, "fast");
-    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
-    // Row written and debited after the aggregate was read.
-    seed_phased(&mut h, |h| h.complete(60, 0.0, "fast"));
-    assert_eq!(tokens_used(&h), 100.0);
-}
-
-#[test]
-fn a_debit_whose_row_the_writer_has_not_flushed_is_counted_once() {
-    let mut h = harness(r#"{"tokens":{"5h":100000}}"#);
-    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
-    // The debit lands first; its row is still in the writer's batch.
-    h.limiter.debit(KEY, "fast", "late", 60.0, 0.0, T0, T0);
-    seed_phased(&mut h, |_| {});
-    // Now the batch is written: the seed must not count it again later.
-    h.row_with_id("late", T0, 60, 0.0, "fast");
-    assert_eq!(tokens_used(&h), 60.0);
-}
-
-#[test]
-fn a_debit_whose_row_was_already_read_by_the_seed_is_not_counted_twice() {
-    let mut h = harness(r#"{"tokens":{"5h":100000}}"#);
-    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
-    h.row_with_id("early", T0, 60, 0.0, "fast");
-    seed_phased(&mut h, |h| {
-        // Debit arrives after the read that already saw its row.
-        h.limiter.debit(KEY, "fast", "early", 60.0, 0.0, T0, T0);
-    });
-    assert_eq!(tokens_used(&h), 60.0);
-}
-
-#[test]
-fn pending_debits_survive_a_failed_seed_and_land_with_the_next_one() {
-    let h = harness(r#"{"tokens":{"5h":100000}}"#);
-    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
-    h.limiter.debit(KEY, "fast", "unflushed", 25.0, 0.0, T0, T0);
-    h.store
-        .connection()
-        .execute_batch("ALTER TABLE request_logs RENAME TO request_logs_gone")
-        .expect("break");
-    h.seed();
-    h.store
-        .connection()
-        .execute_batch("ALTER TABLE request_logs_gone RENAME TO request_logs")
-        .expect("fix");
-    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
-    h.seed();
-    assert_eq!(tokens_used(&h), 25.0);
-}
-
-#[test]
-fn a_debit_after_the_install_for_a_row_the_seed_read_is_not_counted_twice() {
-    let mut h = harness(r#"{"tokens":{"5h":100000}}"#);
-    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
-    h.row_with_id("written-first", T0, 60, 0.0, "fast");
-    h.seed();
-    h.limiter
-        .debit(KEY, "fast", "written-first", 60.0, 0.0, T0, T0 + 1.0);
-    // A different completion after the install is counted normally.
-    h.limiter
-        .debit(KEY, "fast", "fresh", 5.0, 0.0, T0 + 2.0, T0 + 2.0);
-    h.at(T0 + 3.0);
-    assert_eq!(tokens_used(&h), 65.0);
 }

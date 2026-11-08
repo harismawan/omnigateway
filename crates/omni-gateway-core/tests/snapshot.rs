@@ -173,7 +173,7 @@ fn a_health_patch_swaps_in_a_new_snapshot_without_a_store_read() {
         model: "up".into(),
         breaker_state: BreakerState::Open,
         consecutive_failures: 3,
-        opened_at: Some(10),
+        opened_at: Some(10.0),
         rate_limited_until: None,
     });
     let after = holder.load();

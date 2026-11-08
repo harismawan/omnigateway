@@ -112,3 +112,26 @@ pub fn done_rows(
     };
     Ok(out)
 }
+
+/// Bucket sums by start, and every retained done row's `at`.
+pub type SeedRead = (Vec<(i64, Counts)>, Vec<i64>);
+
+/// A long-window seed's two reads in one read transaction, so the bucket
+/// sums and the stamps describe one WAL snapshot. The writer runs it on its
+/// own connection between batches.
+pub fn seed_rows(
+    conn: &Connection,
+    api_key_id: &str,
+    since_ms: i64,
+    grain_ms: i64,
+    requested_model: Option<&str>,
+) -> Result<SeedRead, StoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let buckets = sum_buckets(&tx, api_key_id, since_ms, grain_ms, requested_model)?;
+    let stamps = done_rows(&tx, api_key_id, since_ms, requested_model)?
+        .into_iter()
+        .map(|(at, _)| at)
+        .collect();
+    tx.commit()?;
+    Ok((buckets, stamps))
+}

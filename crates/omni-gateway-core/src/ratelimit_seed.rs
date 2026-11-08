@@ -1,172 +1,184 @@
-//! The limiter's background seeding: long-window buckets and row stamps
-//! read from the store off the request path.
+//! The limiter's long-window seeding, ordered through the request-log writer.
+//!
+//! A seed is read on the writer's connection between batches, and its result
+//! comes back on the same channel as the writer's committed completions, in
+//! the order the writer produced them. [`RateLimiter::apply`] takes that
+//! stream one event at a time; there is no interleaving to reconcile.
+//!
+//! Seeds are asked for in the background: a subject is admitted while its
+//! seed is outstanding (spec ruling).
 
 use crate::ratelimit::{MAX_STAMPS, RateLimiter, SeedJob, grain_ms, long_index};
-use omni_ratelimit::buckets::Counts;
-use omni_store::{SqliteStore, StoreError};
-use std::collections::{HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use omni_ratelimit::Window;
+use omni_store::writer::{Committed, SeedQuery, SeedRows, WriterHandle};
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
-/// A completion debited before its window was seeded.
-#[derive(Debug, Clone)]
-pub(crate) struct PendingDebit {
-    pub(crate) request_id: String,
-    pub(crate) row_at: f64,
-    pub(crate) now: f64,
-    pub(crate) delta: Counts,
-}
-
-/// Pending debits held per subject and window. Past it the oldest go
-/// (warned), which can only under-count by that many requests.
-pub(crate) const MAX_PENDING_DEBITS: usize = 65_536;
-
-/// How long after a seed is installed a debit is still checked against
-/// the ids the seed read. A debit is sent beside its log row's `Finish`
-/// (the row reaches the store up to one writer batch later), so a row the
-/// seed read normally has its debit already pending; this covers a caller
-/// that debits after the row is written.
-pub(crate) const SEEDED_IDS_GRACE_MS: f64 = 10_000.0;
-
-/// What a seed read from the store: bucket sums, and every retained done
-/// row's `(at, request id)`.
-#[derive(Debug, Clone)]
-pub struct SeedRead {
-    pub buckets: Vec<(i64, Counts)>,
-    pub rows: Vec<(i64, String)>,
+/// The window a query's `tag` names.
+fn window_of(tag: u8) -> Window {
+    if tag == 1 { Window::W1 } else { Window::H5 }
 }
 
 impl RateLimiter {
-    /// Seeds still queued or running.
+    /// Row stamps retained across every subject and window: the only state
+    /// that grows with traffic, bounded by the rows inside each window.
+    pub fn held_debits(&self) -> usize {
+        self.lock()
+            .long
+            .values()
+            .flat_map(|w| w.iter())
+            .map(|s| s.stamps.len())
+            .sum()
+    }
+
+    /// Seeds asked for and not yet installed (or failed).
     pub fn seeds_pending(&self) -> usize {
         self.lock().seeding.len()
     }
 
-    /// Runs every queued seed against `store`. Blocking: the seeder calls
-    /// it under `spawn_blocking`; tests and conformance call it directly.
-    /// Returns how many reads were made.
-    pub fn seed_pending(&self, store: &SqliteStore) -> usize {
-        let jobs = self.take_seed_jobs();
-        let count = jobs.len();
-        for job in jobs {
-            let read = self.read_seed(store, &job);
-            self.install_seed(&job, read);
-        }
-        count
-    }
-
-    /// Phase 1: the queued seeds, removed from the queue (still marked as
-    /// seeding until installed).
+    /// The queued seed jobs, removed from the queue (each stays marked as
+    /// seeding until its result is applied, or until it cannot be sent).
     pub fn take_seed_jobs(&self) -> Vec<SeedJob> {
         self.lock().pending.drain(..).collect()
     }
 
-    /// Phase 2: the store read, without the limiter lock. Debits that land
-    /// meanwhile are held as pending (the window is not seeded yet).
+    /// The writer query for a job.
     #[allow(clippy::cast_possible_truncation)]
-    pub fn read_seed(&self, store: &SqliteStore, job: &SeedJob) -> Result<SeedRead, StoreError> {
-        let since = (job.now - job.window.ms()) as i64;
-        let buckets = omni_store::usage::sum_buckets(
-            store.connection(),
-            &job.key_id,
-            since,
-            grain_ms(job.window) as i64,
-            job.model.as_deref(),
-        )?;
-        let rows = omni_store::usage::done_rows(
-            store.connection(),
-            &job.key_id,
-            since,
-            job.model.as_deref(),
-        )?;
-        Ok(SeedRead { buckets, rows })
+    pub fn seed_query(job: &SeedJob) -> SeedQuery {
+        SeedQuery {
+            subject: job.subject.clone(),
+            api_key_id: job.key_id.clone(),
+            requested_model: job.model.clone(),
+            since_ms: (job.now - job.window.ms()) as i64,
+            grain_ms: grain_ms(job.window) as i64,
+            tag: u8::from(long_index(job.window) == 1),
+            now: job.now,
+        }
     }
 
-    /// Phase 3: installs the read and reconciles the pending debits by
-    /// request id. A debit whose row the read included is already in the
-    /// aggregate and is dropped; every other pending debit is added (its
-    /// row was not yet written, or was written after the read). The ids
-    /// the read saw are kept briefly, so a debit for one of them that
-    /// arrives after the install is not added twice either.
-    ///
-    /// The bucket aggregate and the id list come from two statements on
-    /// one connection with no write between them on that connection; a row
-    /// committed between the two is in the ids but not the aggregate. Such
-    /// a row's debit is then dropped at reconcile: a single completion can
-    /// be under-counted in that microsecond window, never double-counted.
+    /// Sends every queued job to the writer. A job the writer had no room
+    /// for is unmarked, so the subject's next request asks again.
+    pub fn send_seeds(&self, writer: &WriterHandle) -> usize {
+        let jobs = self.take_seed_jobs();
+        let mut sent = 0;
+        for job in jobs {
+            if writer.seed(Self::seed_query(&job)) {
+                sent += 1;
+            } else {
+                self.lock()
+                    .seeding
+                    .remove(&(job.subject.clone(), long_index(job.window)));
+            }
+        }
+        sent
+    }
+
+    /// Applies one event from the writer's commit stream, in order.
     #[allow(clippy::cast_precision_loss)]
-    pub fn install_seed(&self, job: &SeedJob, read: Result<SeedRead, StoreError>) {
+    pub fn apply(&self, event: Committed) {
+        match event {
+            Committed::Completions(rows) => {
+                for c in rows {
+                    let Some(key) = c.api_key_id.as_deref() else {
+                        continue;
+                    };
+                    self.debit(key, &c.requested_model, c.tokens, c.cost_usd, c.at, c.at);
+                }
+            }
+            Committed::Seed { query, result } => self.install(&query, result),
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn install(&self, query: &SeedQuery, result: Result<SeedRows, String>) {
+        let window = window_of(query.tag);
         let mut st = self.lock();
         st.seeding
-            .remove(&(job.subject.clone(), long_index(job.window)));
-        let read = match read {
-            Ok(r) => r,
+            .remove(&(query.subject.clone(), long_index(window)));
+        let rows = match result {
+            Ok(rows) => rows,
             Err(e) => {
                 drop(st);
-                match &job.model {
-                    Some(model) => tracing::warn!(api_key_id = %job.key_id, model = %model,
+                match &query.requested_model {
+                    Some(model) => tracing::warn!(api_key_id = %query.api_key_id, model = %model,
                         reason = %e, "rate limit counters unavailable"),
-                    None => tracing::warn!(api_key_id = %job.key_id,
+                    None => tracing::warn!(api_key_id = %query.api_key_id,
                         reason = %e, "rate limit counters unavailable"),
                 }
                 return;
             }
         };
-        let state = &mut st.long_of(&job.subject)[long_index(job.window)];
+        let state = &mut st.long_of(&query.subject)[long_index(window)];
         if state.buckets.is_seeded() {
             return;
         }
-        let rows: Vec<(f64, Counts)> = read
+        let buckets: Vec<(f64, omni_ratelimit::buckets::Counts)> = rows
             .buckets
             .into_iter()
             .map(|(start, c)| (start as f64, c))
             .collect();
-        state.buckets.seed(job.now, &rows);
-        let mut ids: HashSet<String> = HashSet::with_capacity(read.rows.len());
-        let mut stamps = VecDeque::with_capacity(read.rows.len());
-        for (at, id) in read.rows {
-            stamps.push_back(at as f64);
-            ids.insert(id);
-        }
-        state.stamps = stamps;
+        state.buckets.seed(query.now, &buckets);
+        state.stamps = rows.stamps.into_iter().map(|s| s as f64).collect();
         while state.stamps.len() > MAX_STAMPS {
             state.stamps.pop_front();
         }
-        let mut latest = job.now;
-        for debit in std::mem::take(&mut state.pending) {
-            latest = latest.max(debit.now);
-            if ids.remove(&debit.request_id) {
-                continue;
-            }
-            state.buckets.add(debit.now, debit.delta);
-            state.push_stamp(debit.row_at);
-        }
-        state.trim(job.window, latest);
-        state.seeded_ids = ids;
-        state.seeded_ids_until = latest + SEEDED_IDS_GRACE_MS;
+        state.trim(window, query.now);
     }
 
-    /// The background seeder: owns its own store connection and runs queued
-    /// seeds off the request path. Abort the handle to stop it.
-    pub fn spawn_seeder(self: &Arc<Self>, store: SqliteStore) -> tokio::task::JoinHandle<()> {
-        let this = self.clone();
-        tokio::spawn(async move {
-            let store = Arc::new(Mutex::new(store));
-            loop {
-                this.wake.notified().await;
-                let limiter = this.clone();
-                let store = store.clone();
-                let ran = tokio::task::spawn_blocking(move || {
-                    let store = store
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    // Drain until empty: seeds queued during a read are run too.
-                    while limiter.seed_pending(&store) > 0 {}
-                })
-                .await;
-                if let Err(e) = ran {
-                    tracing::error!(error = %e, "rate limit seeder failed");
+    /// The background tasks, both off the request path:
+    ///
+    /// - one sends queued seed jobs to the writer when woken;
+    /// - one applies the writer's commit stream (`commits`, the receiver of
+    ///   the `WriterConfig::commit_sink` sender) in order.
+    ///
+    /// Abort the handles to stop them.
+    pub fn spawn_consumer(
+        self: &Arc<Self>,
+        writer: WriterHandle,
+        mut commits: mpsc::Receiver<Committed>,
+    ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+        let asker = {
+            let this = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    this.wake.notified().await;
+                    this.send_seeds(&writer);
                 }
-            }
-        })
+            })
+        };
+        let applier = {
+            let this = self.clone();
+            tokio::spawn(async move {
+                while let Some(event) = commits.recv().await {
+                    this.apply(event);
+                }
+            })
+        };
+        (asker, applier)
+    }
+}
+
+impl RateLimiter {
+    /// Runs every queued seed against `store` right now, as the writer would
+    /// between batches (one read transaction each), and applies the result.
+    /// For a store no writer is writing to: tests, conformance pre-seeding.
+    /// Blocking. Returns how many reads were made.
+    pub fn seed_now(&self, store: &omni_store::SqliteStore) -> usize {
+        let jobs = self.take_seed_jobs();
+        let n = jobs.len();
+        for job in jobs {
+            let q = Self::seed_query(&job);
+            let result = omni_store::usage::seed_rows(
+                store.connection(),
+                &q.api_key_id,
+                q.since_ms,
+                q.grain_ms,
+                q.requested_model.as_deref(),
+            )
+            .map(|(buckets, stamps)| SeedRows { buckets, stamps })
+            .map_err(|e| e.to_string());
+            self.apply(Committed::Seed { query: q, result });
+        }
+        n
     }
 }

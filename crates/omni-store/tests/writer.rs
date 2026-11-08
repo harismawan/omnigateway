@@ -76,13 +76,14 @@ fn transition(cred: &str, model: &str, state: BreakerState, failures: i64) -> Wr
         model: model.into(),
         breaker_state: state,
         consecutive_failures: failures,
-        opened_at: (failures > 0).then_some(T0 + failures),
-        rate_limited_until: (failures == 2).then_some(T0 + 60_000),
+        opened_at: (failures > 0).then_some(T0 as f64 + failures as f64),
+        // Fractional, as a fractional Retry-After makes it in TS.
+        rate_limited_until: (failures == 2).then_some(T0 as f64 + 60_000.4),
     })
     .into()
 }
 
-fn measure(cred: &str, model: &str, failures: i64, until: Option<i64>) -> WriteEvent {
+fn measure(cred: &str, model: &str, failures: i64, until: Option<f64>) -> WriteEvent {
     HealthMeasurement {
         credential_id: cred.into(),
         model: model.into(),
@@ -100,7 +101,7 @@ fn health_sequence() -> Vec<WriteEvent> {
     vec![
         // Open -> Closed for one pair: the final row is the Closed one.
         transition("cred-1", "sonnet", Open, 3),
-        measure("cred-1", "sonnet", 4, Some(T0 + 5)),
+        measure("cred-1", "sonnet", 4, Some(T0 as f64 + 5.0)),
         transition("cred-1", "sonnet", Closed, 0),
         // Closed -> Open -> HalfOpen, with a measurement after the last one:
         // it keeps HalfOpen and its `opened_at`, and sets the two counters.
@@ -108,12 +109,12 @@ fn health_sequence() -> Vec<WriteEvent> {
         transition("cred-2", "gpt-x", Open, 2),
         transition("cred-2", "gpt-x", HalfOpen, 2),
         measure("cred-2", "gpt-x", 1, None),
-        measure("cred-2", "gpt-x", 5, Some(T0 + 9)),
+        measure("cred-2", "gpt-x", 5, Some(T0 as f64 + 9.25)),
         // A measurement before a transition is overwritten by it.
-        measure("cred-3", "opus", 7, Some(T0 + 1)),
+        measure("cred-3", "opus", 7, Some(T0 as f64 + 1.0)),
         transition("cred-3", "opus", Open, 1),
         // A measurement on a pair with no row files a blank one.
-        measure("cred-1", "haiku", 2, Some(T0 + 60_000)),
+        measure("cred-1", "haiku", 2, Some(T0 as f64 + 60_000.5)),
         // A measurement over a row that existed before the batch.
         measure("cred-3", "seeded", 9, None),
         transition("cred-ghost", "sonnet", Open, 3),
@@ -251,6 +252,7 @@ fn event_json(e: &WriteEvent) -> serde_json::Value {
             "consecutiveFailures": m.consecutive_failures,
             "rateLimitedUntil": m.rate_limited_until,
         }),
+        WriteEvent::Seed(_) => unreachable!("the TS comparison sequence has no seeds"),
     }
 }
 

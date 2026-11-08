@@ -17,7 +17,6 @@ omni-ratelimit = { path = "../omni-ratelimit" }
 omni-router = { path = "../omni-router" }
 omni-store = { path = "../omni-store" }
 arc-swap = "1"
-indexmap = "2"
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

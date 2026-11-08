@@ -26,6 +26,7 @@ mod sql;
 mod task;
 
 pub use events::{
-    BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog, RouteTarget, WriteEvent,
+    BreakerTransition, Committed, Completion, HealthMeasurement, LogEvent, PendingLog, RequestLog,
+    RouteTarget, SeedQuery, SeedRows, WriteEvent,
 };
 pub use task::{Writer, WriterConfig, WriterHandle, WriterStats};

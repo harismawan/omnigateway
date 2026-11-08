@@ -1,7 +1,8 @@
-//! The time buckets the long windows are summed from: `memoryCoord().buckets`
+//! The time buckets the long windows are summed from (gateway-core state): `memoryCoord().buckets`
 //! in `packages/coord/src/index.ts`.
 
-use omni_ratelimit::buckets::{Buckets, Counts};
+use omni_gateway_core::buckets::Buckets;
+use omni_ratelimit::buckets::Counts;
 
 const MINUTE: f64 = 60_000.0;
 const FIVE_HOURS: f64 = 5.0 * 60.0 * MINUTE;

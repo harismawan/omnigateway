@@ -64,20 +64,16 @@ pub fn record_success(current: &CredentialHealth) -> CredentialHealth {
 #[derive(Debug, Clone, Copy)]
 pub struct Failure<'a> {
     pub settings: &'a Settings,
-    pub now: i64,
+    /// The caller's clock, a JS number.
+    pub now: f64,
     pub code: ErrorCode,
     pub retry_after_ms: Option<f64>,
     /// 0..1, injected so the jittered window stays testable.
     pub jitter: f64,
 }
 
-/// `recordFailure`.
-///
-/// One difference from TS, invisible to routing: a fractional `Retry-After`
-/// makes TS store a fractional `rate_limited_until`; the column here is an
-/// integer and takes the ceiling, which agrees with `until > now` for every
-/// integer `now`.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+/// `recordFailure`. Instants keep any fraction, as TS's do.
+#[allow(clippy::cast_precision_loss)]
 pub fn record_failure(current: &CredentialHealth, opts: &Failure<'_>) -> CredentialHealth {
     match penalty(opts.code) {
         Penalty::None => current.clone(),
@@ -87,9 +83,9 @@ pub fn record_failure(current: &CredentialHealth, opts: &Failure<'_>) -> Credent
             } else {
                 opts.retry_after_ms.unwrap_or(DEFAULT_RATE_LIMIT_MS)
             };
-            let until = opts.now as f64 + base + math_round(opts.jitter * MAX_JITTER_MS);
+            let until = opts.now + base + math_round(opts.jitter * MAX_JITTER_MS);
             CredentialHealth {
-                rate_limited_until: Some(until.ceil() as i64),
+                rate_limited_until: Some(until),
                 ..current.clone()
             }
         }

@@ -2,6 +2,8 @@
 //! with every `OMNI_*` variable, the same validation and the same error text.
 //!
 //! A pure function of an env map (plus the host offset, injected), as in TS.
+//! The binary passes the process environment and nothing else: no `.env`
+//! file is read (see the crate docs).
 
 use omni_ir::js::{string_to_number, trim, utf16_len};
 use std::collections::HashMap;
@@ -102,6 +104,19 @@ fn flag(value: Option<&String>) -> bool {
 /// `.replace(/\/+$/, "")`.
 fn strip_trailing_slashes(s: &str) -> &str {
     s.trim_end_matches('/')
+}
+
+/// The process environment, as `process.env` holds it (non-UTF-8 entries
+/// lossily converted).
+pub fn process_env() -> HashMap<String, String> {
+    std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// `loadConfig`. `host_offset` is `hostDayOffsetMinutes`, called only when

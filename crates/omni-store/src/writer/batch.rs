@@ -15,7 +15,7 @@
 //!   the TS `updateHealth` throws and changes nothing.
 
 use super::events::{
-    BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog, WriteEvent,
+    BreakerTransition, Completion, HealthMeasurement, LogEvent, PendingLog, RequestLog, WriteEvent,
 };
 use super::num::Num;
 use super::sql::{
@@ -32,10 +32,38 @@ use rusqlite::{
 use std::collections::HashMap;
 
 /// What one batch did, for the writer's counters.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Outcome {
     /// Health rows the foreign key refused (no such credential).
     pub(crate) health_refused: u64,
+    /// The rows this batch completed, as stored, in completion order: what
+    /// the rate limiter is debited with once the batch has committed.
+    pub(crate) completions: Vec<Completion>,
+}
+
+/// The stored completed row's figures as a [`Completion`].
+fn completion(row: &[SqlValue]) -> Result<Completion, StoreError> {
+    let get = |name: &str| column(row, name);
+    let n = |name: &str| -> Result<f64, StoreError> {
+        Ok(js::number(ValueRef::from(&get(name)?)).unwrap_or(0.0))
+    };
+    let text = |name: &str| -> Result<Option<String>, StoreError> {
+        Ok(match get(name)? {
+            SqlValue::Text(t) => Some(t),
+            _ => None,
+        })
+    };
+    Ok(Completion {
+        id: text("id")?.unwrap_or_default(),
+        api_key_id: text("api_key_id")?,
+        requested_model: text("requested_model")?.unwrap_or_default(),
+        tokens: n("input_tokens")?
+            + n("output_tokens")?
+            + n("cache_read_tokens")?
+            + n("cache_write_tokens")?,
+        cost_usd: n("cost_usd")?,
+        at: n("at")?,
+    })
 }
 
 // Positions in `LOG_COLUMNS`.
@@ -505,8 +533,8 @@ fn write_health(tx: &Transaction<'_>, events: &[WriteEvent]) -> Result<u64, Stor
                         h.model,
                         h.breaker_state.as_str(),
                         h.consecutive_failures,
-                        h.opened_at,
-                        h.rate_limited_until,
+                        h.opened_at.map(js::bind_number),
+                        h.rate_limited_until.map(js::bind_number),
                     ],
                     &mut refused,
                 )?;
@@ -514,7 +542,7 @@ fn write_health(tx: &Transaction<'_>, events: &[WriteEvent]) -> Result<u64, Stor
             WriteEvent::HealthMeasurement(m) => {
                 measured.insert((&m.credential_id, &m.model), m);
             }
-            WriteEvent::Log(_) => {}
+            WriteEvent::Log(_) | WriteEvent::Seed(_) => {}
         }
     }
     for m in measured.values() {
@@ -525,7 +553,7 @@ fn write_health(tx: &Transaction<'_>, events: &[WriteEvent]) -> Result<u64, Stor
                 m.credential_id,
                 m.model,
                 m.consecutive_failures,
-                m.rate_limited_until
+                m.rate_limited_until.map(js::bind_number)
             ],
             &mut refused,
         )?;
@@ -554,15 +582,20 @@ pub(crate) fn write(
 
     let mut daily = Rollup::new("usage_daily", &DAILY_KEY, &DAILY_COUNTERS);
     let mut hourly = Rollup::new("usage_rollup", &HOURLY_KEY, &HOURLY_COUNTERS);
+    let mut completions = Vec::new();
     for row in logs.stored_completed(&tx)? {
         roll_up(&tx, &mut daily, &mut hourly, &row, day_offset_minutes)?;
+        completions.push(completion(&row)?);
     }
     daily.write(&tx)?;
     hourly.write(&tx)?;
 
     let health_refused = write_health(&tx, events)?;
     tx.commit()?;
-    Ok(Outcome { health_refused })
+    Ok(Outcome {
+        health_refused,
+        completions,
+    })
 }
 
 #[cfg(test)]

@@ -549,3 +549,12 @@ fn after_this_request_spends_one_request_and_nothing_else() {
         Some(0.0)
     );
 }
+
+/// The finite-counter precondition is asserted in debug builds.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "non-finite rate-limit counter")]
+fn a_nan_counter_is_refused_in_debug_builds() {
+    let s = counters(Dimension::Tokens, &[(Window::H5, c(f64::NAN, NOW))]);
+    let _ = evaluate(&requests(Some(1), None, None), &s, NOW);
+}

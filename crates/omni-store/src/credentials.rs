@@ -145,15 +145,19 @@ pub fn list(conn: &Connection, key: &FieldKey) -> Result<Vec<Credential>, StoreE
 }
 
 /// `CredentialHealth`: what routing decides on for one (credential, model).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// The instants are JS numbers: `recordFailure` adds a fractional
+/// `Retry-After` and TS stores the fraction (the INTEGER-affinity column
+/// keeps a non-integral REAL as REAL), so they are `f64` end to end.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialHealth {
     pub credential_id: String,
     pub model: String,
     pub breaker_state: BreakerState,
     pub consecutive_failures: i64,
-    pub opened_at: Option<i64>,
-    pub rate_limited_until: Option<i64>,
+    pub opened_at: Option<f64>,
+    pub rate_limited_until: Option<f64>,
 }
 
 const H: &str = "credential_health";
@@ -169,8 +173,8 @@ pub fn list_health(conn: &Connection) -> Result<Vec<CredentialHealth>, StoreErro
             model: row::text(r, H, "model")?,
             breaker_state: BreakerState::parse(&row::text(r, H, "breaker_state")?),
             consecutive_failures: row::integer(r, H, "consecutive_failures")?,
-            opened_at: row::opt_integer(r, H, "opened_at")?,
-            rate_limited_until: row::opt_integer(r, H, "rate_limited_until")?,
+            opened_at: row::opt_number(r, H, "opened_at")?,
+            rate_limited_until: row::opt_number(r, H, "rate_limited_until")?,
         });
     }
     Ok(out)
