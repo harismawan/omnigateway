@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 omni-ir = { path = "../omni-ir" }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -19,6 +20,7 @@ tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", 
 bytes = "1"
 futures-core = "0.3"
 httparse = "1.10"
+memchr = "2"
 url = "2.5"
 httpdate = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }

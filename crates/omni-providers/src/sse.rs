@@ -33,8 +33,12 @@ pub struct SseMessage {
 pub struct SseParser {
     /// Decoded text not yet consumed; starts at the current record.
     buf: String,
-    /// UTF-16 length of `buf`.
-    buf_units: usize,
+    /// The UTF-16 length of `buf[..counted]`. Counted only once `buf` holds
+    /// more than [`MAX_RECORD_CHARS`] bytes: a UTF-16 length never exceeds
+    /// the UTF-8 length, so a shorter buffer cannot be over the cap.
+    counted_units: usize,
+    /// How far into `buf` `counted_units` reaches.
+    counted: usize,
     /// Byte offset in `buf` from which to resume looking for `\n`.
     scan_from: usize,
     /// Bytes of a UTF-8 sequence split across chunks (at most three).
@@ -74,26 +78,40 @@ impl SseParser {
                 }
             };
             let record = &self.buf[consumed..nl];
-            let units = utf16_len(record);
             // Checked before parsing, so an oversized record arriving whole is
-            // refused rather than assembled.
-            if units > MAX_RECORD_CHARS {
+            // refused rather than assembled. Units never exceed bytes, so
+            // only a record longer than the cap in bytes needs counting.
+            if record.len() > MAX_RECORD_CHARS && utf16_len(record) > MAX_RECORD_CHARS {
                 return Err(oversized());
             }
             if let Some(msg) = parse_record(record) {
                 out.push(msg);
             }
-            // Separator characters are ASCII: one byte, one unit each.
-            self.buf_units -= units + (end - nl);
             consumed = end;
             at = end;
         };
-        self.buf.drain(..consumed);
+        if consumed > 0 {
+            self.buf.drain(..consumed);
+            self.counted = 0;
+            self.counted_units = 0;
+        }
         self.scan_from = resume - consumed;
-        if self.buf_units > MAX_RECORD_CHARS {
+        if self.buf_units_over_cap() {
             return Err(oversized());
         }
         Ok(())
+    }
+
+    /// Whether the unconsumed text is over [`MAX_RECORD_CHARS`] UTF-16 units.
+    /// Linear over a stream: the count resumes where it stopped while the
+    /// same record keeps growing, and restarts only after a record ends.
+    fn buf_units_over_cap(&mut self) -> bool {
+        if self.buf.len() <= MAX_RECORD_CHARS {
+            return false;
+        }
+        self.counted_units += utf16_len(&self.buf[self.counted..]);
+        self.counted = self.buf.len();
+        self.counted_units > MAX_RECORD_CHARS
     }
 
     /// End of stream: a record without a final blank line is still a message.
@@ -110,16 +128,14 @@ impl SseParser {
             joined.extend_from_slice(chunk);
             decode_into(&joined, &mut self.buf, &mut self.carry);
         }
-        let mut appended = &self.buf[before..];
+        let appended = &self.buf[before..];
         if !self.started && !appended.is_empty() {
             self.started = true;
             if let Some(rest) = appended.strip_prefix('\u{feff}') {
                 let skip = appended.len() - rest.len();
                 self.buf.drain(before..before + skip);
-                appended = &self.buf[before..];
             }
         }
-        self.buf_units += utf16_len(appended);
     }
 }
 
@@ -152,7 +168,7 @@ fn decode_into(mut bytes: &[u8], out: &mut String, carry: &mut Vec<u8>) {
 }
 
 fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
-    haystack.iter().position(|&b| b == needle)
+    memchr::memchr(needle, haystack)
 }
 
 /// A record past the cap. Gateway-authored: one integer and a literal.

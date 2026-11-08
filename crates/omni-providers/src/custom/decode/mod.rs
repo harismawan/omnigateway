@@ -14,6 +14,7 @@ use serde_json::Value;
 use crate::codec::DecodeError;
 
 mod chat;
+mod fast;
 mod responses;
 
 pub use chat::ChatDecoder;

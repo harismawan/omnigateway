@@ -12,14 +12,14 @@ use crate::codec::{DecodeError, Flow, StreamDecoder};
 use crate::sse::SseMessage;
 
 /// The reasoning text one chat delta carries: the first non-empty spelling.
-fn reasoning_text(delta: Option<&Value>) -> String {
-    if let Some(r) = nonempty(prop(delta, "reasoning")) {
+fn reasoning_text(delta: &DeltaView<'_>) -> String {
+    if let Some(r) = nonempty(delta.reasoning) {
         return r.to_string();
     }
-    if let Some(r) = nonempty(prop(delta, "reasoning_content")) {
+    if let Some(r) = nonempty(delta.reasoning_content) {
         return r.to_string();
     }
-    let Some(Value::Array(details)) = prop(delta, "reasoning_details") else {
+    let Some(Value::Array(details)) = delta.reasoning_details else {
         return String::new();
     };
     let mut out = String::new();
@@ -32,6 +32,43 @@ fn reasoning_text(delta: Option<&Value>) -> String {
         }
     }
     out
+}
+
+/// What the decoder reads off one chunk: each field as `d?.x` sees it
+/// (`None` for absent, `Some(Null)` for null), whichever way it was parsed.
+pub(super) struct ChunkView<'v> {
+    pub(super) id: Option<&'v Value>,
+    pub(super) model: Option<&'v Value>,
+    pub(super) usage: Option<&'v Value>,
+    /// `choices?.[0]`, when truthy.
+    pub(super) choice: Option<ChoiceView<'v>>,
+}
+
+pub(super) struct ChoiceView<'v> {
+    /// `choice.delta`, null filtered out; all-`None` when it is not an object.
+    pub(super) delta: DeltaView<'v>,
+    pub(super) finish_reason: Option<&'v Value>,
+}
+
+#[derive(Default)]
+pub(super) struct DeltaView<'v> {
+    pub(super) content: Option<&'v Value>,
+    pub(super) reasoning: Option<&'v Value>,
+    pub(super) reasoning_content: Option<&'v Value>,
+    pub(super) reasoning_details: Option<&'v Value>,
+    pub(super) tool_calls: Option<&'v Value>,
+}
+
+impl<'v> DeltaView<'v> {
+    fn of(delta: Option<&'v Value>) -> Self {
+        DeltaView {
+            content: prop(delta, "content"),
+            reasoning: prop(delta, "reasoning"),
+            reasoning_content: prop(delta, "reasoning_content"),
+            reasoning_details: prop(delta, "reasoning_details"),
+            tool_calls: prop(delta, "tool_calls"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +88,9 @@ pub struct ChatDecoder {
     keys: KeyMint,
     next_index: u32,
     open: Option<(Open, u32)>,
+    /// Tests only: always take the generic path, to compare the two.
+    #[cfg(test)]
+    pub(super) no_fast: bool,
 }
 
 impl ChatDecoder {
@@ -91,40 +131,14 @@ impl ChatDecoder {
             }
         }
     }
-}
 
-const CHAT_FINISH: [(&str, StopReason); 4] = [
-    ("stop", StopReason::EndTurn),
-    ("length", StopReason::MaxTokens),
-    ("tool_calls", StopReason::ToolUse),
-    ("content_filter", StopReason::ContentFilter),
-];
-
-impl StreamDecoder for ChatDecoder {
-    fn message(
+    /// One chunk's fields, as `decodeCustomChat`'s loop body reads them.
+    fn apply(
         &mut self,
-        msg: &SseMessage,
+        d: &ChunkView<'_>,
         out: &mut VecDeque<StreamEvent>,
     ) -> Result<Flow, DecodeError> {
-        if msg.data == "[DONE]" {
-            // The transport-level success marker.
-            if let Some((_, i)) = self.open {
-                out.push_back(StreamEvent::BlockEnd { index: i });
-            }
-            out.push_back(StreamEvent::End {
-                stop_reason: self.stop_reason.unwrap_or(StopReason::EndTurn),
-                usage: self.usage,
-                vendor: None,
-            });
-            return Ok(Flow::Stop);
-        }
-        let Some(d) = json_object(&msg.data) else {
-            return Ok(Flow::Continue);
-        };
-        let d = Some(&d);
-
-        let id = prop(d, "id");
-        let model = prop(d, "model");
+        let (id, model) = (d.id, d.model);
         if !self.started && (id.is_some() || model.is_some()) {
             self.started = true;
             let text = |v: Option<&Value>| match v {
@@ -137,7 +151,7 @@ impl StreamDecoder for ChatDecoder {
             });
         }
 
-        let usage = prop(d, "usage");
+        let usage = d.usage;
         if truthy(usage) {
             let details = prop(usage, "prompt_tokens_details");
             self.usage = usage_of(
@@ -154,12 +168,10 @@ impl StreamDecoder for ChatDecoder {
             );
         }
 
-        let choice = index0(prop(d, "choices"));
-        if !truthy(choice.as_ref()) {
+        let Some(choice) = &d.choice else {
             return Ok(Flow::Continue);
-        }
-        let choice = choice.as_ref();
-        let delta = prop(choice, "delta").filter(|v| !v.is_null());
+        };
+        let delta = &choice.delta;
 
         let reasoning = reasoning_text(delta);
         if !reasoning.is_empty() {
@@ -170,7 +182,7 @@ impl StreamDecoder for ChatDecoder {
             });
         }
 
-        if let Some(content) = nonempty(prop(delta, "content")) {
+        if let Some(content) = nonempty(delta.content) {
             let index = self.continue_or_open(Open::Text, out);
             out.push_back(StreamEvent::BlockDelta {
                 index,
@@ -180,7 +192,7 @@ impl StreamDecoder for ChatDecoder {
             });
         }
 
-        for call in iterate(prop(delta, "tool_calls"))? {
+        for call in iterate(delta.tool_calls)? {
             // Reading a property of `null` throws in JS.
             if call.is_null() {
                 return Err(DecodeError::Throw("tool call is null"));
@@ -218,7 +230,7 @@ impl StreamDecoder for ChatDecoder {
             }
         }
 
-        if let Some(Value::String(reason)) = prop(choice, "finish_reason") {
+        if let Some(Value::String(reason)) = choice.finish_reason {
             match CHAT_FINISH.iter().find(|(k, _)| k == reason) {
                 Some((_, mapped)) => self.stop_reason = Some(*mapped),
                 None => {
@@ -232,6 +244,63 @@ impl StreamDecoder for ChatDecoder {
             }
         }
         Ok(Flow::Continue)
+    }
+}
+
+const CHAT_FINISH: [(&str, StopReason); 4] = [
+    ("stop", StopReason::EndTurn),
+    ("length", StopReason::MaxTokens),
+    ("tool_calls", StopReason::ToolUse),
+    ("content_filter", StopReason::ContentFilter),
+];
+
+impl StreamDecoder for ChatDecoder {
+    fn message(
+        &mut self,
+        msg: &SseMessage,
+        out: &mut VecDeque<StreamEvent>,
+    ) -> Result<Flow, DecodeError> {
+        if msg.data == "[DONE]" {
+            // The transport-level success marker.
+            if let Some((_, i)) = self.open {
+                out.push_back(StreamEvent::BlockEnd { index: i });
+            }
+            out.push_back(StreamEvent::End {
+                stop_reason: self.stop_reason.unwrap_or(StopReason::EndTurn),
+                usage: self.usage,
+                vendor: None,
+            });
+            return Ok(Flow::Stop);
+        }
+        #[cfg(test)]
+        let fast = if self.no_fast {
+            None
+        } else {
+            super::fast::parse_chat_chunk(&msg.data)
+        };
+        #[cfg(not(test))]
+        let fast = super::fast::parse_chat_chunk(&msg.data);
+        if let Some(fast) = fast {
+            return self.apply(&fast.view(), out);
+        }
+        let Some(d) = json_object(&msg.data) else {
+            return Ok(Flow::Continue);
+        };
+        let d = Some(&d);
+        let choice = index0(prop(d, "choices"));
+        let view = ChunkView {
+            id: prop(d, "id"),
+            model: prop(d, "model"),
+            usage: prop(d, "usage"),
+            choice: truthy(choice.as_ref()).then(|| {
+                let choice = choice.as_ref();
+                ChoiceView {
+                    delta: DeltaView::of(prop(choice, "delta").filter(|v| !v.is_null())),
+                    finish_reason: prop(choice, "finish_reason"),
+                }
+            }),
+        };
+        self.apply(&view, out)
     }
 
     fn finish(&mut self, out: &mut VecDeque<StreamEvent>) {
