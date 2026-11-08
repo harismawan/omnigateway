@@ -159,6 +159,17 @@ const anthropicCases: Case[] = [
   { name: "thinking.enabled.zero", body: j({ ...aBase, thinking: { type: "enabled", budget_tokens: 0 } }) },
   { name: "thinking.enabled.frac", body: j({ ...aBase, thinking: { type: "enabled", budget_tokens: 1.5 } }) },
   { name: "thinking.enabled.huge", body: j({ ...aBase, thinking: { type: "enabled", budget_tokens: 2 ** 60 } }) },
+  { name: "thinking.enabled.max_safe", body: j({ ...aBase, thinking: { type: "enabled", budget_tokens: 9007199254740991 } }) },
+  { name: "thinking.enabled.max_safe.plus.one", body: j({ ...aBase, thinking: { type: "enabled", budget_tokens: 9007199254740992 } }) },
+  { name: "thinking.enabled.neg.max_safe", body: j({ ...aBase, thinking: { type: "enabled", budget_tokens: -9007199254740991 } }) },
+  { name: "thinking.enabled.neg.beyond", body: j({ ...aBase, thinking: { type: "enabled", budget_tokens: -9007199254740993 } }) },
+  { name: "max_tokens.max_safe", body: j({ ...aBase, max_tokens: 9007199254740991 }) },
+  { name: "max_tokens.beyond.safe", body: j({ ...aBase, max_tokens: 9007199254740992 }) },
+  { name: "max_tokens.exponent", body: '{"model":"m","messages":[{"role":"user","content":"x"}],"max_tokens":1e3}' },
+  { name: "max_tokens.fraction.zero", body: '{"model":"m","messages":[{"role":"user","content":"x"}],"max_tokens":5.0}' },
+  { name: "tools.web_search.max_uses.max_safe", body: j({ ...aBase, tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 9007199254740991 }] }) },
+  { name: "tools.web_search.max_uses.beyond", body: j({ ...aBase, tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 9007199254740992 }] }) },
+  { name: "tools.computer.display_number.neg.beyond", body: j({ ...aBase, tools: [{ type: "computer_20250124", name: "computer", display_width_px: 1, display_height_px: 1, display_number: -9007199254740992 }] }) },
   { name: "thinking.enabled.missing", body: j({ ...aBase, thinking: { type: "enabled" } }) },
   { name: "thinking.enabled.effort.ignored", body: j({ ...aBase, thinking: { type: "enabled", budget_tokens: 5 }, output_config: { effort: "low" } }) },
   { name: "thinking.disabled", body: j({ ...aBase, thinking: { type: "disabled" } }) },
@@ -395,6 +406,16 @@ const openaiCases: Case[] = [
   ...mutate(oBase, "tools"),
   ...mutate(oBase, "tool_choice"),
   ...mutate(oBase, "reasoning_effort"),
+  { name: "n.two", body: j({ ...oBase, n: 2 }) },
+  { name: "legacy.functions", body: j({ ...oBase, functions: [{ name: "f", parameters: { type: "object" } }], function_call: { name: "f" } }) },
+  { name: "legacy.function_call.auto", body: j({ ...oBase, function_call: "auto" }) },
+  { name: "legacy.function.message", body: oMsg(user("q"), { role: "assistant", content: null, function_call: { name: "f", arguments: "{}" } }, { role: "function", name: "f", content: "r" }) },
+  { name: "response_format.json_object", body: j({ ...oBase, response_format: { type: "json_object" } }) },
+  { name: "max_tokens.max_safe", body: j({ ...oBase, max_tokens: 9007199254740991 }) },
+  { name: "max_tokens.max_safe.plus.one", body: j({ ...oBase, max_tokens: 9007199254740992 }) },
+  { name: "max_tokens.max_safe.plus.two", body: '{"model":"m","messages":[{"role":"user","content":"x"}],"max_tokens":9007199254740993}' },
+  { name: "temperature.huge", body: '{"model":"m","messages":[{"role":"user","content":"x"}],"temperature":1e308}' },
+  { name: "temperature.neg.max.safe", body: j({ ...oBase, temperature: -9007199254740991 }) },
   { name: "max_tokens.both", body: j({ ...oBase, max_tokens: 10, max_completion_tokens: 20 }) },
   { name: "max_tokens.legacy", body: j({ ...oBase, max_tokens: 10 }) },
   { name: "stop.string", body: j({ ...oBase, stop: "END" }) },
@@ -552,6 +573,18 @@ const responsesCases: Case[] = [
   { name: "items.function_call.bad.json.long.id", body: rItems(user("q"), { type: "function_call", call_id: "c".repeat(65), name: "f", arguments: "{" }) },
   { name: "items.function_call.args.object", body: rItems(user("q"), { type: "function_call", call_id: "c", name: "f", arguments: { a: 1 } }) },
   { name: "items.function_call.long.id", body: rItems(user("q"), { type: "function_call", call_id: "x".repeat(64), name: "f", arguments: "{}" }, { type: "function_call", call_id: `${"y".repeat(64)}z`, name: "f", arguments: "{}" }, { type: "function_call_output", call_id: `${"y".repeat(64)}z`, output: "ok" }) },
+  ...[63, 64, 65].flatMap((units) => {
+    // `units` UTF-16 units: one astral char (2 units) and BMP fill, and all-astral where even.
+    const mixed = `😀${"é".repeat(units - 2)}`;
+    const astral = units % 2 === 0 ? "😀".repeat(units / 2) : `${"😀".repeat((units - 1) / 2)}a`;
+    return [mixed, astral].map((id, k) => ({
+      name: `items.call_id.unicode.${units}.${k}`,
+      body: rItems(user("q"), { type: "function_call", call_id: id, name: "f", arguments: "{}" }, { type: "function_call_output", call_id: id, output: "ok" }),
+    }));
+  }),
+  { name: "items.call_id.unicode.bad.json.65", body: rItems(user("q"), { type: "function_call", call_id: `😀${"é".repeat(63)}`, name: "f", arguments: "{" }) },
+  { name: "max_output_tokens.max_safe", body: j({ ...rBase, max_output_tokens: 9007199254740991 }) },
+  { name: "max_output_tokens.beyond", body: j({ ...rBase, max_output_tokens: 9007199254740992 }) },
   { name: "items.function_call.dropped", body: rItems(user("q"), { type: "function_call", call_id: "c1", name: "", arguments: "{}" }, { type: "function_call_output", call_id: "c1", output: "dropped" }, { type: "function_call", call_id: "", name: "f" }, { type: "function_call_output", output: "also dropped" }, { type: "function_call_output", call_id: "orphan", output: "orphan" }) },
   { name: "items.custom_tool_call", body: rItems(user("q"), { type: "custom_tool_call", call_id: "ct", name: "apply_patch", input: "*** Begin Patch" }, { type: "custom_tool_call_output", call_id: "ct", output: "done" }, { type: "custom_tool_call", call_id: "ct2", name: "apply_patch", input: 5 }) },
   { name: "items.reasoning", body: rItems(user("q"), { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "s" }], encrypted_content: "enc" }, { type: "local_shell_call", id: "ls", call_id: "c", action: { type: "exec" } }, { type: "local_shell_call_output", id: "lso", output: "o" }) },
@@ -677,6 +710,44 @@ const sequences: Seq[] = [
       end("endTurn", usage(20, 3, 10, 0)),
     ],
   },
+  {
+    name: "native.merge.proto",
+    events: [
+      start("gpt-5"),
+      { type: "blockStart", index: 0, block: { type: "providerNative", provider: "openai", blockType: "reasoning", data: JSON.parse('{"id":"rs","__proto__":{"a":1}}') } },
+      { type: "blockDelta", index: 0, delta: { type: "providerNative", provider: "openai", deltaType: "output_item.done", fold: "merge", data: JSON.parse('{"__proto__":{"b":2},"encrypted_content":"e","type":"collide"}') } },
+      { type: "blockEnd", index: 0 },
+      { type: "blockStart", index: 1, block: { type: "providerNative", provider: "anthropic", blockType: "server_tool_use", data: JSON.parse('{"__proto__":{"c":3},"id":"s"}') } },
+      { type: "blockDelta", index: 1, delta: { type: "providerNative", provider: "anthropic", deltaType: "citations_delta", data: JSON.parse('{"__proto__":{"d":4},"x":1}') } },
+      { type: "blockEnd", index: 1 },
+      end("endTurn"),
+    ],
+  },
+  {
+    name: "native.reasoning.text.coercion",
+    events: [
+      start("gpt-5"),
+      { type: "blockStart", index: 0, block: { type: "providerNative", provider: "openai", blockType: "reasoning", data: {} } },
+      ...[5, 1.5e21, true, false, null, [1, [2, null], "x"], { a: 1 }, "", "\u2028"].map(
+        (text): StreamEvent => ({ type: "blockDelta", index: 0, delta: { type: "providerNative", provider: "openai", deltaType: "reasoning_summary_text.delta", data: { text } } }),
+      ),
+      { type: "blockEnd", index: 0 },
+      end("endTurn"),
+    ],
+  },
+  {
+    name: "native.type.collisions",
+    events: [
+      start(),
+      { type: "blockStart", index: 0, block: { type: "providerNative", provider: "anthropic", blockType: "web_search_tool_result", data: { type: "inner", "7": "seven", tool_use_id: "s" } } },
+      { type: "blockDelta", index: 0, delta: { type: "providerNative", provider: "anthropic", deltaType: "citations_delta", data: { type: "inner_delta", "3": "three", citation: {} } } },
+      { type: "blockEnd", index: 0 },
+      { type: "blockStart", index: 1, block: { type: "providerNative", provider: "openai", blockType: "local_shell_call", data: { type: "overridden", "2": 2, id: "ls" } } },
+      { type: "blockDelta", index: 1, delta: { type: "providerNative", provider: "openai", deltaType: "output_item.done", fold: "merge", data: { type: "merged_type", "1": 1 } } },
+      { type: "blockEnd", index: 1 },
+      end("endTurn"),
+    ],
+  },
   { name: "native.other.provider", events: [start(), { type: "blockStart", index: 0, block: { type: "providerNative", provider: "anthropic", blockType: "compaction", data: { content: "c" } } }, { type: "blockEnd", index: 0 }, ...text(1, "t"), end("endTurn")] },
   { name: "duplicate.start", events: [start(), { type: "blockStart", index: 0, block: { type: "text" } }, { type: "blockStart", index: 0, block: { type: "text" } }, { type: "blockDelta", index: 0, delta: { type: "text", text: "once" } }, { type: "blockEnd", index: 0 }, { type: "blockEnd", index: 0 }, end("endTurn")] },
   { name: "reused.index", events: [start(), ...thinking(0, false, ["r"]), ...text(0, "answer"), end("endTurn")] },
@@ -751,6 +822,37 @@ const errorBodies = CODES.flatMap((code) =>
 
 const NOW = 1794026194123;
 const h = (limit: number, remaining: number, resetAt: number, window = "1m", used = limit - remaining) => ({ window, limit, used, remaining, resetAt });
+/**
+ * `anthropicRateLimitHeaders`, or — where `toISOString` throws on a reset
+ * outside `Date`'s range, failing the TS response — the documented Rust rule:
+ * that dimension's reset header is omitted and the rest render as TS renders
+ * them (computed here by the real function with the reset neutralised).
+ */
+function anthropicHeadersOrOmitted(headroom: Record<string, { resetAt: number }>) {
+  try {
+    return { anthropic: anthropicRateLimitHeaders(headroom as never) };
+  } catch (error) {
+    const omitted: string[] = [];
+    const safe = Object.fromEntries(
+      Object.entries(headroom).map(([dim, e]) => {
+        const ok = (() => {
+          try {
+            new Date(Math.ceil(e.resetAt / 1000) * 1000).toISOString();
+            return true;
+          } catch {
+            return false;
+          }
+        })();
+        if (!ok) omitted.push(`anthropic-ratelimit-${dim}-reset`);
+        return [dim, ok ? e : { ...e, resetAt: 0 }];
+      }),
+    );
+    const rendered = anthropicRateLimitHeaders(safe as never);
+    for (const name of omitted) delete rendered[name];
+    return { anthropic: rendered, anthropicTsThrew: String(error) };
+  }
+}
+
 const headroomCases = [
   {},
   { requests: h(60, 59, NOW + 30_000) },
@@ -766,10 +868,22 @@ const headroomCases = [
   { tokens: h(5, 5, 253402300799000), requests: h(3, 2, 946684800000) },
   { requests: h(1, 1, 253402300800000), tokens: h(1, 1, -62198755200001) },
   { requests: h(1, 0, -1), tokens: h(0, 0, 999.5) },
+  { requests: h(Number.POSITIVE_INFINITY, Number.NaN, NOW + 1000), tokens: h(-0, -5, NOW) },
+  { requests: h(1, 1, 8.64e15), tokens: h(1, 1, -8.64e15) },
+  { requests: h(1, 1, 8.64e15 - 999) },
+  { requests: h(1, 1, 8.64e15 + 1), tokens: h(2, 2, NOW) },
+  { requests: h(3, 3, NOW), tokens: h(1, 1, Number.NaN) },
+  { tokens: h(1, 1, Number.POSITIVE_INFINITY), requests: h(1, 1, Number.NEGATIVE_INFINITY) },
 ].map((headroom) => ({
-  headroom,
+  // Numbers as `String(n)` (with `-0` kept), so NaN and the infinities survive JSON.
+  headroom: Object.fromEntries(
+    Object.entries(headroom).map(([dim, e]) => [
+      dim,
+      Object.fromEntries(Object.entries(e).map(([k, v]) => [k, typeof v === "number" ? (Object.is(v, -0) ? "-0" : String(v)) : v])),
+    ]),
+  ),
   now: NOW,
-  anthropic: anthropicRateLimitHeaders(headroom as never),
+  ...anthropicHeadersOrOmitted(headroom),
   openai: openaiRateLimitHeaders(headroom as never, NOW),
   responses: responsesRateLimitHeaders(headroom as never, NOW),
 }));

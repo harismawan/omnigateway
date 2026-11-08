@@ -160,7 +160,13 @@ fn error_bodies_match_ts() {
 
 fn headroom(v: &Value) -> Option<Headroom> {
     let v = v.as_object()?;
-    let f = |k: &str| v[k].as_f64().expect("number");
+    // `String(n)`, so NaN and the infinities survive the JSON file.
+    let f = |k: &str| match s(&v[k]) {
+        "NaN" => f64::NAN,
+        "Infinity" => f64::INFINITY,
+        "-Infinity" => f64::NEG_INFINITY,
+        n => n.parse::<f64>().expect("number"),
+    };
     Some(Headroom {
         window: match s(&v["window"]) {
             "1m" => Window::M1,
