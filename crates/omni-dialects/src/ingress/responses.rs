@@ -231,7 +231,8 @@ fn native_block(item: &Value, block_type: &str) -> ContentBlock {
     let mut data = Map::new();
     if let Some(map) = item.as_object() {
         for key in super::js_keys(map) {
-            if key != "type" && key != "__proto__" {
+            // Object rest (`{ type, ...data }`) keeps an own `__proto__`.
+            if key != "type" {
                 data.insert(key.to_string(), map[key].clone());
             }
         }
@@ -389,7 +390,7 @@ fn read_tools(raw: &[Value]) -> Result<Vec<ToolDef>, GatewayError> {
         }
         let mut wire = Map::new();
         for key in super::js_keys(map) {
-            if key != "type" && key != "name" && key != "__proto__" {
+            if key != "type" && key != "name" {
                 wire.insert(key.to_string(), map[key].clone());
             }
         }

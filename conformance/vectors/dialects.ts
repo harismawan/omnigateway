@@ -566,6 +566,8 @@ const responsesCases: Case[] = [
   { name: "tools.no.type", body: j({ ...rBase, tools: [{ name: "x" }] }) },
   { name: "tools.no.type.no.name", body: j({ ...rBase, tools: [{}] }) },
   { name: "tools.not.object", body: j({ ...rBase, tools: ["x"] }) },
+  { name: "tools.hosted.proto", body: '{"model":"m","input":"q","tools":[{"type":"web_search","__proto__":{"a":1},"z":1}]}' },
+  { name: "items.reasoning.proto", body: '{"model":"m","input":[{"role":"user","content":"q"},{"type":"reasoning","__proto__":{"a":1},"id":"r"}]}' },
   { name: "tools.array.entry", body: j({ ...rBase, tools: [["function", "f"]] }) },
   { name: "tools.null.entry", body: j({ ...rBase, tools: [null] }) },
   { name: "tools.empty", body: j({ ...rBase, tools: [] }) },

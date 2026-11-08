@@ -12706,6 +12706,74 @@
         }
       },
       {
+        "name": "tools.hosted.proto",
+        "body": "{\"model\":\"m\",\"input\":\"q\",\"tools\":[{\"type\":\"web_search\",\"__proto__\":{\"a\":1},\"z\":1}]}",
+        "ok": {
+          "model": "m",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "q"
+                }
+              ]
+            }
+          ],
+          "stream": false,
+          "tools": [
+            {
+              "kind": "provider",
+              "provider": "openai",
+              "type": "web_search",
+              "name": "web_search",
+              "wire": {
+                "__proto__": {
+                  "a": 1
+                },
+                "z": 1
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "items.reasoning.proto",
+        "body": "{\"model\":\"m\",\"input\":[{\"role\":\"user\",\"content\":\"q\"},{\"type\":\"reasoning\",\"__proto__\":{\"a\":1},\"id\":\"r\"}]}",
+        "ok": {
+          "model": "m",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "q"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "providerNative",
+                  "provider": "openai",
+                  "blockType": "reasoning",
+                  "data": {
+                    "__proto__": {
+                      "a": 1
+                    },
+                    "id": "r"
+                  }
+                }
+              ]
+            }
+          ],
+          "stream": false
+        }
+      },
+      {
         "name": "tools.array.entry",
         "body": "{\"model\":\"gpt-5-codex\",\"input\":\"hi\",\"tools\":[[\"function\",\"f\"]]}",
         "error": {
