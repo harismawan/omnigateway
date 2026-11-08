@@ -1,0 +1,558 @@
+//! The server end to end, in process: a real listener, a real local SSE
+//! upstream, every route, exactly-one-row logging, 499 on hang-up,
+//! keepalives, the body limit and graceful shutdown.
+
+mod common;
+
+use std::time::Duration;
+
+use common::*;
+use omni_gateway::{Options, start};
+use omni_gateway_core::config::{LogLevel, load_config};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+/// A chat-completions SSE upstream: `mock-c<n>-d<ms>` streams n deltas
+/// `ms` apart, as `bench-gateway-upstream.ts` does.
+async fn upstream() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 8192];
+                    let Ok(n) = s.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let Some(end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let len: usize = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(str::to_owned)
+                        })
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buf.len() < end + 4 + len {
+                        continue;
+                    }
+                    let body = &text[end + 4..end + 4 + len];
+                    let model = body
+                        .split("\"model\":\"")
+                        .nth(1)
+                        .and_then(|r| r.split('"').next())
+                        .unwrap_or("")
+                        .to_owned();
+                    let parts: Vec<&str> = model.trim_start_matches("mock-c").split("-d").collect();
+                    let chunks: usize = parts.first().and_then(|c| c.parse().ok()).unwrap_or(1);
+                    let delay: u64 = parts.get(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+                    if s.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let send = |d: String| format!("{:x}\r\n{d}\r\n", d.len());
+                    let frame = |c: &str| {
+                        format!(
+                            "data: {{\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"{model}\",\"choices\":[{c}]}}\n\n"
+                        )
+                    };
+                    let mut out = send(frame(
+                        "{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}",
+                    ));
+                    for _ in 0..chunks {
+                        out.push_str(&send(frame(
+                            "{\"index\":0,\"delta\":{\"content\":\"lorem ipsum \"}}",
+                        )));
+                        if delay > 0 {
+                            if s.write_all(out.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            out.clear();
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
+                        }
+                    }
+                    out.push_str(&send(frame(
+                        "{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}",
+                    )));
+                    out.push_str(&send(format!(
+                        "data: {{\"id\":\"x\",\"model\":\"{model}\",\"choices\":[],\"usage\":{{\"prompt_tokens\":64,\"completion_tokens\":{}}}}}\n\n",
+                        chunks * 2
+                    )));
+                    out.push_str(&send("data: [DONE]\n\n".into()));
+                    out.push_str("0\r\n\r\n");
+                    if s.write_all(out.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    buf.drain(..end + 4 + len);
+                }
+            });
+        }
+    });
+    port
+}
+
+struct Gw {
+    f: Fixture,
+    base: String,
+    running: Option<omni_gateway::Running>,
+    key: String,
+}
+
+const KEY: &str = "sk-omni-test-key-plain";
+
+fn add_key(path: &std::path::Path, id: &str, raw: &str, extra: &str, value: &str) {
+    let c = rusqlite::Connection::open(path).expect("open");
+    c.execute(
+        &format!("INSERT INTO api_keys (id, label, prefix, hash, created_at{extra}) VALUES (?,?,?,?,0{value})"),
+        rusqlite::params![id, id, omni_crypto::apikey::prefix(raw), omni_crypto::apikey::hash(raw)],
+    )
+    .expect("key");
+}
+
+async fn boot_with(models: &[(&str, &str)], keepalive: Duration) -> Gw {
+    let port = upstream().await;
+    let f = fixture(&["c0"]);
+    let c = rusqlite::Connection::open(&f.path).expect("open");
+    c.execute(
+        "UPDATE credentials SET provider_data=? WHERE id='c0'",
+        rusqlite::params![format!(
+            "{{\"endpointId\":\"e0\",\"origin\":\"http://127.0.0.1:{port}\",\"protocol\":\"chat_completions\"}}"
+        )],
+    )
+    .expect("origin");
+    for (id, up) in models {
+        c.execute(
+            "INSERT OR REPLACE INTO virtual_models (id, targets, strategy) VALUES (?, ?, 'priority')",
+            rusqlite::params![id, format!(
+                "[{{\"provider\":\"custom\",\"endpointId\":\"e0\",\"model\":\"{up}\",\"tier\":1,\"weight\":1,\
+                 \"costPerMTok\":{{\"input\":1,\"output\":2}},\"capabilities\":{{\"tools\":true,\"images\":true,\"reasoning\":true}}}}]"
+            )],
+        )
+        .expect("model");
+    }
+    drop(c);
+    add_key(&f.path, "kp", KEY, "", "");
+    let env: std::collections::HashMap<String, String> = [
+        ("OMNI_ENCRYPTION_KEY", ENC),
+        ("OMNI_DB_PATH", f.path.to_str().expect("path")),
+        ("OMNI_PORT", "1"),
+        ("OMNI_DAY_OFFSET_MINUTES", "0"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect();
+    let mut config = load_config(&env, || 0).expect("config");
+    config.port = 0;
+    assert_eq!(config.log_level, LogLevel::Info);
+    let running = start(
+        config,
+        Options {
+            keepalive,
+            stop_deadline: Duration::from_secs(5),
+        },
+    )
+    .await
+    .expect("start");
+    Gw {
+        f,
+        base: format!("127.0.0.1:{}", running.addr.port()),
+        running: Some(running),
+        key: KEY.into(),
+    }
+}
+
+async fn boot() -> Gw {
+    boot_with(
+        &[("m1", "mock-c3-d0"), ("slow", "mock-c40-d50")],
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+/// One raw HTTP/1.1 exchange; returns (status, lowercased headers, body).
+async fn call(
+    base: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, Vec<(String, String)>, String) {
+    let mut s = TcpStream::connect(base).await.expect("connect");
+    let mut req = format!(
+        "{method} {path} HTTP/1.1\r\nhost: x\r\nconnection: close\r\ncontent-length: {}\r\n",
+        body.len()
+    );
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    s.write_all(req.as_bytes()).await.expect("write");
+    let mut out = Vec::new();
+    s.read_to_end(&mut out).await.expect("read");
+    let text = String::from_utf8_lossy(&out).to_string();
+    let (head, rest) = text.split_once("\r\n\r\n").expect("head");
+    let mut lines = head.lines();
+    let status: u16 = lines
+        .next()
+        .expect("status")
+        .split(' ')
+        .nth(1)
+        .expect("code")
+        .parse()
+        .expect("num");
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|l| l.split_once(": "))
+        .map(|(k, v)| (k.to_lowercase(), v.to_owned()))
+        .collect();
+    let chunked = headers
+        .iter()
+        .any(|(k, v)| k == "transfer-encoding" && v == "chunked");
+    let body = if chunked {
+        dechunk(rest)
+    } else {
+        rest.to_owned()
+    };
+    (status, headers, body)
+}
+
+fn dechunk(mut s: &str) -> String {
+    let mut out = String::new();
+    while let Some((size, rest)) = s.split_once("\r\n") {
+        let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        out.push_str(&rest[..n]);
+        s = &rest[n + 2..];
+    }
+    out
+}
+
+fn bearer(g: &Gw) -> String {
+    format!("Bearer {}", g.key)
+}
+
+async fn stop(mut g: Gw) -> Fixture {
+    let r = g.running.take().expect("running");
+    r.shutdown();
+    r.wait().await.expect("clean shutdown");
+    g.f
+}
+
+fn logs(f: &Fixture) -> Vec<Vec<String>> {
+    rows(
+        &f.path,
+        "SELECT requested_model, status, error_code, state, attempts, input_tokens, output_tokens FROM request_logs ORDER BY at, id",
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_streaming_request_files_exactly_one_completed_row() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    let (status, headers, body) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", &auth)],
+        r#"{"model":"m1","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(headers.contains(&(
+        "content-type".into(),
+        "text/event-stream; charset=utf-8".into()
+    )));
+    assert_eq!(body.matches("lorem ipsum").count(), 3);
+    assert!(body.ends_with("event: message\ndata: [DONE]\n\n"));
+    let f = stop(g).await;
+    assert_eq!(logs(&f), [["m1", "200", "null", "done", "1", "64", "6"]]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_dialect_answers_buffered_and_streamed() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    for (path, body) in [
+        (
+            "/v1/messages",
+            r#"{"model":"m1","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}"#,
+        ),
+        (
+            "/v1/messages",
+            r#"{"model":"m1","max_tokens":5,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        ),
+        (
+            "/v1/chat/completions",
+            r#"{"model":"m1","messages":[{"role":"user","content":"hi"}]}"#,
+        ),
+        ("/v1/responses", r#"{"model":"m1","input":"hi"}"#),
+        (
+            "/v1/responses",
+            r#"{"model":"m1","stream":true,"input":"hi"}"#,
+        ),
+    ] {
+        let (status, _, text) =
+            call(&g.base, "POST", path, &[("authorization", &auth)], body).await;
+        assert_eq!(status, 200, "{path} {body}: {text}");
+        assert!(text.contains("lorem ipsum"), "{path}: {text}");
+    }
+    let f = stop(g).await;
+    assert_eq!(logs(&f).len(), 5);
+    assert!(logs(&f).iter().all(|r| r[1] == "200" && r[3] == "done"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_failures_answer_in_the_dialect_and_file_a_row() {
+    let g = boot().await;
+    let (s, _, b) = call(&g.base, "POST", "/v1/messages", &[], "{}").await;
+    assert_eq!(s, 401);
+    assert_eq!(
+        b,
+        r#"{"type":"error","error":{"type":"authentication_error","message":"missing or malformed Authorization header"}}"#
+    );
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", "Bearer sk-omni-nope")],
+        "{}",
+    )
+    .await;
+    assert_eq!(s, 401);
+    assert!(b.contains("invalid API key"), "{b}");
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("authorization", "Bearer a"), ("x-api-key", "b")],
+        "{}",
+    )
+    .await;
+    assert_eq!((s, b.contains("conflicting API key headers")), (401, true));
+    let f = stop(g).await;
+    assert_eq!(
+        rows(
+            &f.path,
+            "SELECT status, error_code, api_key_id FROM request_logs"
+        )
+        .len(),
+        3
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unparsable_body_is_ts_s_500_with_jsc_s_message() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("authorization", &auth)],
+        "{bad",
+    )
+    .await;
+    assert_eq!(s, 500);
+    assert_eq!(
+        b,
+        r#"{"type":"error","error":{"type":"api_error","message":"JSON Parse error: Expected '}'"}}"#
+    );
+    let f = stop(g).await;
+    assert_eq!(
+        rows(&f.path, "SELECT status, error_code FROM request_logs"),
+        [["500", "INTERNAL"]]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_over_the_limit_is_the_dialect_s_invalid_request() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    let big = format!(
+        "{{\"model\":\"m1\",\"x\":\"{}\"}}",
+        "a".repeat(omni_gateway::server::BODY_LIMIT)
+    );
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", &auth)],
+        &big,
+    )
+    .await;
+    assert_eq!(s, 400);
+    assert!(b.contains("\"type\":\"invalid_request_error\""), "{b}");
+    stop(g).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_models_count_tokens_and_the_404s() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    let (s, h, b) = call(&g.base, "GET", "/health", &[], "").await;
+    assert_eq!(s, 200);
+    assert!(h.contains(&(
+        "content-type".into(),
+        "application/json;charset=utf-8".into()
+    )));
+    assert!(b.starts_with("{\"ok\":true,\"mode\":\"single\",\"nodeId\":\""));
+    let (s, _, b) = call(&g.base, "GET", "/v1/models", &[("x-api-key", &g.key)], "").await;
+    assert_eq!(s, 200);
+    assert!(
+        b.starts_with("{\"object\":\"list\",\"data\":[{\"id\":\"m1\""),
+        "{b}"
+    );
+    assert!(
+        b.ends_with("\"has_more\":false,\"first_id\":\"m1\",\"last_id\":\"slow\"}"),
+        "{b}"
+    );
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages/count_tokens",
+        &[("authorization", &auth)],
+        r#"{"model":"m1","messages":[{"role":"user","content":"hi there"}]}"#,
+    )
+    .await;
+    assert_eq!((s, b.as_str()), (200, "{\"input_tokens\":10}"));
+    let (s, _, b) = call(&g.base, "GET", "/nope", &[], "").await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            404,
+            r#"{"error":{"code":"NOT_FOUND","message":"no route for /nope"}}"#
+        )
+    );
+    let (s, _, b) = call(&g.base, "POST", "/v1/nope", &[], "").await;
+    assert_eq!((s, b.as_str()), (404, "NOT_FOUND"));
+    let f = stop(g).await;
+    // count_tokens and models write no row.
+    assert!(rows(&f.path, "SELECT id FROM request_logs").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_hangs_up_mid_stream_files_one_499_row() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    let mut s = TcpStream::connect(&g.base).await.expect("connect");
+    let body = r#"{"model":"slow","max_tokens":5,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let req = format!(
+        "POST /v1/messages HTTP/1.1\r\nhost: x\r\nauthorization: {auth}\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.expect("write");
+    let mut got = Vec::new();
+    while !String::from_utf8_lossy(&got).contains("lorem ipsum") {
+        let mut chunk = [0u8; 4096];
+        let n = s.read(&mut chunk).await.expect("read");
+        assert!(n > 0);
+        got.extend_from_slice(&chunk[..n]);
+    }
+    drop(s);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let f = stop(g).await;
+    let r = rows(
+        &f.path,
+        "SELECT status, error_code, state, attempts, credential_id FROM request_logs",
+    );
+    assert_eq!(r, [["499", "interrupted", "done", "1", "c0"]]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_stream_carries_keepalive_comments() {
+    let g = boot_with(&[("slow", "mock-c3-d300")], Duration::from_millis(100)).await;
+    let auth = bearer(&g);
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", &auth)],
+        r#"{"model":"slow","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(b.contains(": keepalive\n\n"), "{b}");
+    assert!(b.ends_with("data: [DONE]\n\n"));
+    stop(g).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_lets_an_open_stream_finish_and_flushes_its_row() {
+    let g = boot_with(&[("slow", "mock-c5-d100")], Duration::from_secs(10)).await;
+    let auth = bearer(&g);
+    let base = g.base.clone();
+    let client = tokio::spawn(async move {
+        call(
+            &base,
+            "POST",
+            "/v1/chat/completions",
+            &[("authorization", &auth)],
+            r#"{"model":"slow","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let f = stop(g).await;
+    let (s, _, b) = client.await.expect("client");
+    assert_eq!(s, 200);
+    assert!(b.ends_with("data: [DONE]\n\n"));
+    assert_eq!(logs(&f), [["slow", "200", "null", "done", "1", "64", "10"]]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_concurrency_limited_key_is_refused_with_retry_after_and_headers() {
+    let g = boot_with(&[("slow", "mock-c3-d200")], Duration::from_secs(10)).await;
+    add_key(
+        &g.f.path,
+        "kl",
+        "sk-omni-limited",
+        ", limits",
+        r#", '{"concurrency":1,"requests":{"1m":100}}'"#,
+    );
+    // The refresher picks the new key up within one poll; the miss read sooner.
+    let base = g.base.clone();
+    let first = tokio::spawn(async move {
+        call(
+            &base,
+            "POST",
+            "/v1/chat/completions",
+            &[("authorization", "Bearer sk-omni-limited")],
+            r#"{"model":"slow","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let (s, h, b) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", "Bearer sk-omni-limited")],
+        r#"{"model":"slow","messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(s, 429, "{b}");
+    assert!(b.contains("API key rate limit exceeded"));
+    assert!(
+        h.iter().any(|(k, _)| k == "x-ratelimit-limit-requests"),
+        "{h:?}"
+    );
+    let (s1, h1, _) = first.await.expect("first");
+    assert_eq!(s1, 200);
+    assert!(
+        h1.contains(&("x-ratelimit-remaining-requests".into(), "99".into())),
+        "{h1:?}"
+    );
+    stop(g).await;
+}
