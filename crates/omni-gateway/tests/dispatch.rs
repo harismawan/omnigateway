@@ -438,3 +438,104 @@ async fn a_rebuild_before_the_health_write_lands_does_not_lose_the_failure() {
         [["2"]]
     );
 }
+
+/// `n` tool calls with no arguments: block starts and ends but no delta, so
+/// nothing commits; then the stream ends without `[DONE]` (retryable).
+fn many_non_delta_events(n: usize) -> Reply {
+    let mut body = Vec::new();
+    for i in 0..n {
+        body.push(format!(
+            "data: {{\"id\":\"u1\",\"model\":\"up\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":{i},\"id\":\"call_{i}\",\"function\":{{\"name\":\"f\"}}}}]}}}}]}}\n\n"
+        ));
+    }
+    Reply::Http(200, vec![], body)
+}
+
+#[tokio::test]
+async fn pre_commit_buffering_is_capped_and_then_commits_without_failover() {
+    let f = fixture(&["c0", "c1"]);
+    let h = harness(&f, vec![many_non_delta_events(3000), sse_ok(1)]);
+    let mut d = dispatch(h.deps.clone(), req("m1"));
+    let events = drain(&mut d).await;
+    // Past the cap the attempt committed: its failure is in-stream, and the
+    // second candidate is never called.
+    assert_eq!(h.script.calls(), 1);
+    match events.last() {
+        // The decoder's own terminal event, yielded as TS yields it.
+        Some(StreamEvent::Error { code, message, .. }) => {
+            assert_eq!(*code, ErrorCode::Upstream);
+            assert_eq!(message, "upstream stream ended before [DONE]");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(d.log.lock().expect("log").ttft_ms.is_some());
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn a_few_non_delta_events_stay_buffered_and_fail_over() {
+    let f = fixture(&["c0", "c1"]);
+    let h = harness(&f, vec![many_non_delta_events(10), sse_ok(1)]);
+    let mut d = dispatch(h.deps.clone(), req("m1"));
+    let events = drain(&mut d).await;
+    assert_eq!(h.script.calls(), 2);
+    assert!(matches!(events.last(), Some(StreamEvent::End { .. })));
+    flush(h).await;
+}
+
+/// A live upstream that commits (one delta) and then hangs.
+async fn commits_then_hangs() -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let mut b = [0u8; 65536];
+                let _n = s.read(&mut b).await;
+                let d = "data: {\"id\":\"u\",\"model\":\"up\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n";
+                let msg = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n{:x}\r\n{d}\r\n",
+                    d.len()
+                );
+                if s.write_all(msg.as_bytes()).await.is_ok() {
+                    std::future::pending::<()>().await;
+                }
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn a_cancel_after_commit_releases_the_slot_with_the_observed_ttft() {
+    let port = commits_then_hangs().await;
+    let f = fixture(&["c0"]);
+    rusqlite::Connection::open(&f.path)
+        .expect("open")
+        .execute(
+            "UPDATE credentials SET provider_data=?",
+            rusqlite::params![format!(
+                "{{\"endpointId\":\"e0\",\"origin\":\"http://127.0.0.1:{port}\",\"protocol\":\"chat_completions\"}}"
+            )],
+        )
+        .expect("origin");
+    let mut h = harness(&f, vec![]);
+    std::sync::Arc::get_mut(&mut h.deps).expect("unique").http =
+        std::sync::Arc::new(omni_providers::http::Client::new());
+    let mut d = dispatch(h.deps.clone(), req("m1"));
+    while let Some(ev) = d.events.next().await {
+        if matches!(ev.expect("event"), StreamEvent::BlockDelta { .. }) {
+            break;
+        }
+    }
+    let ttft = d.log.lock().expect("log").ttft_ms.expect("committed");
+    drop(d);
+    assert!(h.deps.load.counts().is_empty());
+    #[allow(clippy::cast_precision_loss)]
+    let want = ttft as f64;
+    assert_eq!(h.deps.load.recent()["c0::up0"].ewma_ttft_ms, Some(want));
+    flush(h).await;
+}

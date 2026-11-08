@@ -44,6 +44,44 @@ use omni_gateway_core::snapshot::SnapshotHolder;
 use crate::load::{LoadRegistry, LoadSlot, Probes};
 use crate::price::price_of;
 
+/// Pre-commit buffering cap: events held before the first delta. Past
+/// either bound the attempt commits (flushes and streams on); a failure
+/// after that point is in-stream, with no failover.
+pub const PENDING_MAX_EVENTS: usize = 4096;
+/// The same cap in buffered event payload bytes (estimated).
+pub const PENDING_MAX_BYTES: usize = 1024 * 1024;
+
+/// A cheap upper estimate of an event's payload: its strings plus a fixed
+/// overhead; native payloads count their serialized size.
+fn event_size(e: &StreamEvent) -> usize {
+    use omni_ir::stream::{ContentBlockStart, Delta};
+    const BASE: usize = 64;
+    BASE + match e {
+        StreamEvent::Start { id, model } => id.len() + model.len(),
+        StreamEvent::BlockStart { block, .. } => match block {
+            ContentBlockStart::ToolUse { id, name } => id.len() + name.len(),
+            ContentBlockStart::ProviderNative {
+                block_type, data, ..
+            } => {
+                block_type.len()
+                    + omni_ir::jsjson::to_string(&serde_json::Value::Object(data.clone())).len()
+            }
+            _ => 0,
+        },
+        StreamEvent::BlockDelta { delta, .. } => match delta {
+            Delta::Text { text } | Delta::Thinking { text } => text.len(),
+            Delta::ThinkingSignature { signature } => signature.len(),
+            Delta::ToolJson { partial } => partial.len(),
+            other => format!("{other:?}").len(),
+        },
+        StreamEvent::End { vendor, .. } => vendor.as_ref().map_or(0, |v| {
+            omni_ir::jsjson::to_string(&serde_json::Value::Object(v.clone())).len()
+        }),
+        StreamEvent::Error { message, .. } => message.len(),
+        StreamEvent::BlockEnd { .. } => 0,
+    }
+}
+
 /// `DISPATCH_REFRESH_LEAD_MS`.
 pub const REFRESH_LEAD_MS: i64 = 120_000;
 
@@ -67,43 +105,7 @@ pub struct Deps {
     pub rand: fn() -> f64,
 }
 
-/// How long this process's own health write outranks the snapshot: well past
-/// the writer's batch interval (200 ms), so the store holds it by then.
-const OVERLAY_TTL: Duration = Duration::from_secs(5);
-
-/// The rows this process wrote, until the store surely has them.
-///
-/// TS applies a health transition to the row on disk inside one transaction,
-/// so it never computes from a stale row. Here the row reaches the store
-/// through the batched writer, and the snapshot refresher can rebuild from
-/// the store before that batch commits, which would put the older row back.
-/// The overlay is what the next transition starts from, and what is patched
-/// back over a rebuilt snapshot, until the TTL says the store has caught up.
-/// An outside write to the same pair inside that window (the CLI resetting
-/// health) is overridden by this process's own row until the window ends.
-#[derive(Debug, Default)]
-pub struct HealthOverlay {
-    rows: Mutex<std::collections::HashMap<String, (CredentialHealth, tokio::time::Instant)>>,
-}
-
-impl HealthOverlay {
-    /// Patches every fresh row the snapshot disagrees with, and forgets the
-    /// stale ones. Cheap when nothing failed recently: the map is empty.
-    pub fn reconcile(&self, holder: &SnapshotHolder) {
-        let mut rows = lock(&self.rows);
-        if rows.is_empty() {
-            return;
-        }
-        let now = tokio::time::Instant::now();
-        rows.retain(|_, (_, at)| now.duration_since(*at) < OVERLAY_TTL);
-        let snap = holder.load();
-        for (key, (row, _)) in rows.iter() {
-            if snap.routing.health.get(key) != Some(row) {
-                holder.patch_health(row.clone());
-            }
-        }
-    }
-}
+pub use crate::overlay::HealthOverlay;
 
 impl std::fmt::Debug for Deps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -255,11 +257,8 @@ impl Deps {
         transition: impl FnOnce(&CredentialHealth) -> CredentialHealth,
     ) -> CredentialHealth {
         let key = health_key(&c.credential.id, &c.target.model);
-        let mut overlay = lock(&self.health.rows);
-        let fresh = overlay
-            .get(&key)
-            .filter(|(_, at)| at.elapsed() < OVERLAY_TTL)
-            .map(|(row, _)| row.clone());
+        let mut overlay = self.health.lock();
+        let fresh = overlay.fresh(&key);
         let before = fresh.unwrap_or_else(|| {
             self.holder
                 .load()
@@ -284,7 +283,7 @@ impl Deps {
         if !sent {
             tracing::warn!(credentialId = %c.credential.id, "credential health write dropped");
         }
-        overlay.insert(key, (after.clone(), tokio::time::Instant::now()));
+        overlay.insert(key, after.clone());
         self.holder.patch_health(after.clone());
         after
     }
@@ -450,8 +449,8 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
         snapshot: &snapshot.routing,
         now: started_at as f64,
         rand: (deps.rand)(),
-        load: Some(&counts),
-        recent: Some(&recent),
+        load: Some(counts.as_ref()),
+        recent: Some(recent.as_ref()),
         providers: Some(&deps.providers),
     });
     tracing::debug!(
@@ -711,6 +710,7 @@ fn run(mut s: RunState) -> EventsStream {
 
                     let mut terminal = false;
                     let mut pending: Vec<StreamEvent> = Vec::new();
+                    let mut pending_bytes: usize = 0;
                     loop {
                         let next = match within(s.deadline, result.events.next()).await {
                             Err(t) => break 'attempt Err(t),
@@ -721,10 +721,17 @@ fn run(mut s: RunState) -> EventsStream {
                             Some(Err(e)) => break 'attempt Err(e),
                             Some(Ok(ev)) => ev,
                         };
-                        if matches!(event, StreamEvent::BlockDelta { .. }) && !committed {
+                        // Past the buffering cap the attempt commits as if a
+                        // delta had arrived: no failover after this point.
+                        let over_cap = !committed
+                            && !matches!(event, StreamEvent::End { .. } | StreamEvent::Error { .. })
+                            && (pending.len() >= PENDING_MAX_EVENTS
+                                || pending_bytes >= PENDING_MAX_BYTES);
+                        if (matches!(event, StreamEvent::BlockDelta { .. }) || over_cap) && !committed {
                             committed = true;
                             let ttft = now() - s.started_at;
                             lock(&log).ttft_ms = Some(ttft);
+                            slot.observed(ttft);
                             tracing::debug!(requestId = %rid, provider = %c.target.provider,
                                 model = %c.target.model, credentialId = %c.credential.id,
                                 attempt = i + 1, ttftMs = ttft, "stream committed");
@@ -775,6 +782,7 @@ fn run(mut s: RunState) -> EventsStream {
                             return;
                         }
                         if !committed && !is_end {
+                            pending_bytes += event_size(&event);
                             pending.push(event);
                         } else {
                             if !committed {
