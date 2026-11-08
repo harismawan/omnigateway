@@ -31,11 +31,7 @@ use omni_ir::error::{ErrorCode, GatewayError};
 use omni_ratelimit::buckets::{Buckets, Counts};
 use omni_ratelimit::limits::{CountWindows, LimitConfig, LimitScope};
 use omni_ratelimit::window::SlidingWindow;
-use omni_ratelimit::{
-    CounterSnapshot, Decision, HeadroomByDimension, Violation, Window, WindowCounter, combine_all,
-    evaluate, last_to_clear, refused_headroom, retry_after_ms, with_reset,
-};
-use omni_store::SqliteStore;
+use omni_ratelimit::{CounterSnapshot, HeadroomByDimension, Violation, Window, WindowCounter};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -43,7 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 const LONG: [Window; 2] = [Window::H5, Window::W1];
 
 /// `GRAIN_MS`: a minute of five hours, an hour of a week.
-fn grain_ms(window: Window) -> f64 {
+pub(crate) fn grain_ms(window: Window) -> f64 {
     if window == Window::W1 {
         3_600_000.0
     } else {
@@ -51,7 +47,7 @@ fn grain_ms(window: Window) -> f64 {
     }
 }
 
-fn long_index(window: Window) -> usize {
+pub(crate) fn long_index(window: Window) -> usize {
     usize::from(window == Window::W1)
 }
 
@@ -64,7 +60,7 @@ const MAX_PENDING_SEEDS: usize = 4_096;
 
 /// Retained row stamps per subject and window. Past it the oldest are
 /// dropped, which can only make a refusal's reset later (the safe side).
-const MAX_STAMPS: usize = 1 << 20;
+pub(crate) const MAX_STAMPS: usize = 1 << 20;
 
 /// `modelSubjectId`: `encodeURIComponent` keeps `/` and `:` out of the
 /// model part, so no model name can spell another subject's key.
@@ -83,12 +79,12 @@ pub fn model_subject_id(key_id: &str, model: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
-struct Subject {
-    id: String,
-    key_id: String,
+pub(crate) struct Subject {
+    pub(crate) id: String,
+    pub(crate) key_id: String,
     /// `None` for the key-wide subject, whose rows span every model.
-    model: Option<String>,
-    limits: LimitScope,
+    pub(crate) model: Option<String>,
+    pub(crate) limits: LimitScope,
 }
 
 fn configured_count(w: Option<&CountWindows>, f: fn(&CountWindows) -> Option<Option<u64>>) -> bool {
@@ -145,10 +141,10 @@ fn requests_only(l: &LimitScope) -> LimitScope {
 }
 
 #[derive(Debug, Clone)]
-struct LongState {
-    buckets: Buckets,
+pub(crate) struct LongState {
+    pub(crate) buckets: Buckets,
     /// Every retained completed row's `at`, ascending. Valid once seeded.
-    stamps: VecDeque<f64>,
+    pub(crate) stamps: VecDeque<f64>,
 }
 
 impl LongState {
@@ -159,7 +155,7 @@ impl LongState {
         }
     }
 
-    fn trim(&mut self, window: Window, now: f64) {
+    pub(crate) fn trim(&mut self, window: Window, now: f64) {
         let since = now - window.ms();
         while self.stamps.front().is_some_and(|s| *s < since) {
             self.stamps.pop_front();
@@ -188,15 +184,15 @@ pub struct SeedJob {
 }
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     /// The limits last seen per subject, so a debit knows whether a long
     /// window is configured. Bounded by configured keys and overrides.
     limits: HashMap<String, LimitScope>,
     rings: HashMap<String, SlidingWindow>,
     gauges: HashMap<String, u64>,
-    long: HashMap<String, [LongState; 2]>,
-    pending: VecDeque<SeedJob>,
-    seeding: HashSet<(String, usize)>,
+    pub(crate) long: HashMap<String, [LongState; 2]>,
+    pub(crate) pending: VecDeque<SeedJob>,
+    pub(crate) seeding: HashSet<(String, usize)>,
     last_sweep: f64,
 }
 
@@ -213,7 +209,7 @@ impl State {
         });
     }
 
-    fn long_of(&mut self, subject: &str) -> &mut [LongState; 2] {
+    pub(crate) fn long_of(&mut self, subject: &str) -> &mut [LongState; 2] {
         self.long
             .entry(subject.to_owned())
             .or_insert_with(|| [LongState::new(Window::H5), LongState::new(Window::W1)])
@@ -239,7 +235,7 @@ impl State {
     /// `counters`: the ring and gauge as they stand before this request,
     /// and each seeded long window's sums. An unseeded window is left out
     /// (read as nothing used) and a seed is queued.
-    fn counters(
+    pub(crate) fn counters(
         &mut self,
         s: &Subject,
         limits: &LimitScope,
@@ -296,93 +292,6 @@ impl State {
             }
         }
         snapshot
-    }
-
-    /// `exactReset`: when a long window truly frees a slot, from the
-    /// retained row stamps. `None` keeps the overstated figure.
-    fn exact_reset(&mut self, subject: &str, window: Window, now: f64) -> Option<f64> {
-        if window == Window::M1 {
-            return None;
-        }
-        let state = &mut self.long.get_mut(subject)?[long_index(window)];
-        if !state.buckets.is_seeded() {
-            return None;
-        }
-        state.trim(window, now);
-        state.stamps.front().map(|oldest| oldest + window.ms())
-    }
-
-    /// `correct`: one subject's decision with each violated long window's
-    /// true reset, headroom moved with it.
-    fn correct(&mut self, subject: &Subject, scope: &Decision, now: f64) -> Decision {
-        if scope.violations.is_empty() {
-            return scope.clone();
-        }
-        let mut exact: Vec<(Window, f64)> = Vec::new();
-        for v in &scope.violations {
-            let Some(window) = v.window else { continue };
-            if exact.iter().any(|(w, _)| *w == window) {
-                continue;
-            }
-            if let Some(reset) = self.exact_reset(&subject.id, window, now) {
-                exact.push((window, reset));
-            }
-        }
-        let violations: Vec<Violation> = scope
-            .violations
-            .iter()
-            .map(|v| {
-                let reset = v
-                    .window
-                    .and_then(|w| exact.iter().find(|(e, _)| *e == w).map(|(_, r)| *r));
-                reset.map_or(*v, |reset_at| Violation { reset_at, ..*v })
-            })
-            .collect();
-        let mut headroom = scope.headroom;
-        for (window, reset) in &exact {
-            headroom = with_reset(&headroom, *window, *reset);
-        }
-        Decision {
-            allowed: scope.allowed,
-            violation: last_to_clear(&violations),
-            violations,
-            headroom,
-        }
-    }
-
-    /// Judges every subject; on a refusal, corrects and builds the error.
-    fn judge(
-        &mut self,
-        subjects: &[Subject],
-        scope: fn(&LimitScope) -> LimitScope,
-        now: f64,
-        queued: &mut bool,
-    ) -> Result<Decision, RateLimitExceeded> {
-        let mut decisions = Vec::with_capacity(subjects.len());
-        for s in subjects {
-            let limits = scope(&s.limits);
-            let counters = self.counters(s, &limits, now, queued);
-            decisions.push(evaluate(&limits, &counters, now));
-        }
-        let decision = combine_all(&decisions);
-        if decision.violation.is_none() {
-            return Ok(decision);
-        }
-        let corrected: Vec<Decision> = subjects
-            .iter()
-            .zip(&decisions)
-            .map(|(s, d)| self.correct(s, d, now))
-            .collect();
-        let decision = combine_all(&corrected);
-        let Some(violation) = decision.violation else {
-            // Correcting a reset never removes a violation.
-            return Ok(decision);
-        };
-        Err(RateLimitExceeded {
-            retry_after_ms: retry_after_ms(Some(&violation), now),
-            headroom: Box::new(refused_headroom(&decision, &violation)),
-            violation: Box::new(violation),
-        })
     }
 }
 
@@ -458,7 +367,7 @@ impl Drop for Admission {
 #[derive(Default)]
 pub struct RateLimiter {
     state: Mutex<State>,
-    wake: tokio::sync::Notify,
+    pub(crate) wake: tokio::sync::Notify,
 }
 
 impl std::fmt::Debug for RateLimiter {
@@ -472,7 +381,7 @@ impl RateLimiter {
         Arc::new(Self::default())
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
         // A panic under the lock leaves counters that are still numbers;
         // keep serving rather than poison every request after it.
         self.state
@@ -641,94 +550,5 @@ impl RateLimiter {
         for model in limits.models.iter().flat_map(|m| m.keys()) {
             self.prepare(key_id, limits, model, now);
         }
-    }
-
-    /// Seeds still queued or running.
-    pub fn seeds_pending(&self) -> usize {
-        self.lock().seeding.len()
-    }
-
-    /// Runs every queued seed against `store`. Blocking: the seeder calls
-    /// it under `spawn_blocking`; tests and conformance call it directly.
-    /// Returns how many reads were made.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    pub fn seed_pending(&self, store: &SqliteStore) -> usize {
-        let jobs: Vec<SeedJob> = self.lock().pending.drain(..).collect();
-        let count = jobs.len();
-        for job in jobs {
-            let length = job.window.ms();
-            let since = (job.now - length) as i64;
-            let read = omni_store::usage::sum_buckets(
-                store.connection(),
-                &job.key_id,
-                since,
-                grain_ms(job.window) as i64,
-                job.model.as_deref(),
-            )
-            .and_then(|rows| {
-                let stamps = omni_store::usage::done_stamps(
-                    store.connection(),
-                    &job.key_id,
-                    since,
-                    job.model.as_deref(),
-                )?;
-                Ok((rows, stamps))
-            });
-            let mut st = self.lock();
-            st.seeding
-                .remove(&(job.subject.clone(), long_index(job.window)));
-            match read {
-                Ok((rows, stamps)) => {
-                    let state = &mut st.long_of(&job.subject)[long_index(job.window)];
-                    if state.buckets.is_seeded() {
-                        continue;
-                    }
-                    let rows: Vec<(f64, Counts)> = rows
-                        .into_iter()
-                        .map(|(start, c)| (start as f64, c))
-                        .collect();
-                    state.buckets.seed(job.now, &rows);
-                    state.stamps = stamps.into_iter().map(|s| s as f64).collect();
-                    while state.stamps.len() > MAX_STAMPS {
-                        state.stamps.pop_front();
-                    }
-                }
-                Err(e) => {
-                    drop(st);
-                    match &job.model {
-                        Some(model) => tracing::warn!(api_key_id = %job.key_id, model = %model,
-                            reason = %e, "rate limit counters unavailable"),
-                        None => tracing::warn!(api_key_id = %job.key_id,
-                            reason = %e, "rate limit counters unavailable"),
-                    }
-                }
-            }
-        }
-        count
-    }
-
-    /// The background seeder: owns its own store connection and runs queued
-    /// seeds off the request path. Abort the handle to stop it.
-    pub fn spawn_seeder(self: &Arc<Self>, store: SqliteStore) -> tokio::task::JoinHandle<()> {
-        let this = self.clone();
-        tokio::spawn(async move {
-            let store = Arc::new(Mutex::new(store));
-            loop {
-                this.wake.notified().await;
-                let limiter = this.clone();
-                let store = store.clone();
-                let ran = tokio::task::spawn_blocking(move || {
-                    let store = store
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    // Drain until empty: seeds queued during a read are run too.
-                    while limiter.seed_pending(&store) > 0 {}
-                })
-                .await;
-                if let Err(e) = ran {
-                    tracing::error!(error = %e, "rate limit seeder failed");
-                }
-            }
-        })
     }
 }
