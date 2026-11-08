@@ -284,9 +284,16 @@ code depends on it.
   escapes, no `$` expansion, one pair of quotes stripped.
 - **Root resolution** order and the `OMNI_DB_PATH` suppression rule
   (`apps/cli/src/context.ts`).
-- **Gateway environment loading.** Bun auto-loads the working directory's
-  `.env` for the gateway today; Rust must do so explicitly.
-  - Whether Bun's loader expands `$VAR` is unverified. Check it and match.
+- **Gateway environment loading. Ruling made during implementation: no implicit
+  `.env`.**
+  - The shipped compiled gateway (`scripts/build-binary.ts`,
+    `autoloadDotenv: false`, the Docker/k8s path) never reads `.env`.
+  - `omni start` and `omni service` pass the root `.env` explicitly: the CLI
+    parses it with `parseEnvFile`, and systemd uses `EnvironmentFile=`.
+  - Only `bun gateway.js` (npm, dropped) and dev
+    `bun apps/gateway/src/index.ts` relied on Bun's cwd autoload.
+  - The Rust binary matches the compiled binary. A bare binary run from a
+    directory that has a `.env` therefore does not pick it up.
   - Systemd units written by `omni service install` keep working. They must
     reference the new binary.
 - **Every `OMNI_*` variable** in `packages/control/src/config.ts`, with the same
