@@ -30,3 +30,9 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# `cargo build --profile profiling`: release code with symbols, for samply.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

@@ -3,6 +3,12 @@
 use omni_gateway::{Options, logging, start};
 use omni_gateway_core::config::{LogLevel, load_config, process_env};
 
+/// mimalloc rather than glibc malloc: the request path allocates small
+/// values per upstream chunk on every worker, and glibc's arena locks and
+/// free-list work were a third of a streaming request's CPU.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> std::process::ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
