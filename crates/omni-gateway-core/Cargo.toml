@@ -1,0 +1,31 @@
+[package]
+name = "omni-gateway-core"
+description = "The gateway's stateful core: config, the routing snapshot and its refresher, and the in-memory rate limiter."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-crypto = { path = "../omni-crypto" }
+omni-ir = { path = "../omni-ir" }
+omni-ratelimit = { path = "../omni-ratelimit" }
+omni-router = { path = "../omni-router" }
+omni-store = { path = "../omni-store" }
+arc-swap = "1"
+indexmap = "2"
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+tempfile = "3"
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
