@@ -571,3 +571,260 @@ async fn a_stream_complete_at_head_time_goes_out_with_a_content_length() {
     );
     stop(g).await;
 }
+
+/// Screening is not ported: keys that need it fail closed, as TS refuses
+/// when screening is not configured (`guardrail/judge.ts`, `smartRouter/check.ts`).
+async fn screened(settings: &[(&str, &str)]) -> Gw {
+    let g = boot_with(&[("m1", "mock-c3-d0")], Duration::from_secs(10)).await;
+    add_key(
+        &g.f.path,
+        "kpol",
+        "sk-omni-policy",
+        ", guardrail_policy",
+        ", 'no secrets'",
+    );
+    add_key(&g.f.path, "ksr", "sk-omni-smart", ", smart_routing", ", 1");
+    for (k, v) in settings {
+        set_setting(&g.f.path, k, v);
+    }
+    // Let the refresher pick the settings and keys up.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    g
+}
+
+fn screen_rows(f: &Fixture) -> Vec<Vec<String>> {
+    rows(
+        &f.path,
+        "SELECT api_key_id, requested_model, status, error_code, attempts, degradations, credential_id FROM request_logs ORDER BY at, id",
+    )
+}
+
+const MSG: &str = r#"{"model":"m1","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}"#;
+const MSG_STREAM: &str =
+    r#"{"model":"m1","max_tokens":5,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_key_with_no_guardrail_model_is_refused_as_unconfigured() {
+    let g = screened(&[]).await;
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("x-api-key", "sk-omni-policy")],
+        MSG,
+    )
+    .await;
+    assert_eq!(s, 500);
+    assert_eq!(
+        b,
+        r#"{"type":"error","error":{"type":"api_error","message":"usage policy check is not configured"}}"#
+    );
+    let (s, h, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("x-api-key", "sk-omni-policy")],
+        MSG_STREAM,
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(
+        h.contains(&("content-length".into(), b.len().to_string())),
+        "{h:?}"
+    );
+    assert_eq!(
+        b,
+        "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"usage policy check is not configured\"}}\n\n"
+    );
+    let f = stop(g).await;
+    let r = screen_rows(&f);
+    assert_eq!(r.len(), 2);
+    for row in r {
+        assert_eq!(
+            row,
+            [
+                "kpol",
+                "m1",
+                "500",
+                "INTERNAL",
+                "0",
+                r#"["guardrail:unconfigured"]"#,
+                "null"
+            ]
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_key_with_a_guardrail_model_is_refused_as_unavailable_without_a_classifier_call() {
+    let g = screened(&[("guardrailModel", "\"m1\"")]).await;
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &[("x-api-key", "sk-omni-policy")],
+        r#"{"model":"m1","messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(s, 502);
+    assert_eq!(
+        b,
+        r#"{"error":{"message":"usage policy check unavailable","type":"server_error","code":"server_error"}}"#
+    );
+    let f = stop(g).await;
+    // One row: no classifier row, nothing dispatched.
+    assert_eq!(
+        screen_rows(&f),
+        [[
+            "kpol",
+            "m1",
+            "502",
+            "UPSTREAM",
+            "0",
+            r#"["guardrail:unavailable"]"#,
+            "null"
+        ]]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_smart_routing_key_takes_the_normal_path_while_smart_routing_is_off() {
+    let g = screened(&[]).await;
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("x-api-key", "sk-omni-smart")],
+        MSG,
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert!(b.contains("lorem ipsum"));
+    let f = stop(g).await;
+    assert_eq!(
+        screen_rows(&f),
+        [["ksr", "m1", "200", "null", "1", "[]", "c0"]]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_smart_routing_key_with_no_models_is_refused_as_unconfigured() {
+    let g = screened(&[("smartRouterEnabled", "true")]).await;
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("x-api-key", "sk-omni-smart")],
+        MSG,
+    )
+    .await;
+    assert_eq!(s, 500);
+    assert_eq!(
+        b,
+        r#"{"type":"error","error":{"type":"api_error","message":"confidential routing is not configured"}}"#
+    );
+    let f = stop(g).await;
+    assert_eq!(
+        screen_rows(&f),
+        [[
+            "ksr",
+            "m1",
+            "500",
+            "INTERNAL",
+            "0",
+            r#"["smart-router:unconfigured"]"#,
+            "null"
+        ]]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_smart_routing_key_with_models_set_is_refused_as_unavailable() {
+    let g = screened(&[
+        ("smartRouterEnabled", "true"),
+        ("smartRouterClassifierModel", "\"m1\""),
+        ("smartRouterLocalModel", "\"m1\""),
+    ])
+    .await;
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/responses",
+        &[("x-api-key", "sk-omni-smart")],
+        r#"{"model":"m1","input":"hi"}"#,
+    )
+    .await;
+    assert_eq!(s, 502);
+    assert!(
+        b.contains("\"message\":\"confidentiality check unavailable\""),
+        "{b}"
+    );
+    let f = stop(g).await;
+    assert_eq!(
+        screen_rows(&f),
+        [[
+            "ksr",
+            "m1",
+            "502",
+            "UPSTREAM",
+            "0",
+            r#"["smart-router:unavailable"]"#,
+            "null"
+        ]]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_screen_still_takes_its_rate_limit_slot() {
+    let g = boot_with(&[("m1", "mock-c3-d0")], Duration::from_secs(10)).await;
+    add_key(
+        &g.f.path,
+        "kpl",
+        "sk-omni-pol-lim",
+        ", guardrail_policy, limits",
+        r#", 'p', '{"requests":{"1m":1}}'"#,
+    );
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let (s1, _, _) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("x-api-key", "sk-omni-pol-lim")],
+        MSG,
+    )
+    .await;
+    let (s2, _, b2) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("x-api-key", "sk-omni-pol-lim")],
+        MSG,
+    )
+    .await;
+    assert_eq!((s1, s2), (500, 429), "{b2}");
+    stop(g).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_complete_stream_of_two_frames_is_still_chunked_as_bun_sends_it() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    let (s, h, b) = call(
+        &g.base,
+        "POST",
+        "/v1/responses",
+        &[("authorization", &auth)],
+        r#"{"model":"nope","stream":true,"input":"hi"}"#,
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(
+        b.starts_with("event: response.failed\n") && b.ends_with("data: [DONE]\n\n"),
+        "{b}"
+    );
+    assert!(
+        h.contains(&("transfer-encoding".into(), "chunked".into())),
+        "{h:?}"
+    );
+    stop(g).await;
+}

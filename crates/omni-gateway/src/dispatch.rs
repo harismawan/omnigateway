@@ -314,6 +314,91 @@ fn credentials_of(c: &Credential, secrets: Option<&omni_store::CredentialSecrets
     }
 }
 
+/// A pre-dispatch screen's refusal: the error and the notes its row records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refusal {
+    pub code: ErrorCode,
+    pub message: &'static str,
+    pub notes: &'static [&'static str],
+}
+
+/// Pre-dispatch screening, failing closed (`screenFirst` in
+/// `guardrail/judge.ts`, with `checkConfidentiality` and `judge`).
+///
+/// Neither the smart-router classifier nor the guardrail is ported, so a key
+/// that needs screening is always refused. Where TS refuses for missing
+/// configuration the refusal is TS's own; where TS would call a classifier,
+/// the refusal is the one TS gives when that call fails, without the call.
+/// `None` is the unscreened path: neither flag, or smart routing while
+/// `smartRouterEnabled` is off.
+pub fn screen(
+    guardrail_policy: Option<&str>,
+    smart_routing: bool,
+    settings: &omni_store::settings::Settings,
+) -> Option<Refusal> {
+    // `key.smartRouting ? settings : null` then `smartRouterEnabled === true`.
+    if smart_routing && settings.smart_router_enabled {
+        // `checkConfidentiality` step 1. Ported only as far as "both set":
+        // the local-only check needs the classifier this slice lacks, and
+        // either answer refuses.
+        if settings.smart_router_classifier_model.is_none()
+            || settings.smart_router_local_model.is_none()
+        {
+            return Some(Refusal {
+                code: ErrorCode::Internal,
+                message: LOCAL_ONLY_MESSAGE,
+                notes: &["smart-router:unconfigured"],
+            });
+        }
+        return Some(Refusal {
+            code: ErrorCode::Upstream,
+            message: "confidentiality check unavailable",
+            notes: &["smart-router:unavailable"],
+        });
+    }
+    guardrail_policy?;
+    if settings.guardrail_model.is_none() {
+        return Some(Refusal {
+            code: ErrorCode::Internal,
+            message: "usage policy check is not configured",
+            notes: &["guardrail:unconfigured"],
+        });
+    }
+    Some(Refusal {
+        code: ErrorCode::Upstream,
+        message: "usage policy check unavailable",
+        notes: &["guardrail:unavailable"],
+    })
+}
+
+/// `LOCAL_ONLY_MESSAGE`.
+pub const LOCAL_ONLY_MESSAGE: &str = "confidential routing is not configured";
+
+/// `screenFirst`'s refused branch: its own row (no attempt, no target) and
+/// one in-stream `error` event, which the route renders exactly as any other
+/// pre-commit failure.
+pub fn refused(deps: &Deps, req: &Request, refusal: &Refusal, surface: &str) -> Dispatched {
+    let mut log = RequestLog::new(req.request_id.clone(), req.route_started_at, 0);
+    log.requested_model = req.request.model.clone();
+    log.status = i64::from(refusal.code.http_status());
+    log.error_code = Some(refusal.code.as_str().to_owned());
+    log.duration_ms = (deps.now)() - req.route_started_at;
+    log.degradations = refusal.notes.iter().map(|n| (*n).to_owned()).collect();
+    report_rejection(
+        &log,
+        &GatewayError::new(refusal.code, refusal.message).gateway_authored(),
+        Some(surface),
+    );
+    Dispatched {
+        events: Box::pin(futures_util::stream::iter([Ok(StreamEvent::Error {
+            code: refusal.code,
+            message: refusal.message.to_owned(),
+            retryable: refusal.code.retryable(),
+        })])),
+        log: Arc::new(Mutex::new(log)),
+    }
+}
+
 /// `dispatch`. Returns once routing has been decided; the attempts run as
 /// the returned stream is pulled.
 #[allow(clippy::too_many_lines)]

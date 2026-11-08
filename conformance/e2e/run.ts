@@ -225,6 +225,8 @@ async function seed(): Promise<Record<string, string>> {
   keys.allow = (await cli(["keys", "create", "--label", "allow", "--allow", "ok"])).key;
   keys.lim1m = (await cli(["keys", "create", "--label", "lim1m", "--limit", "requests:1m=2"])).key;
   keys.limc = (await cli(["keys", "create", "--label", "limc", "--limit", "concurrency=1"])).key;
+  keys.policy = (await cli(["keys", "create", "--label", "policy", "--policy", "no secrets"])).key;
+  keys.smart = (await cli(["keys", "create", "--label", "smart", "--smart-routing"])).key;
   const revoked = await cli(["keys", "create", "--label", "revoked"]);
   keys.revoked = revoked.key;
   await cli(["keys", "revoke", revoked.id, "--yes"]);
@@ -239,6 +241,8 @@ async function seed(): Promise<Record<string, string>> {
 type Exchange = { status: number; headers: [string, string][]; body: string };
 type Row = {
   name: string;
+  /** Changes stored settings for this row (the gateway's database), restored after. */
+  settings?: Record<string, unknown>;
   run: (base: string, keys: Record<string, string>) => Promise<Exchange[]>;
 };
 
@@ -416,6 +420,36 @@ const ROWS: Row[] = [
     },
   },
   {
+    name: "policy key, guardrail unconfigured (buffered)",
+    run: one("POST", "/v1/messages", (k) => bearer(k.policy), msg("ok", false)),
+  },
+  {
+    name: "policy key, guardrail unconfigured (anthropic stream)",
+    run: one("POST", "/v1/messages", (k) => bearer(k.policy), msg("ok", true)),
+  },
+  {
+    name: "policy key, guardrail unconfigured (chat stream)",
+    run: one("POST", "/v1/chat/completions", (k) => bearer(k.policy), chatBody("ok", true)),
+  },
+  {
+    name: "policy key, guardrail unconfigured (responses stream)",
+    run: one("POST", "/v1/responses", (k) => bearer(k.policy), respBody("ok", true)),
+  },
+  {
+    name: "smart-routing key, smart routing off",
+    run: one("POST", "/v1/chat/completions", (k) => bearer(k.smart), chatBody("ok", false)),
+  },
+  {
+    name: "smart-routing key, smart routing on, unconfigured (buffered)",
+    settings: { smartRouterEnabled: true },
+    run: one("POST", "/v1/messages", (k) => bearer(k.smart), msg("ok", false)),
+  },
+  {
+    name: "smart-routing key, smart routing on, unconfigured (responses stream)",
+    settings: { smartRouterEnabled: true },
+    run: one("POST", "/v1/responses", (k) => bearer(k.smart), respBody("ok", true)),
+  },
+  {
     name: "rate limit 1m hit",
     run: async (base, keys) => {
       const out: Exchange[] = [];
@@ -510,7 +544,27 @@ async function runAgainst(
   for (const row of ROWS) {
     if (only !== undefined && !only.includes(row.name)) continue;
     recorded = [];
+    let restore: string | null = null;
+    if (row.settings !== undefined) {
+      const d = new Database(db);
+      const cur = d.query("SELECT value FROM settings WHERE key = 'settings'").get() as {
+        value: string;
+      } | null;
+      restore = cur?.value ?? "{}";
+      d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [
+        JSON.stringify({ ...(JSON.parse(restore) as object), ...row.settings }),
+      ]);
+      d.close();
+      // Both gateways rebuild on `data_version`; Rust polls every 500 ms.
+      await sleep(1200);
+    }
     exchanges.set(row.name, await row.run(base, keys));
+    if (restore !== null) {
+      const d = new Database(db);
+      d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [restore]);
+      d.close();
+      await sleep(1200);
+    }
     await sleep(50);
     upstream.set(row.name, recorded);
   }

@@ -332,15 +332,22 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             }
         }
         let stream = chat.stream;
-        let dispatched = dispatch::dispatch(
-            app.deps.clone(),
-            dispatch::Request {
-                request: chat,
-                request_id: request_id.clone(),
-                api_key_id: Some(key.id.clone()),
-                route_started_at: started_at,
-            },
+        let dreq = dispatch::Request {
+            request: chat,
+            request_id: request_id.clone(),
+            api_key_id: Some(key.id.clone()),
+            route_started_at: started_at,
+        };
+        // After admission: a refused screen still counts as one request.
+        let refusal = dispatch::screen(
+            key.guardrail_policy.as_deref(),
+            key.smart_routing,
+            &app.deps.holder.load().routing.settings,
         );
+        let dispatched = match &refusal {
+            Some(r) => dispatch::refused(&app.deps, &dreq, r, sname),
+            None => dispatch::dispatch(app.deps.clone(), dreq),
+        };
         fin.outcome = Some(dispatched.log.clone());
 
         if stream {
@@ -506,9 +513,10 @@ fn sse_body(
     http_body_util::BodyExt::boxed_unsync(StreamBody::new(stream))
 }
 
-/// Bun sends a stream body that is already complete when the head is written
-/// with `content-length` instead of chunked framing. Pull what the body yields
-/// without waiting; if that was all of it, answer with a fixed length. A body
+/// Bun sends a stream body of one frame that is already complete when the
+/// head is written with `content-length` instead of chunked framing (two or
+/// more frames are chunked). Pull what the body yields without waiting; if
+/// that was one frame and the end, answer with a fixed length. A body
 /// that would wait (any real upstream call) is streamed as it is.
 fn settle(mut body: Body) -> Body {
     use futures_util::FutureExt as _;
@@ -519,9 +527,15 @@ fn settle(mut body: Body) -> Body {
                 Ok(data) => ready.push(data),
                 Err(_) => continue,
             },
+            // One frame and the end: Bun knows the whole body on its first
+            // pull. Two or more frames take two pulls, and Bun chunks them.
+            Some(None) if ready.len() <= 1 => {
+                return full(ready.pop().unwrap_or_default());
+            }
             Some(None) => {
-                let all: Vec<u8> = ready.iter().flat_map(|b| b.iter().copied()).collect();
-                return full(all);
+                let head =
+                    futures_util::stream::iter(ready.into_iter().map(|b| Ok(Frame::data(b))));
+                return http_body_util::BodyExt::boxed_unsync(StreamBody::new(head));
             }
             // An error, or a frame not ready yet: stream it all, in order.
             Some(Some(Err(e))) => {
