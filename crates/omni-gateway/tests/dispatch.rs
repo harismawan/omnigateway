@@ -416,3 +416,25 @@ async fn a_codec_throw_before_the_commit_point_fails_over() {
     assert_eq!(h.script.calls(), 2);
     flush(h).await;
 }
+
+#[tokio::test]
+async fn a_rebuild_before_the_health_write_lands_does_not_lose_the_failure() {
+    let f = fixture(&["c0"]);
+    let h = harness(&f, vec![Reply::Refused, Reply::Refused]);
+    let mut d = dispatch(h.deps.clone(), req("m1"));
+    drain(&mut d).await;
+    // The refresher rebuilds from the store before the writer's batch
+    // carrying the measurement has committed.
+    let store = omni_store::SqliteStore::open(&f.path, 0).expect("store");
+    h.deps.holder.rebuild(&store).expect("rebuild");
+    let mut d = dispatch(h.deps.clone(), req("m1"));
+    drain(&mut d).await;
+    flush(h).await;
+    assert_eq!(
+        rows(
+            &f.path,
+            "SELECT consecutive_failures FROM credential_health"
+        ),
+        [["2"]]
+    );
+}

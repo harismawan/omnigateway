@@ -59,10 +59,50 @@ pub struct Deps {
     pub load: Arc<LoadRegistry>,
     pub probes: Arc<Probes>,
     pub providers: Providers,
-    /// Serializes health read-modify-writes, as TS's store transaction does.
-    pub health_lock: Mutex<()>,
+    /// This process's own recent health writes, by `healthKey`, with when
+    /// they were made. Held under one lock, which also serializes the
+    /// read-modify-write as TS's store transaction does. See [`HealthOverlay`].
+    pub health: HealthOverlay,
     pub now: fn() -> i64,
     pub rand: fn() -> f64,
+}
+
+/// How long this process's own health write outranks the snapshot: well past
+/// the writer's batch interval (200 ms), so the store holds it by then.
+const OVERLAY_TTL: Duration = Duration::from_secs(5);
+
+/// The rows this process wrote, until the store surely has them.
+///
+/// TS applies a health transition to the row on disk inside one transaction,
+/// so it never computes from a stale row. Here the row reaches the store
+/// through the batched writer, and the snapshot refresher can rebuild from
+/// the store before that batch commits, which would put the older row back.
+/// The overlay is what the next transition starts from, and what is patched
+/// back over a rebuilt snapshot, until the TTL says the store has caught up.
+/// An outside write to the same pair inside that window (the CLI resetting
+/// health) is overridden by this process's own row until the window ends.
+#[derive(Debug, Default)]
+pub struct HealthOverlay {
+    rows: Mutex<std::collections::HashMap<String, (CredentialHealth, tokio::time::Instant)>>,
+}
+
+impl HealthOverlay {
+    /// Patches every fresh row the snapshot disagrees with, and forgets the
+    /// stale ones. Cheap when nothing failed recently: the map is empty.
+    pub fn reconcile(&self, holder: &SnapshotHolder) {
+        let mut rows = lock(&self.rows);
+        if rows.is_empty() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        rows.retain(|_, (_, at)| now.duration_since(*at) < OVERLAY_TTL);
+        let snap = holder.load();
+        for (key, (row, _)) in rows.iter() {
+            if snap.routing.health.get(key) != Some(row) {
+                holder.patch_health(row.clone());
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for Deps {
@@ -214,13 +254,20 @@ impl Deps {
         c: &Cand,
         transition: impl FnOnce(&CredentialHealth) -> CredentialHealth,
     ) -> CredentialHealth {
-        let _guard = lock(&self.health_lock);
-        let snap = self.holder.load();
-        let before = snap
-            .routing
-            .health_of(&c.credential.id, &c.target.model)
-            .cloned()
-            .unwrap_or_else(|| blank_health(&c.credential.id, &c.target.model));
+        let key = health_key(&c.credential.id, &c.target.model);
+        let mut overlay = lock(&self.health.rows);
+        let fresh = overlay
+            .get(&key)
+            .filter(|(_, at)| at.elapsed() < OVERLAY_TTL)
+            .map(|(row, _)| row.clone());
+        let before = fresh.unwrap_or_else(|| {
+            self.holder
+                .load()
+                .routing
+                .health_of(&c.credential.id, &c.target.model)
+                .cloned()
+                .unwrap_or_else(|| blank_health(&c.credential.id, &c.target.model))
+        });
         let after = transition(&before);
         let decided =
             after.breaker_state != before.breaker_state || after.opened_at != before.opened_at;
@@ -237,6 +284,7 @@ impl Deps {
         if !sent {
             tracing::warn!(credentialId = %c.credential.id, "credential health write dropped");
         }
+        overlay.insert(key, (after.clone(), tokio::time::Instant::now()));
         self.holder.patch_health(after.clone());
         after
     }
@@ -271,6 +319,7 @@ fn credentials_of(c: &Credential, secrets: Option<&omni_store::CredentialSecrets
 #[allow(clippy::too_many_lines)]
 pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
     let started_at = (deps.now)();
+    deps.health.reconcile(&deps.holder);
     let snapshot = deps.holder.load();
     let settings = snapshot.routing.settings.clone();
     let deadline = (settings.request_deadline_ms != 0.0).then(|| {

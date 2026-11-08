@@ -224,7 +224,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         load: load::LoadRegistry::new(),
         probes: load::Probes::new(),
         providers: omni_router::Providers::builtin(),
-        health_lock: Mutex::new(()),
+        health: dispatch::HealthOverlay::default(),
         now: clock::now_ms,
         rand: clock::random,
     });

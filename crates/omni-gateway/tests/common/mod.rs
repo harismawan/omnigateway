@@ -201,7 +201,7 @@ pub fn harness(f: &Fixture, replies: Vec<Reply>) -> Harness {
         load: LoadRegistry::new(),
         probes: Probes::new(),
         providers: omni_router::Providers::builtin(),
-        health_lock: Mutex::new(()),
+        health: omni_gateway::dispatch::HealthOverlay::default(),
         now: omni_gateway::clock::now_ms,
         rand: || 0.0,
     });

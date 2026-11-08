@@ -556,3 +556,18 @@ async fn a_concurrency_limited_key_is_refused_with_retry_after_and_headers() {
     );
     stop(g).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_complete_at_head_time_goes_out_with_a_content_length() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    let (s, h, b) = call(&g.base, "POST", "/v1/messages", &[("authorization", &auth)],
+        r#"{"model":"nope","max_tokens":5,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#).await;
+    assert_eq!(s, 200);
+    assert!(b.starts_with("event: error\n"), "{b}");
+    assert!(
+        h.contains(&("content-length".into(), b.len().to_string())),
+        "{h:?}"
+    );
+    stop(g).await;
+}

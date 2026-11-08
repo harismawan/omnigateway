@@ -362,8 +362,8 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             } else {
                 app.keepalive
             };
-            let mut res =
-                Response::new(sse_body(dispatched.events, encoder, keepalive, fin.take()));
+            let body = sse_body(dispatched.events, encoder, keepalive, fin.take());
+            let mut res = Response::new(settle(body));
             let h = res.headers_mut();
             h.insert(
                 "content-type",
@@ -504,6 +504,40 @@ fn sse_body(
         }
     };
     http_body_util::BodyExt::boxed_unsync(StreamBody::new(stream))
+}
+
+/// Bun sends a stream body that is already complete when the head is written
+/// with `content-length` instead of chunked framing. Pull what the body yields
+/// without waiting; if that was all of it, answer with a fixed length. A body
+/// that would wait (any real upstream call) is streamed as it is.
+fn settle(mut body: Body) -> Body {
+    use futures_util::FutureExt as _;
+    let mut ready = Vec::new();
+    loop {
+        match body.frame().now_or_never() {
+            Some(Some(Ok(frame))) => match frame.into_data() {
+                Ok(data) => ready.push(data),
+                Err(_) => continue,
+            },
+            Some(None) => {
+                let all: Vec<u8> = ready.iter().flat_map(|b| b.iter().copied()).collect();
+                return full(all);
+            }
+            // An error, or a frame not ready yet: stream it all, in order.
+            Some(Some(Err(e))) => {
+                let head =
+                    futures_util::stream::iter(ready.into_iter().map(|b| Ok(Frame::data(b))));
+                let tail = futures_util::stream::iter([Err(e)]);
+                return http_body_util::BodyExt::boxed_unsync(StreamBody::new(head.chain(tail)));
+            }
+            None => {
+                let head =
+                    futures_util::stream::iter(ready.into_iter().map(|b| Ok(Frame::data(b))));
+                let rest = http_body_util::BodyStream::new(body);
+                return http_body_util::BodyExt::boxed_unsync(StreamBody::new(head.chain(rest)));
+            }
+        }
+    }
 }
 
 /// `POST /v1/messages/count_tokens`.
