@@ -464,3 +464,78 @@ fn a_deep_js_value_converts_clones_and_drops_on_a_small_stack() {
         drop(js);
     });
 }
+
+#[test]
+fn a_shallow_request_never_grows_the_stack_and_a_deep_one_does() {
+    on_small_stack(|| {
+        let shallow = [
+            (
+                Surface::Anthropic,
+                r#"{"model":"m","max_tokens":5,"system":"s","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{"a":[1,{"b":2}]}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"r"}]}],"tools":[{"name":"f","input_schema":{"type":"object","properties":{"a":{"type":"array"}}}}],"thinking":{"type":"adaptive"}}"#.to_string(),
+            ),
+            (
+                Surface::OpenAi,
+                serde_json::json!({"model":"m","stream":true,"messages":[{"role":"system","content":"s"},{"role":"user","content":"q"},{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{\"a\":[[1]]}"}}]},{"role":"tool","tool_call_id":"c","content":"r"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}]}).to_string(),
+            ),
+            (
+                Surface::Responses,
+                serde_json::json!({"model":"m","instructions":"i","input":[{"role":"user","content":"q"},{"type":"function_call","call_id":"c","name":"f","arguments":"{\"a\":[[1]]}"},{"type":"function_call_output","call_id":"c","output":{"ok":[1]}}],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}},{"type":"web_search"}]}).to_string(),
+            ),
+        ];
+        for (surface, body) in &shallow {
+            let before = deep::grows();
+            let i = ingest(*surface, body).expect("accepted");
+            let copy = i.request.clone();
+            let mut w = String::new();
+            omni_ir::jsjson::write_value(&serde_json::to_value(&copy).expect("ir"), &mut w);
+            drop(copy);
+            drop(i);
+            assert_eq!(
+                deep::grows(),
+                before,
+                "{surface:?}: a shallow request grew the stack"
+            );
+            // A refusal is shallow too.
+            let before = deep::grows();
+            let _ = ingest(*surface, r#"{"model":"","messages":[]}"#).expect_err("refused");
+            assert_eq!(
+                deep::grows(),
+                before,
+                "{surface:?}: a shallow refusal grew the stack"
+            );
+        }
+        for (surface, body) in [
+            (Surface::Anthropic, anthropic_vendor(D - 1)),
+            (Surface::OpenAi, chat_args(D)),
+            (Surface::Responses, responses_args(D)),
+        ] {
+            let before = deep::grows();
+            let i = ingest(surface, &body).expect("accepted");
+            drop(i);
+            assert!(
+                deep::grows() > before,
+                "{surface:?}: a D-deep request did not grow"
+            );
+        }
+    });
+}
+
+#[test]
+fn deep_json_hidden_in_escaped_strings_still_takes_the_grown_path() {
+    on_small_stack(|| {
+        // `arguments` with every bracket written as `\u005b` / `\u005d`.
+        let escaped = format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":"q"}},{{"role":"assistant","tool_calls":[{{"id":"c","type":"function","function":{{"name":"f","arguments":"{}0{}"}}}}]}}]}}"#,
+            "\\u005b".repeat(D),
+            "\\u005d".repeat(D)
+        );
+        let before = deep::grows();
+        let i = ingest(Surface::OpenAi, &escaped).expect("accepted");
+        assert_eq!(depth(tool_input(&i.request).expect("tool")), D);
+        drop(i);
+        assert!(
+            deep::grows() > before,
+            "escaped deep arguments ran unguarded"
+        );
+    });
+}

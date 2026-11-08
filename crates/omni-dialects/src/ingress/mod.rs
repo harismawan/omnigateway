@@ -117,10 +117,12 @@ pub struct Ingested {
 /// **The ingress entry point 5b calls.** Body bytes in, IR out.
 ///
 /// Parses the text (`JSON.parse`, bounded at `omni_ir::deep::MAX_DEPTH`),
-/// validates it in the surface's dialect and converts it to the IR, all inside
-/// `omni_ir::deep::scope`: every client-derived JSON value is created, walked
-/// and dropped on a stack large enough for the deepest accepted body, so this
-/// is safe to call on a 2 MiB tokio worker, on success and on every refusal.
+/// validates it in the surface's dialect and converts it to the IR. A body
+/// that may nest past `omni_ir::deep::SHALLOW_DEPTH` (JSON inside its strings
+/// counted) runs inside `omni_ir::deep::scope`, where every client-derived
+/// value is created, walked and dropped on a stack large enough for the
+/// deepest accepted body; any other body runs directly on the caller's stack.
+/// Safe to call on a 2 MiB tokio worker, on success and on every refusal.
 ///
 /// The returned values are safe to hold, clone, serialize with
 /// `omni_ir::jsjson` and drop on any thread: the IR types that carry client
@@ -136,7 +138,10 @@ pub fn ingest(
     headers: &Headers,
     opts: &mut IngressOptions<'_>,
 ) -> Result<Ingested, GatewayError> {
-    omni_ir::deep::scope(|| {
+    // A pre-scan bounds the body's depth, JSON in its strings included: a
+    // body over `SHALLOW_DEPTH` runs on a grown segment, anything else on the
+    // caller's stack with nothing mapped.
+    omni_ir::deep::scope_for(body, || {
         let value = parse_body_checked(body)?;
         let request = match surface {
             Surface::Anthropic => anthropic::parse(&value, headers, opts),

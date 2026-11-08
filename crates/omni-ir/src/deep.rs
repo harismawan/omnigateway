@@ -34,7 +34,27 @@ const SEGMENT: usize = 4 * 1024 * 1024;
 /// segment first when the current one is nearly used. Wrap each level of a
 /// recursion over client data in this.
 pub fn grow<R>(f: impl FnOnce() -> R) -> R {
-    stacker::maybe_grow(RED_ZONE, SEGMENT, f)
+    maybe_grow(RED_ZONE, SEGMENT, f)
+}
+
+thread_local! {
+    static GROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has moved to a fresh stack segment through
+/// [`grow`] or [`scope`]: a probe for "shallow requests never grow".
+pub fn grows() -> usize {
+    GROWS.with(std::cell::Cell::get)
+}
+
+/// `stacker::maybe_grow`, counting the grow branch.
+fn maybe_grow<R>(red_zone: usize, segment: usize, f: impl FnOnce() -> R) -> R {
+    if stacker::remaining_stack().is_some_and(|left| left >= red_zone) {
+        f()
+    } else {
+        GROWS.with(|c| c.set(c.get() + 1));
+        stacker::grow(segment, f)
+    }
 }
 
 /// Stack for a whole scope that walks client JSON with ordinary recursion
@@ -60,7 +80,94 @@ pub const SCOPE_RED_ZONE: usize = SCOPE_SEGMENT;
 /// the values inside, or return them in a type whose `Drop` is iterative
 /// ([`Owned`], or the IR types in `crate::request`).
 pub fn scope<R>(f: impl FnOnce() -> R) -> R {
-    stacker::maybe_grow(SCOPE_RED_ZONE, SCOPE_SEGMENT, f)
+    maybe_grow(SCOPE_RED_ZONE, SCOPE_SEGMENT, f)
+}
+
+/// The deepest client JSON that runs without [`scope`] on a 2 MiB stack.
+///
+/// Measured in a **debug** build: every client-JSON position of
+/// `omni-dialects/tests/depth.rs` plus Chat and Responses argument strings,
+/// through `ingress::ingest` with [`scope`] *and* every [`grow`] disabled, on
+/// a 2 MiB thread, ingested, cloned, serialized and dropped. The deepest that
+/// survived was 1632 levels (1648 overflowed); release reached 4096. 512 is
+/// under a third of the debug figure, and does not rely on [`grow`].
+pub const SHALLOW_DEPTH: usize = 512;
+
+/// An upper bound on how deep `text` nests once parsed, *including* JSON held
+/// in its strings (tool-call `arguments`), scanned without parsing.
+///
+/// Outside strings it counts containers exactly, as [`depth_of`] does. Inside
+/// each string it counts brackets as if the string were JSON, with no regard
+/// for that JSON's own strings, and `\u005b`-style escapes of the four
+/// bracket characters count too, since they decode to brackets. The result
+/// is the outer depth plus the deepest string; it over-counts and never
+/// under-counts.
+pub fn depth_bound(text: &str) -> usize {
+    let b = text.as_bytes();
+    let (mut depth, mut outer_max) = (0usize, 0usize);
+    let (mut inner, mut inner_max) = (0usize, 0usize);
+    let mut in_string = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        i += 1;
+        if !in_string {
+            match c {
+                b'"' => {
+                    in_string = true;
+                    inner = 0;
+                }
+                b'[' | b'{' => {
+                    depth += 1;
+                    outer_max = outer_max.max(depth);
+                }
+                b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            continue;
+        }
+        let unit = match c {
+            b'"' => {
+                in_string = false;
+                continue;
+            }
+            b'\\' => {
+                let escaped = b.get(i).copied();
+                i += 1;
+                if escaped == Some(b'u') {
+                    let hex = text
+                        .get(i..i + 4)
+                        .and_then(|h| u16::from_str_radix(h, 16).ok());
+                    if hex.is_some() {
+                        i += 4;
+                    }
+                    hex.and_then(|u| u8::try_from(u).ok())
+                } else {
+                    None
+                }
+            }
+            other => Some(other),
+        };
+        match unit {
+            Some(b'[' | b'{') => {
+                inner += 1;
+                inner_max = inner_max.max(inner);
+            }
+            Some(b']' | b'}') => inner = inner.saturating_sub(1),
+            _ => {}
+        }
+    }
+    outer_max + inner_max
+}
+
+/// [`scope`] only when `text` may nest deeper than [`SHALLOW_DEPTH`]; an
+/// ordinary request runs on the caller's stack and maps nothing.
+pub fn scope_for<R>(text: &str, f: impl FnOnce() -> R) -> R {
+    if depth_bound(text) <= SHALLOW_DEPTH {
+        f()
+    } else {
+        scope(f)
+    }
 }
 
 /// `serialize_with` helpers for fields holding client JSON: serde's own
@@ -242,6 +349,16 @@ mod tests {
         assert_eq!(depth_of(r#"{"a":[1,{"b":"[[[\"]]"}]}"#), 3);
         assert_eq!(depth_of("0"), 0);
         assert_eq!(depth_of(r#""\\""#), 0);
+    }
+
+    #[test]
+    fn the_bound_counts_json_inside_strings_and_escaped_brackets() {
+        assert_eq!(depth_bound(r#"{"a":[1]}"#), 2);
+        assert_eq!(depth_bound(r#"{"a":"[[[1]]]"}"#), 1 + 3);
+        assert_eq!(depth_bound(r#"{"a":"\u005b\u005B\u007b"}"#), 1 + 3);
+        assert_eq!(depth_bound(r#"{"a":"\"[\"","b":"[["}"#), 1 + 2);
+        assert_eq!(depth_bound(r#"{"a":"]]]]"}"#), 1);
+        assert_eq!(depth_bound(r#"{"a":"\\[","b":1}"#), 1 + 1);
     }
 
     #[test]
