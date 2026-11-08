@@ -74,6 +74,113 @@ pub fn write_value_pretty(value: &serde_json::Value, out: &mut String) {
     write_serde(value, out, Some(2), 0);
 }
 
+/// Where a spread object puts the key written beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spread {
+    /// `{ [key]: value, ...map }`: the key comes first, and the map's own
+    /// value for it (if any) wins.
+    KeyFirst,
+    /// `{ ...map, [key]: value }`: the given value wins, at the map's
+    /// position for the key if it has one, else last.
+    KeyLast,
+}
+
+/// `JSON.stringify` of a spread of `map` with one string key added, written
+/// straight into `out` without building the merged object.
+pub fn write_spread(
+    map: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &str,
+    spread: Spread,
+    out: &mut String,
+) {
+    use serde_json::Value;
+    enum Item<'a> {
+        Map(&'a Value),
+        Added,
+    }
+    let has = map.contains_key(key);
+    if array_index(key).is_none() && !map.keys().any(|k| array_index(k).is_some()) {
+        // No index keys: insertion order is enumeration order, so the pairs
+        // stream straight out with nothing collected.
+        out.push('{');
+        let mut first = true;
+        let mut pair = |k: &str, out: &mut String| {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            write_str(k, out);
+            out.push(':');
+        };
+        if spread == Spread::KeyFirst {
+            pair(key, out);
+            match map.get(key) {
+                Some(v) => write_value(v, out),
+                None => write_str(value, out),
+            }
+        }
+        for (k, v) in map {
+            if k == key {
+                if spread == Spread::KeyLast {
+                    pair(key, out);
+                    write_str(value, out);
+                }
+                continue;
+            }
+            pair(k, out);
+            write_value(v, out);
+        }
+        if spread == Spread::KeyLast && !has {
+            pair(key, out);
+            write_str(value, out);
+        }
+        out.push('}');
+        return;
+    }
+    let mut items: Vec<(&str, Item<'_>)> = Vec::with_capacity(map.len() + 1);
+    if spread == Spread::KeyFirst {
+        items.push((
+            key,
+            if has {
+                Item::Map(&map[key])
+            } else {
+                Item::Added
+            },
+        ));
+    }
+    for (k, v) in map {
+        if k == key {
+            if spread == Spread::KeyLast {
+                items.push((key, Item::Added));
+            }
+            continue;
+        }
+        items.push((k.as_str(), Item::Map(v)));
+    }
+    if spread == Spread::KeyLast && !has {
+        items.push((key, Item::Added));
+    }
+    let keys: Vec<&str> = items.iter().map(|(k, _)| *k).collect();
+    out.push('{');
+    for (n, position) in enumeration_order(&keys, |k| array_index(k))
+        .into_iter()
+        .enumerate()
+    {
+        if n > 0 {
+            out.push(',');
+        }
+        let (k, item) = &items[position];
+        write_str(k, out);
+        out.push(':');
+        match item {
+            Item::Map(v) => write_value(v, out),
+            Item::Added => write_str(value, out),
+        }
+    }
+    out.push('}');
+}
+
 /// `JSON.stringify(value)` for a parsed JSON value, as a new string.
 pub fn to_string(value: &serde_json::Value) -> String {
     let mut out = String::with_capacity(128);

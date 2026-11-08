@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use omni_ir::deep::Owned;
 use omni_ir::error::ErrorCode;
 use omni_ir::jsjson::{write_number, write_str, write_value};
 use omni_ir::request::ContentBlock;
@@ -76,6 +77,8 @@ struct Item {
     text: String,
     tool_name: String,
     call_id: String,
+    /// A native item's `type`; its payload is `{ type, ...native }`.
+    block_type: String,
     native: Map<String, Value>,
 }
 
@@ -89,59 +92,93 @@ fn custom_tool_input(raw: &str) -> String {
     raw.to_string()
 }
 
-/// `renderItem`.
-fn render_item(item: &Item, status: &str) -> Value {
+/// `renderItem`, written straight into `out`.
+fn write_item(item: &Item, status: &str, out: &mut String) {
     let done = status == "completed";
+    let head = |t: &str, out: &mut String| {
+        out.push_str(r#"{"id":"#);
+        write_str(&item.id, out);
+        out.push_str(r#","type":"#);
+        write_str(t, out);
+        out.push_str(r#","status":"#);
+        write_str(status, out);
+    };
     match item.kind {
-        Kind::Message => json!({
-            "id": item.id,
-            "type": "message",
-            "status": status,
-            "role": "assistant",
-            "content": if done {
-                json!([{ "type": "output_text", "text": item.text, "annotations": [] }])
+        Kind::Message => {
+            head("message", out);
+            out.push_str(r#","role":"assistant","content":["#);
+            if done {
+                out.push_str(r#"{"type":"output_text","text":"#);
+                write_str(&item.text, out);
+                out.push_str(r#","annotations":[]}"#);
+            }
+            out.push_str("]}");
+        }
+        Kind::Reasoning => {
+            head("reasoning", out);
+            out.push_str(r#","summary":["#);
+            if done && !item.text.is_empty() {
+                out.push_str(r#"{"type":"summary_text","text":"#);
+                write_str(&item.text, out);
+                out.push('}');
+            }
+            out.push_str("]}");
+        }
+        Kind::FunctionCall | Kind::CustomToolCall => {
+            let custom = item.kind == Kind::CustomToolCall;
+            head(
+                if custom {
+                    "custom_tool_call"
+                } else {
+                    "function_call"
+                },
+                out,
+            );
+            out.push_str(r#","call_id":"#);
+            write_str(&item.call_id, out);
+            out.push_str(r#","name":"#);
+            write_str(&item.tool_name, out);
+            out.push_str(if custom {
+                r#","input":"#
             } else {
-                json!([])
-            },
-        }),
-        Kind::Reasoning => json!({
-            "id": item.id,
-            "type": "reasoning",
-            "status": status,
-            "summary": if done && !item.text.is_empty() {
-                json!([{ "type": "summary_text", "text": item.text }])
-            } else {
-                json!([])
-            },
-        }),
-        Kind::FunctionCall => json!({
-            "id": item.id,
-            "type": "function_call",
-            "status": status,
-            "call_id": item.call_id,
-            "name": item.tool_name,
-            "arguments": if done { item.text.as_str() } else { "" },
-        }),
-        Kind::CustomToolCall => json!({
-            "id": item.id,
-            "type": "custom_tool_call",
-            "status": status,
-            "call_id": item.call_id,
-            "name": item.tool_name,
-            "input": if done { custom_tool_input(&item.text) } else { String::new() },
-        }),
-        Kind::Native => Value::Object(item.native.clone()),
+                r#","arguments":"#
+            });
+            match (done, custom) {
+                (false, _) => out.push_str(r#""""#),
+                (true, false) => write_str(&item.text, out),
+                (true, true) => write_str(&custom_tool_input(&item.text), out),
+            }
+            out.push('}');
+        }
+        Kind::Native => {
+            omni_ir::jsjson::write_spread(
+                &item.native,
+                "type",
+                &item.block_type,
+                omni_ir::jsjson::Spread::KeyFirst,
+                out,
+            );
+        }
     }
 }
 
-/// `{ type, ...data }`.
-fn native_of(block_type: &str, data: &Map<String, Value>) -> Map<String, Value> {
-    let mut m = Map::new();
-    m.insert("type".into(), Value::String(block_type.into()));
-    for (k, v) in data {
-        m.insert(k.clone(), v.clone());
+/// `,"error":{"code":…,"message":…}`.
+fn write_failure(code: &str, message: &str, out: &mut String) {
+    out.push_str(r#","error":{"code":"#);
+    write_str(code, out);
+    out.push_str(r#","message":"#);
+    write_str(message, out);
+    out.push('}');
+}
+
+/// `JSON.stringify(String(v ?? ""))`, without building the string for a
+/// string value.
+fn write_js_string(v: Option<&Value>, out: &mut String) {
+    match v {
+        None | Some(Value::Null) => out.push_str(r#""""#),
+        Some(Value::String(s)) => write_str(s, out),
+        some => write_str(&omni_ir::js::to_string(some), out),
     }
-    m
 }
 
 /// `responsesStream`, one event at a time.
@@ -150,7 +187,9 @@ pub struct ResponsesStream {
     model: String,
     sequence: u64,
     terminated: bool,
-    output: Vec<Value>,
+    /// Every completed item's JSON, comma-separated: each item is encoded
+    /// once, when it closes, and the terminal snapshot copies these bytes.
+    output: String,
     next_output_index: u32,
     open: Option<Item>,
 }
@@ -177,11 +216,6 @@ impl Fields<'_> {
         write_number(f64::from(v), out);
         self
     }
-    fn value(&mut self, k: &str, v: &Value) -> &mut Self {
-        let out = self.key(k);
-        write_value(v, out);
-        self
-    }
 }
 
 impl ResponsesStream {
@@ -191,7 +225,7 @@ impl ResponsesStream {
             model: String::new(),
             sequence: 0,
             terminated: false,
-            output: Vec::new(),
+            output: String::new(),
             next_output_index: 0,
             open: None,
         }
@@ -210,23 +244,46 @@ impl ResponsesStream {
         end_frame(out);
     }
 
-    /// `snapshot(status, extra)`.
-    fn snapshot(&self, status: &str, extra: &[(&str, Value)]) -> Value {
-        let mut m = Map::new();
-        m.insert(
-            "id".into(),
-            Value::String(format!("resp_{}", self.render.request_id)),
-        );
-        m.insert("object".into(), "response".into());
+    /// `snapshot(status, extra)`, written into `out`.
+    fn write_snapshot(&self, status: &str, extra: impl FnOnce(&mut String), out: &mut String) {
+        out.push_str(r#"{"id":"resp_"#);
+        let mut id = String::new();
+        write_str(&self.render.request_id, &mut id);
+        // `"resp_" + requestId`: the quoted id without its opening quote.
+        out.push_str(&id[1..]);
+        out.push_str(r#","object":"response","created_at":"#);
         #[allow(clippy::cast_precision_loss)]
-        m.insert("created_at".into(), number(self.render.created as f64));
-        m.insert("status".into(), status.into());
-        m.insert("model".into(), self.model.as_str().into());
-        m.insert("output".into(), Value::Array(self.output.clone()));
-        for (k, v) in extra {
-            m.insert((*k).to_string(), v.clone());
-        }
-        Value::Object(m)
+        write_number(self.render.created as f64, out);
+        out.push_str(r#","status":"#);
+        write_str(status, out);
+        out.push_str(r#","model":"#);
+        write_str(&self.model, out);
+        out.push_str(r#","output":["#);
+        out.push_str(&self.output);
+        out.push(']');
+        extra(out);
+        out.push('}');
+    }
+
+    /// A frame whose only field is `response`: a snapshot.
+    fn snapshot_frame(
+        &mut self,
+        event: &str,
+        status: &str,
+        extra: impl FnOnce(&mut String),
+        out: &mut String,
+    ) {
+        self.sequence += 1;
+        begin_frame(event, out);
+        out.push_str(r#"{"type":"#);
+        write_str(event, out);
+        out.push_str(r#","sequence_number":"#);
+        #[allow(clippy::cast_precision_loss)]
+        write_number(self.sequence as f64, out);
+        out.push_str(r#","response":"#);
+        self.write_snapshot(status, extra, out);
+        out.push('}');
+        end_frame(out);
     }
 
     fn open_item(
@@ -235,6 +292,7 @@ impl ResponsesStream {
         kind: Kind,
         call_id: &str,
         tool_name: &str,
+        block_type: &str,
         native: Map<String, Value>,
     ) {
         let output_index = self.next_output_index;
@@ -256,6 +314,7 @@ impl ResponsesStream {
             text: String::new(),
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
+            block_type: block_type.to_string(),
             native,
         });
     }
@@ -273,12 +332,14 @@ impl ResponsesStream {
                         .num("content_index", 0);
                     f.str("text", &item.text);
                 });
-                let part = json!({ "type": "output_text", "text": item.text, "annotations": [] });
                 self.frame("response.content_part.done", out, |f| {
                     f.str("item_id", id)
                         .num("output_index", oi)
                         .num("content_index", 0);
-                    f.value("part", &part);
+                    let out = f.key("part");
+                    out.push_str(r#"{"type":"output_text","text":"#);
+                    write_str(&item.text, out);
+                    out.push_str(r#","annotations":[]}"#);
                 });
             }
             Kind::Reasoning => {
@@ -288,12 +349,14 @@ impl ResponsesStream {
                         .num("summary_index", 0);
                     f.str("text", &item.text);
                 });
-                let part = json!({ "type": "summary_text", "text": item.text });
                 self.frame("response.reasoning_summary_part.done", out, |f| {
                     f.str("item_id", id)
                         .num("output_index", oi)
                         .num("summary_index", 0);
-                    f.value("part", &part);
+                    let out = f.key("part");
+                    out.push_str(r#"{"type":"summary_text","text":"#);
+                    write_str(&item.text, out);
+                    out.push('}');
                 });
             }
             Kind::FunctionCall => {
@@ -317,11 +380,19 @@ impl ResponsesStream {
             }
             Kind::Native => {}
         }
-        let body = render_item(&item, "completed");
+        let mut span = (0, 0);
         self.frame("response.output_item.done", out, |f| {
-            f.num("output_index", oi).value("item", &body);
+            f.num("output_index", oi);
+            let out = f.key("item");
+            let begin = out.len();
+            write_item(&item, "completed", out);
+            span = (begin, out.len());
         });
-        self.output.push(body);
+        // The item's bytes, just written, are kept for the terminal snapshot.
+        if !self.output.is_empty() {
+            self.output.push(',');
+        }
+        self.output.push_str(&out[span.0..span.1]);
     }
 
     pub fn push(&mut self, event: &StreamEvent, out: &mut String) {
@@ -329,10 +400,7 @@ impl ResponsesStream {
             StreamEvent::Start { model, .. } => {
                 self.model.clone_from(model);
                 for name in ["response.created", "response.in_progress"] {
-                    let snap = self.snapshot("in_progress", &[]);
-                    self.frame(name, out, |f| {
-                        f.value("response", &snap);
-                    });
+                    self.snapshot_frame(name, "in_progress", |_| {}, out);
                 }
             }
             StreamEvent::BlockStart { index, block } => {
@@ -342,10 +410,10 @@ impl ResponsesStream {
                 self.close_current(out);
                 match block {
                     ContentBlockStart::Text => {
-                        self.open_item(*index, Kind::Message, "", "", Map::new());
+                        self.open_item(*index, Kind::Message, "", "", "", Map::new());
                     }
                     ContentBlockStart::Thinking { .. } => {
-                        self.open_item(*index, Kind::Reasoning, "", "", Map::new());
+                        self.open_item(*index, Kind::Reasoning, "", "", "", Map::new());
                     }
                     ContentBlockStart::ToolUse { id, name } => {
                         let kind = if self.render.custom_tool_names.contains(name) {
@@ -353,21 +421,28 @@ impl ResponsesStream {
                         } else {
                             Kind::FunctionCall
                         };
-                        self.open_item(*index, kind, id, name, Map::new());
+                        self.open_item(*index, kind, id, name, "", Map::new());
                     }
                     ContentBlockStart::ProviderNative {
                         block_type, data, ..
                     } => {
-                        self.open_item(*index, Kind::Native, "", "", native_of(block_type, data));
+                        self.open_item(
+                            *index,
+                            Kind::Native,
+                            "",
+                            "",
+                            block_type,
+                            omni_ir::deep::clone_map(data),
+                        );
                     }
                 }
                 let Some(item) = self.open.take() else {
                     return;
                 };
-                let body = render_item(&item, "in_progress");
                 let (id, oi) = (item.id.as_str(), item.output_index);
                 self.frame("response.output_item.added", out, |f| {
-                    f.num("output_index", oi).value("item", &body);
+                    f.num("output_index", oi);
+                    write_item(&item, "in_progress", f.key("item"));
                 });
                 match item.kind {
                     Kind::Message => self.frame("response.content_part.added", out, |f| {
@@ -437,21 +512,19 @@ impl ResponsesStream {
                         ..
                     } if kind == Kind::Native => {
                         if delta_type == "reasoning_summary_text.delta" {
-                            let text = match data.get("text") {
-                                None | Some(Value::Null) => String::new(),
-                                some => omni_ir::js::to_string(some),
-                            };
                             let id = item.id.as_str();
                             self.frame("response.reasoning_summary_text.delta", out, |f| {
                                 f.str("item_id", id)
                                     .num("output_index", oi)
                                     .num("summary_index", 0);
-                                f.str("delta", &text);
+                                write_js_string(data.get("text"), f.key("delta"));
                             });
                         }
                         if *fold == Some(NativeFold::Merge) {
+                            // Folded into the item, which holds it until it
+                            // closes: once per merge, not per text delta.
                             for (k, v) in data {
-                                item.native.insert(k.clone(), v.clone());
+                                item.native.insert(k.clone(), omni_ir::deep::clone(v));
                             }
                         }
                     }
@@ -470,29 +543,28 @@ impl ResponsesStream {
                 self.close_current(out);
                 let (status, reason) = status(*stop_reason);
                 self.terminated = true;
-                let mut extra = Vec::with_capacity(2);
-                if let Some(reason) = reason {
-                    extra.push(("incomplete_details", json!({ "reason": reason })));
-                }
-                extra.push(("usage", usage_value(usage)));
-                let snap = self.snapshot(status, &extra);
                 let name = if status == "completed" {
                     "response.completed"
                 } else {
                     "response.incomplete"
                 };
-                self.frame(name, out, |f| {
-                    f.value("response", &snap);
-                });
+                let extra = |out: &mut String| {
+                    if let Some(reason) = reason {
+                        out.push_str(r#","incomplete_details":{"reason":"#);
+                        write_str(reason, out);
+                        out.push('}');
+                    }
+                    out.push_str(r#","usage":"#);
+                    write_value(&usage_value(usage), out);
+                };
+                self.snapshot_frame(name, status, extra, out);
             }
             StreamEvent::Error { code, message, .. } => {
                 self.close_current(out);
                 self.terminated = true;
-                let error = json!({ "code": error_type(*code).1, "message": message });
-                let snap = self.snapshot("failed", &[("error", error)]);
-                self.frame("response.failed", out, |f| {
-                    f.value("response", &snap);
-                });
+                let code = error_type(*code).1;
+                let extra = |out: &mut String| write_failure(code, message, out);
+                self.snapshot_frame("response.failed", "failed", extra, out);
             }
         }
     }
@@ -500,14 +572,14 @@ impl ResponsesStream {
     pub fn finish(&mut self, out: &mut String) {
         if !self.terminated {
             self.close_current(out);
-            let error = json!({
-                "code": "stream_disconnected",
-                "message": "stream closed before response.completed",
-            });
-            let snap = self.snapshot("failed", &[("error", error)]);
-            self.frame("response.failed", out, |f| {
-                f.value("response", &snap);
-            });
+            let extra = |out: &mut String| {
+                write_failure(
+                    "stream_disconnected",
+                    "stream closed before response.completed",
+                    out,
+                );
+            };
+            self.snapshot_frame("response.failed", "failed", extra, out);
         }
         begin_frame("message", out);
         out.push_str("[DONE]");
@@ -516,12 +588,27 @@ impl ResponsesStream {
 }
 
 /// `responsesResponse`.
-pub fn response(collected: &CollectedResponse, render: &ResponsesRender) -> Value {
+/// The body holds client payloads (tool inputs, native blocks), so it is
+/// returned as a [`Owned`] that drops iteratively.
+pub fn response(collected: &CollectedResponse, render: &ResponsesRender) -> Owned {
+    Owned(response_value(collected, render))
+}
+
+fn response_value(collected: &CollectedResponse, render: &ResponsesRender) -> Value {
+    let mut out = String::new();
+    write_response(collected, render, &mut out);
+    // Our own output, so it parses; `Value` is the type the route renders.
+    omni_ir::deep::parse(&out).unwrap_or(Value::Null)
+}
+
+/// `responsesResponse`, written as the bytes `JSON.stringify` produces.
+pub fn write_response(collected: &CollectedResponse, render: &ResponsesRender, out: &mut String) {
     let rid = &render.request_id;
-    let mut output = Vec::new();
+    let mut s = ResponsesStream::new(render.clone());
+    s.model.clone_from(&collected.model);
     for (i, block) in collected.content.iter().enumerate() {
         let oi = u32::try_from(i).unwrap_or(u32::MAX);
-        let item = |kind, id: String, text: String, tool_name: &str, call_id: &str, native| Item {
+        let item = |kind, id: String, text: String, tool_name: &str, call_id: &str| Item {
             ir_index: oi,
             output_index: oi,
             id,
@@ -529,28 +616,27 @@ pub fn response(collected: &CollectedResponse, render: &ResponsesRender) -> Valu
             text,
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
-            native,
+            block_type: String::new(),
+            native: Map::new(),
         };
         let rendered = match block {
-            ContentBlock::Text(t) => Some(item(
+            ContentBlock::Text(t) => item(
                 Kind::Message,
                 format!("msg_{rid}_{oi}"),
                 t.text.clone(),
                 "",
                 "",
-                Map::new(),
-            )),
-            ContentBlock::Thinking(t) => Some(item(
+            ),
+            ContentBlock::Thinking(t) => item(
                 Kind::Reasoning,
                 format!("rs_{rid}_{oi}"),
                 t.text.clone(),
                 "",
                 "",
-                Map::new(),
-            )),
+            ),
             ContentBlock::ToolUse(t) => {
                 let custom = render.custom_tool_names.contains(&t.name);
-                Some(item(
+                item(
                     if custom {
                         Kind::CustomToolCall
                     } else {
@@ -560,38 +646,45 @@ pub fn response(collected: &CollectedResponse, render: &ResponsesRender) -> Valu
                     omni_ir::jsjson::to_string(&t.input),
                     &t.name,
                     &t.id,
-                    Map::new(),
-                ))
+                )
             }
-            ContentBlock::ProviderNative(n) if n.provider == "openai" => Some(item(
-                Kind::Native,
-                format!("item_{rid}_{oi}"),
-                String::new(),
-                "",
-                "",
-                native_of(&n.block_type, &n.data),
-            )),
-            _ => None,
+            ContentBlock::ProviderNative(n) if n.provider == "openai" => {
+                if !s.output.is_empty() {
+                    s.output.push(',');
+                }
+                omni_ir::jsjson::write_spread(
+                    &n.data,
+                    "type",
+                    &n.block_type,
+                    omni_ir::jsjson::Spread::KeyFirst,
+                    &mut s.output,
+                );
+                continue;
+            }
+            _ => continue,
         };
-        if let Some(it) = rendered {
-            output.push(render_item(&it, "completed"));
+        if !s.output.is_empty() {
+            s.output.push(',');
         }
+        let mut buf = std::mem::take(&mut s.output);
+        write_item(&rendered, "completed", &mut buf);
+        s.output = buf;
     }
     let (status, reason) = status(collected.stop_reason);
-    let mut m = Map::new();
-    m.insert("id".into(), Value::String(format!("resp_{rid}")));
-    m.insert("object".into(), "response".into());
-    #[allow(clippy::cast_precision_loss)]
-    m.insert("created_at".into(), number(render.created as f64));
-    m.insert("status".into(), status.into());
-    m.insert("model".into(), collected.model.as_str().into());
-    m.insert("output".into(), Value::Array(output));
-    m.insert("store".into(), Value::Bool(false));
-    if let Some(reason) = reason {
-        m.insert("incomplete_details".into(), json!({ "reason": reason }));
-    }
-    m.insert("usage".into(), usage_value(&collected.usage));
-    Value::Object(m)
+    s.write_snapshot(
+        status,
+        |out| {
+            out.push_str(r#","store":false"#);
+            if let Some(reason) = reason {
+                out.push_str(r#","incomplete_details":{"reason":"#);
+                write_str(reason, out);
+                out.push('}');
+            }
+            out.push_str(r#","usage":"#);
+            write_value(&usage_value(&collected.usage), out);
+        },
+        out,
+    );
 }
 
 /// `responsesErrorBody`.

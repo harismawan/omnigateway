@@ -2,8 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use omni_ir::deep::Owned;
 use omni_ir::error::ErrorCode;
-use omni_ir::jsjson::{write_number, write_value};
+use omni_ir::jsjson::{Spread, write_number, write_spread, write_value};
 use omni_ir::request::ContentBlock;
 use omni_ir::stream::{
     CollectedResponse, ContentBlockStart, Delta, StopReason, StreamEvent, Usage,
@@ -61,20 +62,11 @@ fn safeguard(vendor: Option<&Map<String, Value>>) -> Option<&Value> {
         .get("safeguard_results")
 }
 
-/// `{ ...data, type }`: the payload with `type` set, in place if present.
+/// `{ ...data, type }` as a value, for the buffered body (built once per
+/// block, not per delta).
 fn with_type_last(data: &Map<String, Value>, t: &str) -> Value {
-    let mut m = data.clone();
+    let mut m = omni_ir::deep::clone_map(data);
     m.insert("type".into(), Value::String(t.into()));
-    Value::Object(m)
-}
-
-/// `{ type, ...data }`.
-fn with_type_first(t: &str, data: &Map<String, Value>) -> Value {
-    let mut m = Map::new();
-    m.insert("type".into(), Value::String(t.into()));
-    for (k, v) in data {
-        m.insert(k.clone(), v.clone());
-    }
     Value::Object(m)
 }
 
@@ -137,7 +129,7 @@ impl AnthropicStream {
                     }
                     ContentBlockStart::ProviderNative {
                         block_type, data, ..
-                    } => write_value(&with_type_last(data, block_type), out),
+                    } => write_spread(data, "type", block_type, Spread::KeyLast, out),
                     ContentBlockStart::ToolUse { id, name } => {
                         let mut o = Obj::new(out);
                         o.str("type", "tool_use").str("id", id).str("name", name);
@@ -177,7 +169,7 @@ impl AnthropicStream {
                     }
                     Delta::ProviderNative {
                         delta_type, data, ..
-                    } => write_value(&with_type_first(delta_type, data), out),
+                    } => write_spread(data, "type", delta_type, Spread::KeyFirst, out),
                     Delta::ToolJson { partial } | Delta::ProviderNativeJson { partial, .. } => {
                         Obj::new(out)
                             .str("type", "input_json_delta")
@@ -244,10 +236,16 @@ fn usage_value(u: &Usage) -> Value {
 }
 
 /// `anthropicResponse`.
-pub fn response(collected: &CollectedResponse, request_id: &str) -> Value {
+/// The body holds client payloads (tool inputs, native blocks), so it is
+/// returned as a [`Owned`] that drops iteratively.
+pub fn response(collected: &CollectedResponse, request_id: &str) -> Owned {
+    Owned(response_value(collected, request_id))
+}
+
+fn response_value(collected: &CollectedResponse, request_id: &str) -> Value {
     let mut m = Map::new();
     if let Some(v) = safeguard(collected.vendor.as_ref()) {
-        m.insert("safeguard_results".into(), v.clone());
+        m.insert("safeguard_results".into(), omni_ir::deep::clone(v));
     }
     m.insert("id".into(), request_id.into());
     m.insert("type".into(), "message".into());
@@ -266,7 +264,10 @@ pub fn response(collected: &CollectedResponse, request_id: &str) -> Value {
                 o.insert("type".into(), "text".into());
                 o.insert("text".into(), t.text.as_str().into());
                 if let Some(c) = &t.citations {
-                    o.insert("citations".into(), Value::Array(c.clone()));
+                    o.insert(
+                        "citations".into(),
+                        Value::Array(c.iter().map(omni_ir::deep::clone).collect()),
+                    );
                 }
                 Value::Object(o)
             }
@@ -275,12 +276,14 @@ pub fn response(collected: &CollectedResponse, request_id: &str) -> Value {
                 "thinking": t.text,
                 "signature": t.signature,
             }),
-            ContentBlock::ToolUse(t) => json!({
-                "type": "tool_use",
-                "id": t.id,
-                "name": t.name,
-                "input": t.input,
-            }),
+            ContentBlock::ToolUse(t) => {
+                let mut o = Map::new();
+                o.insert("type".into(), "tool_use".into());
+                o.insert("id".into(), t.id.as_str().into());
+                o.insert("name".into(), t.name.as_str().into());
+                o.insert("input".into(), omni_ir::deep::clone(&t.input));
+                Value::Object(o)
+            }
             ContentBlock::ProviderNative(n) => with_type_last(&n.data, &n.block_type),
             _ => json!({ "type": "text", "text": "" }),
         })

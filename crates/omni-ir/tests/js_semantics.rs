@@ -224,3 +224,50 @@ console.log(JSON.stringify(xs.map((h) => {
         assert_eq!(got_hex, expected, "Math.round({x:e})");
     }
 }
+
+#[test]
+fn spread_writes_match_js_object_spread() {
+    use omni_ir::jsjson::{Spread, write_spread};
+    let map = |s: &str| {
+        serde_json::from_str::<serde_json::Value>(s)
+            .expect("json")
+            .as_object()
+            .expect("obj")
+            .clone()
+    };
+    let w = |m: &serde_json::Map<String, serde_json::Value>, sp| {
+        let mut out = String::new();
+        write_spread(m, "type", "T", sp, &mut out);
+        out
+    };
+    // `{ ...data, type }`
+    assert_eq!(
+        w(&map(r#"{"a":1}"#), Spread::KeyLast),
+        r#"{"a":1,"type":"T"}"#
+    );
+    assert_eq!(
+        w(&map(r#"{"a":1,"type":"x","b":2}"#), Spread::KeyLast),
+        r#"{"a":1,"type":"T","b":2}"#
+    );
+    assert_eq!(
+        w(&map(r#"{"b":1,"2":2}"#), Spread::KeyLast),
+        r#"{"2":2,"b":1,"type":"T"}"#
+    );
+    // `{ type, ...data }`
+    assert_eq!(
+        w(&map(r#"{"a":1}"#), Spread::KeyFirst),
+        r#"{"type":"T","a":1}"#
+    );
+    assert_eq!(
+        w(&map(r#"{"a":1,"type":"x"}"#), Spread::KeyFirst),
+        r#"{"type":"x","a":1}"#
+    );
+    assert_eq!(
+        w(&map(r#"{"a":1,"5":0}"#), Spread::KeyFirst),
+        r#"{"5":0,"type":"T","a":1}"#
+    );
+    assert_eq!(
+        w(&map(r#"{"__proto__":{"q":1}}"#), Spread::KeyFirst),
+        r#"{"type":"T","__proto__":{"q":1}}"#
+    );
+}

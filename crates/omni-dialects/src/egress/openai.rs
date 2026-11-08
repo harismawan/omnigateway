@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use omni_ir::deep::Owned;
 use omni_ir::error::ErrorCode;
 use omni_ir::jsjson::{write_number, write_str};
 use omni_ir::request::ContentBlock;
@@ -215,7 +216,13 @@ impl OpenAiStream {
 }
 
 /// `openaiResponse`.
-pub fn response(collected: &CollectedResponse, request_id: &str, created: i64) -> Value {
+/// The body holds client payloads (tool inputs, native blocks), so it is
+/// returned as a [`Owned`] that drops iteratively.
+pub fn response(collected: &CollectedResponse, request_id: &str, created: i64) -> Owned {
+    Owned(response_value(collected, request_id, created))
+}
+
+fn response_value(collected: &CollectedResponse, request_id: &str, created: i64) -> Value {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();

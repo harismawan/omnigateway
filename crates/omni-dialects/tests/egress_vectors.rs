@@ -61,7 +61,7 @@ fn encode(mut enc: StreamEncoder, evs: &[StreamEvent]) -> String {
 fn check(
     dialect: &str,
     make: impl Fn() -> StreamEncoder,
-    respond: impl Fn(&[StreamEvent]) -> Value,
+    respond: impl Fn(&[StreamEvent]) -> omni_ir::deep::Owned,
 ) {
     let cases = egress_root()[dialect].as_array().expect("cases");
     assert!(cases.len() >= 30, "{dialect}: {} sequences", cases.len());
