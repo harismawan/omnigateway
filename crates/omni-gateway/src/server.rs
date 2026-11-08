@@ -244,11 +244,15 @@ async fn read_body(req: Request<Incoming>, idle: Duration) -> Result<String, Gat
             }
         }
     }
-    let text = String::from_utf8_lossy(&bytes);
-    Ok(match text.strip_prefix('\u{feff}') {
-        Some(rest) => rest.to_owned(),
-        None => text.into_owned(),
-    })
+    // Valid UTF-8 (the usual case) becomes the `String` without a copy.
+    let mut text = match String::from_utf8(Vec::from(bytes)) {
+        Ok(text) => text,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    };
+    if text.starts_with('\u{feff}') {
+        text.drain(..'\u{feff}'.len_utf8());
+    }
+    Ok(text)
 }
 
 /// The body went quiet past the idle timeout. Not a client-visible answer:
@@ -531,6 +535,9 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     }
 }
 
+/// The most SSE bytes coalesced into one body frame.
+const COALESCE_BYTES: usize = 64 * 1024;
+
 /// `sseResponse`: frames into one reused buffer, `: keepalive` while idle,
 /// and the row completed exactly once — at the end, on a break, or (through
 /// the finisher's `Drop`) when the client hangs up and the body is dropped.
@@ -543,15 +550,44 @@ fn sse_body(
     fin.streaming();
     let stream = async_stream::stream! {
         let mut buf = String::with_capacity(1024);
+        // The first non-empty frame goes out alone, so `settle` still sees
+        // one frame exactly when TS's stream had one.
+        let mut sent_first = false;
+        // An item pulled while coalescing that is not an event: handled by
+        // the next loop turn, after the coalesced frame went out.
+        let mut held: Option<Option<Result<omni_ir::stream::StreamEvent, GatewayError>>> = None;
         loop {
-            let next = tokio::time::timeout(keepalive, events.next()).await;
+            let next = match held.take() {
+                Some(item) => Ok(item),
+                None => tokio::time::timeout(keepalive, events.next()).await,
+            };
             match next {
                 Err(_) => {
                     yield Ok::<_, std::io::Error>(Frame::data(Bytes::from_static(b": keepalive\n\n")));
                 }
                 Ok(Some(Ok(event))) => {
                     encoder.push_owned(event, &mut buf);
+                    // Every event already decoded joins this frame: one body
+                    // write (one chunk, one syscall) per upstream read rather
+                    // than per event. Never waits: a pending poll ends it.
+                    while sent_first && buf.len() < COALESCE_BYTES {
+                        let ready = std::future::poll_fn(|cx| {
+                            std::task::Poll::Ready(events.as_mut().poll_next(cx))
+                        })
+                        .await;
+                        match ready {
+                            std::task::Poll::Pending => break,
+                            std::task::Poll::Ready(Some(Ok(event))) => {
+                                encoder.push_owned(event, &mut buf);
+                            }
+                            std::task::Poll::Ready(other) => {
+                                held = Some(other);
+                                break;
+                            }
+                        }
+                    }
                     if !buf.is_empty() {
+                        sent_first = true;
                         let frame = Bytes::copy_from_slice(buf.as_bytes());
                         buf.clear();
                         yield Ok(Frame::data(frame));
