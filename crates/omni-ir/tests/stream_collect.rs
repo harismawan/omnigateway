@@ -254,3 +254,18 @@ fn events_render_in_the_ts_shape() {
         ]
     );
 }
+
+#[test]
+fn tool_result_entries_serialize_with_their_ts_discriminants() {
+    let block: omni_ir::request::ContentBlock = serde_json::from_value(serde_json::json!({
+        "type": "toolResult", "toolUseId": "t", "content": "",
+        "images": [{"type": "image", "mediaType": "image/png", "data": "A"}],
+        "files": [{"mediaType": "application/pdf", "data": "B", "filename": "f"}],
+        "native": [{"type": "providerNative", "provider": "anthropic", "blockType": "document", "data": {"x": 1}}]
+    }))
+    .expect("deserialize");
+    assert_eq!(
+        serde_json::to_string(&block).expect("serialize"),
+        r#"{"type":"toolResult","toolUseId":"t","content":"","images":[{"type":"image","mediaType":"image/png","data":"A"}],"files":[{"type":"file","mediaType":"application/pdf","data":"B","filename":"f"}],"native":[{"type":"providerNative","provider":"anthropic","blockType":"document","data":{"x":1}}]}"#
+    );
+}

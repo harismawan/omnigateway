@@ -185,28 +185,14 @@ pub fn same_ir(actual: &Value, expected: &Value, path: &str) -> Result<(), Strin
             Ok(())
         }
         (Value::Object(a), Value::Object(b)) => {
-            // A tool result's `images[]` / `files[]` / `native[]` entries carry a
-            // `type` tag in TS (`{type: "image", ...}`); the Rust IR types them
-            // by position (`Vec<ImageBlock>` etc.), so the tag has no field.
-            // Every value of it is fixed by the list it sits in.
-            let mut tail = path.rsplit('.');
-            let (last, parent) = (tail.next(), tail.next());
-            let positional = last.is_some_and(|l| l.parse::<usize>().is_ok())
-                && matches!(parent, Some("images" | "files" | "native"));
             let mut ak: Vec<&String> = a.keys().collect();
-            let mut bk: Vec<&String> = b
-                .keys()
-                .filter(|k| !(positional && k.as_str() == "type"))
-                .collect();
+            let mut bk: Vec<&String> = b.keys().collect();
             ak.sort();
             bk.sort();
             if ak != bk {
                 return Err(format!("{path}: keys {ak:?} != {bk:?}"));
             }
             for (k, y) in b {
-                if positional && k == "type" {
-                    continue;
-                }
                 let x = &a[k];
                 let p = format!("{path}.{k}");
                 if OPAQUE.contains(&k.as_str()) {

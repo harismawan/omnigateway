@@ -100,16 +100,76 @@ pub struct ToolUseBlock {
 pub struct ToolResultBlock {
     pub tool_use_id: String,
     pub content: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "tagged::images"
+    )]
     pub images: Option<Vec<ImageBlock>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "tagged::files"
+    )]
     pub files: Option<Vec<FileBlock>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "tagged::native"
+    )]
     pub native: Option<Vec<ProviderNativeBlock>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+}
+
+/// A tool result's `images` / `files` / `native` entries are typed blocks in
+/// TS (`{type: "image", ...}`), so they serialize with that discriminant
+/// first. Deserialization ignores the tag, which the list position fixes.
+mod tagged {
+    use serde::Serialize;
+    use serde::ser::{SerializeSeq, Serializer};
+
+    #[derive(Serialize)]
+    struct Tagged<'a, T> {
+        #[serde(rename = "type")]
+        tag: &'static str,
+        #[serde(flatten)]
+        inner: &'a T,
+    }
+
+    fn list<S: Serializer, T: Serialize>(
+        tag: &'static str,
+        items: &Option<Vec<T>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let items = items.as_deref().unwrap_or_default();
+        let mut seq = s.serialize_seq(Some(items.len()))?;
+        for inner in items {
+            seq.serialize_element(&Tagged { tag, inner })?;
+        }
+        seq.end()
+    }
+
+    pub fn images<S: Serializer>(
+        v: &Option<Vec<super::ImageBlock>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        list("image", v, s)
+    }
+    pub fn files<S: Serializer>(
+        v: &Option<Vec<super::FileBlock>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        list("file", v, s)
+    }
+    pub fn native<S: Serializer>(
+        v: &Option<Vec<super::ProviderNativeBlock>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        list("providerNative", v, s)
+    }
 }
 
 /// A content block one provider owns end to end, carried through unread.
