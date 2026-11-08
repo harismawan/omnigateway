@@ -23,6 +23,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "nod
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Subprocess } from "bun";
+import { bytesEqual, fatal, normalize } from "./masks.ts";
 
 const { values: flags } = parseArgs({
   options: {
@@ -55,8 +56,22 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ------------------------------------------------------------ the upstream
 
-/** Raw requests the upstream received, in arrival order. */
-let recorded: string[] = [];
+/** Raw requests the upstream received, in arrival order, as bytes. */
+let recorded: Uint8Array[] = [];
+
+/**
+ * A gate the scripted `slow` answer waits at after its first delta: the
+ * driver opens it once the client has seen that delta (or a second request
+ * was refused). `arrived` resolves when a `slow` request reaches the upstream,
+ * the handshake that replaces sleeping.
+ */
+let gate = Promise.withResolvers<void>();
+let arrived = Promise.withResolvers<void>();
+function resetGate(): void {
+  gate.resolve();
+  gate = Promise.withResolvers<void>();
+  arrived = Promise.withResolvers<void>();
+}
 
 const frame = (model: string, choice: string) =>
   `data: {"id":"chatcmpl-e2e","object":"chat.completion.chunk","created":0,"model":"${model}","choices":[${choice}]}\n\n`;
@@ -96,7 +111,8 @@ async function answer(model: string, sock: Sock): Promise<void> {
       return;
     case "slow":
       sock.write(SSE_HEAD + [first, delta].map(chunk).join(""));
-      await sleep(1500);
+      arrived.resolve();
+      await gate.promise;
       try {
         sock.write(`${[delta, finish, usage, done].map(chunk).join("")}0\r\n\r\n`);
       } catch {
@@ -124,10 +140,12 @@ Bun.listen<{ buf: Buffer; busy: Promise<void> }>({
         const m = /\r\ncontent-length: *(\d+)/i.exec(head);
         const len = m === null ? 0 : Number(m[1]);
         if (s.data.buf.length < end + 4 + len) return;
-        const raw = s.data.buf.subarray(0, end + 4 + len).toString("utf8");
+        const raw = new Uint8Array(s.data.buf.subarray(0, end + 4 + len));
         s.data.buf = s.data.buf.subarray(end + 4 + len);
         recorded.push(raw);
-        const model = /"model":"([^"]*)"/.exec(raw.slice(end + 4))?.[1] ?? "";
+        const model =
+          /"model":"([^"]*)"/.exec(Buffer.from(raw.subarray(end + 4)).toString("latin1"))?.[1] ??
+          "";
         const sock: Sock = {
           write: (x) => {
             s.write(x);
@@ -238,9 +256,12 @@ async function seed(): Promise<Record<string, string>> {
 
 // ------------------------------------------------------------ the matrix
 
-type Exchange = { status: number; headers: [string, string][]; body: string };
+import type { Exchange } from "./masks.ts";
+
 type Row = {
   name: string;
+  /** Scenario facts both binaries must show, beyond being equal. */
+  expect?: (x: Exchange[], upstream: Uint8Array[]) => string | null;
   /** Changes stored settings for this row (the gateway's database), restored after. */
   settings?: Record<string, unknown>;
   run: (base: string, keys: Record<string, string>) => Promise<Exchange[]>;
@@ -270,7 +291,31 @@ async function send(
     headers,
     ...(body === undefined ? {} : { body }),
   });
-  return { status: res.status, headers: [...res.headers.entries()], body: await res.text() };
+  return {
+    status: res.status,
+    headers: [...res.headers.entries()],
+    body: new Uint8Array(await res.arrayBuffer()),
+  };
+}
+
+async function sendWith(
+  base: string,
+  path: string,
+  headers: Headers,
+  body: string,
+): Promise<Exchange> {
+  const res = await fetch(base + path, { method: "POST", headers, body });
+  return {
+    status: res.status,
+    headers: [...res.headers.entries()],
+    body: new Uint8Array(await res.arrayBuffer()),
+  };
+}
+
+const enc = (s: string) => new TextEncoder().encode(s);
+const dec = (b: Uint8Array) => new TextDecoder().decode(b);
+function concat(parts: Uint8Array[]): Uint8Array {
+  return new Uint8Array(Buffer.concat(parts));
 }
 
 const bearer = (k: string) => ({
@@ -353,6 +398,8 @@ const ROWS: Row[] = [
   },
   {
     name: "model not allowed",
+    expect: (x, up) =>
+      x[0]?.status === 401 && up.length === 0 ? null : "expected 401, no upstream call",
     run: one("POST", "/v1/messages", (k) => bearer(k.allow), msg("fo-500", false)),
   },
   { name: "invalid json", run: one("POST", "/v1/messages", (k) => bearer(k.plain), "{bad") },
@@ -374,22 +421,33 @@ const ROWS: Row[] = [
   },
   {
     name: "no candidates",
+    expect: (_x, up) => (up.length === 0 ? null : "expected no upstream call"),
     run: one("POST", "/v1/messages", (k) => bearer(k.plain), msg("no-cands", true)),
   },
   {
     name: "failover on 500 (stream)",
+    expect: (x, up) =>
+      x[0]?.status === 200 && up.length === 2 ? null : "expected 200 after 2 upstream calls",
     run: one("POST", "/v1/messages", (k) => bearer(k.plain), msg("fo-500", true)),
   },
   {
     name: "failover on 429 (buffered)",
+    expect: (x, up) =>
+      x[0]?.status === 200 && up.length === 2 ? null : "expected 200 after 2 upstream calls",
     run: one("POST", "/v1/chat/completions", (k) => bearer(k.plain), chatBody("fo-429", false)),
   },
   {
     name: "all candidates fail",
+    expect: (x, up) =>
+      x[0]?.status === 503 && up.length === 1
+        ? null
+        : "expected 503; the dead target never reaches the upstream",
     run: one("POST", "/v1/responses", (k) => bearer(k.plain), respBody("all-fail", false)),
   },
   {
     name: "mid-stream error (stream)",
+    expect: (x, up) =>
+      x[0]?.status === 200 && up.length === 1 ? null : "expected an in-stream error, no failover",
     run: one("POST", "/v1/messages", (k) => bearer(k.plain), msg("mid", true)),
   },
   {
@@ -398,6 +456,10 @@ const ROWS: Row[] = [
   },
   {
     name: "client disconnects mid-stream",
+    expect: (x, up) =>
+      x[0]?.status === 200 && dec(x[0].body).includes("lorem ipsum") && up.length === 1
+        ? null
+        : "expected a 200 prefix with the first delta and one upstream call",
     run: async (base, keys) => {
       const ac = new AbortController();
       const res = await fetch(`${base}/v1/messages`, {
@@ -407,50 +469,83 @@ const ROWS: Row[] = [
         signal: ac.signal,
       });
       const reader = (res.body as ReadableStream<Uint8Array>).getReader();
-      let seen = "";
-      while (!seen.includes("lorem ipsum")) {
+      // The upstream holds after its first delta, so the stream cannot end
+      // before the client has read that delta.
+      const parts: Uint8Array[] = [];
+      while (!dec(concat(parts)).includes("lorem ipsum")) {
         const { value, done } = await reader.read();
-        if (done) break;
-        seen += new TextDecoder().decode(value);
+        if (done) throw new Error("stream ended before the gated delta");
+        parts.push(value);
       }
       ac.abort();
-      await sleep(2500);
-      // Only the head is compared: the body is cut by the client.
-      return [{ status: res.status, headers: [...res.headers.entries()], body: "" }];
+      // Wait for the gateway to have filed the row, then let the upstream go.
+      await sleep(300);
+      resetGate();
+      // Compared: the head and the prefix up to and including the first delta.
+      const all = dec(concat(parts));
+      const cut = all.indexOf("lorem ipsum");
+      const prefix = all.slice(0, all.indexOf("\n\n", cut) + 2);
+      return [{ status: res.status, headers: [...res.headers.entries()], body: enc(prefix) }];
     },
   },
   {
     name: "policy key, guardrail unconfigured (buffered)",
+    expect: (x, up) =>
+      x[0]?.status === 500 && up.length === 0 ? null : "expected 500 and no upstream call",
     run: one("POST", "/v1/messages", (k) => bearer(k.policy), msg("ok", false)),
   },
   {
     name: "policy key, guardrail unconfigured (anthropic stream)",
+    expect: (x, up) =>
+      x[0]?.status === 200 && up.length === 0
+        ? null
+        : "expected an in-stream refusal and no upstream call",
     run: one("POST", "/v1/messages", (k) => bearer(k.policy), msg("ok", true)),
   },
   {
     name: "policy key, guardrail unconfigured (chat stream)",
+    expect: (x, up) =>
+      x[0]?.status === 200 && up.length === 0
+        ? null
+        : "expected an in-stream refusal and no upstream call",
     run: one("POST", "/v1/chat/completions", (k) => bearer(k.policy), chatBody("ok", true)),
   },
   {
     name: "policy key, guardrail unconfigured (responses stream)",
+    expect: (x, up) =>
+      x[0]?.status === 200 && up.length === 0
+        ? null
+        : "expected an in-stream refusal and no upstream call",
     run: one("POST", "/v1/responses", (k) => bearer(k.policy), respBody("ok", true)),
   },
   {
     name: "smart-routing key, smart routing off",
+    expect: (x, up) =>
+      x[0]?.status === 200 && up.length === 1 ? null : "expected the normal path",
     run: one("POST", "/v1/chat/completions", (k) => bearer(k.smart), chatBody("ok", false)),
   },
   {
     name: "smart-routing key, smart routing on, unconfigured (buffered)",
+    expect: (x, up) =>
+      x[0]?.status === 500 && up.length === 0 ? null : "expected 500 and no upstream call",
     settings: { smartRouterEnabled: true },
     run: one("POST", "/v1/messages", (k) => bearer(k.smart), msg("ok", false)),
   },
   {
     name: "smart-routing key, smart routing on, unconfigured (responses stream)",
+    expect: (x, up) =>
+      x[0]?.status === 200 && up.length === 0
+        ? null
+        : "expected an in-stream refusal and no upstream call",
     settings: { smartRouterEnabled: true },
     run: one("POST", "/v1/responses", (k) => bearer(k.smart), respBody("ok", true)),
   },
   {
     name: "rate limit 1m hit",
+    expect: (x, up) =>
+      x.map((e) => e.status).join() === "200,200,429" && up.length === 2
+        ? null
+        : "expected 200,200,429",
     run: async (base, keys) => {
       const out: Exchange[] = [];
       for (let i = 0; i < 3; i += 1)
@@ -468,40 +563,33 @@ const ROWS: Row[] = [
   },
   {
     name: "concurrency limit hit",
+    expect: (x, up) =>
+      x[0]?.status === 200 && x[1]?.status === 429 && up.length === 1
+        ? null
+        : `expected 200 then 429 with one upstream call, got ${x.map((e) => e.status)} / ${up.length}`,
     run: async (base, keys) => {
       const first = send(base, "POST", "/v1/messages", bearer(keys.limc), msg("slow", true));
-      await sleep(400);
+      // Handshake: the first request holds its slot at the upstream.
+      await arrived.promise;
       const second = await send(base, "POST", "/v1/messages", bearer(keys.limc), msg("ok", false));
+      resetGate();
       return [await first, second];
+    },
+  },
+  {
+    name: "repeated authorization header",
+    expect: (x, up) =>
+      x[0]?.status === 401 && up.length === 0 ? null : "expected 401 and no upstream call",
+    run: async (base, keys) => {
+      const h = new Headers({ "content-type": "application/json" });
+      h.append("authorization", `Bearer ${keys.plain}`);
+      h.append("authorization", `Bearer ${keys.plain}`);
+      return [await sendWith(base, "/v1/messages", h, msg("ok", false))];
     },
   },
 ];
 
 // ------------------------------------------------------------ masks
-
-const MASKS: [RegExp, string][] = [
-  [/req_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "req_<id>"],
-  [/"nodeId":"[0-9a-f-]{36}"/g, '"nodeId":"<node>"'],
-  [/"created(_at)?":\d+/g, '"created$1":<t>'],
-];
-const MASKED_HEADERS = new Set(["date"]);
-/** Headers whose values are instants or waits measured from the clock. */
-const TIMED_HEADER = /^(retry-after|x-ratelimit-reset-.*|anthropic-ratelimit-.*-reset)$/;
-
-function mask(s: string): string {
-  return MASKS.reduce((acc, [re, to]) => acc.replace(re, to), s);
-}
-
-function normalize(x: Exchange): Exchange {
-  return {
-    status: x.status,
-    headers: x.headers
-      .filter(([k]) => !MASKED_HEADERS.has(k))
-      .map(([k, v]): [string, string] => [k, TIMED_HEADER.test(k) ? "<t>" : v])
-      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
-    body: mask(x.body),
-  };
-}
 
 // ------------------------------------------------------------ running
 
@@ -518,7 +606,11 @@ async function waitHealthy(): Promise<void> {
   throw new Error("gateway did not become healthy");
 }
 
-type Run = { exchanges: Map<string, Exchange[]>; upstream: Map<string, string[]>; db: string };
+type Run = {
+  exchanges: Map<string, Exchange[]>;
+  upstream: Map<string, Uint8Array[]>;
+  db: string;
+};
 
 async function runAgainst(
   label: string,
@@ -539,11 +631,12 @@ async function runAgainst(
   await waitHealthy();
   const base = `http://127.0.0.1:${GATEWAY_PORT}`;
   const exchanges = new Map<string, Exchange[]>();
-  const upstream = new Map<string, string[]>();
+  const upstream = new Map<string, Uint8Array[]>();
   const only = flags.only?.split(",");
   for (const row of ROWS) {
     if (only !== undefined && !only.includes(row.name)) continue;
     recorded = [];
+    resetGate();
     let restore: string | null = null;
     if (row.settings !== undefined) {
       const d = new Database(db);
@@ -574,40 +667,90 @@ async function runAgainst(
   return { exchanges, upstream, db };
 }
 
-function table(db: string, sql: string): unknown[][] {
+/**
+ * Columns that differ between two runs by construction and are not compared
+ * (every other column is, so a new column is compared by default):
+ * - `request_logs`: `id` (a random request id), `at` and `duration_ms`
+ *   (clock), `node_id` (a per-process uuid); `ttft_ms` is compared as
+ *   null / non-null.
+ * - `usage_daily`: `duration_ms_sum` (clock).
+ * - `credential_health`: `opened_at`, `rate_limited_until`, compared as
+ *   null / non-null.
+ * Credential, key and model ids are equal: both runs start from a copy of
+ * one seeded root.
+ */
+const EXCLUDED: Record<string, Record<string, "drop" | "presence">> = {
+  request_logs: {
+    id: "drop",
+    at: "drop",
+    duration_ms: "drop",
+    node_id: "drop",
+    ttft_ms: "presence",
+  },
+  usage_daily: { duration_ms_sum: "drop" },
+  usage_rollup: {},
+  credential_health: { opened_at: "presence", rate_limited_until: "presence" },
+};
+const ORDER: Record<string, string> = {
+  request_logs: "at, rowid",
+  usage_daily: "day, provider, credential_id, requested_model, resolved_model, api_key_id",
+  usage_rollup: "api_key_id, hour",
+  credential_health: "credential_id, model",
+};
+
+function table(db: string, name: string): Record<string, unknown>[] {
   const d = new Database(db, { readonly: true });
-  const rows = d.query(sql).values() as unknown[][];
+  const rows = d.query(`SELECT * FROM ${name} ORDER BY ${ORDER[name]}`).all() as Record<
+    string,
+    unknown
+  >[];
   d.close();
-  return rows;
+  const rules = EXCLUDED[name] ?? {};
+  return rows.map((r) => {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(r)) {
+      const rule = rules[k];
+      if (rule === "drop") continue;
+      out[k] = rule === "presence" ? v !== null : v;
+    }
+    return out;
+  });
 }
 
-/** Final rows, with per-run columns masked (see MASKS in the report). */
-function dbState(db: string): Record<string, unknown[][]> {
-  return {
-    request_logs: table(
-      db,
-      `SELECT api_key_id, requested_model, resolved_provider, resolved_model, credential_id,
-        attempts, status, error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-        ttft_ms IS NOT NULL, cost_usd, degradations, state, rtk_applied, rtk_filter_hits,
-        rtk_original_code_units, rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters
-        FROM request_logs ORDER BY at, rowid`,
-    ),
-    usage_daily: table(
-      db,
-      `SELECT day, provider, credential_id, requested_model, resolved_model, api_key_id,
-        requests, errors, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
-        rtk_saved_tokens, rtk_applied_requests FROM usage_daily ORDER BY 1,2,3,4,5,6`,
-    ),
-    usage_rollup: table(db, "SELECT * FROM usage_rollup ORDER BY api_key_id, hour"),
-    credential_health: table(
-      db,
-      `SELECT credential_id, model, breaker_state, consecutive_failures,
-        opened_at IS NOT NULL, rate_limited_until IS NOT NULL FROM credential_health ORDER BY 1, 2`,
-    ),
-  };
+function dbState(db: string): Record<string, Record<string, unknown>[]> {
+  return Object.fromEntries(Object.keys(EXCLUDED).map((t) => [t, table(db, t)]));
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Upstream requests: bytes equal, and valid UTF-8 (they are JSON over HTTP/1.1). */
+function upstreamEqual(a: Uint8Array[] = [], b: Uint8Array[] = []): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => {
+    const y = b[i] as Uint8Array;
+    try {
+      fatal.decode(x);
+      fatal.decode(y);
+    } catch {
+      return false;
+    }
+    return bytesEqual(x, y);
+  });
+}
+
+/** Rows filed for the disconnect: exactly one 499 per database. */
+function disconnectRows(db: string): number {
+  const d = new Database(db, { readonly: true });
+  const n = (
+    d
+      .query(
+        "SELECT COUNT(*) AS n FROM request_logs WHERE status = 499 AND error_code = 'interrupted' AND requested_model = 'slow' AND api_key_id = (SELECT id FROM api_keys WHERE label = 'plain')",
+      )
+      .get() as { n: number }
+  ).n;
+  d.close();
+  return n;
+}
 
 async function main(): Promise<void> {
   console.error(`work ${work}`);
@@ -616,40 +759,64 @@ async function main(): Promise<void> {
   const rs = await runAgainst("rust", resolve(REPO, flags.rust as string), keys);
 
   let failures = 0;
-  const report: string[] = ["| row | client | upstream |", "|---|---|---|"];
-  for (const [name, tsx] of ts.exchanges) {
-    const rsx = rs.exchanges.get(name) ?? [];
-    const client = same(tsx.map(normalize), rsx.map(normalize));
-    const up = same(ts.upstream.get(name), rs.upstream.get(name));
-    report.push(`| ${name} | ${client ? "pass" : "FAIL"} | ${up ? "pass" : "FAIL"} |`);
-    if (!client) {
-      failures += 1;
-      console.error(
-        `\n--- ${name}: client differs\nTS:   ${JSON.stringify(tsx.map(normalize))}\nRust: ${JSON.stringify(rsx.map(normalize))}`,
+  const fail = (what: string, detail: string) => {
+    failures += 1;
+    console.error(`\n--- ${what}\n${detail}`);
+  };
+  const report: string[] = ["| row | client | upstream | scenario |", "|---|---|---|---|"];
+  for (const row of ROWS) {
+    const tsx = ts.exchanges.get(row.name);
+    if (tsx === undefined) continue;
+    const rsx = rs.exchanges.get(row.name) ?? [];
+    const tn = tsx.map(normalize);
+    const rn = rsx.map(normalize);
+    const decodable = tn.every((x) => x !== null) && rn.every((x) => x !== null);
+    const client = decodable && same(tn, rn);
+    const up = upstreamEqual(ts.upstream.get(row.name), rs.upstream.get(row.name));
+    const facts = [
+      row.expect?.(tsx, ts.upstream.get(row.name) ?? []),
+      row.expect?.(rsx, rs.upstream.get(row.name) ?? []),
+    ];
+    const scenario =
+      row.expect === undefined ? "–" : facts.every((f) => f == null) ? "pass" : "FAIL";
+    report.push(
+      `| ${row.name} | ${client ? "pass" : "FAIL"} | ${up ? "pass" : "FAIL"} | ${scenario} |`,
+    );
+    if (!client)
+      fail(
+        `${row.name}: client differs${decodable ? "" : " (not UTF-8)"}`,
+        `TS:   ${JSON.stringify(tn)}\nRust: ${JSON.stringify(rn)}`,
       );
-    }
     if (!up) {
-      failures += 1;
-      console.error(
-        `\n--- ${name}: upstream bytes differ\nTS:   ${JSON.stringify(ts.upstream.get(name))}\nRust: ${JSON.stringify(rs.upstream.get(name))}`,
+      const show = (xs: Uint8Array[] = []) =>
+        JSON.stringify(xs.map((x) => Buffer.from(x).toString("latin1")));
+      fail(
+        `${row.name}: upstream bytes differ`,
+        `TS:   ${show(ts.upstream.get(row.name))}\nRust: ${show(rs.upstream.get(row.name))}`,
       );
     }
+    if (scenario === "FAIL") fail(`${row.name}: scenario`, `TS: ${facts[0]}\nRust: ${facts[1]}`);
+  }
+  if (ts.exchanges.has("client disconnects mid-stream")) {
+    const counts = [disconnectRows(ts.db), disconnectRows(rs.db)];
+    const ok = counts.every((n) => n === 1);
+    report.push(`| disconnect: one 499 row per db | ${ok ? "pass" : "FAIL"} | | |`);
+    if (!ok) fail("disconnect rows", `TS ${counts[0]}, Rust ${counts[1]}`);
   }
   const tsDb = dbState(ts.db);
   const rsDb = dbState(rs.db);
   for (const t of Object.keys(tsDb)) {
     const ok = same(tsDb[t], rsDb[t]);
-    report.push(`| db: ${t} (${tsDb[t]?.length} rows) | ${ok ? "pass" : "FAIL"} | |`);
+    report.push(`| db: ${t} (${tsDb[t]?.length} rows) | ${ok ? "pass" : "FAIL"} | | |`);
     if (!ok) {
-      failures += 1;
       const a = tsDb[t] ?? [];
       const b = rsDb[t] ?? [];
+      const lines: string[] = [];
       for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
         if (!same(a[i], b[i]))
-          console.error(
-            `\n--- ${t}[${i}]\nTS:   ${JSON.stringify(a[i])}\nRust: ${JSON.stringify(b[i])}`,
-          );
+          lines.push(`[${i}]\nTS:   ${JSON.stringify(a[i])}\nRust: ${JSON.stringify(b[i])}`);
       }
+      fail(`db ${t}`, lines.join("\n"));
     }
   }
   console.log(report.join("\n"));
