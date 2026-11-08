@@ -14,6 +14,9 @@
  *     --cli "bun apps/cli/src/index.ts" \
  *     --out docs/benchmarks/2026-11-07-ts-baseline.json
  *
+ * `--gateway` may be relative (`target/release/omnigateway`): its program
+ * path is resolved against the repo root, not the bench root it runs in.
+ *
  * Options: `--duration 20s` `--warmup 3s` `--gateway-cpus 0-3` `--upstream-cpus 4-5`
  * `--load-cpus 6-7` `--streams 1000` `--boots 5` `--only <scenario,...>`.
  *
@@ -72,7 +75,15 @@ if (flags.gateway === undefined || flags.cli === undefined) {
 }
 
 const REPO = resolve(import.meta.dir, "..");
-const GATEWAY_ARGV = flags.gateway.split(/\s+/).filter(Boolean);
+/**
+ * The gateway is spawned with its cwd in the bench root, so a relative
+ * program path is resolved against the repo root here, once; a bare name
+ * (no slash) is left for PATH lookup.
+ */
+const GATEWAY_ARGV = flags.gateway
+  .split(/\s+/)
+  .filter(Boolean)
+  .map((arg, i) => (i === 0 && arg.includes("/") ? resolve(REPO, arg) : arg));
 const CLI_ARGV = flags.cli.split(/\s+/).filter(Boolean);
 const ENCRYPTION_KEY = "bench-only-encryption-key-0123456789";
 const GATEWAY_PORT = 18200;
