@@ -51,7 +51,11 @@ pub struct TextBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
     /// Anthropic citation payloads, preserved verbatim when present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "deep::ser::opt"
+    )]
     pub citations: Option<Vec<Value>>,
 }
 
@@ -86,6 +90,7 @@ pub struct ThinkingBlock {
 pub struct ToolUseBlock {
     pub id: String,
     pub name: String,
+    #[serde(serialize_with = "deep::ser::value")]
     pub input: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
@@ -178,6 +183,7 @@ mod tagged {
 pub struct ProviderNativeBlock {
     pub provider: ProviderId,
     pub block_type: String,
+    #[serde(serialize_with = "deep::ser::value")]
     pub data: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
@@ -251,10 +257,15 @@ pub struct CustomToolDef {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(serialize_with = "deep::ser::value")]
     pub input_schema: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "deep::ser::opt"
+    )]
     pub options: Option<Map<String, Value>>,
 }
 
@@ -266,6 +277,7 @@ pub struct ProviderToolDef {
     #[serde(rename = "type")]
     pub tool_type: String,
     pub name: String,
+    #[serde(serialize_with = "deep::ser::value")]
     pub wire: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
@@ -374,10 +386,18 @@ pub struct ChatRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
     /// Bags keyed by surface (`openai`, `anthropic`); each value is an object.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "deep::ser::opt"
+    )]
     pub vendor: Option<Map<String, Value>>,
     /// Provider protocol headers only, keyed by provider id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "deep::ser::opt"
+    )]
     pub provider_headers: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub betas: Option<Vec<String>>,
@@ -400,9 +420,10 @@ impl ChatRequest {
 // ------------------------------------------------------------------ deep values
 //
 // These structs hold client JSON verbatim, which may be nested up to
-// `deep::MAX_DEPTH` levels. Their `Clone` and `Drop` go through `deep` so that
-// neither recurses once per level on the caller's stack. `PartialEq` and
-// `Serialize` stay derived (recursive) and are for tests and shallow values.
+// `deep::MAX_DEPTH` levels. Their `Clone` and `Drop` go through `deep`, and
+// their client-JSON fields serialize through `deep::ser`, so none of the three
+// recurses once per level on the caller's stack. `PartialEq` stays derived and
+// recursive: it is for tests, and production never compares requests.
 
 use crate::deep;
 

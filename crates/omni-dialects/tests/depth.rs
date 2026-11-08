@@ -208,3 +208,259 @@ fn the_bound_is_the_depth_bun_can_still_stringify() {
         assert_eq!(case["stringifyValue"].is_null(), d <= D as u64, "depth {d}");
     }
 }
+
+// ------------------------------------------------------------------ ingest()
+//
+// Through the public entry point, with no help from the test: the body text
+// goes in and the IR comes back, on a 2 MiB thread. Each payload puts a value
+// that is `MAX_DEPTH` containers deep *counted from the body root* at one
+// client-JSON position. Accepted results are cloned, serialized with
+// `jsjson` and the IR's `Serialize`, then dropped, all on the same thread.
+
+use ingress::{Ingested, Surface};
+
+/// A body `D` deep whose deepest value sits at `{path}` (`levels` above it).
+fn at(levels_above: usize, template: &str) -> String {
+    template.replace("@", &nest(D - levels_above))
+}
+
+fn ingest(surface: Surface, body: &str) -> Result<Ingested, GatewayError> {
+    let mut ids = ingress::random_tool_use_id;
+    let mut opts = IngressOptions {
+        new_tool_use_id: &mut ids,
+    };
+    ingress::ingest(surface, body, &Headers::new(), &mut opts)
+}
+
+fn exercise(i: Ingested) {
+    let copy = i.request.clone();
+    // The IR's own `Serialize` (recursive), then every jsjson carrier.
+    let ir = serde_json::to_value(&copy).expect("serialize");
+    let mut wire = String::new();
+    omni_ir::jsjson::write_value(&ir, &mut wire);
+    assert!(wire.len() > 2 * (D / 2), "the deep value is in the IR");
+    deep::drop(ir);
+    let _ = omni_ir::tokens::estimate_input_tokens(&copy);
+    drop(copy);
+    drop(i);
+}
+
+/// `(name, surface, levels above the deep value, template, accepted?)`.
+fn positions() -> Vec<(&'static str, Surface, usize, &'static str, bool)> {
+    vec![
+        // outer body, every dialect
+        (
+            "anthropic body",
+            Surface::Anthropic,
+            1,
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"x":@}"#,
+            true,
+        ),
+        (
+            "chat body",
+            Surface::OpenAi,
+            1,
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"x":@}"#,
+            true,
+        ),
+        (
+            "responses body",
+            Surface::Responses,
+            1,
+            r#"{"model":"m","input":"hi","x":@}"#,
+            true,
+        ),
+        // custom tool input_schema: accepted, and refused on a later field
+        (
+            "anthropic input_schema",
+            Surface::Anthropic,
+            4,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"tools":[{"name":"f","input_schema":{"a":@}}]}"#,
+            true,
+        ),
+        (
+            "anthropic input_schema, refused",
+            Surface::Anthropic,
+            4,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"tools":[{"name":"f","strict":5,"input_schema":{"a":@}}]}"#,
+            false,
+        ),
+        (
+            "anthropic input_schema, refused by zod",
+            Surface::Anthropic,
+            4,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"tools":[{"name":"","input_schema":{"a":@}}]}"#,
+            false,
+        ),
+        (
+            "chat parameters",
+            Surface::OpenAi,
+            5,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"a":@}}}]}"#,
+            true,
+        ),
+        (
+            "responses parameters",
+            Surface::Responses,
+            4,
+            r#"{"model":"m","input":"q","tools":[{"type":"function","name":"f","parameters":{"a":@}}]}"#,
+            true,
+        ),
+        (
+            "responses hosted tool",
+            Surface::Responses,
+            3,
+            r#"{"model":"m","input":"q","tools":[{"type":"web_search","x":@}]}"#,
+            true,
+        ),
+        // Responses function_call_output, object form
+        (
+            "responses output object",
+            Surface::Responses,
+            4,
+            r#"{"model":"m","input":[{"role":"user","content":"q"},{"type":"function_call","call_id":"c","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":{"a":@}}]}"#,
+            true,
+        ),
+        (
+            "responses output array",
+            Surface::Responses,
+            4,
+            r#"{"model":"m","input":[{"role":"user","content":"q"},{"type":"function_call","call_id":"c","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":[@]}]}"#,
+            true,
+        ),
+        // raw.type, refused
+        (
+            "responses raw.type",
+            Surface::Responses,
+            3,
+            r#"{"model":"m","input":[{"type":@}]}"#,
+            false,
+        ),
+        (
+            "responses part type",
+            Surface::Responses,
+            5,
+            r#"{"model":"m","input":[{"role":"user","content":[{"type":@}]}]}"#,
+            false,
+        ),
+        // native and vendor carriers
+        (
+            "responses reasoning item",
+            Surface::Responses,
+            3,
+            r#"{"model":"m","input":[{"role":"user","content":"q"},{"type":"reasoning","x":@}]}"#,
+            true,
+        ),
+        (
+            "anthropic native block",
+            Surface::Anthropic,
+            5,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"server_tool_use","id":"s","name":"web_search","input":@}]}]}"#,
+            true,
+        ),
+        (
+            "anthropic native block, refused",
+            Surface::Anthropic,
+            5,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"server_tool_use","id":"s","name":"nope","input":@}]}]}"#,
+            false,
+        ),
+        (
+            "anthropic tool_use input",
+            Surface::Anthropic,
+            6,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{"a":@}}]}]}"#,
+            true,
+        ),
+        (
+            "anthropic block refused after deep sibling",
+            Surface::Anthropic,
+            5,
+            r#"{"model":"m","messages":[{"role":"user","content":[{"type":"bogus","x":@}]}]}"#,
+            false,
+        ),
+        (
+            "anthropic safeguards system",
+            Surface::Anthropic,
+            3,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"safeguards":[1],"system":[{"type":"text","text":"s","x":@}]}"#,
+            true,
+        ),
+        (
+            "chat message refused after deep field",
+            Surface::OpenAi,
+            3,
+            r#"{"model":"m","messages":[{"role":"tool","x":@,"content":"r"}]}"#,
+            false,
+        ),
+    ]
+}
+
+#[test]
+fn ingest_is_stack_safe_at_every_client_json_position() {
+    on_small_stack(|| {
+        let only = std::env::var("ONLY").ok();
+        for (name, surface, above, template, accepted) in positions() {
+            if only.as_deref().is_some_and(|o| o != name) {
+                continue;
+            }
+            let body = at(above, template);
+            assert_eq!(
+                omni_ir::deep::depth_of(&body),
+                D,
+                "{name}: payload is not D deep"
+            );
+            match ingest(surface, &body) {
+                Ok(i) => {
+                    assert!(accepted, "{name}: accepted");
+                    exercise(i);
+                }
+                Err(e) => {
+                    assert!(!accepted, "{name}: refused: {e}");
+                    assert_eq!(e.code.as_str(), "BAD_REQUEST", "{name}");
+                    assert_ne!(e.message, ingress::TOO_DEEP, "{name}: at the bound");
+                }
+            }
+            // One level deeper is refused, whatever the position.
+            let deeper = template.replace("@", &nest(D - above + 1));
+            let e = ingest(surface, &deeper).expect_err(name);
+            assert_eq!(e.message, ingress::TOO_DEEP, "{name}");
+        }
+    });
+}
+
+#[test]
+fn ingest_keeps_deep_argument_strings_in_every_dialect() {
+    on_small_stack(|| {
+        for levels in [D - 1, D] {
+            let chat = ingest(Surface::OpenAi, &chat_args(levels)).expect("chat");
+            assert_eq!(depth(tool_input(&chat.request).expect("tool")), levels);
+            exercise(chat);
+            let resp = ingest(Surface::Responses, &responses_args(levels)).expect("responses");
+            assert_eq!(depth(tool_input(&resp.request).expect("tool")), levels);
+            exercise(resp);
+        }
+        for (surface, body) in [
+            (Surface::OpenAi, chat_args(D + 1)),
+            (Surface::Responses, responses_args(D + 1)),
+        ] {
+            let e = ingest(surface, &body).expect_err("too deep");
+            assert_eq!(e.message, ingress::TOO_DEEP);
+        }
+    });
+}
+
+#[test]
+fn a_deep_js_value_converts_clones_and_drops_on_a_small_stack() {
+    on_small_stack(|| {
+        let v = deep::Owned(deep::parse(&nest(D)).expect("parse"));
+        let js = omni_ir::jsjson::JsValue::from(&*v);
+        let copy = js.clone();
+        assert_eq!(
+            omni_ir::jsjson::stringify(&copy).map(|s| s.len()),
+            Some(2 * D + 1)
+        );
+        drop(copy);
+        drop(js);
+    });
+}

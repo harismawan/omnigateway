@@ -95,6 +95,66 @@ pub fn random_tool_use_id() -> String {
     )
 }
 
+/// Which client dialect a body is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// `/v1/messages` and `/v1/messages/count_tokens`.
+    Anthropic,
+    /// `/v1/chat/completions`.
+    OpenAi,
+    /// `/v1/responses`.
+    Responses,
+}
+
+/// What [`ingest`] reads off a body besides the IR.
+#[derive(Debug)]
+pub struct Ingested {
+    pub request: ChatRequest,
+    /// `customToolNames(body)`: the Responses egress needs it; empty elsewhere.
+    pub custom_tool_names: HashSet<String>,
+}
+
+/// **The ingress entry point 5b calls.** Body bytes in, IR out.
+///
+/// Parses the text (`JSON.parse`, bounded at `omni_ir::deep::MAX_DEPTH`),
+/// validates it in the surface's dialect and converts it to the IR, all inside
+/// `omni_ir::deep::scope`: every client-derived JSON value is created, walked
+/// and dropped on a stack large enough for the deepest accepted body, so this
+/// is safe to call on a 2 MiB tokio worker, on success and on every refusal.
+///
+/// The returned values are safe to hold, clone, serialize with
+/// `omni_ir::jsjson` and drop on any thread: the IR types that carry client
+/// JSON clone and drop iteratively, and the jsjson writer grows its stack.
+///
+/// Errors: a syntax error is `BAD_REQUEST "request body must be valid JSON"`
+/// (TS answers 500 `INTERNAL`; 5b decides which to send), a body deeper than
+/// the bound is [`TOO_DEEP`], and everything else is the dialect's own
+/// `BAD_REQUEST`, as TS words it.
+pub fn ingest(
+    surface: Surface,
+    body: &str,
+    headers: &Headers,
+    opts: &mut IngressOptions<'_>,
+) -> Result<Ingested, GatewayError> {
+    omni_ir::deep::scope(|| {
+        let value = parse_body_checked(body)?;
+        let request = match surface {
+            Surface::Anthropic => anthropic::parse(&value, headers, opts),
+            Surface::OpenAi => openai::parse(&value, headers, opts),
+            Surface::Responses => responses::parse(&value, headers, opts),
+        }?;
+        let custom_tool_names = match surface {
+            Surface::Responses => custom_tool_names(&value),
+            _ => HashSet::new(),
+        };
+        // `value` drops here, still inside the scope.
+        Ok(Ingested {
+            request,
+            custom_tool_names,
+        })
+    })
+}
+
 /// The refusal for JSON nested deeper than `omni_ir::deep::MAX_DEPTH`.
 ///
 /// TS parses such a body (Bun's `JSON.parse` goes past a million levels) and

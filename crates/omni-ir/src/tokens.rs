@@ -24,8 +24,15 @@ fn from_json(value: &Value) -> f64 {
     from_text(&jsjson::to_string(value))
 }
 
+/// `JSON.stringify` length of a map, without copying it into a `Value`.
+fn from_map(map: &serde_json::Map<String, Value>) -> f64 {
+    let mut out = String::new();
+    jsjson::write_map(map, &mut out);
+    from_text(&out)
+}
+
 fn native_tokens(n: &ProviderNativeBlock) -> f64 {
-    BLOCK_OVERHEAD + from_text(&n.block_type) + from_json(&Value::Object(n.data.clone()))
+    BLOCK_OVERHEAD + from_text(&n.block_type) + from_map(&n.data)
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -58,10 +65,7 @@ fn message_tokens(message: &Message) -> f64 {
 fn tool_tokens(tool: &ToolDef) -> f64 {
     match tool {
         ToolDef::Provider(t) => {
-            BLOCK_OVERHEAD
-                + from_text(&t.name)
-                + from_text(&t.tool_type)
-                + from_json(&Value::Object(t.wire.clone()))
+            BLOCK_OVERHEAD + from_text(&t.name) + from_text(&t.tool_type) + from_map(&t.wire)
         }
         ToolDef::Portable(t) => {
             BLOCK_OVERHEAD

@@ -19,7 +19,12 @@
 //! for a parsed [`serde_json::Value`], with no intermediate conversion.
 
 /// A JavaScript value, as far as `JSON.stringify` can observe one.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Used by the conformance tests to model values `serde_json` cannot hold
+/// (`undefined`, lone surrogates); the gateway itself writes `serde_json`
+/// values. Conversion, `Clone` and `Drop` are stack-safe at any depth, like
+/// the rest of `crate::deep`.
+#[derive(Debug, PartialEq)]
 pub enum JsValue {
     Undefined,
     Function,
@@ -42,13 +47,66 @@ impl From<&serde_json::Value> for JsValue {
             Value::Bool(b) => JsValue::Bool(*b),
             Value::Number(n) => JsValue::Number(number_as_f64(n)),
             Value::String(s) => JsValue::String(s.encode_utf16().collect()),
-            Value::Array(items) => JsValue::Array(items.iter().map(JsValue::from).collect()),
-            Value::Object(map) => JsValue::Object(
-                map.iter()
-                    .map(|(k, v)| (k.encode_utf16().collect(), JsValue::from(v)))
-                    .collect(),
-            ),
+            Value::Array(items) => {
+                crate::deep::grow(|| JsValue::Array(items.iter().map(JsValue::from).collect()))
+            }
+            Value::Object(map) => crate::deep::grow(|| {
+                JsValue::Object(
+                    map.iter()
+                        .map(|(k, v)| (k.encode_utf16().collect(), JsValue::from(v)))
+                        .collect(),
+                )
+            }),
         }
+    }
+}
+
+impl Clone for JsValue {
+    fn clone(&self) -> Self {
+        match self {
+            JsValue::Undefined => JsValue::Undefined,
+            JsValue::Function => JsValue::Function,
+            JsValue::Null => JsValue::Null,
+            JsValue::Bool(b) => JsValue::Bool(*b),
+            JsValue::Number(n) => JsValue::Number(*n),
+            JsValue::String(units) => JsValue::String(units.clone()),
+            JsValue::Array(items) => crate::deep::grow(|| JsValue::Array(items.clone())),
+            JsValue::Object(entries) => crate::deep::grow(|| JsValue::Object(entries.clone())),
+        }
+    }
+}
+
+impl Drop for JsValue {
+    /// Iterative: children are moved onto a heap stack before they drop, so
+    /// each one drops with no nested containers left.
+    fn drop(&mut self) {
+        let mut pending: Vec<JsValue> = match self {
+            JsValue::Array(items) if items.iter().any(JsValue::is_container) => {
+                std::mem::take(items)
+            }
+            JsValue::Object(entries) if entries.iter().any(|(_, v)| v.is_container()) => {
+                std::mem::take(entries)
+                    .into_iter()
+                    .map(|(_, v)| v)
+                    .collect()
+            }
+            _ => return,
+        };
+        while let Some(mut v) = pending.pop() {
+            match &mut v {
+                JsValue::Array(items) => pending.append(items),
+                JsValue::Object(entries) => {
+                    pending.extend(std::mem::take(entries).into_iter().map(|(_, v)| v));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl JsValue {
+    fn is_container(&self) -> bool {
+        matches!(self, JsValue::Array(_) | JsValue::Object(_))
     }
 }
 
@@ -179,6 +237,11 @@ pub fn write_spread(
         }
     }
     out.push('}');
+}
+
+/// `JSON.stringify` of an object given as its map, written into `out`.
+pub fn write_map(map: &serde_json::Map<String, serde_json::Value>, out: &mut String) {
+    write_object(map, out, None, 0);
 }
 
 /// `JSON.stringify(value)` for a parsed JSON value, as a new string.
@@ -494,43 +557,51 @@ fn write_serde(value: &serde_json::Value, out: &mut String, indent: Option<usize
             newline_indent(out, indent, depth);
             out.push(']');
         }
-        Value::Object(map) => {
-            if map.is_empty() {
-                out.push_str("{}");
-                return;
+        Value::Object(map) => write_object(map, out, indent, depth),
+    }
+}
+
+fn write_object(
+    map: &serde_json::Map<String, serde_json::Value>,
+    out: &mut String,
+    indent: Option<usize>,
+    depth: usize,
+) {
+    use serde_json::Value;
+    if map.is_empty() {
+        out.push_str("{}");
+        return;
+    }
+    out.push('{');
+    let mut first = true;
+    let mut entry = |key: &str, item: &Value, out: &mut String| {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        newline_indent(out, indent, depth + 1);
+        write_str(key, out);
+        out.push(':');
+        if indent.is_some() {
+            out.push(' ');
+        }
+        crate::deep::grow(|| write_serde(item, out, indent, depth + 1));
+    };
+    if map.keys().any(|k| array_index(k).is_some()) {
+        let keys: Vec<&String> = map.keys().collect();
+        for position in enumeration_order(&keys, |k| array_index(k)) {
+            let key = keys[position];
+            if let Some(item) = map.get(key) {
+                entry(key, item, out);
             }
-            out.push('{');
-            let mut first = true;
-            let mut entry = |key: &str, item: &Value, out: &mut String| {
-                if !first {
-                    out.push(',');
-                }
-                first = false;
-                newline_indent(out, indent, depth + 1);
-                write_str(key, out);
-                out.push(':');
-                if indent.is_some() {
-                    out.push(' ');
-                }
-                crate::deep::grow(|| write_serde(item, out, indent, depth + 1));
-            };
-            if map.keys().any(|k| array_index(k).is_some()) {
-                let keys: Vec<&String> = map.keys().collect();
-                for position in enumeration_order(&keys, |k| array_index(k)) {
-                    let key = keys[position];
-                    if let Some(item) = map.get(key) {
-                        entry(key, item, out);
-                    }
-                }
-            } else {
-                for (key, item) in map {
-                    entry(key, item, out);
-                }
-            }
-            newline_indent(out, indent, depth);
-            out.push('}');
+        }
+    } else {
+        for (key, item) in map {
+            entry(key, item, out);
         }
     }
+    newline_indent(out, indent, depth);
+    out.push('}');
 }
 
 #[cfg(test)]

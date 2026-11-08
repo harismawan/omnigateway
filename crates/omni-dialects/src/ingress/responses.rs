@@ -166,12 +166,13 @@ fn read_tool_output(output: Option<&Value>) -> Result<ToolResultBlock, GatewayEr
             return Ok(out);
         }
         Some(Value::Array(parts)) => parts,
-        other => {
-            let v = match other {
-                None | Some(Value::Null) => Value::String(String::new()),
-                Some(v) => omni_ir::deep::clone(v),
-            };
-            out.content = omni_ir::jsjson::to_string(&v);
+        // `JSON.stringify(output ?? "")`, written from the borrowed value.
+        None | Some(Value::Null) => {
+            out.content = r#""""#.to_string();
+            return Ok(out);
+        }
+        Some(v) => {
+            out.content = omni_ir::jsjson::to_string(v);
             return Ok(out);
         }
     };
@@ -275,13 +276,14 @@ fn read_input_items(items: &[Value]) -> Result<Vec<Message>, GatewayError> {
             return Err(bad("input: item must be an object"));
         }
         // `raw.type ?? (raw.role === undefined ? undefined : "message")`.
-        let declared = raw.get("type").filter(|t| !t.is_null());
-        let t: Option<Value> = match declared {
-            Some(t) => Some(omni_ir::deep::clone(t)),
-            None if raw.get("role").is_some() => Some(Value::String("message".into())),
+        // Borrowed: `type` may be any client value, kept only to be named.
+        let t = raw.get("type").filter(|t| !t.is_null());
+        let kind = match t {
+            Some(t) => t.as_str(),
+            None if raw.get("role").is_some() => Some("message"),
             None => None,
         };
-        match t.as_ref().and_then(Value::as_str) {
+        match kind {
             Some("message") => push(
                 role_of(raw.get("role")),
                 message_blocks(raw.get("content"))?,
@@ -335,7 +337,7 @@ fn read_input_items(items: &[Value]) -> Result<Vec<Message>, GatewayError> {
             _ => {
                 return Err(bad(format!(
                     "input: unsupported item type \"{}\"",
-                    token_of(t.as_ref())
+                    token_of(t)
                 )));
             }
         }

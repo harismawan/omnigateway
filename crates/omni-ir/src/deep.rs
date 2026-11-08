@@ -37,6 +37,55 @@ pub fn grow<R>(f: impl FnOnce() -> R) -> R {
     stacker::maybe_grow(RED_ZONE, SEGMENT, f)
 }
 
+/// Stack for a whole scope that walks client JSON with ordinary recursion
+/// (derived `Drop`, `Clone`, `PartialEq`, `Serialize`, or a helper that
+/// forgot [`grow`]).
+///
+/// Sized by measurement (`omni-dialects/tests/depth.rs`, every client-JSON
+/// position at [`MAX_DEPTH`] through `ingress::ingest`): a 2 MiB segment
+/// faults in a debug build and suffices in release; 4 MiB faults in debug;
+/// 8 MiB passes both. 16 MiB doubles the debug figure. It is virtual memory,
+/// mapped once per scope that needs it and committed only as far as the walk
+/// actually reaches.
+pub const SCOPE_SEGMENT: usize = 16 * 1024 * 1024;
+
+/// Remaining stack below which [`scope`] moves to a fresh segment. A scope
+/// that starts on a thread with less than this left always moves.
+pub const SCOPE_RED_ZONE: usize = SCOPE_SEGMENT;
+
+/// Runs `f` on a stack with at least [`SCOPE_SEGMENT`] bytes free, so that
+/// anything inside may recurse once per level of a [`MAX_DEPTH`]-deep value.
+///
+/// Use it around every scope that holds client JSON: create, walk *and drop*
+/// the values inside, or return them in a type whose `Drop` is iterative
+/// ([`Owned`], or the IR types in `crate::request`).
+pub fn scope<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(SCOPE_RED_ZONE, SCOPE_SEGMENT, f)
+}
+
+/// `serialize_with` helpers for fields holding client JSON: serde's own
+/// `Serialize for Value` recurses once per level, so these run it through a
+/// stack-growing serializer.
+pub mod ser {
+    use serde::{Serialize, Serializer};
+
+    /// Any field.
+    pub fn value<T: Serialize, S: Serializer>(v: &T, s: S) -> Result<S::Ok, S::Error> {
+        super::grow(|| {
+            v.serialize(serde_stacker::Serializer {
+                ser: s,
+                red_zone: super::RED_ZONE,
+                stack_size: super::SEGMENT,
+            })
+        })
+    }
+
+    /// An `Option` field (absent ones are skipped by the caller).
+    pub fn opt<T: Serialize, S: Serializer>(v: &Option<T>, s: S) -> Result<S::Ok, S::Error> {
+        value(v, s)
+    }
+}
+
 /// Why [`parse`] refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {

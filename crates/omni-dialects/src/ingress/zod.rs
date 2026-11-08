@@ -338,6 +338,45 @@ fn disc_values<'z>(option: &'z Z, key: &str) -> &'z [&'static str] {
     &[]
 }
 
+fn check_object(shape: &[(&'static str, Z)], strict: bool, map: &Map<String, Value>) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for (key, field) in shape {
+        let v = map.get(*key);
+        let present = v.is_some();
+        let result = check(field, v);
+        let fin = optin(field);
+        let fout = optout(field);
+        if !present && fout && fin == Some(OptIn::Optional) {
+            continue;
+        }
+        if !result.is_empty() {
+            if fin.is_some() && fout && !present {
+                continue;
+            }
+            issues.extend(prefix(Seg::Key((*key).to_string()), result.clone()));
+        }
+        if !present && fin.is_none() && result.is_empty() {
+            let mut i = Issue::new(Kind::InvalidType {
+                expected: "nonoptional",
+                received: "undefined",
+            });
+            i.path.push(Seg::Key((*key).to_string()));
+            issues.push(i);
+        }
+    }
+    if strict {
+        let unknown: Vec<String> = js_keys(map)
+            .into_iter()
+            .filter(|k| !shape.iter().any(|(s, _)| s == k))
+            .map(str::to_string)
+            .collect();
+        if !unknown.is_empty() {
+            issues.push(Issue::continuing(Kind::UnrecognizedKeys(unknown)));
+        }
+    }
+    issues
+}
+
 /// Runs `z` on `value` (`None` is `undefined`) and returns its issues, in the
 /// order zod reports them.
 pub fn check(z: &Z, value: Option<&Value>) -> Vec<Issue> {
@@ -464,42 +503,7 @@ fn check_inner(z: &Z, value: Option<&Value>) -> Vec<Issue> {
                     received: parsed_type(value),
                 })];
             };
-            let mut issues = Vec::new();
-            for (key, field) in shape {
-                let v = map.get(*key);
-                let present = v.is_some();
-                let result = check(field, v);
-                let fin = optin(field);
-                let fout = optout(field);
-                if !present && fout && fin == Some(OptIn::Optional) {
-                    continue;
-                }
-                if !result.is_empty() {
-                    if fin.is_some() && fout && !present {
-                        continue;
-                    }
-                    issues.extend(prefix(Seg::Key((*key).to_string()), result.clone()));
-                }
-                if !present && fin.is_none() && result.is_empty() {
-                    let mut i = Issue::new(Kind::InvalidType {
-                        expected: "nonoptional",
-                        received: "undefined",
-                    });
-                    i.path.push(Seg::Key((*key).to_string()));
-                    issues.push(i);
-                }
-            }
-            if *strict {
-                let unknown: Vec<String> = js_keys(map)
-                    .into_iter()
-                    .filter(|k| !shape.iter().any(|(s, _)| s == k))
-                    .map(str::to_string)
-                    .collect();
-                if !unknown.is_empty() {
-                    issues.push(Issue::continuing(Kind::UnrecognizedKeys(unknown)));
-                }
-            }
-            issues
+            check_object(shape, *strict, map)
         }
         Z::Rec(inner) => {
             let Some(Value::Object(map)) = value else {
@@ -588,16 +592,7 @@ fn rebuild_inner(z: &Z, value: Option<&Value>) -> Option<Value> {
             other => other.map(omni_ir::deep::clone),
         },
         Z::Obj { shape, .. } => match value {
-            Some(Value::Object(map)) => {
-                let mut out = Map::new();
-                for (key, field) in shape {
-                    let v = map.get(*key);
-                    if let Some(r) = rebuild(field, v) {
-                        out.insert((*key).to_string(), r);
-                    }
-                }
-                Some(Value::Object(out))
-            }
+            Some(Value::Object(map)) => Some(rebuild_object(shape, map)),
             other => other.map(omni_ir::deep::clone),
         },
         Z::Rec(inner) => match value {
@@ -642,6 +637,31 @@ fn rebuild_inner(z: &Z, value: Option<&Value>) -> Option<Value> {
             value.map(omni_ir::deep::clone)
         }
     }
+}
+
+/// [`parse`] of an object given as its map, without wrapping it in a `Value`.
+pub fn parse_map(z: &Z, map: &Map<String, Value>) -> Result<Owned, Issue> {
+    match z {
+        Z::Obj { shape, strict } => {
+            let mut issues = check_object(shape, *strict, map);
+            if issues.is_empty() {
+                Ok(Owned(rebuild_object(shape, map)))
+            } else {
+                Err(issues.swap_remove(0))
+            }
+        }
+        _ => unreachable!("parse_map takes an object schema"),
+    }
+}
+
+fn rebuild_object(shape: &[(&'static str, Z)], map: &Map<String, Value>) -> Value {
+    let mut out = Map::new();
+    for (key, field) in shape {
+        if let Some(r) = rebuild(field, map.get(*key)) {
+            out.insert((*key).to_string(), r);
+        }
+    }
+    Value::Object(out)
 }
 
 /// `safeParse` → the first issue, or the output (dropped iteratively).

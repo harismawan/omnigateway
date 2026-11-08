@@ -286,8 +286,8 @@ fn custom_tool_schema() -> Z {
 }
 
 fn parse_custom_tool(raw: &Map<String, Value>, path: &str) -> Result<ToolDef, GatewayError> {
-    let value = Value::Object(omni_ir::deep::clone_map(raw));
-    let parsed = zod::parse(&custom_tool_schema(), &value).map_err(|issue| {
+    // The schema runs on a borrowed view: `raw` is the tool object itself.
+    let parsed = zod::parse_map(&custom_tool_schema(), raw).map_err(|issue| {
         let p = super::raw_path(&issue);
         let at = if p.is_empty() {
             path.to_string()
