@@ -112,6 +112,11 @@ fn main() {
     let sse = std::fs::read(&args[2]).expect("c2000.sse");
     let h = headers();
 
+    println!(
+        "sizes: StreamEvent {} B, Result<StreamEvent, GatewayError> {} B",
+        std::mem::size_of::<StreamEvent>(),
+        std::mem::size_of::<Result<StreamEvent, omni_ir::error::GatewayError>>()
+    );
     println!("== boot ==");
     time("PBKDF2 field key (210k iterations)", 5, || {
         omni_crypto::field::derive_key("bench-only-encryption-key-0123456789")
