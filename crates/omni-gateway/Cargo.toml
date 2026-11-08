@@ -41,6 +41,9 @@ rusqlite = { version = "0.41", default-features = false, features = ["bundled"] 
 # The global allocator: glibc malloc's arena locks showed up as ~7% of a
 # streaming request (`__lll_lock_*`), and malloc/free as a third of it.
 mimalloc = { version = "0.1", default-features = false }
+# `prctl(PR_SET_THP_DISABLE)` at start: on a host with THP `always`, mimalloc's
+# arenas fault in 2 MiB pages, which took idle RSS from 7 to 17.5 MiB.
+nix = { version = "0.31", default-features = false, features = ["process"] }
 
 [dev-dependencies]
 # The `profile_gateway` example: a SIGPROF sampler, no perf events needed.

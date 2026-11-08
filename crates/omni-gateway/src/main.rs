@@ -10,6 +10,14 @@ use omni_gateway_core::config::{LogLevel, load_config, process_env};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> std::process::ExitCode {
+    // Before the first allocation of any size: with transparent huge pages
+    // `always`, mimalloc's 32 MiB arena reservations fault in 2 MiB at a
+    // time, so a mostly idle heap is resident in huge pages (idle RSS 17.5
+    // MiB against 8.4 MiB without). The throughput difference measured as
+    // noise. Inherited by nothing: the gateway spawns no processes.
+    if nix::sys::prctl::set_thp_disable(true).is_err() {
+        eprintln!("could not disable transparent huge pages; continuing");
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
