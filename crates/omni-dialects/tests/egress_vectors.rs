@@ -1,8 +1,8 @@
 //! Egress parity: every IR event sequence in `dialects.json` was rendered by
 //! the real TS `anthropicStream` / `openaiStream` / `responsesStream` (frames
 //! serialized exactly as `sseResponse` in `routes/proxy.ts` writes them) and by
-//! the buffered renderers over TS `collect()`. The Rust encoders must write the
-//! same bytes, and the buffered renderers the same `JSON.stringify` output.
+//! the buffered renderers over TS `collect()`, recorded as the exact bytes TS
+//! sends. The Rust encoders and renderers must write the same bytes.
 
 mod common;
 
@@ -77,7 +77,7 @@ fn check(
             ));
         }
         let got = jsjson::to_string(&respond(&evs));
-        let want = jsjson::to_string(&case["response"]);
+        let want = s(&case["responseJson"]);
         if got != want {
             failures.push(format!(
                 "{dialect}/{name}: response\n got: {got}\nwant: {want}"
@@ -151,7 +151,7 @@ fn error_bodies_match_ts() {
         for d in ["anthropic", "openai", "responses"] {
             assert_eq!(
                 jsjson::to_string(&dialect(d).error_body(code, message)),
-                jsjson::to_string(&case[d]),
+                s(&case[d]),
                 "{d} {code}"
             );
         }

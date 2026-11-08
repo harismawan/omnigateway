@@ -713,6 +713,10 @@ async function* replay(events: StreamEvent[]): AsyncGenerator<StreamEvent> {
 }
 
 /** What `sseResponse` in `routes/proxy.ts` writes for each frame. */
+/**
+ * Buffered bodies are recorded as the exact `JSON.stringify` bytes `jsonResponse`
+ * sends, so the Rust side compares bytes rather than re-serializing both sides.
+ */
 const sseBytes = (fs: { event: string; data: string }[]) => fs.map((f) => `event: ${f.event}\ndata: ${f.data}\n\n`).join("");
 
 const REQUEST_ID = "req_01JABCDEF";
@@ -726,9 +730,9 @@ async function egress() {
     const o = await frames(openaiStream(replay(seq.events), REQUEST_ID, CREATED));
     const r = await frames(responsesStream(replay(seq.events), { requestId: REQUEST_ID, created: CREATED, customToolNames: CUSTOM }));
     const collected = collect(structuredClone(seq.events));
-    out.anthropic.push({ name: seq.name, events: seq.events, frames: a, bytes: sseBytes(a), response: anthropicResponse(collected, REQUEST_ID) });
-    out.openai.push({ name: seq.name, events: seq.events, frames: o, bytes: sseBytes(o), response: openaiResponse(collected, REQUEST_ID, CREATED) });
-    out.responses.push({ name: seq.name, events: seq.events, frames: r, bytes: sseBytes(r), response: responsesResponse(collected, { requestId: REQUEST_ID, created: CREATED, customToolNames: CUSTOM }) });
+    out.anthropic.push({ name: seq.name, events: seq.events, frames: a, bytes: sseBytes(a), responseJson: JSON.stringify(anthropicResponse(collected, REQUEST_ID)) });
+    out.openai.push({ name: seq.name, events: seq.events, frames: o, bytes: sseBytes(o), responseJson: JSON.stringify(openaiResponse(collected, REQUEST_ID, CREATED)) });
+    out.responses.push({ name: seq.name, events: seq.events, frames: r, bytes: sseBytes(r), responseJson: JSON.stringify(responsesResponse(collected, { requestId: REQUEST_ID, created: CREATED, customToolNames: CUSTOM })) });
   }
   return out;
 }
@@ -739,9 +743,9 @@ const errorBodies = CODES.flatMap((code) =>
     code,
     message,
     status: HTTP_STATUS[code],
-    anthropic: anthropicErrorBody(code, message),
-    openai: openaiErrorBody(code, message),
-    responses: responsesErrorBody(code, message),
+    anthropic: JSON.stringify(anthropicErrorBody(code, message)),
+    openai: JSON.stringify(openaiErrorBody(code, message)),
+    responses: JSON.stringify(responsesErrorBody(code, message)),
   })),
 );
 
