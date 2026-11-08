@@ -88,6 +88,51 @@ fn sweep_pending(
     Ok(out)
 }
 
+/// Pre-seeds every limited key that enters the snapshot after boot: a key
+/// created with the CLI arrives through the refresher, not through a miss.
+/// Watches the snapshot generation; only key ids not seen before are seeded
+/// (`preseed` is idempotent, but asks again for unseeded windows).
+pub fn spawn_preseeder(
+    holder: Arc<SnapshotHolder>,
+    limiter: Arc<RateLimiter>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut seen: std::collections::HashSet<String> = holder
+            .load()
+            .keys_by_hash
+            .values()
+            .map(|k| k.id.clone())
+            .collect();
+        let mut generation = holder.generation();
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let now = holder.generation();
+            if now == generation {
+                continue;
+            }
+            generation = now;
+            let snap = holder.load();
+            let mut current = std::collections::HashSet::with_capacity(snap.keys_by_hash.len());
+            for k in snap.keys_by_hash.values() {
+                current.insert(k.id.clone());
+                if seen.contains(&k.id) {
+                    continue;
+                }
+                if let Some(limits) = &k.limits
+                    && !limits.is_unlimited()
+                {
+                    #[allow(clippy::cast_precision_loss)]
+                    limiter.preseed(&k.id, limits, clock::now_ms() as f64);
+                }
+            }
+            seen = current;
+        }
+    })
+}
+
 /// A running gateway: the bound address and a way to stop it.
 pub struct Running {
     pub addr: std::net::SocketAddr,
@@ -122,13 +167,22 @@ impl Running {
 pub struct Options {
     pub keepalive: Duration,
     pub stop_deadline: Duration,
+    /// Bun's `idleTimeout` (255 s, its maximum, which TS sets): how long a
+    /// request's headers may take, how long a keep-alive connection may sit
+    /// between requests, and how long the request body may go without a byte.
+    /// There is no total body deadline, as in TS.
+    pub idle_timeout: Duration,
 }
+
+/// `idleTimeout: 255`.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(255);
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             keepalive: KEEPALIVE,
             stop_deadline: STOP_DEADLINE,
+            idle_timeout: IDLE_TIMEOUT,
         }
     }
 }
@@ -206,6 +260,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let refresher = holder
         .clone()
         .spawn_refresher(store, Duration::from_millis(500));
+    let preseeder = spawn_preseeder(holder.clone(), limiter.clone(), Duration::from_millis(500));
     let miss_store = tokio::task::spawn_blocking({
         let path = path.clone();
         move || SqliteStore::open(&path, offset).map_err(|e| e.to_string())
@@ -235,6 +290,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         miss,
         node_id,
         keepalive: options.keepalive,
+        idle_timeout: options.idle_timeout,
     });
 
     let listener = TcpListener::bind((config.host.as_str(), config.port))
@@ -245,12 +301,20 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
 
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let deadline = options.stop_deadline;
+    let idle = options.idle_timeout;
     let task = tokio::spawn(async move {
         let graceful = hyper_util::server::graceful::GracefulShutdown::new();
         let mut builder = hyper::server::conn::http1::Builder::new();
         builder.timer(hyper_util::rt::TokioTimer::new());
+        // Armed from the moment hyper waits for a request head, so it bounds
+        // both a slow head and the idle wait between keep-alive requests.
+        builder.header_read_timeout(idle);
+        // Every connection task, so a drain that runs out of time can cancel
+        // and join them (their finishers file 499s) before the writer closes.
+        let mut conns = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                Some(_) = conns.join_next(), if !conns.is_empty() => {}
                 accepted = listener.accept() => {
                     let Ok((sock, _)) = accepted else { continue };
                     if sock.set_nodelay(true).is_err() {
@@ -261,7 +325,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                         server::handle(app.clone(), req)
                     });
                     let conn = graceful.watch(builder.serve_connection(TokioIo::new(sock), service));
-                    tokio::spawn(async move {
+                    conns.spawn(async move {
                         if let Err(e) = conn.await {
                             tracing::debug!(reason = %e, "connection ended with an error");
                         }
@@ -281,11 +345,14 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                 "shutdown timed out waiting for connections to drain"
             );
         }
-        // Responses still streaming past the deadline are dropped with the
-        // runtime; their finishers file 499 rows before the writer closes,
-        // because each connection task is aborted only after this point.
+        // Connections still open past the deadline are cancelled here and
+        // joined: dropping each one drops its response body, whose finisher
+        // files the 499 row into the writer, which is closed only after.
+        conns.abort_all();
+        while conns.join_next().await.is_some() {}
         drop(app);
         refresher.abort();
+        preseeder.abort();
         asker.abort();
         let stats = writer.close().await;
         applier.abort();

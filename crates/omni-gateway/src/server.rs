@@ -44,6 +44,8 @@ pub struct App {
     pub node_id: String,
     /// `KEEPALIVE_MS`; Responses streams use `min(this, 4 s)`.
     pub keepalive: Duration,
+    /// Longest wait for the next byte of a request body.
+    pub idle_timeout: Duration,
 }
 
 impl std::fmt::Debug for App {
@@ -144,9 +146,22 @@ fn health(app: &App) -> Response<Body> {
     json_response(200, JSON_UTF8, body, &[])
 }
 
-fn header<'a>(req: &'a Request<Incoming>, name: &str) -> Option<&'a str> {
-    // WHATWG `Headers.get` joins repeats; a single value is the common case.
-    req.headers().get(name).and_then(|v| v.to_str().ok())
+/// WHATWG `Headers.get`: every value of `name`, HTTP whitespace trimmed,
+/// joined with `", "`. Non-UTF-8 bytes are read as Latin-1, as Bun does.
+fn header(req: &Request<Incoming>, name: &str) -> Option<String> {
+    let mut out: Option<String> = None;
+    for v in req.headers().get_all(name) {
+        let text: String = v.as_bytes().iter().map(|&b| char::from(b)).collect();
+        let text = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
+        match &mut out {
+            None => out = Some(text.to_owned()),
+            Some(acc) => {
+                acc.push_str(", ");
+                acc.push_str(text);
+            }
+        }
+    }
+    out
 }
 
 /// `authenticateApiKey(apiKeyHeader(headers), now)` against the snapshot,
@@ -156,7 +171,9 @@ async fn authenticate(
     req: &Request<Incoming>,
     now: i64,
 ) -> Result<(AuthenticatedKey, Arc<GatewaySnapshot>), GatewayError> {
-    let chosen = api_key_header(header(req, "authorization"), header(req, "x-api-key"))?;
+    let authorization = header(req, "authorization");
+    let x_api_key = header(req, "x-api-key");
+    let chosen = api_key_header(authorization.as_deref(), x_api_key.as_deref())?;
     let snapshot = app.deps.holder.load();
     match snapshot.authenticate(chosen, now) {
         AuthOutcome::Ok(k) => Ok((k, snapshot)),
@@ -192,25 +209,41 @@ async fn authenticate(
 
 /// `await request.json()`'s text: the body read under the limit, decoded as
 /// UTF-8 with replacement and a leading BOM stripped.
-async fn read_body(req: Request<Incoming>) -> Result<String, GatewayError> {
-    let collected = Limited::new(req.into_body(), BODY_LIMIT)
-        .collect()
-        .await
-        .map_err(|e| {
-            if e.downcast_ref::<http_body_util::LengthLimitError>()
-                .is_some()
-            {
-                GatewayError::new(
-                    ErrorCode::BadRequest,
-                    format!("request body exceeds {BODY_LIMIT} bytes"),
-                )
-                .gateway_authored()
-            } else {
-                GatewayError::new(ErrorCode::Internal, "request body could not be read")
-                    .gateway_authored()
+/// Why a body read stopped short.
+fn body_error(e: &(dyn std::error::Error + 'static)) -> GatewayError {
+    if e.downcast_ref::<http_body_util::LengthLimitError>()
+        .is_some()
+    {
+        GatewayError::new(
+            ErrorCode::BadRequest,
+            format!("request body exceeds {BODY_LIMIT} bytes"),
+        )
+        .gateway_authored()
+    } else {
+        GatewayError::new(ErrorCode::Internal, "request body could not be read").gateway_authored()
+    }
+}
+
+/// `await request.json()`'s text: the body read under the limit (enforced
+/// while reading) with at most `idle` between frames, decoded as UTF-8 with
+/// replacement and a leading BOM stripped. A body that goes quiet for `idle`
+/// ends the request; the connection task then closes the socket, as Bun's
+/// `idleTimeout` does.
+async fn read_body(req: Request<Incoming>, idle: Duration) -> Result<String, GatewayError> {
+    let mut body = Limited::new(req.into_body(), BODY_LIMIT);
+    let mut bytes = bytes::BytesMut::new();
+    loop {
+        match tokio::time::timeout(idle, body.frame()).await {
+            Err(_) => return Err(BodyIdle.into()),
+            Ok(None) => break,
+            Ok(Some(Err(e))) => return Err(body_error(e.as_ref())),
+            Ok(Some(Ok(frame))) => {
+                if let Ok(data) = frame.into_data() {
+                    bytes.extend_from_slice(&data);
+                }
             }
-        })?;
-    let bytes = collected.to_bytes();
+        }
+    }
     let text = String::from_utf8_lossy(&bytes);
     Ok(match text.strip_prefix('\u{feff}') {
         Some(rest) => rest.to_owned(),
@@ -218,10 +251,39 @@ async fn read_body(req: Request<Incoming>) -> Result<String, GatewayError> {
     })
 }
 
+/// The body went quiet past the idle timeout. Not a client-visible answer:
+/// the route turns it into a hang-up (a 499 row, the socket closed).
+#[derive(Debug)]
+struct BodyIdle;
+
+impl From<BodyIdle> for GatewayError {
+    fn from(_: BodyIdle) -> Self {
+        GatewayError::new(ErrorCode::Timeout, BODY_IDLE).gateway_authored()
+    }
+}
+
+/// The marker message for [`BodyIdle`]; never sent to a client.
+const BODY_IDLE: &str = "request body idle timeout";
+
+fn is_body_idle(e: &GatewayError) -> bool {
+    e.code == ErrorCode::Timeout && e.message == BODY_IDLE
+}
+
+/// A response that makes hyper close the connection without an answer:
+/// the body errors at once, which aborts the exchange.
+fn hang_up() -> Response<Body> {
+    let s = futures_util::stream::iter([Err::<Frame<Bytes>, _>(std::io::Error::other(BODY_IDLE))]);
+    let mut res = Response::new(http_body_util::BodyExt::boxed_unsync(StreamBody::new(s)));
+    res.headers_mut()
+        .insert("connection", HeaderValue::from_static("close"));
+    res
+}
+
 fn headers_of(req: &Request<Incoming>) -> Headers {
     let mut h = Headers::new();
     for (name, value) in req.headers() {
-        h.append(name.as_str(), &String::from_utf8_lossy(value.as_bytes()));
+        let text: String = value.as_bytes().iter().map(|&b| char::from(b)).collect();
+        h.append(name.as_str(), &text);
     }
     h
 }
@@ -306,7 +368,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             })?;
         fin.key_id = Some(key.id.clone());
         let headers = headers_of(&req);
-        let body = read_body(req).await?;
+        let body = read_body(req, app.idle_timeout).await?;
         let ingested = ingest_body(surface, &body, &headers)?;
         drop(body);
         let chat = ingested.request;
@@ -453,6 +515,11 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
 
     match outcome {
         Ok(res) => res,
+        // Bun closes the socket: no answer, and the row reads as a hang-up.
+        Err(e) if is_body_idle(&e) => {
+            drop(fin);
+            hang_up()
+        }
         Err(e) => {
             fin.reject(&e);
             let mut headers = limit_headers(&headroom, admitted);
@@ -514,44 +581,33 @@ fn sse_body(
 }
 
 /// Bun sends a stream body of one frame that is already complete when the
-/// head is written with `content-length` instead of chunked framing (two or
-/// more frames are chunked). Pull what the body yields without waiting; if
-/// that was one frame and the end, answer with a fixed length. A body
-/// that would wait (any real upstream call) is streamed as it is.
-fn settle(mut body: Body) -> Body {
+/// head is written with `content-length`; two or more frames are chunked.
+/// So this pulls at most two frames without waiting: one frame and the end
+/// answers with a fixed length, anything else streams on unchanged (the
+/// frames already pulled first, in order). At most two frames are held.
+pub fn settle(mut body: Body) -> Body {
     use futures_util::FutureExt as _;
-    let mut ready = Vec::new();
-    loop {
+    let mut first: Option<Bytes> = None;
+    let rest = loop {
         match body.frame().now_or_never() {
             Some(Some(Ok(frame))) => match frame.into_data() {
-                Ok(data) => ready.push(data),
-                Err(_) => continue,
+                Ok(data) if first.is_none() => first = Some(data),
+                // A second frame: chunked, whatever follows.
+                Ok(data) => break vec![Ok(Frame::data(data))],
+                Err(_) => {}
             },
-            // One frame and the end: Bun knows the whole body on its first
-            // pull. Two or more frames take two pulls, and Bun chunks them.
-            Some(None) if ready.len() <= 1 => {
-                return full(ready.pop().unwrap_or_default());
+            Some(None) if first.is_some() => {
+                return full(first.unwrap_or_default());
             }
-            Some(None) => {
-                let head =
-                    futures_util::stream::iter(ready.into_iter().map(|b| Ok(Frame::data(b))));
-                return http_body_util::BodyExt::boxed_unsync(StreamBody::new(head));
-            }
-            // An error, or a frame not ready yet: stream it all, in order.
-            Some(Some(Err(e))) => {
-                let head =
-                    futures_util::stream::iter(ready.into_iter().map(|b| Ok(Frame::data(b))));
-                let tail = futures_util::stream::iter([Err(e)]);
-                return http_body_util::BodyExt::boxed_unsync(StreamBody::new(head.chain(tail)));
-            }
-            None => {
-                let head =
-                    futures_util::stream::iter(ready.into_iter().map(|b| Ok(Frame::data(b))));
-                let rest = http_body_util::BodyStream::new(body);
-                return http_body_util::BodyExt::boxed_unsync(StreamBody::new(head.chain(rest)));
-            }
+            Some(None) => return full(Bytes::new()),
+            Some(Some(Err(e))) => break vec![Err(e)],
+            None => break Vec::new(),
         }
-    }
+    };
+    let head =
+        futures_util::stream::iter(first.into_iter().map(|b| Ok(Frame::data(b))).chain(rest));
+    let tail = http_body_util::BodyStream::new(body);
+    http_body_util::BodyExt::boxed_unsync(StreamBody::new(head.chain(tail)))
 }
 
 /// `POST /v1/messages/count_tokens`.
@@ -560,7 +616,7 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
     let result: Result<f64, GatewayError> = async {
         let (key, _snapshot) = authenticate(&app, &req, now).await?;
         let headers = headers_of(&req);
-        let body = read_body(req).await?;
+        let body = read_body(req, app.idle_timeout).await?;
         let chat = ingest_body(Surface::Anthropic, &body, &headers)?.request;
         omni_dialects::ingress::check_model_allowlist(&chat.model, key.model_allowlist.as_deref())?;
         #[allow(clippy::cast_precision_loss)]
@@ -572,6 +628,7 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
     }
     .await;
     match result {
+        Err(e) if is_body_idle(&e) => hang_up(),
         Ok(n) => {
             let mut body = String::from("{\"input_tokens\":");
             omni_ir::jsjson::write_number(n, &mut body);
@@ -613,5 +670,38 @@ async fn models(app: &App, req: &Request<Incoming>) -> Response<Body> {
                 reason = %e.message, "model listing failed");
             error_response(Dialect::Anthropic, &e, &[])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body::Body as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn counted(n: usize, pulled: Arc<AtomicUsize>) -> Body {
+        let s = futures_util::stream::iter((0..n).map(move |i| {
+            pulled.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(Frame::data(Bytes::from(format!("f{i};"))))
+        }));
+        StreamBody::new(s).boxed_unsync()
+    }
+
+    #[tokio::test]
+    async fn settle_reads_at_most_two_frames_ahead_and_keeps_order() {
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let body = settle(counted(1000, pulled.clone()));
+        assert_eq!(pulled.load(Ordering::SeqCst), 2);
+        assert!(body.size_hint().exact().is_none());
+        let all = body.collect().await.expect("body").to_bytes();
+        let want: String = (0..1000).map(|i| format!("f{i};")).collect();
+        assert_eq!(all, Bytes::from(want));
+    }
+
+    #[tokio::test]
+    async fn one_complete_frame_gets_a_fixed_length() {
+        let body = settle(counted(1, Arc::new(AtomicUsize::new(0))));
+        assert_eq!(body.size_hint().exact(), Some(3));
     }
 }

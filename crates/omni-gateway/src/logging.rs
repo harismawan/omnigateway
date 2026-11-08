@@ -4,8 +4,9 @@
 //! `ISO-INSTANT LEVEL message  key=value key=value`
 //!
 //! The level is padded to five characters. Fields render in TS's fixed
-//! `FIELD_ORDER`; fields TS does not know (other crates' diagnostics) follow
-//! in the order they were recorded. A string value containing whitespace, `=`
+//! `FIELD_ORDER`, which is also the allowlist: any other field (another
+//! crate's diagnostics, or anything that could carry a header or a body) is
+//! dropped, as `LogFields` refuses it at the TS API boundary. A string value containing whitespace, `=`
 //! or `"` is written as a JSON string. `reason` is capped at 200 UTF-16 units,
 //! `model`/`requestedModel` at 120, each with a trailing `…`.
 
@@ -198,11 +199,6 @@ fn render(level: Level, at_ms: i64, f: &Fields) -> String {
             }
         }
     }
-    for (n, v) in &f.values {
-        if !FIELD_ORDER.contains(n) {
-            emit(n, v);
-        }
-    }
     if !parts.is_empty() {
         line.push_str("  ");
         line.push_str(&parts);
@@ -210,14 +206,26 @@ fn render(level: Level, at_ms: i64, f: &Fields) -> String {
     line
 }
 
+/// Where rendered lines go.
+type Sink = Box<dyn Fn(&str) + Send + Sync>;
+
 /// The `tracing` layer writing TS-format lines to stdout at `max` and above.
 pub struct TsFormat {
     max: Level,
+    sink: Option<Sink>,
 }
 
 impl TsFormat {
     pub fn new(max: Level) -> Self {
-        Self { max }
+        Self { max, sink: None }
+    }
+
+    /// Lines go to `sink` instead of stdout (tests).
+    pub fn with_sink(max: Level, sink: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        Self {
+            max,
+            sink: Some(Box::new(sink)),
+        }
     }
 }
 
@@ -234,6 +242,10 @@ impl<S: Subscriber> Layer<S> for TsFormat {
         let mut f = Fields::default();
         event.record(&mut f);
         let mut line = render(level, crate::clock::now_ms(), &f);
+        if let Some(sink) = &self.sink {
+            sink(&line);
+            return;
+        }
         line.push('\n');
         // One write per line; a failed stdout write must never fail the work.
         let stdout = std::io::stdout();
@@ -270,6 +282,33 @@ pub fn install(max: Level) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fields_outside_the_allowlist_never_reach_the_line() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = lines.clone();
+        let layer = TsFormat::with_sink(Level::DEBUG, move |l| {
+            seen.lock().expect("lines").push(l.to_owned());
+        });
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                authorization = "Bearer sk-secret",
+                body = "prompt text",
+                requestId = "req_1",
+                "request rejected"
+            );
+        });
+        let lines = lines.lock().expect("lines");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].ends_with("WARN  request rejected  requestId=req_1"),
+            "{}",
+            lines[0]
+        );
+        assert!(!lines[0].contains("sk-secret") && !lines[0].contains("prompt"));
+    }
 
     #[test]
     fn lines_render_like_ts_format_line() {

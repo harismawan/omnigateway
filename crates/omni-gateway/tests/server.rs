@@ -120,6 +120,18 @@ fn add_key(path: &std::path::Path, id: &str, raw: &str, extra: &str, value: &str
 }
 
 async fn boot_with(models: &[(&str, &str)], keepalive: Duration) -> Gw {
+    boot_opts(
+        models,
+        Options {
+            keepalive,
+            stop_deadline: Duration::from_secs(5),
+            ..Options::default()
+        },
+    )
+    .await
+}
+
+async fn boot_opts(models: &[(&str, &str)], options: Options) -> Gw {
     let port = upstream().await;
     let f = fixture(&["c0"]);
     let c = rusqlite::Connection::open(&f.path).expect("open");
@@ -154,15 +166,7 @@ async fn boot_with(models: &[(&str, &str)], keepalive: Duration) -> Gw {
     let mut config = load_config(&env, || 0).expect("config");
     config.port = 0;
     assert_eq!(config.log_level, LogLevel::Info);
-    let running = start(
-        config,
-        Options {
-            keepalive,
-            stop_deadline: Duration::from_secs(5),
-        },
-    )
-    .await
-    .expect("start");
+    let running = start(config, options).await.expect("start");
     Gw {
         f,
         base: format!("127.0.0.1:{}", running.addr.port()),
@@ -825,6 +829,162 @@ async fn a_complete_stream_of_two_frames_is_still_chunked_as_bun_sends_it() {
     assert!(
         h.contains(&("transfer-encoding".into(), "chunked".into())),
         "{h:?}"
+    );
+    stop(g).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_auth_headers_are_joined_as_whatwg_headers_get_joins_them() {
+    let g = boot().await;
+    let auth = bearer(&g);
+    // Two Authorization lines read as "Bearer k, Bearer k": not a key.
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("authorization", &auth), ("authorization", &auth)],
+        MSG,
+    )
+    .await;
+    assert_eq!(s, 401, "{b}");
+    assert!(b.contains("invalid API key"), "{b}");
+    // Matching Authorization and x-api-key tokens are accepted.
+    let (s, _, _) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("authorization", &auth), ("x-api-key", &g.key)],
+        MSG,
+    )
+    .await;
+    assert_eq!(s, 200);
+    stop(g).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_still_open_at_the_drain_deadline_files_its_499_before_the_writer_closes() {
+    let g = boot_opts(
+        &[("slow", "mock-c50-d200")],
+        Options {
+            stop_deadline: Duration::from_millis(300),
+            ..Options::default()
+        },
+    )
+    .await;
+    let auth = bearer(&g);
+    let mut s = TcpStream::connect(&g.base).await.expect("connect");
+    let body = r#"{"model":"slow","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let req = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nhost: x\r\nauthorization: {auth}\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.expect("write");
+    let mut got = Vec::new();
+    while !String::from_utf8_lossy(&got).contains("lorem ipsum") {
+        let mut chunk = [0u8; 4096];
+        let n = s.read(&mut chunk).await.expect("read");
+        assert!(n > 0);
+        got.extend_from_slice(&chunk[..n]);
+    }
+    let f = stop(g).await;
+    drop(s);
+    assert_eq!(
+        rows(
+            &f.path,
+            "SELECT status, error_code, state, attempts FROM request_logs"
+        ),
+        [["499", "interrupted", "done", "1"]]
+    );
+}
+
+async fn idle_gw(idle: Duration) -> Gw {
+    boot_opts(
+        &[("m1", "mock-c3-d0")],
+        Options {
+            idle_timeout: idle,
+            ..Options::default()
+        },
+    )
+    .await
+}
+
+/// Reads until the server closes; `None` when the read itself waited past `limit`.
+async fn read_until_closed(s: &mut TcpStream, limit: Duration) -> Option<String> {
+    let mut out = Vec::new();
+    let r = tokio::time::timeout(limit, s.read_to_end(&mut out)).await;
+    r.ok().map(|_| String::from_utf8_lossy(&out).into_owned())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_that_stops_arriving_is_cut_after_the_idle_timeout() {
+    let g = idle_gw(Duration::from_millis(300)).await;
+    let mut s = TcpStream::connect(&g.base).await.expect("connect");
+    let req = format!(
+        "POST /v1/messages HTTP/1.1\r\nhost: x\r\nx-api-key: {}\r\ncontent-length: 100\r\n\r\n{{\"model\":",
+        g.key
+    );
+    s.write_all(req.as_bytes()).await.expect("write");
+    let started = std::time::Instant::now();
+    let got = read_until_closed(&mut s, Duration::from_secs(3))
+        .await
+        .expect("closed within 3 s");
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "{:?}",
+        started.elapsed()
+    );
+    // No answer, never dispatched; the row reads as a hang-up.
+    assert!(!got.contains("HTTP/1.1"), "{got}");
+    let f = stop(g).await;
+    assert_eq!(
+        rows(
+            &f.path,
+            "SELECT status, error_code, requested_model, api_key_id FROM request_logs"
+        ),
+        [["499", "interrupted", "", "kp"]]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_but_steady_body_is_not_cut() {
+    let g = idle_gw(Duration::from_millis(300)).await;
+    let mut s = TcpStream::connect(&g.base).await.expect("connect");
+    let body = MSG.as_bytes();
+    let head = format!(
+        "POST /v1/messages HTTP/1.1\r\nhost: x\r\nx-api-key: {}\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+        g.key,
+        body.len()
+    );
+    s.write_all(head.as_bytes()).await.expect("write");
+    // Total well past the idle timeout, every gap well under it.
+    for part in body.chunks(8) {
+        s.write_all(part).await.expect("write");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let got = read_until_closed(&mut s, Duration::from_secs(5))
+        .await
+        .expect("answered");
+    assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+    stop(g).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_keep_alive_connection_and_a_stalled_head_are_closed() {
+    let g = idle_gw(Duration::from_millis(300)).await;
+    let mut idle = TcpStream::connect(&g.base).await.expect("connect");
+    assert!(
+        read_until_closed(&mut idle, Duration::from_secs(3))
+            .await
+            .is_some()
+    );
+    let mut half = TcpStream::connect(&g.base).await.expect("connect");
+    half.write_all(b"GET /health HTTP/1.1\r\nhost")
+        .await
+        .expect("write");
+    assert!(
+        read_until_closed(&mut half, Duration::from_secs(3))
+            .await
+            .is_some()
     );
     stop(g).await;
 }
