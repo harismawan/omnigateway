@@ -371,7 +371,17 @@ pub fn math_max(a: f64, b: f64) -> f64 {
     }
 }
 
-/// `Math.round(x)`: halves round toward +∞.
+/// `Math.round(x)`: the nearest integer, halves toward +∞, exact for every
+/// double. `-0` and inputs in `[-0.5, 0)` give `-0`; NaN and ±∞ pass through.
 pub fn math_round(x: f64) -> f64 {
-    (x + 0.5).floor()
+    if !x.is_finite() || x == 0.0 {
+        return x;
+    }
+    if (-0.5..0.0).contains(&x) {
+        return -0.0;
+    }
+    // `floor` is exact, and so is `x - floor(x)` for |x| < 2^52 (both share
+    // an exponent range); past 2^52 every double is already an integer.
+    let f = x.floor();
+    if x - f >= 0.5 { f + 1.0 } else { f }
 }

@@ -69,23 +69,26 @@ pub fn required_providers(request: &ChatRequest) -> BTreeSet<String> {
             owners.insert(t.provider.clone());
         }
     }
-    let mut scan = |block: &ContentBlock| match block {
-        ContentBlock::ProviderNative(b) => {
+    // `system`: top-level native blocks only. A tool result's own native
+    // parts are read inside messages alone, as TS reads them.
+    for block in request.system.iter().flatten() {
+        if let ContentBlock::ProviderNative(b) = block {
             owners.insert(b.provider.clone());
         }
-        ContentBlock::ToolResult(b) => {
-            for n in b.native.iter().flatten() {
-                owners.insert(n.provider.clone());
-            }
-        }
-        _ => {}
-    };
-    for block in request.system.iter().flatten() {
-        scan(block);
     }
     for message in &request.messages {
         for block in &message.content {
-            scan(block);
+            match block {
+                ContentBlock::ProviderNative(b) => {
+                    owners.insert(b.provider.clone());
+                }
+                ContentBlock::ToolResult(b) => {
+                    for n in b.native.iter().flatten() {
+                        owners.insert(n.provider.clone());
+                    }
+                }
+                _ => {}
+            }
         }
     }
     owners

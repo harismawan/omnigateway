@@ -81,7 +81,8 @@ pub fn resolve_model<'a>(
         .flat_map(|(id, d)| d.model_prefixes.iter().map(move |p| (p.as_str(), id, d)))
         .collect();
     // Stable, so equal lengths keep registry order, as JS `sort` does.
-    prefixed.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
+    // `b.length - a.length`: UTF-16 code units, as JS measures a string.
+    prefixed.sort_by_key(|p| std::cmp::Reverse(p.0.encode_utf16().count()));
     for (prefix, provider, d) in prefixed {
         if name.starts_with(prefix) {
             return Ok(Cow::Owned(synthesize(provider, name, d)));

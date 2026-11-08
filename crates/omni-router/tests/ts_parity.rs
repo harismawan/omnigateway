@@ -197,6 +197,21 @@ fn scenario(rng: &mut Rng) -> Scenario {
     if rng.chance(20) {
         request["maxTokens"] = json!(rng.below(2000));
     }
+    // Native parts in a tool result, in the system prompt or a message: TS
+    // reads only the message ones as an owner.
+    if rng.chance(10) {
+        let block = json!({ "type": "toolResult", "toolUseId": "t", "content": "",
+            "native": [{ "type": "providerNative", "provider": *rng.pick(&PROVIDERS[..3]),
+                "blockType": "document", "data": {} }] });
+        if rng.chance(50) {
+            request["system"] = json!([block]);
+        } else {
+            request["messages"][0]["content"]
+                .as_array_mut()
+                .expect("content")
+                .push(block);
+        }
+    }
     if rng.chance(8) {
         request["tools"] = json!([{ "kind": "provider", "provider": *rng.pick(&PROVIDERS[..3]),
             "type": "t", "name": "n", "wire": {} }]);

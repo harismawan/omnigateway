@@ -467,3 +467,34 @@ fn local_only_model_answers_for_configured_all_custom_models_only() {
         assert!(local_only_model(name, &s, &p).is_none(), "{name}");
     }
 }
+
+#[test]
+fn a_non_ascii_prefix_resolves_by_longest_match() {
+    // Two prefixes that both match one name are prefixes of each other, so
+    // UTF-8 bytes and UTF-16 units order them the same; this pins the
+    // non-ASCII path, and the sort itself now measures units as JS does.
+    let mut p = Providers::builtin();
+    let seed = p.get("anthropic").expect("a").clone();
+    p.register(
+        "short",
+        omni_router::Descriptor {
+            model_prefixes: vec!["é".into()],
+            ..seed.clone()
+        },
+    );
+    p.register(
+        "long",
+        omni_router::Descriptor {
+            model_prefixes: vec!["é😀".into()],
+            ..seed
+        },
+    );
+    assert_eq!(
+        resolve_model("é😀x", empty(), &p).expect("r").targets[0].provider,
+        "long"
+    );
+    assert_eq!(
+        resolve_model("éx", empty(), &p).expect("r").targets[0].provider,
+        "short"
+    );
+}

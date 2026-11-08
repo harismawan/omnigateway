@@ -786,3 +786,16 @@ fn a_breaker_is_admitted_the_instant_its_cooldown_has_elapsed() {
     assert_eq!(at(970_000), 1);
     assert_eq!(at(970_001), 0);
 }
+
+/// TS reads `toolResult.native` inside messages only; a system-prompt tool
+/// result's native parts name no owner (packages/router/src/filters.ts).
+#[test]
+fn a_tool_result_native_part_in_the_system_prompt_names_no_owner() {
+    let block = json!({ "type": "toolResult", "toolUseId": "t", "content": "",
+        "native": [{ "type": "providerNative", "provider": "anthropic", "blockType": "document", "data": {} }] });
+    let r = req_with(json!({ "system": [block] }));
+    assert!(required_providers(&r).is_empty());
+    let m = score_model(vec![target_of("openai", "gpt-5")]);
+    let s = creds(vec![cred_of("o", "openai")]);
+    assert_eq!(pair_ids(&eligible(&input(&r, &m, &s))), ["o"]);
+}
