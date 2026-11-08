@@ -32,6 +32,8 @@ const { values: flags } = parseArgs({
     cli: { type: "string", default: "bun apps/cli/src/index.ts" },
     keep: { type: "boolean", default: false },
     only: { type: "string" },
+    /** Self-check: send every request to this (closed) port instead of the gateway. */
+    "fail-port": { type: "string" },
   },
 });
 if (flags.ts === undefined || flags.rust === undefined) {
@@ -48,6 +50,8 @@ const work = mkdtempSync("/tmp/opencode/omni-e2e-");
 const seedRoot = join(work, "seed");
 mkdirSync(seedRoot);
 const children: Subprocess[] = [];
+/** Rows whose run threw, per binary. Each is a failure. */
+const rowErrors: string[] = [];
 function killChildren(): void {
   for (const c of children) if (c.exitCode === null) c.kill("SIGKILL");
 }
@@ -57,15 +61,64 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Every wait in the matrix is bounded: a hang fails loudly, it never stalls the run. */
 const WAIT_MS = 10_000;
-async function bounded<T>(what: string, p: Promise<T>, ms = WAIT_MS): Promise<T> {
+
+/**
+ * Every outstanding request's controller. A request removes itself when it
+ * settles; `abortAll` (each row's and the run's `finally`) aborts the rest.
+ */
+const outstanding = new Set<AbortController>();
+function abortAll(): void {
+  for (const c of outstanding) c.abort(new Error("aborted by cleanup"));
+  outstanding.clear();
+}
+
+/** Bounded; on timeout `onTimeout` runs (aborting whatever the wait was for). */
+async function bounded<T>(
+  what: string,
+  p: Promise<T>,
+  ms = WAIT_MS,
+  onTimeout: () => void = () => {},
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms: ${what}`)), ms);
+    timer = setTimeout(() => {
+      onTimeout();
+      reject(new Error(`timed out after ${ms} ms: ${what}`));
+    }, ms);
   });
   try {
     return await Promise.race([p, timeout]);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * `fetch` with its own `AbortController`, aborted by the timeout and by
+ * cleanup, and the whole body read within the same bound.
+ */
+async function request(
+  what: string,
+  url: string,
+  init: RequestInit,
+  route: string,
+): Promise<Exchange> {
+  const ac = new AbortController();
+  outstanding.add(ac);
+  try {
+    const res = await bounded(what, fetch(url, { ...init, signal: ac.signal }), WAIT_MS, () =>
+      ac.abort(),
+    );
+    const body = await bounded(`${what}: body`, res.arrayBuffer(), WAIT_MS, () => ac.abort());
+    return {
+      status: res.status,
+      headers: [...res.headers.entries()],
+      body: new Uint8Array(body),
+      route,
+    };
+  } finally {
+    ac.abort();
+    outstanding.delete(ac);
   }
 }
 
@@ -193,6 +246,7 @@ async function cli(args: string[], stdin?: string): Promise<{ id: string; key: s
     stdout: "pipe",
     stderr: "pipe",
   });
+  children.push(p);
   const [out, err, code] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),
@@ -295,36 +349,23 @@ const chatBody = (model: string, stream: boolean) =>
 const respBody = (model: string, stream: boolean) =>
   JSON.stringify({ model, stream, input: "Say hi." });
 
-async function send(
+function send(
   base: string,
   method: string,
   path: string,
   headers: Record<string, string>,
   body?: string,
 ): Promise<Exchange> {
-  const res = await bounded(
+  return request(
     `${method} ${path}`,
-    fetch(base + path, { method, headers, ...(body === undefined ? {} : { body }) }),
+    base + path,
+    { method, headers, ...(body === undefined ? {} : { body }) },
+    path,
   );
-  return {
-    status: res.status,
-    headers: [...res.headers.entries()],
-    body: new Uint8Array(await bounded(`${method} ${path}: body`, res.arrayBuffer())),
-  };
 }
 
-async function sendWith(
-  base: string,
-  path: string,
-  headers: Headers,
-  body: string,
-): Promise<Exchange> {
-  const res = await bounded(`POST ${path}`, fetch(base + path, { method: "POST", headers, body }));
-  return {
-    status: res.status,
-    headers: [...res.headers.entries()],
-    body: new Uint8Array(await bounded(`POST ${path}: body`, res.arrayBuffer())),
-  };
+function sendWith(base: string, path: string, headers: Headers, body: string): Promise<Exchange> {
+  return request(`POST ${path}`, base + path, { method: "POST", headers, body }, path);
 }
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -476,6 +517,7 @@ const ROWS: Row[] = [
         : "expected a 200 prefix through the first delta frame and one upstream call",
     run: async (base, keys) => {
       const ac = new AbortController();
+      outstanding.add(ac);
       try {
         const res = await bounded(
           "disconnect: response head",
@@ -485,6 +527,8 @@ const ROWS: Row[] = [
             body: msg("slow", true),
             signal: ac.signal,
           }),
+          WAIT_MS,
+          () => ac.abort(),
         );
         const reader = (res.body as ReadableStream<Uint8Array>).getReader();
         // The upstream holds after its first delta, so the stream cannot end
@@ -494,7 +538,12 @@ const ROWS: Row[] = [
         let buf = new Uint8Array(0);
         let frameEnd = -1;
         while (frameEnd < 0) {
-          const { value, done } = await bounded("disconnect: first delta frame", reader.read());
+          const { value, done } = await bounded(
+            "disconnect: first delta frame",
+            reader.read(),
+            WAIT_MS,
+            () => ac.abort(),
+          );
           if (done) throw new Error("stream ended before the gated delta frame");
           buf = concat([buf, value]);
           const at = Buffer.from(buf).indexOf(Buffer.from(marker));
@@ -512,10 +561,12 @@ const ROWS: Row[] = [
             status: res.status,
             headers: [...res.headers.entries()],
             body: buf.subarray(0, frameEnd),
+            route: "/v1/messages",
           },
         ];
       } finally {
         ac.abort();
+        outstanding.delete(ac);
         resetGate();
       }
     },
@@ -612,7 +663,8 @@ const ROWS: Row[] = [
         return [await bounded("concurrency: first response", first), second];
       } finally {
         resetGate();
-        // A failed row must not leave the first request hanging on.
+        // A failed row must not leave the first request running: abort it.
+        abortAll();
         first.catch(() => {});
       }
     },
@@ -638,7 +690,11 @@ async function waitHealthy(): Promise<void> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     try {
-      if ((await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`)).ok) return;
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 1000);
+      const ok = (await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`, { signal: ac.signal })).ok;
+      clearTimeout(t);
+      if (ok) return;
     } catch {
       // not yet
     }
@@ -669,7 +725,7 @@ async function runAgainst(
     stderr: Bun.file(join(root, "gateway.err")),
   });
   children.push(proc);
-  const base = `http://127.0.0.1:${GATEWAY_PORT}`;
+  const base = `http://127.0.0.1:${flags["fail-port"] ?? GATEWAY_PORT}`;
   const exchanges = new Map<string, Exchange[]>();
   const upstream = new Map<string, Uint8Array[]>();
   const only = flags.only?.split(",");
@@ -693,7 +749,15 @@ async function runAgainst(
         // Both gateways rebuild on `data_version`; Rust polls every 500 ms.
         await sleep(1200);
       }
-      exchanges.set(row.name, await row.run(base, keys));
+      try {
+        exchanges.set(row.name, await row.run(base, keys));
+      } catch (e) {
+        // Recorded as a row failure; cleanup below still runs.
+        rowErrors.push(`${label}: ${row.name}: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        resetGate();
+        abortAll();
+      }
       if (restore !== null) {
         const d = new Database(db);
         d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [restore]);
@@ -709,6 +773,7 @@ async function runAgainst(
     return { exchanges, upstream, db };
   } finally {
     resetGate();
+    abortAll();
     if (proc.exitCode === null) {
       proc.kill("SIGKILL");
       await proc.exited;
@@ -812,20 +877,41 @@ async function main(): Promise<number> {
     failures += 1;
     console.error(`\n--- ${what}\n${detail}`);
   };
+  for (const e of rowErrors) fail("row error", e);
   const report: string[] = ["| row | client | upstream | scenario |", "|---|---|---|---|"];
   for (const row of ROWS) {
     const tsx = ts.exchanges.get(row.name);
-    if (tsx === undefined) continue;
-    const rsx = rs.exchanges.get(row.name) ?? [];
-    const tn = tsx.map(normalize);
-    const rn = rsx.map(normalize);
+    const rsx = rs.exchanges.get(row.name);
+    if (tsx === undefined && rsx === undefined) continue;
+    if (tsx === undefined || rsx === undefined) {
+      report.push(`| ${row.name} | FAIL | | |`);
+      continue;
+    }
+    let tn: ReturnType<typeof normalize>[];
+    let rn: ReturnType<typeof normalize>[];
+    try {
+      tn = tsx.map(normalize);
+      rn = rsx.map(normalize);
+    } catch (e) {
+      // A payload lacking a path its kind requires: the masks cannot vouch for it.
+      report.push(`| ${row.name} | FAIL | | |`);
+      fail(`${row.name}: masks`, String(e));
+      continue;
+    }
     const decodable = tn.every((x) => x !== null) && rn.every((x) => x !== null);
     const client =
       decodable && tn.length === rn.length && tn.every((x, i) => normalizedEqual(x, rn[i] ?? null));
     const up = upstreamEqual(ts.upstream.get(row.name), rs.upstream.get(row.name));
+    const check = (x: Exchange[], up: Uint8Array[]) => {
+      try {
+        return row.expect?.(x, up);
+      } catch (e) {
+        return `check threw: ${String(e)}`;
+      }
+    };
     const facts = [
-      row.expect?.(tsx, ts.upstream.get(row.name) ?? []),
-      row.expect?.(rsx, rs.upstream.get(row.name) ?? []),
+      check(tsx, ts.upstream.get(row.name) ?? []),
+      check(rsx, rs.upstream.get(row.name) ?? []),
     ];
     const scenario =
       row.expect === undefined ? "–" : facts.every((f) => f == null) ? "pass" : "FAIL";
@@ -881,6 +967,7 @@ try {
   console.error(e);
 } finally {
   resetGate();
+  abortAll();
   killChildren();
   upstreamListener.stop(true);
   if (!flags.keep) rmSync(work, { recursive: true, force: true });
