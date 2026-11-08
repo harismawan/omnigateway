@@ -793,6 +793,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omni-ratelimit"
+version = "0.16.0"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "omni-store"
 version = "0.16.0"
 dependencies = [
@@ -800,6 +809,7 @@ dependencies = [
  "indexmap",
  "omni-crypto",
  "omni-ir",
+ "omni-ratelimit",
  "rusqlite",
  "serde",
  "serde_json",

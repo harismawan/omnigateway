@@ -11,7 +11,6 @@
 //! (`Some(None)`, also unlimited), or a ceiling (`Some(Some(n))`). The two
 //! unlimited spellings are kept apart only so the value re-serializes exactly.
 
-use crate::js;
 use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
@@ -267,7 +266,7 @@ fn count_limit(value: &Value) -> Option<Option<u64>> {
         return Some(None);
     }
     let n = value.as_f64()?;
-    if !js::is_safe_integer(n) || n <= 0.0 {
+    if !is_safe_integer(n) || n <= 0.0 {
         return None;
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -281,4 +280,9 @@ fn spend_limit(value: &Value) -> Option<Option<f64>> {
     }
     let n = value.as_f64()?;
     (n.is_finite() && n > 0.0).then_some(Some(n))
+}
+
+/// `Number.isSafeInteger(v)`.
+fn is_safe_integer(v: f64) -> bool {
+    v.is_finite() && v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0
 }

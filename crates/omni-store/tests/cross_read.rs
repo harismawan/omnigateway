@@ -198,8 +198,12 @@ fn rust_reads_a_database_the_ts_cli_wrote() {
     assert_eq!(cred.provider_data["endpointId"], "bench");
 
     // Models with targets, as `omni models list` reports them.
-    let rust_models: Vec<Value> = snap
+    let models: Vec<&omni_store::VirtualModel> = snap
         .models
+        .iter()
+        .map(|m| m.as_ref().expect("model readable"))
+        .collect();
+    let rust_models: Vec<Value> = models
         .iter()
         .map(|m| serde_json::to_value(m).expect("model json"))
         .collect();
@@ -207,8 +211,8 @@ fn rust_reads_a_database_the_ts_cli_wrote() {
         canon(&Value::Array(rust_models)),
         canon(&omni(dir.path(), &["models", "list"], "")["models"])
     );
-    assert_eq!(snap.models[0].strategy, Strategy::Priority);
-    assert_eq!(snap.models[0].targets[1].context_window, Some(200_000.0));
+    assert_eq!(models[0].strategy, Strategy::Priority);
+    assert_eq!(models[0].targets[1].context_window, Some(200_000.0));
 
     // Health.
     assert_eq!(snap.health.len(), 1);

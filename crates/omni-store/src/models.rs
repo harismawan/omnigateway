@@ -58,7 +58,14 @@ pub struct Target {
     /// Required for custom targets; absent on built-in ones. Kept as JSON
     /// because `servesTarget` treats a non-string as matching nothing, and a
     /// typed read would either refuse the row or lose that distinction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// `None` is absent; `Some(Value::Null)` is an explicit `null`, which
+    /// `servesTarget` treats as a value matching no account.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub endpoint_id: Option<serde_json::Value>,
     pub model: String,
     pub tier: f64,
@@ -76,6 +83,11 @@ pub struct Target {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A key that is present deserializes to `Some`, even when it holds `null`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(d).map(Some)
+}
+
 /// `VirtualModel`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,29 +101,49 @@ pub struct VirtualModel {
 
 const T: &str = "virtual_models";
 
-/// `ConfigRepo.listModels`, ordered by id.
+/// One `virtual_models` row this build could not read, named by its id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRowError {
+    pub id: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for ModelRowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "virtual model {}: {}", self.id, self.reason)
+    }
+}
+
+/// `ConfigRepo.listModels`, ordered by id, one result per row.
 ///
-/// A `targets` value that is not JSON fails the read, as `JSON.parse` fails
-/// the TS one. JSON that does not have the `Target` shape also fails it,
-/// naming the model, where TS would carry it on and misbehave later.
-pub fn list(conn: &Connection) -> Result<Vec<VirtualModel>, StoreError> {
+/// TS parses each row's `targets` with a bare `JSON.parse` inside one `.map`,
+/// so a row that is not JSON throws the whole list there. The gateway's
+/// routing snapshot must not: a row that does not read is returned as its own
+/// error, naming the model, and every other model is still served. JSON that
+/// is not shaped like `Target[]` is an error for that row too, where TS would
+/// carry it on and misbehave at routing.
+///
+/// Only a failure of the query itself, or an unreadable `id`, fails the whole
+/// read.
+pub fn list(conn: &Connection) -> Result<Vec<Result<VirtualModel, ModelRowError>>, StoreError> {
     let mut stmt = conn.prepare_cached("SELECT * FROM virtual_models ORDER BY id")?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
         let id = row::text(r, T, "id")?;
-        let raw = row::json(r, T, "targets")?;
-        let targets = serde_json::from_value(raw).map_err(|e| {
-            StoreError::Corrupt(format!(
-                "virtual_models.targets of {id}: not a Target[] ({e})"
-            ))
-        })?;
-        out.push(VirtualModel {
-            targets,
-            strategy: Strategy::parse(&row::text(r, T, "strategy")?),
-            is_alias: row::flag(r, "is_alias")?,
-            id,
-        });
+        out.push(read_model(r, &id).map_err(|reason| ModelRowError { id, reason }));
     }
     Ok(out)
+}
+
+fn read_model(r: &rusqlite::Row<'_>, id: &str) -> Result<VirtualModel, String> {
+    let raw = row::json(r, T, "targets").map_err(|e| e.to_string())?;
+    let targets = serde_json::from_value(raw)
+        .map_err(|e| format!("virtual_models.targets: not a Target[] ({e})"))?;
+    Ok(VirtualModel {
+        targets,
+        strategy: Strategy::parse(&row::text(r, T, "strategy").map_err(|e| e.to_string())?),
+        is_alias: row::flag(r, "is_alias").map_err(|e| e.to_string())?,
+        id: id.to_owned(),
+    })
 }

@@ -9,9 +9,12 @@ pub mod credentials;
 mod error;
 mod js;
 pub mod keys;
-pub mod limits;
+/// `api_keys.limits`; lives with the arithmetic in `omni-ratelimit`, as TS's
+/// store imports `@omni/ratelimit/catalog`.
+pub use omni_ratelimit::limits;
 pub mod migrate;
 pub mod models;
+pub mod quota;
 pub mod rollup;
 mod row;
 pub mod settings;
@@ -22,7 +25,8 @@ pub use credentials::{Credential, CredentialHealth, CredentialSecrets, Secret};
 pub use error::StoreError;
 pub use keys::ApiKey;
 pub use limits::{LimitConfig, LimitScope};
-pub use models::{Target, TargetPricing, VirtualModel};
+pub use models::{ModelRowError, Target, TargetPricing, VirtualModel};
+pub use quota::{QuotaWindow, WindowType};
 pub use settings::Settings;
 pub use vocab::{AuthType, BreakerState, DisabledReason, Strategy};
 
@@ -39,8 +43,10 @@ pub struct SnapshotData {
     /// By tier then label, secrets decrypted.
     pub credentials: Vec<Credential>,
     pub health: Vec<CredentialHealth>,
-    /// By id.
-    pub models: Vec<VirtualModel>,
+    /// By id. A row that does not read is its own error, so one malformed
+    /// model never takes the others down.
+    pub models: Vec<Result<VirtualModel, ModelRowError>>,
+    pub quota: Vec<QuotaWindow>,
     pub settings: Settings,
 }
 
@@ -115,6 +121,7 @@ impl SqliteStore {
             credentials: credentials::list(&tx, key)?,
             health: credentials::list_health(&tx)?,
             models: models::list(&tx)?,
+            quota: quota::list(&tx)?,
             settings: settings::get(&tx)?,
         };
         tx.commit()?;
@@ -138,8 +145,12 @@ impl SqliteStore {
         credentials::list_health(&self.conn)
     }
 
-    pub fn list_models(&self) -> Result<Vec<VirtualModel>, StoreError> {
+    pub fn list_models(&self) -> Result<Vec<Result<VirtualModel, ModelRowError>>, StoreError> {
         models::list(&self.conn)
+    }
+
+    pub fn list_quota(&self) -> Result<Vec<QuotaWindow>, StoreError> {
+        quota::list(&self.conn)
     }
 
     pub fn get_settings(&self) -> Result<Settings, StoreError> {

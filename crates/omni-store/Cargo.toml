@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 omni-crypto = { path = "../omni-crypto" }
 omni-ir = { path = "../omni-ir" }
+omni-ratelimit = { path = "../omni-ratelimit" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
