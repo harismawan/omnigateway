@@ -23,7 +23,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "nod
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Subprocess } from "bun";
-import { bytesEqual, fatal, normalize } from "./masks.ts";
+import { bytesEqual, fatal, normalize, normalizedEqual, show } from "./masks.ts";
 
 const { values: flags } = parseArgs({
   options: {
@@ -48,11 +48,26 @@ const work = mkdtempSync("/tmp/opencode/omni-e2e-");
 const seedRoot = join(work, "seed");
 mkdirSync(seedRoot);
 const children: Subprocess[] = [];
-process.on("exit", () => {
-  for (const c of children) c.kill("SIGKILL");
-});
+function killChildren(): void {
+  for (const c of children) if (c.exitCode === null) c.kill("SIGKILL");
+}
+process.on("exit", killChildren);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Every wait in the matrix is bounded: a hang fails loudly, it never stalls the run. */
+const WAIT_MS = 10_000;
+async function bounded<T>(what: string, p: Promise<T>, ms = WAIT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms: ${what}`)), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ------------------------------------------------------------ the upstream
 
@@ -112,7 +127,8 @@ async function answer(model: string, sock: Sock): Promise<void> {
     case "slow":
       sock.write(SSE_HEAD + [first, delta].map(chunk).join(""));
       arrived.resolve();
-      await gate.promise;
+      // Bounded: a driver that never opens the gate cannot hold this forever.
+      await Promise.race([gate.promise, sleep(WAIT_MS)]);
       try {
         sock.write(`${[delta, finish, usage, done].map(chunk).join("")}0\r\n\r\n`);
       } catch {
@@ -124,7 +140,7 @@ async function answer(model: string, sock: Sock): Promise<void> {
   }
 }
 
-Bun.listen<{ buf: Buffer; busy: Promise<void> }>({
+const upstreamListener = Bun.listen<{ buf: Buffer; busy: Promise<void> }>({
   hostname: "127.0.0.1",
   port: UPSTREAM_PORT,
   socket: {
@@ -286,15 +302,14 @@ async function send(
   headers: Record<string, string>,
   body?: string,
 ): Promise<Exchange> {
-  const res = await fetch(base + path, {
-    method,
-    headers,
-    ...(body === undefined ? {} : { body }),
-  });
+  const res = await bounded(
+    `${method} ${path}`,
+    fetch(base + path, { method, headers, ...(body === undefined ? {} : { body }) }),
+  );
   return {
     status: res.status,
     headers: [...res.headers.entries()],
-    body: new Uint8Array(await res.arrayBuffer()),
+    body: new Uint8Array(await bounded(`${method} ${path}: body`, res.arrayBuffer())),
   };
 }
 
@@ -304,16 +319,15 @@ async function sendWith(
   headers: Headers,
   body: string,
 ): Promise<Exchange> {
-  const res = await fetch(base + path, { method: "POST", headers, body });
+  const res = await bounded(`POST ${path}`, fetch(base + path, { method: "POST", headers, body }));
   return {
     status: res.status,
     headers: [...res.headers.entries()],
-    body: new Uint8Array(await res.arrayBuffer()),
+    body: new Uint8Array(await bounded(`POST ${path}: body`, res.arrayBuffer())),
   };
 }
 
 const enc = (s: string) => new TextEncoder().encode(s);
-const dec = (b: Uint8Array) => new TextDecoder().decode(b);
 function concat(parts: Uint8Array[]): Uint8Array {
   return new Uint8Array(Buffer.concat(parts));
 }
@@ -457,35 +471,53 @@ const ROWS: Row[] = [
   {
     name: "client disconnects mid-stream",
     expect: (x, up) =>
-      x[0]?.status === 200 && dec(x[0].body).includes("lorem ipsum") && up.length === 1
+      x[0]?.status === 200 && fatal.decode(x[0].body).includes("lorem ipsum") && up.length === 1
         ? null
-        : "expected a 200 prefix with the first delta and one upstream call",
+        : "expected a 200 prefix through the first delta frame and one upstream call",
     run: async (base, keys) => {
       const ac = new AbortController();
-      const res = await fetch(`${base}/v1/messages`, {
-        method: "POST",
-        headers: bearer(keys.plain),
-        body: msg("slow", true),
-        signal: ac.signal,
-      });
-      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
-      // The upstream holds after its first delta, so the stream cannot end
-      // before the client has read that delta.
-      const parts: Uint8Array[] = [];
-      while (!dec(concat(parts)).includes("lorem ipsum")) {
-        const { value, done } = await reader.read();
-        if (done) throw new Error("stream ended before the gated delta");
-        parts.push(value);
+      try {
+        const res = await bounded(
+          "disconnect: response head",
+          fetch(`${base}/v1/messages`, {
+            method: "POST",
+            headers: bearer(keys.plain),
+            body: msg("slow", true),
+            signal: ac.signal,
+          }),
+        );
+        const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+        // The upstream holds after its first delta, so the stream cannot end
+        // before the client has the complete frame carrying it. Read raw
+        // bytes until that frame's terminating blank line has arrived.
+        const marker = enc("lorem ipsum");
+        let buf = new Uint8Array(0);
+        let frameEnd = -1;
+        while (frameEnd < 0) {
+          const { value, done } = await bounded("disconnect: first delta frame", reader.read());
+          if (done) throw new Error("stream ended before the gated delta frame");
+          buf = concat([buf, value]);
+          const at = Buffer.from(buf).indexOf(Buffer.from(marker));
+          if (at >= 0) {
+            const blank = Buffer.from(buf).indexOf("\n\n", at);
+            if (blank >= 0) frameEnd = blank + 2;
+          }
+        }
+        ac.abort();
+        // Let the gateway file its row before the upstream is released.
+        await sleep(300);
+        // Compared: the head and the original bytes through that frame's end.
+        return [
+          {
+            status: res.status,
+            headers: [...res.headers.entries()],
+            body: buf.subarray(0, frameEnd),
+          },
+        ];
+      } finally {
+        ac.abort();
+        resetGate();
       }
-      ac.abort();
-      // Wait for the gateway to have filed the row, then let the upstream go.
-      await sleep(300);
-      resetGate();
-      // Compared: the head and the prefix up to and including the first delta.
-      const all = dec(concat(parts));
-      const cut = all.indexOf("lorem ipsum");
-      const prefix = all.slice(0, all.indexOf("\n\n", cut) + 2);
-      return [{ status: res.status, headers: [...res.headers.entries()], body: enc(prefix) }];
     },
   },
   {
@@ -569,11 +601,20 @@ const ROWS: Row[] = [
         : `expected 200 then 429 with one upstream call, got ${x.map((e) => e.status)} / ${up.length}`,
     run: async (base, keys) => {
       const first = send(base, "POST", "/v1/messages", bearer(keys.limc), msg("slow", true));
-      // Handshake: the first request holds its slot at the upstream.
-      await arrived.promise;
-      const second = await send(base, "POST", "/v1/messages", bearer(keys.limc), msg("ok", false));
-      resetGate();
-      return [await first, second];
+      try {
+        // Handshake: the first request holds its slot at the upstream.
+        await bounded("concurrency: first request at the upstream", arrived.promise);
+        const second = await bounded(
+          "concurrency: second request",
+          send(base, "POST", "/v1/messages", bearer(keys.limc), msg("ok", false)),
+        );
+        resetGate();
+        return [await bounded("concurrency: first response", first), second];
+      } finally {
+        resetGate();
+        // A failed row must not leave the first request hanging on.
+        first.catch(() => {});
+      }
     },
   },
   {
@@ -628,43 +669,51 @@ async function runAgainst(
     stderr: Bun.file(join(root, "gateway.err")),
   });
   children.push(proc);
-  await waitHealthy();
   const base = `http://127.0.0.1:${GATEWAY_PORT}`;
   const exchanges = new Map<string, Exchange[]>();
   const upstream = new Map<string, Uint8Array[]>();
   const only = flags.only?.split(",");
-  for (const row of ROWS) {
-    if (only !== undefined && !only.includes(row.name)) continue;
-    recorded = [];
+  try {
+    await waitHealthy();
+    for (const row of ROWS) {
+      if (only !== undefined && !only.includes(row.name)) continue;
+      recorded = [];
+      resetGate();
+      let restore: string | null = null;
+      if (row.settings !== undefined) {
+        const d = new Database(db);
+        const cur = d.query("SELECT value FROM settings WHERE key = 'settings'").get() as {
+          value: string;
+        } | null;
+        restore = cur?.value ?? "{}";
+        d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [
+          JSON.stringify({ ...(JSON.parse(restore) as object), ...row.settings }),
+        ]);
+        d.close();
+        // Both gateways rebuild on `data_version`; Rust polls every 500 ms.
+        await sleep(1200);
+      }
+      exchanges.set(row.name, await row.run(base, keys));
+      if (restore !== null) {
+        const d = new Database(db);
+        d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [restore]);
+        d.close();
+        await sleep(1200);
+      }
+      await sleep(50);
+      upstream.set(row.name, recorded);
+    }
+    proc.kill("SIGTERM");
+    const code = await bounded(`${label} exit after SIGTERM`, proc.exited, 15_000);
+    if (code !== 0) throw new Error(`${label} exited ${code}`);
+    return { exchanges, upstream, db };
+  } finally {
     resetGate();
-    let restore: string | null = null;
-    if (row.settings !== undefined) {
-      const d = new Database(db);
-      const cur = d.query("SELECT value FROM settings WHERE key = 'settings'").get() as {
-        value: string;
-      } | null;
-      restore = cur?.value ?? "{}";
-      d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [
-        JSON.stringify({ ...(JSON.parse(restore) as object), ...row.settings }),
-      ]);
-      d.close();
-      // Both gateways rebuild on `data_version`; Rust polls every 500 ms.
-      await sleep(1200);
+    if (proc.exitCode === null) {
+      proc.kill("SIGKILL");
+      await proc.exited;
     }
-    exchanges.set(row.name, await row.run(base, keys));
-    if (restore !== null) {
-      const d = new Database(db);
-      d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [restore]);
-      d.close();
-      await sleep(1200);
-    }
-    await sleep(50);
-    upstream.set(row.name, recorded);
   }
-  proc.kill("SIGTERM");
-  const code = await proc.exited;
-  if (code !== 0) throw new Error(`${label} exited ${code}`);
-  return { exchanges, upstream, db };
 }
 
 /**
@@ -752,7 +801,7 @@ function disconnectRows(db: string): number {
   return n;
 }
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   console.error(`work ${work}`);
   const keys = await seed();
   const ts = await runAgainst("ts", resolve(REPO, flags.ts as string), keys);
@@ -771,7 +820,8 @@ async function main(): Promise<void> {
     const tn = tsx.map(normalize);
     const rn = rsx.map(normalize);
     const decodable = tn.every((x) => x !== null) && rn.every((x) => x !== null);
-    const client = decodable && same(tn, rn);
+    const client =
+      decodable && tn.length === rn.length && tn.every((x, i) => normalizedEqual(x, rn[i] ?? null));
     const up = upstreamEqual(ts.upstream.get(row.name), rs.upstream.get(row.name));
     const facts = [
       row.expect?.(tsx, ts.upstream.get(row.name) ?? []),
@@ -785,7 +835,7 @@ async function main(): Promise<void> {
     if (!client)
       fail(
         `${row.name}: client differs${decodable ? "" : " (not UTF-8)"}`,
-        `TS:   ${JSON.stringify(tn)}\nRust: ${JSON.stringify(rn)}`,
+        `TS:   ${tn.map(show).join(" ")}\nRust: ${rn.map(show).join(" ")}`,
       );
     if (!up) {
       const show = (xs: Uint8Array[] = []) =>
@@ -821,8 +871,18 @@ async function main(): Promise<void> {
   }
   console.log(report.join("\n"));
   console.log(failures === 0 ? "\nall rows equal" : `\n${failures} difference(s)`);
-  if (!flags.keep) rmSync(work, { recursive: true, force: true });
-  process.exit(failures === 0 ? 0 : 1);
+  return failures === 0 ? 0 : 1;
 }
 
-await main();
+let exitCode = 1;
+try {
+  exitCode = await main();
+} catch (e) {
+  console.error(e);
+} finally {
+  resetGate();
+  killChildren();
+  upstreamListener.stop(true);
+  if (!flags.keep) rmSync(work, { recursive: true, force: true });
+}
+process.exit(exitCode);
