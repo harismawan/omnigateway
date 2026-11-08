@@ -6,8 +6,12 @@
 //! types carry as `unknown` or `Record<string, unknown>` stay
 //! [`serde_json::Value`] / [`serde_json::Map`]: the gateway forwards them
 //! verbatim and must not narrow what a client may put there.
+//!
+//! `Serialize` writes the same TS shape with absent fields omitted. Struct
+//! keys come out in declaration order, which is not always the order a TS
+//! ingress happened to build them in; values held as `Value`/`Map` keep theirs.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Which provider serves a request. A string, as in TS: plugin providers have
@@ -18,21 +22,21 @@ pub type ProviderId = String;
 pub const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
 /// A caller-placed cache breakpoint. `type` is always `ephemeral`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CacheControl {
     #[serde(rename = "type")]
     pub kind: CacheControlType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<CacheTtl>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheControlType {
     Ephemeral,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CacheTtl {
     #[serde(rename = "5m")]
     FiveMinutes,
@@ -40,50 +44,50 @@ pub enum CacheTtl {
     OneHour,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBlock {
     pub text: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
     /// Anthropic citation payloads, preserved verbatim when present.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citations: Option<Vec<Value>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageBlock {
     pub media_type: String,
     pub data: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
 /// A base64 file carried inside a tool result.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileBlock {
     pub media_type: String,
     pub data: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ThinkingBlock {
     pub text: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolUseBlock {
     pub id: String,
     pub name: String,
     pub input: Value,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
@@ -91,35 +95,35 @@ pub struct ToolUseBlock {
 ///
 /// The three lists are `Option` and not defaulted to empty, because encoders
 /// branch on *presence*: `images: []` still records `custom:images-dropped`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolResultBlock {
     pub tool_use_id: String,
     pub content: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImageBlock>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<FileBlock>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<Vec<ProviderNativeBlock>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
 /// A content block one provider owns end to end, carried through unread.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderNativeBlock {
     pub provider: ProviderId,
     pub block_type: String,
     pub data: Map<String, Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ContentBlock {
     Text(TextBlock),
@@ -156,7 +160,7 @@ impl ContentBlock {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -174,28 +178,28 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
 }
 
 /// A portable tool every provider can express.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomToolDef {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: Value,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Map<String, Value>>,
 }
 
 /// A tool whose schema a provider owns. `family` is Anthropic's only.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderToolDef {
     pub provider: ProviderId,
@@ -203,20 +207,20 @@ pub struct ProviderToolDef {
     pub tool_type: String,
     pub name: String,
     pub wire: Map<String, Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ToolDef {
     Portable(CustomToolDef),
     Provider(ProviderToolDef),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ToolChoice {
     Auto,
@@ -226,7 +230,7 @@ pub enum ToolChoice {
 }
 
 /// `REASONING_EFFORTS`, the widest published ladder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,
@@ -262,7 +266,7 @@ impl ReasoningEffort {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningDisplay {
     Summarized,
@@ -270,14 +274,14 @@ pub enum ReasoningDisplay {
     Updates,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum ReasoningConfig {
     BetweenTools,
     Adaptive {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<ReasoningEffort>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         display: Option<ReasoningDisplay>,
     },
     #[serde(rename_all = "camelCase")]
@@ -289,35 +293,35 @@ pub enum ReasoningConfig {
 
 /// The canonical request. Numbers are `f64` because they are JS numbers in
 /// TS, and the wire encoders print them with `JSON.stringify` rules.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRequest {
     pub model: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<Vec<ContentBlock>>,
     pub messages: Vec<Message>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDef>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
     pub stream: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
     /// Bags keyed by surface (`openai`, `anthropic`); each value is an object.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<Map<String, Value>>,
     /// Provider protocol headers only, keyed by provider id.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_headers: Option<Map<String, Value>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub betas: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
 }
 
