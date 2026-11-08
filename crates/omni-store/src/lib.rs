@@ -18,6 +18,7 @@ pub mod quota;
 pub mod rollup;
 mod row;
 pub mod settings;
+pub mod usage;
 mod vocab;
 pub mod writer;
 
