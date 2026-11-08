@@ -179,10 +179,12 @@ impl DropWarner {
         if !due {
             return;
         }
+        // TS `LogFields` names: `count` is dropped since the last warning,
+        // `rawCount` the total ever dropped.
         tracing::warn!(
-            dropped = total - self.reported,
-            dropped_total = total,
-            "request log writer is full; events dropped"
+            count = total - self.reported,
+            rawCount = total,
+            "request log writer is full; events dropped (count since the last warning, rawCount in total)"
         );
         self.reported = total;
         self.last = Some(Instant::now());
@@ -383,10 +385,10 @@ impl Sink {
         }
         self.sink_warned = Some(Instant::now());
         tracing::warn!(
-            dropped = n,
-            dropped_total = total,
-            kind = what,
-            "rate limiter commit sink full; dropped (long-window limits fail open until it drains)"
+            count = n,
+            rawCount = total,
+            reason = %format!("{what} dropped"),
+            "rate limiter commit sink full; dropped (long-window limits fail open until it drains; count since the last warning, rawCount in total)"
         );
     }
 
@@ -443,11 +445,11 @@ impl Sink {
                 Err(e) if transient(&e) && attempt < MAX_ATTEMPTS => {
                     let delay = RETRY_BASE * 2u32.pow(attempt - 1);
                     tracing::warn!(
-                        events = n,
+                        count = n,
                         attempt,
-                        retry_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        error = %e,
-                        "request log batch hit a busy database; retrying"
+                        retryAfterMs = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                        reason = %e,
+                        "request log batch hit a busy database; retrying (count events)"
                     );
                     sleep(delay).await;
                     attempt += 1;
@@ -455,10 +457,10 @@ impl Sink {
                 Err(e) => {
                     c.failed.fetch_add(n, Ordering::Relaxed);
                     tracing::error!(
-                        events = n,
+                        count = n,
                         attempts = attempt,
-                        error = %e,
-                        "request log batch failed to persist; its events are lost"
+                        reason = %e,
+                        "request log batch failed to persist; its events are lost (count events)"
                     );
                     return Ok(n);
                 }

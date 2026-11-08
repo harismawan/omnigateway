@@ -337,3 +337,40 @@ mod tests {
         assert!(capped.ends_with(&format!("reason={}…", "x".repeat(200))));
     }
 }
+
+#[cfg(test)]
+mod mapped {
+    use super::*;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    /// The lines the writer's busy-retry and drop warnings render.
+    #[test]
+    fn mapped_diagnostic_fields_render_their_values() {
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = lines.clone();
+        let layer = TsFormat::with_sink(Level::DEBUG, move |l| {
+            seen.lock().expect("lines").push(l.to_owned());
+        });
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            tracing::warn!(
+                count = 3u64,
+                attempt = 1u32,
+                retryAfterMs = 100u64,
+                reason = "database is locked",
+                "request log batch hit a busy database; retrying (count events)"
+            );
+            tracing::warn!(
+                apiKeyId = "k1",
+                reason = "x",
+                "rate limit counters unavailable"
+            );
+        });
+        let lines = lines.lock().expect("lines");
+        assert!(
+            lines[0].ends_with("attempt=1 retryAfterMs=100 count=3 reason=\"database is locked\""),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[1].ends_with("apiKeyId=k1 reason=x"), "{}", lines[1]);
+    }
+}

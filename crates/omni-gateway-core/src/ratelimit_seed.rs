@@ -112,9 +112,9 @@ impl RateLimiter {
             Err(e) => {
                 self.lock().seeding.remove(&slot);
                 match &query.requested_model {
-                    Some(model) => tracing::warn!(api_key_id = %query.api_key_id, model = %model,
+                    Some(model) => tracing::warn!(apiKeyId = %query.api_key_id, model = %model,
                         reason = %e, "rate limit counters unavailable"),
-                    None => tracing::warn!(api_key_id = %query.api_key_id,
+                    None => tracing::warn!(apiKeyId = %query.api_key_id,
                         reason = %e, "rate limit counters unavailable"),
                 }
                 return;

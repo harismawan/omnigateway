@@ -88,45 +88,47 @@ fn sweep_pending(
     Ok(out)
 }
 
-/// Pre-seeds every limited key that enters the snapshot after boot: a key
-/// created with the CLI arrives through the refresher, not through a miss.
-/// Watches the snapshot generation; only key ids not seen before are seeded
-/// (`preseed` is idempotent, but asks again for unseeded windows).
+/// Pre-seeds every limited key in the snapshot: at once (the boot
+/// snapshot, and anything a refresh swapped in before this task started),
+/// then on every snapshot swap for each key that is new or whose limits
+/// changed. Keys are diffed by (id, limits), so a key that gains limits is
+/// seeded too. `preseed` is idempotent; the diff only keeps the queue quiet.
 pub fn spawn_preseeder(
     holder: Arc<SnapshotHolder>,
     limiter: Arc<RateLimiter>,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut seen: std::collections::HashSet<String> = holder
-            .load()
-            .keys_by_hash
-            .values()
-            .map(|k| k.id.clone())
-            .collect();
-        let mut generation = holder.generation();
+        let mut seen: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        // `None`: nothing seen yet, so the first pass covers the current snapshot.
+        let mut generation: Option<u64> = None;
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            let now = holder.generation();
-            if now == generation {
+            // Read the generation before the snapshot: a swap between the two
+            // is seen again on the next tick, never missed.
+            let now_gen = holder.generation();
+            if generation == Some(now_gen) {
                 continue;
             }
-            generation = now;
+            generation = Some(now_gen);
             let snap = holder.load();
-            let mut current = std::collections::HashSet::with_capacity(snap.keys_by_hash.len());
+            let mut current = std::collections::HashMap::with_capacity(snap.keys_by_hash.len());
             for k in snap.keys_by_hash.values() {
-                current.insert(k.id.clone());
-                if seen.contains(&k.id) {
-                    continue;
-                }
-                if let Some(limits) = &k.limits
-                    && !limits.is_unlimited()
+                let limits = k
+                    .limits
+                    .as_ref()
+                    .map_or(serde_json::Value::Null, omni_store::LimitConfig::to_json);
+                if seen.get(&k.id) != Some(&limits)
+                    && let Some(l) = &k.limits
+                    && !l.is_unlimited()
                 {
                     #[allow(clippy::cast_precision_loss)]
-                    limiter.preseed(&k.id, limits, clock::now_ms() as f64);
+                    limiter.preseed(&k.id, l, clock::now_ms() as f64);
                 }
+                current.insert(k.id.clone(), limits);
             }
             seen = current;
         }
@@ -246,17 +248,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
 
     let limiter = RateLimiter::new();
     let (asker, applier) = limiter.spawn_consumer(handle.clone(), commit_rx);
-    {
-        let snap = holder.load();
-        for k in snap.keys_by_hash.values() {
-            if let Some(limits) = &k.limits
-                && !limits.is_unlimited()
-            {
-                #[allow(clippy::cast_precision_loss)]
-                limiter.preseed(&k.id, limits, now as f64);
-            }
-        }
-    }
+    // Boot keys are pre-seeded by the preseeder's first pass.
     let refresher = holder
         .clone()
         .spawn_refresher(store, Duration::from_millis(500));
@@ -273,6 +265,9 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         MissConfig::default(),
     );
 
+    let health = Arc::new(dispatch::HealthOverlay::default());
+    let overlay_sweeper =
+        dispatch::HealthOverlay::spawn_sweeper(health.clone(), overlay::OVERLAY_TTL);
     let deps = Arc::new(dispatch::Deps {
         http: Arc::new(omni_providers::http::Client::new()),
         writer: handle.clone(),
@@ -280,7 +275,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         load: load::LoadRegistry::new(),
         probes: load::Probes::new(),
         providers: omni_router::Providers::builtin(),
-        health: dispatch::HealthOverlay::default(),
+        health: health.clone(),
         now: clock::now_ms,
         rand: clock::random,
     });
@@ -353,6 +348,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         drop(app);
         refresher.abort();
         preseeder.abort();
+        overlay_sweeper.abort();
         asker.abort();
         let stats = writer.close().await;
         applier.abort();

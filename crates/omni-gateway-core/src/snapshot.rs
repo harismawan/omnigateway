@@ -106,7 +106,7 @@ fn judge(key: Option<&Arc<ApiKey>>, now_ms: i64) -> Result<AuthenticatedKey, Gat
             limits: limits.clone(),
         }),
         None => {
-            tracing::error!(api_key_id = %key.id, "api key refused: limits unreadable");
+            tracing::error!(apiKeyId = %key.id, "api key refused: limits unreadable");
             Err(
                 GatewayError::new(ErrorCode::Internal, "api key configuration is unusable")
                     .gateway_authored(),
@@ -307,8 +307,8 @@ impl SnapshotHolder {
                 .await;
                 match polled {
                     Ok(Ok(v)) => version = v,
-                    Ok(Err(e)) => tracing::warn!(error = %e, "routing snapshot refresh failed"),
-                    Err(e) => tracing::warn!(error = %e, "routing snapshot refresh task failed"),
+                    Ok(Err(e)) => tracing::warn!(reason = %e, "routing snapshot refresh failed"),
+                    Err(e) => tracing::warn!(reason = %e, "routing snapshot refresh task failed"),
                 }
             }
         })

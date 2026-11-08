@@ -246,11 +246,11 @@ fn start_read(
             Ok(Ok(Some(k))) => MissResult::Found(k),
             Ok(Ok(None)) => MissResult::Absent,
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, "api key fallback read failed");
+                tracing::warn!(reason = %e, "api key fallback read failed");
                 MissResult::Failed
             }
             Err(e) => {
-                tracing::warn!(error = %e, "api key fallback read task failed");
+                tracing::warn!(reason = %e, "api key fallback read task failed");
                 MissResult::Failed
             }
         };

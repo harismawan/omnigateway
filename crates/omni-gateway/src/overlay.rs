@@ -10,7 +10,8 @@
 //! resetting health) is overridden by this process's own row until the window
 //! ends.
 //!
-//! Bounded: every insert and read drops expired rows, and at most
+//! Bounded: a sweeper task drops expired rows every 5 s with or without
+//! traffic, every insert and read drops them too, and at most
 //! [`OVERLAY_CAP`] rows are held (the oldest goes first). An evicted row is
 //! only a lost guard against one race, never lost health: its write is
 //! already in the writer's queue.
@@ -77,6 +78,23 @@ impl Rows {
 }
 
 impl HealthOverlay {
+    /// Drops expired rows every `every`, whether or not any request comes:
+    /// an idle gateway holds no stale rows past one period. Owned by the
+    /// gateway and aborted at shutdown.
+    pub fn spawn_sweeper(
+        overlay: std::sync::Arc<HealthOverlay>,
+        every: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                overlay.lock().sweep(Instant::now());
+            }
+        })
+    }
+
     /// The rows, under the one lock that serializes health read-modify-writes.
     pub fn lock(&self) -> MutexGuard<'_, Rows> {
         self.rows.lock().unwrap_or_else(PoisonError::into_inner)
@@ -119,6 +137,17 @@ mod tests {
         tokio::time::advance(OVERLAY_TTL).await;
         o.lock().insert("c".into(), row("c"));
         assert_eq!(o.lock().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rows_expire_with_no_traffic_at_all() {
+        let o = std::sync::Arc::new(HealthOverlay::default());
+        let sweeper = HealthOverlay::spawn_sweeper(o.clone(), OVERLAY_TTL);
+        o.lock().insert("a".into(), row("a"));
+        // No fresh/insert/reconcile from here on: only the sweeper runs.
+        tokio::time::sleep(OVERLAY_TTL * 3).await;
+        assert_eq!(o.rows.lock().expect("rows").len(), 0);
+        sweeper.abort();
     }
 
     #[tokio::test(start_paused = true)]

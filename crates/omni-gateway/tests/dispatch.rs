@@ -539,3 +539,34 @@ async fn a_cancel_after_commit_releases_the_slot_with_the_observed_ttft() {
     assert_eq!(h.deps.load.recent()["c0::up0"].ewma_ttft_ms, Some(want));
     flush(h).await;
 }
+
+#[tokio::test]
+async fn one_non_delta_event_over_the_byte_cap_commits_at_once() {
+    // A single tool-call start whose name alone is over 1 MiB, then the
+    // stream ends without `[DONE]`.
+    let name = "n".repeat(omni_gateway::dispatch::PENDING_MAX_BYTES + 10);
+    let f = fixture(&["c0", "c1"]);
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(
+                200,
+                vec![],
+                vec![format!(
+                    "data: {{\"id\":\"u1\",\"model\":\"up\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"c\",\"function\":{{\"name\":\"{name}\"}}}}]}}}}]}}\n\n"
+                )],
+            ),
+            sse_ok(1),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("m1"));
+    let events = drain(&mut d).await;
+    assert_eq!(h.script.calls(), 1, "committed: no failover");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::BlockStart { .. }))
+    );
+    assert!(matches!(events.last(), Some(StreamEvent::Error { .. })));
+    flush(h).await;
+}

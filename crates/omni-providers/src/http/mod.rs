@@ -200,14 +200,14 @@ impl Client {
                 status = res.status,
                 host = %target.host_header,
                 path = %path_only(&target.path),
-                duration_ms,
+                durationMs = duration_ms,
                 "upstream http"
             ),
             Err(_) => tracing::debug!(
                 provider = %req.provider,
                 host = %target.host_header,
                 path = %path_only(&target.path),
-                duration_ms,
+                durationMs = duration_ms,
                 reason = "transport error",
                 "upstream http"
             ),

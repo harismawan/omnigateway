@@ -100,7 +100,7 @@ pub struct Deps {
     /// This process's own recent health writes, by `healthKey`, with when
     /// they were made. Held under one lock, which also serializes the
     /// read-modify-write as TS's store transaction does. See [`HealthOverlay`].
-    pub health: HealthOverlay,
+    pub health: Arc<HealthOverlay>,
     pub now: fn() -> i64,
     pub rand: fn() -> f64,
 }
@@ -722,11 +722,14 @@ fn run(mut s: RunState) -> EventsStream {
                             Some(Ok(ev)) => ev,
                         };
                         // Past the buffering cap the attempt commits as if a
-                        // delta had arrived: no failover after this point.
+                        // delta had arrived: no failover after this point. The
+                        // incoming event counts, so one oversized event commits
+                        // (and is flushed) rather than being held.
+                        let size = event_size(&event);
                         let over_cap = !committed
                             && !matches!(event, StreamEvent::End { .. } | StreamEvent::Error { .. })
-                            && (pending.len() >= PENDING_MAX_EVENTS
-                                || pending_bytes >= PENDING_MAX_BYTES);
+                            && (pending.len() + 1 > PENDING_MAX_EVENTS
+                                || pending_bytes + size >= PENDING_MAX_BYTES);
                         if (matches!(event, StreamEvent::BlockDelta { .. }) || over_cap) && !committed {
                             committed = true;
                             let ttft = now() - s.started_at;
@@ -782,7 +785,7 @@ fn run(mut s: RunState) -> EventsStream {
                             return;
                         }
                         if !committed && !is_end {
-                            pending_bytes += event_size(&event);
+                            pending_bytes += size;
                             pending.push(event);
                         } else {
                             if !committed {

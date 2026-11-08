@@ -585,7 +585,7 @@ fn drops_warn_from_the_writer_task_at_most_once_per_interval() {
         tokio::time::sleep(Duration::from_millis(80)).await;
         let warned = log.lines("events dropped");
         assert_eq!(warned.len(), 1, "{warned:?}");
-        assert!(warned[0].contains("dropped=9 "), "{warned:?}");
+        assert!(warned[0].contains("count=9 "), "{warned:?}");
         // More drops inside the interval wait for it to pass.
         for n in 10..13 {
             send(n);
@@ -599,12 +599,9 @@ fn drops_warn_from_the_writer_task_at_most_once_per_interval() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let warned = log.lines("events dropped");
         assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(warned[1].contains(&format!("count={more} ")), "{warned:?}");
         assert!(
-            warned[1].contains(&format!("dropped={more} ")),
-            "{warned:?}"
-        );
-        assert!(
-            warned[1].contains(&format!("dropped_total={}", 9 + more)),
+            warned[1].contains(&format!("rawCount={}", 9 + more)),
             "{warned:?}"
         );
         // Nothing new: no further warnings, however long the writer idles.
@@ -646,7 +643,7 @@ fn a_failed_batch_is_counted_reported_and_fails_close() {
         let errors = log.lines("failed to persist");
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
-            errors[0].contains("ERROR") && errors[0].contains("events=3"),
+            errors[0].contains("ERROR") && errors[0].contains("count=3"),
             "{errors:?}"
         );
         assert!(errors[0].contains("no such table"), "{errors:?}");
@@ -790,7 +787,7 @@ fn close_keeps_the_drop_warning_interval_and_returns_the_full_total() {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let warned = log.lines("events dropped");
         assert_eq!(warned.len(), 1, "{warned:?}");
-        assert!(warned[0].contains("dropped=3 "), "{warned:?}");
+        assert!(warned[0].contains("count=3 "), "{warned:?}");
         // Refill the channel, drop more, and close at once: well inside the
         // 10 s interval, so no second warning — the total says it instead.
         let mut more = 0;

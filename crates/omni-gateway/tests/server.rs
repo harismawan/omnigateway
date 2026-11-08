@@ -988,3 +988,33 @@ async fn an_idle_keep_alive_connection_and_a_stalled_head_are_closed() {
     );
     stop(g).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_upstream_stream_with_keepalives_outlives_the_idle_timeout() {
+    // Idle timeout 300 ms; the upstream is silent 1 s between deltas; the
+    // gateway's keepalive every 100 ms keeps the response going. The idle
+    // timeouts bound reading the request only.
+    let g = boot_opts(
+        &[("silent", "mock-c2-d1000")],
+        Options {
+            idle_timeout: Duration::from_millis(300),
+            keepalive: Duration::from_millis(100),
+            ..Options::default()
+        },
+    )
+    .await;
+    let auth = bearer(&g);
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/messages",
+        &[("authorization", &auth)],
+        MSG_STREAM.replace("m1", "silent").as_str(),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(b.matches(": keepalive").count() >= 10, "{b}");
+    assert!(b.contains("event: message_stop"), "{b}");
+    let f = stop(g).await;
+    assert_eq!(rows(&f.path, "SELECT status FROM request_logs"), [["200"]]);
+}
