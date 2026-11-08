@@ -342,3 +342,36 @@ pub fn object_assign(target: &mut serde_json::Map<String, Value>, source: Option
         _ => {}
     }
 }
+
+/// `safeToken` (`packages/ir/src/logger.ts`): a client-supplied token an
+/// error message may quote, or `(unprintable)`. 1–64 of `[A-Za-z0-9_.:/+-]`.
+pub fn safe_token(value: &str) -> &str {
+    let ok = (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:/+-".contains(&b));
+    if ok { value } else { "(unprintable)" }
+}
+
+/// `Math.min(a, b)`: NaN if either is NaN, where `f64::min` would drop it.
+pub fn math_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.min(b)
+    }
+}
+
+/// `Math.max(a, b)`, NaN-propagating.
+pub fn math_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+/// `Math.round(x)`: halves round toward +∞.
+pub fn math_round(x: f64) -> f64 {
+    (x + 0.5).floor()
+}

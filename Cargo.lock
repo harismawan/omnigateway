@@ -802,6 +802,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omni-router"
+version = "0.16.0"
+dependencies = [
+ "omni-ir",
+ "omni-store",
+ "serde_json",
+]
+
+[[package]]
 name = "omni-store"
 version = "0.16.0"
 dependencies = [

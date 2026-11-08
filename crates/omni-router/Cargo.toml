@@ -1,0 +1,20 @@
+[package]
+name = "omni-router"
+description = "Candidate ranking: filters, score, breaker, quota and model resolution. Pure: no I/O, no clock."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-ir = { path = "../omni-ir" }
+# Types only (`@omni/store/types`); the router never opens a connection.
+omni-store = { path = "../omni-store" }
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

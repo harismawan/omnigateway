@@ -105,3 +105,20 @@ fn json_parse_accepts_lone_surrogate_escapes_as_replacement() {
         Some(r#"{"a":3,"b":2}"#.to_string())
     );
 }
+
+#[test]
+fn safe_token_and_math_helpers() {
+    use omni_ir::js::{math_max, math_min, math_round, safe_token};
+    assert_eq!(safe_token("claude-opus-4"), "claude-opus-4");
+    assert_eq!(safe_token("a/b:c+d.e_f"), "a/b:c+d.e_f");
+    assert_eq!(safe_token(""), "(unprintable)");
+    assert_eq!(safe_token("has space"), "(unprintable)");
+    assert_eq!(safe_token(&"x".repeat(64)), "x".repeat(64));
+    assert_eq!(safe_token(&"x".repeat(65)), "(unprintable)");
+    assert_eq!(safe_token("café"), "(unprintable)");
+    assert!(math_min(1.0, f64::NAN).is_nan());
+    assert!(math_max(f64::NAN, 1.0).is_nan());
+    assert_eq!(math_min(1.0, 2.0), 1.0);
+    assert_eq!(math_round(2.5), 3.0);
+    assert_eq!(math_round(-2.5), -2.0);
+}
