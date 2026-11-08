@@ -27,8 +27,10 @@ use serde_json::Value;
 use super::chat::{ChoiceView, ChunkView, DeltaView};
 
 /// `Some(value)` for a present field, `null` included; `None` only when absent.
-fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
-    Value::deserialize(d).map(Some)
+/// Boxed: a `Value` is large, and serde moves each field through several
+/// layers of `Result`; a pointer keeps those moves small.
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Box<Value>>, D::Error> {
+    Value::deserialize(d).map(|v| Some(Box::new(v)))
 }
 
 /// A struct read from a JSON object only: serde's derived structs also
@@ -54,11 +56,11 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
 #[derive(serde::Deserialize)]
 pub(super) struct FastChunk {
     #[serde(default, deserialize_with = "present")]
-    id: Option<Value>,
+    id: Option<Box<Value>>,
     #[serde(default, deserialize_with = "present")]
-    model: Option<Value>,
+    model: Option<Box<Value>>,
     #[serde(default, deserialize_with = "present")]
-    usage: Option<Value>,
+    usage: Option<Box<Value>>,
     /// `null` and absent both mean no choice (`index0` of either is undefined).
     #[serde(default)]
     choices: Option<Vec<MapOnly<FastChoice>>>,
@@ -70,21 +72,21 @@ struct FastChoice {
     #[serde(default)]
     delta: Option<MapOnly<FastDelta>>,
     #[serde(default, deserialize_with = "present")]
-    finish_reason: Option<Value>,
+    finish_reason: Option<Box<Value>>,
 }
 
 #[derive(serde::Deserialize)]
 struct FastDelta {
     #[serde(default, deserialize_with = "present")]
-    content: Option<Value>,
+    content: Option<Box<Value>>,
     #[serde(default, deserialize_with = "present")]
-    reasoning: Option<Value>,
+    reasoning: Option<Box<Value>>,
     #[serde(default, deserialize_with = "present")]
-    reasoning_content: Option<Value>,
+    reasoning_content: Option<Box<Value>>,
     #[serde(default, deserialize_with = "present")]
-    reasoning_details: Option<Value>,
+    reasoning_details: Option<Box<Value>>,
     #[serde(default, deserialize_with = "present")]
-    tool_calls: Option<Value>,
+    tool_calls: Option<Box<Value>>,
 }
 
 /// The chunk, or `None` for the generic path to decide.
@@ -109,19 +111,19 @@ impl FastChunk {
                 delta: match &c.delta {
                     None => DeltaView::default(),
                     Some(MapOnly(d)) => DeltaView {
-                        content: d.content.as_ref(),
-                        reasoning: d.reasoning.as_ref(),
-                        reasoning_content: d.reasoning_content.as_ref(),
-                        reasoning_details: d.reasoning_details.as_ref(),
-                        tool_calls: d.tool_calls.as_ref(),
+                        content: d.content.as_deref(),
+                        reasoning: d.reasoning.as_deref(),
+                        reasoning_content: d.reasoning_content.as_deref(),
+                        reasoning_details: d.reasoning_details.as_deref(),
+                        tool_calls: d.tool_calls.as_deref(),
                     },
                 },
-                finish_reason: c.finish_reason.as_ref(),
+                finish_reason: c.finish_reason.as_deref(),
             });
         ChunkView {
-            id: self.id.as_ref(),
-            model: self.model.as_ref(),
-            usage: self.usage.as_ref(),
+            id: self.id.as_deref(),
+            model: self.model.as_deref(),
+            usage: self.usage.as_deref(),
             choice,
         }
     }
