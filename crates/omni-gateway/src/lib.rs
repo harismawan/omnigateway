@@ -189,6 +189,17 @@ impl Default for Options {
     }
 }
 
+/// The HTTP/1 server configuration every connection is served with.
+/// `idle` is the header read timeout: armed from the moment hyper waits for a
+/// request head, so it bounds both a slow head and the idle wait between
+/// keep-alive requests.
+pub fn http1_builder(idle: Duration) -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder.timer(hyper_util::rt::TokioTimer::new());
+    builder.header_read_timeout(idle);
+    builder
+}
+
 /// Boots the gateway inside the current runtime and starts serving.
 #[allow(clippy::too_many_lines)]
 pub async fn start(config: Config, options: Options) -> Result<Running, String> {
@@ -306,11 +317,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let idle = options.idle_timeout;
     let task = tokio::spawn(async move {
         let graceful = hyper_util::server::graceful::GracefulShutdown::new();
-        let mut builder = hyper::server::conn::http1::Builder::new();
-        builder.timer(hyper_util::rt::TokioTimer::new());
-        // Armed from the moment hyper waits for a request head, so it bounds
-        // both a slow head and the idle wait between keep-alive requests.
-        builder.header_read_timeout(idle);
+        let builder = http1_builder(idle);
         // Every connection task, so a drain that runs out of time can cancel
         // and join them (their finishers file 499s) before the writer closes.
         let mut conns = tokio::task::JoinSet::new();

@@ -26,7 +26,9 @@ omni-store = { path = "../omni-store" }
 serde_json.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "signal", "io-util"] }
-hyper = { version = "1", features = ["server", "http1"] }
+# 1.11.1: fixes the 1.10 regression that stranded a chunked body's terminator
+# in the write buffer (hyperium/hyper#4143; `tests/http1_flush.rs`).
+hyper = { version = "1.11.1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "http1"] }
 http-body = "1"
 http-body-util = "0.1"
