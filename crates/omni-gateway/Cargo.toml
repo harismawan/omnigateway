@@ -40,7 +40,9 @@ rand = "0.9"
 rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 # The global allocator: glibc malloc's arena locks showed up as ~7% of a
 # streaming request (`__lll_lock_*`), and malloc/free as a third of it.
-mimalloc = { version = "0.1", default-features = false }
+# `v2`: on held-streams its peak RSS measured 74-82 MiB against v3's 78-88,
+# with chat-stream and agent-100k CPU equal or better (interleaved runs).
+mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 # `prctl(PR_SET_THP_DISABLE)` at start: on a host with THP `always`, mimalloc's
 # arenas fault in 2 MiB pages, which took idle RSS from 7 to 17.5 MiB.
 nix = { version = "0.31", default-features = false, features = ["process"] }
