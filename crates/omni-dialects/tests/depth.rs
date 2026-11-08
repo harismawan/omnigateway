@@ -539,3 +539,227 @@ fn deep_json_hidden_in_escaped_strings_still_takes_the_grown_path() {
         );
     });
 }
+
+// ------------------------------------------------- the pre-scan's soundness
+//
+// `depth_bound` must never under-count, or a deep body runs unguarded and
+// overflows the 2 MiB stack.
+
+/// Argument JSON `levels` deep in which every level holds a string with
+/// closing brackets: `{"x":"]}","y":` repeated, then `0` and the closers.
+fn closers_in_strings(levels: usize, piece: &str) -> String {
+    format!("{}0{}", piece.repeat(levels), "}".repeat(levels))
+}
+
+/// True container depth of a value, by an explicit-stack walk.
+fn true_depth(v: &Value) -> usize {
+    let mut max = 0;
+    let mut pending = vec![(v, 0usize)];
+    while let Some((v, d)) = pending.pop() {
+        match v {
+            Value::Array(a) => pending.extend(a.iter().map(|c| (c, d + 1))),
+            Value::Object(m) => pending.extend(m.values().map(|c| (c, d + 1))),
+            _ => {
+                max = max.max(d);
+                continue;
+            }
+        }
+        max = max.max(d + 1);
+    }
+    max
+}
+
+fn chat_args_text(args: &str) -> String {
+    serde_json::json!({
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": args}}]},
+        ]
+    })
+    .to_string()
+}
+
+fn responses_args_text(args: &str) -> String {
+    serde_json::json!({
+        "model": "m",
+        "input": [
+            {"role": "user", "content": "q"},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": args},
+        ]
+    })
+    .to_string()
+}
+
+#[test]
+fn closers_inside_argument_strings_do_not_hide_deep_arguments() {
+    on_small_stack(|| {
+        for piece in [
+            r#"{"x":"]","y":"#,
+            r#"{"x":"]}]}","y":"#,
+            r#"{"x":"\"]}","y":"#,
+            r#"{"x":"\\","z":"]}","y":"#,
+            r#"{"x":"\\\"]}","y":"#,
+        ] {
+            let args = closers_in_strings(D, piece);
+            for (surface, body) in [
+                (Surface::OpenAi, chat_args_text(&args)),
+                (Surface::Responses, responses_args_text(&args)),
+            ] {
+                assert!(deep::depth_bound(&body) > deep::SHALLOW_DEPTH);
+                let before = deep::grows();
+                let i = ingest(surface, &body).expect("accepted");
+                assert_eq!(
+                    true_depth(tool_input(&i.request).expect("tool")),
+                    D,
+                    "{surface:?} {piece}"
+                );
+                drop(i);
+                assert!(
+                    deep::grows() > before,
+                    "{surface:?} {piece}: deep arguments ran unguarded"
+                );
+            }
+        }
+    });
+}
+
+// ------------------------------------------------------ the threshold guard
+//
+// At exactly `depth_bound(body) == SHALLOW_DEPTH`, the deepest body the
+// unguarded path takes, every client-JSON position must ingest on a 2 MiB
+// thread without one grow. Meaningful in a debug build, where frames are
+// largest: if per-level stack use rises past the margin, a `grow` fires (the
+// count moves) or a site without one overflows (the thread dies).
+
+/// `make(levels)` at the largest `levels` whose body bounds to exactly
+/// `SHALLOW_DEPTH`.
+fn at_threshold(name: &str, make: impl Fn(usize) -> String) -> String {
+    let mut levels = deep::SHALLOW_DEPTH;
+    loop {
+        let body = make(levels);
+        let bound = deep::depth_bound(&body);
+        if bound <= deep::SHALLOW_DEPTH {
+            assert_eq!(bound, deep::SHALLOW_DEPTH, "{name}: no body at the bound");
+            return body;
+        }
+        levels -= bound - deep::SHALLOW_DEPTH;
+    }
+}
+
+fn exercise_shallow(i: Ingested) {
+    let copy = i.request.clone();
+    let ir = serde_json::to_value(&copy).expect("serialize");
+    let mut wire = String::new();
+    omni_ir::jsjson::write_value(&ir, &mut wire);
+    deep::drop(ir);
+    let _ = omni_ir::tokens::estimate_input_tokens(&copy);
+    drop(copy);
+    drop(i);
+}
+
+#[test]
+fn every_position_at_the_shallow_threshold_runs_without_growing() {
+    let mut cases: Vec<(String, Surface, String, bool)> = positions()
+        .into_iter()
+        .map(|(name, surface, _, template, accepted)| {
+            let body = at_threshold(name, |l| template.replace("@", &nest(l)));
+            (name.to_string(), surface, body, accepted)
+        })
+        .collect();
+    let closers = r#"{"x":"\"]}","y":"#;
+    for (name, make, accepted) in [
+        ("chat arguments", chat_args as fn(usize) -> String, true),
+        ("responses arguments", responses_args, true),
+    ] {
+        cases.push((
+            name.into(),
+            if name.starts_with("chat") {
+                Surface::OpenAi
+            } else {
+                Surface::Responses
+            },
+            at_threshold(name, make),
+            accepted,
+        ));
+    }
+    for (name, surface, wrap) in [
+        (
+            "chat arguments with closers in strings",
+            Surface::OpenAi,
+            chat_args_text as fn(&str) -> String,
+        ),
+        (
+            "responses arguments with closers in strings",
+            Surface::Responses,
+            responses_args_text,
+        ),
+    ] {
+        let body = at_threshold(name, |l| wrap(&closers_in_strings(l, closers)));
+        cases.push((name.into(), surface, body, true));
+    }
+    // Refusals carrying argument strings at the threshold.
+    let chat_refused = at_threshold("chat arguments, refused", |l| {
+        serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": nest(l)}}]},
+                {"role": "bogus", "content": "r"},
+            ]
+        })
+        .to_string()
+    });
+    cases.push((
+        "chat arguments, refused".into(),
+        Surface::OpenAi,
+        chat_refused,
+        false,
+    ));
+    let responses_refused = at_threshold("responses arguments, refused", |l| {
+        serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "function_call", "call_id": "c", "name": "f", "arguments": nest(l)},
+                5,
+            ]
+        })
+        .to_string()
+    });
+    cases.push((
+        "responses arguments, refused".into(),
+        Surface::Responses,
+        responses_refused,
+        false,
+    ));
+    let responses_bad_args = at_threshold("responses arguments, not JSON", |l| {
+        responses_args_text(&format!("{}0", "[".repeat(l)))
+    });
+    cases.push((
+        "responses arguments, not JSON".into(),
+        Surface::Responses,
+        responses_bad_args,
+        false,
+    ));
+
+    on_small_stack(move || {
+        for (name, surface, body, accepted) in cases {
+            let before = deep::grows();
+            match ingest(surface, &body) {
+                Ok(i) => {
+                    assert!(accepted, "{name}: accepted");
+                    exercise_shallow(i);
+                }
+                Err(e) => {
+                    assert!(!accepted, "{name}: refused: {e}");
+                    assert_eq!(e.code.as_str(), "BAD_REQUEST", "{name}");
+                    assert_ne!(e.message, ingress::TOO_DEEP, "{name}");
+                }
+            }
+            assert_eq!(
+                deep::grows(),
+                before,
+                "{name}: grew at depth_bound == SHALLOW_DEPTH"
+            );
+        }
+    });
+}

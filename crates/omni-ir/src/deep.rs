@@ -96,27 +96,33 @@ pub const SHALLOW_DEPTH: usize = 512;
 /// An upper bound on how deep `text` nests once parsed, *including* JSON held
 /// in its strings (tool-call `arguments`), scanned without parsing.
 ///
-/// Outside strings it counts containers exactly, as [`depth_of`] does. Inside
-/// each string it counts brackets as if the string were JSON, with no regard
-/// for that JSON's own strings, and `\u005b`-style escapes of the four
-/// bracket characters count too, since they decode to brackets. The result
-/// is the outer depth plus the deepest string; it over-counts and never
-/// under-counts.
+/// The result is the outer depth plus the deepest embedded depth of any one
+/// string:
+/// - **Outside strings** it counts containers exactly, as [`depth_of`] does.
+/// - **Inside each string** it decodes the string's escapes (`\"`, `\\`,
+///   `\/`, `\u005b`, ...) and tokenizes the *decoded* text as JSON, with its
+///   own string and escape state, so brackets inside the embedded JSON's
+///   strings never move its depth. On text that is valid JSON this is that
+///   JSON's exact depth, which is the only case where a walker ever sees it
+///   (`arguments` that fail to parse leave no value behind).
+/// - **Embedded text that cannot be valid JSON** (a closer with nothing open,
+///   an unterminated string, or containers left open) counts every `[` and
+///   `{` it decodes to instead, which bounds any reading of it.
+///
+/// Only one level of embedding is decoded, matching ingress, which parses
+/// `arguments` once: a string inside the embedded JSON stays a string.
 pub fn depth_bound(text: &str) -> usize {
     let b = text.as_bytes();
     let (mut depth, mut outer_max) = (0usize, 0usize);
-    let (mut inner, mut inner_max) = (0usize, 0usize);
-    let mut in_string = false;
+    let mut inner_max = 0usize;
+    let mut inner: Option<Embedded> = None;
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
         i += 1;
-        if !in_string {
+        let Some(embedded) = inner.as_mut() else {
             match c {
-                b'"' => {
-                    in_string = true;
-                    inner = 0;
-                }
+                b'"' => inner = Some(Embedded::default()),
                 b'[' | b'{' => {
                     depth += 1;
                     outer_max = outer_max.max(depth);
@@ -125,39 +131,94 @@ pub fn depth_bound(text: &str) -> usize {
                 _ => {}
             }
             continue;
-        }
+        };
         let unit = match c {
             b'"' => {
-                in_string = false;
+                inner_max = inner_max.max(embedded.bound());
+                inner = None;
                 continue;
             }
             b'\\' => {
                 let escaped = b.get(i).copied();
                 i += 1;
-                if escaped == Some(b'u') {
-                    let hex = text
-                        .get(i..i + 4)
-                        .and_then(|h| u16::from_str_radix(h, 16).ok());
-                    if hex.is_some() {
-                        i += 4;
+                match escaped {
+                    Some(b'u') => {
+                        let hex = text
+                            .get(i..i + 4)
+                            .and_then(|h| u16::from_str_radix(h, 16).ok());
+                        if hex.is_some() {
+                            i += 4;
+                        }
+                        // A non-ASCII unit is never JSON punctuation.
+                        hex.map_or(b' ', |u| u8::try_from(u).unwrap_or(b'x'))
                     }
-                    hex.and_then(|u| u8::try_from(u).ok())
-                } else {
-                    None
+                    Some(e @ (b'"' | b'\\' | b'/')) => e,
+                    // `\b \f \n \r \t` decode to whitespace; anything else
+                    // makes the outer text invalid.
+                    _ => b' ',
                 }
             }
-            other => Some(other),
+            other => other,
         };
-        match unit {
-            Some(b'[' | b'{') => {
-                inner += 1;
-                inner_max = inner_max.max(inner);
+        embedded.feed(unit);
+    }
+    // An unterminated outer string is not JSON, but bound it all the same.
+    if let Some(embedded) = inner {
+        inner_max = inner_max.max(embedded.bound());
+    }
+    outer_max + inner_max
+}
+
+/// The JSON tokenizer [`depth_bound`] runs over one decoded string.
+#[derive(Default)]
+struct Embedded {
+    depth: usize,
+    max: usize,
+    /// Every `[` and `{` decoded, inside embedded strings or not.
+    openers: usize,
+    in_string: bool,
+    escaped: bool,
+    /// Seen a closer with nothing open: this text is not JSON.
+    broken: bool,
+}
+
+impl Embedded {
+    fn feed(&mut self, c: u8) {
+        if matches!(c, b'[' | b'{') {
+            self.openers += 1;
+        }
+        if self.in_string {
+            if self.escaped {
+                self.escaped = false;
+            } else if c == b'\\' {
+                self.escaped = true;
+            } else if c == b'"' {
+                self.in_string = false;
             }
-            Some(b']' | b'}') => inner = inner.saturating_sub(1),
+            return;
+        }
+        match c {
+            b'"' => self.in_string = true,
+            b'[' | b'{' => {
+                self.depth += 1;
+                self.max = self.max.max(self.depth);
+            }
+            b']' | b'}' => match self.depth.checked_sub(1) {
+                Some(d) => self.depth = d,
+                None => self.broken = true,
+            },
             _ => {}
         }
     }
-    outer_max + inner_max
+
+    /// The exact depth when the text may be JSON, else every opener.
+    fn bound(&self) -> usize {
+        if self.broken || self.in_string || self.depth != 0 {
+            self.openers
+        } else {
+            self.max
+        }
+    }
 }
 
 /// [`scope`] only when `text` may nest deeper than [`SHALLOW_DEPTH`]; an
@@ -358,7 +419,186 @@ mod tests {
         assert_eq!(depth_bound(r#"{"a":"\u005b\u005B\u007b"}"#), 1 + 3);
         assert_eq!(depth_bound(r#"{"a":"\"[\"","b":"[["}"#), 1 + 2);
         assert_eq!(depth_bound(r#"{"a":"]]]]"}"#), 1);
+        // Decoded `\[` is not JSON: every opener counts.
         assert_eq!(depth_bound(r#"{"a":"\\[","b":1}"#), 1 + 1);
+    }
+
+    /// The reviewer's case: `{"x":"]","y":` N times, then `0` and N `}`.
+    fn closers_in_strings(n: usize) -> String {
+        format!("{}0{}", r#"{"x":"]","y":"#.repeat(n), "}".repeat(n))
+    }
+
+    #[test]
+    fn closers_inside_embedded_strings_do_not_cancel_real_nesting() {
+        for n in [1, 2, 513, 40_000] {
+            let args = closers_in_strings(n);
+            assert_eq!(depth_of(&args), n);
+            let body = serde_json::json!({ "arguments": args }).to_string();
+            assert_eq!(depth_bound(&body), 1 + n, "n = {n}");
+        }
+    }
+
+    #[test]
+    fn embedded_strings_keep_their_own_escapes() {
+        // Closers after `\"` and `\\` inside the embedded JSON's strings, at
+        // every level, in both bracket kinds.
+        for (piece, close) in [
+            (r#"{"x":"\"]}","y":"#, "}"),
+            (r#"{"x":"\\","z":"]}","y":"#, "}"),
+            (r#"["\\\"]]",["#, "]]"),
+        ] {
+            for n in [1, 7, 600] {
+                let args = format!("{}0{}", piece.repeat(n), close.repeat(n));
+                let want = depth_of(&args);
+                assert!(want >= n, "{piece}: fixture depth {want}");
+                let body = serde_json::json!({ "a": args }).to_string();
+                assert_eq!(depth_bound(&body), 1 + want, "{piece} x {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_embedded_text_counts_every_opener() {
+        let cases = [
+            ("]]]{{{", 3),     // closer with nothing open
+            (r#"[["["#, 3),    // unterminated string: opener in it counts
+            ("[[[[", 4),       // left open
+            (r#"{"a":"]"#, 1), // unterminated
+        ];
+        for (args, want) in cases {
+            let body = serde_json::json!({ "a": args }).to_string();
+            assert_eq!(depth_bound(&body), 1 + want, "{args}");
+        }
+    }
+
+    #[test]
+    fn a_double_encoded_argument_is_bounded_by_its_first_decoding() {
+        // `arguments` is a JSON string whose content is itself JSON: ingress
+        // parses once and keeps a string, so depth 0 inside, and the
+        // brackets of the inner text never hide outer nesting.
+        let inner = closers_in_strings(50);
+        let once = serde_json::to_string(&inner).expect("encode");
+        let body = serde_json::json!({ "arguments": once }).to_string();
+        assert!(depth_bound(&body) >= 1);
+        let wrapped = format!(r#"[{once},{}]"#, closers_in_strings(600));
+        let body = serde_json::json!({ "arguments": wrapped }).to_string();
+        assert_eq!(depth_bound(&body), 1 + 1 + 600);
+    }
+
+    /// A tiny xorshift, so the property test is reproducible.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// A string mixing JSON punctuation, escapes and, sometimes, a whole
+    /// encoded JSON value (double encoding).
+    fn gen_string(rng: &mut Rng, budget: usize) -> String {
+        if budget > 0 && rng.below(4) == 0 {
+            return gen_value(rng, budget.min(4)).to_string();
+        }
+        const ALPHABET: &[char] = &['[', ']', '{', '}', '"', '\\', '/', 'a', ':', ',', '\n'];
+        (0..rng.below(8))
+            .map(|_| ALPHABET[rng.below(ALPHABET.len() as u64) as usize])
+            .collect()
+    }
+
+    fn gen_value(rng: &mut Rng, budget: usize) -> Value {
+        let kind = if budget == 0 {
+            rng.below(3)
+        } else {
+            rng.below(6)
+        };
+        match kind {
+            0 => Value::from(rng.below(100)),
+            1 => Value::Null,
+            2 => Value::String(gen_string(rng, budget / 2)),
+            3 | 4 => Value::Array(
+                (0..=rng.below(3))
+                    .map(|_| gen_value(rng, budget - 1))
+                    .collect(),
+            ),
+            _ => Value::Object(
+                (0..=rng.below(3))
+                    .map(|_| (gen_string(rng, 0), gen_value(rng, budget - 1)))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// True container depth, by an explicit-stack walk of the parsed value.
+    fn true_depth(v: &Value) -> usize {
+        let mut max = 0;
+        let mut pending = vec![(v, 0usize)];
+        while let Some((v, d)) = pending.pop() {
+            let children: Vec<&Value> = match v {
+                Value::Array(a) => a.iter().collect(),
+                Value::Object(m) => m.values().collect(),
+                _ => continue,
+            };
+            max = max.max(d + 1);
+            pending.extend(children.into_iter().map(|c| (c, d + 1)));
+        }
+        max
+    }
+
+    /// The deepest JSON value any string in `v` parses to (one decoding).
+    fn embedded_depth(v: &Value) -> usize {
+        let mut max = 0;
+        let mut pending = vec![v];
+        while let Some(v) = pending.pop() {
+            match v {
+                Value::String(s) => {
+                    if let Ok(inner) = parse(s) {
+                        max = max.max(true_depth(&inner));
+                    }
+                }
+                Value::Array(a) => pending.extend(a),
+                Value::Object(m) => {
+                    for (k, v) in m {
+                        if let Ok(inner) = parse(k) {
+                            max = max.max(true_depth(&inner));
+                        }
+                        pending.push(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        max
+    }
+
+    #[test]
+    fn the_bound_is_never_below_the_true_depth_of_generated_json() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for case in 0..3000 {
+            let budget = 1 + rng.below(12) as usize;
+            // Arguments: generated JSON, encoded into a string.
+            let args = gen_value(&mut rng, budget);
+            let args = if rng.below(2) == 0 {
+                args.to_string()
+            } else {
+                // A ragged chain of real nesting with closers in strings.
+                let n = rng.below(40) as usize;
+                format!("{}{args}{}", r#"{"x":"]}","y":["#.repeat(n), "]}".repeat(n))
+            };
+            let body = serde_json::json!({
+                "o": gen_value(&mut rng, budget),
+                "messages": [{ "arguments": args }],
+            });
+            let text = body.to_string();
+            let truth = true_depth(&body) + embedded_depth(&body);
+            let bound = depth_bound(&text);
+            assert!(bound >= truth, "case {case}: {bound} < {truth}: {text}");
+        }
     }
 
     #[test]
