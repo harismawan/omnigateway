@@ -83,10 +83,20 @@ pub enum Flow {
     Stop,
 }
 
-/// A decoder throwing something that is not a `GatewayError` — a `TypeError`
-/// in TS. The host reports it as `"<id> codec decode threw"`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecodeThrow(pub &'static str);
+/// Why a decoder stopped with an error, as `guardStream` in
+/// `codecAdapter.ts` sees what a TS decoder throws.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecodeError {
+    /// A thrown `GatewayError`: the decoder's own classification (built with
+    /// `fail`, say). The host passes it through **unchanged** — not restamped,
+    /// not bounded — whether or not events were already emitted, exactly as
+    /// `guardStream` rethrows `error instanceof GatewayError`.
+    Gateway(GatewayError),
+    /// Anything else thrown — a `TypeError` in TS. The host relabels it as
+    /// the gateway-authored `UPSTREAM` `"<id> codec decode threw"`; the text
+    /// is for debugging and never reaches the caller.
+    Throw(&'static str),
+}
 
 /// An incremental stream decoder: SSE messages in, canonical events out.
 pub trait StreamDecoder: Send {
@@ -95,7 +105,7 @@ pub trait StreamDecoder: Send {
         &mut self,
         msg: &SseMessage,
         out: &mut VecDeque<StreamEvent>,
-    ) -> Result<Flow, DecodeThrow>;
+    ) -> Result<Flow, DecodeError>;
 
     /// The body ended without the decoder stopping.
     fn finish(&mut self, out: &mut VecDeque<StreamEvent>);

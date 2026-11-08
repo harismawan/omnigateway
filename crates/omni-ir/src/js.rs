@@ -5,6 +5,21 @@
 //! narrowed those to "the type the field should have" would decode a sloppy
 //! upstream differently, so each coercion here is the ECMAScript one, applied
 //! to a [`serde_json::Value`]. `None` stands for `undefined`.
+//!
+//! # Known differences from TS
+//!
+//! - **Lone surrogates** become U+FFFD. JS strings can hold a lone surrogate
+//!   (a `\udXXX` escape in JSON, or a slice cutting a pair) and TS re-escapes
+//!   it as `\udXXX` on output; a Rust `String` cannot hold one. Only
+//!   malformed client or upstream input reaches this, and the cost is a
+//!   prompt-cache key that differs from the TS gateway's for that input.
+//! - **`Number()` coercion of usage counts.** The decoders coerce upstream
+//!   usage counts to numbers; TS does arithmetic on whatever arrived, so a
+//!   non-numeric string count passes through TS as a string where Rust has a
+//!   number (or NaN, rendered `null`).
+//! - **Retry-After dates** (in `omni-providers`): the loose free-form date
+//!   strings JavaScriptCore's `Date.parse` accepts are not parsed; the HTTP,
+//!   RFC 2822 and ISO 8601 forms are.
 
 use serde_json::Value;
 

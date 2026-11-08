@@ -2,6 +2,14 @@
 //!
 //! [`StreamEvent::to_json`] renders the TS object shape with `JSON.stringify`
 //! rules, which is what the conformance vectors record and what tests compare.
+//!
+//! # Known differences from TS
+//!
+//! - [`Usage`] counts are always `f64`: a non-numeric upstream count is
+//!   `Number()`-coerced (NaN renders `null`) where TS would carry the raw
+//!   value through.
+//! - Text with a lone surrogate holds U+FFFD instead (see [`crate::js`]).
+//! - Retry-After loose JS date forms are not parsed (see [`crate::js`]).
 
 use std::collections::BTreeMap;
 

@@ -200,7 +200,7 @@ impl ResponseBody {
             && self.reusable
             && self.buf.is_empty()
         {
-            pool.checkin(key, conn);
+            Pool::checkin_owned(&pool, key, conn);
         }
     }
 
@@ -318,9 +318,20 @@ fn parse_chunk_size(line: &[u8]) -> Result<u64, HttpError> {
 }
 
 /// Why an exchange failed.
+///
+/// **The replay rule.** A request is replayed — once, on a fresh connection —
+/// only when it provably never left: the connection was a pooled one and the
+/// very first write of the request was refused, so the kernel (or TLS layer)
+/// accepted **zero** bytes of it. That is node's reused-socket "socket hang
+/// up" before any write: the peer had already closed the idle socket. Once any
+/// byte has been accepted — a prefix of a large body, or the whole request
+/// with only the flush failing — the server may have started acting on it, so
+/// the failure is surfaced unchanged (`is_network()`, so the adapter's
+/// classification lets dispatch fail over before its commit point) and never
+/// replayed here. A hang-up after the write is likewise surfaced, never
+/// replayed.
 pub(crate) enum Failure {
-    /// A reused connection the request could not be written to: nothing
-    /// reached the server, so a fresh connection may safely retry once.
+    /// A reused connection that accepted no byte of the request.
     Stale,
     Fatal(HttpError),
 }
@@ -338,17 +349,25 @@ pub(crate) async fn roundtrip(
     pool: &Arc<Pool>,
     key: Key,
 ) -> Result<HttpResponse, Failure> {
-    if let Err(e) = write(&mut conn, request).await {
-        return Err(if reused {
-            Failure::Stale
-        } else {
-            Failure::Fatal(HttpError::Io(e))
-        });
+    match write(&mut conn, request).await {
+        Ok(()) => {}
+        Err((0, _)) if reused => return Err(Failure::Stale),
+        Err((_, e)) => return Err(Failure::Fatal(HttpError::Io(e))),
     }
     let mut buf = BytesMut::with_capacity(READ_CHUNK);
     loop {
+        // The cap applies to what has been read before a parse (an
+        // unterminated head) and to a parsed head's own length (a complete
+        // one whose terminating CRLF arrived in the read that crossed it).
+        if buf.len() > MAX_HEAD_BYTES && find_head_end(&buf).is_none_or(|end| end > MAX_HEAD_BYTES)
+        {
+            return Err(overflow());
+        }
         let parsed = parse_head(&buf).map_err(Failure::Fatal)?;
         if let Some(head) = parsed {
+            if head.len > MAX_HEAD_BYTES {
+                return Err(overflow());
+            }
             // 1xx (other than 101) are interim; node skips them.
             if (100..200).contains(&head.status) && head.status != 101 {
                 buf.advance(head.len);
@@ -356,11 +375,6 @@ pub(crate) async fn roundtrip(
             }
             buf.advance(head.len);
             return Ok(finish_head(head, conn, buf, facts, pool, key));
-        }
-        if buf.len() > MAX_HEAD_BYTES {
-            return Err(Failure::Fatal(HttpError::InvalidResponse(
-                "header overflow".into(),
-            )));
         }
         buf.reserve(READ_CHUNK);
         match conn.read_buf(&mut buf).await {
@@ -374,9 +388,33 @@ pub(crate) async fn roundtrip(
     }
 }
 
-async fn write(conn: &mut Conn, request: &[u8]) -> std::io::Result<()> {
-    conn.write_all(request).await?;
-    conn.flush().await
+fn overflow() -> Failure {
+    Failure::Fatal(HttpError::InvalidResponse("header overflow".into()))
+}
+
+/// Where the first head in `buf` ends (after its blank line), if it has.
+fn find_head_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|at| at + 4)
+}
+
+/// Writes the whole request. On failure, how many bytes the connection had
+/// accepted before it: zero is the only count [`Failure::Stale`] allows.
+async fn write(conn: &mut Conn, request: &[u8]) -> Result<(), (usize, std::io::Error)> {
+    let mut written = 0;
+    while written < request.len() {
+        match conn.write(&request[written..]).await {
+            Ok(0) => {
+                return Err((written, std::io::ErrorKind::WriteZero.into()));
+            }
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err((written, e)),
+        }
+    }
+    // A flush failure comes after every byte was accepted: never replayable.
+    conn.flush().await.map_err(|e| (written.max(1), e))
 }
 
 struct Head {

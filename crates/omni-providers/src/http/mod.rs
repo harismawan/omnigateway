@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub use body::{Headers, ResponseBody};
+pub use pool::PoolLimits;
 use pool::{Conn, Pool};
 
 /// How long one address gets before the next is tried (node's
@@ -159,14 +160,22 @@ impl Client {
     /// Trusts the platform's roots plus the Mozilla set (`webpki-roots`).
     pub fn new() -> Self {
         Client {
-            pool: Arc::new(Pool::new(None)),
+            pool: Arc::new(Pool::new(None, PoolLimits::default())),
         }
     }
 
     /// A client trusting exactly `roots`, for tests and private CAs.
     pub fn with_roots(roots: rustls::RootCertStore) -> Self {
         Client {
-            pool: Arc::new(Pool::new(Some(roots))),
+            pool: Arc::new(Pool::new(Some(roots), PoolLimits::default())),
+        }
+    }
+
+    /// A client with explicit trust roots (`None`: the platform's plus the
+    /// Mozilla set) and pool limits.
+    pub fn with_config(roots: Option<rustls::RootCertStore>, limits: PoolLimits) -> Self {
+        Client {
+            pool: Arc::new(Pool::new(roots, limits)),
         }
     }
 
@@ -214,9 +223,11 @@ impl Client {
     ) -> Result<HttpResponse, HttpError> {
         let key = pool::Key::of(target);
         if let Some(conn) = self.pool.checkout(&key) {
-            // A pooled socket that cannot take the write comes back `Stale`:
-            // nothing was sent, so that, and only that, is retried once on a
-            // fresh connection. A request that went out is never resent.
+            // A pooled socket that accepted zero bytes of the request comes
+            // back `Stale` (the peer had closed it while idle): nothing was
+            // sent, so that, and only that, is retried once on a fresh
+            // connection. Once any byte was accepted the error is surfaced,
+            // never replayed. See `body::Failure` for the rule.
             match body::roundtrip(conn, true, bytes, facts, &self.pool, key.clone()).await {
                 Err(body::Failure::Stale) => {}
                 Err(body::Failure::Fatal(e)) => return Err(e),

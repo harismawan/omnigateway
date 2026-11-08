@@ -8,7 +8,7 @@ use omni_ir::stream::{ContentBlockStart, Delta, StopReason, StreamEvent};
 use serde_json::Value;
 
 use super::{JsKey, KeyMint, json_object, or_zero, usage_of};
-use crate::codec::{DecodeThrow, Flow, StreamDecoder};
+use crate::codec::{DecodeError, Flow, StreamDecoder};
 use crate::sse::SseMessage;
 
 const RESPONSES_ERROR_CODE: [(&str, ErrorCode); 6] = [
@@ -94,7 +94,7 @@ impl StreamDecoder for ResponsesDecoder {
         &mut self,
         msg: &SseMessage,
         out: &mut VecDeque<StreamEvent>,
-    ) -> Result<Flow, DecodeThrow> {
+    ) -> Result<Flow, DecodeError> {
         if msg.data == "[DONE]" {
             return Ok(Flow::Continue);
         }

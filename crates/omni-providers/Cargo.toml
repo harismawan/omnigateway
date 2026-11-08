@@ -32,7 +32,7 @@ rustls-native-certs = "0.8"
 serde.workspace = true
 # The deep-schema vectors nest past serde_json's default 128-level limit.
 serde_json = { workspace = true, features = ["unbounded_depth"] }
-tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros", "test-util"] }
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

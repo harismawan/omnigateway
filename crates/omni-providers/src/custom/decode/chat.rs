@@ -8,7 +8,7 @@ use omni_ir::stream::{ContentBlockStart, Delta, StopReason, StreamEvent, Usage};
 use serde_json::Value;
 
 use super::{JsKey, KeyMint, index0, iterate, json_object, nonempty, or_zero, usage_of};
-use crate::codec::{DecodeThrow, Flow, StreamDecoder};
+use crate::codec::{DecodeError, Flow, StreamDecoder};
 use crate::sse::SseMessage;
 
 /// The reasoning text one chat delta carries: the first non-empty spelling.
@@ -105,7 +105,7 @@ impl StreamDecoder for ChatDecoder {
         &mut self,
         msg: &SseMessage,
         out: &mut VecDeque<StreamEvent>,
-    ) -> Result<Flow, DecodeThrow> {
+    ) -> Result<Flow, DecodeError> {
         if msg.data == "[DONE]" {
             // The transport-level success marker.
             if let Some((_, i)) = self.open {
@@ -183,7 +183,7 @@ impl StreamDecoder for ChatDecoder {
         for call in iterate(prop(delta, "tool_calls"))? {
             // Reading a property of `null` throws in JS.
             if call.is_null() {
-                return Err(DecodeThrow("tool call is null"));
+                return Err(DecodeError::Throw("tool call is null"));
             }
             let call = Some(&call);
             let wire_index = or_zero(prop(call, "index"));

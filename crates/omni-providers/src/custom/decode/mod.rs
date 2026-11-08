@@ -11,7 +11,7 @@ use omni_ir::js;
 use omni_ir::stream::{Usage, usage_from_prompt_total};
 use serde_json::Value;
 
-use crate::codec::DecodeThrow;
+use crate::codec::DecodeError;
 
 mod chat;
 mod responses;
@@ -80,12 +80,12 @@ pub(super) fn index0(v: Option<&Value>) -> Option<Value> {
 
 /// `for (const x of v ?? [])`: what iterating each JSON value yields, or a
 /// throw for a value that is not iterable.
-pub(super) fn iterate(v: Option<&Value>) -> Result<Vec<Value>, DecodeThrow> {
+pub(super) fn iterate(v: Option<&Value>) -> Result<Vec<Value>, DecodeError> {
     match v {
         None | Some(Value::Null) => Ok(Vec::new()),
         Some(Value::Array(items)) => Ok(items.clone()),
         Some(Value::String(s)) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
-        Some(_) => Err(DecodeThrow("tool_calls is not iterable")),
+        Some(_) => Err(DecodeError::Throw("tool_calls is not iterable")),
     }
 }
 

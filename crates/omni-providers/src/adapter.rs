@@ -12,7 +12,9 @@ use omni_ir::js::utf16_prefix;
 use omni_ir::request::ChatRequest;
 use omni_ir::stream::StreamEvent;
 
-use crate::codec::{CodecErrorInput, CodecInput, Credentials, Flow, ProviderCodec, StreamDecoder};
+use crate::codec::{
+    CodecErrorInput, CodecInput, Credentials, DecodeError, Flow, ProviderCodec, StreamDecoder,
+};
 use crate::http::{BodyEncoding, HttpClient, HttpError, HttpRequest, ResponseBody};
 use crate::http_error::{http_error, now_ms};
 use crate::sse::{SseMessage, SseParser};
@@ -222,9 +224,12 @@ pub async fn send<C: ProviderCodec>(
 
 /// The decoded event stream (`guardStream(id, codec.decode(...))`).
 ///
-/// Yields events, then at most one error, then `None`. A decoder throw and a
-/// body transport failure become `"<id> codec decode threw"`; an oversized SSE
-/// record passes through as the parser's own error.
+/// Yields events, then at most one error, then `None`. An unclassified decoder
+/// throw ([`DecodeError::Throw`]) and a body transport failure become
+/// `"<id> codec decode threw"`; a decoder's classified
+/// [`DecodeError::Gateway`] and an oversized SSE record (the parser's own
+/// `GatewayError`) pass through unchanged, as `guardStream` rethrows any
+/// `GatewayError`.
 pub struct EventStream {
     id: String,
     body: Option<ResponseBody>,
@@ -306,7 +311,13 @@ impl EventStream {
                     self.stop();
                     return true;
                 }
-                Err(_) => {
+                // `guardStream`: a `GatewayError` is rethrown as it is; only
+                // an unclassified throw is relabelled.
+                Err(DecodeError::Gateway(e)) => {
+                    self.failure = Some(e);
+                    return true;
+                }
+                Err(DecodeError::Throw(_)) => {
                     self.failure = Some(codec_failure(&self.id, "decode", "threw"));
                     return true;
                 }
