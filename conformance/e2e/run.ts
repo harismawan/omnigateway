@@ -97,29 +97,48 @@ async function bounded<T>(
  * `fetch` with its own `AbortController`, aborted by the timeout and by
  * cleanup, and the whole body read within the same bound.
  */
-async function request(
+/**
+ * The one place the driver calls `fetch`. The request gets its own
+ * `AbortController`, registered in `outstanding` (so cleanup aborts it), and
+ * `use` gets the response with a `bounded` that aborts this request on
+ * timeout. Whatever `use` leaves unread is cancelled, and the request is
+ * aborted and deregistered, when `use` settles.
+ */
+async function tracked<T>(
   what: string,
   url: string,
   init: RequestInit,
-  route: string,
-): Promise<Exchange> {
+  use: (
+    res: Response,
+    wait: <U>(label: string, p: Promise<U>, ms?: number) => Promise<U>,
+    abort: () => void,
+  ) => Promise<T>,
+  headMs = WAIT_MS,
+): Promise<T> {
   const ac = new AbortController();
   outstanding.add(ac);
+  const abort = () => ac.abort();
+  const wait = <U>(label: string, p: Promise<U>, ms = WAIT_MS) => bounded(label, p, ms, abort);
+  let res: Response | undefined;
   try {
-    const res = await bounded(what, fetch(url, { ...init, signal: ac.signal }), WAIT_MS, () =>
-      ac.abort(),
-    );
-    const body = await bounded(`${what}: body`, res.arrayBuffer(), WAIT_MS, () => ac.abort());
-    return {
-      status: res.status,
-      headers: [...res.headers.entries()],
-      body: new Uint8Array(body),
-      route,
-    };
+    res = await wait(what, fetch(url, { ...init, signal: ac.signal }), headMs);
+    return await use(res, wait, abort);
   } finally {
+    // Cancel an unread body before the abort, so no stream is left open.
+    if (res !== undefined && !res.bodyUsed) await res.body?.cancel().catch(() => {});
     ac.abort();
     outstanding.delete(ac);
   }
+}
+
+/** A whole exchange: head and body, each within the bound. */
+function request(what: string, url: string, init: RequestInit, route: string): Promise<Exchange> {
+  return tracked(what, url, init, async (res, wait) => ({
+    status: res.status,
+    headers: [...res.headers.entries()],
+    body: new Uint8Array(await wait(`${what}: body`, res.arrayBuffer())),
+    route,
+  }));
 }
 
 // ------------------------------------------------------------ the upstream
@@ -516,57 +535,46 @@ const ROWS: Row[] = [
         ? null
         : "expected a 200 prefix through the first delta frame and one upstream call",
     run: async (base, keys) => {
-      const ac = new AbortController();
-      outstanding.add(ac);
       try {
-        const res = await bounded(
+        return await tracked(
           "disconnect: response head",
-          fetch(`${base}/v1/messages`, {
-            method: "POST",
-            headers: bearer(keys.plain),
-            body: msg("slow", true),
-            signal: ac.signal,
-          }),
-          WAIT_MS,
-          () => ac.abort(),
-        );
-        const reader = (res.body as ReadableStream<Uint8Array>).getReader();
-        // The upstream holds after its first delta, so the stream cannot end
-        // before the client has the complete frame carrying it. Read raw
-        // bytes until that frame's terminating blank line has arrived.
-        const marker = enc("lorem ipsum");
-        let buf = new Uint8Array(0);
-        let frameEnd = -1;
-        while (frameEnd < 0) {
-          const { value, done } = await bounded(
-            "disconnect: first delta frame",
-            reader.read(),
-            WAIT_MS,
-            () => ac.abort(),
-          );
-          if (done) throw new Error("stream ended before the gated delta frame");
-          buf = concat([buf, value]);
-          const at = Buffer.from(buf).indexOf(Buffer.from(marker));
-          if (at >= 0) {
-            const blank = Buffer.from(buf).indexOf("\n\n", at);
-            if (blank >= 0) frameEnd = blank + 2;
-          }
-        }
-        ac.abort();
-        // Let the gateway file its row before the upstream is released.
-        await sleep(300);
-        // Compared: the head and the original bytes through that frame's end.
-        return [
-          {
-            status: res.status,
-            headers: [...res.headers.entries()],
-            body: buf.subarray(0, frameEnd),
-            route: "/v1/messages",
+          `${base}/v1/messages`,
+          { method: "POST", headers: bearer(keys.plain), body: msg("slow", true) },
+          async (res, wait, abort) => {
+            const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+            // The upstream holds after its first delta, so the stream cannot
+            // end before the client has the complete frame carrying it. Read
+            // raw bytes until that frame's terminating blank line has arrived.
+            const marker = enc("lorem ipsum");
+            let buf = new Uint8Array(0);
+            let frameEnd = -1;
+            while (frameEnd < 0) {
+              const { value, done } = await wait("disconnect: first delta frame", reader.read());
+              if (done) throw new Error("stream ended before the gated delta frame");
+              buf = concat([buf, value]);
+              const at = Buffer.from(buf).indexOf(Buffer.from(marker));
+              if (at >= 0) {
+                const blank = Buffer.from(buf).indexOf("\n\n", at);
+                if (blank >= 0) frameEnd = blank + 2;
+              }
+            }
+            // The client hangs up here.
+            await reader.cancel().catch(() => {});
+            abort();
+            // Let the gateway file its row before the upstream is released.
+            await sleep(300);
+            // Compared: the head and the original bytes through that frame's end.
+            return [
+              {
+                status: res.status,
+                headers: [...res.headers.entries()],
+                body: buf.subarray(0, frameEnd),
+                route: "/v1/messages",
+              },
+            ];
           },
-        ];
+        );
       } finally {
-        ac.abort();
-        outstanding.delete(ac);
         resetGate();
       }
     },
@@ -690,10 +698,17 @@ async function waitHealthy(): Promise<void> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     try {
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), 1000);
-      const ok = (await fetch(`http://127.0.0.1:${GATEWAY_PORT}/health`, { signal: ac.signal })).ok;
-      clearTimeout(t);
+      // Head and body within 1 s; the body is read to its end.
+      const ok = await tracked(
+        "health probe",
+        `http://127.0.0.1:${GATEWAY_PORT}/health`,
+        {},
+        async (res, wait) => {
+          await wait("health probe: body", res.arrayBuffer(), 1000);
+          return res.ok;
+        },
+        1000,
+      );
       if (ok) return;
     } catch {
       // not yet
