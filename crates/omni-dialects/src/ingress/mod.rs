@@ -13,6 +13,7 @@
 
 use std::collections::HashSet;
 
+use omni_ir::deep::Owned;
 use omni_ir::error::{ErrorCode, GatewayError};
 use omni_ir::js::{safe_token, trim, utf16_len};
 use omni_ir::request::{
@@ -94,9 +95,42 @@ pub fn random_tool_use_id() -> String {
     )
 }
 
-/// `request.json()`: the body, or `None` where `JSON.parse` would throw.
-pub fn parse_body(text: &str) -> Option<Value> {
-    omni_ir::js::parse_json(text)
+/// The refusal for JSON nested deeper than `omni_ir::deep::MAX_DEPTH`.
+///
+/// TS parses such a body (Bun's `JSON.parse` goes past a million levels) and
+/// fails later, when the encoder re-serializes it: a 503 "custom codec
+/// buildRequest threw" or an unrouted crash. Rust refuses up front instead,
+/// as a client error. A documented difference.
+pub const TOO_DEEP: &str = "request body is nested too deeply";
+
+/// `request.json()`: the body, or `None` where `JSON.parse` would throw or the
+/// body is nested deeper than `omni_ir::deep::MAX_DEPTH`. Safe on any stack.
+pub fn parse_body(text: &str) -> Option<Owned> {
+    parse_body_checked(text).ok()
+}
+
+/// [`parse_body`], telling the two refusals apart: a syntax error is
+/// `Err(BAD_REQUEST "request body must be valid JSON")` here (TS renders its
+/// SyntaxError as INTERNAL; 5b chooses), too deep is [`TOO_DEEP`].
+pub fn parse_body_checked(text: &str) -> Result<Owned, GatewayError> {
+    deep_json(text).map(Owned).map_err(|e| match e {
+        omni_ir::deep::ParseError::TooDeep => bad(TOO_DEEP),
+        omni_ir::deep::ParseError::Syntax => bad("request body must be valid JSON"),
+    })
+}
+
+/// `JSON.parse` of client text, bounded and stack-safe, with lone surrogate
+/// escapes read as U+FFFD (see `omni_ir::js::parse_json`).
+pub(crate) fn deep_json(text: &str) -> Result<Value, omni_ir::deep::ParseError> {
+    match omni_ir::deep::parse(text) {
+        Err(omni_ir::deep::ParseError::Syntax) if text.contains("\\u") => {
+            omni_ir::js::replace_lone_surrogates(text)
+                .map_or(Err(omni_ir::deep::ParseError::Syntax), |t| {
+                    omni_ir::deep::parse(&t)
+                })
+        }
+        other => other,
+    }
 }
 
 /// The API-key model allowlist, checked against `ChatRequest.model` (after
@@ -194,7 +228,7 @@ pub(crate) fn extra_fields(
     let mut extras = Map::new();
     for key in js_keys(body) {
         if !known.contains(&key) && key != "__proto__" {
-            extras.insert(key.to_string(), body[key].clone());
+            extras.insert(key.to_string(), omni_ir::deep::clone(&body[key]));
         }
     }
     (!extras.is_empty()).then_some(extras)
@@ -293,7 +327,10 @@ pub(crate) fn read_conversation_header(headers: &Headers) -> Option<String> {
 }
 
 /// `parseOrThrow`: zod's first issue as `<path>: <detail>`.
-pub(crate) fn parse_or_throw(schema: &zod::Z, body: &Value) -> Result<Value, GatewayError> {
+pub(crate) fn parse_or_throw(
+    schema: &zod::Z,
+    body: &Value,
+) -> Result<omni_ir::deep::Owned, GatewayError> {
     zod::parse(schema, body).map_err(|issue| {
         let path = if issue.path.is_empty() {
             "(root)".to_string()

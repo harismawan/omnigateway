@@ -169,7 +169,7 @@ fn read_tool_output(output: Option<&Value>) -> Result<ToolResultBlock, GatewayEr
         other => {
             let v = match other {
                 None | Some(Value::Null) => Value::String(String::new()),
-                Some(v) => v.clone(),
+                Some(v) => omni_ir::deep::clone(v),
             };
             out.content = omni_ir::jsjson::to_string(&v);
             return Ok(out);
@@ -233,7 +233,7 @@ fn native_block(item: &Value, block_type: &str) -> ContentBlock {
         for key in super::js_keys(map) {
             // Object rest (`{ type, ...data }`) keeps an own `__proto__`.
             if key != "type" {
-                data.insert(key.to_string(), map[key].clone());
+                data.insert(key.to_string(), omni_ir::deep::clone(&map[key]));
             }
         }
     }
@@ -251,10 +251,11 @@ fn json_arguments(raw: Option<&Value>, call_id: &str) -> Result<Value, GatewayEr
     if text.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    match omni_ir::js::parse_json(text) {
-        Some(v @ (Value::Object(_) | Value::Array(_))) => Ok(v),
-        Some(v) => Ok(json!({ "value": v })),
-        None => Err(bad(format!(
+    match super::deep_json(text) {
+        Ok(v @ (Value::Object(_) | Value::Array(_))) => Ok(v),
+        Ok(v) => Ok(json!({ "value": v })),
+        Err(omni_ir::deep::ParseError::TooDeep) => Err(bad(super::TOO_DEEP)),
+        Err(omni_ir::deep::ParseError::Syntax) => Err(bad(format!(
             "input: arguments for call {} are not valid JSON",
             safe_token(call_id)
         ))),
@@ -276,7 +277,7 @@ fn read_input_items(items: &[Value]) -> Result<Vec<Message>, GatewayError> {
         // `raw.type ?? (raw.role === undefined ? undefined : "message")`.
         let declared = raw.get("type").filter(|t| !t.is_null());
         let t: Option<Value> = match declared {
-            Some(t) => Some(t.clone()),
+            Some(t) => Some(omni_ir::deep::clone(t)),
             None if raw.get("role").is_some() => Some(Value::String("message".into())),
             None => None,
         };
@@ -371,7 +372,7 @@ fn read_tools(raw: &[Value]) -> Result<Vec<ToolDef>, GatewayError> {
                 json!({"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"]})
             } else {
                 match map.get("parameters") {
-                    Some(p @ (Value::Object(_) | Value::Array(_))) => p.clone(),
+                    Some(p @ (Value::Object(_) | Value::Array(_))) => omni_ir::deep::clone(p),
                     _ => json!({"type": "object"}),
                 }
             };
@@ -391,7 +392,7 @@ fn read_tools(raw: &[Value]) -> Result<Vec<ToolDef>, GatewayError> {
         let mut wire = Map::new();
         for key in super::js_keys(map) {
             if key != "type" && key != "name" {
-                wire.insert(key.to_string(), map[key].clone());
+                wire.insert(key.to_string(), omni_ir::deep::clone(&map[key]));
             }
         }
         tools.push(ToolDef::Provider(ProviderToolDef {

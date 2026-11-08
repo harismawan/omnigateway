@@ -327,7 +327,7 @@ fn write_js(value: &JsValue, out: &mut String, indent: Option<usize>, depth: usi
                     out.push(',');
                 }
                 newline_indent(out, indent, depth + 1);
-                if !write_js(item, out, indent, depth + 1) {
+                if !crate::deep::grow(|| write_js(item, out, indent, depth + 1)) {
                     out.push_str("null");
                 }
             }
@@ -353,7 +353,7 @@ fn write_js(value: &JsValue, out: &mut String, indent: Option<usize>, depth: usi
                 if indent.is_some() {
                     out.push(' ');
                 }
-                write_js(item, out, indent, depth + 1);
+                crate::deep::grow(|| write_js(item, out, indent, depth + 1));
             }
             if wrote {
                 newline_indent(out, indent, depth);
@@ -382,7 +382,7 @@ fn write_serde(value: &serde_json::Value, out: &mut String, indent: Option<usize
                     out.push(',');
                 }
                 newline_indent(out, indent, depth + 1);
-                write_serde(item, out, indent, depth + 1);
+                crate::deep::grow(|| write_serde(item, out, indent, depth + 1));
             }
             newline_indent(out, indent, depth);
             out.push(']');
@@ -405,7 +405,7 @@ fn write_serde(value: &serde_json::Value, out: &mut String, indent: Option<usize
                 if indent.is_some() {
                     out.push(' ');
                 }
-                write_serde(item, out, indent, depth + 1);
+                crate::deep::grow(|| write_serde(item, out, indent, depth + 1));
             };
             if map.keys().any(|k| array_index(k).is_some()) {
                 let keys: Vec<&String> = map.keys().collect();

@@ -44,7 +44,7 @@ pub enum CacheTtl {
     OneHour,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBlock {
     pub text: String,
@@ -81,7 +81,7 @@ pub struct ThinkingBlock {
     pub signature: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolUseBlock {
     pub id: String,
@@ -173,7 +173,7 @@ mod tagged {
 }
 
 /// A content block one provider owns end to end, carried through unread.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderNativeBlock {
     pub provider: ProviderId,
@@ -245,7 +245,7 @@ pub struct Message {
 }
 
 /// A portable tool every provider can express.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomToolDef {
     pub name: String,
@@ -259,7 +259,7 @@ pub struct CustomToolDef {
 }
 
 /// A tool whose schema a provider owns. `family` is Anthropic's only.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderToolDef {
     pub provider: ProviderId,
@@ -353,7 +353,7 @@ pub enum ReasoningConfig {
 
 /// The canonical request. Numbers are `f64` because they are JS numbers in
 /// TS, and the wire encoders print them with `JSON.stringify` rules.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRequest {
     pub model: String,
@@ -394,5 +394,141 @@ impl ChatRequest {
     /// `req.vendor?.[name]`, whatever it holds.
     pub fn vendor_value(&self, name: &str) -> Option<&Value> {
         self.vendor.as_ref()?.get(name)
+    }
+}
+
+// ------------------------------------------------------------------ deep values
+//
+// These structs hold client JSON verbatim, which may be nested up to
+// `deep::MAX_DEPTH` levels. Their `Clone` and `Drop` go through `deep` so that
+// neither recurses once per level on the caller's stack. `PartialEq` and
+// `Serialize` stay derived (recursive) and are for tests and shallow values.
+
+use crate::deep;
+
+impl Clone for TextBlock {
+    fn clone(&self) -> Self {
+        TextBlock {
+            text: self.text.clone(),
+            cache_control: self.cache_control.clone(),
+            citations: self
+                .citations
+                .as_ref()
+                .map(|c| c.iter().map(deep::clone).collect()),
+        }
+    }
+}
+
+impl Drop for TextBlock {
+    fn drop(&mut self) {
+        if let Some(c) = self.citations.take() {
+            deep::drop(Value::Array(c));
+        }
+    }
+}
+
+impl Clone for ToolUseBlock {
+    fn clone(&self) -> Self {
+        ToolUseBlock {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            input: deep::clone(&self.input),
+            cache_control: self.cache_control.clone(),
+        }
+    }
+}
+
+impl Drop for ToolUseBlock {
+    fn drop(&mut self) {
+        deep::drop_in_place(&mut self.input);
+    }
+}
+
+impl Clone for ProviderNativeBlock {
+    fn clone(&self) -> Self {
+        ProviderNativeBlock {
+            provider: self.provider.clone(),
+            block_type: self.block_type.clone(),
+            data: deep::clone_map(&self.data),
+            cache_control: self.cache_control.clone(),
+        }
+    }
+}
+
+impl Drop for ProviderNativeBlock {
+    fn drop(&mut self) {
+        deep::drop_map_in_place(&mut self.data);
+    }
+}
+
+impl Clone for CustomToolDef {
+    fn clone(&self) -> Self {
+        CustomToolDef {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            input_schema: deep::clone(&self.input_schema),
+            cache_control: self.cache_control.clone(),
+            options: self.options.as_ref().map(deep::clone_map),
+        }
+    }
+}
+
+impl Drop for CustomToolDef {
+    fn drop(&mut self) {
+        deep::drop_in_place(&mut self.input_schema);
+        if let Some(o) = self.options.take() {
+            deep::drop_map(o);
+        }
+    }
+}
+
+impl Clone for ProviderToolDef {
+    fn clone(&self) -> Self {
+        ProviderToolDef {
+            provider: self.provider.clone(),
+            tool_type: self.tool_type.clone(),
+            name: self.name.clone(),
+            wire: deep::clone_map(&self.wire),
+            cache_control: self.cache_control.clone(),
+            family: self.family.clone(),
+        }
+    }
+}
+
+impl Drop for ProviderToolDef {
+    fn drop(&mut self) {
+        deep::drop_map_in_place(&mut self.wire);
+    }
+}
+
+impl Clone for ChatRequest {
+    fn clone(&self) -> Self {
+        ChatRequest {
+            model: self.model.clone(),
+            system: self.system.clone(),
+            messages: self.messages.clone(),
+            tools: self.tools.clone(),
+            tool_choice: self.tool_choice.clone(),
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            stop_sequences: self.stop_sequences.clone(),
+            stream: self.stream,
+            reasoning: self.reasoning.clone(),
+            vendor: self.vendor.as_ref().map(deep::clone_map),
+            provider_headers: self.provider_headers.as_ref().map(deep::clone_map),
+            betas: self.betas.clone(),
+            conversation_id: self.conversation_id.clone(),
+        }
+    }
+}
+
+impl Drop for ChatRequest {
+    fn drop(&mut self) {
+        if let Some(v) = self.vendor.take() {
+            deep::drop_map(v);
+        }
+        if let Some(v) = self.provider_headers.take() {
+            deep::drop_map(v);
+        }
     }
 }

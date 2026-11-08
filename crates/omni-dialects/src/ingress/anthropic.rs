@@ -402,7 +402,7 @@ fn native_block(t: &str, parsed: &Value) -> ProviderNativeBlock {
                 "type" => {}
                 "cache_control" => cache_control = ir_cache_control(present(Some(v))),
                 _ => {
-                    data.insert(k.clone(), v.clone());
+                    data.insert(k.clone(), omni_ir::deep::clone(v));
                 }
             }
         }
@@ -528,7 +528,10 @@ fn to_ir_block(b: &Value) -> ContentBlock {
         Some("text") => ContentBlock::Text(TextBlock {
             text: s("text"),
             cache_control: ir_cache_control(b.get("cache_control")),
-            citations: b.get("citations").and_then(Value::as_array).cloned(),
+            citations: b
+                .get("citations")
+                .and_then(Value::as_array)
+                .map(|c| c.iter().map(omni_ir::deep::clone).collect()),
         }),
         Some("image") => ContentBlock::Image(image_from(b)),
         Some("thinking") => ContentBlock::Thinking(ThinkingBlock {
@@ -538,7 +541,7 @@ fn to_ir_block(b: &Value) -> ContentBlock {
         Some("tool_use") => ContentBlock::ToolUse(ToolUseBlock {
             id: s("id"),
             name: s("name"),
-            input: b.get("input").cloned().unwrap_or(Value::Null),
+            input: b.get("input").map_or(Value::Null, omni_ir::deep::clone),
             cache_control: ir_cache_control(b.get("cache_control")),
         }),
         _ => {
@@ -653,7 +656,7 @@ pub fn parse(
         unreachable!("an array fails the schema")
     };
 
-    let parsed_messages = parsed["messages"].as_array().cloned().unwrap_or_default();
+    let parsed_messages: &[Value] = parsed["messages"].as_array().map_or(&[], Vec::as_slice);
     let mut messages = Vec::with_capacity(parsed_messages.len());
     for (i, m) in parsed_messages.iter().enumerate() {
         let role = role_of(string(m.get("role")));
@@ -779,7 +782,7 @@ pub fn parse(
     }
     let safeguards = matches!(extras.get("safeguards"), Some(Value::Array(a)) if !a.is_empty());
     if safeguards && let Some(system) = raw.get("system") {
-        extras.insert("system".into(), system.clone());
+        extras.insert("system".into(), omni_ir::deep::clone(system));
     }
     if !extras.is_empty() {
         let mut vendor = Map::new();

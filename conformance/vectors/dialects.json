@@ -23649,5 +23649,34 @@
         "x-ratelimit-reset-tokens": "0s"
       }
     }
-  ]
+  ],
+  "depth": {
+    "bound": 40000,
+    "cases": [
+      {
+        "depth": 39999,
+        "chatArgumentsDepth": 39999,
+        "responsesArgumentsDepth": 39999,
+        "bodyDepth": 39999,
+        "stringifyValue": null,
+        "stringifyRequest": "RangeError: Maximum call stack size exceeded."
+      },
+      {
+        "depth": 40000,
+        "chatArgumentsDepth": 40000,
+        "responsesArgumentsDepth": 40000,
+        "bodyDepth": 40000,
+        "stringifyValue": null,
+        "stringifyRequest": "RangeError: Maximum call stack size exceeded."
+      },
+      {
+        "depth": 40001,
+        "chatArgumentsDepth": 40001,
+        "responsesArgumentsDepth": 40001,
+        "bodyDepth": 40001,
+        "stringifyValue": "RangeError: Maximum call stack size exceeded.",
+        "stringifyRequest": "RangeError: Maximum call stack size exceeded."
+      }
+    ]
+  }
 }

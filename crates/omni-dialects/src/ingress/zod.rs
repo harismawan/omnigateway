@@ -15,6 +15,8 @@
 
 use serde_json::{Map, Value};
 
+use omni_ir::deep::Owned;
+
 use super::js_keys;
 
 /// One schema node.
@@ -339,6 +341,10 @@ fn disc_values<'z>(option: &'z Z, key: &str) -> &'z [&'static str] {
 /// Runs `z` on `value` (`None` is `undefined`) and returns its issues, in the
 /// order zod reports them.
 pub fn check(z: &Z, value: Option<&Value>) -> Vec<Issue> {
+    omni_ir::deep::grow(|| check_inner(z, value))
+}
+
+fn check_inner(z: &Z, value: Option<&Value>) -> Vec<Issue> {
     match z {
         Z::Str { min, max } => {
             let Some(Value::String(s)) = value else {
@@ -567,6 +573,10 @@ pub fn check(z: &Z, value: Option<&Value>) -> Vec<Issue> {
 
 /// zod's output for a value [`check`] accepted (`None` stays absent).
 pub fn rebuild(z: &Z, value: Option<&Value>) -> Option<Value> {
+    omni_ir::deep::grow(|| rebuild_inner(z, value))
+}
+
+fn rebuild_inner(z: &Z, value: Option<&Value>) -> Option<Value> {
     match z {
         Z::Arr { elem, .. } => match value {
             Some(Value::Array(items)) => Some(Value::Array(
@@ -575,7 +585,7 @@ pub fn rebuild(z: &Z, value: Option<&Value>) -> Option<Value> {
                     .map(|v| rebuild(elem, Some(v)).unwrap_or(Value::Null))
                     .collect(),
             )),
-            other => other.cloned(),
+            other => other.map(omni_ir::deep::clone),
         },
         Z::Obj { shape, .. } => match value {
             Some(Value::Object(map)) => {
@@ -588,7 +598,7 @@ pub fn rebuild(z: &Z, value: Option<&Value>) -> Option<Value> {
                 }
                 Some(Value::Object(out))
             }
-            other => other.cloned(),
+            other => other.map(omni_ir::deep::clone),
         },
         Z::Rec(inner) => match value {
             Some(Value::Object(map)) => {
@@ -603,20 +613,20 @@ pub fn rebuild(z: &Z, value: Option<&Value>) -> Option<Value> {
                 }
                 Some(Value::Object(out))
             }
-            other => other.cloned(),
+            other => other.map(omni_ir::deep::clone),
         },
         Z::Union(options) => {
             let chosen = options.iter().find(|o| check(o, value).is_empty());
             match chosen {
                 Some(o) => rebuild(o, value),
-                None => value.cloned(),
+                None => value.map(omni_ir::deep::clone),
             }
         }
         Z::Disc(key, options) => {
             let tag = value.and_then(|v| v.get(*key)).and_then(Value::as_str);
             match tag.and_then(|t| options.iter().find(|o| disc_values(o, key).contains(&t))) {
                 Some(o) => rebuild(o, value),
-                None => value.cloned(),
+                None => value.map(omni_ir::deep::clone),
             }
         }
         Z::Opt(inner) | Z::Nullable(inner) | Z::NotNull(inner, _) => match value {
@@ -629,16 +639,16 @@ pub fn rebuild(z: &Z, value: Option<&Value>) -> Option<Value> {
             Some(_) => rebuild(inner, value),
         },
         Z::Str { .. } | Z::Num { .. } | Z::Bool | Z::Null | Z::Unknown | Z::OneOf(_) => {
-            value.cloned()
+            value.map(omni_ir::deep::clone)
         }
     }
 }
 
-/// `safeParse` → the first issue, or the output.
-pub fn parse(z: &Z, value: &Value) -> Result<Value, Issue> {
+/// `safeParse` → the first issue, or the output (dropped iteratively).
+pub fn parse(z: &Z, value: &Value) -> Result<Owned, Issue> {
     let mut issues = check(z, Some(value));
     if issues.is_empty() {
-        Ok(rebuild(z, Some(value)).unwrap_or(Value::Null))
+        Ok(Owned(rebuild(z, Some(value)).unwrap_or(Value::Null)))
     } else {
         Err(issues.swap_remove(0))
     }
@@ -696,7 +706,7 @@ mod tests {
         let v = serde_json::from_str::<Value>(r#"{"a":{"__proto__":1,"y":2},"x":0,"b":1}"#)
             .expect("json");
         assert_eq!(
-            serde_json::to_string(&parse(&z, &v).expect("ok")).expect("s"),
+            serde_json::to_string(&*parse(&z, &v).expect("ok")).expect("s"),
             r#"{"b":1,"a":{"y":2}}"#
         );
     }

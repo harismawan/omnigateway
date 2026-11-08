@@ -2,6 +2,7 @@
 //!
 //! Depends on nothing but `serde_json`, mirroring `@omni/ir`.
 
+pub mod deep;
 pub mod error;
 pub mod js;
 pub mod jsjson;

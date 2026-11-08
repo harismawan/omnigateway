@@ -8,6 +8,8 @@ use omni_ir::js::safe_token;
 use omni_ir::request::{CustomToolDef, ProviderToolDef, ToolDef};
 use serde_json::{Map, Value};
 
+use omni_ir::deep::Owned;
+
 use super::zod::{self, Z};
 use super::{bad, ir_cache_control, js_keys};
 
@@ -177,12 +179,14 @@ fn field(path: &str, name: &str, value: &Value) -> Result<Value, GatewayError> {
             &format!("unsupported field \"{t}\""),
         ));
     };
-    zod::parse(&schema, value).map_err(|issue| {
-        fail(
-            &format!("{path}.{}", safe_token(name)),
-            &super::zod_detail(&issue),
-        )
-    })
+    zod::parse(&schema, value)
+        .map(Owned::into_inner)
+        .map_err(|issue| {
+            fail(
+                &format!("{path}.{}", safe_token(name)),
+                &super::zod_detail(&issue),
+            )
+        })
 }
 
 fn parse_anthropic_tool(
@@ -282,7 +286,7 @@ fn custom_tool_schema() -> Z {
 }
 
 fn parse_custom_tool(raw: &Map<String, Value>, path: &str) -> Result<ToolDef, GatewayError> {
-    let value = Value::Object(raw.clone());
+    let value = Value::Object(omni_ir::deep::clone_map(raw));
     let parsed = zod::parse(&custom_tool_schema(), &value).map_err(|issue| {
         let p = super::raw_path(&issue);
         let at = if p.is_empty() {
@@ -325,7 +329,9 @@ fn parse_custom_tool(raw: &Map<String, Value>, path: &str) -> Result<ToolDef, Ga
             .get("description")
             .and_then(Value::as_str)
             .map(str::to_string),
-        input_schema: parsed.get("input_schema").cloned().unwrap_or(Value::Null),
+        input_schema: parsed
+            .get("input_schema")
+            .map_or(Value::Null, omni_ir::deep::clone),
         cache_control: ir_cache_control(parsed.get("cache_control")),
         options: (!options.is_empty()).then_some(options),
     }))

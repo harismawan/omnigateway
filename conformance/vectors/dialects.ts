@@ -774,6 +774,48 @@ const headroomCases = [
   responses: responsesRateLimitHeaders(headroom as never, NOW),
 }));
 
+/**
+ * Deep nesting at the bound Rust enforces (`omni_ir::deep::MAX_DEPTH`).
+ *
+ * Measured, not assumed: TS parses every one of these and keeps the full
+ * nesting in the IR, then `JSON.stringify` of the request throws `RangeError`
+ * at any of them, because the request object adds levels above the value.
+ * The stringify at exactly the bound is recorded on the bare value. Recorded
+ * as counts, not bodies, so the file stays small.
+ */
+const DEPTH_BOUND = 40_000;
+const nestDeep = (d: number) => "[".repeat(d) + "0" + "]".repeat(d);
+const depthOf = (v: unknown): number => {
+  let d = 0;
+  while (Array.isArray(v)) {
+    d++;
+    v = v[0];
+  }
+  return d;
+};
+const throws = (f: () => unknown) => {
+  try {
+    f();
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+};
+const depthCases = [DEPTH_BOUND - 1, DEPTH_BOUND, DEPTH_BOUND + 1].map((d) => {
+  const chat = parseOpenAIRequest({ model: "m", messages: [user("q"), { role: "assistant", tool_calls: [{ id: "c", type: "function", function: { name: "f", arguments: nestDeep(d) } }] }] });
+  const resp = parseResponsesRequest({ model: "m", input: [user("q"), { type: "function_call", call_id: "c", name: "f", arguments: nestDeep(d) }] });
+  const body: unknown = JSON.parse(`{"model":"m","messages":[{"role":"user","content":"hi"}],"x":${nestDeep(d - 1)}}`);
+  const anth = parseAnthropicRequest(body);
+  return {
+    depth: d,
+    chatArgumentsDepth: depthOf((chat.messages[1]?.content[0] as { input: unknown }).input),
+    responsesArgumentsDepth: depthOf((resp.messages[1]?.content[0] as { input: unknown }).input),
+    bodyDepth: depthOf((anth.vendor?.anthropic as { x: unknown }).x) + 1,
+    stringifyValue: throws(() => JSON.stringify(JSON.parse(nestDeep(d)))),
+    stringifyRequest: throws(() => JSON.stringify(chat)),
+  };
+});
+
 const doc = {
   generatedBy: "conformance/vectors/dialects.ts",
   bunVersion: Bun.version,
@@ -787,5 +829,6 @@ const doc = {
   egress: { requestId: REQUEST_ID, created: CREATED, customToolNames: [...CUSTOM], ...(await egress()) },
   errorBodies,
   rateLimitHeaders: headroomCases,
+  depth: { bound: DEPTH_BOUND, cases: depthCases },
 };
 process.stdout.write(`${JSON.stringify(doc, null, 2)}\n`);

@@ -261,6 +261,12 @@ pub fn parse_json(text: &str) -> Option<Value> {
 
 /// Rewrites every `\uD8xx`–`\uDFxx` escape that is not half of a valid pair
 /// to `\ufffd`, inside strings only. `None` if nothing changed.
+/// The lone-surrogate rewrite [`parse_json`] retries with, for callers that
+/// parse through `deep::parse`.
+pub fn replace_lone_surrogates(text: &str) -> Option<String> {
+    replace_lone_surrogate_escapes(text)
+}
+
 fn replace_lone_surrogate_escapes(text: &str) -> Option<String> {
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());

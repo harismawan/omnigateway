@@ -235,10 +235,19 @@ fn content_blocks(content: Option<&Value>) -> Result<Vec<ContentBlock>, GatewayE
 }
 
 /// `parseArguments`: a malformed or non-object argument string becomes `{}`.
-fn parse_arguments(raw: &str) -> Value {
-    match omni_ir::js::parse_json(raw) {
-        Some(v @ (Value::Object(_) | Value::Array(_))) => v,
-        _ => Value::Object(Map::new()),
+///
+/// Only where `JSON.parse` would throw: valid JSON nested past
+/// `omni_ir::deep::MAX_DEPTH` is refused with [`super::TOO_DEEP`], never
+/// replaced by `{}`.
+fn parse_arguments(raw: &str) -> Result<Value, GatewayError> {
+    match super::deep_json(raw) {
+        Ok(v @ (Value::Object(_) | Value::Array(_))) => Ok(v),
+        Ok(other) => {
+            omni_ir::deep::drop(other);
+            Ok(Value::Object(Map::new()))
+        }
+        Err(omni_ir::deep::ParseError::TooDeep) => Err(bad(super::TOO_DEEP)),
+        Err(omni_ir::deep::ParseError::Syntax) => Ok(Value::Object(Map::new())),
     }
 }
 
@@ -286,7 +295,7 @@ pub fn parse(
                                     .unwrap_or_default()
                                     .starts_with("data:")
                         })
-                        .cloned()
+                        .map(omni_ir::deep::clone)
                         .collect(),
                 )
             });
@@ -340,7 +349,7 @@ pub fn parse(
                     .to_string(),
                 input: parse_arguments(
                     string(f.and_then(|f| f.get("arguments"))).unwrap_or_default(),
-                ),
+                )?,
                 cache_control: None,
             }));
         }
@@ -392,11 +401,14 @@ pub fn parse(
                     ToolDef::Portable(CustomToolDef {
                         name: string(f.get("name")).unwrap_or_default().to_string(),
                         description: string(f.get("description")).map(str::to_string),
-                        input_schema: f.get("parameters").cloned().unwrap_or_else(|| {
-                            let mut m = Map::new();
-                            m.insert("type".into(), "object".into());
-                            Value::Object(m)
-                        }),
+                        input_schema: f
+                            .get("parameters")
+                            .map(omni_ir::deep::clone)
+                            .unwrap_or_else(|| {
+                                let mut m = Map::new();
+                                m.insert("type".into(), "object".into());
+                                Value::Object(m)
+                            }),
                         cache_control: outer
                             .or_else(|| loose_cache_control(f.get("cache_control"))),
                         options: None,
