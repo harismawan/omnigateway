@@ -270,18 +270,17 @@ impl Deps {
         let after = transition(&before);
         let decided =
             after.breaker_state != before.breaker_state || after.opened_at != before.opened_at;
-        let sent = if decided {
-            self.writer.send(BreakerTransition(after.clone()))
+        // A refused write is counted in the writer's `dropped` and warned
+        // about by the writer task, rate-limited.
+        if decided {
+            self.writer.send(BreakerTransition(after.clone()));
         } else {
             self.writer.send(HealthMeasurement {
                 credential_id: after.credential_id.clone(),
                 model: after.model.clone(),
                 consecutive_failures: after.consecutive_failures,
                 rate_limited_until: after.rate_limited_until,
-            })
-        };
-        if !sent {
-            tracing::warn!(credentialId = %c.credential.id, "credential health write dropped");
+            });
         }
         overlay.insert(key, after.clone());
         self.holder.patch_health(after.clone());
@@ -610,7 +609,9 @@ fn run(mut s: RunState) -> EventsStream {
                 l.resolved_model = Some(c.target.model.clone());
             }
             // `onRoute`: the pending row on the first attempt, a route update on each failover.
-            let routed = if began {
+            // A refusal is counted in the writer's `dropped` and warned about
+            // by the writer task, rate-limited; never a line per request.
+            if began {
                 deps.writer.send(LogEvent::Route {
                     id: rid.clone(),
                     target: RouteTarget {
@@ -618,7 +619,7 @@ fn run(mut s: RunState) -> EventsStream {
                         model: c.target.model.clone(),
                         credential_id: c.credential.id.clone(),
                     },
-                })
+                });
             } else {
                 began = true;
                 deps.writer.send(LogEvent::Begin(PendingLog {
@@ -629,10 +630,7 @@ fn run(mut s: RunState) -> EventsStream {
                     resolved_provider: Some(c.target.provider.clone()),
                     resolved_model: Some(c.target.model.clone()),
                     credential_id: Some(c.credential.id.clone()),
-                }))
-            };
-            if !routed {
-                tracing::warn!(requestId = %rid, reason = "writer full", "failed to record request start");
+                }));
             }
             tracing::debug!(requestId = %rid, provider = %c.target.provider, model = %c.target.model,
                 credentialId = %c.credential.id, attempt = i + 1, "attempt started");

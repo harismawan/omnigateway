@@ -116,10 +116,10 @@ impl Finisher {
             a.release();
         }
         log.api_key_id = self.key_id.clone();
-        if !self.writer.send(LogEvent::Finish(log)) {
-            tracing::warn!(requestId = %self.request_id, reason = "writer full",
-                "failed to persist request log");
-        }
+        // A refused row is counted in the writer's `dropped`, which the
+        // writer task warns about at most once per interval. No line here:
+        // one per request is a flood exactly when the writer is behind.
+        self.writer.send(LogEvent::Finish(log));
     }
 
     /// The success path's `log(cancelled, failure)`: dispatch's log as it
