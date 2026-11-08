@@ -274,6 +274,13 @@ fn parse_anthropic_tool(
     }))
 }
 
+/// The schema, built once: it is immutable, and building it per request
+/// allocated a few hundred nodes.
+fn custom_tool_schema_cached() -> &'static Z {
+    static SCHEMA: std::sync::OnceLock<Z> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(custom_tool_schema)
+}
+
 fn custom_tool_schema() -> Z {
     use zod::{nullish, one_of, opt, rec, str, str_min};
     zod::obj(vec![
@@ -287,7 +294,7 @@ fn custom_tool_schema() -> Z {
 
 fn parse_custom_tool(raw: &Map<String, Value>, path: &str) -> Result<ToolDef, GatewayError> {
     // The schema runs on a borrowed view: `raw` is the tool object itself.
-    let parsed = zod::parse_map(&custom_tool_schema(), raw).map_err(|issue| {
+    let parsed = zod::parse_map(custom_tool_schema_cached(), raw).map_err(|issue| {
         let p = super::raw_path(&issue);
         let at = if p.is_empty() {
             path.to_string()

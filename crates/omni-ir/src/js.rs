@@ -211,13 +211,11 @@ pub fn max0(x: f64) -> f64 {
 
 /// `string.length`: UTF-16 code units.
 pub fn utf16_len(s: &str) -> usize {
-    // Every char is one unit except the astral ones (4-byte UTF-8), which are two.
+    // Every char is one unit except the astral ones (4-byte UTF-8), which are
+    // two: each non-continuation byte counts one, and a 4-byte lead one more.
+    // Branch-free, so it vectorizes.
     s.bytes()
-        .map(|b| match b {
-            0x80..=0xbf => 0,
-            0xf0..=0xff => 2,
-            _ => 1,
-        })
+        .map(|b| usize::from(b & 0xc0 != 0x80) + usize::from(b >= 0xf0))
         .sum()
 }
 

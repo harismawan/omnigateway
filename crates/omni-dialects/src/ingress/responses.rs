@@ -37,6 +37,13 @@ const KNOWN: &[&str] = &[
     "user",
 ];
 
+/// The schema, built once: it is immutable, and building it per request
+/// allocated a few hundred nodes.
+fn schema_cached() -> &'static Z {
+    static SCHEMA: std::sync::OnceLock<Z> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(schema)
+}
+
 fn schema() -> Z {
     obj(vec![
         ("model", str_between(1, super::MODEL_NAME_MAX)),
@@ -252,7 +259,7 @@ fn json_arguments(raw: Option<&Value>, call_id: &str) -> Result<Value, GatewayEr
     if text.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    match super::deep_json(text) {
+    match super::deep_json(text, usize::MAX) {
         Ok(v @ (Value::Object(_) | Value::Array(_))) => Ok(v),
         Ok(v) => Ok(json!({ "value": v })),
         Err(omni_ir::deep::ParseError::TooDeep) => Err(bad(super::TOO_DEEP)),
@@ -425,7 +432,7 @@ pub fn parse(
     if !matches!(body, Value::Object(_) | Value::Array(_)) {
         return Err(bad("request body must be a JSON object"));
     }
-    let parsed = parse_or_throw(&schema(), body)?;
+    let parsed = parse_or_throw(schema_cached(), body)?;
     let Value::Object(raw) = body else {
         unreachable!("an array fails the schema")
     };

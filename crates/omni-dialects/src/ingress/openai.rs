@@ -41,6 +41,13 @@ fn attachment() -> Z {
     ])
 }
 
+/// The schema, built once: it is immutable, and building it per request
+/// allocated a few hundred nodes.
+fn schema_cached() -> &'static Z {
+    static SCHEMA: std::sync::OnceLock<Z> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(schema)
+}
+
 fn schema() -> Z {
     let part = Z::Disc(
         "type",
@@ -240,7 +247,7 @@ fn content_blocks(content: Option<&Value>) -> Result<Vec<ContentBlock>, GatewayE
 /// `omni_ir::deep::MAX_DEPTH` is refused with [`super::TOO_DEEP`], never
 /// replaced by `{}`.
 fn parse_arguments(raw: &str) -> Result<Value, GatewayError> {
-    match super::deep_json(raw) {
+    match super::deep_json(raw, usize::MAX) {
         Ok(v @ (Value::Object(_) | Value::Array(_))) => Ok(v),
         Ok(other) => {
             omni_ir::deep::drop(other);
@@ -260,7 +267,7 @@ pub fn parse(
     if !matches!(body, Value::Object(_) | Value::Array(_)) {
         return Err(bad("request body must be a JSON object"));
     }
-    let parsed = parse_or_throw(&schema(), body)?;
+    let parsed = parse_or_throw(schema_cached(), body)?;
     let Value::Object(raw) = body else {
         unreachable!("an array fails the schema")
     };

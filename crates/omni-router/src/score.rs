@@ -6,7 +6,7 @@ use crate::rank::{Candidate, RankInput, Reasons};
 use crate::snapshot::health_key;
 use omni_ir::js::math_min;
 use omni_ir::request::ChatRequest;
-use omni_ir::tokens::{estimate_cached_input_tokens, estimate_input_tokens};
+use omni_ir::tokens::estimate_input_and_cached_tokens;
 use omni_store::models::Target;
 use omni_store::{BreakerState, CredentialHealth};
 
@@ -42,8 +42,8 @@ struct TokenEstimate {
 }
 
 fn estimate_tokens(request: &ChatRequest) -> TokenEstimate {
-    let cached = estimate_cached_input_tokens(request);
-    let fresh = (estimate_input_tokens(request) - cached).max(0.0);
+    let (input, cached) = estimate_input_and_cached_tokens(request);
+    let fresh = (input - cached).max(0.0);
     let out = request.max_tokens.map_or(EXPECTED_OUTPUT_TOKENS, |m| {
         math_min(m, EXPECTED_OUTPUT_TOKENS)
     });

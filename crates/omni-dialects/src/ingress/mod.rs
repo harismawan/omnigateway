@@ -141,8 +141,8 @@ pub fn ingest(
     // A pre-scan bounds the body's depth, JSON in its strings included: a
     // body over `SHALLOW_DEPTH` runs on a grown segment, anything else on the
     // caller's stack with nothing mapped.
-    omni_ir::deep::scope_for(body, || {
-        let value = parse_body_checked(body)?;
+    omni_ir::deep::scope_for_bound(omni_ir::deep::depth_bound(body), |bound| {
+        let value = parse_body_bounded(body, bound)?;
         let request = match surface {
             Surface::Anthropic => anthropic::parse(&value, headers, opts),
             Surface::OpenAi => openai::parse(&value, headers, opts),
@@ -178,7 +178,13 @@ pub fn parse_body(text: &str) -> Option<Owned> {
 /// `Err(BAD_REQUEST "request body must be valid JSON")` here (TS renders its
 /// SyntaxError as INTERNAL; 5b chooses), too deep is [`TOO_DEEP`].
 pub fn parse_body_checked(text: &str) -> Result<Owned, GatewayError> {
-    deep_json(text).map(Owned).map_err(|e| match e {
+    parse_body_bounded(text, usize::MAX)
+}
+
+/// [`parse_body_checked`] given `omni_ir::deep::depth_bound(text)`, which
+/// spares the parse its own depth scan.
+fn parse_body_bounded(text: &str, bound: usize) -> Result<Owned, GatewayError> {
+    deep_json(text, bound).map(Owned).map_err(|e| match e {
         omni_ir::deep::ParseError::TooDeep => bad(TOO_DEEP),
         omni_ir::deep::ParseError::Syntax => bad("request body must be valid JSON"),
     })
@@ -186,8 +192,8 @@ pub fn parse_body_checked(text: &str) -> Result<Owned, GatewayError> {
 
 /// `JSON.parse` of client text, bounded and stack-safe, with lone surrogate
 /// escapes read as U+FFFD (see `omni_ir::js::parse_json`).
-pub(crate) fn deep_json(text: &str) -> Result<Value, omni_ir::deep::ParseError> {
-    match omni_ir::deep::parse(text) {
+pub(crate) fn deep_json(text: &str, bound: usize) -> Result<Value, omni_ir::deep::ParseError> {
+    match omni_ir::deep::parse_bounded(text, bound) {
         Err(omni_ir::deep::ParseError::Syntax) if text.contains("\\u") => {
             omni_ir::js::replace_lone_surrogates(text)
                 .map_or(Err(omni_ir::deep::ParseError::Syntax), |t| {

@@ -2,7 +2,9 @@
 //! functions in `packages/ir/src/tokens.ts`, run under Bun.
 
 use omni_ir::request::ChatRequest;
-use omni_ir::tokens::{estimate_cached_input_tokens, estimate_input_tokens};
+use omni_ir::tokens::{
+    estimate_cached_input_tokens, estimate_input_and_cached_tokens, estimate_input_tokens,
+};
 use serde_json::{Value, json};
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -82,5 +84,6 @@ console.log(JSON.stringify(cases.map((c) => [estimateInputTokens(c), estimateCac
         let req: ChatRequest = serde_json::from_value(case).expect("request");
         assert_eq!(estimate_input_tokens(&req), input);
         assert_eq!(estimate_cached_input_tokens(&req), cached);
+        assert_eq!(estimate_input_and_cached_tokens(&req), (input, cached));
     }
 }

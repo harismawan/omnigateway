@@ -392,6 +392,9 @@ fn check_inner(z: &Z, value: Option<&Value>) -> Vec<Issue> {
                     received: parsed_type(value),
                 })];
             };
+            if min.is_none() && max.is_none() {
+                return Vec::new();
+            }
             let n = code_points(s);
             let mut issues = Vec::new();
             if let Some(min) = *min

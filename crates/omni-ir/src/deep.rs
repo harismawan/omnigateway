@@ -118,6 +118,14 @@ pub fn depth_bound(text: &str) -> usize {
     let mut inner: Option<Embedded> = None;
     let mut i = 0;
     while i < b.len() {
+        // Bytes other than `"`, `\` and brackets change no state, except
+        // the one byte after an embedded escape: skip runs of them.
+        if !inner.as_ref().is_some_and(|e| e.escaped) {
+            i = next_special(b, i);
+            if i >= b.len() {
+                break;
+            }
+        }
         let c = b[i];
         i += 1;
         let Some(embedded) = inner.as_mut() else {
@@ -167,6 +175,34 @@ pub fn depth_bound(text: &str) -> usize {
         inner_max = inner_max.max(embedded.bound());
     }
     outer_max + inner_max
+}
+
+/// `"`, `\\`, `[`, `]`, `{` or `}`: the only bytes [`depth_bound`] reads.
+fn special(b: u8) -> bool {
+    // `[`/`{` and `]`/`}` differ only in bit 5.
+    let folded = b | 0x20;
+    b == b'"' || b == b'\\' || folded == b'{' || folded == b'}'
+}
+
+/// The first index at or after `from` holding a [`special`] byte, or
+/// `b.len()`. Tests 32 bytes at a time, which the compiler vectorizes.
+fn next_special(b: &[u8], mut from: usize) -> usize {
+    const BLOCK: usize = 32;
+    // Fixed-size blocks, so the test below is branch-free and vectorized.
+    for block in b[from..].as_chunks::<BLOCK>().0 {
+        let mut hit = 0u8;
+        for &c in block {
+            hit |= u8::from(special(c));
+        }
+        if hit != 0 {
+            break;
+        }
+        from += BLOCK;
+    }
+    b[from..]
+        .iter()
+        .position(|&c| special(c))
+        .map_or(b.len(), |at| from + at)
 }
 
 /// The JSON tokenizer [`depth_bound`] runs over one decoded string.
@@ -224,10 +260,16 @@ impl Embedded {
 /// [`scope`] only when `text` may nest deeper than [`SHALLOW_DEPTH`]; an
 /// ordinary request runs on the caller's stack and maps nothing.
 pub fn scope_for<R>(text: &str, f: impl FnOnce() -> R) -> R {
-    if depth_bound(text) <= SHALLOW_DEPTH {
-        f()
+    scope_for_bound(depth_bound(text), |_| f())
+}
+
+/// [`scope_for`] with the [`depth_bound`] already in hand, which `f` is given
+/// (for [`parse_bounded`]).
+pub fn scope_for_bound<R>(bound: usize, f: impl FnOnce(usize) -> R) -> R {
+    if bound <= SHALLOW_DEPTH {
+        f(bound)
     } else {
-        scope(f)
+        scope(|| f(bound))
     }
 }
 
@@ -300,6 +342,36 @@ pub fn parse(text: &str) -> Result<Value, ParseError> {
     if depth_of(text) > MAX_DEPTH {
         return Err(ParseError::TooDeep);
     }
+    parse_within_bound(text)
+}
+
+/// [`parse`] given `bound`, the text's [`depth_bound`] (never below its
+/// [`depth_of`]), so the depth scan is not repeated. Over [`MAX_DEPTH`] it is
+/// [`parse`] itself.
+pub fn parse_bounded(text: &str, bound: usize) -> Result<Value, ParseError> {
+    if bound > MAX_DEPTH {
+        return parse(text);
+    }
+    if bound <= SHALLOW_DEPTH {
+        // Shallow enough for ordinary recursion on any worker stack (the
+        // threshold tests in `omni-dialects/tests/depth.rs` ingest bodies at
+        // exactly this bound on a 2 MiB thread, in debug): no stacker probe
+        // per level.
+        let mut de = serde_json::Deserializer::from_str(text);
+        de.disable_recursion_limit();
+        let value = Value::deserialize(&mut de).map_err(|_| ParseError::Syntax)?;
+        return match de.end() {
+            Ok(()) => Ok(value),
+            Err(_) => {
+                drop(value);
+                Err(ParseError::Syntax)
+            }
+        };
+    }
+    parse_within_bound(text)
+}
+
+fn parse_within_bound(text: &str) -> Result<Value, ParseError> {
     let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
     let value = {
@@ -599,6 +671,49 @@ mod tests {
             let bound = depth_bound(&text);
             assert!(bound >= truth, "case {case}: {bound} < {truth}: {text}");
         }
+    }
+
+    #[test]
+    fn the_skipping_scan_matches_a_byte_at_a_time_one() {
+        // Brackets and escapes at every offset around the 32-byte blocks.
+        let mut rng = Rng(7);
+        for _ in 0..2000 {
+            let n = rng.below(200) as usize;
+            let text: String = (0..n)
+                .map(|_| match rng.below(12) {
+                    0 => '[',
+                    1 => ']',
+                    2 => '{',
+                    3 => '}',
+                    4 => '"',
+                    5 => '\\',
+                    6 => 'u',
+                    7 => '5',
+                    _ => 'a',
+                })
+                .collect();
+            let b = text.as_bytes();
+            for from in 0..=b.len() {
+                let want = b[from..]
+                    .iter()
+                    .position(|&c| matches!(c, b'"' | b'\\' | b'[' | b']' | b'{' | b'}'))
+                    .map_or(b.len(), |at| from + at);
+                assert_eq!(next_special(b, from), want, "{text:?} from {from}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_bounded_still_refuses_past_the_bound() {
+        let deep = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
+        assert_eq!(
+            parse_bounded(&deep, depth_bound(&deep)),
+            Err(ParseError::TooDeep)
+        );
+        assert_eq!(
+            parse_bounded("[[1]]", depth_bound("[[1]]")),
+            Ok(serde_json::json!([[1]]))
+        );
     }
 
     #[test]

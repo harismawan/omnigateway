@@ -98,6 +98,73 @@ pub fn estimate_input_tokens(request: &ChatRequest) -> f64 {
 /// `estimateCachedInputTokens`: the running total through the last block
 /// carrying a cache breakpoint, in assembly order (tools, system, messages).
 pub fn estimate_cached_input_tokens(request: &ChatRequest) -> f64 {
+    estimate_input_and_cached_tokens(request).1
+}
+
+/// `(estimateInputTokens, estimateCachedInputTokens)` in one walk: each
+/// block is measured once, where calling both measures every block twice.
+/// The input total is summed in `estimateInputTokens`'s own order (system,
+/// messages, tools), so the float result is the same to the bit.
+pub fn estimate_input_and_cached_tokens(request: &ChatRequest) -> (f64, f64) {
+    let tools: Vec<f64> = request.tools.iter().flatten().map(tool_tokens).collect();
+    let system: Vec<f64> = request.system.iter().flatten().map(block_tokens).collect();
+    let messages: Vec<Vec<f64>> = request
+        .messages
+        .iter()
+        .map(|m| m.content.iter().map(block_tokens).collect())
+        .collect();
+
+    let input = system.iter().sum::<f64>()
+        + messages
+            .iter()
+            .map(|blocks| MESSAGE_OVERHEAD + blocks.iter().sum::<f64>())
+            .sum::<f64>()
+        + tools.iter().sum::<f64>();
+
+    let mut running = 0.0;
+    let mut cached = 0.0;
+    for (tool, t) in request.tools.iter().flatten().zip(&tools) {
+        running += t;
+        if tool_cache_marked(tool) {
+            cached = running;
+        }
+    }
+    for (block, t) in request.system.iter().flatten().zip(&system) {
+        running += t;
+        if block.cache_control().is_some() {
+            cached = running;
+        }
+    }
+    for (message, blocks) in request.messages.iter().zip(&messages) {
+        running += MESSAGE_OVERHEAD;
+        for (block, t) in message.content.iter().zip(blocks) {
+            running += t;
+            if block_marks_cache(block) {
+                cached = running;
+            }
+        }
+    }
+    (input, cached)
+}
+
+/// Whether a message block sets the cached-prefix end.
+fn block_marks_cache(block: &ContentBlock) -> bool {
+    if block.cache_control().is_some() {
+        return true;
+    }
+    match block {
+        ContentBlock::ToolResult(b) => {
+            b.images.iter().flatten().any(|i| i.cache_control.is_some())
+                || b.native.iter().flatten().any(|n| n.cache_control.is_some())
+        }
+        _ => false,
+    }
+}
+
+/// The two-walk form of the cached estimate, which the one-walk one is
+/// checked against in the unit test below.
+#[cfg(test)]
+fn estimate_cached_reference(request: &ChatRequest) -> f64 {
     let mut running = 0.0;
     let mut cached = 0.0;
     for tool in request.tools.iter().flatten() {
@@ -129,4 +196,36 @@ pub fn estimate_cached_input_tokens(request: &ChatRequest) -> f64 {
         }
     }
     cached
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_one_walk_estimate_matches_the_two_walk_one() {
+        let text = |t: &str, cc: bool| {
+            let mut b = serde_json::json!({ "type": "text", "text": t });
+            if cc {
+                b["cacheControl"] = serde_json::json!({ "type": "ephemeral" });
+            }
+            b
+        };
+        let req: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model": "m", "stream": true,
+            "system": [text("sys", false), text("sys2", true)],
+            "tools": [{ "kind": "portable", "name": "f", "inputSchema": { "a": 1 }, "cacheControl": { "type": "ephemeral" } }],
+            "messages": [
+                { "role": "user", "content": [text(&"é".repeat(37), false), text("x", true)] },
+                { "role": "assistant", "content": [text("y", false)] },
+                { "role": "user", "content": [{ "type": "toolResult", "toolUseId": "t", "content": "zz",
+                    "images": [{ "type": "image", "mediaType": "image/png", "data": "B", "cacheControl": { "type": "ephemeral" } }] }, text("tail", false)] }
+            ]
+        }))
+        .expect("request");
+        let (input, cached) = estimate_input_and_cached_tokens(&req);
+        assert_eq!(input.to_bits(), estimate_input_tokens(&req).to_bits());
+        assert_eq!(cached.to_bits(), estimate_cached_reference(&req).to_bits());
+        assert!(cached > 0.0 && cached < input);
+    }
 }

@@ -82,6 +82,13 @@ fn truthiness_matches_js() {
 #[test]
 fn utf16_helpers() {
     assert_eq!(js::utf16_len("a😀é"), 4);
+    // Every width, against `encode_utf16`, at lengths around vector widths.
+    for n in [0, 1, 15, 16, 17, 31, 32, 33, 100] {
+        for piece in ["a", "é", "日", "😀", "a😀é日"] {
+            let s = piece.repeat(n);
+            assert_eq!(js::utf16_len(&s), s.encode_utf16().count(), "{piece} x {n}");
+        }
+    }
     // A cut through a pair keeps the half as U+FFFD: what the TS string
     // (which keeps the lone surrogate) becomes when converted lossily.
     assert_eq!(js::utf16_prefix("ab😀c", 3), "ab\u{fffd}");

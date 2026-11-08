@@ -341,6 +341,13 @@ fn native_role(t: &str) -> Option<Role> {
     })
 }
 
+/// The schema, built once: it is immutable, and building it per request
+/// allocated a few hundred nodes.
+fn schema_cached() -> &'static Z {
+    static SCHEMA: std::sync::OnceLock<Z> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(schema)
+}
+
 fn schema() -> Z {
     obj(vec![
         ("model", str_between(1, super::MODEL_NAME_MAX)),
@@ -584,7 +591,8 @@ fn read_block(raw: &Value, role: Role, path: &str) -> Result<ContentBlock, Gatew
         })?;
         return Ok(ContentBlock::ProviderNative(native_block(t, &parsed)));
     }
-    match zod::parse(&block(), raw) {
+    static BLOCK: std::sync::OnceLock<Z> = std::sync::OnceLock::new();
+    match zod::parse(BLOCK.get_or_init(block), raw) {
         Ok(parsed) => Ok(to_ir_block(&parsed)),
         Err(issue) => {
             let union = matches!(issue.kind, Kind::InvalidUnion | Kind::NoDiscriminator(_));
@@ -651,7 +659,7 @@ pub fn parse(
     if !matches!(body, Value::Object(_) | Value::Array(_)) {
         return Err(bad("request body must be a JSON object"));
     }
-    let parsed = parse_or_throw(&schema(), body)?;
+    let parsed = parse_or_throw(schema_cached(), body)?;
     let Value::Object(raw) = body else {
         unreachable!("an array fails the schema")
     };
