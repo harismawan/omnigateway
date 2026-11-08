@@ -112,6 +112,10 @@ fn main() {
     let sse = std::fs::read(&args[2]).expect("c2000.sse");
     let h = headers();
 
+    println!("== boot ==");
+    time("PBKDF2 field key (210k iterations)", 5, || {
+        omni_crypto::field::derive_key("bench-only-encryption-key-0123456789")
+    });
     println!("== agent-100k ingest ({} bytes) ==", agent.len());
     time("depth_bound pre-scan", 2000, || {
         omni_ir::deep::depth_bound(&agent)
