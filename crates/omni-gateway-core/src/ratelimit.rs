@@ -35,6 +35,9 @@ use omni_ratelimit::{CounterSnapshot, HeadroomByDimension, Violation, Window, Wi
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub use crate::ratelimit_seed::SeedRead;
+use crate::ratelimit_seed::{MAX_PENDING_DEBITS, PendingDebit};
+
 /// The long windows, in `LONG_WINDOWS` order.
 const LONG: [Window; 2] = [Window::H5, Window::W1];
 
@@ -145,13 +148,22 @@ pub(crate) struct LongState {
     pub(crate) buckets: Buckets,
     /// Every retained completed row's `at`, ascending. Valid once seeded.
     pub(crate) stamps: VecDeque<f64>,
+    /// Debits that arrived while unseeded, reconciled at install.
+    pub(crate) pending: VecDeque<PendingDebit>,
+    /// The request ids the installed seed already counted, and until when
+    /// a late debit is checked against them.
+    pub(crate) seeded_ids: HashSet<String>,
+    pub(crate) seeded_ids_until: f64,
 }
 
 impl LongState {
-    fn new(window: Window) -> Self {
+    pub(crate) fn new(window: Window) -> Self {
         Self {
             buckets: Buckets::new(grain_ms(window), window.ms()),
             stamps: VecDeque::new(),
+            pending: VecDeque::new(),
+            seeded_ids: HashSet::new(),
+            seeded_ids_until: f64::NEG_INFINITY,
         }
     }
 
@@ -162,7 +174,7 @@ impl LongState {
         }
     }
 
-    fn push_stamp(&mut self, at: f64) {
+    pub(crate) fn push_stamp(&mut self, at: f64) {
         // Rows complete roughly in order; insert keeps it sorted when not.
         let pos = self.stamps.partition_point(|s| *s <= at);
         self.stamps.insert(pos, at);
@@ -473,12 +485,18 @@ impl RateLimiter {
     }
 
     /// `debit`: one completed request against the long windows, beside the
-    /// writer's `Finish`. `row_at` is the log row's `at`; `now` stamps the
-    /// bucket. A subject not yet seeded ignores it: the seed reads the row.
+    /// writer's `Finish` for the same `request_id`. `row_at` is the log
+    /// row's `at`; `now` stamps the bucket.
+    ///
+    /// Counted exactly once whatever the interleaving with a seed: a debit
+    /// for an unseeded window is held, and the seed's install adds it only
+    /// if the rows it read did not include `request_id`.
+    #[allow(clippy::too_many_arguments)]
     pub fn debit(
         &self,
         key_id: &str,
         requested_model: &str,
+        request_id: &str,
         tokens: f64,
         cost_usd: f64,
         row_at: f64,
@@ -499,11 +517,29 @@ impl RateLimiter {
             }
             for window in LONG {
                 let state = &mut st.long_of(&subject)[long_index(window)];
-                if state.buckets.is_seeded() {
-                    state.buckets.add(now, delta);
-                    state.push_stamp(row_at);
-                    state.trim(window, now);
+                if !state.buckets.is_seeded() {
+                    if state.pending.len() >= MAX_PENDING_DEBITS {
+                        state.pending.pop_front();
+                        tracing::warn!(subject = %subject, "rate limit pending debits full; oldest dropped");
+                    }
+                    state.pending.push_back(PendingDebit {
+                        request_id: request_id.to_owned(),
+                        row_at,
+                        now,
+                        delta,
+                    });
+                    continue;
                 }
+                if now <= state.seeded_ids_until {
+                    if state.seeded_ids.remove(request_id) {
+                        continue;
+                    }
+                } else if !state.seeded_ids.is_empty() {
+                    state.seeded_ids = HashSet::new();
+                }
+                state.buckets.add(now, delta);
+                state.push_stamp(row_at);
+                state.trim(window, now);
             }
         }
     }

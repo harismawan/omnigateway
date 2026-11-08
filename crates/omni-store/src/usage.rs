@@ -82,31 +82,33 @@ pub fn sum_buckets(
     Ok(rows)
 }
 
-/// Every done row's `at` since `since_ms`, ascending. Its first element is
-/// `oldestSince`; the limiter keeps the list so a refusal's exact reset is
-/// answered from memory instead of a store read on the request path.
-pub fn done_stamps(
+/// Every done row's `at` and request id since `since_ms`, ascending by
+/// `at`. The first `at` is `oldestSince`; the limiter keeps the stamps so a
+/// refusal's exact reset is answered from memory, and the ids so a debit
+/// racing the seed is counted exactly once.
+pub fn done_rows(
     conn: &Connection,
     api_key_id: &str,
     since_ms: i64,
     requested_model: Option<&str>,
-) -> Result<Vec<i64>, StoreError> {
+) -> Result<Vec<(i64, String)>, StoreError> {
+    let row = |r: &rusqlite::Row<'_>| Ok((r.get(0)?, r.get(1)?));
     let out = if let Some(model) = requested_model {
         let mut stmt = conn.prepare_cached(
-            "SELECT at FROM request_logs
+            "SELECT at, id FROM request_logs
               WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?
               ORDER BY at",
         )?;
-        stmt.query_map(params![api_key_id, model, since_ms], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<i64>>>()?
+        stmt.query_map(params![api_key_id, model, since_ms], row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         let mut stmt = conn.prepare_cached(
-            "SELECT at FROM request_logs
+            "SELECT at, id FROM request_logs
               WHERE api_key_id = ? AND state = 'done' AND at >= ?
               ORDER BY at",
         )?;
-        stmt.query_map(params![api_key_id, since_ms], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<i64>>>()?
+        stmt.query_map(params![api_key_id, since_ms], row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
     };
     Ok(out)
 }

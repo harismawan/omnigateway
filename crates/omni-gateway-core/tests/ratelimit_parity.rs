@@ -196,7 +196,7 @@ fn run_rust(limits_json: &str, history: &[Value], steps: &[Value]) -> Vec<Value>
                     s["cost"].as_f64().expect("c"),
                 );
                 row(&mut n, clock, &last, t, c);
-                limiter.debit("k1", &last, t, c, clock, clock);
+                limiter.debit("k1", &last, &format!("r{n}"), t, c, clock, clock);
                 out.push(Value::Null);
             }
             op => {

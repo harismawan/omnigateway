@@ -5,7 +5,7 @@ mod common;
 
 use common::{bun_available, bun_script};
 use omni_store::SqliteStore;
-use omni_store::usage::{done_stamps, sum_buckets};
+use omni_store::usage::{done_rows, sum_buckets};
 use rusqlite::params;
 use serde_json::{Value, json};
 
@@ -124,8 +124,16 @@ console.log(JSON.stringify(out));
             omni_ir::jsjson::to_string(&expected["buckets"]),
             "{case}"
         );
-        let stamps = done_stamps(store.connection(), "k1", s, m).expect("stamps");
-        assert_eq!(json!(stamps.first()), expected["oldest"], "{case}");
-        assert!(stamps.windows(2).all(|w| w[0] <= w[1]));
+        let rows = done_rows(store.connection(), "k1", s, m).expect("rows");
+        assert_eq!(
+            json!(rows.first().map(|r| r.0)),
+            expected["oldest"],
+            "{case}"
+        );
+        assert!(rows.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert!(
+            rows.iter().all(|r| !r.1.starts_with('p')),
+            "pending rows excluded"
+        );
     }
 }

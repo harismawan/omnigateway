@@ -72,6 +72,11 @@ impl H {
     /// One finished row, without telling the limiter.
     fn row(&mut self, at: f64, tokens: i64, cost: f64, model: &str) {
         self.rows += 1;
+        let id = format!("r{}", self.rows);
+        self.row_with_id(&id, at, tokens, cost, model);
+    }
+
+    fn row_with_id(&mut self, id: &str, at: f64, tokens: i64, cost: f64, model: &str) {
         let q = tokens / 4;
         self.store
             .connection()
@@ -79,7 +84,7 @@ impl H {
                 "INSERT INTO request_logs (id, at, api_key_id, requested_model, status, duration_ms,
                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
                  VALUES (?,?,?,?,200,1,?,?,?,?,?)",
-                params![format!("r{}", self.rows), at as i64, KEY, model, q, q, q, tokens - 3 * q, cost],
+                params![id, at as i64, KEY, model, q, q, q, tokens - 3 * q, cost],
             )
             .expect("row");
         rollup::rebuild_rollup(self.store.connection()).expect("rollup");
@@ -89,8 +94,10 @@ impl H {
     fn complete(&mut self, tokens: i64, cost: f64, model: &str) {
         let at = self.clock;
         self.row(at, tokens, cost, model);
+        let id = format!("r{}", self.rows);
         #[allow(clippy::cast_precision_loss)]
-        self.limiter.debit(KEY, model, tokens as f64, cost, at, at);
+        self.limiter
+            .debit(KEY, model, &id, tokens as f64, cost, at, at);
     }
 }
 
@@ -183,7 +190,7 @@ fn a_long_window_counts_the_seeded_sum_plus_what_has_been_debited_since() {
     h.row(T0 - 1000.0, 40, 0.0, "fast");
     h.preseed("fast");
     admits(h.admit("fast"));
-    h.limiter.debit(KEY, "fast", 60.0, 0.0, T0, T0);
+    h.limiter.debit(KEY, "fast", "r-extra", 60.0, 0.0, T0, T0);
     denied(h.admit("fast"));
 }
 
@@ -587,4 +594,99 @@ fn a_refusals_reset_counts_rows_debited_after_the_seed() {
     let refused = denied(h.admit("fast"));
     // The oldest debited row (T0 + 1h) ages out 5h later.
     assert_eq!(refused.retry_after_ms, 3.0 * HOUR);
+}
+
+// ---- seed boundary: every completion counted exactly once, whatever the
+// interleaving of the seed's read, its install, the row and its debit.
+
+/// A seed split into its three phases, so a test can interleave them.
+fn seed_phased(h: &mut H, between_read_and_install: impl FnOnce(&mut H)) {
+    let jobs = h.limiter.take_seed_jobs();
+    assert!(!jobs.is_empty());
+    let reads: Vec<_> = jobs
+        .into_iter()
+        .map(|job| {
+            let read = h.limiter.read_seed(&h.store, &job);
+            (job, read)
+        })
+        .collect();
+    between_read_and_install(h);
+    for (job, read) in reads {
+        h.limiter.install_seed(&job, read);
+    }
+}
+
+fn tokens_used(h: &H) -> f64 {
+    admitted(h.admit("fast"))
+        .headroom
+        .tokens
+        .map_or(-1.0, |t| t.used)
+}
+
+#[test]
+fn a_completion_between_the_seed_read_and_its_install_is_counted_once() {
+    let mut h = harness(r#"{"tokens":{"5h":100000}}"#);
+    h.row(T0 - 1000.0, 40, 0.0, "fast");
+    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
+    // Row written and debited after the aggregate was read.
+    seed_phased(&mut h, |h| h.complete(60, 0.0, "fast"));
+    assert_eq!(tokens_used(&h), 100.0);
+}
+
+#[test]
+fn a_debit_whose_row_the_writer_has_not_flushed_is_counted_once() {
+    let mut h = harness(r#"{"tokens":{"5h":100000}}"#);
+    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
+    // The debit lands first; its row is still in the writer's batch.
+    h.limiter.debit(KEY, "fast", "late", 60.0, 0.0, T0, T0);
+    seed_phased(&mut h, |_| {});
+    // Now the batch is written: the seed must not count it again later.
+    h.row_with_id("late", T0, 60, 0.0, "fast");
+    assert_eq!(tokens_used(&h), 60.0);
+}
+
+#[test]
+fn a_debit_whose_row_was_already_read_by_the_seed_is_not_counted_twice() {
+    let mut h = harness(r#"{"tokens":{"5h":100000}}"#);
+    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
+    h.row_with_id("early", T0, 60, 0.0, "fast");
+    seed_phased(&mut h, |h| {
+        // Debit arrives after the read that already saw its row.
+        h.limiter.debit(KEY, "fast", "early", 60.0, 0.0, T0, T0);
+    });
+    assert_eq!(tokens_used(&h), 60.0);
+}
+
+#[test]
+fn pending_debits_survive_a_failed_seed_and_land_with_the_next_one() {
+    let h = harness(r#"{"tokens":{"5h":100000}}"#);
+    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
+    h.limiter.debit(KEY, "fast", "unflushed", 25.0, 0.0, T0, T0);
+    h.store
+        .connection()
+        .execute_batch("ALTER TABLE request_logs RENAME TO request_logs_gone")
+        .expect("break");
+    h.seed();
+    h.store
+        .connection()
+        .execute_batch("ALTER TABLE request_logs_gone RENAME TO request_logs")
+        .expect("fix");
+    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
+    h.seed();
+    assert_eq!(tokens_used(&h), 25.0);
+}
+
+#[test]
+fn a_debit_after_the_install_for_a_row_the_seed_read_is_not_counted_twice() {
+    let mut h = harness(r#"{"tokens":{"5h":100000}}"#);
+    h.limiter.prepare(KEY, &h.limits.clone(), "fast", T0);
+    h.row_with_id("written-first", T0, 60, 0.0, "fast");
+    h.seed();
+    h.limiter
+        .debit(KEY, "fast", "written-first", 60.0, 0.0, T0, T0 + 1.0);
+    // A different completion after the install is counted normally.
+    h.limiter
+        .debit(KEY, "fast", "fresh", 5.0, 0.0, T0 + 2.0, T0 + 2.0);
+    h.at(T0 + 3.0);
+    assert_eq!(tokens_used(&h), 65.0);
 }

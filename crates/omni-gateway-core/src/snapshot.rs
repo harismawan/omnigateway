@@ -20,6 +20,7 @@ use omni_router::Snapshot;
 use omni_store::{ApiKey, CredentialHealth, LimitConfig, SqliteStore, StoreError};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// One consistent view: keys and routing read in one transaction.
@@ -47,8 +48,8 @@ impl std::ops::Deref for AuthenticatedKey {
 #[derive(Debug, Clone)]
 pub enum AuthOutcome {
     Ok(AuthenticatedKey),
-    /// Not in the snapshot: the caller may make the one fallback read
-    /// ([`SnapshotHolder::lookup_miss`]), then authenticate again.
+    /// Not in the snapshot: resolve the hash through
+    /// [`crate::miss::MissResolver::resolve`], then authenticate again.
     Miss,
     Refused(GatewayError),
 }
@@ -144,6 +145,9 @@ pub struct SnapshotHolder {
     /// `data_version` read just before the boot read, on the connection
     /// the refresher is then handed. Anything committed after it is a move.
     boot_version: i64,
+    /// Bumped by every wholesale replacement (each rebuild), so a negative
+    /// key lookup recorded before it is known to be stale.
+    generation: AtomicU64,
 }
 
 impl std::fmt::Debug for SnapshotHolder {
@@ -205,6 +209,7 @@ impl SnapshotHolder {
             current: ArcSwap::from_pointee(first),
             key,
             boot_version,
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -216,6 +221,12 @@ impl SnapshotHolder {
     /// Replaces the snapshot wholesale.
     pub fn store(&self, next: GatewaySnapshot) {
         self.current.store(Arc::new(next));
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// How many wholesale replacements have happened since boot.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Re-reads the store and swaps the result in. Blocking: call it from
@@ -241,7 +252,9 @@ impl SnapshotHolder {
 
     /// The one read a snapshot miss (a brand-new key) falls back to. A key
     /// found is added to the snapshot, so the next request does not read.
-    /// Blocking.
+    /// Blocking, and unguarded: the request path goes through
+    /// [`crate::miss::MissResolver`], which caches negatives, coalesces and
+    /// budgets these reads.
     pub fn lookup_miss(
         &self,
         store: &SqliteStore,
@@ -301,3 +314,5 @@ impl SnapshotHolder {
         })
     }
 }
+
+pub use crate::miss::{MissConfig, MissResolver, MissResult};
