@@ -172,13 +172,22 @@ fn write_failure(code: &str, message: &str, out: &mut String) {
 }
 
 /// `JSON.stringify(String(v ?? ""))`, without building the string for a
-/// string value.
+/// string value. A non-string summary is a malformed upstream and rare, so
+/// that branch may allocate its `String()` form.
 fn write_js_string(v: Option<&Value>, out: &mut String) {
     match v {
         None | Some(Value::Null) => out.push_str(r#""""#),
         Some(Value::String(s)) => write_str(s, out),
         some => write_str(&omni_ir::js::to_string(some), out),
     }
+}
+
+/// How a native `merge` payload reaches the open item.
+enum Merge {
+    /// Read from the borrowed event and copied.
+    Borrowed,
+    /// Taken out of an event the caller gave up.
+    Moved(Map<String, Value>),
 }
 
 /// `responsesStream`, one event at a time.
@@ -395,6 +404,91 @@ impl ResponsesStream {
         self.output.push_str(&out[span.0..span.1]);
     }
 
+    /// [`Self::push`] for an event the caller is done with: a native
+    /// `merge` delta's payload is moved into the open item rather than
+    /// copied. Every frame is written from borrowed data, as `push` writes it.
+    pub fn push_owned(&mut self, mut event: StreamEvent, out: &mut String) {
+        let merge = match &mut event {
+            StreamEvent::BlockDelta {
+                delta:
+                    Delta::ProviderNative {
+                        fold: Some(NativeFold::Merge),
+                        data,
+                        ..
+                    },
+                ..
+            } => Some(std::mem::take(data)),
+            _ => None,
+        };
+        match merge {
+            None => self.push(&event, out),
+            Some(data) => self.native_delta(&event, Merge::Moved(data), out),
+        }
+    }
+
+    /// A native delta for the open native item: the frame from borrowed data,
+    /// then a `merge` payload folded in (moved when the caller gave it up).
+    fn native_delta(&mut self, event: &StreamEvent, merge: Merge, out: &mut String) {
+        let StreamEvent::BlockDelta {
+            index,
+            delta:
+                Delta::ProviderNative {
+                    delta_type,
+                    fold,
+                    data,
+                    ..
+                },
+        } = event
+        else {
+            return;
+        };
+        let Some(item) = self.open.take() else {
+            return;
+        };
+        if item.ir_index != *index || item.kind != Kind::Native {
+            self.open = Some(item);
+            return;
+        }
+        let oi = item.output_index;
+        if delta_type == "reasoning_summary_text.delta" {
+            // From the moved map when there is one: the event's was taken.
+            let text = match &merge {
+                Merge::Moved(moved) => moved.get("text"),
+                Merge::Borrowed => data.get("text"),
+            };
+            let id = item.id.as_str();
+            self.frame("response.reasoning_summary_text.delta", out, |f| {
+                f.str("item_id", id)
+                    .num("output_index", oi)
+                    .num("summary_index", 0);
+                write_js_string(text, f.key("delta"));
+            });
+        }
+        let mut item = item;
+        if *fold == Some(NativeFold::Merge) {
+            match merge {
+                Merge::Moved(moved) => {
+                    for (k, v) in moved {
+                        item.native.insert(k, v);
+                    }
+                }
+                // A borrowed event has to be copied to be kept; `push_owned`
+                // moves it instead.
+                Merge::Borrowed => {
+                    for (k, v) in data {
+                        item.native.insert(k.clone(), omni_ir::deep::clone(v));
+                    }
+                }
+            }
+        }
+        self.open = Some(item);
+    }
+
+    /// The open item's retained native payload (diagnostics and tests).
+    pub fn open_native(&self) -> Option<&Map<String, Value>> {
+        self.open.as_ref().map(|o| &o.native)
+    }
+
     pub fn push(&mut self, event: &StreamEvent, out: &mut String) {
         match event {
             StreamEvent::Start { model, .. } => {
@@ -505,28 +599,10 @@ impl ResponsesStream {
                             });
                         }
                     }
-                    Delta::ProviderNative {
-                        delta_type,
-                        fold,
-                        data,
-                        ..
-                    } if kind == Kind::Native => {
-                        if delta_type == "reasoning_summary_text.delta" {
-                            let id = item.id.as_str();
-                            self.frame("response.reasoning_summary_text.delta", out, |f| {
-                                f.str("item_id", id)
-                                    .num("output_index", oi)
-                                    .num("summary_index", 0);
-                                write_js_string(data.get("text"), f.key("delta"));
-                            });
-                        }
-                        if *fold == Some(NativeFold::Merge) {
-                            // Folded into the item, which holds it until it
-                            // closes: once per merge, not per text delta.
-                            for (k, v) in data {
-                                item.native.insert(k.clone(), omni_ir::deep::clone(v));
-                            }
-                        }
+                    Delta::ProviderNative { .. } if kind == Kind::Native => {
+                        self.open = Some(item);
+                        self.native_delta(event, Merge::Borrowed, out);
+                        return;
                     }
                     _ => {}
                 }

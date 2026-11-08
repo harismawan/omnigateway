@@ -187,3 +187,115 @@ fn a_streamed_item_is_written_once_and_reused_by_the_terminal_snapshot() {
     assert_eq!(all.matches(item).count(), 2, "{all}");
     assert!(all.contains(&format!(r#""output":[{item}]"#)));
 }
+
+#[test]
+fn an_owned_native_merge_is_moved_into_the_item_not_copied() {
+    use omni_ir::stream::NativeFold;
+    let mut enc = ResponsesStream::new(ResponsesRender {
+        request_id: "req_1".into(),
+        created: 1,
+        custom_tool_names: HashSet::new(),
+    });
+    let mut buf = String::new();
+    enc.push(
+        &StreamEvent::Start {
+            id: "u".into(),
+            model: "m".into(),
+        },
+        &mut buf,
+    );
+    enc.push(
+        &StreamEvent::BlockStart {
+            index: 0,
+            block: ContentBlockStart::ProviderNative {
+                provider: "openai".into(),
+                block_type: "reasoning".into(),
+                data: Map::new(),
+            },
+        },
+        &mut buf,
+    );
+    let blob = "e".repeat(4096);
+    let at = blob.as_ptr();
+    let mut data = Map::new();
+    data.insert("encrypted_content".into(), serde_json::Value::String(blob));
+    enc.push_owned(
+        StreamEvent::BlockDelta {
+            index: 0,
+            delta: Delta::ProviderNative {
+                provider: "openai".into(),
+                delta_type: "output_item.done".into(),
+                fold: Some(NativeFold::Merge),
+                data,
+            },
+        },
+        &mut buf,
+    );
+    let kept = enc.open_native().expect("open item")["encrypted_content"]
+        .as_str()
+        .expect("string");
+    assert_eq!(kept.len(), 4096);
+    assert_eq!(
+        kept.as_ptr(),
+        at,
+        "the merged payload was copied, not moved"
+    );
+}
+
+#[test]
+fn objects_without_index_keys_build_no_key_order_vector() {
+    use omni_ir::jsjson::key_order_builds;
+    let plain = native_map();
+    let mut numeric = Map::new();
+    numeric.insert("b".into(), json!(1));
+    numeric.insert("7".into(), json!(2));
+    let delta = |data| StreamEvent::BlockDelta {
+        index: 0,
+        delta: Delta::ProviderNative {
+            provider: "anthropic".into(),
+            delta_type: "citations_delta".into(),
+            fold: None,
+            data,
+        },
+    };
+    let start = |data| StreamEvent::BlockStart {
+        index: 0,
+        block: ContentBlockStart::ProviderNative {
+            provider: "anthropic".into(),
+            block_type: "web_search_tool_result".into(),
+            data,
+        },
+    };
+    let mut buf = String::new();
+    let mut enc = StreamEncoder::Anthropic(AnthropicStream::new("r"));
+    enc.push(
+        &StreamEvent::Start {
+            id: "u".into(),
+            model: "m".into(),
+        },
+        &mut buf,
+    );
+    let before = key_order_builds();
+    enc.push(&start(plain.clone()), &mut buf);
+    for _ in 0..100 {
+        enc.push(&delta(plain.clone()), &mut buf);
+        buf.clear();
+    }
+    let mut v = String::new();
+    omni_ir::jsjson::write_value(&serde_json::Value::Object(plain.clone()), &mut v);
+    assert_eq!(
+        key_order_builds(),
+        before,
+        "the common path built a key-order Vec"
+    );
+    enc.push(&delta(numeric.clone()), &mut buf);
+    assert!(
+        buf.contains(r#"{"7":2,"type":"citations_delta","b":1}"#),
+        "{buf}"
+    );
+    assert_eq!(
+        key_order_builds(),
+        before + 1,
+        "the index-key path hoists once"
+    );
+}

@@ -58,6 +58,20 @@ fn encode(mut enc: StreamEncoder, evs: &[StreamEvent]) -> String {
     all
 }
 
+/// The same, through `push_owned` with owned events.
+fn encode_owned(mut enc: StreamEncoder, evs: &[StreamEvent]) -> String {
+    let mut buf = String::new();
+    let mut all = String::new();
+    for e in evs {
+        enc.push_owned(e.clone(), &mut buf);
+        all.push_str(&buf);
+        buf.clear();
+    }
+    enc.finish(&mut buf);
+    all.push_str(&buf);
+    all
+}
+
 fn check(
     dialect: &str,
     make: impl Fn() -> StreamEncoder,
@@ -74,6 +88,12 @@ fn check(
         if got != want {
             failures.push(format!(
                 "{dialect}/{name}: stream\n got: {got}\nwant: {want}"
+            ));
+        }
+        let owned = encode_owned(make(), &evs);
+        if owned != want {
+            failures.push(format!(
+                "{dialect}/{name}: push_owned\n got: {owned}\nwant: {want}"
             ));
         }
         let got = jsjson::to_string(&respond(&evs));

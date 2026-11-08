@@ -88,6 +88,16 @@ impl StreamEncoder {
         }
     }
 
+    /// [`Self::push`] for an event the caller no longer needs, which lets an
+    /// encoder move what it must retain instead of copying it. **5b's stream
+    /// loop should call this.**
+    pub fn push_owned(&mut self, event: StreamEvent, out: &mut String) {
+        match self {
+            StreamEncoder::Responses(e) => e.push_owned(event, out),
+            other => other.push(&event, out),
+        }
+    }
+
     /// The upstream stream ended: appends the frames TS writes after its loop.
     pub fn finish(&mut self, out: &mut String) {
         match self {

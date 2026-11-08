@@ -443,7 +443,22 @@ fn array_index_utf16(key: &[u16]) -> Option<u32> {
 }
 
 /// Indices of `keys` in JS enumeration order.
+/// How many key-order vectors this thread has built: a probe for the claim
+/// that only objects with array-index keys pay for one.
+pub fn key_order_builds() -> usize {
+    KEY_ORDER_BUILDS.with(std::cell::Cell::get)
+}
+
+thread_local! {
+    static KEY_ORDER_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_key_order_build() {
+    KEY_ORDER_BUILDS.with(|c| c.set(c.get() + 1));
+}
+
 fn enumeration_order<K>(keys: &[K], index_of: impl Fn(&K) -> Option<u32>) -> Vec<usize> {
+    note_key_order_build();
     let mut indexed: Vec<(u32, usize)> = Vec::new();
     let mut named: Vec<usize> = Vec::with_capacity(keys.len());
     for (position, key) in keys.iter().enumerate() {
