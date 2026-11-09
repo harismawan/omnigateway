@@ -81,10 +81,12 @@ enum Open {
 /// `decodeCustomChat`.
 #[derive(Debug, Default)]
 pub struct ChatDecoder {
+    identity_budget: super::IdentityBudget,
     started: bool,
     stop_reason: Option<StopReason>,
     usage: Usage,
     tool_index: HashMap<JsKey, u32>,
+    argument_depth: HashMap<u32, super::ArgumentDepth>,
     keys: KeyMint,
     next_index: u32,
     open: Option<(Open, u32)>,
@@ -204,6 +206,7 @@ impl ChatDecoder {
             let index = match self.tool_index.get(&key) {
                 Some(&index) => index,
                 None => {
+                    self.identity_budget.add(key.bytes())?;
                     let id = match prop(call, "id") {
                         None | Some(Value::Null) => {
                             format!("call_{}", js::to_string(Some(&wire_index)))
@@ -221,6 +224,7 @@ impl ChatDecoder {
                 }
             };
             if let Some(args) = nonempty(prop(function, "arguments")) {
+                self.argument_depth.entry(index).or_default().push(args)?;
                 out.push_back(StreamEvent::BlockDelta {
                     index,
                     delta: Delta::ToolJson {

@@ -1,5 +1,24 @@
 import { collect, type StreamEvent } from "../packages/ir/src/stream";
 import { decodeCustomChat, decodeCustomResponses } from "../packages/providers/src/custom/decode";
+for (const depth of [200, 512, 40000]) {
+  const nested = "[".repeat(depth - 2) + "0" + "]".repeat(depth - 2);
+  for (const field of ["usage", "ignored"]) {
+    async function* chat() {
+      yield {event:"message",data:`{"choices":[{"delta":{"content":"hello"}}],"${field}":{"extra":${nested}}}`};
+      yield {event:"message",data:"[DONE]"};
+    }
+    async function* responses() {
+      yield {event:"response.output_text.delta",data:`{"delta":"hello","${field}":{"extra":${nested}}}`};
+      yield {event:"response.completed",data:'{"response":{"status":"completed"}}'};
+    }
+    for (const stream of [decodeCustomChat(chat()),decodeCustomResponses(responses())]) {
+      let text="";
+      for await(const e of stream) if(e.type==="blockDelta" && e.delta.type==="text") text+=e.delta.text;
+      if(text!=="hello") throw Error(`${depth} ${field}`);
+    }
+    console.log(depth, field, "preserved");
+  }
+}
 for (const depth of [150, 512, 40000]) {
   const raw = "[".repeat(depth) + "0" + "]".repeat(depth);
   for (const protocol of ["chat", "responses"]) {

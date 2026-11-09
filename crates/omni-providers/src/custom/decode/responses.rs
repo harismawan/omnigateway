@@ -50,6 +50,8 @@ const KNOWN_RESPONSES_EVENTS: [&str; 24] = [
 /// `decodeCustomResponses`.
 #[derive(Debug, Default)]
 pub struct ResponsesDecoder {
+    identity_budget: super::IdentityBudget,
+    argument_depth: std::collections::HashMap<u32, super::ArgumentDepth>,
     /// Keyed by the template string `${output_index}:${content_index}`.
     indices: HashMap<String, u32>,
     next: u32,
@@ -65,19 +67,20 @@ impl ResponsesDecoder {
         Self::default()
     }
 
-    fn ir_index(&mut self, output: &Value, content: &Value) -> u32 {
+    fn ir_index(&mut self, output: &Value, content: &Value) -> Result<u32, DecodeError> {
         let key = format!(
             "{}:{}",
             js::to_string(Some(output)),
             js::to_string(Some(content))
         );
         if let Some(&i) = self.indices.get(&key) {
-            return i;
+            return Ok(i);
         }
+        self.identity_budget.add(key.len())?;
         let assigned = self.next;
         self.next += 1;
         self.indices.insert(key, assigned);
-        assigned
+        Ok(assigned)
     }
 }
 
@@ -135,8 +138,11 @@ impl StreamDecoder for ResponsesDecoder {
                     match prop(item, "type").and_then(Value::as_str) {
                         Some("reasoning") => {
                             let key = self.keys.key(&output);
+                            if !self.owns_block.contains(&key) {
+                                self.identity_budget.add(key.bytes())?;
+                            }
                             self.owns_block.insert(key);
-                            let index = self.ir_index(&output, &zero);
+                            let index = self.ir_index(&output, &zero)?;
                             out.push_back(StreamEvent::BlockStart {
                                 index,
                                 block: ContentBlockStart::Thinking { signed: None },
@@ -145,8 +151,11 @@ impl StreamDecoder for ResponsesDecoder {
                         Some("function_call") => {
                             self.saw_tool_call = true;
                             let key = self.keys.key(&output);
+                            if !self.owns_block.contains(&key) {
+                                self.identity_budget.add(key.bytes())?;
+                            }
                             self.owns_block.insert(key);
-                            let index = self.ir_index(&output, &zero);
+                            let index = self.ir_index(&output, &zero)?;
                             out.push_back(StreamEvent::BlockStart {
                                 index,
                                 block: ContentBlockStart::ToolUse {
@@ -161,7 +170,7 @@ impl StreamDecoder for ResponsesDecoder {
                 "response.content_part.added" => {
                     if prop(prop(d, "part"), "type").and_then(Value::as_str) == Some("output_text")
                     {
-                        let index = self.ir_index(&output, &content);
+                        let index = self.ir_index(&output, &content)?;
                         out.push_back(StreamEvent::BlockStart {
                             index,
                             block: ContentBlockStart::Text,
@@ -169,7 +178,7 @@ impl StreamDecoder for ResponsesDecoder {
                     }
                 }
                 "response.output_text.delta" => {
-                    let index = self.ir_index(&output, &content);
+                    let index = self.ir_index(&output, &content)?;
                     out.push_back(StreamEvent::BlockDelta {
                         index,
                         delta: Delta::Text {
@@ -178,7 +187,7 @@ impl StreamDecoder for ResponsesDecoder {
                     });
                 }
                 "response.reasoning_summary_text.delta" => {
-                    let index = self.ir_index(&output, &zero);
+                    let index = self.ir_index(&output, &zero)?;
                     out.push_back(StreamEvent::BlockDelta {
                         index,
                         delta: Delta::Thinking {
@@ -187,7 +196,11 @@ impl StreamDecoder for ResponsesDecoder {
                     });
                 }
                 "response.function_call_arguments.delta" => {
-                    let index = self.ir_index(&output, &zero);
+                    let index = self.ir_index(&output, &zero)?;
+                    self.argument_depth
+                        .entry(index)
+                        .or_default()
+                        .push(prop(d, "delta").and_then(Value::as_str).unwrap_or(""))?;
                     out.push_back(StreamEvent::BlockDelta {
                         index,
                         delta: Delta::ToolJson {
@@ -196,14 +209,15 @@ impl StreamDecoder for ResponsesDecoder {
                     });
                 }
                 "response.content_part.done" => {
-                    let index = self.ir_index(&output, &content);
+                    let index = self.ir_index(&output, &content)?;
                     out.push_back(StreamEvent::BlockEnd { index });
                 }
                 "response.output_item.done" => {
                     // A fresh object key never matches, exactly as `Set.delete`.
                     let key = self.keys.key(&output);
                     if self.owns_block.remove(&key) {
-                        let index = self.ir_index(&output, &zero);
+                        self.identity_budget.remove(key.bytes());
+                        let index = self.ir_index(&output, &zero)?;
                         out.push_back(StreamEvent::BlockEnd { index });
                     }
                 }

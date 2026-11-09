@@ -20,6 +20,81 @@ mod responses;
 pub use chat::ChatDecoder;
 pub use responses::ResponsesDecoder;
 
+#[derive(Debug, Default)]
+pub(super) struct IdentityBudget {
+    entries: usize,
+    bytes: usize,
+}
+impl IdentityBudget {
+    pub(super) fn remove(&mut self, bytes: usize) {
+        self.entries -= 1;
+        self.bytes -= bytes;
+    }
+    pub(super) fn add(&mut self, bytes: usize) -> Result<(), DecodeError> {
+        if self.entries == 4096 || bytes > 1024 * 1024 - self.bytes {
+            return Err(DecodeError::Gateway(omni_ir::error::GatewayError::new(
+                omni_ir::error::ErrorCode::Upstream,
+                "upstream decoder identity budget exceeded",
+            )));
+        }
+        self.entries += 1;
+        self.bytes += bytes;
+        Ok(())
+    }
+}
+
+impl JsKey {
+    pub(super) fn bytes(&self) -> usize {
+        if let Self::String(s) = self {
+            s.len()
+        } else {
+            0
+        }
+    }
+}
+
+/// Container depth across argument fragments, including split string escapes.
+/// The same lexical policy as deep::depth_of; syntax remains the collector's
+/// concern, preserving malformed-input fallback below the ceiling.
+#[derive(Debug, Default)]
+pub(super) struct ArgumentDepth {
+    depth: usize,
+    quoted: bool,
+    escaped: bool,
+}
+
+impl ArgumentDepth {
+    pub(super) fn push(&mut self, text: &str) -> Result<(), DecodeError> {
+        for b in text.bytes() {
+            if self.quoted {
+                if self.escaped {
+                    self.escaped = false;
+                } else if b == b'\\' {
+                    self.escaped = true;
+                } else if b == b'"' {
+                    self.quoted = false;
+                }
+            } else {
+                match b {
+                    b'"' => self.quoted = true,
+                    b'[' | b'{' => {
+                        self.depth += 1;
+                        if self.depth > omni_ir::deep::MAX_DEPTH {
+                            return Err(DecodeError::Gateway(omni_ir::error::GatewayError::new(
+                                omni_ir::error::ErrorCode::Upstream,
+                                "tool arguments exceed JSON depth 40000",
+                            )));
+                        }
+                    }
+                    b']' | b'}' => self.depth = self.depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A JS `Map`/`Set` key under SameValueZero. Objects and arrays parsed from
 /// JSON are distinct identities, so each gets a key no other value equals.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
