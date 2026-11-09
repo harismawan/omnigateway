@@ -48,3 +48,48 @@ fn mutation_is_visible_to_other_connection_and_auth_reader() {
     assert!(!key.usable(100));
     assert_eq!(key.hash, hash);
 }
+
+#[test]
+fn minted_secret_roundtrips_only_as_hash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::open(dir.path().join("db"), 0).expect("store");
+    let raw = omni_crypto::apikey::generate();
+    let hash = omni_crypto::apikey::hash(&raw);
+    let key = keys::ApiKey {
+        id: "minted".into(),
+        label: "mint".into(),
+        prefix: omni_crypto::apikey::prefix(&raw),
+        hash: hash.clone(),
+        model_allowlist: None,
+        limits: Some(Default::default()),
+        body_logging_opt_out: true,
+        created_at: 100,
+        revoked_at: None,
+        expires_at: Some(200),
+        guardrail_policy: None,
+        smart_routing: false,
+    };
+    keys::create(store.connection(), &key).expect("create");
+    let found = keys::find_by_hash(store.connection(), &hash)
+        .expect("lookup")
+        .expect("key");
+    assert!(found.usable(199));
+    assert!(!found.usable(200));
+    assert_eq!(found, key);
+    assert_ne!(found.hash, raw);
+    keys::edit(
+        store.connection(),
+        "minted",
+        KeyEdit::Limits("{\"concurrency\":2}"),
+    )
+    .expect("limits");
+    assert_eq!(
+        keys::find_by_hash(store.connection(), &hash)
+            .expect("lookup")
+            .expect("key")
+            .limits
+            .expect("limits")
+            .to_json()["concurrency"],
+        2
+    );
+}

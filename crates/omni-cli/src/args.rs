@@ -13,7 +13,14 @@ pub fn resolve(args: &[String]) -> Option<(String, Vec<String>)> {
         && args.get(i + 1).is_some_and(|s| {
             matches!(
                 s.as_str(),
-                "list" | "models" | "guardrail" | "smart-routing" | "revoke" | "expiry"
+                "list"
+                    | "models"
+                    | "guardrail"
+                    | "smart-routing"
+                    | "revoke"
+                    | "expiry"
+                    | "limits"
+                    | "create"
             )
         })
     {
@@ -63,7 +70,14 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             .map_or((&token[2..], None), |(k, v)| (k, Some(v)));
         match name {
             name if matches!(name, "root" | "db")
+                || (command == "create"
+                    && matches!(
+                        name,
+                        "label" | "allow" | "limit" | "model-limit" | "expires" | "policy"
+                    ))
                 || (command == "expiry" && name == "at")
+                || (command == "limits"
+                    && matches!(name, "set" | "unset" | "model-limit" | "unset-model-limit"))
                 || (command == "models" && name == "allow")
                 || (command == "guardrail" && matches!(name, "policy" | "policy-file")) =>
             {
@@ -84,9 +98,18 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 if name == "allow" {
                     allow.push(value.clone());
                 }
+                if command == "create" && matches!(name, "limit" | "model-limit") {
+                    allow.push(format!("{name}\0{value}"));
+                }
+                if command == "limits"
+                    && matches!(name, "set" | "unset" | "model-limit" | "unset-model-limit")
+                {
+                    allow.push(format!("{name}\0{value}"));
+                }
                 flags.insert(name.into(), value);
             }
             name if matches!(name, "json" | "no-color" | "yes" | "help" | "version")
+                || (command == "create" && matches!(name, "smart-routing" | "no-bodies"))
                 || (command == "expiry" && name == "never")
                 || (command == "models" && matches!(name, "all" | "none"))
                 || (command == "guardrail" && name == "clear")

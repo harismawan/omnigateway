@@ -2,6 +2,12 @@ use std::{collections::HashMap, io::IsTerminal};
 
 pub fn usage(command: &str) -> &'static str {
     match command {
+        "create" => {
+            "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--model-limit <model>:<d>:<w>=N ...] [--expires <when>] [--policy <text>] [--smart-routing] [--no-bodies]"
+        }
+        "limits" => {
+            "keys limits <id> [--set <d>:<w>=N ...] [--unset <d>:<w> ...] [--model-limit <model>:<d>:<w>=N ...] [--unset-model-limit <model>:<d>[:<w>] ...]"
+        }
         "expiry" => "keys expiry <id> [--at <when>] [--never]",
         "models" => "keys models <id> [--allow <model> ...] [--all] [--none]",
         "guardrail" => "keys guardrail <id> [--policy <text> | --policy-file <path> | --clear]",
@@ -19,6 +25,56 @@ pub fn run(
 ) -> Result<String, (u8, String)> {
     let fail = |s: String| (1, s);
     let usage = |s: &str| (2, s.to_owned());
+    if command == "create" {
+        let entries: Vec<_> = allow
+            .iter()
+            .filter(|v| v.contains('\0'))
+            .map(|v| v.replacen("limit\0", "set\0", usize::from(v.starts_with("limit\0"))))
+            .collect();
+        let limits = crate::limits::edit(&serde_json::json!({}), &entries)
+            .map_err(|(code, e)| (code, e.replace("--set", "--limit")))?;
+        let store = crate::context::open(flags).map_err(fail)?;
+        let expiry = flags
+            .get("expires")
+            .map(|raw| {
+                crate::date::parse(raw).ok_or_else(|| {
+                    (
+                        2,
+                        format!("--expires must be a date, e.g. 2030-01-01, got \"{raw}\""),
+                    )
+                })
+            })
+            .transpose()?;
+        let input = omni_control::keys::CreateKey {
+            label: flags
+                .get("label")
+                .cloned()
+                .unwrap_or_else(|| "api key".into()),
+            models: flags.contains_key("allow").then(|| {
+                allow
+                    .iter()
+                    .filter(|v| !v.contains('\0'))
+                    .cloned()
+                    .collect()
+            }),
+            limits,
+            no_bodies: flags.contains_key("no-bodies"),
+            expiry,
+            policy: flags.get("policy").cloned(),
+            smart: flags.contains_key("smart-routing"),
+        };
+        let created =
+            omni_control::keys::create_key(&store, input, chrono::Utc::now().timestamp_millis())
+                .map_err(fail)?;
+        if flags.contains_key("json") {
+            return Ok(
+                omni_ir::jsjson::stringify_pretty(&omni_ir::jsjson::JsValue::from(&created))
+                    .expect("created"),
+            );
+        }
+        eprintln!("this key is shown once and stored only as a hash");
+        return Ok(created["key"].as_str().expect("key").into());
+    }
     let id = positional
         .first()
         .ok_or_else(|| usage("key id is required"))?;
@@ -43,7 +99,22 @@ pub fn run(
         .position(|k| k["id"] == *id)
         .ok_or_else(|| fail(format!("no api key \"{id}\"")))?;
     let key = &listing.data["keys"][index];
+    let replaced = command == "limits" && !allow.is_empty() && key["limits"].is_null();
     match command {
+        "limits" if !allow.is_empty() => {
+            if replaced {
+                if allow.iter().any(|e| e.starts_with("unset")) {
+                    return Err(fail(format!(
+                        "the stored limits for \"{id}\" cannot be read, so there is nothing to unset; replace them with --set instead"
+                    )));
+                }
+                if !has("json") {
+                    eprintln!("the stored limits could not be read and are being replaced");
+                }
+            }
+            let limits = crate::limits::edit(&key["limits"], allow)?;
+            omni_control::keys::set_limits(&store, id, &limits).map_err(fail)?;
+        }
         "expiry" if has("at") || has("never") => {
             if has("at") && has("never") {
                 return Err(usage("--at and --never cannot be combined"));
@@ -139,6 +210,9 @@ pub fn run(
         .position(|key| key["id"] == *id)
         .ok_or_else(|| fail(format!("no api key \"{id}\"")))?;
     if has("json") {
+        if replaced {
+            listing.data["keys"][index]["limitsReplaced"] = true.into();
+        }
         return Ok(listing.one_json(index));
     }
     let key = &listing.data["keys"][index];
@@ -153,6 +227,7 @@ pub fn run(
         key["prefix"].as_str().expect("stored prefix")
     );
     Ok(match command {
+        "limits" => crate::limits::human(key, &head),
         "expiry" => {
             if key["expiresAt"].is_null() {
                 format!("{head}\nexpires: never")

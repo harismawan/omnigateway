@@ -1061,6 +1061,7 @@ dependencies = [
 name = "omni-control"
 version = "0.16.0"
 dependencies = [
+ "omni-crypto",
  "omni-ir",
  "omni-store",
  "serde_json",

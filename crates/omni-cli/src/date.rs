@@ -2,6 +2,38 @@
 //! legacy dates use the process local timezone, as the frozen Bun command does.
 use chrono::{Local, NaiveDate, TimeZone};
 
+fn local(naive: &chrono::NaiveDateTime) -> Option<i64> {
+    if let Some(date) = Local.from_local_datetime(naive).earliest() {
+        let mut stamp = date.timestamp_millis();
+        // Some host local-time adapters return a single side of a fold.
+        // Validate earlier candidates by roundtripping through the timezone.
+        for minutes in 1..=1440 {
+            let candidate = stamp - i64::from(minutes) * 60000;
+            if Local
+                .timestamp_millis_opt(candidate)
+                .single()
+                .is_some_and(|d| d.naive_local() == *naive)
+            {
+                stamp = candidate;
+                break;
+            }
+        }
+        return Some(stamp);
+    }
+    // Date's compatible disambiguation advances through a DST gap using the
+    // offset before the transition; folds choose the earlier instant above.
+    for minutes in 1..=1440 {
+        let before = naive.checked_sub_signed(chrono::Duration::minutes(minutes))?;
+        if let Some(date) = Local.from_local_datetime(&before).earliest() {
+            return Some(
+                naive.and_utc().timestamp_millis()
+                    - i64::from(date.offset().local_minus_utc()) * 1000,
+            );
+        }
+    }
+    None
+}
+
 fn civil(year: i64, month: i64, day: i64) -> i64 {
     let y = year - i64::from(month <= 2);
     let era = y.div_euclid(400);
@@ -118,16 +150,39 @@ fn iso(raw: &str) -> Option<i64> {
         Some(offset) => Some(stamp - offset),
         None => {
             let naive = chrono::DateTime::from_timestamp_millis(stamp)?.naive_utc();
-            Local
-                .from_local_datetime(&naive)
-                .earliest()
-                .map(|d| d.timestamp_millis())
+            local(&naive)
         }
     }
 }
 
 fn legacy(raw: &str) -> Option<i64> {
     let raw = omni_ir::js::trim(raw);
+    let slash: Vec<_> = raw.split('/').collect();
+    if slash.len() == 3
+        && slash
+            .iter()
+            .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+    {
+        let a: i32 = slash[0].parse().ok()?;
+        let b: u32 = slash[1].parse().ok()?;
+        let c: i32 = slash[2].parse().ok()?;
+        let (y, m, d) = if a >= 100 {
+            (a, b, c as u32)
+        } else {
+            (
+                if c < 50 {
+                    2000 + c
+                } else if c < 100 {
+                    1900 + c
+                } else {
+                    c
+                },
+                a as u32,
+                b,
+            )
+        };
+        return local(&NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?);
+    }
     if let Some(tail) = raw.strip_prefix("-000000-") {
         return legacy(&format!("2001-{tail}"));
     }

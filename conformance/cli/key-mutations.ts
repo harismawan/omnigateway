@@ -49,6 +49,72 @@ try {
   }
   writeFileSync(join(root, "policy"), "  Work only.\nRefuse roleplay.\n");
   const cases = [
+    ...["2030/01/01", "01/02/30", "2030-03-10T02:30:00", "2030-11-03T01:30:00"].map((at) => [
+      "expiry",
+      "k",
+      "--at",
+      at,
+      "--json",
+    ]),
+    ["limits", "k"],
+    ["limits", "k", "--set", "requests:1m=0x10", "--set", "concurrency=2", "--json"],
+    [
+      "limits",
+      "k",
+      "--model-limit",
+      "llama3:8b:tokens:1w=100",
+      "--model-limit",
+      "2:concurrency=1",
+      "--model-limit",
+      "constructor:requests:5h=2",
+      "--json",
+    ],
+    ["limits", "k", "--unset", "requests:1m", "--set", "requests:1m=5", "--json"],
+    ["limits", "k", "--unset-model-limit", "llama3:8b:tokens:1w", "--json"],
+    ["limits", "k"],
+    ["limits", "k", "--set", "spend:5h=0.01"],
+    ["limits", "k", "--unset-model-limit", "absent:concurrency"],
+    ["limits", "k", "--unset", "__proto__"],
+    ["limits", "k", "--unset", "concurrency", "--unset", "concurrency"],
+    ["limits", "k", "--set", "spend:5h=2.5", "--set", "tokens:1w=0b100"],
+    [
+      "limits",
+      "k",
+      "--model-limit",
+      "tier=gold:concurrency=2",
+      "--model-limit",
+      "toString:tokens:1m=3",
+      "--json",
+    ],
+    ["limits", "k", "--model-limit", "__proto__:concurrency=1"],
+    ["limits", "k", "--model-limit", "x:requests=1"],
+    [
+      "limits",
+      "k",
+      "--model-limit",
+      "x:requests:1m=2",
+      "--model-limit",
+      "x:requests:1m=3",
+      "--json",
+    ],
+    ["limits", "k", "--set", "foo🌍=2"],
+    ["limits", "k", "--set", "requests:1m=9007199254740992"],
+    ["limits", "k", "--set", "requests=2"],
+    ["limits", "k", "--set", "concurrency:1m=2"],
+    ...[
+      "requests",
+      "requests:__proto__=2",
+      "models=2",
+      "foo=1",
+      "requests:9m=2",
+      "tokens:1m=1.2",
+      "spend:1m=1",
+      "concurrency=0",
+      "requests:1m=",
+      "requests:1m=Infinity",
+    ].map((set) => ["limits", "k", "--set", set]),
+    ["limits", "k", "--unset", "requests:5h"],
+    ["limits", "missing", "--set", "bad"],
     ["expiry", "k"],
     ["expiry", "k", "--at", "2030-01-01"],
     ...[
@@ -234,6 +300,145 @@ try {
     count += 2;
   }
   console.log(`${count} key mutation subprocess/DB comparisons passed`);
+  for (const args of [
+    ["limits", "k"],
+    ["limits", "k", "--unset", "concurrency"],
+    ["limits", "k", "--set", "requests:1m=3"],
+    ["limits", "k", "--model-limit", "m:concurrency=2", "--json"],
+  ]) {
+    const outputs = [],
+      rows = [];
+    for (let i = 0; i < 2; i++) {
+      const dir = roots[i],
+        command = commands[i];
+      assert(dir && command);
+      const db = new Database(join(dir, "db"));
+      db.run(
+        "UPDATE api_keys SET limits='broken',model_allowlist=NULL,revoked_at=NULL WHERE id='k'",
+      );
+      db.close();
+      const p = Bun.spawn([...command, "keys", ...args, "--root", dir, "--db", "db"], {
+        cwd: dir,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      outputs.push({
+        out: await new Response(p.stdout).text(),
+        err: await new Response(p.stderr).text(),
+        code: await p.exited,
+      });
+      const after = new Database(join(dir, "db"));
+      rows.push(after.query("SELECT * FROM api_keys").all());
+      after.close();
+    }
+    assert.deepEqual(outputs[1], outputs[0]);
+    assert.deepEqual(rows[1], rows[0]);
+  }
+  console.log("4 unreadable-limit repair byte/DB comparisons passed");
+  for (const flags of [
+    [],
+    ["--json"],
+    [
+      "--json",
+      "--label",
+      "staff",
+      "--allow",
+      "llama3:8b",
+      "--limit",
+      "requests:1m=0x10",
+      "--model-limit",
+      "2:concurrency=2",
+      "--no-bodies",
+      "--policy",
+      "  work  ",
+      "--smart-routing",
+      "--expires",
+      "2030-01-01",
+    ],
+    ["--label="],
+    ["--limit", "requests:1m=0"],
+    ["--expires", "bad"],
+    ["--policy", " "],
+  ]) {
+    const results = [],
+      persisted = [];
+    for (let i = 0; i < 2; i++) {
+      const dir = roots[i],
+        command = commands[i];
+      assert(dir && command);
+      const db = new Database(join(dir, "db"));
+      db.run("DELETE FROM api_keys");
+      db.close();
+      const before = Date.now();
+      const proc = Bun.spawn(
+        [...command, "keys", "create", ...flags, "--root", dir, "--db", "db"],
+        { cwd: dir, env, stdout: "pipe", stderr: "pipe" },
+      );
+      let out = await new Response(proc.stdout).text();
+      const err = await new Response(proc.stderr).text(),
+        code = await proc.exited;
+      const after = Date.now();
+      const database = new Database(join(dir, "db"));
+      const rows = database.query("SELECT * FROM api_keys").all() as Record<string, unknown>[];
+      database.close();
+      if (code === 0) {
+        assert.equal(rows.length, 1);
+        const row = rows[0];
+        assert(row);
+        const raw = flags.includes("--json") ? JSON.parse(out).key : out.trim();
+        assert.match(raw, /^sk-omni-[A-Za-z0-9_-]{43}$/);
+        assert.equal(Buffer.from(raw.slice(8), "base64url").length, 32);
+        assert.equal(Buffer.from(raw.slice(8), "base64url").toString("base64url"), raw.slice(8));
+        assert.match(
+          String(row.id),
+          /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/,
+        );
+        assert.equal(row.prefix, raw.slice(0, 12));
+        assert.equal(row.hash, await hashApiKey(raw));
+        assert(
+          typeof row.created_at === "number" && row.created_at >= before && row.created_at <= after,
+        );
+        if (flags.includes("--json")) {
+          const parsed = JSON.parse(out);
+          assert.equal(parsed.id, row.id);
+          assert.equal(parsed.prefix, row.prefix);
+          assert.equal(parsed.label, row.label);
+        }
+        out = out
+          .replaceAll(String(row.id), "<uuid>")
+          .replaceAll(raw, "<secret>")
+          .replaceAll(String(row.prefix), "<prefix>");
+        Object.assign(row, {
+          id: "<uuid>",
+          prefix: "<prefix>",
+          hash: "<sha256>",
+          created_at: "<time>",
+        });
+        const listing = Bun.spawn(
+          [...command, "keys", "list", "--json", "--root", dir, "--db", "db"],
+          { cwd: dir, env, stdout: "pipe", stderr: "pipe" },
+        );
+        const listed = await new Response(listing.stdout).text();
+        assert.equal(await listing.exited, 0);
+        assert(!listed.includes(raw));
+        assert(!listed.includes(await hashApiKey(raw)));
+        const store = await createStore({
+          path: join(dir, "db"),
+          encryptionKey: await deriveKey(secret),
+        });
+        assert(await store.keys.findByHash(await hashApiKey(raw)));
+        store.close();
+      } else {
+        assert.equal(rows.length, 0);
+      }
+      results.push({ out: Buffer.from(out), err: Buffer.from(err), code });
+      persisted.push(rows);
+    }
+    assert.deepEqual(results[1], results[0], JSON.stringify(flags));
+    assert.deepEqual(persisted[1], persisted[0]);
+  }
+  console.log("7 creation byte/DB/secret comparisons passed");
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

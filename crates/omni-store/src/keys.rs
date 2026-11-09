@@ -41,6 +41,7 @@ const T: &str = "api_keys";
 
 /// Explicit mutation vocabulary; SQL identifiers never come from CLI input.
 pub enum KeyEdit<'a> {
+    Limits(&'a str),
     Expiry(Option<i64>),
     Models(Option<&'a str>),
     Guardrail(Option<&'a str>),
@@ -48,8 +49,24 @@ pub enum KeyEdit<'a> {
     Revoke(i64),
 }
 
+pub fn create(conn: &Connection, key: &ApiKey) -> Result<(), StoreError> {
+    let limits = key
+        .limits
+        .as_ref()
+        .ok_or_else(|| StoreError::Corrupt("unreadable limits".into()))?
+        .to_json();
+    let limits =
+        omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&limits)).expect("limits");
+    conn.execute("INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,body_logging_opt_out,created_at,revoked_at,expires_at,guardrail_policy,smart_routing) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)",rusqlite::params![key.id,key.label,key.prefix,key.hash,key.model_allowlist.as_ref().map(|v|serde_json::to_string(v).expect("models")),limits,i64::from(key.body_logging_opt_out),key.created_at,key.expires_at,key.guardrail_policy,i64::from(key.smart_routing)])?;
+    Ok(())
+}
+
 pub fn edit(conn: &Connection, id: &str, edit: KeyEdit<'_>) -> Result<(), StoreError> {
     match edit {
+        KeyEdit::Limits(v) => conn.execute(
+            "UPDATE api_keys SET limits = ? WHERE id = ?",
+            rusqlite::params![v, id],
+        )?,
         KeyEdit::Expiry(v) => conn.execute(
             "UPDATE api_keys SET expires_at = ? WHERE id = ?",
             rusqlite::params![v, id],

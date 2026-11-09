@@ -2,6 +2,188 @@
 use omni_store::{SqliteStore, StoreError};
 use serde_json::{Value, json};
 
+pub struct CreateKey {
+    pub label: String,
+    pub models: Option<Vec<String>>,
+    pub limits: Value,
+    pub no_bodies: bool,
+    pub expiry: Option<i64>,
+    pub policy: Option<String>,
+    pub smart: bool,
+}
+pub fn create_key(store: &SqliteStore, input: CreateKey, now: i64) -> Result<Value, String> {
+    if input.label.is_empty() {
+        return Err("BAD_REQUEST: label: Too small: expected string to have >=1 characters".into());
+    }
+    if let Some(i) = input
+        .models
+        .as_ref()
+        .and_then(|v| v.iter().position(String::is_empty))
+    {
+        return Err(format!(
+            "BAD_REQUEST: modelAllowlist.{i}: Too small: expected string to have >=1 characters"
+        ));
+    }
+    validate_limits(&input.limits, "limits", true)?;
+    if input.expiry.is_some_and(|v| v <= 0) {
+        return Err("BAD_REQUEST: expiresAt: Too small: expected number to be >0".into());
+    }
+    let policy = input.policy.as_deref().map(omni_ir::js::trim);
+    if let Some(p) = policy {
+        if p.is_empty() {
+            return Err(
+                "BAD_REQUEST: guardrailPolicy: Too small: expected string to have >=1 characters"
+                    .into(),
+            );
+        }
+        if p.chars().count() > 4000 {
+            return Err(
+                "BAD_REQUEST: guardrailPolicy: Too big: expected string to have <=4000 characters"
+                    .into(),
+            );
+        }
+    }
+    let raw = omni_crypto::apikey::generate();
+    // Independent CSPRNG material for the public UUID; never derived from the key.
+    let id = omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate());
+    let prefix = omni_crypto::apikey::prefix(&raw);
+    let limits = omni_store::limits::parse_limits(&input.limits.to_string())
+        .ok_or("BAD_REQUEST: invalid limits")?;
+    let key = omni_store::keys::ApiKey {
+        id: id.clone(),
+        label: input.label.clone(),
+        prefix: prefix.clone(),
+        hash: omni_crypto::apikey::hash(&raw),
+        model_allowlist: input.models,
+        limits: Some(limits),
+        body_logging_opt_out: input.no_bodies,
+        created_at: now,
+        revoked_at: None,
+        expires_at: input.expiry,
+        guardrail_policy: policy.map(str::to_owned),
+        smart_routing: input.smart,
+    };
+    omni_store::keys::create(store.connection(), &key).map_err(|e| e.to_string())?;
+    Ok(json!({"id":id,"label":input.label,"prefix":prefix,"key":raw}))
+}
+
+pub fn set_limits(store: &SqliteStore, id: &str, limits: &Value) -> Result<(), String> {
+    validate_limits(limits, "limits", true)?;
+    require_key(store, id)?;
+    let config = omni_store::limits::parse_limits(&limits.to_string())
+        .ok_or("BAD_REQUEST: invalid limits")?;
+    let raw = omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&config.to_json()))
+        .expect("limits JSON");
+    omni_store::keys::edit(
+        store.connection(),
+        id,
+        omni_store::keys::KeyEdit::Limits(&raw),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn validate_limits(v: &Value, path: &str, root: bool) -> Result<(), String> {
+    let err = |p: &str, message: String| format!("BAD_REQUEST: {p}: {message}");
+    let object = v.as_object().ok_or_else(|| {
+        err(
+            path,
+            "Invalid input: expected object, received number".into(),
+        )
+    })?;
+    for d in ["requests", "tokens", "spend", "concurrency"] {
+        let Some(value) = object.get(d) else { continue };
+        let p = format!("{path}.{d}");
+        let check = |v: &Value, p: &str| -> Result<(), String> {
+            if v.is_null() {
+                return Ok(());
+            }
+            let n = v
+                .as_f64()
+                .ok_or_else(|| err(p, "Invalid input: expected number, received object".into()))?;
+            if d != "spend" && n.fract() != 0.0 {
+                return Err(err(
+                    p,
+                    "Invalid input: expected int, received number".into(),
+                ));
+            }
+            if d != "spend" && n > 9007199254740991.0 {
+                return Err(err(
+                    p,
+                    "Too big: expected int to be <=9007199254740991".into(),
+                ));
+            }
+            if n <= 0.0 {
+                return Err(err(p, "Too small: expected number to be >0".into()));
+            }
+            Ok(())
+        };
+        if d == "concurrency" {
+            check(value, &p)?;
+        } else {
+            let windows = value
+                .as_object()
+                .ok_or_else(|| err(&p, "Invalid input: expected object, received number".into()))?;
+            for w in ["1m", "5h", "1w"] {
+                if d == "spend" && w == "1m" {
+                    continue;
+                }
+                if let Some(n) = windows.get(w) {
+                    check(n, &format!("{p}.{w}"))?;
+                }
+            }
+            let unknown: Vec<_> = windows
+                .keys()
+                .filter(|w| !matches!(w.as_str(), "1m" | "5h" | "1w") || d == "spend" && *w == "1m")
+                .collect();
+            if !unknown.is_empty() {
+                return Err(err(&p, unknown_keys(&unknown)));
+            }
+        }
+    }
+    if root && let Some(models) = object.get("models").and_then(Value::as_object) {
+        for (model, scope) in omni_ir::jsjson::own_entries(models) {
+            if model.is_empty() || model.chars().count() > 256 {
+                return Err(err(
+                    &format!("{path}.models.{model}"),
+                    "Invalid key in record".into(),
+                ));
+            }
+            validate_limits(scope, &format!("{path}.models.{model}"), false)?;
+        }
+        if models.len() > 64 {
+            return Err(err(
+                &format!("{path}.models"),
+                "at most 64 model overrides per key".into(),
+            ));
+        }
+    }
+    let unknown: Vec<_> = object
+        .keys()
+        .filter(|k| {
+            !matches!(k.as_str(), "requests" | "tokens" | "spend" | "concurrency")
+                && !(root && *k == "models")
+        })
+        .collect();
+    if !unknown.is_empty() {
+        return Err(err(path, unknown_keys(&unknown)));
+    }
+    Ok(())
+}
+fn unknown_keys(keys: &[&String]) -> String {
+    format!("unrecognized key \"{}\"", safe_token(keys[0]))
+}
+fn safe_token(s: &str) -> &str {
+    if !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:/+-".contains(&b))
+    {
+        s
+    } else {
+        "(unprintable)"
+    }
+}
+
 pub fn set_expiry(store: &SqliteStore, id: &str, expiry: Option<i64>) -> Result<(), String> {
     if expiry.is_some_and(|v| v <= 0) {
         return Err("BAD_REQUEST: expiresAt: Too small: expected number to be >0".into());
