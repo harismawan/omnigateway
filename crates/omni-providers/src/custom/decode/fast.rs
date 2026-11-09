@@ -299,7 +299,9 @@ mod tests {
     /// decoded with the fast path and with it forced off, whole and re-cut
     /// into pieces of 1, 7, 64 and 4096 bytes, and (for every vector exported
     /// as more than one chunk) the entire body as one chunk: the same events,
-    /// flows and errors every time.
+    /// flows and errors every time. The vectors include `customLargeDecode`:
+    /// ~8 KiB, 64 KiB and 1 MiB streams of many messages, each with a 64-call
+    /// parallel tool delta and one big content record (1 MB in the largest).
     #[test]
     fn the_fast_path_agrees_with_the_generic_one_on_every_decode_vector() {
         let path = concat!(
@@ -308,8 +310,22 @@ mod tests {
         );
         let text = std::fs::read_to_string(path).expect("vectors.json is committed");
         let v: serde_json::Value = serde_json::from_str(&text).expect("vectors.json parses");
-        let cases = v["custom"]["decode"].as_array().expect("decode");
+        let large = v["customLargeDecode"]
+            .as_array()
+            .expect("customLargeDecode");
+        let cases: Vec<&serde_json::Value> = v["custom"]["decode"]
+            .as_array()
+            .expect("decode")
+            .iter()
+            .chain(large)
+            .collect();
         let mut checked = 0;
+        // The large vectors (~8 KiB, 64 KiB, 1 MiB of SSE, many messages per
+        // chunk): how many ran whole, and how many of their messages the
+        // fast path answered.
+        let mut large_whole = 0;
+        let mut large_fast = 0;
+        let mut large_messages = 0;
         let mut fast_messages = 0;
         let mut whole_runs = 0;
         let mut whole_over_4096 = 0;
@@ -324,10 +340,14 @@ mod tests {
                 .iter()
                 .map(chunk_bytes)
                 .collect();
+            let is_large = large.iter().any(|l| std::ptr::eq(l, case));
             let mut cuts = vec![0, 1, 7, 64, 4096];
             if body.len() > 1 {
                 cuts.push(WHOLE);
                 whole_runs += 1;
+                if is_large {
+                    large_whole += 1;
+                }
                 if body.concat().len() > 4096 {
                     whole_over_4096 += 1;
                 }
@@ -346,26 +366,35 @@ mod tests {
             let mut parser = crate::sse::SseParser::new();
             let mut msgs = Vec::new();
             parser.push(&body.concat(), &mut msgs).ok();
-            fast_messages += msgs
+            let fast_here = msgs
                 .iter()
                 .filter(|m| super::parse_chat_chunk(&m.data).is_some())
                 .count();
+            fast_messages += fast_here;
+            if is_large {
+                large_fast += fast_here;
+                large_messages += msgs.len();
+            }
             checked += 1;
         }
-        assert!(checked >= 70, "{checked} chat_completions vectors");
+        assert!(checked >= 73, "{checked} chat_completions vectors");
         eprintln!(
-            "{checked} vectors; {whole_runs} multi-chunk ones also run as one whole-body chunk, {whole_over_4096} of them over 4096 bytes"
+            "{checked} vectors; {whole_runs} multi-chunk ones also run as one whole-body chunk, {whole_over_4096} of them over 4096 bytes; large: {large_whole} run whole, fast path on {large_fast} of {large_messages} messages"
         );
-        // Every multi-chunk vector ran whole, including the one larger than
-        // 4096 bytes (`200 oversized record`, 11.5 MB in 12 chunks), which
-        // the fixed cuts only ever fed in pieces.
+        // Every multi-chunk vector ran whole: the 4 in `custom.decode` and
+        // the 3 large ones, all over 4096 bytes.
         assert_eq!(
-            whole_runs, 4,
+            whole_runs, 7,
             "multi-chunk vectors run as one whole-body chunk"
         );
+        assert_eq!(large_whole, 3, "the large vectors ran whole");
         assert!(
-            whole_over_4096 >= 1,
-            "a multi-chunk body over 4096 bytes ran whole"
+            large_fast * 10 >= large_messages * 9,
+            "the fast path answered only {large_fast} of the large vectors' {large_messages} messages"
+        );
+        assert!(
+            whole_over_4096 >= 4,
+            "multi-chunk bodies over 4096 bytes ran whole: {whole_over_4096}"
         );
         assert!(
             fast_messages >= 70,

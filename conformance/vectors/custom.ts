@@ -918,6 +918,108 @@ async function decodeVectors(): Promise<unknown[]> {
   return out;
 }
 
+/**
+ * Large multi-chunk Chat Completions streams, each well under
+ * `MAX_RECORD_CHARS`: about 8 KiB, 64 KiB and 1 MiB of SSE. They exist so a
+ * decoder that behaves differently when many messages arrive in one large
+ * chunk (the fast path's typed parse, say) has a TS answer to be held to.
+ *
+ * Each opens with two large single records, since a decoder sees one record
+ * at a time however the body is chunked: one parallel tool-call delta
+ * carrying 64 calls (ids, names, arguments), and one content delta of
+ * `bigDelta` characters (1 MB in the largest stream, still a tenth of the
+ * record cap). Then it repeats one round until the body reaches its size:
+ * content deltas (some with escapes and multi-byte text), reasoning deltas
+ * in each spelling (`reasoning`, `reasoning_content`, `reasoning_details`
+ * with `text` and `summary`), and a tool call whose arguments arrive split
+ * across several deltas. A finish, a usage chunk and `[DONE]` close it. The
+ * body is cut into chunks of a few irregular sizes, so records straddle
+ * chunk boundaries everywhere; the big delta spans hundreds of chunks.
+ *
+ * Deterministic: no randomness, so a re-export gives the same bytes.
+ */
+function largeStream(targetBytes: number, bigDelta: number): Chunk[] {
+  const PARALLEL = 64;
+  const parallel = Array.from(
+    { length: PARALLEL },
+    (_, i) =>
+      `{"index":${i},"id":"call_p${i}","type":"function","function":{"name":"par_${i}","arguments":"{\\"i\\":${i}}"}}`,
+  ).join(",");
+  const filler = "lorem ipsum dolor sit amet ".repeat(Math.ceil(bigDelta / 27)).slice(0, bigDelta);
+  const frames: string[] = [
+    '{"id":"chatcmpl-large","model":"m-large","choices":[{"delta":{"role":"assistant","content":""}}]}',
+    `{"choices":[{"delta":{"tool_calls":[${parallel}]}}]}`,
+    `{"choices":[{"delta":{"content":"${filler}"}}]}`,
+  ];
+  // Round tool calls start past the parallel ones.
+  let round = PARALLEL;
+  let size = frames.reduce((n, f) => n + f.length + 8, 0);
+  while (size < targetBytes) {
+    const r = round;
+    const round_frames = [
+      `{"choices":[{"delta":{"reasoning":"step ${r} "}}]}`,
+      `{"choices":[{"delta":{"reasoning_content":"think ${r} \u00e9 "}}]}`,
+      `{"choices":[{"delta":{"reasoning_details":[{"text":"detail ${r} "},{"summary":"sum ${r} "}]}}]}`,
+      `{"choices":[{"delta":{"content":"word ${r} "}}]}`,
+      `{"choices":[{"delta":{"content":"qu\\"ote\\\\ ${r} 😀 "}}]}`,
+      `{"choices":[{"delta":{"content":"plain ${r} "}}]}`,
+      `{"choices":[{"delta":{"tool_calls":[{"index":${r},"id":"call_${r}","type":"function","function":{"name":"tool_${r % 5}","arguments":""}}]}}]}`,
+      `{"choices":[{"delta":{"tool_calls":[{"index":${r},"function":{"arguments":"{\\"path\\":\\"/src/"}}]}}]}`,
+      `{"choices":[{"delta":{"tool_calls":[{"index":${r},"function":{"arguments":"file${r}.ts\\",\\"n\\":"}}]}}]}`,
+      `{"choices":[{"delta":{"tool_calls":[{"index":${r},"function":{"arguments":"${r}}"}}]}}]}`,
+      `{"choices":[{"delta":{"content":"after tool ${r} "}}]}`,
+    ];
+    for (const f of round_frames) {
+      frames.push(f);
+      size += f.length + 8;
+    }
+    round += 1;
+  }
+  frames.push('{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}');
+  frames.push(
+    `{"choices":[],"usage":{"prompt_tokens":${1000 + round},"completion_tokens":${round * 7},"prompt_tokens_details":{"cached_tokens":${round}}}}`,
+  );
+  const whole = sse(frames);
+  // Irregular cuts: 1, 7, 97, 1024 and 4093 bytes in turn (in UTF-16 units of
+  // the string; a cut through the emoji's surrogate pair is avoided by the
+  // encoder working on whole strings, so it is cut at a code point).
+  const sizes = [1, 7, 97, 1024, 4093];
+  const chars = Array.from(whole);
+  const out: string[] = [];
+  let at = 0;
+  for (let i = 0; at < chars.length; i += 1) {
+    const n = sizes[i % sizes.length] as number;
+    out.push(chars.slice(at, at + n).join(""));
+    at += n;
+  }
+  return out;
+}
+
+const LARGE_CHAT_STREAMS: { name: string; chunks: Chunk[] }[] = [
+  { name: "large stream ~8 KiB", chunks: largeStream(8 * 1024, 1024) },
+  { name: "large stream ~64 KiB", chunks: largeStream(64 * 1024, 16 * 1024) },
+  // The big delta is 1 000 100 characters: past 1 MB in one record.
+  { name: "large stream ~1 MiB", chunks: largeStream(1024 * 1024 + 64 * 1024, 1_000_100) },
+];
+
+/** `customAdapter.send` over the large streams, in the `custom.decode` shape. */
+async function largeDecodeVectors(): Promise<unknown[]> {
+  const out = [];
+  const base = REQUESTS[0]?.request as ChatRequest;
+  for (const s of LARGE_CHAT_STREAMS) {
+    const response: FakeResponse = { status: 200, headers: [], chunks: s.chunks };
+    const credentials: AdapterCredentials = {
+      accessToken: null,
+      apiKey: "ck",
+      providerData: { origin: "https://host.test", protocol: "chat_completions" },
+    };
+    const result = (await runAdapter(base, credentials, response)) as Record<string, unknown>;
+    delete result.sent;
+    out.push({ name: s.name, protocol: "chat_completions", response, result });
+  }
+  return out;
+}
+
 // --------------------------------------------------------------- http.ts
 
 async function httpErrorVectors(): Promise<unknown> {
@@ -1064,5 +1166,7 @@ export async function customVectors(): Promise<Record<string, unknown>> {
     },
     sse: { maxRecordChars: MAX_RECORD_CHARS, cases: await sseVectors() },
     httpWire: await httpWireVectors(),
+    // Appended last, so every section above keeps its bytes.
+    customLargeDecode: await largeDecodeVectors(),
   }) as Record<string, unknown>;
 }
