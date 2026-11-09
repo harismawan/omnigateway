@@ -1,5 +1,24 @@
 # Rust CLI foundation + keys list — 2026-11-10
 
+## Fix round 3 — data-only object coercion
+
+Implementation `58333799`, base `26912423`. R2-I1 addressed: iterative human join is fallible. JSON objects with an own `toString` cannot supply a callable method; own JSON `valueOf` is also noncallable, and inherited valueOf returns the object. Such elements return `No default value` before printing the assembled table. Objects without own toString retain inherited object rendering, including own valueOf and JSON __proto__ data properties. JSON serialization, parser, gateway admission and prior overflow/depth behavior are unchanged.
+
+RED command: `OMNI_CLI_COLLECT_RED=1 OMNI_CLI_BIN=target/release/omni bun conformance/cli/keys-list.ts` against prior release: **8/135 differential failures**, all human coercion cases; local `/tmp/opencode/cli-r3-red.log`. Mandatory oracle covers direct/nested objects, scalar/null/object/array toString, own valueOf combinations, duplicate properties, and an earlier 1500-deep key followed by an error key. Each is checked in human and JSON modes against unchanged TS, including empty stdout on failure.
+
+GREEN actual commands/output:
+```
+OMNI_CLI_BIN=target/release/omni bun conformance/cli/keys-list.ts
+PASS 135 real TS/Rust golden comparisons
+OMNI_CLI_BIN=target/release/omnigateway OMNI_CLI_SUBCOMMAND=1 bun conformance/cli/keys-list.ts
+PASS 135 real TS/Rust golden comparisons
+OMNI_CLI_BIN=target/release/omnigateway OMNI_CLI_SYMLINK=1 bun conformance/cli/keys-list.ts
+PASS 135 real TS/Rust golden comparisons
+```
+`cargo test -p omni-control -p omni-ir -p omni-cli --lib`: **control2 + IR18 pass**, CLI0 (CLI covered by 405 process comparisons). Added 256KiB-stack test exercises 20k-deep object ownership/duplicate replacement/error teardown and KeyListing pretty output with an earlier deep array and later coercion failure. Previous deep overflow small-stack test remains passing.
+
+`cargo clippy -p omni-control -p omni-ir -p omni-cli --all-targets -- -D warnings`, `cargo fmt --all -- --check`, scoped Biome, `git diff --check`, and release builds pass. No latency rerun: change is confined to human coercion; measured JSON listing path is unchanged. Round2 timing/hash remain evidence for the round2 binary only, not a fresh measurement of this release build. Existing public projection invariant maintenance concerns and platform/PTY/filesystem gaps remain; controller owns independent scoped re-review.
+
 ## Fix round 2 — residual operator JSON
 
 Implementation `2033a4db`, base `848f918f`. R1-I1 and noncallable-own-join diagnostic addressed. Operator-only parser validates with existing JSC diagnostics, then constructs existing `JsValue` with an explicit container stack. IEEE overflow survives as ±Infinity until the JSON writer emits null; human array join uses an explicit traversal stack. Existing stack-growing JsValue clone/serialization and iterative destruction handle deep ownership. Gateway parsing/normalized key reads are unchanged. String decoding retains the existing documented surrogate replacement exception.
