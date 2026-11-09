@@ -1,5 +1,33 @@
 # Rust CLI foundation + keys list — 2026-11-10
 
+## Fix round 1 — 2026-11-10
+
+Implementation `0ec7ed9b`, base `aa41493d`. All four Important findings addressed in the implemented keys-list scope:
+
+- I1: safe standard-library `std::env::home_dir()` supplies platform account fallback when HOME is absent. Actual subprocess regression unsets HOME, places misleading `.config/omnigateway/.env` under a non-installation cwd, and supplies an absolute database. No home files modified.
+- I2: separate store operator projection preserves raw allowlist JSON and numeric dates; gateway normalized/fail-closed reader remains unchanged. Mixed arrays, nested arrays, objects, scalars, empty strings, length-zero objects and malformed JSON tested in both formats. Shared JSC diagnostics moved unchanged from gateway into IR, with gateway compatibility re-export; operator empty JSON uses JSON.parse EOF wording, preserving gateway Request.json empty-body behavior. Hash stays excluded.
+- I3: public own-entry traversal wraps the existing JS ordering implementation and is used before assembling usage arrays/human summaries. Goldens include z/10/2/4294967295/4294967294/01 model names.
+- I4: full JS Date range uses Gregorian civil-day arithmetic, TimeClip truncation, four/signed-six-digit years and exact ISO slice(0,19). Goldens cover 10000, negative year, both ±8.64e15 boundaries, both out-of-range neighbors, zero, negative milliseconds and fractional stored time.
+- Local minors: short -yh/-hy accepted without triggering standalone help scan; THP policy precedes argv allocation; width removes only TS SGR syntax; config docs distinguish gateway and CLI env handling.
+
+Evidence:
+- Before fixes, expanded mandatory real-TS oracle against prior release recorded **45/71 differential failures**, including all Important findings (local `/tmp/opencode/cli-round1-red.log`). Initial mixed-array failure also observed separately. No expected-output renderer introduced.
+- Final **85 raw-buffer stdout/stderr/status comparisons pass each** for standalone release, unified subcommand, and unified argv[0] symlink: 255 comparisons. TS sources unchanged. CLI/control behavior is verified by these process goldens (their library test targets contain zero unit tests).
+- IR library 18 pass, including moved JSC message tests; store snapshot rows 4 + usage reads 2 pass. Usage differential now includes sumSince across 42 cases: exact partial/hour boundaries, cross-key exclusion, model narrowing, pending rows and zero windows, with rollup rebuilt from committed rows.
+- Gateway config 2 pass (1 child probe intentionally ignored); gateway server/startup suite **32 pass**, including invalid JSON response, failed boot/restart and shutdown paths.
+- Strict all-target clippy for CLI/control/store/IR/gateway-core/gateway passes; workspace fmt, scoped Biome and diff whitespace checks pass. Release build passes.
+
+Repeated unified release scoped latency (same rig/method, three batches of ten): p50 **1.805 / 1.774 / 1.689 ms**, maxima **2.250 / 3.284 / 2.527 ms**. All samples below 15 ms. Binary SHA256 `5e8713bd1d3916ae384e8c02c4091a1af9cea27bd5be0f6605c7b484bccc3ae5`; built from the implementation sources in `0ec7ed9b` (subsequent precommit changes were comments and additional tests only). Raw artifact `/tmp/opencode/cli-round1-latency.json`.
+
+Raw timings ms:
+```
+2.056999 1.817920 2.085282 1.804619 1.587776 2.249891 1.935511 1.747055 1.779192 1.625466
+1.740078 1.757117 1.774352 2.895653 1.731896 3.283935 2.739610 1.692803 1.794355 1.936948
+1.739956 1.677819 1.603728 1.720716 1.503975 2.527195 1.688683 1.687192 1.834926 1.692566
+```
+
+Remaining coverage: PTY/platform matrix and exhaustive filesystem failures remain untested; shared sequential migration fixtures remain a limitation. Existing IR handling of lone surrogates/astral diagnostic characters retains its previously documented limitation. Other CLI commands remain unported; scoped independent re-review belongs to controller. This section supersedes the original HOME/allowlist/date/symlink limitations below. No full gateway benchmark or migration readiness claim.
+
 Implementation: `75ad6215`, base `a435d55b`. Astra implementer; independent review belongs to controller.
 
 ## Completed increment

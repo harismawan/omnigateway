@@ -1,5 +1,10 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-07-rust-slice-1-benchmarkable.md
 
+## CLI foundation fix round 1 — 2026-11-10
+- `0ec7ed9b`: I1 account-home fallback; I2 raw operator allowlist projection with gateway semantics preserved; I3 JS model traversal; I4 full-range JS dates. Local help/THP/ANSI/docs minors fixed.
+- Prior release RED 45/71 comparisons; final raw-byte oracle GREEN 85 each standalone/subcommand/symlink. IR18/store6/config2/server32 pass; strict scoped clippy, fmt, Biome pass. sumSince differential expanded to 42 cases.
+- Repeated unified CLI p50 1.805/1.774/1.689ms; max3.284ms. Report contains hash/raw timing/evidence and residual coverage. Controller owns independent re-review; no full CLI/migration readiness claim.
+
 ## CLI foundation + keys list — 2026-11-10
 - Astra implementer commit `75ad6215`, base `a435d55b`; controller owns independent review.
 - Added layered Rust CLI/control, reused shared config/store/JSON, unified binary CLI dispatch before runtime startup. Only keys list ported; top-level help explicitly scoped.
