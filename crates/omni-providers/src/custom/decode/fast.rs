@@ -242,13 +242,16 @@ mod tests {
 
     /// The whole body through `SseParser` and the decoder as the adapter
     /// drives them (stop on `Flow::Stop` or an error, `finish` at end of
-    /// body), in `pieces` of the given size (0: as exported): every event,
-    /// every flow, and the error, rendered.
+    /// body), in `pieces` of the given size (0: as exported; [`WHOLE`]: the
+    /// entire body as one chunk): every event, every flow, and the error,
+    /// rendered.
     fn decode_body(body: &[Vec<u8>], pieces: usize, fast: bool) -> String {
         use crate::codec::{DecodeError, Flow};
         use crate::sse::SseParser;
         let chunks: Vec<Vec<u8>> = if pieces == 0 {
             body.to_vec()
+        } else if pieces == WHOLE {
+            vec![body.concat()]
         } else {
             body.concat().chunks(pieces).map(<[u8]>::to_vec).collect()
         };
@@ -288,11 +291,15 @@ mod tests {
         format!("{out:?} {trace:?}")
     }
 
+    /// The entire body as one chunk, whatever its size.
+    const WHOLE: usize = usize::MAX;
+
     /// Every `chat_completions` decode vector the TS exporter wrote (the
     /// corpus `decode_vectors_match_the_ts_custom_adapter` holds Rust to),
     /// decoded with the fast path and with it forced off, whole and re-cut
-    /// into pieces of 1, 7, 64 and 4096 bytes: the same events, flows and
-    /// errors every time.
+    /// into pieces of 1, 7, 64 and 4096 bytes, and (for every vector exported
+    /// as more than one chunk) the entire body as one chunk: the same events,
+    /// flows and errors every time.
     #[test]
     fn the_fast_path_agrees_with_the_generic_one_on_every_decode_vector() {
         let path = concat!(
@@ -304,6 +311,8 @@ mod tests {
         let cases = v["custom"]["decode"].as_array().expect("decode");
         let mut checked = 0;
         let mut fast_messages = 0;
+        let mut whole_runs = 0;
+        let mut whole_over_4096 = 0;
         for case in cases {
             if case["protocol"] != "chat_completions" {
                 continue;
@@ -315,10 +324,23 @@ mod tests {
                 .iter()
                 .map(chunk_bytes)
                 .collect();
-            for pieces in [0, 1, 7, 64, 4096] {
+            let mut cuts = vec![0, 1, 7, 64, 4096];
+            if body.len() > 1 {
+                cuts.push(WHOLE);
+                whole_runs += 1;
+                if body.concat().len() > 4096 {
+                    whole_over_4096 += 1;
+                }
+            }
+            for pieces in cuts {
                 let fast = decode_body(&body, pieces, true);
                 let generic = decode_body(&body, pieces, false);
-                assert_eq!(fast, generic, "{name}, pieces of {pieces}");
+                let cut = if pieces == WHOLE {
+                    "one whole-body chunk".to_owned()
+                } else {
+                    format!("pieces of {pieces}")
+                };
+                assert_eq!(fast, generic, "{name}, {cut}");
             }
             // How many of its messages the fast path actually answers.
             let mut parser = crate::sse::SseParser::new();
@@ -331,6 +353,20 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 70, "{checked} chat_completions vectors");
+        eprintln!(
+            "{checked} vectors; {whole_runs} multi-chunk ones also run as one whole-body chunk, {whole_over_4096} of them over 4096 bytes"
+        );
+        // Every multi-chunk vector ran whole, including the one larger than
+        // 4096 bytes (`200 oversized record`, 11.5 MB in 12 chunks), which
+        // the fixed cuts only ever fed in pieces.
+        assert_eq!(
+            whole_runs, 4,
+            "multi-chunk vectors run as one whole-body chunk"
+        );
+        assert!(
+            whole_over_4096 >= 1,
+            "a multi-chunk body over 4096 bytes ran whole"
+        );
         assert!(
             fast_messages >= 70,
             "the fast path answered only {fast_messages} messages"
