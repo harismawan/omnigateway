@@ -121,6 +121,21 @@ try {
   usage.close();
   const edits = new Database(join(root, "keys.db"));
   const regressions: [string, unknown[]][] = [
+    ...[
+      "[1e400,-1e400,1E+999,-9E999,1e-400]",
+      '{"join":1}',
+      '{"join":null}',
+      '{"join":"x"}',
+      '{"join":true}',
+      '{"join":{}}',
+      '{"join":[]}',
+      "[1.7976931348623157e308,1.7976931348623159e308,-1.7976931348623159e308,1e999999,-0,5e-324]",
+      '{"join":1,"join":null}',
+      ...[127, 128, 150, 512, 1500].map((n) => `${"[".repeat(n)}0${"]".repeat(n)}`),
+    ].map(
+      (raw) =>
+        ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", [raw]] as [string, unknown[]],
+    ),
     ...['"m"', '""', "42", "true", '{"length":0}', '"unterminated', "{bad"].map(
       (raw) =>
         ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", [raw]] as [string, unknown[]],

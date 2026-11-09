@@ -85,7 +85,12 @@ fn width(s: &str) -> usize {
     }
     width
 }
-pub fn human(data: &Value, now: i64, color: bool) -> Result<String, String> {
+pub fn human(
+    listing: &omni_control::keys::KeyListing,
+    now: i64,
+    color: bool,
+) -> Result<String, String> {
+    let data = &listing.data;
     let Some(keys) = data["keys"].as_array().filter(|k| !k.is_empty()) else {
         return Ok("no api keys; create one with: omni keys create".into());
     };
@@ -106,14 +111,8 @@ pub fn human(data: &Value, now: i64, color: bool) -> Result<String, String> {
         .map(str::to_owned)
         .to_vec(),
     ];
-    for k in keys {
-        let models = match k["modelAllowlist"].as_array() {
-            None if k["modelAllowlist"].is_null() => "all".into(),
-            None if k["modelAllowlist"] == "" || k["modelAllowlist"]["length"] == 0 => "none".into(),
-            None => return Err("key.modelAllowlist.join is not a function. (In 'key.modelAllowlist.join(\",\")', 'key.modelAllowlist.join' is undefined)".into()),
-            Some(a) if a.is_empty() => "none".into(),
-            Some(a) => a.iter().map(|v| if v.is_null() {String::new()} else {omni_ir::js::to_string(Some(v))}).collect::<Vec<_>>().join(","),
-        };
+    for (k, allowlist) in keys.iter().zip(&listing.allowlists) {
+        let models = omni_control::operator_json::models(allowlist)?;
         let limits = if k["limits"].is_null() {
             paint(color, false, "unreadable")
         } else {

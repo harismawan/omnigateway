@@ -39,8 +39,35 @@ fn scope_usage(
 }
 
 /// Explicit public projection: never serialize the stored hash.
-pub fn list_keys(store: &SqliteStore, now: i64) -> Result<Value, String> {
+pub struct KeyListing {
+    pub data: Value,
+    pub allowlists: Vec<omni_ir::jsjson::JsValue>,
+}
+
+impl KeyListing {
+    pub fn json(&self) -> String {
+        use omni_ir::jsjson::{JsValue, stringify_pretty};
+        let mut data = JsValue::from(&self.data);
+        if let JsValue::Object(root) = &mut data
+            && let JsValue::Array(keys) = &mut root[0].1
+        {
+            for (key, allowlist) in keys.iter_mut().zip(&self.allowlists) {
+                if let JsValue::Object(fields) = key
+                    && let Some((_, v)) = fields
+                        .iter_mut()
+                        .find(|(k, _)| k.iter().copied().eq("modelAllowlist".encode_utf16()))
+                {
+                    *v = allowlist.clone();
+                }
+            }
+        }
+        stringify_pretty(&data).unwrap_or_default()
+    }
+}
+
+pub fn list_keys(store: &SqliteStore, now: i64) -> Result<KeyListing, String> {
     let mut keys = Vec::new();
+    let mut allowlists = Vec::new();
     for omni_store::keys::OperatorKey {
         key,
         allowlist_json: raw,
@@ -48,17 +75,11 @@ pub fn list_keys(store: &SqliteStore, now: i64) -> Result<Value, String> {
         expires_at,
     } in omni_store::keys::list_operator(store.connection()).map_err(|e| e.to_string())?
     {
-        let allowlist = match raw {
-            None => Value::Null,
-            Some(raw) => omni_ir::js::parse_json(&raw).ok_or_else(|| {
-                if raw.is_empty() {
-                    "JSON Parse error: Unexpected EOF".into()
-                } else {
-                    omni_ir::jsc_json::parse_error(&raw)
-                        .unwrap_or_else(|| "JSON Parse error: Unable to parse JSON string".into())
-                }
-            })?,
-        };
+        allowlists.push(match raw {
+            None => omni_ir::jsjson::JsValue::Null,
+            Some(raw) => crate::operator_json::parse(&raw)?,
+        });
+        let allowlist = Value::Null;
         let limits = key.limits.as_ref().map_or(Value::Null, |l| l.to_json());
         let mut usage = Vec::new();
         scope_usage(store, &key.id, &limits, None, now, &mut usage).map_err(|e| e.to_string())?;
@@ -70,5 +91,8 @@ pub fn list_keys(store: &SqliteStore, now: i64) -> Result<Value, String> {
         }
         keys.push(json!({"id":key.id,"label":key.label,"prefix":key.prefix,"modelAllowlist":allowlist,"limits":limits,"limitUsage":usage,"bodyLoggingOptOut":key.body_logging_opt_out,"createdAt":created_at,"revokedAt":key.revoked_at,"expiresAt":expires_at,"guardrailPolicy":key.guardrail_policy,"smartRouting":key.smart_routing}));
     }
-    Ok(json!({"keys":keys}))
+    Ok(KeyListing {
+        data: json!({"keys":keys}),
+        allowlists,
+    })
 }

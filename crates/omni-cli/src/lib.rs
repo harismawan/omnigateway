@@ -47,7 +47,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             && std::env::var("NO_COLOR").unwrap_or_default().is_empty()
             && std::io::stdout().is_terminal();
         Ok::<_, String>(if flags.contains_key("json") {
-            omni_ir::jsjson::to_string_pretty(&data)
+            data.json()
         } else {
             output::human(&data, now, color)?
         })
