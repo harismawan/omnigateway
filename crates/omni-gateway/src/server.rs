@@ -75,6 +75,49 @@ fn deadline_body(body: Body, deadline: tokio::time::Instant) -> Body {
     StreamBody::new(stream).boxed_unsync()
 }
 
+#[cfg(test)]
+mod deadline_ownership {
+    use super::*;
+    struct Released(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for Released {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                tx.send(()).ok();
+            }
+        }
+    }
+    #[tokio::test]
+    async fn deadline_drops_unpolled_body_and_disconnect_aborts_worker() {
+        for disconnect in [false, true] {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let owned = Released(Some(tx));
+            let source = async_stream::stream! {
+                let _owned=owned;
+                loop { yield Ok::<_,std::io::Error>(Frame::data(Bytes::from_static(b"frame"))); }
+            };
+            let body = deadline_body(
+                StreamBody::new(source).boxed_unsync(),
+                tokio::time::Instant::now() + Duration::from_millis(20),
+            );
+            if disconnect {
+                drop(body);
+            } else {
+                // The downstream has never polled the returned body.
+                tokio::time::timeout(Duration::from_secs(1), rx)
+                    .await
+                    .expect("independent deadline")
+                    .expect("source dropped");
+                drop(body);
+                continue;
+            }
+            tokio::time::timeout(Duration::from_secs(1), rx)
+                .await
+                .expect("owned abort")
+                .expect("source dropped");
+        }
+    }
+}
+
 /// Everything a request handler reads. One per process.
 pub struct App {
     pub deps: Arc<Deps>,
