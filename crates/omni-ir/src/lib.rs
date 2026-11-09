@@ -5,6 +5,7 @@
 pub mod deep;
 pub mod error;
 pub mod js;
+pub mod jsc_json;
 pub mod jsjson;
 pub mod request;
 pub mod stream;

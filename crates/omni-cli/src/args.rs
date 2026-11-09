@@ -32,8 +32,8 @@ pub fn parse(args: &[String]) -> Result<HashMap<String, String>, String> {
         }
         if !token.starts_with("--") {
             for c in token[1..].chars() {
-                if c == 'y' {
-                    flags.insert("yes".into(), "true".into());
+                if matches!(c, 'y' | 'h') {
+                    flags.insert(if c == 'y' { "yes" } else { "help" }.into(), "true".into());
                 } else {
                     return Err(unknown(&format!("-{c}")));
                 }

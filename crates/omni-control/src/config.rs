@@ -2,8 +2,8 @@
 //! with every `OMNI_*` variable, the same validation and the same error text.
 //!
 //! A pure function of an env map (plus the host offset, injected), as in TS.
-//! The binary passes the process environment and nothing else: no `.env`
-//! file is read (see the crate docs).
+//! The gateway passes only the process environment; the CLI caller explicitly
+//! merges its selected root's `.env` before calling this pure parser.
 
 use omni_ir::js::{string_to_number, trim, utf16_len};
 use std::collections::HashMap;

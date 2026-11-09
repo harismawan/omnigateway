@@ -40,6 +40,10 @@ impl ApiKey {
 const T: &str = "api_keys";
 
 fn to_key(r: &Row<'_>) -> Result<ApiKey, StoreError> {
+    read_key(r, false)
+}
+
+fn read_key(r: &Row<'_>, operator: bool) -> Result<ApiKey, StoreError> {
     let id = row::text(r, T, "id")?;
     // TS is `JSON.parse(..) as string[]`: invalid JSON throws, and anything
     // else is used by `includes(model)`. A JSON `null` is unrestricted there
@@ -47,7 +51,11 @@ fn to_key(r: &Row<'_>) -> Result<ApiKey, StoreError> {
     // changes no decision. Any other non-array is a hand-edited row TS would
     // throw on (or, for a string, substring-match) at the request; it reads
     // here as deny-all, the closed direction.
-    let model_allowlist = match row::opt_text(r, T, "model_allowlist")? {
+    let model_allowlist = match if operator {
+        None
+    } else {
+        row::opt_text(r, T, "model_allowlist")?
+    } {
         None => None,
         Some(raw) => {
             let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
@@ -78,13 +86,49 @@ fn to_key(r: &Row<'_>) -> Result<ApiKey, StoreError> {
         limits,
         // Only a stored 1 opts out.
         body_logging_opt_out: row::flag(r, "body_logging_opt_out")?,
-        created_at: row::integer(r, T, "created_at")?,
+        created_at: if operator {
+            0
+        } else {
+            row::integer(r, T, "created_at")?
+        },
         revoked_at: row::opt_integer(r, T, "revoked_at")?,
-        expires_at: row::opt_integer(r, T, "expires_at")?,
+        expires_at: if operator {
+            None
+        } else {
+            row::opt_integer(r, T, "expires_at")?
+        },
         guardrail_policy: row::opt_text(r, T, "guardrail_policy")?,
         smart_routing: row::flag(r, "smart_routing")?,
         id,
     })
+}
+
+/// Operator projection preserves stored allowlist JSON and numeric dates. The
+/// gateway continues to use its fail-closed, normalized reader above.
+pub struct OperatorKey {
+    pub key: ApiKey,
+    pub allowlist_json: Option<String>,
+    pub created_at: serde_json::Value,
+    pub expires_at: serde_json::Value,
+}
+
+pub fn list_operator(conn: &Connection) -> Result<Vec<OperatorKey>, StoreError> {
+    let mut stmt = conn.prepare_cached("SELECT * FROM api_keys ORDER BY created_at DESC")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        let date = |name| -> Result<serde_json::Value, StoreError> {
+            Ok(r.get::<_, Option<f64>>(name)?
+                .map_or(serde_json::Value::Null, serde_json::Value::from))
+        };
+        out.push(OperatorKey {
+            key: read_key(r, true)?,
+            allowlist_json: row::opt_text(r, T, "model_allowlist")?,
+            created_at: date("created_at")?,
+            expires_at: date("expires_at")?,
+        });
+    }
+    Ok(out)
 }
 
 /// `KeyRepo.list`: every key, newest first.

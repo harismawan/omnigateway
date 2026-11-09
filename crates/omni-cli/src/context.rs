@@ -32,7 +32,9 @@ pub fn open(flags: &HashMap<String, String>) -> Result<omni_store::SqliteStore, 
     {
         cwd
     } else {
-        PathBuf::from(env.get("HOME").cloned().unwrap_or_default()).join(".config/omnigateway")
+        std::env::home_dir()
+            .ok_or("could not resolve account home directory")?
+            .join(".config/omnigateway")
     };
     let mut file_env = HashMap::new();
     let file = root.join(".env");

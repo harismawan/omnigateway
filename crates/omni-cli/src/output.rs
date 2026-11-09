@@ -6,16 +6,43 @@ fn text(v: &Value) -> String {
         .map_or_else(|| jsjson::to_string(v), str::to_owned)
 }
 fn time(v: &Value) -> String {
-    let Some(ms) = v.as_i64() else {
+    let Some(ms) = v.as_f64().filter(|n| n.is_finite()) else {
         return "—".into();
     };
-    if ms.unsigned_abs() > 8_640_000_000_000_000 {
+    if ms.abs() > 8_640_000_000_000_000.0 {
         return "out of range".into();
     }
-    chrono::DateTime::from_timestamp_millis(ms).map_or_else(
-        || "out of range".into(),
-        |d| d.format("%Y-%m-%d %H:%M:%S").to_string(),
-    )
+    // TimeClip truncates toward zero. Gregorian civil-from-days arithmetic
+    // covers the full JS ±100 million day range (including year zero).
+    let ms = ms.trunc() as i64;
+    let days = ms.div_euclid(86_400_000);
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let year = if (0..=9999).contains(&year) {
+        format!("{year:04}")
+    } else {
+        format!(
+            "{}{abs:06}",
+            if year < 0 { "-" } else { "+" },
+            abs = year.abs()
+        )
+    };
+    let seconds = ms.rem_euclid(86_400_000) / 1000;
+    let iso = format!(
+        "{year}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    );
+    iso[..19].into()
 }
 fn scope(v: &Value, prefix: &str, out: &mut Vec<String>) {
     for dimension in ["requests", "tokens", "spend"] {
@@ -39,27 +66,28 @@ fn paint(color: bool, ok: bool, s: &str) -> String {
     }
 }
 fn width(s: &str) -> usize {
-    let mut escape = false;
-    s.chars()
-        .filter(|c| {
-            if *c == '\x1b' {
-                escape = true;
-                false
-            } else if escape {
-                if *c == 'm' {
-                    escape = false;
-                }
-                false
-            } else {
-                true
+    let mut rest = s;
+    let mut width = 0;
+    while !rest.is_empty() {
+        if let Some(tail) = rest.strip_prefix("\x1b[") {
+            let n = tail
+                .bytes()
+                .take_while(|b| b.is_ascii_digit() || *b == b';')
+                .count();
+            if tail[n..].starts_with('m') {
+                rest = &tail[n + 1..];
+                continue;
             }
-        })
-        .map(char::len_utf16)
-        .sum()
+        }
+        let c = rest.chars().next().expect("nonempty");
+        width += c.len_utf16();
+        rest = &rest[c.len_utf8()..];
+    }
+    width
 }
-pub fn human(data: &Value, now: i64, color: bool) -> String {
+pub fn human(data: &Value, now: i64, color: bool) -> Result<String, String> {
     let Some(keys) = data["keys"].as_array().filter(|k| !k.is_empty()) else {
-        return "no api keys; create one with: omni keys create".into();
+        return Ok("no api keys; create one with: omni keys create".into());
     };
     let mut rows = vec![
         [
@@ -80,9 +108,11 @@ pub fn human(data: &Value, now: i64, color: bool) -> String {
     ];
     for k in keys {
         let models = match k["modelAllowlist"].as_array() {
-            None => "all".into(),
+            None if k["modelAllowlist"].is_null() => "all".into(),
+            None if k["modelAllowlist"] == "" || k["modelAllowlist"]["length"] == 0 => "none".into(),
+            None => return Err("key.modelAllowlist.join is not a function. (In 'key.modelAllowlist.join(\",\")', 'key.modelAllowlist.join' is undefined)".into()),
             Some(a) if a.is_empty() => "none".into(),
-            Some(a) => a.iter().map(text).collect::<Vec<_>>().join(","),
+            Some(a) => a.iter().map(|v| if v.is_null() {String::new()} else {omni_ir::js::to_string(Some(v))}).collect::<Vec<_>>().join(","),
         };
         let limits = if k["limits"].is_null() {
             paint(color, false, "unreadable")
@@ -90,7 +120,7 @@ pub fn human(data: &Value, now: i64, color: bool) -> String {
             let mut parts = Vec::new();
             scope(&k["limits"], "", &mut parts);
             if let Some(models) = k["limits"]["models"].as_object() {
-                for (model, v) in models {
+                for (model, v) in jsjson::own_entries(models) {
                     scope(v, &format!("{model}:"), &mut parts);
                 }
             }
@@ -102,7 +132,7 @@ pub fn human(data: &Value, now: i64, color: bool) -> String {
         };
         let state = if !k["revokedAt"].is_null() {
             "revoked"
-        } else if k["expiresAt"].as_i64().is_some_and(|e| e <= now) {
+        } else if k["expiresAt"].as_f64().is_some_and(|e| e <= now as f64) {
             "expired"
         } else {
             "active"
@@ -139,7 +169,8 @@ pub fn human(data: &Value, now: i64, color: bool) -> String {
     let widths: Vec<_> = (0..rows[0].len())
         .map(|i| rows.iter().map(|r| width(&r[i])).max().unwrap_or(0))
         .collect();
-    rows.iter()
+    Ok(rows
+        .iter()
         .map(|r| {
             r.iter()
                 .enumerate()
@@ -150,5 +181,5 @@ pub fn human(data: &Value, now: i64, color: bool) -> String {
                 .to_owned()
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }

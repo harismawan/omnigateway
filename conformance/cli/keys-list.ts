@@ -1,7 +1,7 @@
 // Real frozen-TS entrypoint versus Rust process: bytes, streams, and status.
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { requestLog } from "../../packages/testkit/src/index.ts";
@@ -10,6 +10,11 @@ const repo = resolve(import.meta.dir, "../..");
 const binary = resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni");
 const rust = [binary, ...(process.env.OMNI_CLI_SUBCOMMAND === "1" ? ["omni"] : [])];
 const root = mkdtempSync("/tmp/opencode/cli-golden-");
+if (process.env.OMNI_CLI_SYMLINK === "1") {
+  const link = join(root, "omni");
+  symlinkSync(binary, link);
+  rust.splice(0, rust.length, link);
+}
 const secret = "golden-secret-at-least-sixteen";
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("OMNI_")));
 Object.assign(env, { OMNI_ENCRYPTION_KEY: secret, NO_COLOR: "1", HOME: root });
@@ -22,17 +27,26 @@ async function invoke(cmd: string[], args: string[], cwd = root, extra = {}) {
     stderr: "pipe",
   });
   const [out, err, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
+    new Response(p.stdout).arrayBuffer().then((b) => Buffer.from(b)),
+    new Response(p.stderr).arrayBuffer().then((b) => Buffer.from(b)),
     p.exited,
   ]);
   return { out, err, code };
 }
 let count = 0;
+let failures = 0;
 async function check(args: string[], cwd = root, extra = {}) {
   const expected = await invoke(ts, args, cwd, extra);
   const actual = await invoke(rust, args, cwd, extra);
-  assert.deepEqual(actual, expected, JSON.stringify(args));
+  try {
+    assert.deepEqual(actual, expected, JSON.stringify(args));
+  } catch (e) {
+    if (process.env.OMNI_CLI_COLLECT_RED !== "1") throw e;
+    failures++;
+    console.error(
+      `RED ${count}: ${JSON.stringify(args)} TS=${expected.code}/${expected.err} Rust=${actual.code}/${actual.err}`,
+    );
+  }
   assert(!actual.out.includes("confidential-hash"));
   count++;
 }
@@ -105,6 +119,45 @@ try {
     );
   }
   usage.close();
+  const edits = new Database(join(root, "keys.db"));
+  const regressions: [string, unknown[]][] = [
+    ...['"m"', '""', "42", "true", '{"length":0}', '"unterminated', "{bad"].map(
+      (raw) =>
+        ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", [raw]] as [string, unknown[]],
+    ),
+    ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", ['[1,"m",null,[2,null],{}]']],
+    ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", ["{}"]],
+    ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", ["bad"]],
+    ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", [""]],
+    ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", ["["]],
+    ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", ["null"]],
+    [
+      "UPDATE api_keys SET limits=? WHERE id='k1'",
+      [
+        '{"models":{"z":{"concurrency":1},"10":{"concurrency":10},"2":{"concurrency":2},"4294967295":{"concurrency":3},"4294967294":{"concurrency":4},"01":{"concurrency":5}}}',
+      ],
+    ],
+    ...[
+      253402300800000, -62198755200000, 8640000000000000, -8640000000000000, 8640000000000001,
+      -8640000000000001, 0, -1, 1.9,
+    ].map((n) => ["UPDATE api_keys SET expires_at=? WHERE id='k1'", [n]] as [string, unknown[]]),
+  ];
+  for (const [sql, params] of regressions) {
+    edits.run(sql, params as never);
+    await check(["keys", "list"]);
+    await check(["keys", "list", "--json"]);
+  }
+  edits.run("UPDATE api_keys SET expires_at=NULL, label=? WHERE id='k1'", [
+    "a\x1bXsomethingm\x1b[31mred\x1b[0m",
+  ]);
+  await check(["keys", "list"]);
+  edits.close();
+  await check(["keys", "list", "-yh"]);
+  await check(["keys", "list", "-hy"]);
+  const homeless = join(root, "homeless");
+  mkdirSync(join(homeless, ".config/omnigateway"), { recursive: true });
+  writeFileSync(join(homeless, ".config/omnigateway/.env"), "OMNI_ENCRYPTION_KEY=bad");
+  await check(["keys", "list", "--db", join(root, "keys.db")], homeless, { HOME: undefined });
   const pending = new Database(join(root, "keys.db"));
   // Pending traffic must not inflate committed usage; the key-wide reader
   // also needs its rollup, while the model reader scans only matching logs.
@@ -172,7 +225,7 @@ try {
         const start = performance.now();
         const result = await invoke(rust, ["--root", root, "--json", "keys", "list"]);
         assert.equal(result.code, 0);
-        JSON.parse(result.out);
+        JSON.parse(result.out.toString());
         times.push(performance.now() - start);
       }
       const sorted = [...times].sort((a, b) => a - b);
@@ -192,6 +245,7 @@ try {
       ),
     );
   }
+  assert.equal(failures, 0, `${failures}/${count} differential failures`);
   console.log(`PASS ${count} real TS/Rust golden comparisons`);
 } finally {
   rmSync(root, { recursive: true, force: true });

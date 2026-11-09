@@ -415,6 +415,17 @@ fn note_key_order_build() {
     KEY_ORDER_BUILDS.with(|c| c.set(c.get() + 1));
 }
 
+/// JS own-property traversal, including numeric array-index keys first.
+pub fn own_entries(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(&String, &serde_json::Value)> {
+    let entries: Vec<_> = map.iter().collect();
+    enumeration_order(&entries, |(k, _)| array_index(k))
+        .into_iter()
+        .map(|i| entries[i])
+        .collect()
+}
+
 fn enumeration_order<K>(keys: &[K], index_of: impl Fn(&K) -> Option<u32>) -> Vec<usize> {
     note_key_order_build();
     let mut indexed: Vec<(u32, usize)> = Vec::new();

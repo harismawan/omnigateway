@@ -49,7 +49,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         Ok::<_, String>(if flags.contains_key("json") {
             omni_ir::jsjson::to_string_pretty(&data)
         } else {
-            output::human(&data, now, color)
+            output::human(&data, now, color)?
         })
     })();
     match result {

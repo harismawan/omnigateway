@@ -22,6 +22,15 @@ fn seed(store: &SqliteStore) {
         ("r5", "k1", T0 - 1, "opus", 9, 2.5),
         ("r6", "k2", T0 - 10, "fast", 1000, 9.0),
         ("p1", "k1", T0 - 5, "fast", 0, 0.0),
+        ("edge", "k1", T0.div_euclid(HOUR) * HOUR, "fast", 20, 0.125),
+        (
+            "before-edge",
+            "k1",
+            T0.div_euclid(HOUR) * HOUR - 1,
+            "fast",
+            30,
+            0.25,
+        ),
     ];
     for (id, key, at, model, tokens, cost) in rows {
         let state = if id.starts_with('p') {
@@ -50,7 +59,15 @@ fn seed_reads_equal_the_ts_store() {
     let store = SqliteStore::open(&path, 0).expect("open");
     seed(&store);
 
-    let since = [T0 - 5 * HOUR, T0 - 7 * 24 * HOUR, T0 - 3 * HOUR];
+    let since = [
+        T0 - 5 * HOUR,
+        T0 - 7 * 24 * HOUR,
+        T0 - 3 * HOUR,
+        T0 - 1,
+        T0,
+        T0.div_euclid(HOUR) * HOUR,
+        T0.div_euclid(HOUR) * HOUR - 1,
+    ];
     let grains = [60_000, HOUR];
     let models: [Option<&str>; 3] = [None, Some("opus"), Some("fast")];
     let mut cases = Vec::new();
@@ -71,7 +88,8 @@ const out = [];
 for (const [since, grain, model] of cases) {{
   const buckets = await store.usage.sumBuckets("k1", since, grain, model ?? undefined);
   const oldest = await store.usage.oldestSince("k1", since, model ?? undefined);
-  out.push({{ buckets: buckets.sort((a, b) => a[0] - b[0]), oldest }});
+  const sum = await store.usage.sumSince("k1", since, model ?? undefined);
+  out.push({{ buckets: buckets.sort((a, b) => a[0] - b[0]), oldest, sum }});
 }}
 store.close();
 console.log(JSON.stringify(out));
@@ -125,6 +143,14 @@ console.log(JSON.stringify(out));
             "{case}"
         );
         let stamps = done_stamps(store.connection(), "k1", s, m, 1000).expect("stamps");
+        let sum = omni_store::usage::sum_since(store.connection(), "k1", s, m).expect("sum");
+        assert_eq!(
+            omni_ir::jsjson::to_string(
+                &json!({"requests":sum.requests,"tokens":sum.tokens,"costUsd":sum.cost_usd})
+            ),
+            omni_ir::jsjson::to_string(&expected["sum"]),
+            "sum {case}"
+        );
         assert_eq!(json!(stamps.first()), expected["oldest"], "{case}");
         assert!(stamps.windows(2).all(|w| w[0] <= w[1]));
     }
