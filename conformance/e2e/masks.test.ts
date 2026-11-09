@@ -186,3 +186,34 @@ test("the tokenizer refuses what is not JSON, which leaves the body as it is", (
   expect(sse("data: [DONE]\n\n", "openai")).toBe("data: [DONE]\n\n");
   expect(json("{bad", "openai")).toBe("{bad");
 });
+
+test("request ids are masked as v4 (TS) or v7 (Rust), at the same paths only", () => {
+  const v7 = "req_019a6a2f-1c3e-7a01-9f3c-5b2d8e4f6a7b";
+  const v1 = "req_019a6a2f-1c3e-1a01-9f3c-5b2d8e4f6a7b";
+  for (const rid of [id, v7]) {
+    const body = `{"type":"message","id":"${rid}","content":[{"type":"text","text":"${rid}"}]}`;
+    expect(json(body, "anthropic")).toBe(
+      `{"type":"message","id":"req_<id>","content":[{"type":"text","text":"${rid}"}]}`,
+    );
+    const resp = JSON.stringify({
+      id: `resp_${rid}`,
+      object: "response",
+      created_at: now(),
+      output: [{ id: `msg_${rid}_0` }],
+    });
+    expect(json(resp, "responses")).toBe(
+      JSON.stringify({
+        id: "resp_req_<id>",
+        object: "response",
+        created_at: "<t>",
+        output: [{ id: "msg_req_<id>_0" }],
+      }),
+    );
+  }
+  // Any other version is not a request id, and stays for the comparison.
+  const other = `{"type":"message","id":"${v1}","content":[]}`;
+  expect(json(other, "anthropic")).toBe(other);
+  // The node id is a v4 uuid in both; a v7 there is not masked.
+  const node = '{"ok":true,"nodeId":"019a6a2f-1c3e-7a01-9f3c-5b2d8e4f6a7b"}';
+  expect(json(node, "health")).toBe(node);
+});

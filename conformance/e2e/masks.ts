@@ -28,9 +28,14 @@
  * | health | `/health` | `nodeId` (required) |
  *
  * A value at a mask path is replaced only if it has its expected shape
- * (`req_<uuid4>`; `resp_req_<uuid4>`; `<msg|rs|fc|ctc|item>_req_<uuid4>_<n>`;
- * an integer within ±120 s of now; a uuid). Anything else is left, so the
- * comparison sees it.
+ * (`req_<uuid>`; `resp_req_<uuid>`; `<msg|rs|fc|ctc|item>_req_<uuid>_<n>`;
+ * an integer within ±120 s of now; a v4 uuid for the node id). Anything else
+ * is left, so the comparison sees it.
+ *
+ * A request id's uuid is version 4 (TS mints `crypto.randomUUID()`) or 7
+ * (Rust mints time-ordered ids: spec §Writes, "Request ids: time-ordered"),
+ * at the same paths; any other version is not masked. The scenario check in
+ * `run.ts` holds each binary to its own version.
  *
  * Headers: `date` (an IMF date within ±120 s); `retry-after` (an integer
  * 0..120); `x-ratelimit-reset-*` (a duration like `1m0s`);
@@ -43,6 +48,9 @@ export type Exchange = {
   body: Uint8Array;
   /** The request path, which names the dialect. */
   route: string;
+  /** Epoch ms the driver sent the request, and when the body had arrived. */
+  sentAt?: number;
+  doneAt?: number;
 };
 
 export const fatal = new TextDecoder("utf-8", { fatal: true });
@@ -52,11 +60,15 @@ export const ANY_INDEX = Symbol("any index");
 type Seg = string | number;
 type PathPattern = readonly (string | typeof ANY_INDEX)[];
 
-const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
-const REQ = new RegExp(`^"req_${UUID}"$`);
-const RESP = new RegExp(`^"resp_req_${UUID}"$`);
-const ITEM = new RegExp(`^"(msg|rs|fc|ctc|item)_req_${UUID}_(\\d+)"$`);
-const NODE = new RegExp(`^"${UUID}"$`);
+const uuid = (version: string) =>
+  `[0-9a-f]{8}-[0-9a-f]{4}-${version}[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`;
+/** A request id's uuid: v4 (TS) or v7 (Rust). */
+export const REQUEST_UUID = uuid("[47]");
+const REQ = new RegExp(`^"req_${REQUEST_UUID}"$`);
+const RESP = new RegExp(`^"resp_req_${REQUEST_UUID}"$`);
+const ITEM = new RegExp(`^"(msg|rs|fc|ctc|item)_req_${REQUEST_UUID}_(\\d+)"$`);
+/** The node id is v4 in both. */
+const NODE = new RegExp(`^"${uuid("4")}"$`);
 
 type Shape = (raw: string) => string | null;
 const reqId: Shape = (r) => (REQ.test(r) ? '"req_<id>"' : null);

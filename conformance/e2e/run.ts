@@ -133,12 +133,18 @@ async function tracked<T>(
 
 /** A whole exchange: head and body, each within the bound. */
 function request(what: string, url: string, init: RequestInit, route: string): Promise<Exchange> {
-  return tracked(what, url, init, async (res, wait) => ({
-    status: res.status,
-    headers: [...res.headers.entries()],
-    body: new Uint8Array(await wait(`${what}: body`, res.arrayBuffer())),
-    route,
-  }));
+  const sentAt = Date.now();
+  return tracked(what, url, init, async (res, wait) => {
+    const body = new Uint8Array(await wait(`${what}: body`, res.arrayBuffer()));
+    return {
+      status: res.status,
+      headers: [...res.headers.entries()],
+      body,
+      route,
+      sentAt,
+      doneAt: Date.now(),
+    };
+  });
 }
 
 // ------------------------------------------------------------ the upstream
@@ -852,6 +858,71 @@ function dbState(db: string): Record<string, Record<string, unknown>[]> {
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
+/** How far a v7 id's timestamp may sit outside its request's send…receive window. */
+const ID_SLACK_MS = 2000;
+const REQUEST_ID =
+  /req_([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f])[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/g;
+/** A v7 uuid's 48-bit millisecond timestamp, from its first two groups. */
+const v7Ms = (g1: string, g2: string) => Number.parseInt(g1 + g2, 16);
+
+/**
+ * Request ids, held to each binary's own format (spec §Writes, "Request ids:
+ * time-ordered"): every id a client saw is `req_<uuid v4>` from TS and
+ * `req_<uuid v7>` from Rust, a Rust id's timestamp within ±`ID_SLACK_MS` of
+ * when the driver sent the request (and before its answer arrived); every
+ * `request_logs.id` likewise. For Rust, sorting the rows by `id` must give
+ * them in `at` order: `at` is read just after the id is minted, so two
+ * concurrent requests may invert by at most 1 ms, never more; and each row's
+ * `at` is within 0..1000 ms after its id's timestamp.
+ */
+function idProblems(run: Run, version: "4" | "7"): string[] {
+  const problems: string[] = [];
+  let seen = 0;
+  for (const [name, xs] of run.exchanges) {
+    for (const x of xs) {
+      const text = Buffer.from(x.body).toString("latin1");
+      for (const m of text.matchAll(REQUEST_ID)) {
+        seen += 1;
+        const [id, g1, g2, ver] = m as unknown as [string, string, string, string];
+        if (ver !== version) {
+          problems.push(`${name}: ${id} is v${ver}, want v${version}`);
+          continue;
+        }
+        if (version === "7" && x.sentAt !== undefined && x.doneAt !== undefined) {
+          const ms = v7Ms(g1, g2);
+          if (ms < x.sentAt - ID_SLACK_MS || ms > x.doneAt + ID_SLACK_MS)
+            problems.push(`${name}: ${id} stamped ${ms}, sent ${x.sentAt}, answered ${x.doneAt}`);
+        }
+      }
+    }
+  }
+  if (seen === 0) problems.push("no request id seen in any response");
+  const d = new Database(run.db, { readonly: true });
+  const rows = d.query("SELECT id, at FROM request_logs ORDER BY id").all() as {
+    id: string;
+    at: number;
+  }[];
+  d.close();
+  let lastAt = Number.NEGATIVE_INFINITY;
+  for (const r of rows) {
+    const m = [...r.id.matchAll(REQUEST_ID)][0];
+    if (m === undefined || m[0] !== r.id) {
+      problems.push(`request_logs.id ${r.id} is not a request id`);
+      continue;
+    }
+    if (m[3] !== version) problems.push(`request_logs.id ${r.id} is v${m[3]}, want v${version}`);
+    if (version === "7") {
+      const ms = v7Ms(m[1] as string, m[2] as string);
+      if (r.at < ms || r.at - ms > 1000)
+        problems.push(`request_logs ${r.id}: at ${r.at} vs id time ${ms}`);
+      if (r.at < lastAt - 1)
+        problems.push(`request_logs ${r.id}: at ${r.at} sorts after at ${lastAt} by id`);
+      lastAt = Math.max(lastAt, r.at);
+    }
+  }
+  return problems;
+}
+
 /** Upstream requests: bytes equal, and valid UTF-8 (they are JSON over HTTP/1.1). */
 function upstreamEqual(a: Uint8Array[] = [], b: Uint8Array[] = []): boolean {
   if (a.length !== b.length) return false;
@@ -954,6 +1025,13 @@ async function main(): Promise<number> {
     report.push(`| disconnect: one 499 row per db | ${ok ? "pass" : "FAIL"} | | |`);
     if (!ok) fail("disconnect rows", `TS ${counts[0]}, Rust ${counts[1]}`);
   }
+  const idsTs = idProblems(ts, "4");
+  const idsRs = idProblems(rs, "7");
+  const idsOk = idsTs.length === 0 && idsRs.length === 0;
+  report.push(
+    `| request ids: TS v4, Rust v7 stamped at send, request_logs in at order | | | ${idsOk ? "pass" : "FAIL"} |`,
+  );
+  if (!idsOk) fail("request ids", `TS: ${idsTs.join("; ")}\nRust: ${idsRs.join("; ")}`);
   const tsDb = dbState(ts.db);
   const rsDb = dbState(rs.db);
   for (const t of Object.keys(tsDb)) {

@@ -63,6 +63,29 @@ fn uuid_like(n: u64) -> String {
     )
 }
 
+/// A UUIDv7-shaped id as the gateway mints them: the start's ms timestamp
+/// in the top 48 bits, a per-ms counter in `rand_a`, random `rand_b`.
+fn v7_like(n: u64, ms: u64) -> String {
+    let b = uuid_like(n);
+    // Keep v4's random tail (from its 4th group on), replace the head.
+    format!(
+        "req_{:08x}-{:04x}-7{:03x}-{}",
+        ms >> 16,
+        ms & 0xffff,
+        n & 0xfff,
+        &b[23..]
+    )
+}
+
+/// Which request ids a run mints.
+#[derive(Clone, Copy, Debug)]
+enum Ids {
+    /// `req_<uuid v4>`, as TS mints them.
+    V4,
+    /// `req_<uuid v7>`, as the Rust gateway mints them.
+    V7,
+}
+
 /// What a run committed: events per second of wall time, and the drops.
 struct Run {
     per_s: f64,
@@ -72,7 +95,7 @@ struct Run {
 
 /// Offers `rate` requests/s for `secs` on a one-worker runtime with one
 /// blocking thread, and closes the writer.
-fn offer(rate: u64, secs: u64) -> Run {
+fn offer(rate: u64, secs: u64, ids: Ids) -> Run {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .max_blocking_threads(1)
@@ -96,7 +119,10 @@ fn offer(rate: u64, secs: u64) -> Run {
             let ids: Vec<String> = (0..per_ms)
                 .map(|_| {
                     n += 1;
-                    uuid_like(n)
+                    match ids {
+                        Ids::V4 => uuid_like(n),
+                        Ids::V7 => v7_like(n, 1_794_007_800_000 + step),
+                    }
                 })
                 .collect();
             for id in &ids {
@@ -124,14 +150,30 @@ fn offer(rate: u64, secs: u64) -> Run {
 
 /// 30 k req/s is 60 k events/s. With 512-event batches and SQLite's default
 /// checkpoint the writer committed ~45-48 k events/s here on a quiet core
-/// and shed; with 4096 and a 10 000-page checkpoint, ~75 k.
+/// with v4 ids and shed; with 4096 and a 10 000-page checkpoint, ~59 k.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release builds only")]
 fn the_writer_keeps_up_with_30k_requests_per_second_on_one_core() {
-    let run = offer(30_000, 10);
+    let run = offer(30_000, 10, Ids::V4);
     println!(
-        "committed {:.0} events/s, dropped {}, batches {}",
+        "v4 ids: committed {:.0} events/s, dropped {}, batches {}",
         run.per_s, run.dropped, run.batches
     );
     assert_eq!(run.dropped, 0, "the writer shed at 30 k req/s");
+}
+
+/// The gateway's own ids (v7) at 60 k req/s, 120 k events/s: more than its
+/// best 4-core rate on the bench rig. v4 ids shed here (the second half of
+/// this test shows it), v7 ids must not.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release builds only")]
+fn time_ordered_ids_keep_up_with_60k_requests_per_second_on_one_core() {
+    let v7 = offer(60_000, 10, Ids::V7);
+    let v4 = offer(60_000, 10, Ids::V4);
+    println!(
+        "60k req/s offered: v7 committed {:.0} events/s, dropped {}; v4 committed {:.0} events/s, dropped {}",
+        v7.per_s, v7.dropped, v4.per_s, v4.dropped
+    );
+    assert_eq!(v7.dropped, 0, "v7 ids shed at 60 k req/s");
+    assert!(v4.dropped > 0, "the v4 baseline is expected to shed here");
 }
