@@ -279,50 +279,8 @@ pub fn write_number(value: f64, out: &mut String) {
         out.push_str("null");
         return;
     }
-    if value == 0.0 {
-        // Covers -0 as well: JSON.stringify(-0) is "0".
-        out.push('0');
-        return;
-    }
-    if value < 0.0 {
-        out.push('-');
-    }
-    // Rust's `{:e}` prints the shortest digits that round-trip, which is the
-    // digit string ECMA-262 Number::toString starts from.
-    let sci = format!("{:e}", value.abs());
-    let (mantissa, exponent) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
-    let exponent: i32 = exponent.parse().unwrap_or(0);
-    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-    let k = i32::try_from(digits.len()).unwrap_or(i32::MAX);
-    let n = exponent + 1;
-
-    if k <= n && n <= 21 {
-        out.push_str(&digits);
-        for _ in 0..(n - k) {
-            out.push('0');
-        }
-    } else if 0 < n && n <= 21 {
-        let split = usize::try_from(n).unwrap_or(0);
-        out.push_str(&digits[..split]);
-        out.push('.');
-        out.push_str(&digits[split..]);
-    } else if -6 < n && n <= 0 {
-        out.push_str("0.");
-        for _ in 0..(-n) {
-            out.push('0');
-        }
-        out.push_str(&digits);
-    } else {
-        let e = n - 1;
-        out.push_str(&digits[..1]);
-        if k > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        out.push('e');
-        out.push(if e < 0 { '-' } else { '+' });
-        push_u64(u64::from(e.unsigned_abs()), out);
-    }
+    // ECMAScript's shortest-decimal tie selection differs from Rust Display.
+    out.push_str(ryu_js::Buffer::new().format_finite(value));
 }
 
 fn write_serde_number(n: &serde_json::Number, out: &mut String) {
