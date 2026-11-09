@@ -260,17 +260,31 @@ impl SnapshotHolder {
         store: &SqliteStore,
         hash: &str,
     ) -> Result<Option<Arc<ApiKey>>, StoreError> {
+        self.lookup_miss_after_read(store, hash, || {})
+    }
+
+    fn lookup_miss_after_read(
+        &self,
+        store: &SqliteStore,
+        hash: &str,
+        after_read: impl FnOnce(),
+    ) -> Result<Option<Arc<ApiKey>>, StoreError> {
+        let observed = self.current.load_full();
         let Some(found) = store.find_api_key_by_hash(hash)? else {
             return Ok(None);
         };
+        after_read();
         let found = Arc::new(found);
-        let added = found.clone();
-        self.current.rcu(move |cur| {
-            let mut next = GatewaySnapshot::clone(cur);
-            next.keys_by_hash.insert(added.hash.clone(), added.clone());
-            next
-        });
-        Ok(Some(found))
+        let mut next = GatewaySnapshot::clone(&observed);
+        next.keys_by_hash.insert(found.hash.clone(), found.clone());
+        // The exact snapshot read before the database lookup must still be
+        // current at publication. A separate generation check would race.
+        let previous = self.current.compare_and_swap(&observed, Arc::new(next));
+        if Arc::ptr_eq(&previous, &observed) {
+            Ok(Some(found))
+        } else {
+            Ok(self.current.load().keys_by_hash.get(hash).cloned())
+        }
     }
 
     /// Polls `PRAGMA data_version` every `interval` and rebuilds when it
@@ -316,3 +330,38 @@ impl SnapshotHolder {
 }
 
 pub use crate::miss::{MissConfig, MissResolver, MissResult};
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_positive_read_cannot_replace_revoke_delete_or_restriction() {
+        for mutation in [
+            "UPDATE api_keys SET revoked_at=1",
+            "DELETE FROM api_keys",
+            "UPDATE api_keys SET limits='{\"requests\":{\"1m\":1}}'",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("test.db");
+            let store = SqliteStore::open(&path, 0).unwrap();
+            let holder =
+                SnapshotHolder::build(&store, omni_crypto::field::derive_key("k"), 0.0).unwrap();
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute("INSERT INTO api_keys (id,label,prefix,hash,created_at,limits) VALUES ('k','k','k','h',0,'{}')", []).unwrap();
+            let result = holder
+                .lookup_miss_after_read(&store, "h", || {
+                    db.execute(mutation, []).unwrap();
+                    holder.rebuild(&store).unwrap();
+                })
+                .unwrap();
+            let expected = store.find_api_key_by_hash("h").unwrap();
+            // No subsequent database write or refresh may be needed to heal.
+            assert_eq!(format!("{result:?}"), format!("{expected:?}"));
+            assert_eq!(
+                format!("{:?}", holder.load().keys_by_hash.get("h")),
+                format!("{:?}", expected.as_ref())
+            );
+        }
+    }
+}
