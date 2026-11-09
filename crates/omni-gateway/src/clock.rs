@@ -1,6 +1,8 @@
 //! The wall clock as TS reads it (`Date.now()`: integer epoch ms) and the
 //! random ids the gateway mints.
 
+use rand::{Rng, SeedableRng};
+
 /// Epoch milliseconds, `Date.now()`.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -25,12 +27,42 @@ pub fn uuid_v4() -> String {
 /// gateway's own throughput. v7 keys append at the index's right edge. The
 /// `req_<lowercase hyphenated uuid>` shape, and every id derived from it, are
 /// unchanged.
+///
+/// # Panics
+/// If called before `init_request_ids` succeeds (normally done by `start`).
 pub fn request_id() -> String {
     format!("req_{}", format_uuid(&uuid_v7()))
 }
 
-/// The last id's millisecond and its 74-bit `rand_a`‖`rand_b` value.
-static V7_LAST: std::sync::Mutex<(u64, u128)> = std::sync::Mutex::new((0, 0));
+struct RequestIds {
+    last: (u64, u128),
+    rng: rand::rngs::StdRng,
+}
+
+static REQUEST_IDS: std::sync::Mutex<Option<RequestIds>> = std::sync::Mutex::new(None);
+
+/// Seed the actual request-ID CSPRNG before serving; never use an implicitly
+/// initialized thread RNG on this path. Repeated boots retain process ordering.
+pub fn init_request_ids() -> Result<(), String> {
+    init_request_ids_with(&REQUEST_IDS, || {
+        rand::rngs::StdRng::try_from_os_rng().map_err(|e| e.to_string())
+    })
+}
+
+fn init_request_ids_with(
+    state: &std::sync::Mutex<Option<RequestIds>>,
+    seed: impl FnOnce() -> Result<rand::rngs::StdRng, String>,
+) -> Result<(), String> {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.is_none() {
+        let rng =
+            seed().map_err(|e| format!("request-ID OS entropy initialization failed: {e}"))?;
+        *state = Some(RequestIds { last: (0, 0), rng });
+    }
+    Ok(())
+}
 
 /// The 74 bits after the version and variant: `rand_a` (12) then `rand_b` (62).
 const SUB_MS_BITS: u32 = 74;
@@ -70,9 +102,8 @@ fn v7_next(last: (u64, u128), now: u64, fresh: u128, step: u128) -> (u64, u128) 
 ///   the last id's millisecond is kept), it is the last value plus a random
 ///   step in `1..=2^56`.
 ///
-/// So same-ms ids are strictly increasing, yet a client cannot tell from two
-/// of its own ids how many were minted between them. Method 1's counter in
-/// `rand_a` stepped by exactly 1 and could be counted.
+/// Random steps hide exact intervening counts, but permit statistical rate
+/// estimates. Method 1's counter in `rand_a` stepped by exactly 1.
 ///
 /// **Rollover:** if a step would overflow the 74 bits, the millisecond is
 /// bumped by one and the counter starts afresh. The timestamp may then run
@@ -80,16 +111,21 @@ fn v7_next(last: (u64, u128), now: u64, fresh: u128, step: u128) -> (u64, u128) 
 /// clock passes it (the RFC allows this). With the bounds above that needs
 /// over 262 144 ids in one millisecond.
 ///
-/// One short lock per id keeps the order across threads. Every random bit
-/// comes from `rand`'s thread-local ChaCha CSPRNG, seeded from the OS.
+/// One short lock per id keeps the order across threads. Randomness comes
+/// from the process CSPRNG fallibly seeded from OS entropy at boot.
+/// The 48-bit timestamp representation ends in year 10889: masking/truncation
+/// at that boundary cannot preserve timestamp accuracy or monotonic ordering.
 fn uuid_v7() -> [u8; 16] {
     let now = u64::try_from(now_ms()).unwrap_or(0) & ((1 << 48) - 1);
     let (ms, sub) = {
-        let mut last = V7_LAST
+        let mut state = REQUEST_IDS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let next = v7_next(*last, now, rand::random(), rand::random());
-        *last = next;
+        let ids = state
+            .as_mut()
+            .expect("request-ID RNG must be initialized at boot");
+        let next = v7_next(ids.last, now, ids.rng.random(), ids.rng.random());
+        ids.last = next;
         next
     };
     let rand_a = u16::try_from(sub >> 62).unwrap_or(0);
@@ -123,6 +159,33 @@ pub fn random() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn entropy_failure_leaves_request_ids_uninitialized_and_can_retry() {
+        use rand::{Rng, SeedableRng};
+        let state = std::sync::Mutex::new(None);
+        let error = super::init_request_ids_with(&state, || Err("injected failure".into()))
+            .expect_err("boot must fail");
+        assert_eq!(
+            error,
+            "request-ID OS entropy initialization failed: injected failure"
+        );
+        assert!(state.lock().expect("lock").is_none());
+        super::init_request_ids_with(&state, || Ok(rand::rngs::StdRng::from_seed([42; 32])))
+            .expect("retry");
+        let mut expected = rand::rngs::StdRng::from_seed([42; 32]);
+        let mut guard = state.lock().expect("lock");
+        let ids = guard.as_mut().expect("initialized");
+        assert_eq!(ids.rng.random::<u128>(), expected.random::<u128>());
+        ids.last = (123, 456);
+        drop(guard);
+        super::init_request_ids_with(&state, || panic!("must not reseed"))
+            .expect("idempotent boot");
+        assert_eq!(
+            state.lock().expect("lock").as_ref().expect("ids").last,
+            (123, 456)
+        );
+    }
+
     /// `req_<8-4-4-4-12 lowercase hex>`, version 7, variant `10`.
     fn assert_v7(id: &str) -> u64 {
         let u = id.strip_prefix("req_").expect("req_ prefix");
@@ -145,6 +208,7 @@ mod tests {
 
     #[test]
     fn request_ids_are_uuid_v7_stamped_with_now() {
+        super::init_request_ids().expect("entropy");
         let id = super::request_id();
         let ms = assert_v7(&id);
         let now = u64::try_from(super::now_ms()).expect("now");
@@ -153,6 +217,7 @@ mod tests {
 
     #[test]
     fn request_ids_are_strictly_increasing_in_a_tight_loop() {
+        super::init_request_ids().expect("entropy");
         let ids: Vec<String> = (0..100_000).map(|_| super::request_id()).collect();
         for w in ids.windows(2) {
             assert!(w[0] < w[1], "{} !< {}", w[0], w[1]);
@@ -179,6 +244,7 @@ mod tests {
     /// of at most 2^56 makes about 1 in 128.
     #[test]
     fn same_millisecond_ids_step_by_a_random_amount() {
+        super::init_request_ids().expect("entropy");
         let ids: Vec<String> = (0..50_000).map(|_| super::request_id()).collect();
         let mut same_ms = 0;
         let mut rand_a_plus_one = 0;
@@ -229,6 +295,7 @@ mod tests {
 
     #[test]
     fn request_ids_across_threads_are_sorted_per_thread_and_unique() {
+        super::init_request_ids().expect("entropy");
         let threads: Vec<_> = (0..8)
             .map(|_| {
                 std::thread::spawn(|| (0..20_000).map(|_| super::request_id()).collect::<Vec<_>>())

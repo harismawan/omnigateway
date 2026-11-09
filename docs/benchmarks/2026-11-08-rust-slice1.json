@@ -1,6 +1,6 @@
 {
-  "label": "rust-slice1 single @ ca80bcfa: median of 3 full runs, uncapped; request ids req_<uuid v7> (RFC 9562 method 3); rate-limit windows bounded by their limits; every scenario 0 dropped, 0 failed, 0 missing, 0 pending (writer barrier, exact prefix)",
-  "method": "scripts/bench-gateway.ts (no --rate), gateway cpus 0-3, upstream 4-5, oha 6-7, 20 s scenarios after a 3 s warmup, OMNI_LOG_LEVEL=warn, OMNI_BENCH=1 (writer barrier: {watermark, committed, failed, dropped}, committed+failed+dropped == watermark, per-scenario deltas), release build. Host checked before each run: no headless Chrome load (chrome gpu 0.0 %), load average 0.7-4.0 (the previous run). Each value is median/min/max of `runs`.",
+  "label": "PREVIOUS IMPLEMENTATION ca80bcfa (not revised round-3 code): median of 3 full uncapped runs; reported zero dropped/failed/missing/pending in every scenario. Final rerun pending.",
+  "method": "scripts/bench-gateway.ts (no --rate), gateway cpus 0-3, upstream 4-5, oha 6-7, 20 s scenarios after a 3 s warmup, OMNI_LOG_LEVEL=warn, OMNI_BENCH=1 (writer barrier: {watermark, committed, failed, dropped}, committed+failed+dropped == watermark, per-scenario deltas), release build. Host checked before each run: no headless Chrome load (chrome gpu 0.0 %), load average 0.74-3.74 (the previous run). Summary/process values are median/min/max of `runs`; isolated and previous measurements are separately labeled. Calibration: alone 461-489 ms, together 529-596 ms; scenario foreignCores 0.15-1.17. Measurements predate round-3 revisions.",
   "idFormat": "Rust mints request ids as req_ + RFC 9562 UUIDv7 (time-ordered, monotonic per process by RFC 9562 method 3: a random 1..2^56 step in rand_a||rand_b within a millisecond); TS mints req_ + UUIDv4. Spec \u00a7Writes, \"Request ids: time-ordered\" (operator decision a4a6de5b).",
   "command": "bun scripts/bench-gateway.ts --gateway target/release/omnigateway --cli \"bun apps/cli/src/index.ts\" --out <run>.json",
   "hostBeforeRuns": [
@@ -8,6 +8,17 @@
     "== r2 uncapped run 2 2026-11-09T09:38:58Z load average: 3.74, 3.44, 2.41\n 1.9 opencode; 1.2 opencode; 1.0 hermes; 1.0 bun;\nchrome-gpu 0.0%\n1240516 homebrew  20   0  472488 145852  12164 S   9.1   0.9   3:58.92 hermes\n      1 root      20   0   38900  20616   7740 S   0.0   0.1   5:51.75 systemd\n      2 root      20   0       0      0      0 S   0.0   0.0   0:00.85 kthreadd\n",
     "== r2 uncapped run 3 2026-11-09T09:43:46Z load average: 3.55, 4.06, 3.00\n 1.9 opencode; 1.2 opencode; 1.0 hermes; 1.0 bun;\nchrome-gpu 0.0%\n1231932 root      20   0   40596  32144  12480 R  45.5   0.2   0:00.05 rocm-smi\n 843890 homebrew  20   0   11.0g 269680  37140 S   9.1   1.7  61:23.28 opencode\n3241389 homebrew  20   0 2301760  45392  14144 S   9.1   0.3  45:18.06 herdr\n"
   ],
+  "deferredTargets": {
+    "status": "DEFERRED: Rust CLI and cluster stores are not implemented",
+    "cliKeysListMaxMs": 15,
+    "cluster2ChatStream64MinRps": 8000,
+    "cluster2ChatStream64MaxP99Ms": 15,
+    "cluster2PostgresValkeyMaxCpuMsPerRequest": 0.1,
+    "cluster2AnthropicJsonMaxP99Ms": 20,
+    "clusterCancelMaxCrashes": 0,
+    "clusterCancelMaxRssAboveStartMiB": 20,
+    "clusterCancelRecoveryMaxSeconds": 10
+  },
   "process": {
     "bootP50Ms": {
       "median": 26.542794000000868,
@@ -1091,7 +1102,7 @@
     }
   ],
   "previous": {
-    "note": "Earlier rounds, with v4 request ids, kept for comparison: the 20k-capped zero-drop median of 3 (d6933714) and the shedding runs.",
+    "note": "Previous implementations only: zero-drop v7 and capped v4 measurements. Withdrawn shedding evidence is retained only in the internal Task 6b report.",
     "uncappedV7UnboundedWindows": {
       "label": "rust-slice1 single @ 394287df: median of 3 full runs, uncapped, request ids req_<uuid v7>; every scenario 0 dropped, 0 failed, 0 missing, 0 pending (writer flush barrier)",
       "summary": {
@@ -2247,317 +2258,6 @@
           "rowsMissing": 0,
           "rowsPending": 0,
           "writerDrops": 0
-        }
-      }
-    },
-    "shedding": {
-      "note": "Not comparable with TS (rows were dropped); kept to show what the writer changes did. Rows: answered = responses the clients got, done/pending = request_logs rows in the scenario window, writerDrops = the gateway's own drop warnings in the window.",
-      "before437c4ef5Uncapped": {
-        "label": "before (437c4ef5) shedding check",
-        "writerDroppedTotal": 10173739,
-        "scenarios": {
-          "overhead-c1": {
-            "rps": 9887,
-            "rows": {
-              "answered": 228267,
-              "done": 228267,
-              "pending": 0,
-              "missing": 0
-            }
-          },
-          "chat-stream": {
-            "rps": 56325,
-            "rows": {
-              "answered": 1301041,
-              "done": 294954,
-              "pending": 35888,
-              "missing": 1006087
-            }
-          },
-          "anthropic-json": {
-            "rps": 64229,
-            "rows": {
-              "answered": 1470409,
-              "done": 241768,
-              "pending": 29635,
-              "missing": 1228641
-            }
-          },
-          "responses-stream": {
-            "rps": 56034,
-            "rows": {
-              "answered": 1310564,
-              "done": 231845,
-              "pending": 29018,
-              "missing": 1078719
-            }
-          },
-          "agent-100k": {
-            "rps": 6323,
-            "rows": {
-              "answered": 144990,
-              "done": 144990,
-              "pending": 0,
-              "missing": 0
-            }
-          },
-          "many-chunks": {
-            "rps": 3296,
-            "rows": {
-              "answered": 75937,
-              "done": 75937,
-              "pending": 0,
-              "missing": 0
-            }
-          },
-          "rate-limited-key": {
-            "rps": 54920,
-            "rows": {
-              "answered": 1264970,
-              "done": 219682,
-              "pending": 26556,
-              "missing": 1045288
-            }
-          },
-          "held-streams": {
-            "rps": 32,
-            "rows": {
-              "answered": 1000,
-              "done": 1000,
-              "pending": 0,
-              "missing": 0
-            }
-          },
-          "client-cancel": {
-            "rps": 100,
-            "rows": {
-              "answered": 0,
-              "done": 2000,
-              "pending": 0,
-              "missing": 0
-            }
-          },
-          "early-cancel": {
-            "rps": 46613,
-            "rows": {
-              "answered": 552200,
-              "done": 198735,
-              "pending": 24207,
-              "missing": 353465
-            }
-          }
-        }
-      },
-      "before437c4ef5At20000": {
-        "label": "before (437c4ef5), --rate 20000",
-        "writerDroppedTotal": 1643333,
-        "scenarios": {
-          "overhead-c1": {
-            "rps": 9051,
-            "rows": {
-              "answered": 208838,
-              "done": 204949,
-              "pending": 2,
-              "missing": 3889,
-              "writerDrops": 7778
-            }
-          },
-          "chat-stream": {
-            "rps": 19998,
-            "rows": {
-              "answered": 459938,
-              "done": 394709,
-              "pending": 8014,
-              "missing": 65229,
-              "writerDrops": 99034
-            }
-          },
-          "anthropic-json": {
-            "rps": 19998,
-            "rows": {
-              "answered": 459975,
-              "done": 388771,
-              "pending": 7381,
-              "missing": 71204,
-              "writerDrops": 102285
-            }
-          },
-          "responses-stream": {
-            "rps": 19998,
-            "rows": {
-              "answered": 459974,
-              "done": 146350,
-              "pending": 3362,
-              "missing": 313624,
-              "writerDrops": 593668
-            }
-          },
-          "agent-100k": {
-            "rps": 6217,
-            "rows": {
-              "answered": 143118,
-              "done": 143118,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 90666
-            }
-          },
-          "many-chunks": {
-            "rps": 3320,
-            "rows": {
-              "answered": 76398,
-              "done": 76398,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 0
-            }
-          },
-          "rate-limited-key": {
-            "rps": 19998,
-            "rows": {
-              "answered": 459978,
-              "done": 251693,
-              "pending": 6389,
-              "missing": 208285,
-              "writerDrops": 388059
-            }
-          },
-          "held-streams": {
-            "rps": 32,
-            "rows": {
-              "answered": 1000,
-              "done": 1000,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 23993
-            }
-          },
-          "client-cancel": {
-            "rps": 100,
-            "rows": {
-              "answered": 0,
-              "done": 2000,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 0
-            }
-          },
-          "early-cancel": {
-            "rps": 19999,
-            "rows": {
-              "answered": 386713,
-              "done": 227994,
-              "pending": 6269,
-              "missing": 158719,
-              "writerDrops": 337850
-            }
-          }
-        }
-      },
-      "afterd6933714Uncapped": {
-        "label": "after (d6933714), uncapped",
-        "writerDroppedTotal": 6228811,
-        "scenarios": {
-          "overhead-c1": {
-            "rps": 9995,
-            "rows": {
-              "answered": 230830,
-              "done": 230830,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 0
-            }
-          },
-          "chat-stream": {
-            "rps": 53241,
-            "rows": {
-              "answered": 1205212,
-              "done": 597986,
-              "pending": 6582,
-              "missing": 607226,
-              "writerDrops": 1183259
-            }
-          },
-          "anthropic-json": {
-            "rps": 57213,
-            "rows": {
-              "answered": 1304329,
-              "done": 528544,
-              "pending": 5589,
-              "missing": 775785,
-              "writerDrops": 898619
-            }
-          },
-          "responses-stream": {
-            "rps": 52134,
-            "rows": {
-              "answered": 1205410,
-              "done": 421798,
-              "pending": 6195,
-              "missing": 783612,
-              "writerDrops": 1926427
-            }
-          },
-          "agent-100k": {
-            "rps": 6453,
-            "rows": {
-              "answered": 146294,
-              "done": 146294,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 165277
-            }
-          },
-          "many-chunks": {
-            "rps": 3379,
-            "rows": {
-              "answered": 77750,
-              "done": 77750,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 0
-            }
-          },
-          "rate-limited-key": {
-            "rps": 50334,
-            "rows": {
-              "answered": 1145114,
-              "done": 509112,
-              "pending": 5506,
-              "missing": 636002,
-              "writerDrops": 1230518
-            }
-          },
-          "held-streams": {
-            "rps": 32,
-            "rows": {
-              "answered": 1000,
-              "done": 1000,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 41526
-            }
-          },
-          "client-cancel": {
-            "rps": 100,
-            "rows": {
-              "answered": 0,
-              "done": 2000,
-              "pending": 0,
-              "missing": 0,
-              "writerDrops": 0
-            }
-          },
-          "early-cancel": {
-            "rps": 42983,
-            "rows": {
-              "answered": 429297,
-              "done": 457370,
-              "pending": 5176,
-              "missing": 0,
-              "writerDrops": 783185
-            }
-          }
         }
       }
     }

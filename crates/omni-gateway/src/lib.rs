@@ -215,6 +215,7 @@ pub fn http1_builder(idle: Duration) -> hyper::server::conn::http1::Builder {
 /// Boots the gateway inside the current runtime and starts serving.
 #[allow(clippy::too_many_lines)]
 pub async fn start(config: Config, options: Options) -> Result<Running, String> {
+    clock::init_request_ids()?;
     let now = clock::now_ms();
     let node_id = clock::uuid_v4();
     // PBKDF2 at 210 000 rounds is most of boot (~24 ms in release) and is a

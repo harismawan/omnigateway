@@ -195,7 +195,11 @@ async fn decode_vectors_match_the_ts_custom_adapter() {
         "stream": true
     }))
     .expect("request");
-    for case in cases {
+    let large = vectors()["customLargeDecode"]
+        .as_array()
+        .expect("large decode");
+    assert_eq!(large.len(), 3, "all large TS decode vectors must run");
+    for case in cases.iter().chain(large) {
         let name = format!(
             "{} [{}]",
             case["name"].as_str().expect("name"),

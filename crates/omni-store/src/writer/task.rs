@@ -835,10 +835,10 @@ fn resolve(epochs: std::collections::BTreeMap<u64, u64>, lost: u64, counters: &C
 
 /// Answers barriers once the batch before them is written.
 ///
-/// Every event ahead of the barrier is now committed or failed, and none
-/// behind it is (the barrier ended its batch), so the writer's cumulative
-/// `written` and `failed` are exactly the prefix's. Events are only ever
-/// counted `written` or `failed` once, in queue order.
+/// All validated producers in the barrier's epoch have settled before its
+/// publication, so every event in its epoch prefix is committed or failed.
+/// Later epochs may publish ahead of it too: global written/failed totals
+/// are not the prefix. Fold only the tagged epochs through the barrier's.
 fn answer(barriers: Vec<Pending>, counters: &Counters) {
     for b in barriers {
         // Fold every epoch up to the barrier's into the answered total, so

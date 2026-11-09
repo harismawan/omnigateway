@@ -58,15 +58,16 @@
 //! not `started`, which a stray may briefly raise).
 //!
 //! **Strays.** A producer whose step-3 load sees a bump undoes its step-2
-//! increment. Until it does, `started` reads one high, so `done == started`
-//! cannot hold on that slot: the barrier waits a moment longer, never
-//! settles early. `done` itself is never raised by a stray.
+//! increment. If observed by the settlement read, that increment makes
+//! `started` read high and delays settlement until undone. A stray arriving
+//! after that read is harmless: it cannot validate the old epoch or publish
+//! an event tagged with it. `done` itself is never raised by a stray.
 //!
 //! A stray increment (step 2, then undone in step 3) can only make `started`
 //! read high, never low: `done` only grows after a kept increment. So
-//! `done == started` holds only when no stray is outstanding on that slot and
-//! every kept event has finished; any stray that reaches a slot after one
-//! barrier settled is undone before the next barrier on that slot can settle.
+//! the settlement reads cannot accept an unfinished validated producer.
+//! They do not exclude a late stray after the `started` read; that stray
+//! only retries, and an observed outstanding stray delays a later settlement.
 //!
 //! **What waits.** Only the barrier, and only for producers already between
 //! steps 1 and 5 of epoch `E`: a `try_send` and a few atomics each.
