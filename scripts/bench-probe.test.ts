@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { smoke, setupViaApi, recoveryVerdict } from "./bench-probe";
+import { smoke, setupViaApi, recoveryVerdict, sampleRecovery } from "./bench-probe";
 
 for (const phase of ["headers", "body"]) {
   test(`smoke deadline bounds stalled ${phase}`, async () => {
@@ -40,4 +40,21 @@ test("recovery classification uses ten-second observation, requires data", () =>
   for (const samples of [[], [s(null)], [s(10, 5000)]]) expect(recoveryVerdict(10, samples, 0)).toBe("inconclusive");
   expect(recoveryVerdict(null, [s(10)], 0)).toBe("inconclusive");
   expect(recoveryVerdict(10, [s(10)], 1)).toBe("miss");
+});
+
+test("sampling caller records delayed observations and refuses a sixty-second recovery", async () => {
+  let clock = 0;
+  let calls = 0;
+  const samples = await sampleRecovery(0, () => clock, async ms => { clock += ms; }, () => {
+    calls++;
+    clock = calls === 1 ? 5001 : 60000;
+    return calls === 1 ? 40 : 10;
+  });
+  expect(samples).toEqual([{ deadlineMs: 5000, elapsedMs: 5001, rssMb: 40 }, { deadlineMs: 10000, elapsedMs: 60000, rssMb: 10 }]);
+  expect(recoveryVerdict(10, samples, 0)).toBe("inconclusive");
+  expect(recoveryVerdict(10, samples, 1)).toBe("miss");
+  samples[1]!.elapsedMs = 10025;
+  expect(recoveryVerdict(10, samples, 0)).toBe("pass");
+  samples[1]!.elapsedMs = 10026;
+  expect(recoveryVerdict(10, samples, 0)).toBe("inconclusive");
 });

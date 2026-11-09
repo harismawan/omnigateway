@@ -40,10 +40,22 @@ export async function smoke(base: string, key: string, cases: [string, string][]
 }
 
 export type RecoverySample = { deadlineMs: number; elapsedMs: number; rssMb: number | null };
+// Scheduling allowance, not an extension of the recovery target. Preserve
+// actual elapsed time and refuse to classify observations beyond this window.
+export const RECOVERY_LATENESS_MS = 25;
+export async function sampleRecovery(origin: number, now: () => number, sleep: (ms: number) => Promise<unknown>, rss: () => number | null): Promise<RecoverySample[]> {
+  const samples: RecoverySample[] = [];
+  for (const deadlineMs of [5000, 10000]) {
+    await sleep(Math.max(0, origin + deadlineMs - now()));
+    const rssMb = rss();
+    samples.push({ deadlineMs, elapsedMs: now() - origin, rssMb });
+  }
+  return samples;
+}
 export function recoveryVerdict(start: number | null, samples: RecoverySample[], crashed: number): "pass" | "miss" | "inconclusive" {
   if (crashed > 0) return "miss";
   const sample = samples.find(s => s.deadlineMs === 10_000);
   if (start === null || !Number.isFinite(start) || !sample || sample.rssMb === null ||
-      !Number.isFinite(sample.rssMb) || !Number.isFinite(sample.elapsedMs) || sample.elapsedMs < 10_000) return "inconclusive";
+      !Number.isFinite(sample.rssMb) || !Number.isFinite(sample.elapsedMs) || sample.elapsedMs < 10_000 || sample.elapsedMs > 10_000 + RECOVERY_LATENESS_MS) return "inconclusive";
   return sample.rssMb - start <= 20 ? "pass" : "miss";
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { setupViaApi as apiSetup, smoke as smokeRequests, recoveryVerdict, type RecoverySample } from "./bench-probe";
+import { setupViaApi as apiSetup, smoke as smokeRequests, recoveryVerdict, sampleRecovery, RECOVERY_LATENESS_MS, type RecoverySample } from "./bench-probe";
 /**
  * Black-box latency, throughput, CPU and memory benchmark for the gateway.
  *
@@ -651,6 +651,7 @@ type ScenarioResult = {
   /** Actual cancellation recovery observations; elapsed times include scheduler lag. */
   recoverySamples: RecoverySample[];
   recoveryVerdict: "pass" | "miss" | "inconclusive" | null;
+  recoveryLatenessToleranceMs: number;
   healthyAfter: boolean;
   /** Replicas whose process was gone after the scenario. Each is restarted. */
   crashed: number;
@@ -1067,13 +1068,12 @@ async function runScenario(
   // Settle before the next scenario, then confirm the process still answers:
   // a scenario that leaves the gateway wedged is a result, not a crash. The
   // settle also lets the writer flush the scenario's last batch (≤ 200 ms).
-  const recoverySamples: RecoverySample[] = [];
+  let recoverySamples: RecoverySample[] = [];
   if (scenario.clientTimeout !== undefined) {
-    for (const at of [5000, 10000]) {
-      await sleep(Math.max(0, recoveryStart + at - performance.now()));
+    recoverySamples = await sampleRecovery(recoveryStart, () => performance.now(), sleep, () => {
       const sample = fleetSample(pids);
-      recoverySamples.push({ deadlineMs: at, elapsedMs: performance.now() - recoveryStart, rssMb: sample === null ? null : sample.rssKb / 1024 });
-    }
+      return sample === null ? null : sample.rssKb / 1024;
+    });
   } else {
     await sleep(1000);
   }
@@ -1133,6 +1133,7 @@ async function runScenario(
     rssPeakMb: peak / 1024,
     rssEndMb: (settled?.rssKb ?? 0) / 1024,
     recoverySamples,
+    recoveryLatenessToleranceMs: RECOVERY_LATENESS_MS,
     recoveryVerdict: scenario.clientTimeout === undefined ? null : recoveryVerdict(before === null ? null : before.rssKb / 1024, recoverySamples, crashed),
     healthyAfter,
     crashed,
