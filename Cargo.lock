@@ -1046,6 +1046,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "omni-cli"
+version = "0.16.0"
+dependencies = [
+ "chrono",
+ "omni-control",
+ "omni-ir",
+ "omni-store",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "omni-control"
+version = "0.16.0"
+dependencies = [
+ "omni-ir",
+ "omni-store",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "omni-crypto"
 version = "0.16.0"
 dependencies = [
@@ -1090,6 +1112,7 @@ dependencies = [
  "hyper-util",
  "mimalloc",
  "nix 0.31.3",
+ "omni-cli",
  "omni-crypto",
  "omni-dialects",
  "omni-gateway-core",
@@ -1113,6 +1136,7 @@ name = "omni-gateway-core"
 version = "0.16.0"
 dependencies = [
  "arc-swap",
+ "omni-control",
  "omni-crypto",
  "omni-ir",
  "omni-ratelimit",

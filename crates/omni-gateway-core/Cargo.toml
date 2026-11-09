@@ -11,6 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+omni-control = { path = "../omni-control" }
 omni-crypto = { path = "../omni-crypto" }
 omni-ir = { path = "../omni-ir" }
 omni-ratelimit = { path = "../omni-ratelimit" }

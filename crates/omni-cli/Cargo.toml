@@ -1,0 +1,22 @@
+[package]
+name = "omni-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "omni"
+path = "src/main.rs"
+
+[dependencies]
+omni-control = { path = "../omni-control" }
+omni-ir = { path = "../omni-ir" }
+omni-store = { path = "../omni-store" }
+serde_json.workspace = true
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

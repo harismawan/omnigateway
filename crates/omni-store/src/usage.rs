@@ -8,6 +8,27 @@ use rusqlite::{Connection, params};
 
 const HOUR_MS: i64 = 3_600_000;
 
+/// Exact sliding-window operator read: rollup whole hours plus the partial edge.
+pub fn sum_since(
+    conn: &Connection,
+    id: &str,
+    since: i64,
+    model: Option<&str>,
+) -> Result<Counts, StoreError> {
+    let read = |r: &rusqlite::Row<'_>| counts(r).map(|(_, c)| c);
+    if let Some(model) = model {
+        return Ok(conn.query_row("SELECT 0, COUNT(*), COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens),0), COALESCE(SUM(cost_usd),0) FROM request_logs WHERE api_key_id=? AND requested_model=? AND state='done' AND at>=?", params![id, model, since], read)?);
+    }
+    let boundary = since.div_euclid(HOUR_MS);
+    let whole = conn.query_row("SELECT 0, COALESCE(SUM(requests),0), COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens),0), COALESCE(SUM(cost_usd),0) FROM usage_rollup WHERE api_key_id=? AND hour>?", params![id,boundary], read)?;
+    let edge = conn.query_row("SELECT 0, COUNT(*), COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens),0), COALESCE(SUM(cost_usd),0) FROM request_logs WHERE api_key_id=? AND state='done' AND at>=? AND at<?", params![id,since,(boundary+1)*HOUR_MS], read)?;
+    Ok(Counts {
+        requests: whole.requests + edge.requests,
+        tokens: whole.tokens + edge.tokens,
+        cost_usd: whole.cost_usd + edge.cost_usd,
+    })
+}
+
 fn counts(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Counts)> {
     let num = |i: usize| -> rusqlite::Result<f64> {
         Ok(match r.get_ref(i)? {

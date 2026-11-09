@@ -10,6 +10,19 @@ use omni_gateway_core::config::{LogLevel, load_config, process_env};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> std::process::ExitCode {
+    let mut args = std::env::args();
+    let executable = args.next().unwrap_or_default();
+    let mut rest: Vec<_> = args.collect();
+    if std::path::Path::new(&executable)
+        .file_name()
+        .is_some_and(|n| n == "omni")
+    {
+        return omni_cli::run(rest);
+    }
+    if rest.first().is_some_and(|s| s == "omni") {
+        rest.remove(0);
+        return omni_cli::run(rest);
+    }
     // Before the first allocation of any size: with transparent huge pages
     // `always`, mimalloc's 32 MiB arena reservations fault in 2 MiB at a
     // time, so a mostly idle heap is resident in huge pages (idle RSS 17.5

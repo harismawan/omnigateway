@@ -15,6 +15,7 @@ name = "omnigateway"
 path = "src/main.rs"
 
 [dependencies]
+omni-cli = { path = "../omni-cli" }
 omni-crypto = { path = "../omni-crypto" }
 omni-dialects = { path = "../omni-dialects" }
 omni-gateway-core = { path = "../omni-gateway-core" }
