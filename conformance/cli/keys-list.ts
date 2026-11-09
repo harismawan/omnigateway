@@ -122,6 +122,21 @@ try {
   const edits = new Database(join(root, "keys.db"));
   const regressions: [string, unknown[]][] = [
     ...[
+      '[{"toString":null}]',
+      '[[[{"toString":0}]]]',
+      '[{"toString":"x","valueOf":1}]',
+      '[{"toString":{},"valueOf":null}]',
+      '[{"toString":[],"valueOf":"primitive"}]',
+      '[{"valueOf":null}]',
+      '[{"valueOf":1,"toString":true}]',
+      '[{"toString":null,"toString":false}]',
+      '[{"valueOf":null,"valueOf":1}]',
+      '[{"__proto__":{"toString":null}}]',
+    ].map(
+      (raw) =>
+        ["UPDATE api_keys SET model_allowlist=? WHERE id='k1'", [raw]] as [string, unknown[]],
+    ),
+    ...[
       "[1e400,-1e400,1E+999,-9E999,1e-400]",
       '{"join":1}',
       '{"join":null}',
@@ -162,6 +177,16 @@ try {
     await check(["keys", "list"]);
     await check(["keys", "list", "--json"]);
   }
+  // Newest key renders a deep value before the oldest key fails coercion.
+  // JSON must still print both; human must emit no partial table.
+  edits.run("UPDATE api_keys SET model_allowlist=? WHERE id='k3'", [
+    `${"[".repeat(1500)}0${"]".repeat(1500)}`,
+  ]);
+  edits.run("UPDATE api_keys SET model_allowlist=? WHERE id='k1'", ['[[{"toString":null}]]']);
+  await check(["keys", "list"]);
+  await check(["keys", "list", "--json"]);
+  edits.run("UPDATE api_keys SET model_allowlist='[]' WHERE id='k3'");
+  edits.run("UPDATE api_keys SET model_allowlist='null' WHERE id='k1'");
   edits.run("UPDATE api_keys SET expires_at=NULL, label=? WHERE id='k1'", [
     "a\x1bXsomethingm\x1b[31mred\x1b[0m",
   ]);

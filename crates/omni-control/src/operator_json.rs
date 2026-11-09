@@ -100,7 +100,7 @@ pub fn parse(text: &str) -> Result<JsValue, String> {
 }
 
 /// Array.join's recursive ToString, traversed without the native stack.
-fn join(value: &JsValue) -> String {
+fn join(value: &JsValue) -> Result<String, String> {
     let mut out = String::new();
     let mut pending = vec![Some(value)];
     while let Some(next) = pending.pop() {
@@ -126,21 +126,36 @@ fn join(value: &JsValue) -> String {
             }),
             JsValue::Number(n) => omni_ir::jsjson::write_number(*n, &mut out),
             JsValue::String(s) => out.push_str(&String::from_utf16_lossy(s)),
+            JsValue::Object(fields) => {
+                // OrdinaryToPrimitive with a string hint tries toString first.
+                // JSON cannot contain callable own methods: any own toString
+                // shadows Object.prototype.toString without replacing it with
+                // a callable. Own valueOf is likewise noncallable; inherited
+                // valueOf returns the object, never a primitive. __proto__ in
+                // JSON.parse is only a data property, not a prototype change.
+                if fields
+                    .iter()
+                    .any(|(key, _)| key.iter().copied().eq("toString".encode_utf16()))
+                {
+                    return Err("No default value".into());
+                }
+                out.push_str("[object Object]");
+            }
             _ => out.push_str("[object Object]"),
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn models(value: &JsValue) -> Result<String, String> {
     match value {
         JsValue::Null => return Ok("all".into()),
         JsValue::Array(a) => {
-            return Ok(if a.is_empty() {
-                "none".into()
+            return if a.is_empty() {
+                Ok("none".into())
             } else {
                 join(value)
-            });
+            };
         }
         JsValue::String(s) if s.is_empty() => return Ok("none".into()),
         _ => {}
@@ -161,7 +176,7 @@ pub fn models(value: &JsValue) -> Result<String, String> {
         None => "undefined".into(),
         Some(JsValue::Object(_)) => "an instance of Object".into(),
         Some(JsValue::Array(_)) => "an instance of Array".into(),
-        Some(JsValue::Number(n)) if n.is_infinite() => join(&JsValue::Number(*n)),
+        Some(JsValue::Number(n)) if n.is_infinite() => join(&JsValue::Number(*n))?,
         Some(v) => omni_ir::jsjson::stringify(v).unwrap_or_default(),
     };
     Err(format!(
@@ -172,6 +187,25 @@ pub fn models(value: &JsValue) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deep_coercion_error_and_pretty_listing_drop_on_small_stack() {
+        std::thread::Builder::new().stack_size(256 * 1024).spawn(|| {
+            // A duplicate property discards a deep object before coercion;
+            // another deep value survives until the later error unwinds.
+            let deep = format!("{}0{}", "{\"x\":".repeat(20_000), "}".repeat(20_000));
+            let value = parse(&format!("[{deep},{{\"toString\":{deep},\"toString\":null}}]")).expect("parse");
+            assert_eq!(models(&value), Err("No default value".into()));
+            let earlier = parse(&format!("{}0{}", "[".repeat(512), "]".repeat(512))).expect("deep array");
+            let later = parse("[{\"toString\":null}]").expect("error array");
+            let listing = crate::keys::KeyListing {
+                data: serde_json::json!({"keys":[{"modelAllowlist":null},{"modelAllowlist":null}]}),
+                allowlists: vec![earlier, later],
+            };
+            assert_eq!(models(&listing.allowlists[0]).expect("earlier"), "0");
+            assert_eq!(models(&listing.allowlists[1]), Err("No default value".into()));
+            assert!(listing.json().contains("\"toString\": null"));
+        }).expect("thread").join().expect("no overflow");
+    }
     #[test]
     fn deep_parse_clone_join_and_drop_on_small_stack() {
         std::thread::Builder::new()
