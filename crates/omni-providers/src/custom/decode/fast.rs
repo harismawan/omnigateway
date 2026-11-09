@@ -214,6 +214,129 @@ mod tests {
         }
     }
 
+    /// Rebuilds an exported chunk (`Chunk` in `conformance/vectors/custom.ts`).
+    fn chunk_bytes(chunk: &serde_json::Value) -> Vec<u8> {
+        use serde_json::Value;
+        match chunk {
+            Value::String(s) => s.as_bytes().to_vec(),
+            Value::Object(m) if m.contains_key("bytes") => m["bytes"]
+                .as_array()
+                .expect("bytes")
+                .iter()
+                .map(|b| u8::try_from(b.as_u64().expect("byte")).expect("u8"))
+                .collect(),
+            Value::Object(m) if m.contains_key("repeat") => {
+                let unit = m["repeat"].as_str().expect("repeat");
+                let count = usize::try_from(m["count"].as_u64().expect("count")).expect("count");
+                unit.repeat(count).into_bytes()
+            }
+            Value::Object(m) if m.contains_key("concat") => m["concat"]
+                .as_array()
+                .expect("concat")
+                .iter()
+                .flat_map(chunk_bytes)
+                .collect(),
+            other => panic!("unknown chunk {other}"),
+        }
+    }
+
+    /// The whole body through `SseParser` and the decoder as the adapter
+    /// drives them (stop on `Flow::Stop` or an error, `finish` at end of
+    /// body), in `pieces` of the given size (0: as exported): every event,
+    /// every flow, and the error, rendered.
+    fn decode_body(body: &[Vec<u8>], pieces: usize, fast: bool) -> String {
+        use crate::codec::{DecodeError, Flow};
+        use crate::sse::SseParser;
+        let chunks: Vec<Vec<u8>> = if pieces == 0 {
+            body.to_vec()
+        } else {
+            body.concat().chunks(pieces).map(<[u8]>::to_vec).collect()
+        };
+        let mut d = ChatDecoder::new();
+        d.no_fast = !fast;
+        let mut parser = SseParser::new();
+        let mut out = VecDeque::new();
+        let mut trace = Vec::new();
+        let mut feed = |msgs: &[SseMessage], out: &mut VecDeque<_>, trace: &mut Vec<String>| {
+            for m in msgs {
+                let r = d.message(m, out);
+                trace.push(format!("{r:?}"));
+                match r {
+                    Ok(Flow::Continue) => {}
+                    Ok(Flow::Stop) | Err(DecodeError::Gateway(_) | DecodeError::Throw(_)) => {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        for c in &chunks {
+            let mut msgs = Vec::new();
+            let parsed = parser.push(c, &mut msgs);
+            if feed(&msgs, &mut out, &mut trace) {
+                return format!("{out:?} {trace:?}");
+            }
+            if let Err(e) = parsed {
+                trace.push(format!("parse error {e:?}"));
+                return format!("{out:?} {trace:?}");
+            }
+        }
+        let last: Vec<SseMessage> = parser.finish().into_iter().collect();
+        if !feed(&last, &mut out, &mut trace) {
+            d.finish(&mut out);
+        }
+        format!("{out:?} {trace:?}")
+    }
+
+    /// Every `chat_completions` decode vector the TS exporter wrote (the
+    /// corpus `decode_vectors_match_the_ts_custom_adapter` holds Rust to),
+    /// decoded with the fast path and with it forced off, whole and re-cut
+    /// into pieces of 1, 7, 64 and 4096 bytes: the same events, flows and
+    /// errors every time.
+    #[test]
+    fn the_fast_path_agrees_with_the_generic_one_on_every_decode_vector() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/vectors/vectors.json"
+        );
+        let text = std::fs::read_to_string(path).expect("vectors.json is committed");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("vectors.json parses");
+        let cases = v["custom"]["decode"].as_array().expect("decode");
+        let mut checked = 0;
+        let mut fast_messages = 0;
+        for case in cases {
+            if case["protocol"] != "chat_completions" {
+                continue;
+            }
+            let name = case["name"].as_str().expect("name");
+            let body: Vec<Vec<u8>> = case["response"]["chunks"]
+                .as_array()
+                .expect("chunks")
+                .iter()
+                .map(chunk_bytes)
+                .collect();
+            for pieces in [0, 1, 7, 64, 4096] {
+                let fast = decode_body(&body, pieces, true);
+                let generic = decode_body(&body, pieces, false);
+                assert_eq!(fast, generic, "{name}, pieces of {pieces}");
+            }
+            // How many of its messages the fast path actually answers.
+            let mut parser = crate::sse::SseParser::new();
+            let mut msgs = Vec::new();
+            parser.push(&body.concat(), &mut msgs).ok();
+            fast_messages += msgs
+                .iter()
+                .filter(|m| super::parse_chat_chunk(&m.data).is_some())
+                .count();
+            checked += 1;
+        }
+        assert!(checked >= 70, "{checked} chat_completions vectors");
+        assert!(
+            fast_messages >= 70,
+            "the fast path answered only {fast_messages} messages"
+        );
+    }
+
     #[test]
     fn the_benchmark_chunk_takes_the_fast_path() {
         let chunk = r#"{"id":"a","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"lorem ipsum "}}]}"#;
