@@ -115,6 +115,12 @@ pub fn run(
         _ => {}
     }
     listing = omni_control::keys::list_keys(&store, now).map_err(fail)?;
+    let index = listing.data["keys"]
+        .as_array()
+        .expect("key listing array")
+        .iter()
+        .position(|key| key["id"] == *id)
+        .ok_or_else(|| fail(format!("no api key \"{id}\"")))?;
     if has("json") {
         return Ok(listing.one_json(index));
     }
