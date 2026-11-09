@@ -36,6 +36,45 @@ pub const BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 pub type Body = UnsyncBoxBody<Bytes, std::io::Error>;
 
+/// A deadline-owned pump keeps polling cancellation even when hyper stops
+/// polling the body. One-frame channel bounds read-ahead. Dropping the returned
+/// body aborts its owned worker, dropping dispatch and the admission finisher.
+fn deadline_body(body: Body, deadline: tokio::time::Instant) -> Body {
+    struct Worker(tokio::task::JoinHandle<()>);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = expired.clone();
+    let worker = Worker(tokio::spawn(async move {
+        let mut body = body;
+        let pump = async {
+            while let Some(frame) = body.frame().await {
+                if tx.send(frame).await.is_err() {
+                    return;
+                }
+            }
+        };
+        if tokio::time::timeout_at(deadline, pump).await.is_err() {
+            // Release upstream, load/probe and concurrency BEFORE attempting
+            // to notify a client whose bounded output queue may still be full.
+            drop(body);
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }));
+    let stream = async_stream::stream! {
+        let _worker = worker;
+        while let Some(frame) = rx.recv().await { yield frame; }
+        if expired.load(std::sync::atomic::Ordering::Acquire) {
+            yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"request deadline exceeded"));
+        }
+    };
+    StreamBody::new(stream).boxed_unsync()
+}
+
 /// Everything a request handler reads. One per process.
 pub struct App {
     pub deps: Arc<Deps>,
@@ -457,6 +496,11 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             Some(r) => dispatch::refused(&app.deps, &dreq, r, sname),
             None => dispatch::dispatch(app.deps.clone(), dreq),
         };
+        let deadline_ms = app.deps.holder.load().routing.settings.request_deadline_ms;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let response_deadline = (deadline_ms != 0.0).then(|| {
+            tokio::time::Instant::now() + Duration::from_millis(deadline_ms.max(0.0) as u64)
+        });
         fin.outcome = Some(dispatched.log.clone());
         let retain = !stream || surface == Surface::Responses;
         let mut upstream = dispatched.events;
@@ -492,6 +536,10 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 app.keepalive
             };
             let body = sse_body(bounded_events, encoder, keepalive, fin.take());
+            let body = match response_deadline {
+                Some(deadline) => deadline_body(body, deadline),
+                None => body,
+            };
             let mut res = Response::new(settle(body));
             let h = res.headers_mut();
             h.insert(
