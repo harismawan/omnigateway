@@ -82,9 +82,9 @@ pub fn sum_buckets(
     Ok(rows)
 }
 
-/// The oldest `cap` done rows' `at` since `since_ms`, ascending: bounded in
-/// SQL, instants only. The first is `oldestSince`. The limiter keeps them
-/// so a refusal's exact reset is answered from memory.
+/// The newest `cap` done rows' `at` since `since_ms`, returned ascending.
+/// Truncation can delay resets until the omitted history expires, even after
+/// the live population drops below the cap. Aggregate sums are not capped.
 pub fn done_stamps(
     conn: &Connection,
     api_key_id: &str,
@@ -93,11 +93,11 @@ pub fn done_stamps(
     cap: usize,
 ) -> Result<Vec<i64>, StoreError> {
     let cap = i64::try_from(cap).unwrap_or(i64::MAX);
-    let out = if let Some(model) = requested_model {
+    let mut out = if let Some(model) = requested_model {
         let mut stmt = conn.prepare_cached(
             "SELECT at FROM request_logs
               WHERE api_key_id = ? AND requested_model = ? AND state = 'done' AND at >= ?
-              ORDER BY at LIMIT ?",
+              ORDER BY at DESC LIMIT ?",
         )?;
         stmt.query_map(params![api_key_id, model, since_ms, cap], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?
@@ -105,15 +105,16 @@ pub fn done_stamps(
         let mut stmt = conn.prepare_cached(
             "SELECT at FROM request_logs
               WHERE api_key_id = ? AND state = 'done' AND at >= ?
-              ORDER BY at LIMIT ?",
+              ORDER BY at DESC LIMIT ?",
         )?;
         stmt.query_map(params![api_key_id, since_ms, cap], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?
     };
+    out.reverse();
     Ok(out)
 }
 
-/// Bucket sums by start (one row per grain), and the oldest capped stamps.
+/// Bucket sums by start (one row per grain), and newest capped stamps ascending.
 pub type SeedRead = (Vec<(i64, Counts)>, Vec<i64>);
 
 /// A long-window seed's two reads in one read transaction, so the bucket

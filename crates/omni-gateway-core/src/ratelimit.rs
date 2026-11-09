@@ -5,7 +5,7 @@
 //! Everything a request asks is answered from memory under one short lock,
 //! with no I/O:
 //!
-//! - `requests` at `1m` from an exact ring per subject;
+//! - `requests` at `1m` from bounded history per subject (exact below its cap);
 //! - `concurrency` from a gauge raised at admission and lowered when the
 //!   [`Admission`] is released or dropped (immediately; never batched);
 //! - the long windows (`5h`, `1w`) from time buckets seeded from the store
@@ -78,8 +78,8 @@ const MAX_PENDING_SEEDS: usize = 4_096;
 /// Retained row stamps per subject and long window, for a refusal's exact
 /// reset (the oldest retained row's `at` plus the window, which TS reads from
 /// the store). Past it the oldest are dropped, which can only make a refusal's
-/// reset later (the safe side): only a window holding more than this many
-/// rows when it refuses reports a later `Retry-After` than TS. A fixed bound,
+/// reset later (the safe side). Divergence can persist below the cap until
+/// omitted rows expire. A fixed bound,
 /// so the memory does not follow the request rate (it was 2^20, 16 MiB per
 /// window at the bench's rate).
 pub const MAX_LONG_STAMPS: usize = 65_536;
@@ -224,10 +224,16 @@ pub(crate) struct State {
     /// asked again.
     pub(crate) seeding: HashMap<(String, usize), f64>,
     last_sweep: f64,
+    /// Clock high-water survives eviction of empty per-subject histories.
+    high_water: f64,
 }
 
 impl State {
     fn sweep(&mut self, now: f64) {
+        if now < self.high_water {
+            return;
+        }
+        self.high_water = now;
         let since = now - self.last_sweep;
         if (0.0..SWEEP_INTERVAL_MS).contains(&since) {
             return;
@@ -287,8 +293,16 @@ impl State {
             .or_insert_with(|| SlidingWindow::new(Window::M1.ms()));
         #[allow(clippy::cast_precision_loss)]
         let before = WindowCounter {
-            used: ring.count(now) as f64,
-            reset_at: ring.reset_at(now),
+            used: if now < self.high_water {
+                usize::MAX
+            } else {
+                ring.count(now)
+            } as f64,
+            reset_at: if now < self.high_water {
+                self.high_water + Window::M1.ms()
+            } else {
+                ring.reset_at(now)
+            },
         };
         let mut snapshot = CounterSnapshot::default();
         snapshot.requests.set(Window::M1, before);

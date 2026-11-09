@@ -33,6 +33,25 @@ fn limits(json: &str) -> LimitConfig {
 }
 
 #[test]
+fn backward_clock_after_history_eviction_refuses_until_clock_recovers() {
+    let limiter = RateLimiter::new();
+    let config = limits(r#"{"requests":{"1m":1}}"#);
+    drop(limiter.admit(KEY, &config, "m", 1000.0).expect("first"));
+    // Another subject advances the sweep and evicts the original history.
+    drop(
+        limiter
+            .admit("other", &config, "m", 100_000.0)
+            .expect("sweep"),
+    );
+    assert!(limiter.admit(KEY, &config, "m", 2000.0).is_err());
+    drop(
+        limiter
+            .admit(KEY, &config, "m", 100_000.0)
+            .expect("recovered"),
+    );
+}
+
+#[test]
 fn lowering_then_raising_minute_limit_preserves_all_admissions() {
     let limiter = RateLimiter::new();
     let three = limits(r#"{"requests":{"1m":3}}"#);

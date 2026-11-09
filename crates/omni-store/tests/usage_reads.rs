@@ -134,7 +134,7 @@ console.log(JSON.stringify(out));
 /// which is what an exact reset reads), and nothing per-request beyond the
 /// instant is selected.
 #[test]
-fn seed_stamps_are_capped_in_the_query_and_keep_the_oldest() {
+fn seed_stamps_are_capped_in_the_query_and_keep_the_newest() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteStore::open(dir.path().join("omni.db"), 0).expect("open");
     let c = store.connection();
@@ -148,8 +148,31 @@ fn seed_stamps_are_capped_in_the_query_and_keep_the_oldest() {
     }
     let stamps = done_stamps(c, "k1", T0 - 5 * HOUR, None, 7).expect("stamps");
     assert_eq!(stamps.len(), 7);
-    assert_eq!(stamps[0], T0 - 1000);
-    assert_eq!(stamps[6], T0 - 1000 + 60);
+    assert_eq!(stamps[0], T0 - 1000 + 430);
+    assert_eq!(stamps[6], T0 - 1000 + 490);
+    // Eight rows remain: the omitted head still matters even after most rows
+    // expire. At 425 only seven remain and the retained head is exact again.
+    assert_eq!(
+        done_stamps(c, "k1", T0 - 580, None, 100)
+            .expect("live")
+            .len(),
+        8
+    );
+    assert_eq!(
+        done_stamps(c, "k1", T0 - 575, None, 100).expect("recovery"),
+        stamps
+    );
+    assert_eq!(
+        done_stamps(c, "k1", T0 - 5 * HOUR, Some("fast"), 7).expect("model"),
+        stamps
+    );
+    // Once older omitted rows expire, the retained head is exact again.
+    for offset in [430, 480, 490, 500] {
+        let since = T0 - 1000 + offset;
+        let fresh = done_stamps(c, "k1", since, None, 7).expect("expiry");
+        let retained: Vec<_> = stamps.iter().copied().filter(|s| *s >= since).collect();
+        assert_eq!(fresh, retained);
+    }
     let (buckets, capped) = seed_rows(c, "k1", T0 - 5 * HOUR, 60_000, None, 7).expect("seed");
     assert_eq!(capped, stamps);
     // The aggregate still counts every row, whatever the stamp cap.
