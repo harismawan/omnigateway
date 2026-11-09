@@ -2,6 +2,77 @@
 use omni_store::{SqliteStore, StoreError};
 use serde_json::{Value, json};
 
+pub fn set_models(store: &SqliteStore, id: &str, models: Option<&[String]>) -> Result<(), String> {
+    if let Some(i) = models.and_then(|m| m.iter().position(String::is_empty)) {
+        return Err(format!(
+            "BAD_REQUEST: modelAllowlist.{i}: Too small: expected string to have >=1 characters"
+        ));
+    }
+    let json = models.map(|m| serde_json::to_string(m).expect("strings"));
+    require_key(store, id)?;
+    omni_store::keys::edit(
+        store.connection(),
+        id,
+        omni_store::keys::KeyEdit::Models(json.as_deref()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn set_guardrail(store: &SqliteStore, id: &str, policy: Option<&str>) -> Result<(), String> {
+    let policy = policy.map(omni_ir::js::trim);
+    if let Some(p) = policy {
+        // Frozen Zod counts Unicode code points for string size checks.
+        let length = p.chars().count();
+        if length == 0 {
+            return Err(
+                "BAD_REQUEST: policy: Too small: expected string to have >=1 characters".into(),
+            );
+        }
+        if length > 4000 {
+            return Err(
+                "BAD_REQUEST: policy: Too big: expected string to have <=4000 characters".into(),
+            );
+        }
+    }
+    require_key(store, id)?;
+    omni_store::keys::edit(
+        store.connection(),
+        id,
+        omni_store::keys::KeyEdit::Guardrail(policy),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn require_key(store: &SqliteStore, id: &str) -> Result<(), String> {
+    if !omni_store::keys::list_operator(store.connection())
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|k| k.key.id == id)
+    {
+        return Err("BAD_REQUEST: no such api key".into());
+    }
+    Ok(())
+}
+
+pub fn set_smart_routing(store: &SqliteStore, id: &str, enabled: bool) -> Result<(), String> {
+    require_key(store, id)?;
+    omni_store::keys::edit(
+        store.connection(),
+        id,
+        omni_store::keys::KeyEdit::SmartRouting(enabled),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn revoke(store: &SqliteStore, id: &str, now: i64) -> Result<(), String> {
+    omni_store::keys::edit(
+        store.connection(),
+        id,
+        omni_store::keys::KeyEdit::Revoke(now),
+    )
+    .map_err(|e| e.to_string())
+}
+
 fn scope_usage(
     store: &SqliteStore,
     id: &str,
@@ -45,6 +116,18 @@ pub struct KeyListing {
 }
 
 impl KeyListing {
+    pub fn one_json(&self, index: usize) -> String {
+        use omni_ir::jsjson::{JsValue, stringify_pretty};
+        let mut data = JsValue::from(&self.data["keys"][index]);
+        if let JsValue::Object(fields) = &mut data {
+            for (name, value) in fields {
+                if name.iter().copied().eq("modelAllowlist".encode_utf16()) {
+                    *value = self.allowlists[index].clone();
+                }
+            }
+        }
+        stringify_pretty(&data).unwrap_or_default()
+    }
     pub fn json(&self) -> String {
         use omni_ir::jsjson::{JsValue, stringify_pretty};
         let mut data = JsValue::from(&self.data);

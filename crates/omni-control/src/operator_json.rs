@@ -184,6 +184,26 @@ pub fn models(value: &JsValue) -> Result<String, String> {
     ))
 }
 
+/// The models command uses a spaced separator at the outer level only;
+/// nested arrays still use Array.toString's comma separator.
+pub fn models_detail(value: &JsValue) -> Result<String, String> {
+    match value {
+        JsValue::Null => Ok("every model".into()),
+        JsValue::Array(a) if a.is_empty() => {
+            Ok("no models; every request this key makes is refused".into())
+        }
+        JsValue::String(s) if s.is_empty() => {
+            Ok("no models; every request this key makes is refused".into())
+        }
+        JsValue::Array(a) => a
+            .iter()
+            .map(join)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| v.join(", ")),
+        _ => models(value).map_err(|e| e.replace("join(\",\")", "join(\", \")")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

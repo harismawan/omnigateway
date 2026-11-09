@@ -39,6 +39,36 @@ impl ApiKey {
 
 const T: &str = "api_keys";
 
+/// Explicit mutation vocabulary; SQL identifiers never come from CLI input.
+pub enum KeyEdit<'a> {
+    Models(Option<&'a str>),
+    Guardrail(Option<&'a str>),
+    SmartRouting(bool),
+    Revoke(i64),
+}
+
+pub fn edit(conn: &Connection, id: &str, edit: KeyEdit<'_>) -> Result<(), StoreError> {
+    match edit {
+        KeyEdit::Models(v) => conn.execute(
+            "UPDATE api_keys SET model_allowlist = ? WHERE id = ?",
+            rusqlite::params![v, id],
+        )?,
+        KeyEdit::Guardrail(v) => conn.execute(
+            "UPDATE api_keys SET guardrail_policy = ? WHERE id = ?",
+            rusqlite::params![v, id],
+        )?,
+        KeyEdit::SmartRouting(v) => conn.execute(
+            "UPDATE api_keys SET smart_routing = ? WHERE id = ?",
+            rusqlite::params![i64::from(v), id],
+        )?,
+        KeyEdit::Revoke(v) => conn.execute(
+            "UPDATE api_keys SET revoked_at = ? WHERE id = ?",
+            rusqlite::params![v, id],
+        )?,
+    };
+    Ok(())
+}
+
 fn to_key(r: &Row<'_>) -> Result<ApiKey, StoreError> {
     read_key(r, false)
 }

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 mod args;
 mod context;
+mod mutations;
 mod output;
 use std::{io::IsTerminal, process::ExitCode};
 
@@ -10,10 +11,10 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let help = argv.iter().any(|s| matches!(s.as_str(), "--help" | "-h"));
-    let Some(rest) = args::resolve(&argv) else {
+    let Some((command, rest)) = args::resolve(&argv) else {
         if help || argv.iter().all(|s| s.starts_with('-')) {
             println!(
-                "omni — Rust CLI migration increment\n\nUsage: omni keys list [--root <path>] [--db <path>] [--json] [--no-color]\n\nOnly keys list is implemented in this increment."
+                "omni — Rust CLI migration increment\n\nImplemented: keys list, models, guardrail, smart-routing, revoke\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
             );
             return ExitCode::SUCCESS;
         }
@@ -29,8 +30,38 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         return ExitCode::from(2);
     };
     if help {
-        println!("omni keys list\n\nList gateway API keys");
+        println!(
+            "omni {}\n\n{}",
+            mutations::usage(&command),
+            match command.as_str() {
+                "models" => "Show or replace one key's allowed models",
+                "guardrail" => "Show or replace one key's usage policy",
+                "smart-routing" => "Turn confidential-data routing on or off for one key",
+                "revoke" => "Revoke a gateway API key, keeping its usage history",
+                _ => "List gateway API keys",
+            }
+        );
         return ExitCode::SUCCESS;
+    }
+    if command != "list" {
+        let result = args::parse_command(&rest, &command)
+            .map_err(|e| (2, e))
+            .and_then(|(flags, positional, allow)| {
+                mutations::run(&command, &flags, &positional, &allow)
+            });
+        return match result {
+            Ok(out) => {
+                println!("{out}");
+                ExitCode::SUCCESS
+            }
+            Err((code, error)) => {
+                eprintln!("{error}");
+                if code == 2 {
+                    eprintln!("usage: omni {}", mutations::usage(&command));
+                }
+                ExitCode::from(code)
+            }
+        };
     }
     let flags = match args::parse(&rest) {
         Ok(f) => f,
