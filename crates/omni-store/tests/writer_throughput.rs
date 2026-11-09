@@ -211,7 +211,7 @@ fn eight_producers_send_rate() {
                     let t0 = Instant::now();
                     // ~8 k sends/s each, 64 k in all: the gateway's event rate
                     // at full throughput (2 per request at ~32 k req/s), so
-                    // the queue drains and only contention is measured.
+                    // shedding and backlog are measured, not assumed absent.
                     let pace = Duration::from_micros(125);
                     let mut next = Instant::now();
                     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -236,17 +236,32 @@ fn eight_producers_send_rate() {
             })
             .collect();
         let until = Instant::now() + Duration::from_secs(5);
+        let stopper = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(until.saturating_duration_since(Instant::now()));
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
         let mut taken = 0;
+        let mut failed = 0;
+        let mut timed_out = 0;
+        let mut flush_times = Vec::new();
         while Instant::now() < until {
             if barriers {
-                if handle.flush().await.is_ok() {
-                    taken += 1;
+                let start = Instant::now();
+                match tokio::time::timeout(Duration::from_secs(10), handle.flush()).await {
+                    Ok(Ok(_)) => taken += 1,
+                    Ok(Err(_)) => failed += 1,
+                    Err(_) => timed_out += 1,
                 }
+                flush_times.push(start.elapsed());
             } else {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        stopper.join().expect("independent stop");
         let mut total = 0;
         let mut worst = Duration::ZERO;
         let mut slow = 0;
@@ -256,7 +271,7 @@ fn eight_producers_send_rate() {
             total += n;
             worst = worst.max(w);
             slow += sl;
-            secs = e.as_secs_f64();
+            secs = e.as_secs_f64().max(secs);
         }
         let st = handle.stats();
         #[allow(clippy::cast_precision_loss)]
@@ -265,6 +280,8 @@ fn eight_producers_send_rate() {
             "8 producers: {rate:.0} sends/s, worst send {worst:?}, sends over 100 us {slow}, dropped {}, barriers {taken}",
             st.dropped
         );
-        writer.close().await.ok();
+        let drain = Instant::now();
+        tokio::time::timeout(Duration::from_secs(30), writer.close()).await.expect("bounded drain").expect("writer close");
+        println!("producer_seconds={secs:.6} drain_seconds={:.6} flush_ok={taken} flush_failed={failed} flush_timeout={timed_out} flush_times={flush_times:?} final_stats={:?}", drain.elapsed().as_secs_f64(), handle.stats());
     });
 }

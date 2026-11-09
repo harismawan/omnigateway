@@ -408,6 +408,7 @@ impl WriterHandle {
             return Err(BarrierError::Busy);
         }
         let busy = BusyGuard(Arc::clone(c));
+        let phase = Instant::now();
         while !c.epochs.previous_settled() {
             tokio::task::yield_now().await;
         }
@@ -416,6 +417,10 @@ impl WriterHandle {
             tokio::task::yield_now().await;
         }
         let produced = c.epochs.prefix(epoch, before);
+        if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
+            eprintln!("writer_phase settlement_us={}", phase.elapsed().as_micros());
+        }
+        let phase = Instant::now();
         let (tx, rx) = oneshot::channel();
         let queued = Queued {
             at: Instant::now(),
@@ -433,7 +438,14 @@ impl WriterHandle {
             Err(mpsc::error::TrySendError::Full(_)) => return Err(BarrierError::Full),
             Err(mpsc::error::TrySendError::Closed(_)) => return Err(BarrierError::Closed),
         }
-        rx.await.map_err(|_| BarrierError::Closed)
+        let result = rx.await.map_err(|_| BarrierError::Closed);
+        if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
+            eprintln!(
+                "writer_phase queue_and_commit_us={}",
+                phase.elapsed().as_micros()
+            );
+        }
+        result
     }
 
     /// Queues a long-window seed read, run on the writer's connection after
@@ -745,7 +757,15 @@ impl Sink {
             let node_id = Arc::clone(&self.node_id);
             let offset = self.day_offset_minutes;
             let (conn, back, result) = tokio::task::spawn_blocking(move || {
+                let phase = Instant::now();
                 let result = batch::write(&mut conn, &events, &node_id, offset);
+                if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
+                    eprintln!(
+                        "writer_phase sql_us={} events={}",
+                        phase.elapsed().as_micros(),
+                        events.len()
+                    );
+                }
                 (conn, events, result)
             })
             .await
