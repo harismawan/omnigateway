@@ -86,6 +86,86 @@ async fn a_head_of_exactly_16_kib_is_accepted() {
 }
 
 #[tokio::test]
+async fn error_text_budget_covers_every_framing_and_closes_unread_socket() {
+    const LIMIT: usize = 1024 * 1024;
+    for framing in ["length", "chunked", "close"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket, &mut Vec::new()).await.unwrap();
+            let header = match framing {
+                "length" => format!("Content-Length: {}\r\n", LIMIT + 1),
+                "chunked" => "Transfer-Encoding: chunked\r\n".into(),
+                _ => String::new(),
+            };
+            socket
+                .write_all(format!("HTTP/1.1 500 Error\r\n{header}\r\n").as_bytes())
+                .await
+                .unwrap();
+            if framing == "chunked" {
+                socket
+                    .write_all(format!("{:x}\r\n", LIMIT + 1).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            let _ = socket.write_all(&vec![b'x'; LIMIT + 1]).await;
+            let mut byte = [0];
+            let closed = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                .await
+                .expect("client closes unread body");
+            assert!(matches!(closed, Ok(0) | Err(_)));
+        });
+        let response = Client::new().send(request(port, "{}")).await.unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), response.body.text())
+            .await
+            .expect("bounded read")
+            .expect_err("budget");
+        assert!(
+            matches!(error, HttpError::InvalidResponse(ref s) if s == "error body exceeds 1048576 bytes")
+        );
+        server.await.unwrap();
+    }
+    let body = omni_providers::http::ResponseBody::from_chunks(vec![bytes::Bytes::from(vec![
+        b'x';
+        LIMIT
+    ])]);
+    assert_eq!(body.text().await.unwrap().len(), LIMIT);
+}
+
+#[tokio::test]
+async fn cancelling_error_collection_closes_socket() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_request(&mut socket, &mut Vec::new()).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 500 Error\r\nContent-Length: 99\r\n\r\nx")
+            .await
+            .unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    });
+    let response = Client::new().send(request(port, "{}")).await.unwrap();
+    let mut read = Box::pin(response.body.text());
+    // Observe Pending before cancelling, without scheduling sleeps.
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(read.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(read);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn a_complete_head_over_16_kib_in_one_read_is_refused() {
     // The terminating CRLF arrives in the same read that crosses the cap, so
     // the head parses complete: the cap must apply to its parsed length.

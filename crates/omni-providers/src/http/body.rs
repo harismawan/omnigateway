@@ -185,9 +185,18 @@ impl ResponseBody {
     /// The whole body as text, decoded as UTF-8 with replacement
     /// (`Buffer.toString("utf8")`).
     pub async fn text(mut self) -> Result<String, HttpError> {
+        const LIMIT: usize = 1024 * 1024;
+        let overflow = || HttpError::InvalidResponse("error body exceeds 1048576 bytes".into());
+        if matches!(self.framing, Framing::Length(n) if n > LIMIT as u64) {
+            return Err(overflow());
+        }
         let mut all = Vec::new();
         while let Some(chunk) = self.next_chunk().await {
-            all.extend_from_slice(&chunk?);
+            let chunk = chunk?;
+            if chunk.len() > LIMIT - all.len() {
+                return Err(overflow());
+            }
+            all.extend_from_slice(&chunk);
         }
         Ok(String::from_utf8_lossy(&all).into_owned())
     }
