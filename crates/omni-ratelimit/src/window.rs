@@ -19,6 +19,9 @@ pub struct SlidingWindow {
     entries: VecDeque<(f64, usize)>,
     held: usize,
     bucketed: bool,
+    // Clamping loses original timestamps and the TS reverse-scan stopping
+    // point. Do not remove any representative until this history drains.
+    clamped_history: bool,
     high_water: f64,
 }
 
@@ -32,6 +35,7 @@ impl SlidingWindow {
             entries: VecDeque::new(),
             held: 0,
             bucketed: false,
+            clamped_history: false,
             high_water: f64::NEG_INFINITY,
         }
     }
@@ -62,6 +66,7 @@ impl SlidingWindow {
         }
         if self.entries.is_empty() {
             self.bucketed = false;
+            self.clamped_history = false;
         }
         if self.entries.capacity() > 64 && self.entries.capacity() > 4 * self.entries.len() {
             self.entries.shrink_to(self.entries.len() * 2);
@@ -81,9 +86,11 @@ impl SlidingWindow {
     }
 
     pub fn record(&mut self, now: f64) {
+        let clamped = now < self.high_water;
         let at = now.max(self.high_water);
         // Expiration here bounds storage even for callers recording without reads.
         self.count(at);
+        self.clamped_history |= clamped;
         self.append(if self.bucketed { Self::end(at) } else { at }, 1);
         self.held = self.held.saturating_add(1);
         if self.entries.len() > Self::MAX_ENTRIES {
@@ -98,7 +105,7 @@ impl SlidingWindow {
     /// Approximate or clamped history cannot identify a particular event safely;
     /// rollback then retains conservative debt until expiration.
     pub fn forget(&mut self, at: f64) {
-        if self.bucketed {
+        if self.bucketed || self.clamped_history {
             return;
         }
         for index in (0..self.entries.len()).rev() {

@@ -130,9 +130,9 @@ console.log(JSON.stringify(out));
     }
 }
 
-/// The seed payload is bounded in SQL: stamps are capped (oldest first,
-/// which is what an exact reset reads), and nothing per-request beyond the
-/// instant is selected.
+/// The seed payload is bounded in SQL: the newest capped stamps are selected,
+/// then returned ascending, matching debit eviction. Nothing per-request
+/// beyond the instant is selected; truncation may delay the reported reset.
 #[test]
 fn seed_stamps_are_capped_in_the_query_and_keep_the_newest() {
     let dir = tempfile::tempdir().expect("tempdir");

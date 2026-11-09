@@ -5,6 +5,78 @@ use omni_ratelimit::window::SlidingWindow;
 const MINUTE: f64 = 60_000.0;
 
 #[test]
+fn clamped_history_forget_never_undercounts_actual_ts_and_recovers() {
+    // Execute the real TS reverse scan, including its early stop on a lower
+    // backdated stamp. Repeated forgets must not spend ambiguous debt twice.
+    let ops = serde_json::json!([
+        ["record", 10000],
+        ["record", 5000],
+        ["forget", 10000],
+        ["count", 10000],
+        ["forget", 10000],
+        ["count", 10000],
+        ["forget", 5000],
+        ["count", 10000],
+        ["record", 11000],
+        ["forget", 11000],
+        ["forget", 10000],
+        ["count", 11000],
+        ["count", 69999],
+        ["count", 70000],
+        ["count", 71000],
+        ["record", 72000],
+        ["record", 72000],
+        ["forget", 72000],
+        ["count", 72000],
+        ["forget", 72000],
+        ["count", 72000]
+    ]);
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/ratelimit/src/window.ts");
+    let script = format!(
+        "import {{SlidingWindow}} from {}; const w=new SlidingWindow(60000); \
+         const out=[]; for(const [op,at] of {ops}) {{ \
+         const v=w[op](at); if(op==='count') out.push(v); }} console.log(JSON.stringify(out));",
+        serde_json::to_string(&source).expect("path")
+    );
+    let output = std::process::Command::new("bun")
+        .args(["-e", &script])
+        .output()
+        .expect("Bun is required for real TS window parity");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<usize> = serde_json::from_slice(&output.stdout).expect("TS counts");
+    assert_eq!(expected[0], 2, "TS early stop reproduces reviewer finding");
+    let mut w = SlidingWindow::new(MINUTE);
+    let mut index = 0;
+    for op in ops.as_array().expect("ops") {
+        let at = op[1].as_f64().expect("at");
+        match op[0].as_str().expect("op") {
+            "record" => w.record(at),
+            "forget" => w.forget(at),
+            "count" => {
+                let count = w.count(at);
+                assert!(
+                    count >= expected[index],
+                    "at {at}: Rust {count} < TS {}",
+                    expected[index]
+                );
+                if at >= 71000.0 {
+                    assert_eq!(count, expected[index], "recovered exact rollback");
+                }
+                index += 1;
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(index, expected.len());
+    assert!(w.is_empty());
+}
+
+#[test]
 fn bucket_fallback_tracks_exact_reference_with_one_trailing_bucket_error() {
     for limit in [65_536, 65_537] {
         let mut w = SlidingWindow::with_limit(MINUTE, Some(limit));
@@ -214,7 +286,7 @@ fn a_drained_window_reports_empty() {
     assert!(w.is_empty());
 }
 
-// ---- memory scales with the limit, not the request rate (Task 6 round 2)
+// ---- memory bounded independently of configuration and request rate
 
 /// The gateway's request rate on the bench rig: ~51 admitted requests per
 /// millisecond, every stamp a whole millisecond (`Date.now()`).
@@ -299,9 +371,8 @@ fn no_minute_limit_still_retains_history() {
 }
 
 /// Stamps that are not whole milliseconds (never produced by the gateway)
-/// cannot grow it past its fixed cap either: past `MAX_ENTRIES` the oldest
-/// two entries merge into the later stamp, which can only make a count higher
-/// and a reset later (the side a limiter may err on).
+/// cannot grow it past its fixed cap either: past `MAX_ENTRIES`, fixed-width
+/// buckets retain counts at exclusive ends, conservatively delaying expiry.
 #[test]
 fn sub_millisecond_stamps_are_capped_too() {
     let mut w = SlidingWindow::with_limit(MINUTE, Some(100_000_000));

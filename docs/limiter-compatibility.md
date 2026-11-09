@@ -29,6 +29,12 @@ count on reads below it. Gateway high-water survives empty-ring eviction, so a
 wall-clock rollback cannot make minute admission silently forget earlier usage.
 Normal operation resumes at the high-water instant; clamped debt expires one
 window later (plus at most the trailing bucket). This may refuse more than TS.
+Once any record is clamped, `forget` retains all rollback debt until the
+retained history drains: original timestamps and TS's reverse-scan stopping
+point are no longer known. Repeated forget calls cannot remove ambiguous
+representatives. One boolean records this ambiguity, so memory remains bounded.
+Fresh ordered history after draining regains exact forget behavior; continuous
+traffic may retain the conservative forget restriction longer than one window.
 The one-bucket error bound applies only to ordered traffic. Neither implementation
 promises exact historical reconstruction arbitrarily far into the past.
 
