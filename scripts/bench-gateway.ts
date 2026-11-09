@@ -991,7 +991,16 @@ async function runScenario(
   // settle also lets the writer flush the scenario's last batch (≤ 200 ms).
   await sleep(scenario.clientTimeout === undefined ? 1000 : 5000);
   const settled = fleetSample(pids);
-  const log = logRows(windowFrom, Date.now());
+  // The writer may still hold queued rows (it queues through a disk stall
+  // rather than shed): count once the log has stopped changing, up to 15 s.
+  let log = logRows(windowFrom, Date.now());
+  for (let waited = 0; log !== null && waited < 15_000; waited += 500) {
+    await sleep(500);
+    const again = logRows(windowFrom, Date.now());
+    const same = again !== null && again.done === log.done && again.pending === log.pending;
+    log = again;
+    if (same) break;
+  }
   const rowsAnswered = warmAnswered + answered(report);
   const rows: RowCheck | null =
     log === null
