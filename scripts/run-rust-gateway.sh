@@ -5,4 +5,10 @@
 set -eu
 : "${MIMALLOC_PURGE_DELAY:=1}"
 export MIMALLOC_PURGE_DELAY
-exec "${OMNI_RUST_BINARY:-$(dirname "$0")/../target/release/omnigateway}" "$@"
+# Parameter expansion avoids spawning dirname during startup. Match dirname's
+# no-slash case as well; the installed binary override remains supported.
+case "$0" in
+  */*) script_dir=${0%/*} ;;
+  *) script_dir=. ;;
+esac
+exec "${OMNI_RUST_BINARY:-$script_dir/../target/release/omnigateway}" "$@"
