@@ -197,15 +197,14 @@ impl StreamDecoder for ResponsesDecoder {
                 }
                 "response.function_call_arguments.delta" => {
                     let index = self.ir_index(&output, &zero)?;
+                    let partial = string_or_empty(prop(d, "delta"));
                     self.argument_depth
                         .entry(index)
                         .or_default()
-                        .push(prop(d, "delta").and_then(Value::as_str).unwrap_or(""))?;
+                        .push(&partial)?;
                     out.push_back(StreamEvent::BlockDelta {
                         index,
-                        delta: Delta::ToolJson {
-                            partial: string_or_empty(prop(d, "delta")),
-                        },
+                        delta: Delta::ToolJson { partial },
                     });
                 }
                 "response.content_part.done" => {

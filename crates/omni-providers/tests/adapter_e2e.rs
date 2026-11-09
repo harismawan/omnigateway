@@ -67,6 +67,91 @@ fn creds(port: u16) -> Credentials {
     }
 }
 
+#[tokio::test]
+async fn responses_coerced_arguments_streamed_and_buffered() {
+    for buffered in [false, true] {
+        for string in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                read_request(&mut socket, &mut Vec::new()).await.unwrap();
+                let deltas = if string {
+                    vec![json!(["\""]), json!("[".repeat(40001)), json!("\"")]
+                } else {
+                    vec![
+                        json!(["[".repeat(40001)]),
+                        json!("0"),
+                        json!(["]".repeat(40001)]),
+                    ]
+                };
+                let mut wire = String::from(
+                    "event: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"f\"}}\n\n",
+                );
+                for delta in deltas {
+                    wire.push_str(&format!(
+                        "event: response.function_call_arguments.delta\ndata: {}\n\n",
+                        json!({"output_index":0,"delta":delta})
+                    ));
+                }
+                wire.push_str("event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n");
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{wire}",wire.len()).as_bytes()).await.unwrap();
+            });
+            let client = Client::new();
+            let req = request();
+            let mut credentials = creds(port);
+            credentials
+                .provider_data
+                .insert("protocol".into(), "responses".into());
+            let mut result = send(
+                &CustomCodec,
+                "custom",
+                AdapterRequest::new(&req, "m", &credentials),
+                &client,
+            )
+            .await
+            .unwrap();
+            let mut events = Vec::new();
+            let mut raw = String::new();
+            let mut failed = false;
+            while let Some(event) = result.events.next().await {
+                match event {
+                    Ok(e) => {
+                        if let StreamEvent::BlockDelta {
+                            delta: Delta::ToolJson { partial },
+                            ..
+                        } = &e
+                        {
+                            raw.push_str(partial);
+                        }
+                        events.push(e);
+                    }
+                    Err(e) => {
+                        assert!(e.message.contains("depth 40000"));
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            assert_eq!(failed, !string);
+            if string {
+                assert_eq!(
+                    serde_json::from_str::<String>(&raw).unwrap(),
+                    "[".repeat(40001)
+                );
+                if buffered {
+                    let response = omni_ir::stream::try_collect(events).unwrap();
+                    let rendered = omni_dialects::egress::anthropic::response(&response, "r");
+                    assert!(rendered.to_string().contains(&"[".repeat(40001)));
+                }
+            } else {
+                assert!(raw.is_empty(), "overflowing fragment escaped");
+            }
+            server.await.unwrap();
+        }
+    }
+}
+
 /// Real transport ownership: both explicit policy errors and downstream
 /// cancellation close the unread socket, even after content has committed.
 #[tokio::test]
