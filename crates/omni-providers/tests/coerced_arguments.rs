@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use omni_ir::stream::{Delta, StreamEvent};
 use omni_providers::{codec::StreamDecoder, custom::decode::ResponsesDecoder, sse::SseMessage};
 use serde_json::json;
@@ -17,7 +18,7 @@ fn responses_coerced_arguments_match_scanned_text() {
         "{}",
         String::from_utf8_lossy(&oracle.stderr)
     );
-    for string in [false, true] {
+    for string in [true, false] {
         let deltas = if string {
             vec![json!(["\""]), json!("[".repeat(40001)), json!("\"")]
         } else {

@@ -36,20 +36,82 @@ pub const BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 pub type Body = UnsyncBoxBody<Bytes, std::io::Error>;
 
+/// Handles live with the server, not the response. Reap on every registration:
+/// retained handles are bounded by peak concurrent workers, never request count.
+pub struct DeadlineWorkers(
+    std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+    #[cfg(test)] std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<&'static str>>>,
+);
+
+impl Default for DeadlineWorkers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeadlineWorkers {
+    pub fn new() -> Self {
+        Self(
+            std::sync::Mutex::new(Some(tokio::task::JoinSet::new())),
+            #[cfg(test)]
+            std::sync::Mutex::new(None),
+        )
+    }
+
+    fn spawn(
+        &self,
+        future: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Option<tokio::task::AbortHandle> {
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workers = guard.as_mut()?;
+        while workers.try_join_next().is_some() {}
+        Some(workers.spawn(future))
+    }
+
+    pub async fn shutdown(&self) {
+        // Taking the set and registering a worker share one lock. No worker
+        // can escape the shutdown snapshot; rejected futures drop in caller.
+        let workers = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(mut workers) = workers {
+            #[cfg(test)]
+            if let Some(tx) = self.1.lock().expect("test observer").as_ref() {
+                tx.send("joining").expect("test observer alive");
+            }
+            workers.shutdown().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn before_writer_close(&self) {
+        if let Some(tx) = self.1.lock().expect("test observer").as_ref() {
+            tx.send("closing").expect("test observer alive");
+        }
+    }
+}
+
 /// A deadline-owned pump keeps polling cancellation even when hyper stops
 /// polling the body. One-frame channel bounds read-ahead. Dropping the returned
 /// body aborts its owned worker, dropping dispatch and the admission finisher.
-fn deadline_body(body: Body, deadline: tokio::time::Instant) -> Body {
-    struct Worker(tokio::task::JoinHandle<()>);
+fn deadline_body(body: Body, deadline: tokio::time::Instant, workers: &DeadlineWorkers) -> Body {
+    struct Worker(Option<tokio::task::AbortHandle>);
     impl Drop for Worker {
         fn drop(&mut self) {
-            self.0.abort();
+            if let Some(worker) = &self.0 {
+                worker.abort();
+            }
         }
     }
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = expired.clone();
-    let worker = Worker(tokio::spawn(async move {
+    let worker = Worker(workers.spawn(async move {
         let mut body = body;
         let pump = async {
             while let Some(frame) = body.frame().await {
@@ -76,8 +138,182 @@ fn deadline_body(body: Body, deadline: tokio::time::Instant) -> Body {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod deadline_ownership {
     use super::*;
+
+    #[tokio::test]
+    async fn workers_reap_history_and_refuse_spawn_after_shutdown() {
+        let workers = DeadlineWorkers::new();
+        for _ in 0..1000 {
+            let handle = workers.spawn(async {}).unwrap();
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            assert!(workers.0.lock().unwrap().as_ref().unwrap().len() <= 1);
+        }
+        workers.shutdown().await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let owned = Released(Some(tx));
+        assert!(
+            workers
+                .spawn(async move {
+                    let _owned = owned;
+                    std::future::pending::<()>().await;
+                })
+                .is_none()
+        );
+        rx.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_racing_shutdown_cannot_escape_ownership() {
+        for _ in 0..100 {
+            let workers = Arc::new(DeadlineWorkers::new());
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let owned = Released(Some(tx));
+            let spawning = {
+                let workers = workers.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    workers.spawn(async move {
+                        let _owned = owned;
+                        std::future::pending::<()>().await;
+                    });
+                })
+            };
+            barrier.wait().await;
+            workers.shutdown().await;
+            spawning.await.unwrap();
+            rx.await.unwrap();
+            assert!(workers.0.lock().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn shutdown_joins_gated_worker_before_terminal_row_and_writer_close() {
+        use omni_store::writer::{LogEvent, PendingLog};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.db");
+        let env = std::collections::HashMap::from([
+            (
+                "OMNI_ENCRYPTION_KEY".into(),
+                "test-encryption-key-0123456789".into(),
+            ),
+            ("OMNI_DB_PATH".into(), path.to_str().unwrap().into()),
+        ]);
+        let mut config = omni_gateway_core::config::load_config(&env, || 0).unwrap();
+        config.port = 0;
+        let running = crate::start(
+            config,
+            crate::Options {
+                stop_deadline: Duration::ZERO,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let app = running.app.clone();
+        let writer = app.deps.writer.clone();
+        writer.send(LogEvent::Begin(PendingLog {
+            id: "gated".into(),
+            at: 0,
+            api_key_id: None,
+            requested_model: "m".into(),
+            resolved_provider: None,
+            resolved_model: None,
+            credential_id: None,
+        }));
+        writer.flush().await.unwrap();
+        let state = || {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT state, status FROM request_logs WHERE id='gated'",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state().0, "pending");
+        let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        *app.deadline_workers.1.lock().unwrap() = Some(events.clone());
+        let (release, gate) = std::sync::mpsc::channel();
+        let (dropped, released) = tokio::sync::oneshot::channel();
+        struct Gated {
+            events: tokio::sync::mpsc::UnboundedSender<&'static str>,
+            gate: std::sync::mpsc::Receiver<()>,
+            finisher: Option<Finisher>,
+            released: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for Gated {
+            fn drop(&mut self) {
+                self.events.send("destruction").unwrap();
+                self.gate.recv().unwrap();
+                drop(self.finisher.take());
+                self.released.take().unwrap().send(()).unwrap();
+            }
+        }
+        let owned = Gated {
+            events: events.clone(),
+            gate,
+            finisher: Some(Finisher::new(
+                writer.clone(),
+                "gated".into(),
+                0,
+                "test",
+                crate::clock::now_ms,
+            )),
+            released: Some(dropped),
+        };
+        let source = async_stream::stream! {
+            let _owned = owned;
+            events.send("live").unwrap();
+            std::future::pending::<()>().await;
+            yield Ok::<_,std::io::Error>(Frame::data(Bytes::new()));
+        };
+        let body = deadline_body(
+            StreamBody::new(source).boxed_unsync(),
+            tokio::time::Instant::now() + Duration::from_secs(3600),
+            &app.deadline_workers,
+        );
+        assert_eq!(observed.recv().await, Some("live"));
+        running.shutdown();
+        let mut wait = tokio::spawn(running.wait());
+        let phase = observed.recv().await.unwrap();
+        // Shutdown itself must cancel the still-live pump. On RED, disconnect
+        // it here so the test can release the gate and report without hanging.
+        drop(body);
+        assert_eq!(observed.recv().await, Some("destruction"));
+        if phase == "closing" {
+            // Force the reported legal interleaving on the old implementation:
+            // writer fully closes before the blocked destructor can file Finish.
+            (&mut wait).await.unwrap().unwrap();
+            release.send(()).unwrap();
+            released.await.unwrap();
+            assert_eq!(state().0, "pending");
+            assert_eq!(writer.stats().dropped, 1);
+            panic!("writer closed before worker destruction: pending row, dropped Finish=1");
+        }
+        // Release even on RED, so a failing assertion cannot strand a runtime thread.
+        let waiting = !wait.is_finished();
+        let pending = state().0;
+        release.send(()).unwrap();
+        released.await.unwrap();
+        wait.await.unwrap().unwrap();
+        assert_eq!(
+            phase, "joining",
+            "writer closure overtook worker destruction"
+        );
+        assert!(waiting);
+        assert_eq!(pending, "pending");
+        assert_eq!(state(), ("done".into(), 499));
+        assert_eq!(writer.stats().dropped, 0);
+        assert_eq!(writer.stats().failed, 0);
+        assert!(app.deadline_workers.0.lock().unwrap().is_none());
+    }
     struct Released(Option<tokio::sync::oneshot::Sender<()>>);
     impl Drop for Released {
         fn drop(&mut self) {
@@ -89,6 +325,7 @@ mod deadline_ownership {
     #[tokio::test]
     async fn deadline_drops_unpolled_body_and_disconnect_aborts_worker() {
         for disconnect in [false, true] {
+            let workers = DeadlineWorkers::new();
             let (tx, rx) = tokio::sync::oneshot::channel();
             let owned = Released(Some(tx));
             let source = async_stream::stream! {
@@ -98,6 +335,7 @@ mod deadline_ownership {
             let body = deadline_body(
                 StreamBody::new(source).boxed_unsync(),
                 tokio::time::Instant::now() + Duration::from_millis(20),
+                &workers,
             );
             if disconnect {
                 drop(body);
@@ -120,6 +358,7 @@ mod deadline_ownership {
 
 /// Everything a request handler reads. One per process.
 pub struct App {
+    pub deadline_workers: DeadlineWorkers,
     pub deps: Arc<Deps>,
     pub limiter: Arc<RateLimiter>,
     pub miss: MissResolver,
@@ -576,7 +815,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             };
             let body = sse_body(bounded_events, encoder, keepalive, fin.take());
             let body = match response_deadline {
-                Some(deadline) => deadline_body(body, deadline),
+                Some(deadline) => deadline_body(body, deadline, &app.deadline_workers),
                 None => body,
             };
             let mut res = Response::new(settle(body));

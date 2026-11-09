@@ -68,6 +68,7 @@ fn creds(port: u16) -> Credentials {
 }
 
 #[tokio::test]
+#[allow(clippy::unwrap_used)]
 async fn responses_coerced_arguments_streamed_and_buffered() {
     for buffered in [false, true] {
         for string in [false, true] {

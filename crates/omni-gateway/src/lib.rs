@@ -141,6 +141,8 @@ pub struct Running {
     pub addr: std::net::SocketAddr,
     stop: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<Result<(), String>>,
+    #[cfg(test)]
+    app: Arc<server::App>,
 }
 
 impl std::fmt::Debug for Running {
@@ -374,6 +376,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         rand: clock::random,
     });
     let app = Arc::new(server::App {
+        deadline_workers: server::DeadlineWorkers::new(),
         deps,
         limiter,
         miss,
@@ -389,6 +392,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let deadline = options.stop_deadline;
     let idle = options.idle_timeout;
+    #[cfg(test)]
+    let test_app = app.clone();
     let task = tokio::spawn(async move {
         let graceful = hyper_util::server::graceful::GracefulShutdown::new();
         let builder = http1_builder(idle);
@@ -433,6 +438,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         // files the 499 row into the writer, which is closed only after.
         conns.abort_all();
         while conns.join_next().await.is_some() {}
+        // Abort only requests cancellation. Join the body pumps as well so
+        // their source/Finisher destructors finish before the writer closes.
+        app.deadline_workers.shutdown().await;
+        #[cfg(test)]
+        app.deadline_workers.before_writer_close();
         drop(app);
         refresher.abort();
         preseeder.abort();
@@ -457,5 +467,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             }
         }
     });
-    Ok(Running { addr, stop, task })
+    Ok(Running {
+        addr,
+        stop,
+        task,
+        #[cfg(test)]
+        app: test_app,
+    })
 }
