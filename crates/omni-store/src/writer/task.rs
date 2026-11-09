@@ -38,12 +38,25 @@ pub struct WriterConfig {
     pub node_id: String,
     /// The fixed offset `usage_daily` days are cut at.
     pub day_offset_minutes: i64,
-    /// Channel capacity: what may be pending while the database stalls. A full
-    /// channel drops, never waits. 131 072 events is ~3 s of the gateway's
-    /// 20 k requests/s (two events each), so a stall of the disk under the
-    /// WAL's fsync (XFS log flushes of up to ~1 s were seen on the bench host)
-    /// queues instead of shedding; a longer outage still sheds. The channel
-    /// allocates in blocks as it fills, so an idle writer holds little of it.
+    /// Channel capacity, in events: what may be pending while the database
+    /// stalls. A full channel drops, never waits. 131 072 events is ~3 s of
+    /// the gateway's 20 k requests/s (two events each), so a stall of the
+    /// disk under the WAL's fsync (XFS log flushes of up to ~1 s were seen on
+    /// the bench host) queues instead of shedding; a longer outage still
+    /// sheds. The channel allocates in blocks as it fills, so an idle writer
+    /// holds little of it.
+    ///
+    /// **It bounds events, not bytes.** What a full queue holds:
+    /// - **slots**: 360 bytes each (a 344-byte [`WriteEvent`] plus its
+    ///   enqueue time), ~45 MiB for 131 072;
+    /// - **payload** each event owns on the heap, on top: its id and model
+    ///   strings and, for a Finish, its `degradations` and `rtk_filters`
+    ///   lists. A bench-shaped event's six short strings (a 40-byte id, the
+    ///   key, model, provider and credential) are ~120-200 bytes with
+    ///   allocator rounding, ~15-25 MiB for a full queue; there is no fixed
+    ///   maximum, since the strings are the
+    ///   request's own (a model name, say, is as long as the client sent and
+    ///   the snapshot allowed), so the worst case grows with them.
     pub capacity: usize,
     /// Most events per batch.
     pub max_batch: usize,
@@ -58,12 +71,19 @@ pub struct WriterConfig {
     /// a checkpoint: with SQLite's in-commit auto-checkpoint, one batch in
     /// several stalled 80-900 ms at bench rates and the channel filled
     /// behind it. `None` leaves checkpoints to `wal_autocheckpoint` alone.
+    /// Like it, this cannot shrink a WAL that an open reader pins.
     pub checkpoint_every: Option<Duration>,
-    /// The writer connection's `wal_autocheckpoint`, in pages: only a
-    /// backstop when the checkpointer runs (a reader holding the WAL can stop
-    /// a passive checkpoint from reaching its end, and the WAL then grows to
-    /// this before a commit checkpoints it), the only checkpoint when it does
-    /// not. 10 000 pages is ~40 MiB of WAL.
+    /// The writer connection's `wal_autocheckpoint`, in pages: a **trigger**,
+    /// not a bound. Once a commit leaves the WAL at this many pages or more,
+    /// that commit runs a passive checkpoint (a backstop when the checkpointer
+    /// runs, the only checkpoint when it does not). 10 000 pages is ~40 MiB.
+    ///
+    /// It does **not** bound the WAL. A passive checkpoint copies only frames
+    /// no open reader still needs, and the WAL restarts from its start only
+    /// once every frame is copied; while some connection holds a read
+    /// transaction open, the WAL keeps growing past this, however often a
+    /// checkpoint runs (`a_pinned_reader_lets_the_wal_grow_past_the_trigger`).
+    /// TS's `bun:sqlite` default auto-checkpoint behaves the same way.
     pub wal_autocheckpoint: u32,
     /// At most one dropped-event warning per this long.
     pub drop_warn_interval: Duration,
@@ -110,6 +130,9 @@ impl Default for WriterConfig {
 /// What the writer has done so far.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WriterStats {
+    /// Events accepted into the channel (seed reads aside). After a
+    /// [`WriterHandle::flush`] barrier, `enqueued == written + failed`.
+    pub enqueued: u64,
     /// Events refused because the channel was full or the writer had closed.
     /// The full total: the rate-limited warning may not have reported the
     /// last of them (see [`Writer::close`]).
@@ -132,6 +155,7 @@ pub struct WriterStats {
 
 #[derive(Debug)]
 struct Counters {
+    enqueued: AtomicU64,
     dropped: AtomicU64,
     batches: AtomicU64,
     written: AtomicU64,
@@ -144,6 +168,7 @@ struct Counters {
 impl Counters {
     fn new() -> Self {
         Self {
+            enqueued: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             batches: AtomicU64::new(0),
             written: AtomicU64::new(0),
@@ -156,6 +181,7 @@ impl Counters {
 
     fn snapshot(&self) -> WriterStats {
         WriterStats {
+            enqueued: self.enqueued.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             batches: self.batches.load(Ordering::Relaxed),
             written: self.written.load(Ordering::Relaxed),
@@ -221,7 +247,23 @@ impl DropWarner {
 #[derive(Debug)]
 struct Queued {
     at: Instant,
-    event: WriteEvent,
+    item: Item,
+}
+
+/// The bytes one queue slot takes (the [`WriterConfig::capacity`] docs).
+pub fn queue_slot_bytes() -> usize {
+    std::mem::size_of::<Queued>()
+}
+
+/// What travels the channel: an event, or a [`WriterHandle::flush`] barrier
+/// answered once everything queued before it is committed.
+#[derive(Debug)]
+// Nearly every item is an event; boxing it to shrink the rare barrier would
+// cost an allocation per event.
+#[allow(clippy::large_enum_variant)]
+enum Item {
+    Event(WriteEvent),
+    Barrier(oneshot::Sender<WriterStats>),
 }
 
 /// The request path's side: cheap to clone, and [`Self::send`] never waits.
@@ -237,17 +279,45 @@ impl WriterHandle {
     /// about it later, rate-limited. Nothing here but the `try_send` and an
     /// atomic add.
     pub fn send(&self, event: impl Into<WriteEvent>) -> bool {
+        let event = event.into();
+        let counted = !matches!(event, WriteEvent::Seed(_));
         let queued = Queued {
             at: Instant::now(),
-            event: event.into(),
+            item: Item::Event(event),
         };
         match self.tx.try_send(queued) {
-            Ok(()) => true,
+            Ok(()) => {
+                if counted {
+                    self.counters.enqueued.fetch_add(1, Ordering::Relaxed);
+                }
+                true
+            }
             Err(_) => {
                 self.counters.dropped.fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
+    }
+
+    /// A barrier: waits until every event accepted before this call is
+    /// committed (or counted failed), then returns the cumulative counters.
+    /// It goes through the channel like an event, so it waits for queue room
+    /// (it is never dropped), and it ends the batch it lands in, so it is
+    /// answered without waiting out the batch interval. `Err` when the writer
+    /// has closed.
+    ///
+    /// Not for the request path, which never waits on the writer: the bench
+    /// harness calls it (`POST /__omni/bench/flush`, only with `OMNI_BENCH=1`)
+    /// to read exact per-scenario drop counts.
+    pub async fn flush(&self) -> Result<WriterStats, StoreError> {
+        let (tx, rx) = oneshot::channel();
+        let queued = Queued {
+            at: Instant::now(),
+            item: Item::Barrier(tx),
+        };
+        let closed = || StoreError::Writer("writer closed".into());
+        self.tx.send(queued).await.map_err(|_| closed())?;
+        rx.await.map_err(|_| closed())
     }
 
     /// Queues a long-window seed read, run on the writer's connection after
@@ -588,6 +658,22 @@ async fn flush_watching(
     Ok(lost)
 }
 
+/// Sorts one channel item into the batch or the barriers waiting on it.
+fn take(item: Item, batch: &mut Vec<WriteEvent>, barriers: &mut Vec<oneshot::Sender<WriterStats>>) {
+    match item {
+        Item::Event(e) => batch.push(e),
+        Item::Barrier(b) => barriers.push(b),
+    }
+}
+
+/// Answers barriers once the batch before them is written.
+fn answer(barriers: Vec<oneshot::Sender<WriterStats>>, counters: &Counters) {
+    for b in barriers {
+        // A caller that gave up waiting is no one's concern.
+        b.send(counters.snapshot()).ok();
+    }
+}
+
 /// Whether the stop was signalled (or its sender dropped) without waiting.
 /// Only called on a receiver that has not yet completed.
 fn stop_arrived(stop: &mut oneshot::Receiver<()>) -> bool {
@@ -640,11 +726,13 @@ async fn run(
         // write is already due, and goes out with the next write.
         let deadline = first.at + config.interval;
         let mut batch = Vec::with_capacity(max_batch);
-        batch.push(first.event);
+        // Barriers end the batch they land in and are answered after it.
+        let mut barriers = Vec::new();
+        take(first.item, &mut batch, &mut barriers);
         let mut stopping = false;
-        while batch.len() < max_batch {
+        while batch.len() < max_batch && barriers.is_empty() {
             if let Ok(e) = rx.try_recv() {
-                batch.push(e.event);
+                take(e.item, &mut batch, &mut barriers);
                 continue;
             }
             tokio::select! {
@@ -652,13 +740,14 @@ async fn run(
                 _ = &mut stop => { stopping = true; break; }
                 () = sleep_until(deadline) => break,
                 e = rx.recv() => match e {
-                    Some(e) => batch.push(e.event),
+                    Some(e) => take(e.item, &mut batch, &mut barriers),
                     None => break,
                 },
                 _ = warn_tick.tick() => warner.check(&counters),
             }
         }
         let lost = flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
+        answer(barriers, &counters);
         // A stop that arrived while this batch was being written (or retried)
         // waited on its outcome, so its loss is the close's to report.
         if stopping || stop_arrived(&mut stop) {
@@ -671,17 +760,25 @@ async fn run(
     rx.close();
     loop {
         let mut batch = Vec::with_capacity(max_batch);
-        while batch.len() < max_batch {
+        let mut barriers = Vec::new();
+        let mut ended = false;
+        while batch.len() < max_batch && barriers.is_empty() {
             match rx.recv().await {
-                Some(e) => batch.push(e.event),
-                None => break,
+                Some(e) => take(e.item, &mut batch, &mut barriers),
+                None => {
+                    ended = true;
+                    break;
+                }
             }
         }
-        if batch.is_empty() {
+        if !batch.is_empty() {
+            lost_on_close +=
+                flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
+        }
+        answer(barriers, &counters);
+        if ended {
             break;
         }
-        lost_on_close +=
-            flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
     }
     // A last look, still rate-limited: drops inside the current interval go
     // unwarned here and are reported by `close()`'s `dropped` total instead.

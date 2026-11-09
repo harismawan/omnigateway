@@ -1018,3 +1018,53 @@ async fn a_silent_upstream_stream_with_keepalives_outlives_the_idle_timeout() {
     let f = stop(g).await;
     assert_eq!(rows(&f.path, "SELECT status FROM request_logs"), [["200"]]);
 }
+
+/// `POST /__omni/bench/flush`, with bench endpoints on (`OMNI_BENCH=1`):
+/// answered once every row from before it is committed, with the writer's
+/// cumulative counters.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bench_flush_barrier_commits_and_counts() {
+    let g = boot_opts(
+        &[("fast", "mock-c1-d0")],
+        Options {
+            bench_endpoints: true,
+            ..Options::default()
+        },
+    )
+    .await;
+    let auth = bearer(&g);
+    for _ in 0..5 {
+        let (s, _, _) = call(
+            &g.base,
+            "POST",
+            "/v1/chat/completions",
+            &[("authorization", &auth)],
+            r#"{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        )
+        .await;
+        assert_eq!(s, 200);
+    }
+    let (s, _, b) = call(&g.base, "POST", "/__omni/bench/flush", &[], "").await;
+    assert_eq!(s, 200, "{b}");
+    let v: serde_json::Value = serde_json::from_str(&b).expect("json");
+    assert_eq!(v["dropped"], 0, "{b}");
+    assert_eq!(v["failed"], 0, "{b}");
+    assert!(v["enqueued"].as_u64().expect("enqueued") >= 10, "{b}");
+    assert_eq!(v["enqueued"], v["committed"], "{b}");
+    // Committed means in the database, now.
+    let done = rows(
+        &g.f.path,
+        "SELECT COUNT(*) FROM request_logs WHERE state = 'done'",
+    );
+    assert_eq!(done, [["5"]]);
+    stop(g).await;
+}
+
+/// Without `OMNI_BENCH=1` the route does not exist: the ordinary 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bench_flush_route_is_off_by_default() {
+    let g = boot_opts(&[("fast", "mock-c1-d0")], Options::default()).await;
+    let (s, _, _) = call(&g.base, "POST", "/__omni/bench/flush", &[], "").await;
+    assert_eq!(s, 404);
+    stop(g).await;
+}

@@ -174,6 +174,10 @@ pub struct Options {
     /// between requests, and how long the request body may go without a byte.
     /// There is no total body deadline, as in TS.
     pub idle_timeout: Duration,
+    /// `OMNI_BENCH=1`: serve `POST /__omni/bench/flush`, the bench harness's
+    /// writer barrier. Off by default; not a TS route, and never for
+    /// production: it makes the caller wait on the database.
+    pub bench_endpoints: bool,
 }
 
 /// `idleTimeout: 255`.
@@ -185,6 +189,7 @@ impl Default for Options {
             keepalive: KEEPALIVE,
             stop_deadline: STOP_DEADLINE,
             idle_timeout: IDLE_TIMEOUT,
+            bench_endpoints: false,
         }
     }
 }
@@ -304,6 +309,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         node_id,
         keepalive: options.keepalive,
         idle_timeout: options.idle_timeout,
+        bench_endpoints: options.bench_endpoints,
     });
 
     let listener = TcpListener::bind((config.host.as_str(), config.port))

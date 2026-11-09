@@ -21,13 +21,21 @@
  * `--load-cpus 6-7` `--streams 1000` `--boots 5` `--only <scenario,...>`
  * `--request-timeout 30s` `--rate <req/s>`.
  *
- * **Every request has a row.** After each scenario (single mode) the request
- * log is read for that scenario's window: every response the clients got must
- * have a `done` row, and no row may still be `pending`. A gateway that sheds
- * log rows under load (a full writer queue) fails that, and the run is flagged
- * in the table. The gateway's own drop counters, where its log reports them,
- * are recorded too. A run that dropped rows is not a like-for-like comparison
- * with one that wrote them all.
+ * **Every request has a row.** The gateway runs with `OMNI_BENCH=1`, which
+ * makes the Rust gateway serve `POST /__omni/bench/flush`: a writer barrier
+ * that answers once everything its writer accepted is committed, with the
+ * cumulative `{enqueued, committed, dropped, failed}`. The harness calls it at
+ * each scenario's start and end, so the scenario's drops are the exact delta,
+ * and the rows it then counts are all in. A barrier that does not answer in
+ * 60 s makes the scenario *inconclusive* (flagged, never counted as zero). A
+ * gateway without the route (TS, which writes every row synchronously, 404s)
+ * is checked by the rows alone.
+ *
+ * After each scenario (single mode) the request log is read for the
+ * scenario's window: every response the clients got must have a `done` row,
+ * and no row may still be `pending`. Drops, failures, missing or pending rows
+ * flag the scenario and the run. A run that dropped rows is not a
+ * like-for-like comparison with one that wrote them all.
  *
  * **Per-request timeout.** Every scenario but the held and cancelling ones
  * passes `-t` (`--request-timeout`, 30 s), so one wedged connection becomes a
@@ -175,6 +183,9 @@ const env = {
   // directory is a supported, logged configuration.
   OMNI_STATIC_DIR: join(root, "no-dashboard"),
   OMNI_LOG_LEVEL: "warn",
+  // The Rust gateway's writer barrier (`POST /__omni/bench/flush`); off
+  // without it, and unknown to TS.
+  OMNI_BENCH: "1",
   ...(CLUSTER
     ? {
         OMNI_CLUSTER_MODE: "true",
@@ -671,14 +682,67 @@ type RowCheck = {
   /** `answered - done`, floored at 0. */
   missing: number;
   /**
-   * Events the gateway's writer warned it dropped while this scenario ran:
-   * the `count` of its rate-limited "writer is full" warnings stamped inside
-   * the window (they come at most every 10 s, so a drop near the end may be
-   * counted in the next scenario). The cancel scenarios' 499 rows can hide a
-   * missing row from `missing`; this cannot. `null` until the log is read.
+   * The writer's counters over this scenario, from the flush barrier at its
+   * start and end: exact, whenever the drops happened in it. The cancel
+   * scenarios' 499 rows can hide a missing row from `missing`; this cannot.
+   * `"unsupported"`: the gateway has no barrier (TS). `"inconclusive"`: a
+   * barrier did not answer in time.
    */
-  writerDrops: number | null;
+  writer: WriterDelta | "unsupported" | "inconclusive";
 };
+
+/** `POST /__omni/bench/flush`'s answer: cumulative since the gateway started. */
+type WriterCounts = { enqueued: number; committed: number; dropped: number; failed: number };
+/** The same, over one scenario. */
+type WriterDelta = WriterCounts;
+
+const BARRIER_TIMEOUT_MS = 60_000;
+
+/**
+ * Every replica's writer barrier, summed. `"unsupported"` if a gateway 404s
+ * it, `"inconclusive"` if one does not answer within the timeout (or errs).
+ */
+async function writerBarrier(): Promise<WriterCounts | "unsupported" | "inconclusive"> {
+  const total: WriterCounts = { enqueued: 0, committed: 0, dropped: 0, failed: 0 };
+  for (const base of BASES) {
+    try {
+      const res = await fetch(`${base}/__omni/bench/flush`, {
+        method: "POST",
+        signal: AbortSignal.timeout(BARRIER_TIMEOUT_MS),
+      });
+      if (res.status === 404) {
+        await res.body?.cancel();
+        return "unsupported";
+      }
+      if (!res.ok) {
+        await res.body?.cancel();
+        return "inconclusive";
+      }
+      const c = (await res.json()) as WriterCounts;
+      total.enqueued += c.enqueued;
+      total.committed += c.committed;
+      total.dropped += c.dropped;
+      total.failed += c.failed;
+    } catch {
+      return "inconclusive";
+    }
+  }
+  return total;
+}
+
+function writerDelta(
+  a: Awaited<ReturnType<typeof writerBarrier>>,
+  b: Awaited<ReturnType<typeof writerBarrier>>,
+): WriterDelta | "unsupported" | "inconclusive" {
+  if (a === "inconclusive" || b === "inconclusive") return "inconclusive";
+  if (a === "unsupported" || b === "unsupported") return "unsupported";
+  return {
+    enqueued: b.enqueued - a.enqueued,
+    committed: b.committed - a.committed,
+    dropped: b.dropped - a.dropped,
+    failed: b.failed - a.failed,
+  };
+}
 
 function scenarios(): Scenario[] {
   const long = Number(flags.streams);
@@ -933,6 +997,8 @@ async function runScenario(
   const key = keys[scenario.key];
   // Scenarios run one after another with idle gaps, so the rows whose `at`
   // falls between the warmup's start and the settle's end are this one's.
+  // Everything before this scenario committed, and the counters to diff from.
+  const barrierBefore = await writerBarrier();
   const windowFrom = Date.now();
   let warmAnswered = 0;
   if (scenario.warmup !== false)
@@ -991,16 +1057,12 @@ async function runScenario(
   // settle also lets the writer flush the scenario's last batch (≤ 200 ms).
   await sleep(scenario.clientTimeout === undefined ? 1000 : 5000);
   const settled = fleetSample(pids);
-  // The writer may still hold queued rows (it queues through a disk stall
-  // rather than shed): count once the log has stopped changing, up to 15 s.
-  let log = logRows(windowFrom, Date.now());
-  for (let waited = 0; log !== null && waited < 15_000; waited += 500) {
-    await sleep(500);
-    const again = logRows(windowFrom, Date.now());
-    const same = again !== null && again.done === log.done && again.pending === log.pending;
-    log = again;
-    if (same) break;
-  }
+  // The barrier: every row this scenario's requests filed is committed when
+  // it answers (the writer may have queued them through a disk stall), and
+  // its counters give the scenario's drops exactly.
+  const barrierAfter = await writerBarrier();
+  const writer = writerDelta(barrierBefore, barrierAfter);
+  const log = logRows(windowFrom, Date.now());
   const rowsAnswered = warmAnswered + answered(report);
   const rows: RowCheck | null =
     log === null
@@ -1010,7 +1072,7 @@ async function runScenario(
           done: log.done,
           pending: log.pending,
           missing: Math.max(0, rowsAnswered - log.done),
-          writerDrops: null,
+          writer,
         };
   const crashed = pids.filter((pid) => procSample(pid) === null).length;
   const healthyAfter =
@@ -1309,6 +1371,7 @@ async function main(): Promise<void> {
         (result.rows === null
           ? ""
           : `  rows ${result.rows.done}/${result.rows.answered} pending ${result.rows.pending}` +
+            `  writer ${writerCell(result.rows.writer)}` +
             (shed(result) ? "  ROWS DROPPED" : "")) +
         `  foreign ${result.foreignCores} cores` +
         (result.threads === null ? "" : `  threads ${JSON.stringify(result.threads)}`) +
@@ -1318,7 +1381,6 @@ async function main(): Promise<void> {
   const final = fleetSample(pids);
   const shutdownMs = Math.max(...(await Promise.all(gateways.map(stopGateway))));
   const writerDropped = writerDrops();
-  attributeDrops(results);
   // The CLI reads SQLite only; a cluster has no file for it to open.
   const cli = CLUSTER ? null : await cliTimings(10);
 
@@ -1383,37 +1445,26 @@ async function main(): Promise<void> {
   console.error(markdown(output));
 }
 
-/** A scenario whose request log is missing rows, left rows pending, or whose writer dropped. */
+/**
+ * A scenario whose request log is missing rows or left rows pending, whose
+ * writer dropped or failed events, or whose barrier did not answer.
+ */
 function shed(r: ScenarioResult): boolean {
+  if (r.rows === null) return false;
+  const w = r.rows.writer;
   return (
-    r.rows !== null && (r.rows.missing > 0 || r.rows.pending > 0 || (r.rows.writerDrops ?? 0) > 0)
+    r.rows.missing > 0 ||
+    r.rows.pending > 0 ||
+    w === "inconclusive" ||
+    (typeof w === "object" && (w.dropped > 0 || w.failed > 0))
   );
 }
 
-/**
- * Spreads the gateway's "writer is full; events dropped … count=N" warnings
- * over the scenarios by their timestamps: each goes to the scenario whose
- * window (its start up to the next one's) holds it.
- */
-function attributeDrops(results: ScenarioResult[]): void {
-  const warnings: { at: number; count: number }[] = [];
-  for (let i = 0; i < REPLICAS; i += 1) {
-    let text = "";
-    try {
-      text = readFileSync(join(root, `gateway-${i}.log`), "utf8");
-    } catch {
-      continue;
-    }
-    for (const m of text.matchAll(/^(\S+) WARN +request log writer is full.*?\bcount=(\d+)/gm))
-      warnings.push({ at: Date.parse(m[1] as string), count: Number(m[2]) });
-  }
-  results.forEach((r, i) => {
-    if (r.rows === null) return;
-    const until = results[i + 1]?.windowFrom ?? Number.POSITIVE_INFINITY;
-    r.rows.writerDrops = warnings
-      .filter((w) => w.at >= r.windowFrom && w.at < until)
-      .reduce((a, w) => a + w.count, 0);
-  });
+/** The writer column: drops / failures, or why there are none to show. */
+function writerCell(w: RowCheck["writer"]): string {
+  if (w === "unsupported") return "n/a";
+  if (w === "inconclusive") return "INCONCLUSIVE";
+  return `${w.dropped} / ${w.failed}`;
 }
 
 /**
@@ -1462,14 +1513,14 @@ function markdown(o: {
         ]
       : []),
     "",
-    "| scenario | c | req/s | p50 ms | p99 ms | p99.9 ms | TTFB p50 | CPU ms/req | +db ms/req | RSS peak MiB | ok % | crashed | rows missing / pending / writer drops | foreign cores |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| scenario | c | req/s | p50 ms | p99 ms | p99.9 ms | TTFB p50 | CPU ms/req | +db ms/req | RSS peak MiB | ok % | crashed | rows missing / pending | writer dropped / failed | foreign cores |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
   ];
   for (const r of o.scenarios) {
     const rows =
       r.rows === null
-        ? "–"
-        : `${r.rows.missing} / ${r.rows.pending} / ${r.rows.writerDrops ?? "–"}${shed(r) ? " ⚠ DROPPED" : ""}`;
+        ? "– | –"
+        : `${r.rows.missing} / ${r.rows.pending} | ${writerCell(r.rows.writer)}${shed(r) ? " ⚠ DROPPED" : ""}`;
     lines.push(
       `| ${r.name} | ${r.concurrency} | ${r.rps.toFixed(0)} | ${r.latencyMs.p50.toFixed(2)} | ${r.latencyMs.p99.toFixed(2)} | ` +
         `${r.latencyMs.p999.toFixed(2)} | ${r.ttfbMs === null ? "–" : r.ttfbMs.p50.toFixed(2)} | ` +

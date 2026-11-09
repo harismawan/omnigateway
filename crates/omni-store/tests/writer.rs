@@ -926,3 +926,122 @@ fn the_default_queue_rides_out_a_one_second_stall_at_bench_rates() {
         );
     });
 }
+
+/// `flush` is a barrier: it returns once every event accepted before it is
+/// committed (or failed), with the cumulative counters, even when the batch
+/// interval has not come round. `enqueued` counts accepted events (seeds
+/// aside), so after a barrier `enqueued == written + failed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flush_returns_once_everything_before_it_is_committed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path());
+    let cfg = WriterConfig {
+        // Nothing would be written for an hour but for the barrier.
+        interval: Duration::from_secs(3600),
+        ..config(0, 512)
+    };
+    let writer = Writer::spawn(&db, cfg).expect("spawn");
+    let handle = writer.handle();
+    for n in 0..1500 {
+        let id = format!("r{n}");
+        assert!(handle.send(pending(&id, T0 + n, Some("key-1"), "sonnet")));
+        assert!(handle.send(LogEvent::Finish(done(
+            &id,
+            T0 + n,
+            Some("key-1"),
+            "sonnet",
+            n
+        ))));
+    }
+    let stats = tokio::time::timeout(Duration::from_secs(10), handle.flush())
+        .await
+        .expect("barrier within 10 s")
+        .expect("barrier");
+    assert_eq!(stats.enqueued, 3000);
+    assert_eq!(stats.written + stats.failed, stats.enqueued);
+    assert_eq!(stats.dropped, 0);
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM request_logs WHERE state = 'done'"
+        ),
+        1500,
+        "every row is in the database when the barrier returns"
+    );
+    // A second barrier with nothing new returns the same totals.
+    let again = handle.flush().await.expect("barrier");
+    assert_eq!((again.enqueued, again.written), (3000, stats.written));
+    writer.close().await.expect("close");
+}
+
+/// A barrier on a closed writer says so instead of hanging.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flush_on_a_closed_writer_is_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path());
+    let writer = Writer::spawn(&db, config(0, 512)).expect("spawn");
+    let handle = writer.handle();
+    writer.close().await.expect("close");
+    assert!(handle.flush().await.is_err());
+}
+
+/// `wal_autocheckpoint` is a trigger, not a bound: while another connection
+/// holds a read transaction open, no checkpoint (the writer's backstop or its
+/// checkpointer) may reuse the WAL frames that reader can see, so the WAL
+/// grows past the trigger for as long as the reader stays. Once it ends, the
+/// next checkpoint resets the WAL and new writes reuse it from the start.
+/// This is SQLite's WAL design, the same under TS's `bun:sqlite`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_reader_lets_the_wal_grow_past_the_trigger() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path());
+    let wal = db.with_extension("db-wal");
+    let cfg = WriterConfig {
+        // A small trigger, to see the WAL pass it: 50 pages, ~200 KiB.
+        wal_autocheckpoint: 50,
+        checkpoint_every: Some(Duration::from_millis(10)),
+        ..config(0, 512)
+    };
+    let writer = Writer::spawn(&db, cfg).expect("spawn");
+    let handle = writer.handle();
+    let reader = Connection::open(&db).expect("reader");
+    reader.execute_batch("BEGIN").expect("begin");
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0))
+        .expect("pin a snapshot");
+    let batch = |from: i64| {
+        for n in from..from + 2000 {
+            let log = done(&format!("r{n}"), T0 + n, Some("key-1"), "sonnet", n);
+            assert!(handle.send(LogEvent::Finish(log)));
+        }
+    };
+    batch(0);
+    handle.flush().await.expect("barrier");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let pinned = std::fs::metadata(&wal).expect("wal").len();
+    assert!(
+        pinned > 50 * 4096 * 4,
+        "with a reader pinned the WAL grows past the 50-page trigger: {pinned} bytes"
+    );
+    reader.execute_batch("COMMIT").expect("unpin");
+    drop(reader);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Unpinned, the WAL is checkpointed in full and reused from its start:
+    // the next writes do not make the file grow.
+    batch(2000);
+    handle.flush().await.expect("barrier");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let after = std::fs::metadata(&wal).expect("wal").len();
+    assert!(
+        after <= pinned,
+        "reused after the reader left: {after} > {pinned}"
+    );
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM request_logs"), 4000);
+    writer.close().await.expect("close");
+}
+
+/// The queue's slot size, which the capacity docs quote (360 bytes).
+#[test]
+fn a_queue_slot_is_360_bytes() {
+    assert_eq!(omni_store::writer::queue_slot_bytes(), 360);
+}

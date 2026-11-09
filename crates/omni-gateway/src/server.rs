@@ -46,6 +46,8 @@ pub struct App {
     pub keepalive: Duration,
     /// Longest wait for the next byte of a request body.
     pub idle_timeout: Duration,
+    /// Serve `POST /__omni/bench/flush` (`OMNI_BENCH=1` only).
+    pub bench_endpoints: bool,
 }
 
 impl std::fmt::Debug for App {
@@ -128,6 +130,7 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Bo
     let method = req.method().clone();
     let res = match (method.clone(), route) {
         (Method::GET | Method::HEAD, "/health") => health(&app),
+        (Method::POST, "/__omni/bench/flush") if app.bench_endpoints => bench_flush(&app).await,
         (Method::POST, "/v1/messages") => proxy(app, Surface::Anthropic, req).await,
         (Method::POST, "/v1/chat/completions") => proxy(app, Surface::OpenAi, req).await,
         (Method::POST, "/v1/responses") => proxy(app, Surface::Responses, req).await,
@@ -144,6 +147,29 @@ fn health(app: &App) -> Response<Body> {
     omni_ir::jsjson::write_str(&app.node_id, &mut body);
     body.push_str(",\"coord\":\"ok\"}");
     json_response(200, JSON_UTF8, body, &[])
+}
+
+/// The bench harness's writer barrier: answered once every event the writer
+/// accepted before it is committed, with the cumulative counters, so the
+/// harness can take exact per-scenario deltas. 503 if the writer has closed.
+async fn bench_flush(app: &App) -> Response<Body> {
+    match app.deps.writer.flush().await {
+        Ok(s) => json_response(
+            200,
+            JSON_UTF8,
+            format!(
+                "{{\"enqueued\":{},\"committed\":{},\"dropped\":{},\"failed\":{}}}",
+                s.enqueued, s.written, s.dropped, s.failed
+            ),
+            &[],
+        ),
+        Err(e) => json_response(
+            503,
+            JSON_UTF8,
+            format!("{{\"error\":{:?}}}", e.to_string()),
+            &[],
+        ),
+    }
 }
 
 /// WHATWG `Headers.get`: every value of `name`, HTTP whitespace trimmed,

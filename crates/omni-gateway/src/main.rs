@@ -57,7 +57,12 @@ async fn run() -> std::process::ExitCode {
             dayOffsetMinutes = config.day_offset_minutes, reason = %from,
             "omnigateway booting; invalid day offset, using host offset"),
     }
-    let running = match start(config, Options::default()).await {
+    // The bench harness's writer barrier, off unless asked for.
+    let options = Options {
+        bench_endpoints: env.get("OMNI_BENCH").is_some_and(|v| v == "1"),
+        ..Options::default()
+    };
+    let running = match start(config, options).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(reason = %e, "gateway boot failed");

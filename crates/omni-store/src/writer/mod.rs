@@ -29,4 +29,4 @@ pub use events::{
     BreakerTransition, Committed, Completion, HealthMeasurement, LogEvent, PendingLog, RequestLog,
     RouteTarget, SeedQuery, SeedRows, WriteEvent,
 };
-pub use task::{Writer, WriterConfig, WriterHandle, WriterStats};
+pub use task::{Writer, WriterConfig, WriterHandle, WriterStats, queue_slot_bytes};
