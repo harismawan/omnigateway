@@ -528,7 +528,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 omni_ir::jsjson::to_string(&dialect.error_body(code, &message)),
             ),
             None => {
-                let collected = omni_ir::stream::collect(events);
+                let collected = omni_ir::stream::try_collect(events)?;
                 let rendered = match surface {
                     Surface::Anthropic => {
                         omni_dialects::egress::anthropic::response(&collected, &request_id)

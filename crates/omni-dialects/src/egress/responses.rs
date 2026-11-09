@@ -82,14 +82,27 @@ struct Item {
     native: Map<String, Value>,
 }
 
+impl Drop for Item {
+    fn drop(&mut self) {
+        omni_ir::deep::drop_map_in_place(&mut self.native);
+    }
+}
+
 /// `customToolInput`: the program inside `{"input": "<program>"}`, else raw.
 fn custom_tool_input(raw: &str) -> String {
-    if let Some(Value::Object(m)) = omni_ir::js::parse_json(raw)
-        && let Some(Value::String(inner)) = m.get("input")
-    {
-        return inner.clone();
-    }
-    raw.to_string()
+    omni_ir::deep::scope_for(raw, || {
+        let parsed = omni_ir::deep::parse(raw)
+            .ok()
+            .or_else(|| {
+                omni_ir::js::replace_lone_surrogates(raw)
+                    .and_then(|s| omni_ir::deep::parse(&s).ok())
+            })
+            .map(omni_ir::deep::Owned);
+        if let Some(Value::String(inner)) = parsed.as_ref().and_then(|v| v.get("input")) {
+            return inner.clone();
+        }
+        raw.to_string()
+    })
 }
 
 /// `renderItem`, written straight into `out`.

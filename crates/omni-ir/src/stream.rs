@@ -349,6 +349,16 @@ enum Accum {
 
 /// Folds a canonical event stream into one response (`collect` in TS).
 pub fn collect(events: impl IntoIterator<Item = StreamEvent>) -> CollectedResponse {
+    try_collect(events).expect(
+        "collect input must satisfy the JSON depth policy; use try_collect for upstream input",
+    )
+}
+
+/// Fallible collection for untrusted upstream tool argument fragments.
+pub fn try_collect(
+    events: impl IntoIterator<Item = StreamEvent>,
+) -> Result<CollectedResponse, crate::error::GatewayError> {
+    let mut depth_error = false;
     let mut id = String::new();
     let mut model = String::new();
     let mut stop_reason = StopReason::EndTurn;
@@ -463,7 +473,7 @@ pub fn collect(events: impl IntoIterator<Item = StreamEvent>) -> CollectedRespon
             Accum::ToolUse { id, name, json } => ContentBlock::ToolUse(ToolUseBlock {
                 id,
                 name,
-                input: parse_tool_json(&json),
+                input: parse_tool_json(&json, &mut depth_error),
                 cache_control: None,
             }),
             Accum::ProviderNative {
@@ -474,7 +484,7 @@ pub fn collect(events: impl IntoIterator<Item = StreamEvent>) -> CollectedRespon
                 merges,
             } => {
                 if !json.is_empty() {
-                    data.insert("input".into(), parse_tool_json(&json));
+                    data.insert("input".into(), parse_tool_json(&json, &mut depth_error));
                 }
                 for merge in merges {
                     for (k, v) in merge {
@@ -491,20 +501,36 @@ pub fn collect(events: impl IntoIterator<Item = StreamEvent>) -> CollectedRespon
         })
         .collect();
 
-    CollectedResponse {
+    let response = CollectedResponse {
         id,
         model,
         content,
         stop_reason,
         usage,
         vendor,
+    };
+    if depth_error {
+        return Err(crate::error::GatewayError::new(
+            ErrorCode::Upstream,
+            "tool arguments exceed JSON depth 40000",
+        ));
     }
+    Ok(response)
 }
 
 /// Tool arguments arrive in fragments; a truncated stream must not throw.
-fn parse_tool_json(raw: &str) -> Value {
+fn parse_tool_json(raw: &str, depth_error: &mut bool) -> Value {
     if crate::js::trim(raw).is_empty() {
         return Value::Object(Map::new());
     }
-    crate::js::parse_json(raw).unwrap_or_else(|| Value::Object(Map::new()))
+    crate::deep::scope_for(raw, || match crate::deep::parse(raw) {
+        Ok(value) => value,
+        Err(crate::deep::ParseError::TooDeep) => {
+            *depth_error = true;
+            Value::Object(Map::new())
+        }
+        Err(crate::deep::ParseError::Syntax) => crate::js::replace_lone_surrogates(raw)
+            .and_then(|text| crate::deep::parse(&text).ok())
+            .unwrap_or_else(|| Value::Object(Map::new())),
+    })
 }
