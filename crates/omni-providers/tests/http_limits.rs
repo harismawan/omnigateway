@@ -25,6 +25,117 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+#[tokio::test]
+async fn framing_body_matrix_matches_real_ts() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut cases = Vec::new();
+    for headers in [
+        "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n",
+        "Content-Length: 5\r\nTransfer-Encoding: chunked\r\n",
+        "Content-Length: 5\r\nContent-Length: 5\r\n",
+        "Content-Length: +5\r\n",
+        "Content-Length: 05\r\n",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n",
+        "Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n",
+        "Transfer-Encoding: chunked, chunked\r\n",
+        "Transfer-Encoding: gzip, chunked\r\n",
+        "Transfer-Encoding: chunked, gzip\r\n",
+        "Connection: close\r\nConnection: keep-alive\r\nContent-Length: 5\r\n",
+        "Connection: keep-alive\r\nConnection: close\r\nContent-Length: 5\r\n",
+    ] {
+        for body in ["hello", "5\r\nhello\r\n0\r\n\r\n"] {
+            cases.push(format!("HTTP/1.1 200 OK\r\n{headers}\r\n{body}"));
+        }
+    }
+    let mut oracle = Command::new("bun")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../conformance/framing-oracle.ts"
+        ))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("mandatory Bun oracle");
+    oracle
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(serde_json::to_string(&cases).expect("cases").as_bytes())
+        .expect("write");
+    let result = oracle.wait_with_output().expect("oracle");
+    assert!(result.status.success());
+    let expected: Vec<String> = serde_json::from_slice(&result.stdout).expect("oracle JSON");
+    for (wire, expected) in cases.into_iter().zip(expected) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let response = wire.clone();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            read_request(&mut socket, &mut Vec::new())
+                .await
+                .expect("request");
+            socket.write_all(response.as_bytes()).await.ok();
+        });
+        let actual = match Client::new().send(request(port, "{}")).await {
+            Ok(response) => match response.body.text().await {
+                Ok(text) => format!("ok:{text}"),
+                Err(_) => "error".into(),
+            },
+            Err(_) => "error".into(),
+        };
+        task.await.expect("server");
+        assert_eq!(actual, expected, "{wire:?}");
+    }
+}
+
+#[tokio::test]
+async fn header_cardinality_and_fragmented_line_boundaries() {
+    // Explicit conservative 128-field budget, independently of byte budget.
+    for (count, accepted) in [(128, true), (129, false)] {
+        let wire = format!("HTTP/1.1 200 OK\r\n{}\r\n", "X: a\r\n".repeat(count));
+        let port = one_shot(wire.into_bytes()).await;
+        assert_eq!(
+            Client::new().send(request(port, "{}")).await.is_ok(),
+            accepted
+        );
+    }
+    for length in [8192, 8193] {
+        for fragmented in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let task = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                read_request(&mut socket, &mut Vec::new())
+                    .await
+                    .expect("request");
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    .await
+                    .expect("head");
+                let line = format!("1;{}\r\nx\r\n0\r\n\r\n", "a".repeat(length - 2));
+                if fragmented {
+                    for chunk in line.as_bytes().chunks(31) {
+                        if socket.write_all(chunk).await.is_err() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                } else {
+                    socket.write_all(line.as_bytes()).await.ok();
+                }
+            });
+            let response = Client::new().send(request(port, "{}")).await.expect("head");
+            assert_eq!(
+                response.body.text().await.is_ok(),
+                length == 8192,
+                "length={length} fragmented={fragmented}"
+            );
+            task.await.expect("server");
+        }
+    }
+}
+
 /// Reads one request with a Content-Length body; `None` at EOF or error.
 async fn read_request(sock: &mut TcpStream, buf: &mut Vec<u8>) -> Option<Vec<u8>> {
     loop {
