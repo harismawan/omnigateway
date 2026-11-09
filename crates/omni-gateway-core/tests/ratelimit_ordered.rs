@@ -13,6 +13,32 @@ use tokio::sync::mpsc;
 const T0: f64 = 1_794_000_000_000.0;
 const KEY: &str = "k1";
 
+#[tokio::test]
+async fn commit_crossing_minute_uses_application_time_not_row_time() {
+    let mut h = harness(r#"{"requests":{"5h":1}}"#, 64, Duration::from_millis(5));
+    let minute = (T0 / 60_000.0).floor() * 60_000.0;
+    h.limiter.prepare(KEY, &h.limits, "fast", minute + 59_999.0);
+    h.limiter.seed_now(&h.store);
+    h.limiter.apply_at(
+        Committed::Completions(vec![omni_store::writer::Completion {
+            id: "boundary".into(),
+            api_key_id: Some(KEY.into()),
+            requested_model: "fast".into(),
+            tokens: 0.0,
+            cost_usd: 0.0,
+            at: minute + 59_999.0,
+        }]),
+        minute + 60_001.0,
+    );
+    assert!(
+        h.limiter
+            .admit(KEY, &h.limits, "fast", minute + 18_000_000.0 + 60_000.0)
+            .is_err(),
+        "completion bucket must remain until its own expiration"
+    );
+    h.settle().await;
+}
+
 struct H {
     /// A clone of the writer's sink sender, so a test can fill the sink.
     sink: mpsc::Sender<Committed>,
@@ -82,7 +108,7 @@ impl H {
     fn drain(&mut self) -> usize {
         let mut n = 0;
         while let Ok(e) = self.commits.try_recv() {
-            self.limiter.apply(e);
+            self.limiter.apply_at(e, T0);
             n += 1;
         }
         n
@@ -158,7 +184,7 @@ async fn completions_around_a_slow_seed_total_the_row_count_exactly() {
     let mut commits = std::mem::replace(&mut h.commits, mpsc::channel(1).1);
     let consumer = tokio::spawn(async move {
         while let Some(e) = commits.recv().await {
-            limiter.apply(e);
+            limiter.apply_at(e, T0);
         }
     });
     drop(h.limiter.admit(KEY, &h.limits, "fast", T0).expect("admit"));
@@ -368,7 +394,7 @@ async fn a_dropped_seed_result_is_retried_and_installs_the_exact_total() {
     let consumer = tokio::spawn(async move {
         while let Some(e) = commits.recv().await {
             let seed = matches!(e, Committed::Seed { .. });
-            limiter.apply(e);
+            limiter.apply_at(e, T0);
             if seed {
                 seen_tx.send(()).ok();
             }

@@ -78,13 +78,22 @@ impl RateLimiter {
     /// Applies one event from the writer's commit stream, in order.
     #[allow(clippy::cast_precision_loss)]
     pub fn apply(&self, event: Committed) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_millis() as f64);
+        self.apply_at(event, now);
+    }
+
+    /// Applies a committed event at an explicit application clock instant.
+    /// Persisted request timestamps remain separate for seed/reset semantics.
+    pub fn apply_at(&self, event: Committed, now: f64) {
         match event {
             Committed::Completions(rows) => {
                 for c in rows {
                     let Some(key) = c.api_key_id.as_deref() else {
                         continue;
                     };
-                    self.debit(key, &c.requested_model, c.tokens, c.cost_usd, c.at, c.at);
+                    self.debit(key, &c.requested_model, c.tokens, c.cost_usd, c.at, now);
                 }
             }
             Committed::Seed { query, result } => self.install(&query, result),
