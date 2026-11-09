@@ -537,6 +537,11 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
 
 /// The most SSE bytes coalesced into one body frame.
 const COALESCE_BYTES: usize = 64 * 1024;
+/// The most events taken in one poll of the body: per coalesced frame, and
+/// across ready events that encode to nothing (a Chat `BlockEnd`), after
+/// which the task yields. Without it, an upstream that delivers a long run of
+/// such events at once would keep one poll going through all of them.
+const COALESCE_EVENTS: usize = 64;
 
 /// `sseResponse`: frames into one reused buffer, `: keepalive` while idle,
 /// and the row completed exactly once — at the end, on a break, or (through
@@ -556,6 +561,9 @@ fn sse_body(
         // An item pulled while coalescing that is not an event: handled by
         // the next loop turn, after the coalesced frame went out.
         let mut held: Option<Option<Result<omni_ir::stream::StreamEvent, GatewayError>>> = None;
+        // Events taken since this body last gave the task back (a frame out,
+        // or a pending poll).
+        let mut taken = 0usize;
         loop {
             let next = match held.take() {
                 Some(item) => Ok(item),
@@ -567,18 +575,24 @@ fn sse_body(
                 }
                 Ok(Some(Ok(event))) => {
                     encoder.push_owned(event, &mut buf);
+                    taken += 1;
                     // Every event already decoded joins this frame: one body
                     // write (one chunk, one syscall) per upstream read rather
                     // than per event. Never waits: a pending poll ends it.
-                    while sent_first && buf.len() < COALESCE_BYTES {
+                    // Bounded by bytes and by events taken.
+                    while sent_first && buf.len() < COALESCE_BYTES && taken < COALESCE_EVENTS {
                         let ready = std::future::poll_fn(|cx| {
                             std::task::Poll::Ready(events.as_mut().poll_next(cx))
                         })
                         .await;
                         match ready {
-                            std::task::Poll::Pending => break,
+                            std::task::Poll::Pending => {
+                                taken = 0;
+                                break;
+                            }
                             std::task::Poll::Ready(Some(Ok(event))) => {
                                 encoder.push_owned(event, &mut buf);
+                                taken += 1;
                             }
                             std::task::Poll::Ready(other) => {
                                 held = Some(other);
@@ -588,9 +602,16 @@ fn sse_body(
                     }
                     if !buf.is_empty() {
                         sent_first = true;
+                        taken = 0;
                         let frame = Bytes::copy_from_slice(buf.as_bytes());
                         buf.clear();
                         yield Ok(Frame::data(frame));
+                    } else if taken >= COALESCE_EVENTS {
+                        // Nothing to write, and the budget is spent: give
+                        // the task back once rather than run on through
+                        // every ready event in this poll.
+                        taken = 0;
+                        tokio::task::yield_now().await;
                     }
                 }
                 Ok(Some(Err(e))) => {
@@ -739,5 +760,132 @@ mod tests {
     async fn one_complete_frame_gets_a_fixed_length() {
         let body = settle(counted(1, Arc::new(AtomicUsize::new(0))));
         assert_eq!(body.size_hint().exact(), Some(3));
+    }
+    use omni_ir::stream::{ContentBlockStart, Delta};
+
+    /// A finisher whose writer is closed: `sse_body` needs one, and these
+    /// tests only look at the frames.
+    async fn finisher() -> (Finisher, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("omni.db");
+        drop(omni_store::SqliteStore::open(&db, 0).expect("open"));
+        let w = omni_store::writer::Writer::spawn(&db, omni_store::writer::WriterConfig::default())
+            .expect("writer");
+        let handle = w.handle();
+        w.close().await.expect("close");
+        let fin = Finisher::new(handle, "req_t".into(), 0, "openai", || 0);
+        (fin, dir)
+    }
+
+    fn text(t: &str) -> StreamEvent {
+        StreamEvent::BlockDelta {
+            index: 0,
+            delta: Delta::Text { text: t.into() },
+        }
+    }
+
+    /// Events that are all ready but encode to nothing (`BlockEnd` writes no
+    /// Chat Completions chunk) cannot keep one poll going: after
+    /// `COALESCE_EVENTS` the frame (empty or not) gives the task back, and
+    /// what follows comes out in the next frames.
+    #[tokio::test]
+    async fn ready_events_that_write_nothing_cannot_extend_one_poll() {
+        let (fin, _dir) = finisher().await;
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let counter = pulled.clone();
+        let mut items: Vec<Result<StreamEvent, GatewayError>> = vec![
+            Ok(StreamEvent::Start {
+                id: "a".into(),
+                model: "m".into(),
+            }),
+            Ok(StreamEvent::BlockStart {
+                index: 0,
+                block: ContentBlockStart::Text,
+            }),
+        ];
+        items.extend((0..10_000).map(|_| Ok(StreamEvent::BlockEnd { index: 0 })));
+        items.push(Ok(text("tail")));
+        let events: dispatch::EventsStream =
+            Box::pin(futures_util::stream::iter(items).inspect(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }));
+        let encoder = StreamEncoder::OpenAi(OpenAiStream::new("req_t", 0));
+        let mut body = sse_body(events, encoder, Duration::from_secs(60), fin);
+        // The first frame goes out alone (`settle`'s rule).
+        let first = body.frame().await.expect("frame").expect("ok");
+        assert!(!first.into_data().unwrap_or_default().is_empty());
+        let before = pulled.load(Ordering::SeqCst);
+        // The second poll: all 10 000 no-output events are ready, but one
+        // poll may take at most the budget of them.
+        let polled = futures_util::FutureExt::now_or_never(body.frame());
+        let after = pulled.load(Ordering::SeqCst);
+        assert!(
+            after - before <= 64,
+            "one poll took {} ready events (budget 64)",
+            after - before
+        );
+        let mut seen = match polled {
+            Some(Some(Ok(f))) => {
+                String::from_utf8_lossy(&f.into_data().unwrap_or_default()).into_owned()
+            }
+            _ => String::new(),
+        };
+        let rest = body.collect().await.expect("rest").to_bytes();
+        seen.push_str(&String::from_utf8_lossy(&rest));
+        assert!(
+            seen.contains("tail"),
+            "the events after still arrive: {seen}"
+        );
+        assert_eq!(pulled.load(Ordering::SeqCst), 10_003, "every event pulled");
+    }
+
+    /// An upstream that pends between events: what is ready goes out at once
+    /// (no waiting for more to coalesce), and an idle gap still gets its
+    /// keepalive.
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_upstream_flushes_what_is_ready_and_keepalives_still_fire() {
+        let (fin, _dir) = finisher().await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<StreamEvent, GatewayError>>();
+        let events: dispatch::EventsStream = Box::pin(tokio_stream_from(rx));
+        let encoder = StreamEncoder::OpenAi(OpenAiStream::new("req_t", 0));
+        let mut body = sse_body(events, encoder, Duration::from_millis(100), fin);
+        tx.send(Ok(StreamEvent::Start {
+            id: "a".into(),
+            model: "m".into(),
+        }))
+        .expect("send");
+        tx.send(Ok(StreamEvent::BlockStart {
+            index: 0,
+            block: ContentBlockStart::Text,
+        }))
+        .expect("send");
+        let first = body.frame().await.expect("frame").expect("ok");
+        assert!(
+            String::from_utf8_lossy(&first.into_data().unwrap_or_default()).contains("assistant")
+        );
+        // Two deltas ready, then the upstream pends: both go out in one frame
+        // now, not after the next event.
+        tx.send(Ok(text("one "))).expect("send");
+        tx.send(Ok(text("two"))).expect("send");
+        let f = body.frame().await.expect("frame").expect("ok");
+        let f = String::from_utf8_lossy(&f.into_data().unwrap_or_default()).into_owned();
+        assert!(f.contains("one ") && f.contains("two"), "{f}");
+        // Nothing for 250 ms: keepalives.
+        let k = body.frame().await.expect("frame").expect("ok");
+        assert_eq!(
+            k.into_data().unwrap_or_default(),
+            Bytes::from_static(b": keepalive\n\n")
+        );
+        tx.send(Ok(text("three"))).expect("send");
+        drop(tx);
+        let rest = body.collect().await.expect("rest").to_bytes();
+        let rest = String::from_utf8_lossy(&rest);
+        assert!(rest.contains("three"), "{rest}");
+    }
+
+    fn tokio_stream_from<T: Send + 'static>(
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<T>,
+    ) -> impl futures_util::Stream<Item = T> + Send {
+        futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx))
     }
 }
