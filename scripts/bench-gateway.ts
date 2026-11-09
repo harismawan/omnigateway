@@ -18,7 +18,32 @@
  * path is resolved against the repo root, not the bench root it runs in.
  *
  * Options: `--duration 20s` `--warmup 3s` `--gateway-cpus 0-3` `--upstream-cpus 4-5`
- * `--load-cpus 6-7` `--streams 1000` `--boots 5` `--only <scenario,...>`.
+ * `--load-cpus 6-7` `--streams 1000` `--boots 5` `--only <scenario,...>`
+ * `--request-timeout 30s` `--rate <req/s>`.
+ *
+ * **Every request has a row.** After each scenario (single mode) the request
+ * log is read for that scenario's window: every response the clients got must
+ * have a `done` row, and no row may still be `pending`. A gateway that sheds
+ * log rows under load (a full writer queue) fails that, and the run is flagged
+ * in the table. The gateway's own drop counters, where its log reports them,
+ * are recorded too. A run that dropped rows is not a like-for-like comparison
+ * with one that wrote them all.
+ *
+ * **Per-request timeout.** Every scenario but the held and cancelling ones
+ * passes `-t` (`--request-timeout`, 30 s), so one wedged connection becomes a
+ * counted error instead of a run that never ends.
+ *
+ * **Host calibration.** Before the run, a fixed CPU-bound loop is timed on
+ * each vCPU, alone and then all at once, and recorded with the output: a slow
+ * or contended vCPU shows up there, so runs on different days are comparable.
+ * During each scenario the CPU time spent by processes other than the bench's
+ * own is sampled too (`foreignCores`): load from elsewhere on the host is the
+ * first thing that makes two runs of one binary disagree.
+ *
+ * `--rate` caps every duration scenario (the cancelling ones included) at that
+ * many requests per second (`oha -q`), for finding and reporting the highest
+ * rate a gateway sustains without dropping log rows. The scenario shapes are
+ * otherwise unchanged; held-streams has a fixed request count and no cap.
  *
  * **Cluster mode** (`--cluster`) runs the k8s shape instead: Postgres + Redis,
  * `OMNI_CLUSTER_MODE=true`, `--replicas N` gateway processes on consecutive
@@ -41,7 +66,17 @@
  * `bench-gateway-upstream.ts`, a scripted chat-completions SSE server reached
  * through a `custom` credential, so no provider is ever called.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { cpus, release, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -66,6 +101,8 @@ const { values: flags } = parseArgs({
     "database-url": { type: "string" },
     "redis-url": { type: "string" },
     containers: { type: "string" },
+    "request-timeout": { type: "string", default: "30s" },
+    rate: { type: "string" },
   },
 });
 
@@ -240,6 +277,199 @@ function fleetSample(pids: number[]): { cpuS: number; rssKb: number } | null {
   return { cpuS, rssKb };
 }
 
+/** Expands a taskset cpu list (`0-3,6`) into cpu numbers. */
+function cpuList(spec: string): number[] {
+  const out: number[] = [];
+  for (const part of spec.split(",")) {
+    const [a, b] = part.split("-").map(Number) as [number, number | undefined];
+    for (let c = a; c <= (b ?? a); c += 1) out.push(c);
+  }
+  return out;
+}
+
+/** Busy and total jiffies per cpu, from /proc/stat. */
+function cpuTimes(): Map<number, { busy: number; total: number }> {
+  const out = new Map<number, { busy: number; total: number }>();
+  for (const line of readFileSync("/proc/stat", "utf8").split("\n")) {
+    const m = /^cpu(\d+) (.*)$/.exec(line);
+    if (m === null) continue;
+    const [user, nice, system, idle, iowait, irq, softirq, steal] = (m[2] as string)
+      .trim()
+      .split(/\s+/)
+      .map(Number) as number[];
+    const busy = (user ?? 0) + (nice ?? 0) + (system ?? 0) + (irq ?? 0) + (softirq ?? 0);
+    out.set(Number(m[1]), {
+      busy,
+      total: busy + (idle ?? 0) + (iowait ?? 0) + (steal ?? 0),
+    });
+  }
+  return out;
+}
+
+/** The current `cpu MHz` of each cpu, as the guest kernel reports it. */
+function cpuMhz(): number[] {
+  return [...readFileSync("/proc/cpuinfo", "utf8").matchAll(/^cpu MHz\s*:\s*([\d.]+)/gm)].map((m) =>
+    Number(m[1]),
+  );
+}
+
+/**
+ * A fixed, CPU-bound loop (an LCG, no memory traffic) in a child pinned to one
+ * cpu; returns the loop's wall time in ms, measured inside the child so its
+ * startup does not count. Equal hardware gives equal numbers, so a slower
+ * vCPU (an E-core under it, a lower clock, a host thread sharing its core)
+ * shows up as a larger one.
+ */
+const SPIN =
+  "let a = 1; const t = performance.now(); " +
+  "for (let i = 0; i < 100_000_000; i += 1) a = (a * 1103515245 + 12345) | 0; " +
+  "console.log(JSON.stringify({ ms: performance.now() - t, a }));";
+
+async function spin(cpu: number): Promise<number> {
+  const proc = Bun.spawn(["taskset", "-c", String(cpu), process.execPath, "-e", SPIN], {
+    stdout: "pipe",
+    stderr: "inherit",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return (JSON.parse(out) as { ms: number }).ms;
+}
+
+type Calibration = {
+  /** Per cpu, the spin loop alone on the host's otherwise idle bench cpus. */
+  alone: Record<string, number>;
+  /** Per cpu, the same loop with one copy on every cpu at once. */
+  together: Record<string, number>;
+  /** `cpu MHz` per cpu, sampled while every cpu spins. */
+  mhzUnderLoad: number[];
+  /** Busy cores outside the bench in the second before calibration. */
+  foreignCoresBefore: number;
+};
+
+/**
+ * Times the spin loop on every cpu, first one at a time, then all at once (a
+ * vCPU whose physical core is shared or slower falls behind there). Two
+ * passes of each; the faster is kept, so a one-off hiccup does not count.
+ */
+async function calibrate(): Promise<Calibration> {
+  const all = cpus().map((_, i) => i);
+  const before = cpuTimes();
+  await sleep(1000);
+  const foreignCoresBefore = busyCores(before, cpuTimes());
+  const alone: Record<string, number> = {};
+  const together: Record<string, number> = {};
+  let mhzUnderLoad: number[] = [];
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const c of all) {
+      alone[c] = Math.min(alone[c] ?? Number.POSITIVE_INFINITY, await spin(c));
+    }
+    const runs = all.map((c) => spin(c));
+    await sleep(150);
+    mhzUnderLoad = cpuMhz();
+    const done = await Promise.all(runs);
+    done.forEach((ms, c) => {
+      together[c] = Math.min(together[c] ?? Number.POSITIVE_INFINITY, ms);
+    });
+  }
+  const round = (r: Record<string, number>) =>
+    Object.fromEntries(Object.entries(r).map(([k, v]) => [k, Math.round(v)]));
+  return {
+    alone: round(alone),
+    together: round(together),
+    mhzUnderLoad,
+    foreignCoresBefore: Math.round(foreignCoresBefore * 100) / 100,
+  };
+}
+
+/** Busy cores across the whole host between two `cpuTimes` samples. */
+function busyCores(
+  a: Map<number, { busy: number; total: number }>,
+  b: Map<number, { busy: number; total: number }>,
+): number {
+  let busy = 0;
+  let total = 0;
+  for (const [c, s] of b) {
+    const p = a.get(c);
+    if (p === undefined) continue;
+    busy += s.busy - p.busy;
+    total += s.total - p.total;
+  }
+  return total === 0 ? 0 : (busy / total) * b.size;
+}
+
+type ThreadTime = { name: string; cpuS: number; waitS: number };
+
+/**
+ * Per thread of `pid`: its name, CPU seconds, and seconds spent runnable but
+ * waiting for a cpu (`schedstat`), which is what a thread starved of cores
+ * shows and a thread blocked on I/O does not.
+ */
+function threadTimes(pid: number): Map<string, ThreadTime> {
+  const out = new Map<string, ThreadTime>();
+  try {
+    for (const tid of readdirSync(`/proc/${pid}/task`)) {
+      try {
+        const stat = readFileSync(`/proc/${pid}/task/${tid}/stat`, "utf8");
+        const name = stat.slice(stat.indexOf("(") + 1, stat.lastIndexOf(")"));
+        const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        const sched = readFileSync(`/proc/${pid}/task/${tid}/schedstat`, "utf8").split(" ");
+        out.set(tid, {
+          name,
+          cpuS: (Number(f[11]) + Number(f[12])) / CLK_TCK,
+          waitS: Number(sched[1]) / 1e9,
+        });
+      } catch {
+        // thread ended
+      }
+    }
+  } catch {
+    // process ended
+  }
+  return out;
+}
+
+/**
+ * Per thread between two `threadTimes` samples `secs` apart, keyed `name` (or
+ * `name#2`, `#3`… for threads sharing a name), busiest first: `cpu` is CPU%
+ * and `runqueue` the % of the window it was runnable but not running. Threads
+ * under 1% CPU are left out.
+ */
+function threadShare(
+  a: Map<string, ThreadTime>,
+  b: Map<string, ThreadTime>,
+  secs: number,
+): Record<string, { cpu: number; runqueue: number }> {
+  const rows = [...b]
+    .map(([tid, t]) => {
+      const p = a.get(tid);
+      return {
+        name: t.name,
+        cpu: ((t.cpuS - (p?.cpuS ?? 0)) / secs) * 100,
+        runqueue: ((t.waitS - (p?.waitS ?? 0)) / secs) * 100,
+      };
+    })
+    .filter((r) => r.cpu >= 1)
+    .sort((x, y) => y.cpu - x.cpu);
+  const seen = new Map<string, number>();
+  const out: Record<string, { cpu: number; runqueue: number }> = {};
+  for (const r of rows) {
+    const n = (seen.get(r.name) ?? 0) + 1;
+    seen.set(r.name, n);
+    out[n === 1 ? r.name : `${r.name}#${n}`] = {
+      cpu: Math.round(r.cpu),
+      runqueue: Math.round(r.runqueue),
+    };
+  }
+  return out;
+}
+
+/** utime+stime of the upstream processes, in seconds. */
+function upstreamCpuS(): number {
+  let total = 0;
+  for (const pid of upstreamPids) total += procSample(pid)?.cpuS ?? 0;
+  return total;
+}
+
 async function waitHealthy(timeoutMs: number, base = BASE): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
@@ -404,7 +634,50 @@ type ScenarioResult = {
   healthyAfter: boolean;
   /** Replicas whose process was gone after the scenario. Each is restarted. */
   crashed: number;
+  /**
+   * The request log against what the clients saw, for this scenario's
+   * measured window (single mode; `null` in cluster mode). `missing` is
+   * answered requests with no `done` row; `pending` is rows never finished.
+   * Either above zero means the gateway shed log rows.
+   */
+  rows: RowCheck | null;
+  /** Busy cores spent by processes outside the bench during the scenario. */
+  foreignCores: number;
+  /** Epoch ms the scenario (its warmup) started. */
+  windowFrom: number;
+  /** `cpu MHz` of each gateway cpu, sampled mid-scenario. */
+  gatewayMhz: number[];
+  /**
+   * CPU% per gateway thread name over a 5 s window mid-scenario (single
+   * mode): where the gateway's cores go, e.g. request workers against the
+   * writer's blocking thread.
+   */
+  threads: Record<string, { cpu: number; runqueue: number }> | null;
   perReplica?: { rps: number; p50: number; p99: number }[];
+};
+
+/**
+ * What the request log holds for one scenario's window. Scenarios run one at a
+ * time with idle gaps, and a row's `at` is when its request started, so the
+ * rows with `at` from the warmup's start to the settle's end are exactly the
+ * scenario's: its warmup's and its measured run's, against both their
+ * answered counts.
+ */
+type RowCheck = {
+  /** Requests the clients got any HTTP status for: each must have a row. */
+  answered: number;
+  done: number;
+  pending: number;
+  /** `answered - done`, floored at 0. */
+  missing: number;
+  /**
+   * Events the gateway's writer warned it dropped while this scenario ran:
+   * the `count` of its rate-limited "writer is full" warnings stamped inside
+   * the window (they come at most every 10 s, so a drop near the end may be
+   * counted in the next scenario). The cancel scenarios' 499 rows can hide a
+   * missing row from `missing`; this cannot. `null` until the log is read.
+   */
+  writerDrops: number | null;
 };
 
 function scenarios(): Scenario[] {
@@ -540,8 +813,16 @@ async function oha(
     // every open request when the clock runs out, which turns each scenario
     // into a disconnect test as well — `client-cancel` is the one that is.
     if (scenario.clientTimeout === undefined) args.push("-w");
+    if (flags.rate !== undefined)
+      args.push("-q", String(Math.max(1, Math.round(Number(flags.rate) / BASES.length))));
   }
-  if (scenario.clientTimeout !== undefined) args.push("-t", scenario.clientTimeout);
+  // A scenario with no timeout of its own gets the per-request one, so one
+  // wedged connection is a counted error instead of an `oha -w` that never
+  // returns. Held streams (~30 s by design) and the cancel shapes keep theirs.
+  const timeout =
+    scenario.clientTimeout ??
+    (scenario.requests === undefined ? flags["request-timeout"] : undefined);
+  if (timeout !== undefined) args.push("-t", timeout);
   args.push(`${base}${scenario.path}`);
   const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([
@@ -549,11 +830,45 @@ async function oha(
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
+  const used = proc.resourceUsage()?.cpuTime.total;
+  if (used !== undefined) ohaCpuS += Number(used) / 1e6;
   if (code !== 0) throw new Error(`oha failed for ${scenario.name}: ${err}`);
   return JSON.parse(out) as OhaJson;
 }
 
 const ms = (v: number | null | undefined): number => (v == null ? Number.NaN : v * 1000);
+
+/** CPU seconds every finished `oha` used, for telling the bench's own load from the host's. */
+let ohaCpuS = 0;
+/** The upstream processes, whose CPU is the bench's own too. */
+const upstreamPids: number[] = [];
+
+/** Requests the clients got an HTTP status for. */
+const answered = (r: OhaJson): number =>
+  Object.values(r.statusCodeDistribution).reduce((a, b) => a + b, 0);
+
+/**
+ * The request log for `[from, to]` (epoch ms, the rows' `at`): `done` and
+ * `pending` rows. Read-only, on its own connection, so the gateway's writer
+ * is not held up. `null` where there is no SQLite file (cluster mode).
+ */
+function logRows(from: number, to: number): { done: number; pending: number } | null {
+  const path = env.OMNI_DB_PATH;
+  if (CLUSTER || path === undefined || !existsSync(path)) return null;
+  const db = new Database(path, { readonly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    const row = db
+      .query<{ done: number | null; pending: number | null }, [number, number]>(
+        "SELECT SUM(state = 'done') AS done, SUM(state = 'pending') AS pending " +
+          "FROM request_logs WHERE at BETWEEN ? AND ?",
+      )
+      .get(from, to);
+    return { done: row?.done ?? 0, pending: row?.pending ?? 0 };
+  } finally {
+    db.close();
+  }
+}
 
 /**
  * One `oha` per replica, concurrency split evenly, merged.
@@ -616,17 +931,43 @@ async function runScenario(
   keys: Record<Scenario["key"], string>,
 ): Promise<ScenarioResult> {
   const key = keys[scenario.key];
-  if (scenario.warmup !== false) await ohaFleet(scenario, key, flags.warmup ?? "3s");
+  // Scenarios run one after another with idle gaps, so the rows whose `at`
+  // falls between the warmup's start and the settle's end are this one's.
+  const windowFrom = Date.now();
+  let warmAnswered = 0;
+  if (scenario.warmup !== false)
+    warmAnswered = answered((await ohaFleet(scenario, key, flags.warmup ?? "3s")).merged);
   await sleep(500);
 
   const before = fleetSample(pids);
   const backingBefore = backingCpuS();
+  const hostBefore = cpuTimes();
+  const ownBefore =
+    ohaCpuS + process.cpuUsage().user / 1e6 + process.cpuUsage().system / 1e6 + upstreamCpuS();
   let peak = before?.rssKb ?? 0;
   let sampling = true;
+  let gatewayMhz: number[] = [];
+  let threads: Record<string, { cpu: number; runqueue: number }> | null = null;
+  let threadsFrom: Map<string, ThreadTime> | null = null;
+  let threadsAt = 0;
+  const started = performance.now();
   const sampler = (async () => {
     while (sampling) {
       const s = fleetSample(pids);
       if (s !== null && s.rssKb > peak) peak = s.rssKb;
+      // Mid-scenario, once: the clock each gateway cpu runs at under load.
+      if (gatewayMhz.length === 0 && performance.now() - started > 5000) {
+        const mhz = cpuMhz();
+        gatewayMhz = CPU_SETS.flatMap(cpuList).map((c) => mhz[c] ?? Number.NaN);
+        if (!CLUSTER) {
+          threadsFrom = threadTimes(pids[0] as number);
+          threadsAt = performance.now();
+        }
+      }
+      if (threadsFrom !== null && threads === null && performance.now() - threadsAt > 5000) {
+        const secs = (performance.now() - threadsAt) / 1000;
+        threads = threadShare(threadsFrom, threadTimes(pids[0] as number), secs);
+      }
       await sleep(100);
     }
   })();
@@ -636,10 +977,32 @@ async function runScenario(
   await sampler;
   const after = fleetSample(pids);
   const backingAfter = backingCpuS();
+  const hostAfter = cpuTimes();
+  const ownAfter =
+    ohaCpuS + process.cpuUsage().user / 1e6 + process.cpuUsage().system / 1e6 + upstreamCpuS();
+  const windowS = (performance.now() - started) / 1000;
+  const gatewayCpuS = (after?.cpuS ?? 0) - (before?.cpuS ?? 0);
+  const foreignCores = Math.max(
+    0,
+    busyCores(hostBefore, hostAfter) - (gatewayCpuS + (ownAfter - ownBefore)) / windowS,
+  );
   // Settle before the next scenario, then confirm the process still answers:
-  // a scenario that leaves the gateway wedged is a result, not a crash.
+  // a scenario that leaves the gateway wedged is a result, not a crash. The
+  // settle also lets the writer flush the scenario's last batch (≤ 200 ms).
   await sleep(scenario.clientTimeout === undefined ? 1000 : 5000);
   const settled = fleetSample(pids);
+  const log = logRows(windowFrom, Date.now());
+  const rowsAnswered = warmAnswered + answered(report);
+  const rows: RowCheck | null =
+    log === null
+      ? null
+      : {
+          answered: rowsAnswered,
+          done: log.done,
+          pending: log.pending,
+          missing: Math.max(0, rowsAnswered - log.done),
+          writerDrops: null,
+        };
   const crashed = pids.filter((pid) => procSample(pid) === null).length;
   const healthyAfter =
     crashed === 0 &&
@@ -679,6 +1042,11 @@ async function runScenario(
     rssEndMb: (settled?.rssKb ?? 0) / 1024,
     healthyAfter,
     crashed,
+    rows,
+    foreignCores: Math.round(foreignCores * 100) / 100,
+    windowFrom,
+    gatewayMhz,
+    threads,
     ...(perReplica.length > 1
       ? {
           perReplica: perReplica.map((r) => ({
@@ -830,6 +1198,7 @@ function startUpstreams(): void {
       { stdout: "ignore", stderr: "inherit" },
     );
     children.push(proc);
+    upstreamPids.push(proc.pid);
   }
 }
 
@@ -877,6 +1246,11 @@ async function main(): Promise<void> {
     `OMNI_ENCRYPTION_KEY=${ENCRYPTION_KEY}\nOMNI_DB_PATH=${env.OMNI_DB_PATH}\n`,
   );
   console.error(`bench root ${root}${CLUSTER ? ` · cluster × ${REPLICAS}` : ""}`);
+  const calibration = await calibrate();
+  console.error(
+    `calibration (ms, lower is faster) alone ${JSON.stringify(calibration.alone)} ` +
+      `together ${JSON.stringify(calibration.together)} · foreign load ${calibration.foreignCoresBefore} cores`,
+  );
   let keys = CLUSTER ? null : await setup();
   startUpstreams();
   await sleep(500);
@@ -923,11 +1297,19 @@ async function main(): Promise<void> {
       `  ${result.rps.toFixed(0)} req/s  p50 ${result.latencyMs.p50.toFixed(2)} ms  ` +
         `p99 ${result.latencyMs.p99.toFixed(2)} ms  cpu ${result.cpuMsPerRequest.toFixed(3)} ms/req  ` +
         `rss peak ${result.rssPeakMb.toFixed(0)} MiB  ok ${(result.successRate * 100).toFixed(2)}%` +
+        (result.rows === null
+          ? ""
+          : `  rows ${result.rows.done}/${result.rows.answered} pending ${result.rows.pending}` +
+            (shed(result) ? "  ROWS DROPPED" : "")) +
+        `  foreign ${result.foreignCores} cores` +
+        (result.threads === null ? "" : `  threads ${JSON.stringify(result.threads)}`) +
         (result.crashed > 0 ? `  CRASHED ×${result.crashed}` : ""),
     );
   }
   const final = fleetSample(pids);
   const shutdownMs = Math.max(...(await Promise.all(gateways.map(stopGateway))));
+  const writerDropped = writerDrops();
+  attributeDrops(results);
   // The CLI reads SQLite only; a cluster has no file for it to open.
   const cli = CLUSTER ? null : await cliTimings(10);
 
@@ -981,6 +1363,8 @@ async function main(): Promise<void> {
     finalRssMb: (final?.rssKb ?? 0) / 1024,
     dbBytesAfter: dbBytes,
     cliKeysList: cli,
+    calibration,
+    writerDropped,
     scenarios: results,
   };
 
@@ -990,27 +1374,98 @@ async function main(): Promise<void> {
   console.error(markdown(output));
 }
 
+/** A scenario whose request log is missing rows, left rows pending, or whose writer dropped. */
+function shed(r: ScenarioResult): boolean {
+  return (
+    r.rows !== null && (r.rows.missing > 0 || r.rows.pending > 0 || (r.rows.writerDrops ?? 0) > 0)
+  );
+}
+
+/**
+ * Spreads the gateway's "writer is full; events dropped … count=N" warnings
+ * over the scenarios by their timestamps: each goes to the scenario whose
+ * window (its start up to the next one's) holds it.
+ */
+function attributeDrops(results: ScenarioResult[]): void {
+  const warnings: { at: number; count: number }[] = [];
+  for (let i = 0; i < REPLICAS; i += 1) {
+    let text = "";
+    try {
+      text = readFileSync(join(root, `gateway-${i}.log`), "utf8");
+    } catch {
+      continue;
+    }
+    for (const m of text.matchAll(/^(\S+) WARN +request log writer is full.*?\bcount=(\d+)/gm))
+      warnings.push({ at: Date.parse(m[1] as string), count: Number(m[2]) });
+  }
+  results.forEach((r, i) => {
+    if (r.rows === null) return;
+    const until = results[i + 1]?.windowFrom ?? Number.POSITIVE_INFINITY;
+    r.rows.writerDrops = warnings
+      .filter((w) => w.at >= r.windowFrom && w.at < until)
+      .reduce((a, w) => a + w.count, 0);
+  });
+}
+
+/**
+ * Events the gateway's writer reported dropping, from its log: the Rust
+ * gateway logs the total at shutdown (`request log writer lost events …
+ * count=N`). `null` when the log has no such line (TS has no drop path: it
+ * writes every row synchronously).
+ */
+function writerDrops(): number | null {
+  let total: number | null = null;
+  for (let i = 0; i < REPLICAS; i += 1) {
+    let text = "";
+    try {
+      text = readFileSync(join(root, `gateway-${i}.log`), "utf8");
+    } catch {
+      continue;
+    }
+    for (const m of text.matchAll(/request log writer lost events.*?\bcount=(\d+)/g))
+      total = (total ?? 0) + Number(m[1]);
+  }
+  return total;
+}
+
 function markdown(o: {
   boot: { p50Ms: number };
   idleRssMb: number;
   finalRssMb: number;
   binaryBytes: number | null;
   cliKeysList: { p50Ms: number } | null;
+  calibration: Calibration;
+  writerDropped: number | null;
   scenarios: ScenarioResult[];
 }): string {
+  const anyShed = o.scenarios.some(shed) || (o.writerDropped ?? 0) > 0;
   const lines = [
     `boot p50 ${o.boot.p50Ms.toFixed(0)} ms · idle RSS ${o.idleRssMb.toFixed(0)} MiB · final RSS ${o.finalRssMb.toFixed(0)} MiB · ` +
       `binary ${o.binaryBytes === null ? "n/a" : `${(o.binaryBytes / 2 ** 20).toFixed(0)} MiB`} · ` +
       `omni keys list p50 ${o.cliKeysList === null ? "n/a" : `${o.cliKeysList.p50Ms.toFixed(0)} ms`}`,
+    `calibration ms per vCPU, alone ${JSON.stringify(o.calibration.alone)} · all at once ${JSON.stringify(o.calibration.together)}`,
+    `writer drops reported by the gateway: ${o.writerDropped ?? "none logged"}`,
+    ...(anyShed
+      ? [
+          "",
+          "**⚠ ROWS DROPPED: the gateway shed request-log rows in this run (rows column). " +
+            "Its throughput is not comparable with a run that wrote every row.**",
+        ]
+      : []),
     "",
-    "| scenario | c | req/s | p50 ms | p99 ms | p99.9 ms | TTFB p50 | CPU ms/req | +db ms/req | RSS peak MiB | ok % | crashed |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| scenario | c | req/s | p50 ms | p99 ms | p99.9 ms | TTFB p50 | CPU ms/req | +db ms/req | RSS peak MiB | ok % | crashed | rows missing / pending / writer drops | foreign cores |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
   ];
   for (const r of o.scenarios) {
+    const rows =
+      r.rows === null
+        ? "–"
+        : `${r.rows.missing} / ${r.rows.pending} / ${r.rows.writerDrops ?? "–"}${shed(r) ? " ⚠ DROPPED" : ""}`;
     lines.push(
       `| ${r.name} | ${r.concurrency} | ${r.rps.toFixed(0)} | ${r.latencyMs.p50.toFixed(2)} | ${r.latencyMs.p99.toFixed(2)} | ` +
         `${r.latencyMs.p999.toFixed(2)} | ${r.ttfbMs === null ? "–" : r.ttfbMs.p50.toFixed(2)} | ` +
-        `${r.cpuMsPerRequest.toFixed(3)} | ${r.backingCpuMsPerRequest === null ? "–" : r.backingCpuMsPerRequest.toFixed(3)} | ${r.rssPeakMb.toFixed(0)} | ${(r.successRate * 100).toFixed(2)} | ${r.crashed} |`,
+        `${r.cpuMsPerRequest.toFixed(3)} | ${r.backingCpuMsPerRequest === null ? "–" : r.backingCpuMsPerRequest.toFixed(3)} | ${r.rssPeakMb.toFixed(0)} | ${(r.successRate * 100).toFixed(2)} | ${r.crashed} | ` +
+        `${rows} | ${r.foreignCores.toFixed(2)} |`,
     );
   }
   return lines.join("\n");
