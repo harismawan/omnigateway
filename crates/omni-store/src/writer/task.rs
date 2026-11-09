@@ -39,8 +39,11 @@ pub struct WriterConfig {
     /// The fixed offset `usage_daily` days are cut at.
     pub day_offset_minutes: i64,
     /// Channel capacity: what may be pending while the database stalls. A full
-    /// channel drops, never waits. Eight batches, so one slow write (a
-    /// checkpoint) does not shed.
+    /// channel drops, never waits. 131 072 events is ~3 s of the gateway's
+    /// 20 k requests/s (two events each), so a stall of the disk under the
+    /// WAL's fsync (XFS log flushes of up to ~1 s were seen on the bench host)
+    /// queues instead of shedding; a longer outage still sheds. The channel
+    /// allocates in blocks as it fills, so an idle writer holds little of it.
     pub capacity: usize,
     /// Most events per batch.
     pub max_batch: usize,
@@ -91,7 +94,7 @@ impl Default for WriterConfig {
         Self {
             node_id: String::new(),
             day_offset_minutes: 0,
-            capacity: 32_768,
+            capacity: 131_072,
             max_batch: 4096,
             interval: Duration::from_millis(200),
             busy_timeout: Duration::from_secs(5),

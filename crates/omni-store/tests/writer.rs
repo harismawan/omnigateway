@@ -880,3 +880,49 @@ async fn the_wal_is_checkpointed_in_the_background_between_batches() {
     let stats = writer.close().await.expect("close");
     assert_eq!(stats.dropped, 0);
 }
+
+/// A one-second stall of the database (on the bench host, an XFS log flush
+/// under the WAL's fsync took up to ~950 ms) at 40 k events/s, the rate of
+/// 20 k requests/s, is absorbed by the queue rather than shed: the default
+/// capacity holds more than a second of events. Shedding stays for a real
+/// outage, longer than that.
+#[test]
+fn the_default_queue_rides_out_a_one_second_stall_at_bench_rates() {
+    current_thread().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let writer = Writer::spawn(&db, WriterConfig::default()).expect("spawn");
+        let handle = writer.handle();
+        let locker = lock_for(&db, Duration::from_millis(1000));
+        // 40 000 events (20 000 begun-and-finished requests) queued while the
+        // writer is stuck behind the lock: this current-thread runtime only
+        // lets it run between sends, and its batch waits on the lock.
+        let mut refused = 0;
+        for n in 0..20_000 {
+            let id = format!("r{n}");
+            if !handle.send(pending(&id, T0 + n, Some("key-1"), "sonnet")) {
+                refused += 1;
+            }
+            if !handle.send(LogEvent::Finish(done(
+                &id,
+                T0 + n,
+                Some("key-1"),
+                "sonnet",
+                n,
+            ))) {
+                refused += 1;
+            }
+        }
+        assert_eq!(refused, 0, "events shed during a one-second stall");
+        locker.join().expect("locker");
+        let stats = writer.close().await.expect("close");
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM request_logs WHERE state = 'done'"
+            ),
+            20_000
+        );
+    });
+}
