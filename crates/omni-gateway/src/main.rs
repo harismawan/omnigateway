@@ -15,6 +15,8 @@ fn main() -> std::process::ExitCode {
     // time, so a mostly idle heap is resident in huge pages (idle RSS 17.5
     // MiB against 8.4 MiB without). The throughput difference measured as
     // noise. Inherited by nothing: the gateway spawns no processes.
+    // `prctl` is Linux's; elsewhere there is no THP to opt out of.
+    #[cfg(target_os = "linux")]
     if nix::sys::prctl::set_thp_disable(true).is_err() {
         eprintln!("could not disable transparent huge pages; continuing");
     }

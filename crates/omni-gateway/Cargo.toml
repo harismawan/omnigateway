@@ -45,8 +45,11 @@ rusqlite = { version = "0.41", default-features = false, features = ["bundled"] 
 # `v2`: on held-streams its peak RSS measured 74-82 MiB against v3's 78-88,
 # with chat-stream and agent-100k CPU equal or better (interleaved runs).
 mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
+
 # `prctl(PR_SET_THP_DISABLE)` at start: on a host with THP `always`, mimalloc's
-# arenas fault in 2 MiB pages, which took idle RSS from 7 to 17.5 MiB.
+# arenas fault in 2 MiB pages, which took idle RSS from 7 to 17.5 MiB. Linux
+# only: `nix::sys::prctl` does not exist elsewhere, and neither does THP.
+[target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["process"] }
 
 [dev-dependencies]
