@@ -67,6 +67,180 @@ fn creds(port: u16) -> Credentials {
     }
 }
 
+/// Real transport ownership: both explicit policy errors and downstream
+/// cancellation close the unread socket, even after content has committed.
+#[tokio::test]
+async fn policy_overflow_and_cancellation_close_upstream_after_content() {
+    for responses in [false, true] {
+        for mode in ["identities", "depth", "cancel"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().expect("address").port();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                read_request(&mut socket, &mut Vec::new())
+                    .await
+                    .expect("request");
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.expect("head");
+                let record = |i: usize, part: &str| {
+                    if responses {
+                        format!(
+                            "event: response.function_call_arguments.delta\ndata: {}\n\n",
+                            json!({"output_index":i,"delta":part})
+                        )
+                    } else {
+                        format!(
+                            "data: {}\n\n",
+                            json!({"choices":[{"delta":{"tool_calls":[{"index":i,"function":{"arguments":part}}]}}]})
+                        )
+                    }
+                };
+                let count = if mode == "identities" { 4097 } else { 1 };
+                for i in 0..count {
+                    if socket.write_all(&chunk(&record(i, " "))).await.is_err() {
+                        break;
+                    }
+                }
+                if mode == "depth" {
+                    socket
+                        .write_all(&chunk(&record(0, &"[".repeat(40_001))))
+                        .await
+                        .ok();
+                }
+                let mut byte = [0];
+                let eof = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
+                    .await
+                    .expect("upstream released without terminal marker");
+                assert!(
+                    matches!(eof, Ok(0) | Err(_)),
+                    "unread connection not closed"
+                );
+            });
+            let client = Client::new();
+            let request = request();
+            let mut credentials = creds(port);
+            if responses {
+                credentials
+                    .provider_data
+                    .insert("protocol".into(), "responses".into());
+            }
+            let mut result = send(
+                &CustomCodec,
+                "custom",
+                AdapterRequest::new(&request, "m", &credentials),
+                &client,
+            )
+            .await
+            .expect("send");
+            let mut emitted = 0;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), result.events.next())
+                    .await
+                    .expect("bounded next")
+                {
+                    Some(Ok(_)) => {
+                        emitted += 1;
+                        if mode == "cancel" {
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        assert!(emitted > 0, "postcommit");
+                        assert_eq!(e.code, omni_ir::error::ErrorCode::Upstream);
+                        assert!(e.message.contains(if mode == "depth" {
+                            "depth 40000"
+                        } else {
+                            "identity budget"
+                        }));
+                        break;
+                    }
+                    None => panic!("policy failure must not disappear"),
+                }
+            }
+            drop(result);
+            server.await.expect("server closure observed");
+        }
+    }
+}
+
+#[tokio::test]
+async fn accepted_deep_adapter_arguments_collect_render_and_release() {
+    for responses in [false, true] {
+        let raw = format!("{}0{}", "[".repeat(40_000), "]".repeat(40_000));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let input = raw.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            read_request(&mut socket, &mut Vec::new())
+                .await
+                .expect("request");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .expect("head");
+            if responses {
+                socket.write_all(&chunk("event: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"f\"}}\n\n")).await.expect("start");
+            }
+            for part in input.as_bytes().chunks(997) {
+                let part = std::str::from_utf8(part).expect("ASCII");
+                let record = if responses {
+                    format!(
+                        "event: response.function_call_arguments.delta\ndata: {}\n\n",
+                        json!({"output_index":0,"delta":part})
+                    )
+                } else {
+                    format!(
+                        "data: {}\n\n",
+                        json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":part}}]}}]})
+                    )
+                };
+                socket.write_all(&chunk(&record)).await.expect("fragment");
+            }
+            let done = if responses {
+                "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
+            } else {
+                "data: [DONE]\n\n"
+            };
+            socket.write_all(&chunk(done)).await.expect("done");
+            socket.write_all(b"0\r\n\r\n").await.expect("body end");
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
+                    .await
+                    .expect("release")
+                    .expect("read"),
+                0
+            );
+        });
+        let client = Client::new();
+        let req = request();
+        let mut credentials = creds(port);
+        if responses {
+            credentials
+                .provider_data
+                .insert("protocol".into(), "responses".into());
+        }
+        let mut result = send(
+            &CustomCodec,
+            "custom",
+            AdapterRequest::new(&req, "m", &credentials),
+            &client,
+        )
+        .await
+        .expect("send");
+        let mut events = Vec::new();
+        while let Some(e) = result.events.next().await {
+            events.push(e.expect("event"));
+        }
+        let response = omni_ir::stream::try_collect(events).expect("collect");
+        let copy = response.clone();
+        let rendered = omni_dialects::egress::anthropic::response(&copy, "r");
+        assert!(omni_ir::jsjson::to_string(&rendered).contains(&raw));
+        drop((rendered, copy, response, result, client));
+        server.await.expect("upstream released");
+    }
+}
+
 #[tokio::test]
 async fn streams_incrementally_and_reuses_the_connection_after_done() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

@@ -5,6 +5,58 @@ use omni_providers::sse::SseMessage;
 use std::collections::VecDeque;
 
 #[test]
+fn exact_identity_limits_preserve_late_fragments() {
+    let mut decoder = ChatDecoder::new();
+    let mut out = VecDeque::new();
+    let mut feed = |key: &str, part: &str| {
+        out.clear();
+        decoder.message(&SseMessage { event:"message".into(), data:serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":key,"function":{"arguments":part}}]}}]}).to_string() }, &mut out)
+    };
+    // 4096 distinct keys, exactly 1 MiB retained string bytes.
+    let key = |i: usize| format!("{i:0256}");
+    for i in 0..4096 {
+        assert!(feed(&key(i), " ").is_ok());
+    }
+    assert!(
+        feed(&key(0), "0").is_ok(),
+        "late original identity retained at both limits"
+    );
+    assert!(feed("new", "0").is_err());
+}
+
+#[test]
+fn deep_syntax_errors_and_ignored_native_payloads_drop_on_worker_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let nested = format!("{}0{}", "[".repeat(39_996), "]".repeat(39_996));
+            let mut decoder = ResponsesDecoder::new();
+            for data in [
+                format!(r#"{{"item":{{"type":"unknown_native","data":{nested}}}}}"#),
+                format!(r#"{{"item":{{"type":"unknown_native","data":{nested}}}}} trailing"#),
+            ] {
+                let mut out = VecDeque::new();
+                assert!(
+                    decoder
+                        .message(
+                            &SseMessage {
+                                event: "response.output_item.added".into(),
+                                data
+                            },
+                            &mut out
+                        )
+                        .is_ok()
+                );
+                assert!(out.is_empty());
+            }
+            drop(decoder);
+        })
+        .expect("thread")
+        .join()
+        .expect("teardown");
+}
+
+#[test]
 fn many_small_records_and_large_keys_fail_explicitly_without_eviction() {
     for responses in [false, true] {
         for wide in [false, true] {
