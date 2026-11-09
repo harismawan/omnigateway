@@ -20,6 +20,7 @@
 //! as failed and reported with `tracing::error!`.
 
 mod batch;
+mod epoch;
 mod events;
 mod num;
 mod sql;

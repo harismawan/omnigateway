@@ -1200,8 +1200,174 @@ async fn a_pinned_reader_lets_the_wal_grow_past_the_trigger() {
     writer.close().await.expect("close");
 }
 
-/// The queue's slot size, which the capacity docs quote (360 bytes).
+/// The queue's slot size, which the capacity docs quote (376 bytes).
 #[test]
-fn a_queue_slot_is_360_bytes() {
-    assert_eq!(omni_store::writer::queue_slot_bytes(), 360);
+fn a_queue_slot_is_376_bytes() {
+    assert_eq!(omni_store::writer::queue_slot_bytes(), 376);
+}
+
+/// A seed refused by a full queue is not an event: it never enters barrier
+/// accounting (no sequence number, not in `dropped`); it is counted in
+/// `seeds_refused`. A barrier after it is coherent.
+#[test]
+fn a_refused_seed_leaves_barrier_prefixes_coherent() {
+    current_thread().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let writer = Writer::spawn(
+            &db,
+            WriterConfig {
+                capacity: 2,
+                ..config(0, 512)
+            },
+        )
+        .expect("spawn");
+        let handle = writer.handle();
+        // Current-thread runtime: nothing drains while the queue fills.
+        assert!(handle.send(pending("a", T0, None, "m")));
+        assert!(handle.send(pending("b", T0, None, "m")));
+        let seed = omni_store::writer::SeedQuery {
+            subject: "k".into(),
+            api_key_id: "k".into(),
+            requested_model: None,
+            since_ms: 0,
+            grain_ms: 60_000,
+            tag: 0,
+            now: 0.0,
+            stamp_cap: 10,
+        };
+        assert!(!handle.seed(seed), "the queue is full");
+        let stats = handle.stats();
+        assert_eq!(stats.dropped, 0, "a refused seed is not a dropped event");
+        assert_eq!(stats.seeds_refused, 1);
+        // Let the writer drain, then take a barrier.
+        let b = loop {
+            match handle.flush().await {
+                Ok(b) => break b,
+                Err(BarrierError::Full) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Err(e) => panic!("{e:?}"),
+            }
+        };
+        assert_eq!(
+            (b.watermark, b.committed, b.failed, b.dropped),
+            (2, 2, 0, 0),
+            "{b:?}"
+        );
+        writer.close().await.expect("close");
+    });
+}
+
+/// Eight producer threads on a 64-slot queue, with barriers taken back to
+/// back and every third one abandoned mid-wait (as a caller's timeout does):
+/// every answered barrier is an exact prefix, and the final one accounts for
+/// every event sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eight_producers_with_abandoned_barriers_keep_prefixes_exact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path());
+    let writer = Writer::spawn(
+        &db,
+        WriterConfig {
+            capacity: 64,
+            ..config(0, 512)
+        },
+    )
+    .expect("spawn");
+    let handle = writer.handle();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let producers: Vec<_> = (0..8)
+        .map(|p| {
+            let h = handle.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut sent = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let id = format!("q{p}-{sent}");
+                    h.send(LogEvent::Finish(done(&id, T0, Some("key-1"), "sonnet", 1)));
+                    sent += 1;
+                    // Bursts with gaps: the queue fills (drops) and drains
+                    // (barriers get in), over and over.
+                    if sent.is_multiple_of(256) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                sent
+            })
+        })
+        .collect();
+    let mut answered = 0;
+    let mut last = 0;
+    let mut n = 0u64;
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < until {
+        n += 1;
+        let r = if n.is_multiple_of(3) {
+            // Abandoned after a moment, wherever it is.
+            match tokio::time::timeout(Duration::from_micros(50), handle.flush()).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            }
+        } else {
+            handle.flush().await
+        };
+        match r {
+            Ok(b) => {
+                assert_eq!(b.committed + b.failed + b.dropped, b.watermark, "{b:?}");
+                assert!(b.watermark >= last, "{b:?}");
+                last = b.watermark;
+                answered += 1;
+            }
+            Err(BarrierError::Full | BarrierError::Busy) => tokio::task::yield_now().await,
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let sent: u64 = producers
+        .into_iter()
+        .map(|t| t.join().expect("producer"))
+        .sum();
+    let fin = loop {
+        match handle.flush().await {
+            Ok(b) => break b,
+            Err(BarrierError::Full | BarrierError::Busy) => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    };
+    assert_eq!(fin.watermark, sent, "{fin:?}");
+    assert_eq!(fin.committed + fin.failed + fin.dropped, sent, "{fin:?}");
+    assert!(fin.dropped > 0, "a 64-slot queue was meant to drop");
+    assert!(answered >= 3, "{answered} answered");
+    writer.close().await.expect("close");
+}
+
+/// A producer never waits on a barrier: with a barrier admitted and stuck
+/// behind a locked database, `send` still returns at once.
+#[test]
+fn send_does_not_wait_while_a_barrier_is_pending() {
+    current_thread().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let writer = Writer::spawn(&db, config(0, 512)).expect("spawn");
+        let handle = writer.handle();
+        let locker = lock_for(&db, Duration::from_millis(500));
+        assert!(handle.send(pending("a", T0, None, "m")));
+        let barrier = handle.flush();
+        tokio::pin!(barrier);
+        assert!(futures_poll_once(&mut barrier).await.is_none());
+        let started = std::time::Instant::now();
+        for n in 0..10_000 {
+            handle.send(pending(&format!("x{n}"), T0, None, "m"));
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "{:?}",
+            started.elapsed()
+        );
+        let b = barrier.await.expect("barrier");
+        assert_eq!(b.committed + b.failed + b.dropped, b.watermark);
+        locker.join().expect("locker");
+        writer.close().await.expect("close");
+    });
 }

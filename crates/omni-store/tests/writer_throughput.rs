@@ -177,3 +177,94 @@ fn time_ordered_ids_keep_up_with_60k_requests_per_second_on_one_core() {
     assert_eq!(v7.dropped, 0, "v7 ids shed at 60 k req/s");
     assert!(v4.dropped > 0, "the v4 baseline is expected to shed here");
 }
+
+/// Eight producer threads sending into the writer at the gateway's full
+/// event rate (`XFLOOD=1`: as fast as they can) on the gateway's cores:
+/// sends per second, the slowest send, and how many took over 100 µs. For contention between
+/// producers, and between producers and barriers; prints, asserts nothing
+/// but that it ran. `cargo test --release -p omni-store --test
+/// writer_throughput eight -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn eight_producers_send_rate() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("omni.db");
+        drop(SqliteStore::open(&db, 0).expect("open"));
+        let writer = Writer::spawn(&db, WriterConfig::default()).expect("spawn");
+        let handle = writer.handle();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let barriers = std::env::var_os("XBARRIERS").is_some();
+        let producers: Vec<_> = (0..8_u64)
+            .map(|p| {
+                let h = handle.clone();
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    let mut n = 0u64;
+                    let mut worst = Duration::ZERO;
+                    let mut slow = 0u64;
+                    let t0 = Instant::now();
+                    // ~8 k sends/s each, 64 k in all: the gateway's event rate
+                    // at full throughput (2 per request at ~32 k req/s), so
+                    // the queue drains and only contention is measured.
+                    let pace = Duration::from_micros(125);
+                    let mut next = Instant::now();
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let id = uuid_like(p << 40 | n);
+                        if std::env::var_os("XFLOOD").is_none() {
+                            next += pace;
+                            while Instant::now() < next {
+                                std::hint::spin_loop();
+                            }
+                        }
+                        let t = Instant::now();
+                        h.send(begin(&id, 1_794_007_800_000));
+                        let took = t.elapsed();
+                        worst = worst.max(took);
+                        if took > Duration::from_micros(100) {
+                            slow += 1;
+                        }
+                        n += 1;
+                    }
+                    (n, t0.elapsed(), worst, slow)
+                })
+            })
+            .collect();
+        let until = Instant::now() + Duration::from_secs(5);
+        let mut taken = 0;
+        while Instant::now() < until {
+            if barriers {
+                if handle.flush().await.is_ok() {
+                    taken += 1;
+                }
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut total = 0;
+        let mut worst = Duration::ZERO;
+        let mut slow = 0;
+        let mut secs = 0.0;
+        for t in producers {
+            let (n, e, w, sl) = t.join().expect("producer");
+            total += n;
+            worst = worst.max(w);
+            slow += sl;
+            secs = e.as_secs_f64();
+        }
+        let st = handle.stats();
+        #[allow(clippy::cast_precision_loss)]
+        let rate = total as f64 / secs;
+        println!(
+            "8 producers: {rate:.0} sends/s, worst send {worst:?}, sends over 100 us {slow}, dropped {}, barriers {taken}",
+            st.dropped
+        );
+        writer.close().await.ok();
+    });
+}

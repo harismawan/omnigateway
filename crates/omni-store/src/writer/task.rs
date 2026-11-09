@@ -8,6 +8,7 @@
 //! than from when the writer got round to it.
 
 use super::batch;
+use super::epoch::{Entered, Epochs, Produced};
 use super::events::{Committed, SeedQuery, SeedRows, WriteEvent};
 use crate::error::StoreError;
 use rusqlite::{Connection, ErrorCode};
@@ -39,16 +40,16 @@ pub struct WriterConfig {
     /// The fixed offset `usage_daily` days are cut at.
     pub day_offset_minutes: i64,
     /// Channel capacity, in events: what may be pending while the database
-    /// stalls. A full channel drops, never waits. 131 072 events is ~3 s of
-    /// the gateway's 20 k requests/s (two events each), so a stall of the
-    /// disk under the WAL's fsync (XFS log flushes of up to ~1 s were seen on
-    /// the bench host) queues instead of shedding; a longer outage still
-    /// sheds. The channel allocates in blocks as it fills, so an idle writer
-    /// holds little of it.
+    /// stalls. A full channel drops, never waits. 131 072 events is ~1.2 s of
+    /// the gateway's ~55 k requests/s at full rate (two events each, so
+    /// ~110 k events/s), enough to ride out the 0.5–1 s stalls of the disk
+    /// under the WAL's fsync seen on the bench host (XFS log flushes); a
+    /// longer outage still sheds. The channel allocates in blocks as it fills,
+    /// so an idle writer holds little of it.
     ///
     /// **It bounds events, not bytes.** What a full queue holds:
-    /// - **slots**: 360 bytes each (a 344-byte [`WriteEvent`] plus its
-    ///   enqueue time), ~45 MiB for 131 072;
+    /// - **slots**: 376 bytes each (a 344-byte [`WriteEvent`] plus its
+    ///   enqueue time and barrier epoch), ~47 MiB for 131 072;
     /// - **payload** each event owns on the heap, on top: its id and model
     ///   strings and, for a Finish, its `degradations` and `rtk_filters`
     ///   lists. A bench-shaped event's six short strings (a 40-byte id, the
@@ -132,6 +133,9 @@ impl Default for WriterConfig {
 pub struct WriterStats {
     /// Events accepted into the channel (seed reads aside).
     pub enqueued: u64,
+    /// Seed reads refused because the channel was full or closed. Not
+    /// events: they never enter `dropped` or barrier accounting.
+    pub seeds_refused: u64,
     /// Events refused because the channel was full or the writer had closed.
     /// The full total: the rate-limited warning may not have reported the
     /// last of them (see [`Writer::close`]).
@@ -154,17 +158,16 @@ pub struct WriterStats {
 
 #[derive(Debug)]
 struct Counters {
-    /// The last event sequence number handed out (seeds take none).
-    seq: AtomicU64,
-    /// Held shared around taking a sequence number and publishing (or
-    /// dropping) the event; a barrier takes it exclusively to take its
-    /// watermark and enter the queue, so every event numbered at or below
-    /// the watermark is already in the queue ahead of it or counted dropped,
-    /// and every later one is behind it.
-    order: std::sync::RwLock<()>,
+    /// Barrier accounting, lock-free on the producer side (see `epoch.rs`).
+    epochs: Epochs,
+    /// Committed and failed events per epoch not yet folded into a barrier's
+    /// answer, and the folded total. The writer task's alone: producers never
+    /// touch it.
+    resolved: std::sync::Mutex<Resolved>,
     /// A barrier is admitted and not yet answered.
     barrier_busy: std::sync::atomic::AtomicBool,
     enqueued: AtomicU64,
+    seeds_refused: AtomicU64,
     dropped: AtomicU64,
     batches: AtomicU64,
     written: AtomicU64,
@@ -177,10 +180,11 @@ struct Counters {
 impl Counters {
     fn new() -> Self {
         Self {
-            seq: AtomicU64::new(0),
-            order: std::sync::RwLock::new(()),
+            epochs: Epochs::default(),
+            resolved: std::sync::Mutex::new(Resolved::default()),
             barrier_busy: std::sync::atomic::AtomicBool::new(false),
             enqueued: AtomicU64::new(0),
+            seeds_refused: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             batches: AtomicU64::new(0),
             written: AtomicU64::new(0),
@@ -194,6 +198,7 @@ impl Counters {
     fn snapshot(&self) -> WriterStats {
         WriterStats {
             enqueued: self.enqueued.load(Ordering::Relaxed),
+            seeds_refused: self.seeds_refused.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             batches: self.batches.load(Ordering::Relaxed),
             written: self.written.load(Ordering::Relaxed),
@@ -260,6 +265,9 @@ impl DropWarner {
 struct Queued {
     at: Instant,
     item: Item,
+    /// The barrier epoch an event was published in; `None` for a seed or a
+    /// barrier.
+    epoch: Option<u64>,
 }
 
 /// The bytes one queue slot takes (the [`WriterConfig::capacity`] docs).
@@ -278,13 +286,13 @@ enum Item {
     Barrier(Pending),
 }
 
-/// A barrier waiting in the queue: its watermark, the drops among events up
-/// to it (all known at admission), where to answer, and the busy flag it
+/// A barrier waiting in the queue: its epoch and the producer-side totals of
+/// its prefix (final at admission), where to answer, and the busy flag it
 /// holds until it is answered or discarded.
 #[derive(Debug)]
 struct Pending {
-    watermark: u64,
-    dropped: u64,
+    epoch: u64,
+    produced: Produced,
     reply: oneshot::Sender<Barrier>,
     /// Held for its `Drop`, which frees the one-barrier slot.
     _busy: BusyGuard,
@@ -300,10 +308,10 @@ impl Drop for BusyGuard {
     }
 }
 
-/// A [`WriterHandle::flush`] answer: the outcome of every event with a
-/// sequence number up to `watermark` (the events sequenced before the
-/// barrier was admitted). `committed + failed + dropped == watermark`,
-/// exactly, whatever was sent meanwhile.
+/// A [`WriterHandle::flush`] answer: the outcome of every event of the
+/// barrier's prefix (every event whose producer entered an epoch up to the
+/// barrier's, see `epoch.rs`): `watermark` events, of which `committed +
+/// failed + dropped == watermark`, exactly, whatever was sent meanwhile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Barrier {
     pub watermark: u64,
@@ -336,53 +344,58 @@ impl WriterHandle {
     /// writer closed) and counted in [`Self::dropped`]; the writer task warns
     /// about it later, rate-limited. Nothing here but the `try_send` and an
     /// atomic add.
+    ///
+    /// Takes no lock and never waits: its barrier bookkeeping is a few
+    /// atomics (`epoch.rs`). A seed read is not an event: it takes no part in
+    /// barrier accounting, and a refused one is counted in `seeds_refused`.
     pub fn send(&self, event: impl Into<WriteEvent>) -> bool {
         let event = event.into();
-        let counted = !matches!(event, WriteEvent::Seed(_));
+        let c = &self.counters;
+        if matches!(event, WriteEvent::Seed(_)) {
+            let queued = Queued {
+                at: Instant::now(),
+                item: Item::Event(event),
+                epoch: None,
+            };
+            let ok = self.tx.try_send(queued).is_ok();
+            if !ok {
+                c.seeds_refused.fetch_add(1, Ordering::Relaxed);
+            }
+            return ok;
+        }
+        let entered: Entered = c.epochs.enter();
         let queued = Queued {
             at: Instant::now(),
             item: Item::Event(event),
+            epoch: Some(entered.0),
         };
-        let c = &self.counters;
-        // Shared: many senders at once; only a barrier's admission excludes.
-        let _order = c
-            .order
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The sequence number is taken before the event is published, so a
-        // barrier's watermark counts it either as queued ahead of the
-        // barrier or as dropped, never as neither.
-        if counted {
-            c.seq.fetch_add(1, Ordering::Relaxed);
+        let ok = self.tx.try_send(queued).is_ok();
+        if ok {
+            c.enqueued.fetch_add(1, Ordering::Relaxed);
+        } else {
+            c.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        match self.tx.try_send(queued) {
-            Ok(()) => {
-                if counted {
-                    c.enqueued.fetch_add(1, Ordering::Relaxed);
-                }
-                true
-            }
-            Err(_) => {
-                c.dropped.fetch_add(1, Ordering::Relaxed);
-                false
-            }
-        }
+        c.epochs.leave(entered, !ok);
+        ok
     }
 
-    /// A barrier: the outcome of every event sequenced before it, once all
-    /// of them are resolved (see [`Barrier`]).
+    /// A barrier: the outcome of every event of its prefix, once all of them
+    /// are resolved (see [`Barrier`] and `epoch.rs`).
     ///
-    /// - **Admission** takes the order lock exclusively for an instant: the
-    ///   watermark is the last sequence number handed out, the drops so far
-    ///   are exactly the drops among events up to it, and the barrier enters
-    ///   the queue (by `try_send`, as every event does) behind all of them.
-    /// - It never waits for room: a full queue is [`BarrierError::Full`], so
-    ///   it cannot reserve capacity ahead of the request path.
-    /// - One at a time: a second while one is in flight is
+    /// - **One at a time:** a second while one is in flight is
     ///   [`BarrierError::Busy`]. The slot is held until the writer answers or
     ///   discards it, also if the caller stops waiting.
+    /// - **Never blocks a producer, never blocks a thread.** Admission bumps
+    ///   an epoch; it then waits, by yielding, for the producers already
+    ///   inside the previous and the bumped epoch to finish (a `try_send` and
+    ///   a few atomics each). Every wait is an `.await`, so a caller's
+    ///   timeout can cancel it at any point; a cancelled barrier leaves the
+    ///   next one to wait out its epoch.
+    /// - **Enters the queue by `try_send`,** as every event does: a full queue
+    ///   is [`BarrierError::Full`], so it cannot reserve capacity ahead of the
+    ///   request path.
     /// - It ends the batch it lands in, and is answered after that batch is
-    ///   written: committed and failed then cover exactly the events ahead.
+    ///   written, when every event of its prefix is resolved.
     ///
     /// Not for the request path, which never waits on the writer: the bench
     /// harness calls it (`POST /__omni/bench/flush`, only with `OMNI_BENCH=1`).
@@ -395,28 +408,30 @@ impl WriterHandle {
             return Err(BarrierError::Busy);
         }
         let busy = BusyGuard(Arc::clone(c));
+        while !c.epochs.previous_settled() {
+            tokio::task::yield_now().await;
+        }
+        let (epoch, before) = c.epochs.bump();
+        while !c.epochs.settled(epoch) {
+            tokio::task::yield_now().await;
+        }
+        let produced = c.epochs.prefix(epoch, before);
         let (tx, rx) = oneshot::channel();
-        {
-            let _order = c
-                .order
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let pending = Pending {
-                watermark: c.seq.load(Ordering::Relaxed),
-                dropped: c.dropped.load(Ordering::Relaxed),
+        let queued = Queued {
+            at: Instant::now(),
+            item: Item::Barrier(Pending {
+                epoch,
+                produced,
                 reply: tx,
                 _busy: busy,
-            };
-            let queued = Queued {
-                at: Instant::now(),
-                item: Item::Barrier(pending),
-            };
-            match self.tx.try_send(queued) {
-                Ok(()) => {}
-                // The guard goes with the refused item, freeing the slot.
-                Err(mpsc::error::TrySendError::Full(_)) => return Err(BarrierError::Full),
-                Err(mpsc::error::TrySendError::Closed(_)) => return Err(BarrierError::Closed),
-            }
+            }),
+            epoch: None,
+        };
+        match self.tx.try_send(queued) {
+            Ok(()) => {}
+            // The guard goes with the refused item, freeing the slot.
+            Err(mpsc::error::TrySendError::Full(_)) => return Err(BarrierError::Full),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(BarrierError::Closed),
         }
         rx.await.map_err(|_| BarrierError::Closed)
     }
@@ -587,19 +602,32 @@ impl Sink {
     /// seed are flushed (and their completions delivered) first, then the
     /// seed is read and its result delivered, so the sink sees one ordered
     /// story. Returns the events lost.
-    async fn flush_ordered(&mut self, events: Vec<WriteEvent>) -> Result<u64, StoreError> {
+    ///
+    /// Each transaction's events are counted committed or failed against
+    /// their barrier epochs as soon as it ends.
+    async fn flush_ordered(&mut self, events: Vec<Tagged>) -> Result<u64, StoreError> {
         let mut lost = 0;
         let mut run = Vec::with_capacity(events.len());
-        for e in events {
+        let mut epochs = std::collections::BTreeMap::new();
+        for (e, epoch) in events {
             match e {
                 WriteEvent::Seed(q) => {
-                    lost += self.flush(std::mem::take(&mut run)).await?;
+                    let l = self.flush(std::mem::take(&mut run)).await?;
+                    resolve(std::mem::take(&mut epochs), l, &self.counters);
+                    lost += l;
                     self.seed(q).await?;
                 }
-                other => run.push(other),
+                other => {
+                    if let Some(epoch) = epoch {
+                        *epochs.entry(epoch).or_default() += 1;
+                    }
+                    run.push(other);
+                }
             }
         }
-        lost += self.flush(run).await?;
+        let l = self.flush(run).await?;
+        resolve(epochs, l, &self.counters);
+        lost += l;
         Ok(lost)
     }
 
@@ -741,7 +769,7 @@ impl Sink {
 /// busy one can take several `busy_timeout`s.
 async fn flush_watching(
     sink: &mut Sink,
-    batch: Vec<WriteEvent>,
+    batch: Vec<Tagged>,
     warner: &mut DropWarner,
     tick: &mut tokio::time::Interval,
     counters: &Counters,
@@ -760,10 +788,48 @@ async fn flush_watching(
 }
 
 /// Sorts one channel item into the batch or the barriers waiting on it.
-fn take(item: Item, batch: &mut Vec<WriteEvent>, barriers: &mut Vec<Pending>) {
-    match item {
-        Item::Event(e) => batch.push(e),
+fn take(q: Queued, batch: &mut Vec<Tagged>, barriers: &mut Vec<Pending>) {
+    match q.item {
+        Item::Event(e) => batch.push((e, q.epoch)),
         Item::Barrier(b) => barriers.push(b),
+    }
+}
+
+/// An event and its barrier epoch (`None` for a seed).
+type Tagged = (WriteEvent, Option<u64>);
+
+/// Committed and failed counts per epoch, and the total of epochs already
+/// answered.
+#[derive(Debug, Default)]
+struct Resolved {
+    by_epoch: std::collections::BTreeMap<u64, (u64, u64)>,
+    answered: (u64, u64),
+}
+
+/// After one transaction: its events committed, or (`lost > 0`) failed,
+/// counted against their epochs. A transaction commits or fails as a whole.
+fn resolve(epochs: std::collections::BTreeMap<u64, u64>, lost: u64, counters: &Counters) {
+    let mut resolved = counters
+        .resolved
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (epoch, n) in epochs {
+        let e = resolved.by_epoch.entry(epoch).or_default();
+        if lost == 0 {
+            e.0 += n;
+        } else {
+            e.1 += n;
+        }
+    }
+    // No future barrier can ask for a prefix older than the previous
+    // epoch. Fold older resolved outcomes even when admission was refused
+    // or cancelled; otherwise those attempts grow this map indefinitely.
+    let floor = counters.epochs.current().saturating_sub(1);
+    let later = resolved.by_epoch.split_off(&floor);
+    let older = std::mem::replace(&mut resolved.by_epoch, later);
+    for (c, f) in older.values() {
+        resolved.answered.0 += c;
+        resolved.answered.1 += f;
     }
 }
 
@@ -775,11 +841,26 @@ fn take(item: Item, batch: &mut Vec<WriteEvent>, barriers: &mut Vec<Pending>) {
 /// counted `written` or `failed` once, in queue order.
 fn answer(barriers: Vec<Pending>, counters: &Counters) {
     for b in barriers {
+        // Fold every epoch up to the barrier's into the answered total, so
+        // the map holds only the epochs after it.
+        let (committed, failed) = {
+            let mut resolved = counters
+                .resolved
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let later = resolved.by_epoch.split_off(&(b.epoch + 1));
+            let upto = std::mem::replace(&mut resolved.by_epoch, later);
+            for (c, f) in upto.values() {
+                resolved.answered.0 += c;
+                resolved.answered.1 += f;
+            }
+            resolved.answered
+        };
         let answer = Barrier {
-            watermark: b.watermark,
-            committed: counters.written.load(Ordering::Relaxed),
-            failed: counters.failed.load(Ordering::Relaxed),
-            dropped: b.dropped,
+            watermark: b.produced.events,
+            committed,
+            failed,
+            dropped: b.produced.dropped,
         };
         // Free the one-barrier slot before the caller is woken, so a caller
         // that asks again right after its answer is admitted.
@@ -841,14 +922,14 @@ async fn run(
         // From the oldest event's enqueue: one that queued behind a slow
         // write is already due, and goes out with the next write.
         let deadline = first.at + config.interval;
-        let mut batch = Vec::with_capacity(max_batch);
+        let mut batch: Vec<Tagged> = Vec::with_capacity(max_batch);
         // Barriers end the batch they land in and are answered after it.
         let mut barriers = Vec::new();
-        take(first.item, &mut batch, &mut barriers);
+        take(first, &mut batch, &mut barriers);
         let mut stopping = false;
         while batch.len() < max_batch && barriers.is_empty() {
             if let Ok(e) = rx.try_recv() {
-                take(e.item, &mut batch, &mut barriers);
+                take(e, &mut batch, &mut barriers);
                 continue;
             }
             tokio::select! {
@@ -856,7 +937,7 @@ async fn run(
                 _ = &mut stop => { stopping = true; break; }
                 () = sleep_until(deadline) => break,
                 e = rx.recv() => match e {
-                    Some(e) => take(e.item, &mut batch, &mut barriers),
+                    Some(e) => take(e, &mut batch, &mut barriers),
                     None => break,
                 },
                 _ = warn_tick.tick() => warner.check(&counters),
@@ -875,12 +956,12 @@ async fn run(
     // Graceful flush: refuse new events, then write what was already queued.
     rx.close();
     loop {
-        let mut batch = Vec::with_capacity(max_batch);
+        let mut batch: Vec<Tagged> = Vec::with_capacity(max_batch);
         let mut barriers = Vec::new();
         let mut ended = false;
         while batch.len() < max_batch && barriers.is_empty() {
             match rx.recv().await {
-                Some(e) => take(e.item, &mut batch, &mut barriers),
+                Some(e) => take(e, &mut batch, &mut barriers),
                 None => {
                     ended = true;
                     break;
@@ -905,4 +986,31 @@ async fn run(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod epoch_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn abandoned_and_refused_prefixes_keep_resolution_bounded() {
+        let c = Counters::new();
+        for n in 0..100_u64 {
+            let delayed = c.epochs.enter();
+            let (e, before) = c.epochs.bump();
+            assert!(!c.epochs.previous_settled());
+            // Cancellation before settlement, or refusal after settlement,
+            // leaves exactly this state; no answer() is called.
+            c.epochs.leave(delayed, false);
+            resolve([(e, 1)].into(), 0, &c);
+            let prefix = c.epochs.prefix(e, before);
+            assert_eq!(prefix.events, n + 1);
+            let r = c.resolved.lock().expect("resolved");
+            assert!(r.by_epoch.len() <= 2);
+            assert_eq!(
+                r.answered.0 + r.by_epoch.values().map(|v| v.0).sum::<u64>(),
+                prefix.events
+            );
+        }
+    }
 }
