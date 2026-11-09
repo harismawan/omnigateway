@@ -272,35 +272,41 @@ impl StreamDecoder for ChatDecoder {
             });
             return Ok(Flow::Stop);
         }
-        #[cfg(test)]
-        let fast = if self.no_fast {
-            None
-        } else {
-            super::fast::parse_chat_chunk(&msg.data)
-        };
-        #[cfg(not(test))]
-        let fast = super::fast::parse_chat_chunk(&msg.data);
-        if let Some(fast) = fast {
-            return self.apply(&fast.view(), out);
+        let depth = omni_ir::deep::depth_of(&msg.data);
+        if depth > omni_ir::deep::MAX_DEPTH {
+            return Err(DecodeError::Throw("upstream JSON exceeds depth 40000"));
         }
-        let Some(d) = json_object(&msg.data) else {
-            return Ok(Flow::Continue);
-        };
-        let d = Some(&d);
-        let choice = index0(prop(d, "choices"));
-        let view = ChunkView {
-            id: prop(d, "id"),
-            model: prop(d, "model"),
-            usage: prop(d, "usage"),
-            choice: truthy(choice.as_ref()).then(|| {
-                let choice = choice.as_ref();
-                ChoiceView {
-                    delta: DeltaView::of(prop(choice, "delta").filter(|v| !v.is_null())),
-                    finish_reason: prop(choice, "finish_reason"),
-                }
-            }),
-        };
-        self.apply(&view, out)
+        omni_ir::deep::scope_for_bound(depth, |_| {
+            #[cfg(test)]
+            let fast = if self.no_fast {
+                None
+            } else {
+                super::fast::parse_chat_chunk(&msg.data)
+            };
+            #[cfg(not(test))]
+            let fast = super::fast::parse_chat_chunk(&msg.data);
+            if let Some(fast) = fast {
+                return self.apply(&fast.view(), out);
+            }
+            let Some(d) = json_object(&msg.data) else {
+                return Ok(Flow::Continue);
+            };
+            let d = Some(&d);
+            let choice = index0(prop(d, "choices"));
+            let view = ChunkView {
+                id: prop(d, "id"),
+                model: prop(d, "model"),
+                usage: prop(d, "usage"),
+                choice: truthy(choice.as_ref()).then(|| {
+                    let choice = choice.as_ref();
+                    ChoiceView {
+                        delta: DeltaView::of(prop(choice, "delta").filter(|v| !v.is_null())),
+                        finish_reason: prop(choice, "finish_reason"),
+                    }
+                }),
+            };
+            self.apply(&view, out)
+        })
     }
 
     fn finish(&mut self, out: &mut VecDeque<StreamEvent>) {

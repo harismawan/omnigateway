@@ -158,6 +158,20 @@ mod tests {
     }
 
     #[test]
+    fn deep_unknown_and_usage_fields_match_general_policy() {
+        for bound in [200, 512, 40_000, 40_001] {
+            for field in ["usage", "ignored"] {
+                let nested = format!("{}0{}", "[".repeat(bound - 2), "]".repeat(bound - 2));
+                let chunk = format!(
+                    r#"{{"choices":[{{"delta":{{"content":"hello"}}}}],"{field}":{{"extra":{nested}}}}}"#
+                );
+                let (fast, general) = both(&[&chunk, "[DONE]"]);
+                assert_eq!(fast, general, "{bound} {field}");
+            }
+        }
+    }
+
+    #[test]
     fn the_fast_path_agrees_with_the_generic_one() {
         let cases: &[&[&str]] = &[
             &[

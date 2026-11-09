@@ -57,20 +57,23 @@ impl KeyMint {
 pub(super) fn or_zero(v: Option<&Value>) -> Value {
     match v {
         None | Some(Value::Null) => Value::from(0),
-        Some(v) => v.clone(),
+        Some(v) => omni_ir::deep::clone(v),
     }
 }
 
 /// `JSON.parse` that keeps only what `typeof v === "object" && v !== null` keeps.
 pub(super) fn json_object(data: &str) -> Option<Value> {
-    js::parse_json(data).filter(|v| v.is_object() || v.is_array())
+    omni_ir::deep::parse(data)
+        .ok()
+        .or_else(|| js::replace_lone_surrogates(data).and_then(|s| omni_ir::deep::parse(&s).ok()))
+        .filter(|v| v.is_object() || v.is_array())
 }
 
 /// `x?.[0]`.
 pub(super) fn index0(v: Option<&Value>) -> Option<Value> {
     match v? {
-        Value::Array(items) => items.first().cloned(),
-        Value::Object(map) => map.get("0").cloned(),
+        Value::Array(items) => items.first().map(omni_ir::deep::clone),
+        Value::Object(map) => map.get("0").map(omni_ir::deep::clone),
         Value::String(s) => s
             .encode_utf16()
             .next()
@@ -84,7 +87,7 @@ pub(super) fn index0(v: Option<&Value>) -> Option<Value> {
 pub(super) fn iterate(v: Option<&Value>) -> Result<Vec<Value>, DecodeError> {
     match v {
         None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(items)) => Ok(items.clone()),
+        Some(Value::Array(items)) => Ok(items.iter().map(omni_ir::deep::clone).collect()),
         Some(Value::String(s)) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
         Some(_) => Err(DecodeError::Throw("tool_calls is not iterable")),
     }
