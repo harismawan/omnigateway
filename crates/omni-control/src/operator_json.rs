@@ -200,7 +200,15 @@ pub fn models_detail(value: &JsValue) -> Result<String, String> {
             .map(join)
             .collect::<Result<Vec<_>, _>>()
             .map(|v| v.join(", ")),
-        _ => models(value).map_err(|e| e.replace("join(\",\")", "join(\", \")")),
+        _ => models(value)
+            .map(|v| {
+                if v == "none" {
+                    "no models; every request this key makes is refused".into()
+                } else {
+                    v
+                }
+            })
+            .map_err(|e| e.replace("join(\",\")", "join(\", \")")),
     }
 }
 

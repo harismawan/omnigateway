@@ -161,6 +161,27 @@ pub fn list_operator(conn: &Connection) -> Result<Vec<OperatorKey>, StoreError> 
     Ok(out)
 }
 
+/// Control writes inspect the target row with TS's raw allowlist semantics,
+/// rather than using the admission reader or parsing unrelated keys.
+pub fn get_operator(conn: &Connection, id: &str) -> Result<Option<ApiKey>, StoreError> {
+    conn.query_row("SELECT * FROM api_keys WHERE id = ?", [id], |r| {
+        Ok((
+            read_key(r, true),
+            r.get::<_, Option<String>>("model_allowlist")?,
+        ))
+    })
+    .optional()?
+    .map(|(key, raw)| {
+        if let Some(raw) = raw
+            && let Some(error) = omni_ir::jsc_json::parse_error(&raw)
+        {
+            return Err(StoreError::Corrupt(error));
+        }
+        key
+    })
+    .transpose()
+}
+
 /// `KeyRepo.list`: every key, newest first.
 pub fn list(conn: &Connection) -> Result<Vec<ApiKey>, StoreError> {
     let mut stmt = conn.prepare_cached("SELECT * FROM api_keys ORDER BY created_at DESC")?;

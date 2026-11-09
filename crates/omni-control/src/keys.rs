@@ -44,10 +44,9 @@ pub fn set_guardrail(store: &SqliteStore, id: &str, policy: Option<&str>) -> Res
 }
 
 fn require_key(store: &SqliteStore, id: &str) -> Result<(), String> {
-    if !omni_store::keys::list_operator(store.connection())
+    if omni_store::keys::get_operator(store.connection(), id)
         .map_err(|e| e.to_string())?
-        .iter()
-        .any(|k| k.key.id == id)
+        .is_none()
     {
         return Err("BAD_REQUEST: no such api key".into());
     }
