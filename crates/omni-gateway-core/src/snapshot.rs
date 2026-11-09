@@ -336,6 +336,7 @@ mod publication_tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::unwrap_used)] // Isolated database fixture setup.
     fn delayed_positive_read_cannot_replace_revoke_delete_or_restriction() {
         for mutation in [
             "UPDATE api_keys SET revoked_at=1",

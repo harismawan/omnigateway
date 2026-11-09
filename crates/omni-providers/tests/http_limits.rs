@@ -105,6 +105,7 @@ async fn ambiguous_response_framing_is_refused() {
 }
 
 #[tokio::test]
+#[allow(clippy::unwrap_used)] // Local socket fixture setup.
 async fn error_text_budget_covers_every_framing_and_closes_unread_socket() {
     const LIMIT: usize = 1024 * 1024;
     for framing in ["length", "chunked", "close"] {
@@ -128,7 +129,7 @@ async fn error_text_budget_covers_every_framing_and_closes_unread_socket() {
                     .await
                     .unwrap();
             }
-            let _ = socket.write_all(&vec![b'x'; LIMIT + 1]).await;
+            socket.write_all(&vec![b'x'; LIMIT + 1]).await.ok();
             let mut byte = [0];
             let closed = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
                 .await
@@ -153,6 +154,7 @@ async fn error_text_budget_covers_every_framing_and_closes_unread_socket() {
 }
 
 #[tokio::test]
+#[allow(clippy::unwrap_used)] // Local socket fixture setup.
 async fn cancelling_error_collection_closes_socket() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

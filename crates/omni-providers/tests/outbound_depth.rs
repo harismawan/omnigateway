@@ -4,6 +4,7 @@ use omni_providers::codec::{CodecInput, Credentials, ProviderCodec};
 use omni_providers::custom::CustomCodec;
 
 #[test]
+#[allow(clippy::unwrap_used)] // Child-process fixture setup; every failure aborts the regression.
 fn ingress_to_custom_build_depth() {
     if let Ok(protocol) = std::env::var("OMNI_DEPTH_CHILD") {
         std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(move || {

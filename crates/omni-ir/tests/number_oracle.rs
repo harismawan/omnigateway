@@ -21,12 +21,16 @@ fn numbers_match_real_bun_including_shortest_ties() {
         .join("\n");
     let mut child = Command::new("bun").args(["-e", "const a=new ArrayBuffer(8), d=new DataView(a);for(const x of (await Bun.stdin.text()).trim().split('\\n')){d.setBigUint64(0,BigInt(x));console.log(JSON.stringify(d.getFloat64(0)))}"])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("Bun oracle required");
-    let mut stdin = child.stdin.take().unwrap();
-    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()).unwrap());
-    let output = child.wait_with_output().unwrap();
-    writer.join().unwrap();
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let writer = std::thread::spawn(move || {
+        stdin
+            .write_all(input.as_bytes())
+            .expect("write oracle input")
+    });
+    let output = child.wait_with_output().expect("wait oracle");
+    writer.join().expect("input writer");
     assert!(output.status.success());
-    let text = String::from_utf8(output.stdout).unwrap();
+    let text = String::from_utf8(output.stdout).expect("oracle UTF-8");
     assert_eq!(text.lines().count(), values.len());
     for (value, expected) in values.into_iter().zip(text.lines()) {
         let mut actual = String::new();
