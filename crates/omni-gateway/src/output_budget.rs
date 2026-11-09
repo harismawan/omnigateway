@@ -96,5 +96,14 @@ mod tests {
                 .expect("exact event limit");
         }
         assert!(b.charge(&StreamEvent::BlockEnd { index: 0 }).is_err());
+        let mut b = OutputBudget::default();
+        let event = StreamEvent::BlockStart {
+            index: 0,
+            block: ContentBlockStart::Text,
+        };
+        for _ in 0..4096 {
+            b.charge(&event).expect("exact item limit");
+        }
+        assert!(b.charge(&event).is_err());
     }
 }

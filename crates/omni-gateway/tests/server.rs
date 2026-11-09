@@ -183,6 +183,113 @@ async fn boot() -> Gw {
     .await
 }
 
+#[tokio::test]
+async fn retained_output_overflow_closes_upstream_and_releases_admission() {
+    for streaming in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            for round in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buf = Vec::new();
+                loop {
+                    let mut piece = [0; 8192];
+                    let n = socket.read(&mut piece).await.expect("read");
+                    assert!(n > 0);
+                    buf.extend_from_slice(&piece[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.expect("head");
+                let record = format!(
+                    "data: {}\n\n",
+                    serde_json::json!({"id":"c","model":"m","choices":[{"delta":{"content":"x".repeat(1024)}}]})
+                );
+                let frame = format!("{:x}\r\n{record}\r\n", record.len());
+                // Below-limit second request verifies admission was released.
+                let count = if round == 0 { 8193 } else { 8191 };
+                for _ in 0..count {
+                    if socket.write_all(frame.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+                if round == 1 {
+                    let done = "data: [DONE]\n\n";
+                    socket
+                        .write_all(format!("{:x}\r\n{done}\r\n0\r\n\r\n", done.len()).as_bytes())
+                        .await
+                        .expect("terminal");
+                } else {
+                    let mut byte = [0];
+                    let closed =
+                        tokio::time::timeout(Duration::from_secs(10), socket.read(&mut byte))
+                            .await
+                            .expect("overflow cancels upstream");
+                    assert!(matches!(closed, Ok(0) | Err(_)));
+                }
+            }
+        });
+        let f = fixture(&["c0"]);
+        let c = rusqlite::Connection::open(&f.path).expect("db");
+        c.execute("UPDATE credentials SET provider_data=?",[format!(r#"{{"endpointId":"e0","origin":"http://127.0.0.1:{port}","protocol":"chat_completions"}}"#)]).expect("origin");
+        add_key(&f.path, "kp", KEY, ",limits", ",'{\"concurrency\":1}'");
+        let env = [
+            ("OMNI_ENCRYPTION_KEY".to_owned(), ENC.to_owned()),
+            ("OMNI_DB_PATH".into(), f.path.to_str().expect("path").into()),
+            ("OMNI_PORT".into(), "1".into()),
+        ]
+        .into_iter()
+        .collect();
+        let mut config = load_config(&env, || 0).expect("config");
+        config.port = 0;
+        let running = start(config, Options::default()).await.expect("start");
+        let base = format!("127.0.0.1:{}", running.addr.port());
+        let (path, body) = if streaming {
+            (
+                "/v1/responses",
+                r#"{"model":"m1","input":"hi","stream":true}"#,
+            )
+        } else {
+            (
+                "/v1/chat/completions",
+                r#"{"model":"m1","messages":[{"role":"user","content":"hi"}],"stream":false}"#,
+            )
+        };
+        for round in 0..2 {
+            let (status, _, body) = tokio::time::timeout(
+                Duration::from_secs(30),
+                call(
+                    &base,
+                    "POST",
+                    path,
+                    &[("authorization", &format!("Bearer {KEY}"))],
+                    body,
+                ),
+            )
+            .await
+            .expect("bounded call");
+            if round == 0 {
+                if streaming {
+                    assert_eq!(status, 200);
+                    assert!(!body.contains("response.completed"));
+                } else {
+                    assert_eq!(status, 502);
+                    assert!(body.contains("retained response budget"));
+                }
+            } else {
+                assert_eq!(status, 200, "admission released: {body}");
+                if streaming {
+                    assert!(body.contains("response.completed"));
+                }
+            }
+        }
+        server.await.expect("server");
+        running.shutdown();
+        running.wait().await.expect("stop");
+    }
+}
+
 /// One raw HTTP/1.1 exchange; returns (status, lowercased headers, body).
 async fn call(
     base: &str,
