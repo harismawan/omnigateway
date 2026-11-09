@@ -43,8 +43,9 @@
 //! `started[E]` increment precedes the bump, and the barrier's step-4 reads,
 //! which follow the bump, see all of them. An undone
 //! increment is matched by its decrement, which may come after the bump; until
-//! then `started[E]` reads one too high, `done[E]` cannot match it, and the
-//! barrier keeps waiting. A producer's step-5 increment follows its publish
+//! then, if observed by settlement, `started[E]` reads one too high,
+//! `done[E]` cannot match it, and the barrier keeps waiting. A stray may
+//! instead arrive after successful settlement reads. A producer's step-5 increment follows its publish
 //! or its drop, so once `done[E] == started[E]` every `E` event is either in
 //! the queue or counted in `dropped[E]`, all before the barrier publishes
 //! itself. The writer handles the queue in order, so when it reaches the
