@@ -130,8 +130,7 @@ impl Default for WriterConfig {
 /// What the writer has done so far.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WriterStats {
-    /// Events accepted into the channel (seed reads aside). After a
-    /// [`WriterHandle::flush`] barrier, `enqueued == written + failed`.
+    /// Events accepted into the channel (seed reads aside).
     pub enqueued: u64,
     /// Events refused because the channel was full or the writer had closed.
     /// The full total: the rate-limited warning may not have reported the
@@ -155,6 +154,16 @@ pub struct WriterStats {
 
 #[derive(Debug)]
 struct Counters {
+    /// The last event sequence number handed out (seeds take none).
+    seq: AtomicU64,
+    /// Held shared around taking a sequence number and publishing (or
+    /// dropping) the event; a barrier takes it exclusively to take its
+    /// watermark and enter the queue, so every event numbered at or below
+    /// the watermark is already in the queue ahead of it or counted dropped,
+    /// and every later one is behind it.
+    order: std::sync::RwLock<()>,
+    /// A barrier is admitted and not yet answered.
+    barrier_busy: std::sync::atomic::AtomicBool,
     enqueued: AtomicU64,
     dropped: AtomicU64,
     batches: AtomicU64,
@@ -168,6 +177,9 @@ struct Counters {
 impl Counters {
     fn new() -> Self {
         Self {
+            seq: AtomicU64::new(0),
+            order: std::sync::RwLock::new(()),
+            barrier_busy: std::sync::atomic::AtomicBool::new(false),
             enqueued: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             batches: AtomicU64::new(0),
@@ -263,7 +275,53 @@ pub fn queue_slot_bytes() -> usize {
 #[allow(clippy::large_enum_variant)]
 enum Item {
     Event(WriteEvent),
-    Barrier(oneshot::Sender<WriterStats>),
+    Barrier(Pending),
+}
+
+/// A barrier waiting in the queue: its watermark, the drops among events up
+/// to it (all known at admission), where to answer, and the busy flag it
+/// holds until it is answered or discarded.
+#[derive(Debug)]
+struct Pending {
+    watermark: u64,
+    dropped: u64,
+    reply: oneshot::Sender<Barrier>,
+    /// Held for its `Drop`, which frees the one-barrier slot.
+    _busy: BusyGuard,
+}
+
+/// Clears `barrier_busy` when the barrier is answered or dropped unanswered.
+#[derive(Debug)]
+struct BusyGuard(Arc<Counters>);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.barrier_busy.store(false, Ordering::Release);
+    }
+}
+
+/// A [`WriterHandle::flush`] answer: the outcome of every event with a
+/// sequence number up to `watermark` (the events sequenced before the
+/// barrier was admitted). `committed + failed + dropped == watermark`,
+/// exactly, whatever was sent meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Barrier {
+    pub watermark: u64,
+    pub committed: u64,
+    pub failed: u64,
+    pub dropped: u64,
+}
+
+/// Why a barrier was not answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarrierError {
+    /// Another barrier is in flight; one at a time.
+    Busy,
+    /// The queue had no room. A barrier never waits for room, so it cannot
+    /// reserve capacity ahead of the request path's events.
+    Full,
+    /// The writer has closed.
+    Closed,
 }
 
 /// The request path's side: cheap to clone, and [`Self::send`] never waits.
@@ -285,39 +343,82 @@ impl WriterHandle {
             at: Instant::now(),
             item: Item::Event(event),
         };
+        let c = &self.counters;
+        // Shared: many senders at once; only a barrier's admission excludes.
+        let _order = c
+            .order
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The sequence number is taken before the event is published, so a
+        // barrier's watermark counts it either as queued ahead of the
+        // barrier or as dropped, never as neither.
+        if counted {
+            c.seq.fetch_add(1, Ordering::Relaxed);
+        }
         match self.tx.try_send(queued) {
             Ok(()) => {
                 if counted {
-                    self.counters.enqueued.fetch_add(1, Ordering::Relaxed);
+                    c.enqueued.fetch_add(1, Ordering::Relaxed);
                 }
                 true
             }
             Err(_) => {
-                self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+                c.dropped.fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
     }
 
-    /// A barrier: waits until every event accepted before this call is
-    /// committed (or counted failed), then returns the cumulative counters.
-    /// It goes through the channel like an event, so it waits for queue room
-    /// (it is never dropped), and it ends the batch it lands in, so it is
-    /// answered without waiting out the batch interval. `Err` when the writer
-    /// has closed.
+    /// A barrier: the outcome of every event sequenced before it, once all
+    /// of them are resolved (see [`Barrier`]).
+    ///
+    /// - **Admission** takes the order lock exclusively for an instant: the
+    ///   watermark is the last sequence number handed out, the drops so far
+    ///   are exactly the drops among events up to it, and the barrier enters
+    ///   the queue (by `try_send`, as every event does) behind all of them.
+    /// - It never waits for room: a full queue is [`BarrierError::Full`], so
+    ///   it cannot reserve capacity ahead of the request path.
+    /// - One at a time: a second while one is in flight is
+    ///   [`BarrierError::Busy`]. The slot is held until the writer answers or
+    ///   discards it, also if the caller stops waiting.
+    /// - It ends the batch it lands in, and is answered after that batch is
+    ///   written: committed and failed then cover exactly the events ahead.
     ///
     /// Not for the request path, which never waits on the writer: the bench
-    /// harness calls it (`POST /__omni/bench/flush`, only with `OMNI_BENCH=1`)
-    /// to read exact per-scenario drop counts.
-    pub async fn flush(&self) -> Result<WriterStats, StoreError> {
+    /// harness calls it (`POST /__omni/bench/flush`, only with `OMNI_BENCH=1`).
+    pub async fn flush(&self) -> Result<Barrier, BarrierError> {
+        let c = &self.counters;
+        if c.barrier_busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(BarrierError::Busy);
+        }
+        let busy = BusyGuard(Arc::clone(c));
         let (tx, rx) = oneshot::channel();
-        let queued = Queued {
-            at: Instant::now(),
-            item: Item::Barrier(tx),
-        };
-        let closed = || StoreError::Writer("writer closed".into());
-        self.tx.send(queued).await.map_err(|_| closed())?;
-        rx.await.map_err(|_| closed())
+        {
+            let _order = c
+                .order
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pending = Pending {
+                watermark: c.seq.load(Ordering::Relaxed),
+                dropped: c.dropped.load(Ordering::Relaxed),
+                reply: tx,
+                _busy: busy,
+            };
+            let queued = Queued {
+                at: Instant::now(),
+                item: Item::Barrier(pending),
+            };
+            match self.tx.try_send(queued) {
+                Ok(()) => {}
+                // The guard goes with the refused item, freeing the slot.
+                Err(mpsc::error::TrySendError::Full(_)) => return Err(BarrierError::Full),
+                Err(mpsc::error::TrySendError::Closed(_)) => return Err(BarrierError::Closed),
+            }
+        }
+        rx.await.map_err(|_| BarrierError::Closed)
     }
 
     /// Queues a long-window seed read, run on the writer's connection after
@@ -659,7 +760,7 @@ async fn flush_watching(
 }
 
 /// Sorts one channel item into the batch or the barriers waiting on it.
-fn take(item: Item, batch: &mut Vec<WriteEvent>, barriers: &mut Vec<oneshot::Sender<WriterStats>>) {
+fn take(item: Item, batch: &mut Vec<WriteEvent>, barriers: &mut Vec<Pending>) {
     match item {
         Item::Event(e) => batch.push(e),
         Item::Barrier(b) => barriers.push(b),
@@ -667,10 +768,25 @@ fn take(item: Item, batch: &mut Vec<WriteEvent>, barriers: &mut Vec<oneshot::Sen
 }
 
 /// Answers barriers once the batch before them is written.
-fn answer(barriers: Vec<oneshot::Sender<WriterStats>>, counters: &Counters) {
+///
+/// Every event ahead of the barrier is now committed or failed, and none
+/// behind it is (the barrier ended its batch), so the writer's cumulative
+/// `written` and `failed` are exactly the prefix's. Events are only ever
+/// counted `written` or `failed` once, in queue order.
+fn answer(barriers: Vec<Pending>, counters: &Counters) {
     for b in barriers {
+        let answer = Barrier {
+            watermark: b.watermark,
+            committed: counters.written.load(Ordering::Relaxed),
+            failed: counters.failed.load(Ordering::Relaxed),
+            dropped: b.dropped,
+        };
+        // Free the one-barrier slot before the caller is woken, so a caller
+        // that asks again right after its answer is admitted.
+        let Pending { reply, _busy, .. } = b;
+        drop(_busy);
         // A caller that gave up waiting is no one's concern.
-        b.send(counters.snapshot()).ok();
+        reply.send(answer).ok();
     }
 }
 

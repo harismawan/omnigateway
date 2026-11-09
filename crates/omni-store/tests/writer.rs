@@ -6,8 +6,8 @@ mod common;
 
 use common::{bun_available, bun_script, ts, typed_rows};
 use omni_store::writer::{
-    BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog, RouteTarget,
-    WriteEvent, Writer, WriterConfig, WriterStats,
+    BarrierError, BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog,
+    RouteTarget, WriteEvent, Writer, WriterConfig, WriterStats,
 };
 use omni_store::{BreakerState, CredentialHealth, SqliteStore};
 use rusqlite::Connection;
@@ -927,10 +927,9 @@ fn the_default_queue_rides_out_a_one_second_stall_at_bench_rates() {
     });
 }
 
-/// `flush` is a barrier: it returns once every event accepted before it is
-/// committed (or failed), with the cumulative counters, even when the batch
-/// interval has not come round. `enqueued` counts accepted events (seeds
-/// aside), so after a barrier `enqueued == written + failed`.
+/// `flush` is a barrier: it returns once every event sequenced before it is
+/// resolved, with that prefix's counts, even when the batch interval has not
+/// come round: `committed + failed + dropped == watermark`, exactly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flush_returns_once_everything_before_it_is_committed() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -953,13 +952,14 @@ async fn flush_returns_once_everything_before_it_is_committed() {
             n
         ))));
     }
-    let stats = tokio::time::timeout(Duration::from_secs(10), handle.flush())
+    let b = tokio::time::timeout(Duration::from_secs(10), handle.flush())
         .await
         .expect("barrier within 10 s")
         .expect("barrier");
-    assert_eq!(stats.enqueued, 3000);
-    assert_eq!(stats.written + stats.failed, stats.enqueued);
-    assert_eq!(stats.dropped, 0);
+    assert_eq!(
+        (b.watermark, b.committed, b.failed, b.dropped),
+        (3000, 3000, 0, 0)
+    );
     assert_eq!(
         count(
             &db,
@@ -968,9 +968,9 @@ async fn flush_returns_once_everything_before_it_is_committed() {
         1500,
         "every row is in the database when the barrier returns"
     );
-    // A second barrier with nothing new returns the same totals.
+    // A second barrier with nothing new returns the same prefix.
     let again = handle.flush().await.expect("barrier");
-    assert_eq!((again.enqueued, again.written), (3000, stats.written));
+    assert_eq!(again, b);
     writer.close().await.expect("close");
 }
 
@@ -982,7 +982,167 @@ async fn flush_on_a_closed_writer_is_an_error() {
     let writer = Writer::spawn(&db, config(0, 512)).expect("spawn");
     let handle = writer.handle();
     writer.close().await.expect("close");
-    assert!(handle.flush().await.is_err());
+    assert_eq!(handle.flush().await, Err(BarrierError::Closed));
+}
+
+/// Producers on other threads keep sending, and dropping on a small queue,
+/// throughout a run of barriers: every barrier's answer is a coherent prefix,
+/// `committed + failed + dropped == watermark` exactly, watermarks only grow,
+/// and the last barrier after the producers stop accounts for every event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_producers_see_coherent_barrier_prefixes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path());
+    let cfg = WriterConfig {
+        // Small, so producers drop while barriers are taken.
+        capacity: 256,
+        ..config(0, 512)
+    };
+    let writer = Writer::spawn(&db, cfg).expect("spawn");
+    let handle = writer.handle();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let producers: Vec<_> = (0..4)
+        .map(|p| {
+            let h = handle.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut sent = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let id = format!("p{p}-{sent}");
+                    h.send(LogEvent::Finish(done(&id, T0, Some("key-1"), "sonnet", 1)));
+                    sent += 1;
+                }
+                sent
+            })
+        })
+        .collect();
+    let mut last = 0;
+    let mut barriers = 0;
+    let mut saw_drops = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        match handle.flush().await {
+            Ok(b) => {
+                assert_eq!(
+                    b.committed + b.failed + b.dropped,
+                    b.watermark,
+                    "incoherent prefix {b:?}"
+                );
+                assert!(b.watermark >= last, "watermark went back: {b:?}");
+                last = b.watermark;
+                saw_drops |= b.dropped > 0;
+                barriers += 1;
+            }
+            // The small queue is often full: the barrier is refused, never
+            // waits. Counted, and retried.
+            Err(BarrierError::Full) => tokio::task::yield_now().await,
+            Err(e) => panic!("barrier: {e:?}"),
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let sent: u64 = producers
+        .into_iter()
+        .map(|t| t.join().expect("producer"))
+        .sum();
+    let fin = loop {
+        match handle.flush().await {
+            Ok(b) => break b,
+            Err(BarrierError::Full) => tokio::time::sleep(Duration::from_millis(5)).await,
+            Err(e) => panic!("{e:?}"),
+        }
+    };
+    assert_eq!(fin.watermark, sent, "every event sequenced once");
+    assert_eq!(fin.committed + fin.failed + fin.dropped, sent);
+    assert!(barriers >= 3, "{barriers} barriers answered");
+    assert!(
+        saw_drops,
+        "producers were meant to drop on a 256-slot queue"
+    );
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM request_logs") as u64,
+        fin.committed
+    );
+    writer.close().await.expect("close");
+}
+
+/// At most one barrier in flight: a second while one is pending is `Busy`;
+/// a barrier never waits for queue room (`Full`); once the first is
+/// answered, the next one is admitted.
+#[test]
+fn a_second_barrier_is_busy_and_a_full_queue_refuses_one() {
+    current_thread().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let cfg = WriterConfig {
+            capacity: 4,
+            busy_timeout: Duration::from_secs(5),
+            ..config(0, 512)
+        };
+        let writer = Writer::spawn(&db, cfg).expect("spawn");
+        let handle = writer.handle();
+        // The writer's first batch waits on this lock for 300 ms.
+        let locker = lock_for(&db, Duration::from_millis(300));
+        assert!(handle.send(pending("a", T0, None, "m")));
+        tokio::task::yield_now().await;
+        let first = handle.flush();
+        tokio::pin!(first);
+        // Poll it once: admitted, now waiting for the writer.
+        assert!(futures_poll_once(&mut first).await.is_none());
+        assert_eq!(handle.flush().await, Err(BarrierError::Busy));
+        // Fill the queue behind the stuck batch: a barrier is not let in.
+        while handle.send(pending("x", T0, None, "m")) {}
+        let first = first.await.expect("first barrier");
+        assert_eq!(
+            first.committed + first.failed + first.dropped,
+            first.watermark
+        );
+        locker.join().expect("locker");
+        // Busy is released with the answer; the queue drains; a new one fits.
+        let next = loop {
+            match handle.flush().await {
+                Ok(b) => break b,
+                Err(BarrierError::Full) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Err(e) => panic!("{e:?}"),
+            }
+        };
+        assert_eq!(next.committed + next.failed + next.dropped, next.watermark);
+        writer.close().await.expect("close");
+    });
+}
+
+/// A full queue refuses a barrier at once.
+#[test]
+fn a_barrier_on_a_full_queue_is_refused_without_waiting() {
+    current_thread().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let writer = Writer::spawn(
+            &db,
+            WriterConfig {
+                capacity: 2,
+                ..config(0, 512)
+            },
+        )
+        .expect("spawn");
+        let handle = writer.handle();
+        // Current-thread runtime: the writer cannot drain while we fill.
+        while handle.send(pending("x", T0, None, "m")) {}
+        let started = std::time::Instant::now();
+        assert_eq!(handle.flush().await, Err(BarrierError::Full));
+        assert!(started.elapsed() < Duration::from_millis(50));
+        writer.close().await.expect("close");
+    });
+}
+
+/// Polls a future once; `Some` if it finished.
+async fn futures_poll_once<F: std::future::Future + Unpin>(f: &mut F) -> Option<F::Output> {
+    std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(match std::pin::Pin::new(&mut *f).poll(cx) {
+            std::task::Poll::Ready(v) => Some(v),
+            std::task::Poll::Pending => None,
+        })
+    })
+    .await
 }
 
 /// `wal_autocheckpoint` is a trigger, not a bound: while another connection

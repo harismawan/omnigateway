@@ -178,6 +178,11 @@ pub struct Options {
     /// writer barrier. Off by default; not a TS route, and never for
     /// production: it makes the caller wait on the database.
     pub bench_endpoints: bool,
+    /// The barrier's server-side deadline (30 s); tests shorten it.
+    pub bench_flush_timeout: Duration,
+    /// The writer's queue capacity, if not [`WriterConfig`]'s default; tests
+    /// shrink it.
+    pub writer_capacity: Option<usize>,
 }
 
 /// `idleTimeout: 255`.
@@ -190,6 +195,8 @@ impl Default for Options {
             stop_deadline: STOP_DEADLINE,
             idle_timeout: IDLE_TIMEOUT,
             bench_endpoints: false,
+            bench_flush_timeout: Duration::from_secs(30),
+            writer_capacity: None,
         }
     }
 }
@@ -254,6 +261,9 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             node_id: node_id.clone(),
             day_offset_minutes: offset,
             commit_sink: Some(commit_tx),
+            capacity: options
+                .writer_capacity
+                .unwrap_or(WriterConfig::default().capacity),
             ..WriterConfig::default()
         },
     )
@@ -310,6 +320,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         keepalive: options.keepalive,
         idle_timeout: options.idle_timeout,
         bench_endpoints: options.bench_endpoints,
+        bench_flush_timeout: options.bench_flush_timeout,
     });
 
     let listener = TcpListener::bind((config.host.as_str(), config.port))

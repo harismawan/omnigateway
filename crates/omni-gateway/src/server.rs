@@ -48,6 +48,8 @@ pub struct App {
     pub idle_timeout: Duration,
     /// Serve `POST /__omni/bench/flush` (`OMNI_BENCH=1` only).
     pub bench_endpoints: bool,
+    /// How long that barrier waits for the writer before a 504.
+    pub bench_flush_timeout: Duration,
 }
 
 impl std::fmt::Debug for App {
@@ -149,26 +151,41 @@ fn health(app: &App) -> Response<Body> {
     json_response(200, JSON_UTF8, body, &[])
 }
 
-/// The bench harness's writer barrier: answered once every event the writer
-/// accepted before it is committed, with the cumulative counters, so the
-/// harness can take exact per-scenario deltas. 503 if the writer has closed.
+/// The bench harness's writer barrier (`OMNI_BENCH=1` only): the outcome of
+/// every event sequenced before it, `{watermark, committed, failed,
+/// dropped}` with `committed + failed + dropped == watermark`, so the
+/// harness can take exact per-scenario deltas.
+///
+/// - 409 `inconclusive` while another barrier is in flight (one at a time);
+/// - 503 `inconclusive` if the writer's queue has no room (a barrier never
+///   waits for room, so it cannot crowd out request events) or it has closed;
+/// - 504 `inconclusive` if the writer has not answered within
+///   `bench_flush_timeout` (30 s). That barrier stays in flight, and later
+///   calls get 409, until the writer answers it.
 async fn bench_flush(app: &App) -> Response<Body> {
-    match app.deps.writer.flush().await {
-        Ok(s) => json_response(
+    use omni_store::writer::BarrierError;
+    let inconclusive = |status: u16, reason: &str| {
+        json_response(
+            status,
+            JSON_UTF8,
+            format!("{{\"inconclusive\":true,\"reason\":\"{reason}\"}}"),
+            &[],
+        )
+    };
+    match tokio::time::timeout(app.bench_flush_timeout, app.deps.writer.flush()).await {
+        Ok(Ok(b)) => json_response(
             200,
             JSON_UTF8,
             format!(
-                "{{\"enqueued\":{},\"committed\":{},\"dropped\":{},\"failed\":{}}}",
-                s.enqueued, s.written, s.dropped, s.failed
+                "{{\"watermark\":{},\"committed\":{},\"failed\":{},\"dropped\":{}}}",
+                b.watermark, b.committed, b.failed, b.dropped
             ),
             &[],
         ),
-        Err(e) => json_response(
-            503,
-            JSON_UTF8,
-            format!("{{\"error\":{:?}}}", e.to_string()),
-            &[],
-        ),
+        Ok(Err(BarrierError::Busy)) => inconclusive(409, "another barrier is in flight"),
+        Ok(Err(BarrierError::Full)) => inconclusive(503, "writer queue full"),
+        Ok(Err(BarrierError::Closed)) => inconclusive(503, "writer closed"),
+        Err(_) => inconclusive(504, "writer did not answer in time"),
     }
 }
 

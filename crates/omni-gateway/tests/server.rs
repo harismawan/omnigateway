@@ -1049,8 +1049,9 @@ async fn the_bench_flush_barrier_commits_and_counts() {
     let v: serde_json::Value = serde_json::from_str(&b).expect("json");
     assert_eq!(v["dropped"], 0, "{b}");
     assert_eq!(v["failed"], 0, "{b}");
-    assert!(v["enqueued"].as_u64().expect("enqueued") >= 10, "{b}");
-    assert_eq!(v["enqueued"], v["committed"], "{b}");
+    // Two events per request (Begin, Finish), all ahead of the barrier.
+    assert_eq!(v["watermark"], 10, "{b}");
+    assert_eq!(v["committed"], 10, "{b}");
     // Committed means in the database, now.
     let done = rows(
         &g.f.path,
@@ -1066,5 +1067,109 @@ async fn the_bench_flush_route_is_off_by_default() {
     let g = boot_opts(&[("fast", "mock-c1-d0")], Options::default()).await;
     let (s, _, _) = call(&g.base, "POST", "/__omni/bench/flush", &[], "").await;
     assert_eq!(s, 404);
+    stop(g).await;
+}
+
+/// Holds the database's write lock from another connection, so the writer's
+/// next batch (and any barrier behind it) waits.
+fn hold_write_lock(path: &std::path::Path) -> rusqlite::Connection {
+    let c = rusqlite::Connection::open(path).expect("open");
+    c.execute_batch("BEGIN IMMEDIATE").expect("lock");
+    c
+}
+
+/// One barrier at a time: while one waits on a stuck writer, a second gets
+/// 409; the first gives up after the server's timeout with 504
+/// `inconclusive`; the slot stays taken until the writer answers it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_concurrent_barrier_is_409_and_a_stuck_one_times_out_with_504() {
+    let g = boot_opts(
+        &[("fast", "mock-c1-d0")],
+        Options {
+            bench_endpoints: true,
+            bench_flush_timeout: Duration::from_millis(500),
+            ..Options::default()
+        },
+    )
+    .await;
+    let auth = bearer(&g);
+    let (s, _, _) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", &auth)],
+        r#"{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let lock = hold_write_lock(&g.f.path);
+    let base = g.base.clone();
+    let first =
+        tokio::spawn(async move { call(&base, "POST", "/__omni/bench/flush", &[], "").await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (s2, _, b2) = call(&g.base, "POST", "/__omni/bench/flush", &[], "").await;
+    assert_eq!(s2, 409, "{b2}");
+    assert!(b2.contains("\"inconclusive\":true"), "{b2}");
+    let (s1, _, b1) = first.await.expect("first");
+    assert_eq!(s1, 504, "{b1}");
+    assert!(b1.contains("\"inconclusive\":true"), "{b1}");
+    // Still in flight (the writer has not answered it): still 409.
+    let (s3, _, _) = call(&g.base, "POST", "/__omni/bench/flush", &[], "").await;
+    assert_eq!(s3, 409);
+    drop(lock);
+    // Once the writer gets through, barriers are admitted again.
+    let mut ok = false;
+    for _ in 0..50 {
+        let (s, _, b) = call(&g.base, "POST", "/__omni/bench/flush", &[], "").await;
+        if s == 200 {
+            let v: serde_json::Value = serde_json::from_str(&b).expect("json");
+            assert_eq!(v["watermark"], 2, "{b}");
+            assert_eq!(v["committed"], 2, "{b}");
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ok, "no barrier admitted after the writer recovered");
+    stop(g).await;
+}
+
+/// A barrier never waits for queue room: a full queue is 503 `inconclusive`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_barrier_on_a_full_queue_is_503() {
+    let g = boot_opts(
+        &[("fast", "mock-c1-d0")],
+        Options {
+            bench_endpoints: true,
+            writer_capacity: Some(2),
+            ..Options::default()
+        },
+    )
+    .await;
+    let auth = bearer(&g);
+    let lock = hold_write_lock(&g.f.path);
+    // The writer takes the first request's events into a batch that, after
+    // the 200 ms interval, sticks on the lock; the next ones fill its 2-slot
+    // queue (and the rest are dropped).
+    for i in 0..4 {
+        if i == 1 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let (s, _, _) = call(
+            &g.base,
+            "POST",
+            "/v1/chat/completions",
+            &[("authorization", &auth)],
+            r#"{"model":"fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        )
+        .await;
+        assert_eq!(s, 200);
+    }
+    let started = std::time::Instant::now();
+    let (s, _, b) = call(&g.base, "POST", "/__omni/bench/flush", &[], "").await;
+    assert_eq!(s, 503, "{b}");
+    assert!(b.contains("\"inconclusive\":true"), "{b}");
+    assert!(started.elapsed() < Duration::from_secs(1), "it waited");
+    drop(lock);
     stop(g).await;
 }

@@ -22,14 +22,18 @@
  * `--request-timeout 30s` `--rate <req/s>`.
  *
  * **Every request has a row.** The gateway runs with `OMNI_BENCH=1`, which
- * makes the Rust gateway serve `POST /__omni/bench/flush`: a writer barrier
- * that answers once everything its writer accepted is committed, with the
- * cumulative `{enqueued, committed, dropped, failed}`. The harness calls it at
- * each scenario's start and end, so the scenario's drops are the exact delta,
- * and the rows it then counts are all in. A barrier that does not answer in
- * 60 s makes the scenario *inconclusive* (flagged, never counted as zero). A
- * gateway without the route (TS, which writes every row synchronously, 404s)
- * is checked by the rows alone.
+ * makes the Rust gateway serve `POST /__omni/bench/flush`: a writer barrier.
+ * Every event the gateway hands its writer takes a sequence number; the
+ * barrier's watermark is the last one at its admission, and it answers once
+ * all of those are resolved, with `{watermark, committed, failed, dropped}`
+ * for exactly that prefix (`committed + failed + dropped == watermark`). The
+ * harness calls it at each scenario's start and end; the scenario's events,
+ * drops and failures are the deltas between the two, and the rows it then
+ * counts are all in. Any barrier answer but 200 (409 another in flight, 503
+ * queue full, 504 server timeout of 30 s), a timeout here (60 s), or an
+ * incoherent answer makes the scenario *inconclusive*: flagged, never counted
+ * as zero. A gateway without the route (TS, which writes every row
+ * synchronously, 404s) is checked by the rows alone.
  *
  * After each scenario (single mode) the request log is read for the
  * scenario's window: every response the clients got must have a `done` row,
@@ -691,10 +695,10 @@ type RowCheck = {
   writer: WriterDelta | "unsupported" | "inconclusive";
 };
 
-/** `POST /__omni/bench/flush`'s answer: cumulative since the gateway started. */
-type WriterCounts = { enqueued: number; committed: number; dropped: number; failed: number };
-/** The same, over one scenario. */
-type WriterDelta = WriterCounts;
+/** `POST /__omni/bench/flush`'s answer: the prefix of events up to `watermark`. */
+type WriterCounts = { watermark: number; committed: number; failed: number; dropped: number };
+/** One scenario's events: `events == committed + failed + dropped`. */
+type WriterDelta = { events: number; committed: number; failed: number; dropped: number };
 
 const BARRIER_TIMEOUT_MS = 60_000;
 
@@ -703,7 +707,7 @@ const BARRIER_TIMEOUT_MS = 60_000;
  * it, `"inconclusive"` if one does not answer within the timeout (or errs).
  */
 async function writerBarrier(): Promise<WriterCounts | "unsupported" | "inconclusive"> {
-  const total: WriterCounts = { enqueued: 0, committed: 0, dropped: 0, failed: 0 };
+  const total: WriterCounts = { watermark: 0, committed: 0, failed: 0, dropped: 0 };
   for (const base of BASES) {
     try {
       const res = await fetch(`${base}/__omni/bench/flush`, {
@@ -719,10 +723,12 @@ async function writerBarrier(): Promise<WriterCounts | "unsupported" | "inconclu
         return "inconclusive";
       }
       const c = (await res.json()) as WriterCounts;
-      total.enqueued += c.enqueued;
+      // The gateway promises an exact prefix; anything else is not evidence.
+      if (c.committed + c.failed + c.dropped !== c.watermark) return "inconclusive";
+      total.watermark += c.watermark;
       total.committed += c.committed;
-      total.dropped += c.dropped;
       total.failed += c.failed;
+      total.dropped += c.dropped;
     } catch {
       return "inconclusive";
     }
@@ -737,10 +743,10 @@ function writerDelta(
   if (a === "inconclusive" || b === "inconclusive") return "inconclusive";
   if (a === "unsupported" || b === "unsupported") return "unsupported";
   return {
-    enqueued: b.enqueued - a.enqueued,
+    events: b.watermark - a.watermark,
     committed: b.committed - a.committed,
-    dropped: b.dropped - a.dropped,
     failed: b.failed - a.failed,
+    dropped: b.dropped - a.dropped,
   };
 }
 

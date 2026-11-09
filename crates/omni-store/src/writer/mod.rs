@@ -29,4 +29,6 @@ pub use events::{
     BreakerTransition, Committed, Completion, HealthMeasurement, LogEvent, PendingLog, RequestLog,
     RouteTarget, SeedQuery, SeedRows, WriteEvent,
 };
-pub use task::{Writer, WriterConfig, WriterHandle, WriterStats, queue_slot_bytes};
+pub use task::{
+    Barrier, BarrierError, Writer, WriterConfig, WriterHandle, WriterStats, queue_slot_bytes,
+};
