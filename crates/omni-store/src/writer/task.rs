@@ -592,6 +592,7 @@ struct Sink {
     day_offset_minutes: i64,
     counters: Arc<Counters>,
     commit_sink: Option<mpsc::Sender<Committed>>,
+    delivery_gap: bool,
     sink_warned: Option<Instant>,
     sink_warn_every: Duration,
     seed_delay: Duration,
@@ -659,6 +660,11 @@ impl Sink {
         let result = result
             .map(|(buckets, stamps)| SeedRows { buckets, stamps })
             .map_err(|e| e.to_string());
+        self.recover_gap();
+        if self.delivery_gap {
+            self.counters.seeds_dropped.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
         if let Some(sink) = &self.commit_sink
             && let Err(mpsc::error::TrySendError::Full(_)) =
                 sink.try_send(Committed::Seed { query, result })
@@ -688,6 +694,13 @@ impl Sink {
     }
 
     fn deliver(&mut self, completions: Vec<super::events::Completion>) {
+        self.recover_gap();
+        if self.delivery_gap {
+            self.counters
+                .sink_dropped
+                .fetch_add(completions.len() as u64, Ordering::Relaxed);
+            return;
+        }
         let Some(sink) = &self.commit_sink else {
             return;
         };
@@ -699,7 +712,19 @@ impl Sink {
             sink.try_send(Committed::Completions(completions))
         {
             let total = self.counters.sink_dropped.fetch_add(n, Ordering::Relaxed) + n;
+            self.delivery_gap = true;
             self.warn_sink_full("completions", n, total);
+        }
+    }
+
+    /// Bounded nonwaiting recovery: a single sticky bit, emitted before any
+    /// later delivery. A full sink prevents later messages too, preserving FIFO.
+    fn recover_gap(&mut self) {
+        if self.delivery_gap
+            && let Some(sink) = &self.commit_sink
+            && sink.try_send(Committed::Gap).is_ok()
+        {
+            self.delivery_gap = false;
         }
     }
 
@@ -894,6 +919,7 @@ async fn run(
         day_offset_minutes: config.day_offset_minutes,
         counters: Arc::clone(&counters),
         commit_sink: config.commit_sink.clone(),
+        delivery_gap: false,
         sink_warned: None,
         sink_warn_every: config.drop_warn_interval,
         seed_delay: config.seed_delay,
@@ -906,6 +932,7 @@ async fn run(
     warn_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     'running: loop {
+        sink.recover_gap();
         // Idle until the first event of the next batch, or the stop.
         let first = tokio::select! {
             biased;

@@ -14,6 +14,40 @@ const T0: f64 = 1_794_000_000_000.0;
 const KEY: &str = "k1";
 
 #[tokio::test]
+async fn original_limiter_recovers_gap_and_counts_later_commits_once() {
+    let mut h = harness(r#"{"tokens":{"5h":1000000}}"#, 2, Duration::from_millis(2));
+    h.limiter.prepare(KEY, &h.limits, "fast", T0);
+    h.limiter.seed_now(&h.store);
+    for _ in 0..2 {
+        h.sink
+            .try_send(Committed::Completions(Vec::new()))
+            .expect("fill");
+    }
+    h.finish(10);
+    tokio::time::timeout(Duration::from_secs(2), h.handle.flush())
+        .await
+        .expect("writer never waits on sink")
+        .expect("flush");
+    assert_eq!(h.handle.stats().sink_dropped, 1);
+    h.drain();
+    // A later completion is queued after the pending Gap; applying both leaves
+    // windows invalidated until an ordered seed includes both committed rows.
+    h.finish(20);
+    h.handle.flush().await.expect("flush");
+    h.drain();
+    assert_eq!(h.ask_seed(), 2);
+    h.handle.flush().await.expect("seed flush");
+    h.drain();
+    assert_eq!(h.tokens_used(), 30.0);
+    h.finish(7);
+    h.handle.flush().await.expect("later flush");
+    h.drain();
+    assert_eq!(h.tokens_used(), 37.0);
+    assert_eq!(h.rows(), 3);
+    h.settle().await;
+}
+
+#[tokio::test]
 async fn commit_crossing_minute_uses_application_time_not_row_time() {
     let mut h = harness(r#"{"requests":{"5h":1}}"#, 64, Duration::from_millis(5));
     let minute = (T0 / 60_000.0).floor() * 60_000.0;
@@ -405,13 +439,9 @@ async fn a_dropped_seed_result_is_retried_and_installs_the_exact_total() {
     }
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(h.limiter.held_debits(), 0, "unseeded windows ignore debits");
-    // Within the timeout the marker blocks a duplicate ask...
+    // The completion gap invalidates outstanding seeds, allowing immediate
+    // recovery rather than waiting for the ordinary dropped-seed timeout.
     h.limiter.prepare(KEY, &h.limits, "fast", T0 + 1.0);
-    assert_eq!(h.limiter.send_seeds(&h.handle), 0);
-    // ...past it, the seed is asked again; wait until both results applied
-    // (the consumer frees the one slot between them).
-    let later = T0 + omni_gateway_core::ratelimit::SEED_TIMEOUT_MS + 1.0;
-    h.limiter.prepare(KEY, &h.limits, "fast", later);
     assert_eq!(h.limiter.send_seeds(&h.handle), 2);
     for _ in 0..2 {
         tokio::time::timeout(Duration::from_secs(2), seen.recv())
@@ -437,7 +467,7 @@ async fn a_dropped_seed_result_is_retried_and_installs_the_exact_total() {
     assert_eq!(h.handle.stats().seeds_dropped, 2, "the retry was delivered");
     let used = h
         .limiter
-        .admit(KEY, &h.limits, "fast", later)
+        .admit(KEY, &h.limits, "fast", T0 + 1.0)
         .expect("admit")
         .headroom
         .requests

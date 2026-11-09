@@ -232,6 +232,9 @@ pub struct SeedRows {
 /// What the writer tells its commit sink, in the order it happened.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Committed {
+    /// A committed completion notification was shed. All following seeds and
+    /// debits are ordered after this invalidation marker.
+    Gap,
     /// One committed batch's completed rows.
     Completions(Vec<Completion>),
     /// A seed's read, taken after every completion delivered before it and

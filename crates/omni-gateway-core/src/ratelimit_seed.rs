@@ -88,6 +88,12 @@ impl RateLimiter {
     /// Persisted request timestamps remain separate for seed/reset semantics.
     pub fn apply_at(&self, event: Committed, now: f64) {
         match event {
+            Committed::Gap => {
+                let mut state = self.lock();
+                state.long.clear();
+                state.pending.clear();
+                state.seeding.clear();
+            }
             Committed::Completions(rows) => {
                 for c in rows {
                     let Some(key) = c.api_key_id.as_deref() else {
