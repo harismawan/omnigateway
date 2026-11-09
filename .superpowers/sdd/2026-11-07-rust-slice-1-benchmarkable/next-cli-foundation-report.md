@@ -1,5 +1,27 @@
 # Rust CLI foundation + keys list — 2026-11-10
 
+## Fix round 2 — residual operator JSON
+
+Implementation `2033a4db`, base `848f918f`. R1-I1 and noncallable-own-join diagnostic addressed. Operator-only parser validates with existing JSC diagnostics, then constructs existing `JsValue` with an explicit container stack. IEEE overflow survives as ±Infinity until the JSON writer emits null; human array join uses an explicit traversal stack. Existing stack-growing JsValue clone/serialization and iterative destruction handle deep ownership. Gateway parsing/normalized key reads are unchanged. String decoding retains the existing documented surrogate replacement exception.
+
+RED command: `OMNI_CLI_COLLECT_RED=1 OMNI_CLI_BIN=target/release/omni bun conformance/cli/keys-list.ts` against prior release: **14/105 failures**, local `/tmp/opencode/cli-r2-red.log`. Cases include signed/exponent overflow, depths 127/128/150/512/1500, and own join scalar values. Final goldens also include finite/overflow f64 boundaries, huge positive exponent, underflow/subnormal, duplicate join properties, and object/array diagnostic values.
+
+GREEN: **113 raw-byte TS comparisons per entrypoint**, standalone, unified subcommand, unified symlink (339 total):
+```
+OMNI_CLI_BIN=target/release/omni bun conformance/cli/keys-list.ts
+OMNI_CLI_BIN=target/release/omnigateway OMNI_CLI_SUBCOMMAND=1 OMNI_CLI_BENCH=1 bun conformance/cli/keys-list.ts
+OMNI_CLI_BIN=target/release/omnigateway OMNI_CLI_SYMLINK=1 bun conformance/cli/keys-list.ts
+```
+`cargo test -p omni-cli -p omni-control -p omni-ir --lib`: control 1 / IR 18 pass (CLI zero unit tests; process goldens cover CLI). New small-stack test parses, clones, coerces, serializes and drops a **20,000-level** overflow-containing array on a 256KiB thread stack. Strict all-target clippy for CLI/control/IR, workspace fmt, scoped Biome, diff check and release builds pass.
+
+Repeated unified release latency p50 **1.777 / 1.829 / 1.722 ms**, max **3.038 ms**, 30/30 below 15ms. Same warm seeded fixture/spawn-drain-exit-parse method. SHA256 `80418f13c3c507f9ab9e5b7d67bfdfd1255cb5f5f32912d16784415297456d88`, sources `2033a4db`. Raw artifact `/tmp/opencode/cli-r2-latency.json`.
+```
+1.994378 2.913158 1.694028 1.822364 1.899214 1.777469 1.784865 1.628368 1.681260 1.709187
+1.582503 1.672940 1.938131 2.736467 3.037602 1.896007 1.686682 1.732825 2.265752 1.828784
+1.816632 1.879637 1.721966 1.670848 1.676116 1.858539 1.838950 1.697996 1.648429 1.772719
+```
+Maintenance concern retained: public `OperatorKey.key` still contains auth-shaped placeholder fields; current operator projection uses raw fields correctly, but a dedicated non-auth metadata type would reduce future misuse risk. PTY/platform/exhaustive filesystem and independent migration-fixture coverage remain outstanding. No unsafe, frozen TS, gateway parser/admission changes or new commands. Controller owns scoped re-review; no full migration readiness claim.
+
 ## Fix round 1 — 2026-11-10
 
 Implementation `0ec7ed9b`, base `aa41493d`. All four Important findings addressed in the implemented keys-list scope:

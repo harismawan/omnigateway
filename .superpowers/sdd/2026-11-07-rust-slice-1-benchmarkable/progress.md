@@ -1,5 +1,10 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-07-rust-slice-1-benchmarkable.md
 
+## CLI foundation fix round 2
+- `2033a4db`: operator-only JS values retain Infinity/deep JSON, iterative parser/join and existing stack-safe JsValue clone/render/drop; own noncallable join diagnostic matched. Gateway parser/admission unchanged.
+- RED14/105 against prior binary; GREEN113 raw-byte comparisons each standalone/subcommand/symlink. Control deep20k small-stack1 + IR18 pass; strict clippy/fmt/Biome pass. Unified latency p50 1.777/1.829/1.722ms, max3.038ms (30/30 below15ms).
+- Full commands/hash/raw timing and retained OperatorKey placeholder maintenance concern in next-cli-foundation-report.md. Scoped controller re-review pending.
+
 ## CLI foundation fix round 1 — 2026-11-10
 - `0ec7ed9b`: I1 account-home fallback; I2 raw operator allowlist projection with gateway semantics preserved; I3 JS model traversal; I4 full-range JS dates. Local help/THP/ANSI/docs minors fixed.
 - Prior release RED 45/71 comparisons; final raw-byte oracle GREEN 85 each standalone/subcommand/symlink. IR18/store6/config2/server32 pass; strict scoped clippy, fmt, Biome pass. sumSince differential expanded to 42 cases.
