@@ -13,7 +13,7 @@ pub fn resolve(args: &[String]) -> Option<(String, Vec<String>)> {
         && args.get(i + 1).is_some_and(|s| {
             matches!(
                 s.as_str(),
-                "list" | "models" | "guardrail" | "smart-routing" | "revoke"
+                "list" | "models" | "guardrail" | "smart-routing" | "revoke" | "expiry"
             )
         })
     {
@@ -63,6 +63,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             .map_or((&token[2..], None), |(k, v)| (k, Some(v)));
         match name {
             name if matches!(name, "root" | "db")
+                || (command == "expiry" && name == "at")
                 || (command == "models" && name == "allow")
                 || (command == "guardrail" && matches!(name, "policy" | "policy-file")) =>
             {
@@ -86,6 +87,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 flags.insert(name.into(), value);
             }
             name if matches!(name, "json" | "no-color" | "yes" | "help" | "version")
+                || (command == "expiry" && name == "never")
                 || (command == "models" && matches!(name, "all" | "none"))
                 || (command == "guardrail" && name == "clear")
                 || (command == "smart-routing" && matches!(name, "on" | "off")) =>

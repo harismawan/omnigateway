@@ -26,6 +26,21 @@ fn mutation_is_visible_to_other_connection_and_auth_reader() {
         .expect("key");
     assert_eq!(key.model_allowlist, Some(vec![]));
     assert!(key.usable(100));
+    let before = version();
+    keys::edit(writer.connection(), "k", KeyEdit::Expiry(Some(100))).expect("expiry");
+    assert_ne!(before, version());
+    let key = keys::find_by_hash(reader.connection(), &hash)
+        .expect("read")
+        .expect("key");
+    assert!(key.usable(99));
+    assert!(!key.usable(100));
+    keys::edit(writer.connection(), "k", KeyEdit::Expiry(None)).expect("never");
+    assert!(
+        keys::find_by_hash(reader.connection(), &hash)
+            .expect("read")
+            .expect("key")
+            .usable(100)
+    );
     keys::edit(writer.connection(), "k", KeyEdit::Revoke(100)).expect("revoke");
     let key = keys::find_by_hash(reader.connection(), &hash)
         .expect("read")

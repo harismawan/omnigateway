@@ -2,6 +2,24 @@
 use omni_store::{SqliteStore, StoreError};
 use serde_json::{Value, json};
 
+pub fn set_expiry(store: &SqliteStore, id: &str, expiry: Option<i64>) -> Result<(), String> {
+    if expiry.is_some_and(|v| v <= 0) {
+        return Err("BAD_REQUEST: expiresAt: Too small: expected number to be >0".into());
+    }
+    if expiry.is_some_and(|v| v > 8_640_000_000_000_000) {
+        return Err(
+            "BAD_REQUEST: expiresAt: Too big: expected number to be <=8640000000000000".into(),
+        );
+    }
+    require_key(store, id)?;
+    omni_store::keys::edit(
+        store.connection(),
+        id,
+        omni_store::keys::KeyEdit::Expiry(expiry),
+    )
+    .map_err(|e| e.to_string())
+}
+
 pub fn set_models(store: &SqliteStore, id: &str, models: Option<&[String]>) -> Result<(), String> {
     if let Some(i) = models.and_then(|m| m.iter().position(String::is_empty)) {
         return Err(format!(

@@ -49,6 +49,54 @@ try {
   }
   writeFileSync(join(root, "policy"), "  Work only.\nRefuse roleplay.\n");
   const cases = [
+    ["expiry", "k"],
+    ["expiry", "k", "--at", "2030-01-01"],
+    ...[
+      "2030",
+      "2030-01",
+      "2030-1-1",
+      " 2030-01-01 ",
+      "12/31/2030",
+      "January 1, 2030",
+      "Tue, 01 Jan 2030 00:00:00 GMT",
+      "0",
+      "1",
+      "49",
+      "50",
+      "99",
+      "100",
+      "2030-13-01",
+      "2030-01-32",
+      "2030-01-01T25:00:00Z",
+      "2030-01-01T00:00:00.123456Z",
+      "2030-01-01T00:00:00.🌍Z",
+      "2030-01-01T00:00:00+🌍",
+      "2030-01-01T00:00:00.Z",
+    ].map((at) => ["expiry", "k", "--at", at, "--json"]),
+    ["expiry", "k", "--at", "2001-01-01", "--json"],
+    ["expiry", "k", "--never"],
+    ["expiry", "k", "--at", "2030-02-30", "--json"],
+    ["expiry", "k", "--at", "2030-01-01T24:00:00Z", "--json"],
+    ["expiry", "k", "--at", "2030-01-01T00:00:00+02:00", "--json"],
+    ["expiry", "k", "--at", "2030-01-01T12:00:00", "--json"],
+    ["expiry", "k", "--at", "+275760-09-13", "--json"],
+    ["expiry", "k", "--at", "+275760-09-14"],
+    ["expiry", "k", "--at", "1970-01-01"],
+    ["expiry", "k", "--at", "1969-01-01"],
+    ["expiry", "k", "--at", "not-a-date"],
+    ...[
+      "2030-01-01T-1:00Z",
+      "2030-01-01T00:-1Z",
+      "2030-01-01T00:00:-1Z",
+      "2030-01-01T00:00:00+00:-1",
+      "2030-01-01T00:00:00+0:000",
+      "+275760-09-13T00:00:00.001Z",
+      "-271821-04-20",
+      "-000000-01-01",
+    ].map((at) => ["expiry", "k", `--at=${at}`]),
+    ["expiry", "k", "--at", "2030", "--never"],
+    ["expiry", "missing", "--at", "bad"],
+    ["expiry", "k", "--never", "--json"],
     ["smart-routing", "k", "--on"],
     ["smart-routing", "k", "--off", "--json"],
     ["smart-routing", "k"],
@@ -117,7 +165,10 @@ try {
       });
       const key = await store.keys.findByHash(await hashApiKey(rawKey));
       assert(key);
-      assert.equal(keyUsable(key, Date.now()), key.revokedAt === null);
+      assert.equal(
+        keyUsable(key, Date.now()),
+        key.revokedAt === null && (key.expiresAt === null || key.expiresAt > Date.now()),
+      );
       store.close();
     }
     assert.deepEqual(outputs[1], outputs[0], JSON.stringify(args));

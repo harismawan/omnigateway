@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 mod args;
 mod context;
+mod date;
 mod mutations;
 mod output;
 use std::{io::IsTerminal, process::ExitCode};
@@ -14,7 +15,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     let Some((command, rest)) = args::resolve(&argv) else {
         if help || argv.iter().all(|s| s.starts_with('-')) {
             println!(
-                "omni — Rust CLI migration increment\n\nImplemented: keys list, models, guardrail, smart-routing, revoke\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
+                "omni — Rust CLI migration increment\n\nImplemented: keys list, models, guardrail, smart-routing, revoke, expiry\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
             );
             return ExitCode::SUCCESS;
         }
@@ -35,6 +36,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             mutations::usage(&command),
             match command.as_str() {
                 "models" => "Show or replace one key's allowed models",
+                "expiry" => "Show or replace one key's expiry",
                 "guardrail" => "Show or replace one key's usage policy",
                 "smart-routing" => "Turn confidential-data routing on or off for one key",
                 "revoke" => "Revoke a gateway API key, keeping its usage history",

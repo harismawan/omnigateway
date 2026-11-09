@@ -2,6 +2,7 @@ use std::{collections::HashMap, io::IsTerminal};
 
 pub fn usage(command: &str) -> &'static str {
     match command {
+        "expiry" => "keys expiry <id> [--at <when>] [--never]",
         "models" => "keys models <id> [--allow <model> ...] [--all] [--none]",
         "guardrail" => "keys guardrail <id> [--policy <text> | --policy-file <path> | --clear]",
         "smart-routing" => "keys smart-routing <id> (--on | --off)",
@@ -43,6 +44,22 @@ pub fn run(
         .ok_or_else(|| fail(format!("no api key \"{id}\"")))?;
     let key = &listing.data["keys"][index];
     match command {
+        "expiry" if has("at") || has("never") => {
+            if has("at") && has("never") {
+                return Err(usage("--at and --never cannot be combined"));
+            }
+            let at = if let Some(raw) = flags.get("at") {
+                Some(crate::date::parse(raw).ok_or_else(|| {
+                    (
+                        2,
+                        format!("--at must be a date, e.g. 2030-01-01, got \"{raw}\""),
+                    )
+                })?)
+            } else {
+                None
+            };
+            omni_control::keys::set_expiry(&store, id, at).map_err(fail)?;
+        }
         "smart-routing" => {
             omni_control::keys::set_smart_routing(&store, id, has("on")).map_err(fail)?
         }
@@ -136,6 +153,23 @@ pub fn run(
         key["prefix"].as_str().expect("stored prefix")
     );
     Ok(match command {
+        "expiry" => {
+            if key["expiresAt"].is_null() {
+                format!("{head}\nexpires: never")
+            } else {
+                format!(
+                    "{head}\nexpires: {}{}",
+                    crate::output::time(&key["expiresAt"]),
+                    if key["revokedAt"].is_null()
+                        && key["expiresAt"].as_f64().is_some_and(|v| v <= now as f64)
+                    {
+                        " (expired)"
+                    } else {
+                        ""
+                    }
+                )
+            }
+        }
         "smart-routing" => format!(
             "{head}\nsmart routing  {}",
             if key["smartRouting"] == true {

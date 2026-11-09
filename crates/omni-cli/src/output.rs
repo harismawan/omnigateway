@@ -5,7 +5,7 @@ fn text(v: &Value) -> String {
     v.as_str()
         .map_or_else(|| jsjson::to_string(v), str::to_owned)
 }
-fn time(v: &Value) -> String {
+pub(crate) fn time(v: &Value) -> String {
     let Some(ms) = v.as_f64().filter(|n| n.is_finite()) else {
         return "—".into();
     };

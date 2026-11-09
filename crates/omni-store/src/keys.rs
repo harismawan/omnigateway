@@ -41,6 +41,7 @@ const T: &str = "api_keys";
 
 /// Explicit mutation vocabulary; SQL identifiers never come from CLI input.
 pub enum KeyEdit<'a> {
+    Expiry(Option<i64>),
     Models(Option<&'a str>),
     Guardrail(Option<&'a str>),
     SmartRouting(bool),
@@ -49,6 +50,10 @@ pub enum KeyEdit<'a> {
 
 pub fn edit(conn: &Connection, id: &str, edit: KeyEdit<'_>) -> Result<(), StoreError> {
     match edit {
+        KeyEdit::Expiry(v) => conn.execute(
+            "UPDATE api_keys SET expires_at = ? WHERE id = ?",
+            rusqlite::params![v, id],
+        )?,
         KeyEdit::Models(v) => conn.execute(
             "UPDATE api_keys SET model_allowlist = ? WHERE id = ?",
             rusqlite::params![v, id],
