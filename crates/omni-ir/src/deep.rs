@@ -311,21 +311,27 @@ pub enum ParseError {
 /// the parse that follows decides whether it is JSON.
 pub fn depth_of(text: &str) -> usize {
     let (mut depth, mut max) = (0usize, 0usize);
-    let mut in_string = false;
-    let mut escaped = false;
-    for &b in text.as_bytes() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while let Some(&b) = bytes.get(at) {
+        at += 1;
         match b {
-            b'"' => in_string = true,
+            b'"' => {
+                // Only quotes and escapes affect the outer-depth state inside
+                // a string. Skip ordinary UTF-8 bytes in vectorized runs, but
+                // consume exactly one byte after every escape as before.
+                while at < bytes.len() {
+                    let Some(next) = memchr::memchr2(b'"', b'\\', &bytes[at..]) else {
+                        at = bytes.len();
+                        break;
+                    };
+                    at += next + 1;
+                    if bytes[at - 1] == b'"' {
+                        break;
+                    }
+                    at = (at + 1).min(bytes.len());
+                }
+            }
             b'[' | b'{' => {
                 depth += 1;
                 max = max.max(depth);
@@ -335,6 +341,46 @@ pub fn depth_of(text: &str) -> usize {
         }
     }
     max
+}
+
+#[test]
+fn vectorized_depth_matches_scalar_on_arbitrary_text() {
+    fn scalar(text: &str) -> usize {
+        let (mut depth, mut max) = (0usize, 0usize);
+        let (mut quoted, mut escaped) = (false, false);
+        for b in text.bytes() {
+            if quoted {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == b'"' {
+                    quoted = false;
+                }
+            } else {
+                match b {
+                    b'"' => quoted = true,
+                    b'[' | b'{' => {
+                        depth += 1;
+                        max = max.max(depth);
+                    }
+                    b']' | b'}' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+        }
+        max
+    }
+    let mut seed = 1234567u64;
+    let alphabet = ['[', ']', '{', '}', '"', '\\', 'x', 'é', '🦀'];
+    for len in 0..1024 {
+        let mut text = String::new();
+        for _ in 0..len {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            text.push(alphabet[(seed % 9) as usize]);
+        }
+        assert_eq!(depth_of(&text), scalar(&text), "{text:?}");
+    }
 }
 
 /// `JSON.parse`, bounded at [`MAX_DEPTH`] and safe on any stack.

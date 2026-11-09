@@ -11,6 +11,52 @@ use super::{JsKey, KeyMint, index0, iterate, json_object, nonempty, or_zero, usa
 use crate::codec::{DecodeError, Flow, StreamDecoder};
 use crate::sse::SseMessage;
 
+#[cfg(test)]
+mod performance {
+    use super::*;
+    use std::{hint::black_box, time::Instant};
+
+    #[test]
+    #[ignore = "serial release stage profile, not a correctness test"]
+    fn actual_benchmark_chunk_stages() {
+        let data = r#"{"id":"chatcmpl-bench-01234567-89ab-cdef-0123-456789abcdef","object":"chat.completion.chunk","created":0,"model":"mock-c2000-d0","choices":[{"index":0,"delta":{"content":"lorem ipsum "}}]}"#;
+        let msg = SseMessage {
+            event: String::new(),
+            data: data.into(),
+        };
+        for stage in [
+            "scan",
+            "typed",
+            "general",
+            "fast-decoder",
+            "general-decoder",
+        ] {
+            let mut decoder = ChatDecoder::new();
+            decoder.no_fast = stage == "general-decoder";
+            let mut out = VecDeque::new();
+            let start = Instant::now();
+            for _ in 0..1_000_000 {
+                match stage {
+                    "scan" => {
+                        black_box(omni_ir::deep::depth_of(black_box(data)));
+                    }
+                    "typed" => {
+                        black_box(super::super::fast::parse_chat_chunk(black_box(data)));
+                    }
+                    "general" => {
+                        black_box(json_object(black_box(data)));
+                    }
+                    _ => {
+                        decoder.message(black_box(&msg), &mut out).expect("decode");
+                        out.clear();
+                    }
+                }
+            }
+            eprintln!("{stage} million actual chunks {:?}", start.elapsed());
+        }
+    }
+}
+
 /// The reasoning text one chat delta carries: the first non-empty spelling.
 fn reasoning_text(delta: &DeltaView<'_>) -> String {
     if let Some(r) = nonempty(delta.reasoning) {

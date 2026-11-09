@@ -1131,6 +1131,7 @@ dependencies = [
 name = "omni-ir"
 version = "0.16.0"
 dependencies = [
+ "memchr",
  "ryu-js",
  "serde",
  "serde_json",
