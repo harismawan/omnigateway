@@ -5,6 +5,28 @@ use omni_ratelimit::window::SlidingWindow;
 const MINUTE: f64 = 60_000.0;
 
 #[test]
+fn arbitrary_limit_increases_do_not_lose_history() {
+    for size in [3_u32, 65_536, 65_537] {
+        let mut w = SlidingWindow::with_limit(MINUTE, None);
+        for i in 0..size {
+            w.record(f64::from(i) * 0.25);
+        }
+        for limit in [1, 2, u64::from(size) + 100, 0] {
+            w.set_limit(Some(limit));
+            assert_eq!(w.count(20_000.0), size as usize);
+            assert!(w.retained() <= SlidingWindow::MAX_ENTRIES);
+        }
+        w.set_limit(None);
+        assert_eq!(w.count(20_000.0), size as usize);
+        assert_eq!(w.count(80_000.0), 0);
+        w.record(80_000.0);
+        assert_eq!(w.count(139_999.0), 1);
+        assert_eq!(w.reset_at(139_999.0), 140_000.0);
+        assert_eq!(w.count(140_000.0), 0);
+    }
+}
+
+#[test]
 fn a_window_counts_only_what_has_not_aged_out() {
     let mut w = SlidingWindow::new(MINUTE);
     w.record(1_000.0);
@@ -117,20 +139,16 @@ fn a_huge_limit_at_a_high_rate_holds_one_entry_per_millisecond_and_stays_exact()
     assert_eq!(w.reset_at(61_000.0), 1_001.0 + MINUTE);
 }
 
-/// A small limit holds at most `limit` events however many are recorded:
-/// what admission (`count < limit`) and the exact reset (the oldest of the
-/// newest `limit`) need. Past the limit a request is refused and the caller
-/// does not record it; a lowered limit trims to the newest.
+/// History cannot be truncated to today's limit: tomorrow's may be larger.
 #[test]
-fn a_limit_bounds_what_is_held() {
+fn history_is_independent_of_the_current_limit() {
     let mut w = SlidingWindow::with_limit(MINUTE, Some(3));
     for t in 0..10 {
         w.record(1_000.0 + f64::from(t) * 10.0);
     }
-    assert_eq!(w.count(1_100.0), 3);
-    assert!(w.retained() <= 3);
-    // The newest three: 1070, 1080, 1090.
-    assert_eq!(w.reset_at(1_100.0), 1_070.0 + MINUTE);
+    assert_eq!(w.count(1_100.0), 10);
+    assert_eq!(w.retained(), 10);
+    assert_eq!(w.reset_at(1_100.0), 1_000.0 + MINUTE);
 }
 
 /// With the gateway's admission discipline (record only when `count < limit`)
@@ -167,13 +185,13 @@ fn bounded_and_unbounded_agree_under_admission() {
     }
 }
 
-/// No 1m limit configured: nothing needs the stamps, so none are held.
+/// Concurrency/long-window-only subjects need history if a minute limit is enabled.
 #[test]
-fn no_limit_holds_nothing() {
+fn no_minute_limit_still_retains_history() {
     let mut w = SlidingWindow::with_limit(MINUTE, None);
     flood(&mut w, 0.0, 100, 51);
-    assert_eq!(w.retained(), 0);
-    assert_eq!(w.count(100.0), 0);
+    assert_eq!(w.retained(), 100);
+    assert_eq!(w.count(100.0), 5100);
 }
 
 /// Stamps that are not whole milliseconds (never produced by the gateway)

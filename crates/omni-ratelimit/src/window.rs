@@ -1,23 +1,20 @@
 //! `SlidingWindow` from `packages/ratelimit/src/window.ts`: an exact sliding
 //! count of event timestamps. `now` is a parameter on every method.
 //!
-//! **Memory scales with the limit, not the request rate.** TS keeps every
+//! **Memory has a fixed entry cap, independent of configuration.** TS keeps every
 //! stamp in a minute ("sixty requests in a minute is sixty numbers"), which
 //! at the Rust gateway's ~51 k req/s is ~3 M numbers per key. Here:
 //! - equal stamps are held as one `(stamp, count)` entry. The gateway's
 //!   stamps are whole milliseconds, so a minute is at most 60 000 entries
 //!   whatever the rate, and counts and resets stay exact;
-//! - a window built [`SlidingWindow::with_limit`] holds at most `limit` events:
-//!   admission needs only `count < limit`, and the exact reset (the oldest
-//!   held stamp plus the window) only the newest `limit`. Under the gateway's
-//!   discipline (record only an admitted request, that is when
-//!   `count < limit`) nothing is ever trimmed by it, so it answers exactly as
-//!   TS's unbounded window. Only a limit lowered mid-window trims to the
-//!   newest `limit`: `used` then reads as the limit (still refused), and the
-//!   reset is when one of those frees a slot;
+//! - configuration changes never discard events, including when no minute
+//!   limit is configured. A later limit can therefore use prior admissions;
 //! - at most [`SlidingWindow::MAX_ENTRIES`] entries. Only stamps finer than a
 //!   millisecond can reach it; past it the two oldest entries merge into the
 //!   later stamp, which can only make a count higher and a reset later.
+//!   This legacy fallback has no bound on expiration delay (L2 pending).
+//!   Exactness resumes after the merged history expires. Ordered timestamps
+//!   are assumed, as in TS; this is not a backward-clock guarantee.
 
 use std::collections::VecDeque;
 
@@ -29,8 +26,6 @@ pub struct SlidingWindow {
     entries: VecDeque<(f64, u32)>,
     /// Events held: the sum of the entries' counts.
     held: usize,
-    /// At most this many events are held (`None`: unbounded, TS's window).
-    limit: Option<usize>,
 }
 
 impl SlidingWindow {
@@ -44,24 +39,18 @@ impl SlidingWindow {
             window_ms,
             entries: VecDeque::new(),
             held: 0,
-            limit: None,
         }
     }
 
-    /// A window that holds at most `limit` events; `None` (no limit
-    /// configured on it) holds none, since nothing reads them.
-    pub fn with_limit(window_ms: f64, limit: Option<u64>) -> Self {
-        let mut w = Self::new(window_ms);
-        w.set_limit(limit);
-        w
+    /// Configuration-compatible constructor. History is independent of the
+    /// current limit: even `None` must retain events for a later enabled limit.
+    pub fn with_limit(window_ms: f64, _limit: Option<u64>) -> Self {
+        Self::new(window_ms)
     }
 
-    /// Re-bounds the window for a limit that changed: the newest `limit`
-    /// events are kept.
-    pub fn set_limit(&mut self, limit: Option<u64>) {
-        self.limit = Some(limit.map_or(0, |l| usize::try_from(l).unwrap_or(usize::MAX)));
-        self.trim_to_limit();
-    }
+    /// Retained for callers that update configuration. Never discards history:
+    /// a future arbitrary increase must still count every live admission.
+    pub fn set_limit(&mut self, _limit: Option<u64>) {}
 
     pub fn window_ms(&self) -> f64 {
         self.window_ms
@@ -86,40 +75,17 @@ impl SlidingWindow {
     }
 
     pub fn record(&mut self, now: f64) {
-        if self.limit == Some(0) {
-            return;
-        }
         match self.entries.back_mut() {
             Some((s, n)) if *s == now && *n < u32::MAX => *n += 1,
             _ => self.entries.push_back((now, 1)),
         }
         self.held += 1;
-        self.trim_to_limit();
         if self.entries.len() > Self::MAX_ENTRIES
             && let (Some((_, a)), Some((_, b))) =
                 (self.entries.pop_front(), self.entries.front_mut())
         {
             // The older entry's events now age out with the later stamp.
             *b = b.saturating_add(a);
-        }
-    }
-
-    /// Drops the oldest events beyond the limit.
-    fn trim_to_limit(&mut self) {
-        let Some(limit) = self.limit else { return };
-        while self.held > limit {
-            let Some(front) = self.entries.front_mut() else {
-                break;
-            };
-            let excess = self.held - limit;
-            if (front.1 as usize) <= excess {
-                self.held -= front.1 as usize;
-                self.entries.pop_front();
-            } else {
-                // `excess < front.1 <= u32::MAX`.
-                front.1 -= u32::try_from(excess).unwrap_or(u32::MAX);
-                self.held -= excess;
-            }
         }
     }
 

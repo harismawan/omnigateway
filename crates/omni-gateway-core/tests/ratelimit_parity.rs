@@ -93,6 +93,7 @@ for (const c of cases) {
   let lastModel = "fast";
   const steps = [];
   for (const s of c.steps) {
+    if (s.op === "limits") { c.limits = s.value; steps.push(null); continue; }
     if (s.op === "at") { clock = s.ms; steps.push(null); continue; }
     if (s.op === "release") { held.shift()?.release(); steps.push(null); continue; }
     if (s.op === "complete") {
@@ -139,7 +140,7 @@ fn headroom_json(h: &HeadroomByDimension) -> Value {
 fn run_rust(limits_json: &str, history: &[Value], steps: &[Value]) -> Vec<Value> {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteStore::open(dir.path().join("omni.db"), 0).expect("store");
-    let limits = parse_limits(limits_json).expect("limits");
+    let mut limits = parse_limits(limits_json).expect("limits");
     let mut n = 0;
     let row = |n: &mut usize, at: f64, model: &str, tokens: f64, cost: f64| {
         *n += 1;
@@ -182,6 +183,10 @@ fn run_rust(limits_json: &str, history: &[Value], steps: &[Value]) -> Vec<Value>
     let mut out = Vec::new();
     for s in steps {
         match s["op"].as_str().expect("op") {
+            "limits" => {
+                limits = parse_limits(&s["value"].to_string()).expect("updated limits");
+                out.push(Value::Null);
+            }
             "at" => {
                 clock = s["ms"].as_f64().expect("ms");
                 out.push(Value::Null);
@@ -235,6 +240,28 @@ fn the_limiter_equals_the_ts_limiter_step_for_step() {
     }
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     let mut cases = Vec::new();
+    for initial in [r#"{"requests":{"1m":3}}"#, r#"{"concurrency":1}"#] {
+        let mut steps = Vec::new();
+        // Expire the harness's two pre-seed admissions first.
+        for delta in [61_000, 62_000, 63_000] {
+            steps.push(json!({"op":"at", "ms":T0 + f64::from(delta)}));
+            steps.push(json!({"op":"admit", "model":"fast"}));
+            steps.push(json!({"op":"release"}));
+        }
+        for (delta, limit) in [
+            (64_000, 1),
+            (65_000, 2),
+            (121_000, 2),
+            (122_000, 2),
+            (123_000, 100),
+        ] {
+            steps.push(json!({"op":"at", "ms":T0 + f64::from(delta)}));
+            steps.push(json!({"op":"limits", "value":{"requests":{"1m":limit}}}));
+            steps.push(json!({"op":"admit", "model":"fast"}));
+            steps.push(json!({"op":"release"}));
+        }
+        cases.push((initial, Vec::new(), steps));
+    }
     for i in 0..140 {
         let limits = LIMITS[i % LIMITS.len()];
         let (history, steps) = script(&mut rng);

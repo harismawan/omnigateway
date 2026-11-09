@@ -278,18 +278,13 @@ impl State {
         now: f64,
         queued: &mut bool,
     ) -> CounterSnapshot {
-        // Bounded by the subject's 1m request limit (none configured: nothing
-        // held): memory follows the limit, not the rate.
-        let limit = limits
-            .requests
-            .as_ref()
-            .and_then(|r| r.one_minute)
-            .flatten();
+        // Every limited subject records minute history, including concurrency-
+        // only subjects. Later configuration changes must see prior admissions.
+        // SlidingWindow's fixed entry cap bounds memory independently of limits.
         let ring = self
             .rings
             .entry(s.id.clone())
-            .or_insert_with(|| SlidingWindow::with_limit(Window::M1.ms(), limit));
-        ring.set_limit(limit);
+            .or_insert_with(|| SlidingWindow::new(Window::M1.ms()));
         #[allow(clippy::cast_precision_loss)]
         let before = WindowCounter {
             used: ring.count(now) as f64,

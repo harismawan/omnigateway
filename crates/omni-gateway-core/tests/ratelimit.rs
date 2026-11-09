@@ -32,6 +32,50 @@ fn limits(json: &str) -> LimitConfig {
     parse_limits(json).expect("limits")
 }
 
+#[test]
+fn lowering_then_raising_minute_limit_preserves_all_admissions() {
+    let limiter = RateLimiter::new();
+    let three = limits(r#"{"requests":{"1m":3}}"#);
+    for now in [1000.0, 2000.0, 3000.0] {
+        drop(
+            limiter
+                .admit(KEY, &three, "m", now)
+                .expect("initial admission"),
+        );
+    }
+    let one = limits(r#"{"requests":{"1m":1}}"#);
+    assert!(limiter.admit(KEY, &one, "m", 4000.0).is_err());
+    let two = limits(r#"{"requests":{"1m":2}}"#);
+    assert!(limiter.admit(KEY, &two, "m", 5000.0).is_err());
+    assert!(limiter.admit(KEY, &two, "m", 61_000.0).is_err());
+    drop(
+        limiter
+            .admit(KEY, &two, "m", 62_000.0)
+            .expect("expired slot"),
+    );
+}
+
+#[test]
+fn enabling_minute_limit_counts_concurrency_only_history() {
+    let limiter = RateLimiter::new();
+    let concurrency = limits(r#"{"concurrency":1}"#);
+    for now in [1000.0, 2000.0, 3000.0] {
+        drop(
+            limiter
+                .admit(KEY, &concurrency, "m", now)
+                .expect("free gauge"),
+        );
+    }
+    let two = limits(r#"{"concurrency":1,"requests":{"1m":2}}"#);
+    assert!(limiter.admit(KEY, &two, "m", 5000.0).is_err());
+    assert_eq!(limiter.window_count(KEY, 5000.0), 3);
+    drop(
+        limiter
+            .admit(KEY, &two, "m", 62_000.0)
+            .expect("expired slot"),
+    );
+}
+
 fn harness(json: &str) -> H {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteStore::open(dir.path().join("omni.db"), 0).expect("store");
