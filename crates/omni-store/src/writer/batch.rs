@@ -169,7 +169,7 @@ impl Logs {
         let ids: Vec<&str> = ids.into_keys().collect();
         let mut rows: HashMap<String, Option<LogRow>> =
             ids.iter().map(|id| ((*id).to_owned(), None)).collect();
-        for chunk in ids.chunks(sql::max_variables(tx)?) {
+        for chunk in sql::fixed_chunks(&ids, &sql::id_sizes(tx)?) {
             let mut stmt = tx.prepare_cached(&sql::select_logs(chunk.len()))?;
             let mut found = stmt.query(params_from_iter(chunk))?;
             while let Some(r) = found.next()? {

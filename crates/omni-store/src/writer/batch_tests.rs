@@ -6,7 +6,7 @@ use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use std::sync::{Arc, Mutex};
 
 #[test]
-fn a_full_batch_is_one_insert_per_table() {
+fn a_full_batch_is_a_few_multi_row_inserts_per_table() {
     let mut conn = Connection::open_in_memory().expect("open");
     migrate::migrate(&mut conn, 0).expect("migrate");
     let events: Vec<WriteEvent> = (0..512)
@@ -37,10 +37,11 @@ fn a_full_batch_is_one_insert_per_table() {
             .filter(|s| s.starts_with(&format!("INSERT INTO {table} ")))
             .count()
     };
-    assert_eq!(inserts("request_logs"), 1);
-    // 512 distinct daily keys and 300 hourly ones, one statement each.
-    assert_eq!(inserts("usage_daily"), 1);
-    assert_eq!(inserts("usage_rollup"), 1);
+    // 512 rows in two 256-row statements; 512 distinct daily keys likewise,
+    // and 300 hourly ones as 256 + 2 × 16 + 3 × 4.
+    assert_eq!(inserts("request_logs"), 2);
+    assert_eq!(inserts("usage_daily"), 2);
+    assert_eq!(inserts("usage_rollup"), 6);
     let rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0))
         .expect("count");
@@ -100,7 +101,9 @@ fn a_batch_reads_request_logs_once_and_writes_a_begun_and_finished_row_once() {
         .iter()
         .filter(|s| s.starts_with("SELECT") && s.contains(" FROM request_logs "))
         .count();
-    assert_eq!(reads, 1, "one read of the touched rows, no read-back");
+    // The touched ids, read once in fixed-size chunks; no read-back after.
+    let once = super::sql::fixed_chunks(&[(); 100], &super::sql::CHUNK_SIZES).len();
+    assert_eq!(reads, once, "one read of the touched rows, no read-back");
     let touches: i64 = conn
         .query_row("SELECT COUNT(*) FROM touches", [], |r| r.get(0))
         .expect("touches");
@@ -114,4 +117,55 @@ fn a_batch_reads_request_logs_once_and_writes_a_begun_and_finished_row_once() {
         )
         .expect("rows");
     assert_eq!((done, input), (100, 300));
+}
+
+/// Every batch size reuses the same few prepared statements: full chunks
+/// of one fixed row count plus single rows, never a statement per size, so
+/// the statement cache stays small however the batches fall.
+#[test]
+fn batches_of_any_size_reuse_a_fixed_set_of_statements() {
+    let mut conn = Connection::open_in_memory().expect("open");
+    migrate::migrate(&mut conn, 0).expect("migrate");
+    let seen = Arc::new(Mutex::new(std::collections::HashSet::<String>::new()));
+    let sink = Arc::clone(&seen);
+    conn.trace_v2(
+        TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(move |e: TraceEvent<'_>| {
+            if let TraceEvent::Stmt(stmt, _) = e {
+                // The statement's own text (with `?`s), not the expanded one.
+                let sql = stmt.sql();
+                if sql.contains("request_logs") || sql.contains("usage_") {
+                    sink.lock().expect("lock").insert(sql.into_owned());
+                }
+            }
+        }),
+    )
+    .expect("trace");
+    let mut n = 0;
+    for size in [1, 2, 3, 5, 64, 127, 128, 129, 300, 511, 512, 777] {
+        let events: Vec<WriteEvent> = (0..size)
+            .map(|_| {
+                n += 1;
+                let mut log = RequestLog::new(format!("r{n}"), 1_794_007_800_000 + n, 200);
+                log.api_key_id = Some(format!("k{}", n % 97));
+                log.requested_model = format!("m{}", n % 89);
+                LogEvent::Finish(log).into()
+            })
+            .collect();
+        write(&mut conn, &events, "n", 0).expect("write");
+    }
+    conn.trace_v2(TraceEventCodes::empty(), None::<fn(TraceEvent<'_>)>)
+        .expect("untrace");
+    let seen = seen.lock().expect("lock");
+    let count = |prefix: &str| seen.iter().filter(|s| s.starts_with(prefix)).count();
+    // At most one statement per chunk size, for each statement shape.
+    let sizes = super::sql::CHUNK_SIZES.len();
+    assert!(count("INSERT INTO request_logs ") <= sizes, "{seen:#?}");
+    assert!(count("INSERT INTO usage_daily ") <= sizes, "{seen:#?}");
+    assert!(count("INSERT INTO usage_rollup ") <= sizes, "{seen:#?}");
+    assert!(count("SELECT") <= sizes + 2, "{seen:#?}");
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM request_logs", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(rows, n);
 }
