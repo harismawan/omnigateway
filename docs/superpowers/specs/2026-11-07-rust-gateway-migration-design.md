@@ -440,6 +440,22 @@ These rules apply to every `/v1/*` request.
 **Accepted loss.** On a hard kill (OOM, SIGKILL), at most one batch is lost:
 about 200 ms of rows and usage. The operator accepted this.
 
+**Request ids: time-ordered. Operator decision, 2026-11-09.**
+- **Format.** Request ids are `req_` + an RFC 9562 UUIDv7, minted monotonically
+  within a process. TS mints `req_` + UUIDv4.
+- **Why.** Random v4 keys scatter every `request_logs` primary-key insert across
+  the index. That caps the single-writer commit rate (about 20–25 k req/s on the
+  gateway's 4 cores) well below the gateway's own throughput. Time-ordered keys
+  append instead.
+- **What stays the same.** The `req_<uuid>` shape, and every id derived from it:
+  `resp_req_…`, `msg_req_…_n`, Grok's `x-grok-req-id`, and the Antigravity,
+  OpenAI and Qoder derivations. Providers already receive a fresh id per request.
+- **What changes.** The version nibble, and a millisecond timestamp in the first
+  48 bits. That timestamp tells the request's start time, which the response's
+  `created` field already discloses.
+- **Status.** This is a deliberate, documented difference from TS. Clients must
+  not parse request ids.
+
 **Graceful shutdown.** On SIGTERM:
 1. Stop accepting new requests.
 2. Let streams finish up to the existing drain deadline.
