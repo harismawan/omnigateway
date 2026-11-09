@@ -75,9 +75,15 @@ pub const SEED_TIMEOUT_MS: f64 = 5_000.0;
 /// again at its next request.
 const MAX_PENDING_SEEDS: usize = 4_096;
 
-/// Retained row stamps per subject and window. Past it the oldest are
-/// dropped, which can only make a refusal's reset later (the safe side).
-pub(crate) const MAX_STAMPS: usize = 1 << 20;
+/// Retained row stamps per subject and long window, for a refusal's exact
+/// reset (the oldest retained row's `at` plus the window, which TS reads from
+/// the store). Past it the oldest are dropped, which can only make a refusal's
+/// reset later (the safe side): only a window holding more than this many
+/// rows when it refuses reports a later `Retry-After` than TS. A fixed bound,
+/// so the memory does not follow the request rate (it was 2^20, 16 MiB per
+/// window at the bench's rate).
+pub const MAX_LONG_STAMPS: usize = 65_536;
+pub(crate) const MAX_STAMPS: usize = MAX_LONG_STAMPS;
 
 /// `modelSubjectId`: `encodeURIComponent` keeps `/` and `:` out of the
 /// model part, so no model name can spell another subject's key.
@@ -177,6 +183,9 @@ impl LongState {
         while self.stamps.front().is_some_and(|s| *s < since) {
             self.stamps.pop_front();
         }
+        if self.stamps.capacity() > 64 && self.stamps.capacity() > 4 * self.stamps.len() {
+            self.stamps.shrink_to(self.stamps.len() * 2);
+        }
     }
 
     pub(crate) fn push_stamp(&mut self, at: f64) {
@@ -269,10 +278,18 @@ impl State {
         now: f64,
         queued: &mut bool,
     ) -> CounterSnapshot {
+        // Bounded by the subject's 1m request limit (none configured: nothing
+        // held): memory follows the limit, not the rate.
+        let limit = limits
+            .requests
+            .as_ref()
+            .and_then(|r| r.one_minute)
+            .flatten();
         let ring = self
             .rings
             .entry(s.id.clone())
-            .or_insert_with(|| SlidingWindow::new(Window::M1.ms()));
+            .or_insert_with(|| SlidingWindow::with_limit(Window::M1.ms(), limit));
+        ring.set_limit(limit);
         #[allow(clippy::cast_precision_loss)]
         let before = WindowCounter {
             used: ring.count(now) as f64,
@@ -552,6 +569,26 @@ impl RateLimiter {
                 .limits
                 .insert(model_subject_id(key_id, model), o.clone());
         }
+    }
+
+    /// What a subject holds: its 1m window's entries, and each long window's
+    /// retained row stamps (5h, 1w). For tests and diagnostics.
+    pub fn retained(&self, subject: &str) -> (usize, [usize; 2]) {
+        let st = self.lock();
+        let ring = st.rings.get(subject).map_or(0, SlidingWindow::retained);
+        let long = st
+            .long
+            .get(subject)
+            .map_or([0, 0], |l| [l[0].stamps.len(), l[1].stamps.len()]);
+        (ring, long)
+    }
+
+    /// The 1m window's count for a subject at `now`. For tests.
+    pub fn window_count(&self, subject: &str, now: f64) -> usize {
+        self.lock()
+            .rings
+            .get_mut(subject)
+            .map_or(0, |r| r.count(now))
     }
 
     /// In-flight requests for a subject: a key id, or [`model_subject_id`].

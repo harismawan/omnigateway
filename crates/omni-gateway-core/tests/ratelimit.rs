@@ -586,3 +586,48 @@ fn a_refusals_reset_counts_rows_debited_after_the_seed() {
     // The oldest debited row (T0 + 1h) ages out 5h later.
     assert_eq!(refused.retry_after_ms, 3.0 * HOUR);
 }
+
+/// Memory per subject follows its configured limits, not its request rate.
+/// The bench key (`requests:1m=100000000`, `tokens:5h=1e11`,
+/// `concurrency=100000`) at the bench's ~51 admitted requests per ms for a
+/// minute is 3 M requests: the 1m window holds at most one entry per
+/// millisecond, and the long windows' row stamps (debited on completion)
+/// stay under their fixed cap, while every count stays exact.
+#[test]
+fn the_bench_key_at_51_requests_per_ms_holds_bounded_state() {
+    let h = harness(
+        r#"{"requests":{"1m":100000000},"tokens":{"5h":100000000000},"concurrency":100000}"#,
+    );
+    // Seed the long windows (empty), as the preseeder does at boot.
+    h.limiter.preseed(KEY, &h.limits, T0);
+    h.seed();
+    let mut n = 0_u64;
+    for ms in 0..60_000_u32 {
+        let now = T0 + f64::from(ms);
+        for _ in 0..51 {
+            let mut a = h.limiter.admit(KEY, &h.limits, "m", now).expect("admitted");
+            a.release();
+            h.limiter.debit(KEY, "m", 10.0, 0.0, now, now);
+            n += 1;
+        }
+    }
+    let (ring, long) = h.limiter.retained(KEY);
+    assert!(
+        ring <= 60_000,
+        "1m window holds {ring} entries for {n} requests"
+    );
+    assert!(
+        long.iter()
+            .all(|l| *l <= omni_gateway_core::ratelimit::MAX_LONG_STAMPS),
+        "long-window stamps {long:?} for {n} requests"
+    );
+    // Still exact: the next request's 1m count holds all of them, and the
+    // 5h token sum all their tokens.
+    let a = h
+        .limiter
+        .admit(KEY, &h.limits, "m", T0 + 59_999.0)
+        .expect("admitted");
+    assert_eq!(h.limiter.window_count(KEY, T0 + 59_999.0), 3_060_001);
+    let tokens = a.headroom.tokens.expect("tokens headroom").used;
+    assert!((tokens - 30_600_000.0).abs() < 0.5, "tokens {tokens}");
+}
