@@ -6,10 +6,12 @@
 //!   is a plain INSERT that fails on an existing id, `route` updates only a
 //!   pending row, `append` is the `COMPLETE` claim), and each changed row is
 //!   written once in one multi-row upsert.
-//! - **Rollups.** Each completed row is read back as stored, as `complete`
-//!   does, and folded into its `usage_daily` and `usage_rollup` rows in
-//!   completion order, starting from what those rows held, with SQLite's
-//!   arithmetic. Each rollup row is then written once.
+//! - **Rollups.** Each completed row is folded, as `complete` does after
+//!   reading it back with `SELECT *`, into its `usage_daily` and
+//!   `usage_rollup` rows in completion order, starting from what those rows
+//!   held, with SQLite's arithmetic. Each rollup row is then written once. The
+//!   row folded is the one this batch just wrote, held in memory, not read
+//!   back (see [`Logs::completed_rows`]).
 //! - **Health.** The last row per (credential, model) wins, written with the
 //!   `UPSERT_HEALTH` statement. A row the foreign key refuses is skipped, as
 //!   the TS `updateHealth` throws and changes nothing.
@@ -118,7 +120,9 @@ fn log_values(log: &RequestLog, state: &str, node_id: &str) -> LogRow {
         int(log.cache_write_tokens),
         log.ttft_ms.map_or(SqlValue::Null, int),
         int(log.duration_ms),
-        js::bind_number(log.cost_usd),
+        // `+ 0.0` turns a `-0` into `0`, which is what SQLite stores for it
+        // anyway, so the row held in memory is the row read back.
+        js::bind_number(log.cost_usd + 0.0),
         json_strings(&log.degradations),
         int(i64::from(log.rtk_applied)),
         int(log.rtk_filter_hits),
@@ -233,40 +237,27 @@ impl Logs {
     }
 
     fn write(&self, tx: &Transaction<'_>) -> Result<(), StoreError> {
-        let rows: Vec<LogRow> = self
+        let rows: Vec<&LogRow> = self
             .dirty
             .keys()
-            .filter_map(|id| self.rows.get(id).cloned().flatten())
+            .filter_map(|id| self.rows.get(id).and_then(Option::as_ref))
             .collect();
         Upsert::new("request_logs", &LOG_COLUMNS[..1], &LOG_COLUMNS[1..]).run(tx, &rows)
     }
 
-    /// The completed rows as stored, in completion order: what `complete`
-    /// reads back with `SELECT *` before rolling up. A completed row is never
-    /// changed again within the batch, so reading them all after the write is
-    /// reading each at its completion.
-    fn stored_completed(&self, tx: &Transaction<'_>) -> Result<Vec<LogRow>, StoreError> {
-        let order: HashMap<&str, usize> = self
-            .completed
+    /// The completed rows, in completion order, as this batch stored them:
+    /// what `complete` reads back with `SELECT *` before rolling up, without
+    /// the read. The upsert sets every column to the row held here, and a
+    /// completed row is never changed again within the batch. Every cell is
+    /// either one read from the table or one bound from the event, and a bound
+    /// cell reads back as the same JS number or string (an integral
+    /// `cost_usd` bound as an INTEGER reads back as the equal REAL, and
+    /// `log_values` never binds a `-0`). The TS comparison test holds the two
+    /// to the same rows.
+    fn completed_rows(&self) -> impl Iterator<Item = &LogRow> {
+        self.completed
             .iter()
-            .enumerate()
-            .map(|(n, id)| (id.as_str(), n))
-            .collect();
-        let mut stored: Vec<(usize, LogRow)> = Vec::with_capacity(order.len());
-        for chunk in self.completed.chunks(sql::max_variables(tx)?) {
-            let mut stmt = tx.prepare_cached(&sql::select_logs(chunk.len()))?;
-            let mut found = stmt.query(params_from_iter(chunk))?;
-            while let Some(r) = found.next()? {
-                let row = read_log_row(r)?;
-                if let SqlValue::Text(id) = &row[0]
-                    && let Some(n) = order.get(id.as_str())
-                {
-                    stored.push((*n, row));
-                }
-            }
-        }
-        stored.sort_by_key(|(n, _)| *n);
-        Ok(stored.into_iter().map(|(_, row)| row).collect())
+            .filter_map(|id| self.rows.get(id).and_then(Option::as_ref))
     }
 }
 
@@ -583,9 +574,9 @@ pub(crate) fn write(
     let mut daily = Rollup::new("usage_daily", &DAILY_KEY, &DAILY_COUNTERS);
     let mut hourly = Rollup::new("usage_rollup", &HOURLY_KEY, &HOURLY_COUNTERS);
     let mut completions = Vec::new();
-    for row in logs.stored_completed(&tx)? {
-        roll_up(&tx, &mut daily, &mut hourly, &row, day_offset_minutes)?;
-        completions.push(completion(&row)?);
+    for row in logs.completed_rows() {
+        roll_up(&tx, &mut daily, &mut hourly, row, day_offset_minutes)?;
+        completions.push(completion(row)?);
     }
     daily.write(&tx)?;
     hourly.write(&tx)?;

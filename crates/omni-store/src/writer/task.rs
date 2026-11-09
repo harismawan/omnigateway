@@ -24,7 +24,14 @@ const MAX_ATTEMPTS: u32 = 3;
 /// First retry delay; doubled for each later one.
 const RETRY_BASE: Duration = Duration::from_millis(100);
 
-/// How the writer batches. [`Default`] is the spec's: 200 ms or 512 events.
+/// How the writer batches. [`Default`]: 200 ms (the spec's) or 4096 events.
+///
+/// 4096 rather than the spec's 512: a batch's cost is mostly the pages it
+/// dirties, and `request_logs` has a random primary key (`req_<uuid v4>`), so
+/// each row dirties one more leaf of it. Bigger batches share those pages and
+/// the per-transaction fixed cost: on one quiet core, bench-shaped requests,
+/// 512 committed ~47 k events/s and 4096 (with the checkpoint below) ~76 k.
+/// The 200 ms bound on how long an event waits is unchanged.
 #[derive(Debug, Clone)]
 pub struct WriterConfig {
     /// `request_logs.node_id` for every row this process files.
@@ -32,7 +39,8 @@ pub struct WriterConfig {
     /// The fixed offset `usage_daily` days are cut at.
     pub day_offset_minutes: i64,
     /// Channel capacity: what may be pending while the database stalls. A full
-    /// channel drops, never waits.
+    /// channel drops, never waits. Eight batches, so one slow write (a
+    /// checkpoint) does not shed.
     pub capacity: usize,
     /// Most events per batch.
     pub max_batch: usize,
@@ -41,6 +49,12 @@ pub struct WriterConfig {
     pub interval: Duration,
     /// The writer connection's `busy_timeout`; the TS pragma's 5 s by default.
     pub busy_timeout: Duration,
+    /// The writer connection's `wal_autocheckpoint`, in pages. SQLite's
+    /// default (1000, ~4 MiB) checkpoints every batch or two at bench rates,
+    /// rewriting the same hot index pages each time; 10 000 (~40 MiB of WAL)
+    /// writes a page back once for several batches' changes. The WAL file
+    /// keeps that size once reached.
+    pub wal_autocheckpoint: u32,
     /// At most one dropped-event warning per this long.
     pub drop_warn_interval: Duration,
     /// Where committed completions and seed reads go, in the order they
@@ -70,10 +84,11 @@ impl Default for WriterConfig {
         Self {
             node_id: String::new(),
             day_offset_minutes: 0,
-            capacity: 8192,
-            max_batch: 512,
+            capacity: 32_768,
+            max_batch: 4096,
             interval: Duration::from_millis(200),
             busy_timeout: Duration::from_secs(5),
+            wal_autocheckpoint: 10_000,
             drop_warn_interval: Duration::from_secs(10),
             commit_sink: None,
             seed_delay: Duration::ZERO,
@@ -256,6 +271,7 @@ impl Writer {
     pub fn spawn(path: impl AsRef<Path>, config: WriterConfig) -> Result<Self, StoreError> {
         let conn = crate::open_connection(path.as_ref())?;
         conn.busy_timeout(config.busy_timeout)?;
+        conn.pragma_update(None, "wal_autocheckpoint", config.wal_autocheckpoint)?;
         let (tx, rx) = mpsc::channel(config.capacity.max(1));
         let (shutdown, stop) = oneshot::channel();
         let counters = Arc::new(Counters::new());

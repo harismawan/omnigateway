@@ -6,7 +6,7 @@
 //! transaction per batch, leaving the rows the TS store would have left after
 //! the same events one at a time (see `batch.rs`).
 //!
-//! **Timing.** A batch is written once it holds 512 events, or once its oldest
+//! **Timing.** A batch is written once it holds 4096 events, or once its oldest
 //! event has waited 200 ms *since it was enqueued*, whichever comes first. So
 //! under normal database latency no event waits longer than about 200 ms plus
 //! one write.

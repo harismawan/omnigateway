@@ -132,14 +132,14 @@ impl Upsert {
     }
 
     /// Writes `rows` (each `columns.len()` wide), one statement per chunk.
-    pub(crate) fn run(
+    pub(crate) fn run<R: AsRef<[SqlValue]>>(
         &self,
         tx: &Transaction<'_>,
-        rows: &[Vec<SqlValue>],
+        rows: &[R],
     ) -> Result<(), StoreError> {
         for chunk in rows.chunks(self.chunk(tx)?) {
             let mut stmt = tx.prepare_cached(&self.sql(chunk.len()))?;
-            stmt.execute(params_from_iter(chunk.iter().flatten()))?;
+            stmt.execute(params_from_iter(chunk.iter().flat_map(AsRef::as_ref)))?;
         }
         Ok(())
     }
