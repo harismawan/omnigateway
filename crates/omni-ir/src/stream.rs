@@ -44,8 +44,8 @@ impl StopReason {
     }
 }
 
-/// Token counts. JS numbers, so `f64`: an upstream reporting `"12"` or `1.5`
-/// flows through TS arithmetic unchanged, and pricing sees the same value.
+/// Token counts use `f64`; upstream values are numerically coerced as documented
+/// in the module's compatibility exception, rather than retaining string counts.
 ///
 /// `input_tokens` is the uncached remainder, never the whole prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

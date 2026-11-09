@@ -1,6 +1,6 @@
 //! Provider-neutral domain model and the JS-compatible JSON writer.
 //!
-//! Depends on nothing but `serde_json`, mirroring `@omni/ir`.
+//! Uses serde JSON, stack-safe deep-value helpers and ECMAScript number formatting.
 
 pub mod deep;
 pub mod error;

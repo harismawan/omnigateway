@@ -489,7 +489,8 @@ async function waitHealthy(timeoutMs: number, base = BASE): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
     try {
-      const res = await fetch(`${base}/health`);
+      const res = await fetch(`${base}/health`, {signal: AbortSignal.timeout(Math.max(1, Math.min(1000, Math.ceil(deadline - performance.now()))))});
+      await res.body?.cancel();
       if (res.ok) return true;
     } catch {
       // not listening yet
@@ -1178,6 +1179,7 @@ const NEVER_DENY = {
 async function setupViaApi(): Promise<Record<"plain" | "limited", string>> {
   const call = async (method: string, path: string, body: unknown, cookie?: string) => {
     const res = await fetch(`${BASE}${path}`, {
+      signal: AbortSignal.timeout(10_000),
       method,
       headers: {
         "content-type": "application/json",
