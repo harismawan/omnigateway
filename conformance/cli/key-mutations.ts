@@ -50,13 +50,27 @@ try {
   }
   writeFileSync(join(root, "policy"), "  Work only.\nRefuse roleplay.\n");
   const cases = [
-    ...["2030-03-10 02:30:00", "2030-11-03 01:30:00"].map((at) => [
-      "expiry",
-      "k",
-      "--at",
-      at,
+    ["limits", "k", "--model-limit", "m:concurrency=2", "--json"],
+    ["limits", "k", "--unset", "models", "--json"],
+    ["limits", "k", "--unset", "models:m", "--set", "concurrency=3", "--json"],
+    ...["limits", "expiry", "models", "guardrail", "smart-routing", "revoke"].map((c) => [
+      c,
+      "",
       "--json",
     ]),
+    ...[
+      "+275760-09-13T00:00:00",
+      "+275760-09-13T00:00:00.001",
+      "+275760-09-13T01:00:00+01:00",
+      "02/30/2030",
+      "02/29/2028",
+      "02/29/2030",
+      "04/31/2030",
+      "02/32/2030",
+      "13/01/2030",
+    ].map((at) => ["expiry", "k", "--at", at, "--json"]),
+    ["limits", "k", "--set", "spend:5h=1.125"],
+    ["limits", "k", "--set", "spend:5h=1e21"],
     ...["2030-03-10 02:30:00", "2030-11-03 01:30:00"].map((at) => [
       "expiry",
       "k",
@@ -459,6 +473,17 @@ try {
   }
   console.log("5 PTY ANSI/confirmation comparisons passed");
   for (const flags of [
+    ...[
+      "+275760-09-13T00:00:00",
+      "+275760-09-13T00:00:00.001",
+      "+275760-09-13T01:00:00+01:00",
+      "02/30/2030",
+      "02/29/2028",
+      "02/29/2030",
+      "04/31/2030",
+      "02/32/2030",
+      "13/01/2030",
+    ].map((at) => ["--expires", at, "--json"]),
     [],
     ["--json"],
     [
@@ -560,7 +585,7 @@ try {
     assert.deepEqual(results[1], results[0], JSON.stringify(flags));
     assert.deepEqual(persisted[1], persisted[0]);
   }
-  console.log("7 creation byte/DB/secret comparisons passed");
+  console.log("16 creation byte/DB/secret comparisons passed");
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

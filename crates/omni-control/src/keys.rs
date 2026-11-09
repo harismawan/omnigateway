@@ -245,6 +245,7 @@ mod mutation_tests {
         let other = SqliteStore::open(&path, 0).expect("other");
         store.connection().execute("INSERT INTO api_keys(id,label,prefix,hash,limits,created_at) VALUES('k','before','p','h','{}',1)",[]).expect("seed");
         let mut listing = list_keys(&store, 100).expect("list");
+        other.connection().execute("INSERT INTO api_keys(id,label,prefix,hash,limits,created_at,model_allowlist) VALUES('bad','bad','b','bad','{}',2,'broken')",[]).expect("unrelated bad row after initial list");
         listing
             .capture_mutation(&store, "k", 100, "smartRouting", true.into(), || {
                 set_smart_routing(&store, "k", true)?;
@@ -262,8 +263,20 @@ mod mutation_tests {
         assert_eq!(listing.data["keys"][0]["label"], "before");
         assert_eq!(listing.data["keys"][0]["smartRouting"], true);
         assert_eq!(
-            list_keys(&store, 100).expect("persisted").data["keys"][0]["label"],
+            other
+                .connection()
+                .query_row("SELECT label FROM api_keys WHERE id='k'", [], |r| r
+                    .get::<_, String>(0))
+                .expect("persisted"),
             "after"
+        );
+        assert_eq!(
+            other
+                .connection()
+                .query_row("SELECT smart_routing FROM api_keys WHERE id='k'", [], |r| r
+                    .get::<_, i64>(0))
+                .expect("persisted"),
+            0
         );
     }
 }
@@ -424,7 +437,12 @@ impl KeyListing {
     where
         F: FnOnce() -> Result<(), String>,
     {
-        let mut captured = list_keys(store, now)?;
+        let mut captured = project_keys(
+            store,
+            now,
+            omni_store::keys::operator_rows(store.connection(), Some(id))
+                .map_err(|e| e.to_string())?,
+        )?;
         let index = captured.data["keys"]
             .as_array()
             .expect("keys")
@@ -482,6 +500,17 @@ impl KeyListing {
 }
 
 pub fn list_keys(store: &SqliteStore, now: i64) -> Result<KeyListing, String> {
+    project_keys(
+        store,
+        now,
+        omni_store::keys::list_operator(store.connection()).map_err(|e| e.to_string())?,
+    )
+}
+fn project_keys(
+    store: &SqliteStore,
+    now: i64,
+    rows: Vec<omni_store::keys::OperatorKey>,
+) -> Result<KeyListing, String> {
     let mut keys = Vec::new();
     let mut allowlists = Vec::new();
     for omni_store::keys::OperatorKey {
@@ -489,7 +518,7 @@ pub fn list_keys(store: &SqliteStore, now: i64) -> Result<KeyListing, String> {
         allowlist_json: raw,
         created_at,
         expires_at,
-    } in omni_store::keys::list_operator(store.connection()).map_err(|e| e.to_string())?
+    } in rows
     {
         allowlists.push(match raw {
             None => omni_ir::jsjson::JsValue::Null,

@@ -2,6 +2,20 @@
 //! legacy dates use the process local timezone, as the frozen Bun command does.
 use chrono::{Local, NaiveDate, TimeZone};
 
+fn local_civil(stamp: i64, year: i64) -> Option<i64> {
+    if let Some(date) = chrono::DateTime::from_timestamp_millis(stamp) {
+        return local(&date.naive_utc());
+    }
+    // Gregorian calendars repeat every 400 years. Outside Chrono's civil
+    // range use a calendar-equivalent future year for recurring timezone rules,
+    // then apply that offset to the original (still unclipped) JS civil instant.
+    let equivalent = 2400 + year.rem_euclid(400);
+    let shift = civil(year, 1, 1) - civil(equivalent, 1, 1);
+    let mapped = stamp - shift;
+    let date = chrono::DateTime::from_timestamp_millis(mapped)?;
+    local(&date.naive_utc()).map(|v| v + shift)
+}
+
 fn local(naive: &chrono::NaiveDateTime) -> Option<i64> {
     if let Some(date) = Local.from_local_datetime(naive).earliest() {
         let mut stamp = date.timestamp_millis();
@@ -148,10 +162,7 @@ fn iso(raw: &str) -> Option<i64> {
     let stamp = base + ((h * 60 + m) * 60 + s) * 1000 + ms;
     match offset {
         Some(offset) => Some(stamp - offset),
-        None => {
-            let naive = chrono::DateTime::from_timestamp_millis(stamp)?.naive_utc();
-            local(&naive)
-        }
+        None => local_civil(stamp, year),
     }
 }
 
@@ -181,7 +192,13 @@ fn legacy(raw: &str) -> Option<i64> {
                 b,
             )
         };
-        return local(&NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?);
+        if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+            return None;
+        }
+        return local_civil(
+            civil(i64::from(y), i64::from(m), i64::from(d)),
+            i64::from(y),
+        );
     }
     if let Some(tail) = raw.strip_prefix("-000000-") {
         return legacy(&format!("2001-{tail}"));

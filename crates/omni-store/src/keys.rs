@@ -172,8 +172,20 @@ pub struct OperatorKey {
 }
 
 pub fn list_operator(conn: &Connection) -> Result<Vec<OperatorKey>, StoreError> {
-    let mut stmt = conn.prepare_cached("SELECT * FROM api_keys ORDER BY created_at DESC")?;
-    let mut rows = stmt.query([])?;
+    operator_rows(conn, None)
+}
+
+pub fn operator_rows(conn: &Connection, id: Option<&str>) -> Result<Vec<OperatorKey>, StoreError> {
+    let mut stmt = conn.prepare_cached(if id.is_some() {
+        "SELECT * FROM api_keys WHERE id = ?1"
+    } else {
+        "SELECT * FROM api_keys ORDER BY created_at DESC"
+    })?;
+    let mut rows = if let Some(id) = id {
+        stmt.query([id])?
+    } else {
+        stmt.query([])?
+    };
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
         let date = |name| -> Result<serde_json::Value, StoreError> {

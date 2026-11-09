@@ -1,5 +1,40 @@
 use serde_json::{Value, json};
 
+fn usd(n: f64) -> String {
+    if n.abs() >= 1e21 {
+        return format!("${}", omni_ir::jsjson::to_string(&Value::from(n)));
+    }
+    let digits = if n < 1.0 { 4 } else { 2 };
+    let bits = n.abs().to_bits();
+    let exponent = ((bits >> 52) & 2047) as i32;
+    let mantissa = (bits & ((1u64 << 52) - 1)) | if exponent == 0 { 0 } else { 1u64 << 52 };
+    let shift = if exponent == 0 {
+        -1074
+    } else {
+        exponent - 1075
+    };
+    let scaled = u128::from(mantissa) * 10u128.pow(digits);
+    let rounded = if shift >= 0 {
+        scaled << shift
+    } else {
+        let right = (-shift) as u32;
+        if right >= 128 {
+            0
+        } else {
+            (scaled >> right)
+                + u128::from((scaled & ((1u128 << right) - 1)) >= (1u128 << (right - 1)))
+        }
+    };
+    let scale = 10u128.pow(digits);
+    format!(
+        "${}{}.{:0width$}",
+        if n < 0.0 { "-" } else { "" },
+        rounded / scale,
+        rounded % scale,
+        width = digits as usize
+    )
+}
+
 pub fn human(key: &Value, head: &str) -> String {
     if key["limits"].is_null() {
         return format!(
@@ -19,11 +54,7 @@ pub fn human(key: &Value, head: &str) -> String {
         let amount = |v: &Value| {
             if r["dimension"] == "spend" {
                 let n = v.as_f64().unwrap_or(0.0);
-                if n < 1.0 {
-                    format!("${n:.4}")
-                } else {
-                    format!("${n:.2}")
-                }
+                usd(n)
             } else {
                 omni_ir::jsjson::to_string(v)
             }
@@ -214,6 +245,10 @@ pub fn edit(existing: &Value, entries: &[String]) -> Result<Value, Error> {
                 }
                 proto(&flag, d)?;
                 proto(&flag, w.unwrap_or(""))?;
+                // Key-wide scope excludes the separate model override record.
+                if d == "models" {
+                    return Err(usage(format!("this key has no {entry} limit")));
+                }
                 remove(&mut out, d, w, entry)?;
             } else if name == "unset-model-limit" {
                 if entry.contains('=') {

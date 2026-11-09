@@ -1,4 +1,6 @@
 // Frozen control oracle: deterministic rival commit after set, before summary.
+
+import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -24,6 +26,12 @@ try {
     smartRouting: false,
   });
   const original = store.keys.setSmartRouting.bind(store.keys);
+  await store.keys.list();
+  const db = new Database(join(dir, "db"));
+  db.run(
+    "INSERT INTO api_keys(id,label,prefix,hash,limits,created_at,model_allowlist) VALUES('bad','bad','b','bad','{}',2,'broken')",
+  );
+  db.close();
   store.keys.setSmartRouting = async (id, enabled) => {
     await original(id, enabled);
     await original(id, false);

@@ -90,6 +90,7 @@ pub fn run(
     }
     let id = positional
         .first()
+        .filter(|id| !id.is_empty())
         .ok_or_else(|| usage("key id is required"))?;
     let has = |k: &str| flags.contains_key(k);
     if command == "smart-routing" && has("on") == has("off") {
