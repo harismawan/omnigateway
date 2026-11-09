@@ -31,6 +31,7 @@ webpki-roots = "1"
 rustls-native-certs = "0.8"
 
 [dev-dependencies]
+omni-dialects = { path = "../omni-dialects" }
 serde.workspace = true
 # The deep-schema vectors nest past serde_json's default 128-level limit.
 serde_json = { workspace = true, features = ["unbounded_depth"] }

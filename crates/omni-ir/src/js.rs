@@ -325,13 +325,17 @@ pub fn object_assign(target: &mut serde_json::Map<String, Value>, source: Option
         Some(Value::Object(map)) => {
             for (k, v) in map {
                 if k != "__proto__" {
-                    target.insert(k.clone(), v.clone());
+                    if let Some(old) = target.insert(k.clone(), crate::deep::clone(v)) {
+                        crate::deep::drop(old);
+                    }
                 }
             }
         }
         Some(Value::Array(items)) => {
             for (i, v) in items.iter().enumerate() {
-                target.insert(i.to_string(), v.clone());
+                if let Some(old) = target.insert(i.to_string(), crate::deep::clone(v)) {
+                    crate::deep::drop(old);
+                }
             }
         }
         Some(Value::String(s)) => {

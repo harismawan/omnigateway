@@ -121,7 +121,7 @@ fn from_spec(spec: Option<&Value>) -> ResponseFormatRead {
         _ => "response".to_string(),
     };
     ResponseFormatRead::Readable(ResponseFormat {
-        schema: schema.clone(),
+        schema: omni_ir::deep::clone_map(schema),
         name,
     })
 }
@@ -186,33 +186,33 @@ pub fn move_to_responses_text(
     }
 
     let read = read_response_format(req);
-    let client_text = body.get("text").and_then(Value::as_object).cloned();
+    let client_text = body
+        .get("text")
+        .and_then(Value::as_object)
+        .map(omni_ir::deep::clone_map);
     let client_format = client_text.as_ref().and_then(|t| t.get("format"));
     if readable_format(client_format) && matches!(read, ResponseFormatRead::Readable(_)) {
         return None;
     }
     let malformed_format = client_text.is_some() && client_format.is_some();
     let text = client_text.as_ref().map(|t| {
-        let mut copy = t.clone();
+        let mut copy = omni_ir::deep::clone_map(t);
         copy.shift_remove("format");
         copy
     });
     if malformed_format && let Some(text) = &text {
-        body.insert("text".into(), Value::Object(text.clone()));
+        body.insert("text".into(), Value::Object(omni_ir::deep::clone_map(text)));
     }
 
     match read {
         ResponseFormatRead::Readable(format) => {
             let mut next = text.unwrap_or_default();
-            next.insert(
-                "format".into(),
-                json!({
-                    "type": "json_schema",
-                    "name": format.name,
-                    "schema": Value::Object(format.schema),
-                    "strict": true,
-                }),
-            );
+            let mut spec = Map::new();
+            spec.insert("type".into(), json!("json_schema"));
+            spec.insert("name".into(), json!(format.name));
+            spec.insert("schema".into(), Value::Object(format.schema));
+            spec.insert("strict".into(), Value::Bool(true));
+            next.insert("format".into(), Value::Object(spec));
             body.insert("text".into(), Value::Object(next));
             Some(format!("{provider}:response-format-translated"))
         }

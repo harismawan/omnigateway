@@ -1148,6 +1148,7 @@ dependencies = [
  "httparse",
  "httpdate",
  "memchr",
+ "omni-dialects",
  "omni-ir",
  "rcgen",
  "rustls",

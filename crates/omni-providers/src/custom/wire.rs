@@ -89,7 +89,7 @@ fn function_fields(
     if let Some(d) = description {
         out.insert("description".into(), json!(d));
     }
-    out.insert("parameters".into(), schema.clone());
+    out.insert("parameters".into(), omni_ir::deep::clone(schema));
 }
 
 fn note_betas(req: &ChatRequest, notes: &mut Notes) {
@@ -190,7 +190,10 @@ pub fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded {
                         t.description.as_ref(),
                         &t.input_schema,
                     );
-                    Some(json!({"type": "function", "function": function}))
+                    let mut tool = Map::new();
+                    tool.insert("type".into(), json!("function"));
+                    tool.insert("function".into(), Value::Object(function));
+                    Some(Value::Object(tool))
                 }
                 ToolDef::Provider(_) => None,
             })
@@ -222,17 +225,14 @@ pub fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded {
     match read_response_format(req) {
         ResponseFormatRead::Readable(format) => {
             if !body.contains_key("response_format") {
-                body.insert(
-                    "response_format".into(),
-                    json!({
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": format.name,
-                            "schema": Value::Object(format.schema),
-                            "strict": true,
-                        },
-                    }),
-                );
+                let mut spec = Map::new();
+                spec.insert("name".into(), json!(format.name));
+                spec.insert("schema".into(), Value::Object(format.schema));
+                spec.insert("strict".into(), Value::Bool(true));
+                let mut format = Map::new();
+                format.insert("type".into(), json!("json_schema"));
+                format.insert("json_schema".into(), Value::Object(spec));
+                body.insert("response_format".into(), Value::Object(format));
                 notes.note("custom:response-format-translated");
             }
         }

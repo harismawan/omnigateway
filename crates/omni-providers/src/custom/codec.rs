@@ -60,48 +60,18 @@ impl ProviderCodec for CustomCodec {
         &self,
         input: &CodecInput<'_>,
     ) -> Result<CodecRequest<Protocol>, GatewayError> {
-        let Some(api_key) = &input.credentials.api_key else {
-            return Err(fail(ErrorCode::Auth, "custom credential has no API key"));
-        };
-        let data = &input.credentials.provider_data;
-        let origin = data.get("origin").and_then(Value::as_str);
-        let protocol = match data.get("protocol").and_then(Value::as_str) {
-            Some("chat_completions") => Some(Protocol::ChatCompletions),
-            Some("responses") => Some(Protocol::Responses),
-            _ => None,
-        };
-        let (Some(origin), Some(protocol)) = (origin, protocol) else {
-            return Err(fail(
-                ErrorCode::BadRequest,
-                "custom credential has invalid endpoint metadata",
-            ));
-        };
-        // Rows written before custom endpoints carried a base path have none.
-        let base_path = data.get("basePath").and_then(Value::as_str).unwrap_or("");
-
-        let mut encoded = match protocol {
-            Protocol::ChatCompletions => to_custom_chat_wire(input.request, input.model),
-            Protocol::Responses => to_custom_responses_wire(input.request, input.model),
-        };
-        // `{ ...encoded.body, stream: true }`: keeps `stream`'s position.
-        encoded.body.insert("stream".into(), Value::Bool(true));
-        let body = jsjson::to_string(&Value::Object(encoded.body));
-
-        Ok(CodecRequest {
-            request: CodecHttpRequest {
-                url: endpoint_url(origin, base_path, protocol),
-                method: "POST".into(),
-                headers: vec![
-                    ("Content-Type".into(), "application/json".into()),
-                    ("Authorization".into(), format!("Bearer {api_key}")),
-                ],
-                body,
-                body_encoding: None,
-            },
-            decode_state: protocol,
-            degradations: encoded.degradations,
-            cloaked_tools: None,
-        })
+        // Only these carriers enter recursively cloned/serialized temporary
+        // maps. Tool-call inputs are written by the stack-safe JSON writer.
+        // Keep the entire synchronous lifetime (including temporary drops)
+        // inside the scope; only strings and protocol metadata escape it.
+        let deep = input.request.tools.iter().flatten().any(|tool| {
+            matches!(tool, omni_ir::request::ToolDef::Portable(t) if needs_scope(&t.input_schema))
+        }) || input.request.vendor.iter().flat_map(|m| m.values()).any(needs_scope);
+        if deep {
+            omni_ir::deep::scope(|| build_request(input))
+        } else {
+            build_request(input)
+        }
     }
 
     fn decoder(&self, state: Protocol, _headers: &Headers) -> Box<dyn StreamDecoder> {
@@ -110,6 +80,79 @@ impl ProviderCodec for CustomCodec {
             Protocol::Responses => Box::new(ResponsesDecoder::new()),
         }
     }
+}
+
+// A bounded-depth iterator stack, rather than a pending node per sibling.
+fn needs_scope(value: &Value) -> bool {
+    fn children(value: &Value) -> Option<Box<dyn Iterator<Item = &Value> + '_>> {
+        match value {
+            Value::Array(a) => Some(Box::new(a.iter())),
+            Value::Object(m) => Some(Box::new(m.values())),
+            _ => None,
+        }
+    }
+    let Some(root) = children(value) else {
+        return false;
+    };
+    let mut stack = vec![root];
+    while let Some(iter) = stack.last_mut() {
+        if let Some(child) = iter.next() {
+            if let Some(iter) = children(child) {
+                stack.push(iter);
+                if stack.len() > omni_ir::deep::SHALLOW_DEPTH {
+                    return true;
+                }
+            }
+        } else {
+            stack.pop();
+        }
+    }
+    false
+}
+
+fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<Protocol>, GatewayError> {
+    let Some(api_key) = &input.credentials.api_key else {
+        return Err(fail(ErrorCode::Auth, "custom credential has no API key"));
+    };
+    let data = &input.credentials.provider_data;
+    let origin = data.get("origin").and_then(Value::as_str);
+    let protocol = match data.get("protocol").and_then(Value::as_str) {
+        Some("chat_completions") => Some(Protocol::ChatCompletions),
+        Some("responses") => Some(Protocol::Responses),
+        _ => None,
+    };
+    let (Some(origin), Some(protocol)) = (origin, protocol) else {
+        return Err(fail(
+            ErrorCode::BadRequest,
+            "custom credential has invalid endpoint metadata",
+        ));
+    };
+    // Rows written before custom endpoints carried a base path have none.
+    let base_path = data.get("basePath").and_then(Value::as_str).unwrap_or("");
+
+    let mut encoded = match protocol {
+        Protocol::ChatCompletions => to_custom_chat_wire(input.request, input.model),
+        Protocol::Responses => to_custom_responses_wire(input.request, input.model),
+    };
+    // `{ ...encoded.body, stream: true }`: keeps `stream`'s position.
+    encoded.body.insert("stream".into(), Value::Bool(true));
+    let body = jsjson::to_string(&Value::Object(encoded.body));
+
+    Ok(CodecRequest {
+        request: CodecHttpRequest {
+            url: endpoint_url(origin, base_path, protocol),
+            method: "POST".into(),
+            headers: vec![
+                ("Content-Type".into(), "application/json".into()),
+                ("Authorization".into(), format!("Bearer {api_key}")),
+            ],
+            body,
+            body_encoding: None,
+        },
+        decode_state: protocol,
+        degradations: encoded.degradations,
+        cloaked_tools: None,
+    })
 }
 
 #[cfg(test)]
