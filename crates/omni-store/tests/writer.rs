@@ -25,6 +25,69 @@ const TABLES: [&str; 4] = [
 /// puts some of these requests on another day than UTC does.
 const T0: i64 = 1_794_007_800_000;
 
+#[test]
+fn seed_latency_and_fifo_prefix() {
+    current_thread().block_on(async {
+        for interval in [20, 200] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db = migrated(dir.path());
+            let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+            let writer = Writer::spawn(
+                &db,
+                WriterConfig {
+                    interval: Duration::from_millis(interval),
+                    commit_sink: Some(tx),
+                    ..config(0, 512)
+                },
+            )
+            .expect("spawn");
+            let handle = writer.handle();
+            let started = std::time::Instant::now();
+            for tag in 0..20 {
+                assert!(handle.send(LogEvent::Finish(done(
+                    &format!("seed-{tag}"),
+                    T0,
+                    Some("k"),
+                    "m",
+                    1
+                ))));
+                assert!(handle.seed(omni_store::writer::SeedQuery {
+                    subject: "k".into(),
+                    api_key_id: "k".into(),
+                    requested_model: None,
+                    since_ms: 0,
+                    grain_ms: 60_000,
+                    tag,
+                    now: 0.0,
+                    stamp_cap: 100,
+                }));
+                loop {
+                    if let omni_store::writer::Committed::Seed { result, .. } =
+                        rx.recv().await.expect("result")
+                    {
+                        let rows = result.expect("seed SQL");
+                        assert_eq!(
+                            rows.stamps.len(),
+                            tag as usize + 1,
+                            "seed must include preceding commit"
+                        );
+                        break;
+                    }
+                }
+            }
+            eprintln!(
+                "seed phase interval={interval}ms subjects=20 elapsed={:?}",
+                started.elapsed()
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "seeds must not wait for ordinary batching"
+            );
+            writer.close().await.expect("close");
+        }
+    });
+}
+
 fn pending(id: &str, at: i64, key: Option<&str>, model: &str) -> LogEvent {
     LogEvent::Begin(PendingLog {
         id: id.into(),

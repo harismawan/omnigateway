@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { probeText } from "./bench-probe";
 /**
  * Black-box latency, throughput, CPU and memory benchmark for the gateway.
  *
@@ -647,6 +648,8 @@ type ScenarioResult = {
   rssStartMb: number;
   rssPeakMb: number;
   rssEndMb: number;
+  /** Actual cancellation recovery observations; elapsed times include scheduler lag. */
+  recoverySamples: { elapsedMs: number; rssMb: number | null }[];
   healthyAfter: boolean;
   /** Replicas whose process was gone after the scenario. Each is restarted. */
   crashed: number;
@@ -1062,7 +1065,17 @@ async function runScenario(
   // Settle before the next scenario, then confirm the process still answers:
   // a scenario that leaves the gateway wedged is a result, not a crash. The
   // settle also lets the writer flush the scenario's last batch (≤ 200 ms).
-  await sleep(scenario.clientTimeout === undefined ? 1000 : 5000);
+  const recoveryStart = performance.now();
+  const recoverySamples: { elapsedMs: number; rssMb: number | null }[] = [];
+  if (scenario.clientTimeout !== undefined) {
+    for (const at of [5000, 10000]) {
+      await sleep(Math.max(0, recoveryStart + at - performance.now()));
+      const sample = fleetSample(pids);
+      recoverySamples.push({ elapsedMs: performance.now() - recoveryStart, rssMb: sample === null ? null : sample.rssKb / 1024 });
+    }
+  } else {
+    await sleep(1000);
+  }
   const settled = fleetSample(pids);
   // The barrier: every row this scenario's requests filed is committed when
   // it answers (the writer may have queued them through a disk stall), and
@@ -1118,6 +1131,7 @@ async function runScenario(
     rssStartMb: (before?.rssKb ?? 0) / 1024,
     rssPeakMb: peak / 1024,
     rssEndMb: (settled?.rssKb ?? 0) / 1024,
+    recoverySamples,
     healthyAfter,
     crashed,
     rows,
@@ -1178,7 +1192,7 @@ const NEVER_DENY = {
  */
 async function setupViaApi(): Promise<Record<"plain" | "limited", string>> {
   const call = async (method: string, path: string, body: unknown, cookie?: string) => {
-    const res = await fetch(`${BASE}${path}`, {
+    const res = await probeText(`${BASE}${path}`, {
       signal: AbortSignal.timeout(10_000),
       method,
       headers: {
@@ -1187,7 +1201,7 @@ async function setupViaApi(): Promise<Record<"plain" | "limited", string>> {
       },
       body: JSON.stringify(body),
     });
-    const text = await res.text();
+    const text = res.text;
     if (!res.ok) throw new Error(`${method} ${path} → ${res.status}: ${text}`);
     return { res, json: text.length === 0 ? null : (JSON.parse(text) as unknown) };
   };

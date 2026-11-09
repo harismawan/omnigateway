@@ -974,7 +974,13 @@ async fn run(
         let mut barriers = Vec::new();
         take(first, &mut batch, &mut barriers);
         let mut stopping = false;
-        while batch.len() < max_batch && barriers.is_empty() {
+        // A seed ends collection like a barrier: flush preceding commits and
+        // perform the ordered read immediately, without the ordinary batch
+        // timer. It stays in the FIFO and flush_ordered retains SQL ordering.
+        while batch.len() < max_batch
+            && barriers.is_empty()
+            && !matches!(batch.last(), Some((WriteEvent::Seed(_), _)))
+        {
             if let Ok(e) = rx.try_recv() {
                 take(e, &mut batch, &mut barriers);
                 continue;
