@@ -97,7 +97,7 @@ for (const c of cases) {
     if (s.op === "at") { clock = s.ms; steps.push(null); continue; }
     if (s.op === "release") { held.shift()?.release(); steps.push(null); continue; }
     if (s.op === "complete") {
-      await row(clock, lastModel, s.tokens, s.cost);
+      await row(s.rowAt ?? clock, lastModel, s.tokens, s.cost);
       limiter.debit(key.id, lastModel, { tokens: s.tokens, costUsd: s.cost });
       steps.push(null); continue;
     }
@@ -200,8 +200,30 @@ fn run_rust(limits_json: &str, history: &[Value], steps: &[Value]) -> Vec<Value>
                     s["tokens"].as_f64().expect("t"),
                     s["cost"].as_f64().expect("c"),
                 );
-                row(&mut n, clock, &last, t, c);
-                limiter.debit("k1", &last, t, c, clock, clock);
+                let row_at = s["rowAt"].as_f64().unwrap_or(clock);
+                row(&mut n, row_at, &last, t, c);
+                let stored: i64 = store
+                    .connection()
+                    .query_row(
+                        "SELECT at FROM request_logs ORDER BY rowid DESC LIMIT 1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .expect("stored timestamp");
+                assert_eq!(stored, row_at as i64);
+                limiter.apply_at(
+                    omni_store::writer::Committed::Completions(vec![
+                        omni_store::writer::Completion {
+                            id: format!("r{n}"),
+                            api_key_id: Some("k1".into()),
+                            requested_model: last.clone(),
+                            tokens: t,
+                            cost_usd: c,
+                            at: row_at,
+                        },
+                    ]),
+                    clock,
+                );
                 out.push(Value::Null);
             }
             op => {
@@ -235,11 +257,28 @@ fn the_limiter_equals_the_ts_limiter_step_for_step() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        println!("skipping: bun is not on PATH");
-        return;
+        panic!("mandatory real Bun oracle missing");
     }
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     let mut cases = Vec::new();
+    cases.push((
+        r#"{"requests":{"5h":1}}"#,
+        Vec::new(),
+        json!([
+            {"op":"at","ms":T0+59999.0},
+            {"op":"admit","model":"fast"},
+            {"op":"release"},
+            {"op":"at","ms":T0+60001.0},
+            {"op":"complete","rowAt":T0+59999.0,"tokens":0,"cost":0},
+            {"op":"at","ms":T0+18_000_000.0+60000.0},
+            {"op":"admit","model":"fast"},
+            {"op":"at","ms":T0+18_000_000.0+120000.0},
+            {"op":"admit","model":"fast"}
+        ])
+        .as_array()
+        .expect("steps")
+        .clone(),
+    ));
     for initial in [r#"{"requests":{"1m":3}}"#, r#"{"concurrency":1}"#] {
         let mut steps = Vec::new();
         // Expire the harness's two pre-seed admissions first.
