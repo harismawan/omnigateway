@@ -126,6 +126,7 @@ pub struct Request {
 
 /// `DispatchOutcome`: the events and the log they fill in.
 pub struct Dispatched {
+    pub deadline: Option<tokio::time::Instant>,
     pub events: EventsStream,
     /// Final once the stream has ended; the route completes the row from it.
     pub log: Arc<Mutex<RequestLog>>,
@@ -388,6 +389,7 @@ pub fn refused(deps: &Deps, req: &Request, refusal: &Refusal, surface: &str) -> 
         Some(surface),
     );
     Dispatched {
+        deadline: None,
         events: Box::pin(futures_util::stream::iter([Ok(StreamEvent::Error {
             code: refusal.code,
             message: refusal.message.to_owned(),
@@ -436,7 +438,11 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
         Ok(m) => m.into_owned(),
         Err(e) => {
             let events = fail(&log, e.code, e.message);
-            return Dispatched { events, log };
+            return Dispatched {
+                events,
+                log,
+                deadline,
+            };
         }
     };
 
@@ -494,7 +500,11 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
             safe_token(&req.request.model)
         );
         let events = fail(&log, ErrorCode::NoCandidates, message);
-        return Dispatched { events, log };
+        return Dispatched {
+            events,
+            log,
+            deadline,
+        };
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -515,7 +525,11 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
         started_at,
         deadline,
     });
-    Dispatched { events, log }
+    Dispatched {
+        events,
+        log,
+        deadline,
+    }
 }
 
 struct RunState {

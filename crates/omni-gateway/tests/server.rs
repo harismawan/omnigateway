@@ -184,6 +184,97 @@ async fn boot() -> Gw {
 }
 
 #[tokio::test]
+async fn nonreading_client_deadline_releases_upstream_and_concurrency() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (blocked_tx, blocked_rx) = tokio::sync::oneshot::channel();
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut request = [0; 8192];
+        assert!(socket.read(&mut request).await.expect("request") > 0);
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .await
+            .expect("head");
+        let record = format!(
+            "data: {}\n\n",
+            serde_json::json!({"choices":[{"delta":{"content":"x".repeat(16384)}}]})
+        );
+        let frame = format!("{:x}\r\n{record}\r\n", record.len());
+        let mut total = 0;
+        loop {
+            match tokio::time::timeout(
+                Duration::from_millis(100),
+                socket.write_all(frame.as_bytes()),
+            )
+            .await
+            {
+                Ok(Ok(())) => total += frame.len(),
+                Err(_) => break,
+                Ok(Err(e)) => panic!("closed before observed backpressure: {e}"),
+            }
+        }
+        assert!(total > 1024 * 1024, "actually filled network buffers");
+        blocked_tx.send(total).expect("blocked signal");
+        let mut b = [0];
+        let closed = tokio::time::timeout(Duration::from_secs(8), socket.read(&mut b))
+            .await
+            .expect("deadline closed upstream");
+        assert!(matches!(closed, Ok(0) | Err(_)));
+        closed_tx.send(()).expect("closure signal");
+        let (mut next, _) = listener.accept().await.expect("later request admitted");
+        assert!(next.read(&mut request).await.expect("next request") > 0);
+        next.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\ndata: [DONE]\n\n")
+            .await
+            .expect("answer");
+    });
+    let f = fixture(&["c0"]);
+    let db = rusqlite::Connection::open(&f.path).expect("db");
+    db.execute("UPDATE credentials SET provider_data=?",[format!(r#"{{"endpointId":"e0","origin":"http://127.0.0.1:{port}","protocol":"chat_completions"}}"#)]).expect("origin");
+    set_setting(&f.path, "requestDeadlineMs", "3000");
+    add_key(&f.path, "kp", KEY, ",limits", ",'{\"concurrency\":1}'");
+    let env = [
+        ("OMNI_ENCRYPTION_KEY".into(), ENC.into()),
+        ("OMNI_DB_PATH".into(), f.path.to_str().expect("path").into()),
+        ("OMNI_PORT".into(), "1".into()),
+    ]
+    .into_iter()
+    .collect();
+    let mut config = load_config(&env, || 0).expect("config");
+    config.port = 0;
+    let running = start(config, Options::default()).await.expect("start");
+    let base = format!("127.0.0.1:{}", running.addr.port());
+    let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+    socket
+        .set_recv_buffer_size(1024)
+        .expect("small receive window");
+    let mut client = socket
+        .connect(base.parse().expect("address"))
+        .await
+        .expect("connect");
+    let body = r#"{"model":"m1","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nhost: x\r\nauthorization: Bearer {KEY}\r\ncontent-length: {}\r\n\r\n{body}",body.len()).as_bytes()).await.expect("request");
+    tokio::time::timeout(Duration::from_secs(2), blocked_rx)
+        .await
+        .expect("backpressure before deadline")
+        .expect("blocked");
+    let headers = [("authorization", format!("Bearer {KEY}"))];
+    let auth = [(headers[0].0, headers[0].1.as_str())];
+    let (status, _, _) = call(&base, "POST", "/v1/chat/completions", &auth, body).await;
+    assert_eq!(status, 429, "concurrency held before deadline");
+    closed_rx
+        .await
+        .expect("upstream closure with client still unread");
+    let (status, _, response) = call(&base, "POST", "/v1/chat/completions", &auth, body).await;
+    assert_eq!(status, 200, "admission/load released: {response}");
+    upstream.await.expect("upstream");
+    drop(client);
+    running.shutdown();
+    running.wait().await.expect("shutdown joins owned pump");
+}
+
+#[tokio::test]
 async fn exhausted_persisted_budget_rejects_first_request_after_boot() {
     let f = fixture(&["c0"]);
     add_key(&f.path, "kp", KEY, ",limits", ",'{\"tokens\":{\"5h\":1}}'");

@@ -539,11 +539,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             Some(r) => dispatch::refused(&app.deps, &dreq, r, sname),
             None => dispatch::dispatch(app.deps.clone(), dreq),
         };
-        let deadline_ms = app.deps.holder.load().routing.settings.request_deadline_ms;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let response_deadline = (deadline_ms != 0.0).then(|| {
-            tokio::time::Instant::now() + Duration::from_millis(deadline_ms.max(0.0) as u64)
-        });
+        let response_deadline = dispatched.deadline;
         fin.outcome = Some(dispatched.log.clone());
         let retain = !stream || surface == Surface::Responses;
         let mut upstream = dispatched.events;
