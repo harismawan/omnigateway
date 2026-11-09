@@ -13,6 +13,7 @@ pub mod jsc_json;
 pub mod load;
 pub mod logging;
 pub mod models;
+mod output_budget;
 pub mod overlay;
 pub mod price;
 pub mod server;

@@ -458,6 +458,19 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             None => dispatch::dispatch(app.deps.clone(), dreq),
         };
         fin.outcome = Some(dispatched.log.clone());
+        let retain = !stream || surface == Surface::Responses;
+        let mut upstream = dispatched.events;
+        let bounded_events: dispatch::EventsStream = Box::pin(async_stream::stream! {
+            let mut budget = crate::output_budget::OutputBudget::default();
+            while let Some(item) = upstream.next().await {
+                if retain && let Ok(event) = &item && let Err(error) = budget.charge(event) {
+                    drop(upstream);
+                    yield Err(error);
+                    return;
+                }
+                yield item;
+            }
+        });
 
         if stream {
             let encoder = match surface {
@@ -478,7 +491,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             } else {
                 app.keepalive
             };
-            let body = sse_body(dispatched.events, encoder, keepalive, fin.take());
+            let body = sse_body(bounded_events, encoder, keepalive, fin.take());
             let mut res = Response::new(settle(body));
             let h = res.headers_mut();
             h.insert(
@@ -504,7 +517,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
 
         let mut events = Vec::new();
         let mut throw = None;
-        let mut s = dispatched.events;
+        let mut s = bounded_events;
         while let Some(item) = s.next().await {
             match item {
                 Ok(ev) => events.push(ev),
