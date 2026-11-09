@@ -49,11 +49,18 @@ pub struct WriterConfig {
     pub interval: Duration,
     /// The writer connection's `busy_timeout`; the TS pragma's 5 s by default.
     pub busy_timeout: Duration,
-    /// The writer connection's `wal_autocheckpoint`, in pages. SQLite's
-    /// default (1000, ~4 MiB) checkpoints every batch or two at bench rates,
-    /// rewriting the same hot index pages each time; 10 000 (~40 MiB of WAL)
-    /// writes a page back once for several batches' changes. The WAL file
-    /// keeps that size once reached.
+    /// How often the writer's checkpointer copies the WAL back into the
+    /// database (`wal_checkpoint(PASSIVE)` on a connection of its own, on a
+    /// thread of its own). Off the batch path, so no batch's commit pays for
+    /// a checkpoint: with SQLite's in-commit auto-checkpoint, one batch in
+    /// several stalled 80-900 ms at bench rates and the channel filled
+    /// behind it. `None` leaves checkpoints to `wal_autocheckpoint` alone.
+    pub checkpoint_every: Option<Duration>,
+    /// The writer connection's `wal_autocheckpoint`, in pages: only a
+    /// backstop when the checkpointer runs (a reader holding the WAL can stop
+    /// a passive checkpoint from reaching its end, and the WAL then grows to
+    /// this before a commit checkpoints it), the only checkpoint when it does
+    /// not. 10 000 pages is ~40 MiB of WAL.
     pub wal_autocheckpoint: u32,
     /// At most one dropped-event warning per this long.
     pub drop_warn_interval: Duration,
@@ -88,6 +95,7 @@ impl Default for WriterConfig {
             max_batch: 4096,
             interval: Duration::from_millis(200),
             busy_timeout: Duration::from_secs(5),
+            checkpoint_every: Some(Duration::from_millis(20)),
             wal_autocheckpoint: 10_000,
             drop_warn_interval: Duration::from_secs(10),
             commit_sink: None,
@@ -263,6 +271,54 @@ pub struct Writer {
     handle: WriterHandle,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<Result<(), StoreError>>,
+    checkpointer: Option<Checkpointer>,
+}
+
+/// The background checkpoint thread and the flag that stops it.
+#[derive(Debug)]
+struct Checkpointer {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Checkpointer {
+    /// Starts a thread that runs `wal_checkpoint(PASSIVE)` on its own
+    /// connection every `every`. Passive: it never waits on the writer or on
+    /// a reader, copying only what no reader still needs, so it cannot stall
+    /// a batch; the writer's commits only append to the WAL meanwhile.
+    fn spawn(path: &Path, every: Duration) -> Result<Self, StoreError> {
+        let conn = crate::open_connection(path)?;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("omni-checkpoint".into())
+            .spawn(move || {
+                let mut failing = false;
+                while !flag.load(Ordering::Relaxed) {
+                    std::thread::park_timeout(every);
+                    match conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())) {
+                        Ok(()) => failing = false,
+                        // Busy is the normal answer while another checkpoint
+                        // runs; anything else is reported once per streak,
+                        // and the writer's own backstop still checkpoints.
+                        Err(e) if !failing => {
+                            failing = true;
+                            tracing::warn!(reason = %e, "request log checkpoint failed; retrying");
+                        }
+                        Err(_) => {}
+                    }
+                }
+            })
+            .map_err(|e| StoreError::Writer(format!("checkpoint thread: {e}")))?;
+        Ok(Self { stop, thread })
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.thread().unpark();
+        // A panic there has nothing to hand back; the writer is unaffected.
+        self.thread.join().ok();
+    }
 }
 
 impl Writer {
@@ -272,6 +328,10 @@ impl Writer {
         let conn = crate::open_connection(path.as_ref())?;
         conn.busy_timeout(config.busy_timeout)?;
         conn.pragma_update(None, "wal_autocheckpoint", config.wal_autocheckpoint)?;
+        let checkpointer = config
+            .checkpoint_every
+            .map(|every| Checkpointer::spawn(path.as_ref(), every))
+            .transpose()?;
         let (tx, rx) = mpsc::channel(config.capacity.max(1));
         let (shutdown, stop) = oneshot::channel();
         let counters = Arc::new(Counters::new());
@@ -280,6 +340,7 @@ impl Writer {
             handle: WriterHandle { tx, counters },
             shutdown: Some(shutdown),
             task,
+            checkpointer,
         })
     }
 
@@ -303,9 +364,25 @@ impl Writer {
             s.send(()).ok();
         }
         let task = &mut self.task;
-        task.await
-            .map_err(|e| StoreError::Writer(format!("writer task ended abnormally: {e}")))??;
+        let ended = task.await;
+        if let Some(c) = self.checkpointer.take() {
+            // Joins within one checkpoint; the writer's connection closing
+            // after it checkpoints whatever is left.
+            tokio::task::spawn_blocking(move || c.stop()).await.ok();
+        }
+        ended.map_err(|e| StoreError::Writer(format!("writer task ended abnormally: {e}")))??;
         Ok(self.handle.counters.snapshot())
+    }
+}
+
+/// A writer dropped without [`Writer::close`] still stops its checkpointer
+/// (without waiting for it), so no thread outlives it.
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if let Some(c) = self.checkpointer.take() {
+            c.stop.store(true, Ordering::Relaxed);
+            c.thread.thread().unpark();
+        }
     }
 }
 

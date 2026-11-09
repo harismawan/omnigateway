@@ -848,3 +848,35 @@ async fn a_close_during_a_retry_that_succeeds_returns_ok() {
     assert_eq!((closed.failed, closed.batches, closed.written), (0, 1, 1));
     assert_eq!(stats, closed);
 }
+
+/// The WAL is copied back into the database by the writer's checkpointer, off
+/// the batch path: a batch's commit never pays for a checkpoint, and the copy
+/// happens between batches even when the WAL is far below the fallback
+/// auto-checkpoint size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wal_is_checkpointed_in_the_background_between_batches() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = migrated(dir.path());
+    let before = std::fs::metadata(&db).expect("db").len();
+    let writer = Writer::spawn(&db, config(0, 512)).expect("spawn");
+    let handle = writer.handle();
+    for n in 0..3000 {
+        let log = done(&format!("r{n}"), T0 + n, Some("key-1"), "sonnet", n);
+        assert!(handle.send(LogEvent::Finish(log)), "channel full");
+    }
+    // Written within the 200 ms interval, then checkpointed shortly after.
+    let mut grown = 0;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        grown = std::fs::metadata(&db).expect("db").len();
+        if grown > before && count(&db, "SELECT COUNT(*) FROM request_logs") == 3000 {
+            break;
+        }
+    }
+    assert!(
+        grown > before,
+        "the database file still holds only the schema ({before} bytes): nothing was checkpointed"
+    );
+    let stats = writer.close().await.expect("close");
+    assert_eq!(stats.dropped, 0);
+}
