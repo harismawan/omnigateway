@@ -1,138 +1,105 @@
 {
-  "label": "rust-slice1 single @ 394287df: median of 3 full runs, uncapped, request ids req_<uuid v7>; every scenario 0 dropped, 0 failed, 0 missing, 0 pending (writer flush barrier)",
-  "method": "scripts/bench-gateway.ts (no --rate), gateway cpus 0-3, upstream 4-5, oha 6-7, 20 s scenarios after a 3 s warmup, OMNI_LOG_LEVEL=warn, OMNI_BENCH=1 (writer barrier), release build. Host checked before each run: no headless Chrome load (chrome gpu 0.0 %), load average 0.7-4.0 (the previous run). Each value is median/min/max of `runs`.",
-  "idFormat": "Rust mints request ids as req_ + RFC 9562 UUIDv7 (time-ordered, monotonic per process); TS mints req_ + UUIDv4. Spec \u00a7Writes, \"Request ids: time-ordered\" (operator decision a4a6de5b).",
+  "label": "rust-slice1 single @ ca80bcfa: median of 3 full runs, uncapped; request ids req_<uuid v7> (RFC 9562 method 3); rate-limit windows bounded by their limits; every scenario 0 dropped, 0 failed, 0 missing, 0 pending (writer barrier, exact prefix)",
+  "method": "scripts/bench-gateway.ts (no --rate), gateway cpus 0-3, upstream 4-5, oha 6-7, 20 s scenarios after a 3 s warmup, OMNI_LOG_LEVEL=warn, OMNI_BENCH=1 (writer barrier: {watermark, committed, failed, dropped}, committed+failed+dropped == watermark, per-scenario deltas), release build. Host checked before each run: no headless Chrome load (chrome gpu 0.0 %), load average 0.7-4.0 (the previous run). Each value is median/min/max of `runs`.",
+  "idFormat": "Rust mints request ids as req_ + RFC 9562 UUIDv7 (time-ordered, monotonic per process by RFC 9562 method 3: a random 1..2^56 step in rand_a||rand_b within a millisecond); TS mints req_ + UUIDv4. Spec \u00a7Writes, \"Request ids: time-ordered\" (operator decision a4a6de5b).",
   "command": "bun scripts/bench-gateway.ts --gateway target/release/omnigateway --cli \"bun apps/cli/src/index.ts\" --out <run>.json",
   "hostBeforeRuns": [
-    "== v7 uncapped run 1 2026-11-09T08:32:39Z load average: 0.68, 0.96, 1.41\n 1.9 opencode; 1.2 opencode; 1.0 hermes; 1.0 bun;\nchrome-gpu 0.0%\n",
-    "== v7 uncapped run 2 2026-11-09T08:37:43Z load average: 2.86, 3.29, 2.39\n 1.9 opencode; 1.2 opencode; 1.0 hermes; 1.0 bun;\nchrome-gpu 0.0%\n",
-    "== v7 uncapped run 3 2026-11-09T08:42:31Z load average: 4.00, 4.09, 3.00\n 1.9 opencode; 1.2 opencode; 1.0 hermes; 1.0 bun;\nchrome-gpu 0.0%\n"
+    "== r2 uncapped run 1 2026-11-09T09:34:10Z load average: 0.74, 1.33, 1.50\n 1.9 opencode; 1.2 opencode; 1.0 hermes; 1.0 bun;\nchrome-gpu 0.0%\n 841797 homebrew  20   0 8551708 447852  50644 S  10.0   2.8  40:24.26 opencode\n 843890 homebrew  20   0   11.0g 268052  37140 S  10.0   1.7  61:08.71 opencode\n      1 root      20   0   38900  20616   7740 S   0.0   0.1   5:51.65 systemd\n",
+    "== r2 uncapped run 2 2026-11-09T09:38:58Z load average: 3.74, 3.44, 2.41\n 1.9 opencode; 1.2 opencode; 1.0 hermes; 1.0 bun;\nchrome-gpu 0.0%\n1240516 homebrew  20   0  472488 145852  12164 S   9.1   0.9   3:58.92 hermes\n      1 root      20   0   38900  20616   7740 S   0.0   0.1   5:51.75 systemd\n      2 root      20   0       0      0      0 S   0.0   0.0   0:00.85 kthreadd\n",
+    "== r2 uncapped run 3 2026-11-09T09:43:46Z load average: 3.55, 4.06, 3.00\n 1.9 opencode; 1.2 opencode; 1.0 hermes; 1.0 bun;\nchrome-gpu 0.0%\n1231932 root      20   0   40596  32144  12480 R  45.5   0.2   0:00.05 rocm-smi\n 843890 homebrew  20   0   11.0g 269680  37140 S   9.1   1.7  61:23.28 opencode\n3241389 homebrew  20   0 2301760  45392  14144 S   9.1   0.3  45:18.06 herdr\n"
   ],
   "process": {
     "bootP50Ms": {
-      "median": 26.41245699999854,
-      "min": 26.380600000000413,
-      "max": 26.683607999999367
+      "median": 26.542794000000868,
+      "min": 26.339420999998765,
+      "max": 26.743846999999732
     },
     "idleRssMb": {
-      "median": 10.078125,
-      "min": 9.87890625,
-      "max": 10.15625
+      "median": 10.25,
+      "min": 10.125,
+      "max": 10.34375
     },
     "finalRssMb": {
-      "median": 78.84375,
-      "min": 77.21484375,
-      "max": 86.89453125
+      "median": 54.8828125,
+      "min": 50.65234375,
+      "max": 55.70703125
     },
     "shutdownIdleP50Ms": {
-      "median": 5.727460000000065,
-      "min": 5.245861999999761,
-      "max": 6.314856999999392
+      "median": 5.990880000001198,
+      "min": 5.909426000000167,
+      "max": 6.118521000000328
     },
     "shutdownAfterLoadMs": {
-      "median": 7.2961360000190325,
-      "min": 7.12125200004084,
-      "max": 8.477997999987565
+      "median": 6.662092000013217,
+      "min": 6.535981000051834,
+      "max": 7.5900130000081845
     },
-    "binaryBytes": 6430816,
+    "binaryBytes": 6426720,
     "dbBytesAfter": {
-      "median": 6746136576,
-      "min": 6663622656,
-      "max": 6798893056
+      "median": 6622298112,
+      "min": 6582521856,
+      "max": 6696542208
     },
     "cliKeysListP50Ms": {
-      "median": 98.43087600002764,
-      "min": 98.05557500000577,
-      "max": 99.57187899999553
+      "median": 99.32118000002811,
+      "min": 98.95690200000536,
+      "max": 101.9392569999909
     }
   },
   "calibration": [
     {
       "alone": {
-        "0": 480,
-        "1": 485,
-        "2": 479,
-        "3": 479,
-        "4": 476,
-        "5": 487,
-        "6": 481,
-        "7": 483
+        "0": 487,
+        "1": 477,
+        "2": 481,
+        "3": 484,
+        "4": 484,
+        "5": 481,
+        "6": 483,
+        "7": 489
       },
       "together": {
-        "0": 556,
-        "1": 589,
-        "2": 534,
-        "3": 536,
-        "4": 535,
-        "5": 538,
-        "6": 533,
-        "7": 533
-      },
-      "mhzUnderLoad": [
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496
-      ],
-      "foreignCoresBefore": 0.23
-    },
-    {
-      "alone": {
-        "0": 481,
-        "1": 479,
-        "2": 480,
-        "3": 480,
-        "4": 481,
-        "5": 483,
-        "6": 482,
-        "7": 475
-      },
-      "together": {
-        "0": 531,
-        "1": 532,
-        "2": 529,
-        "3": 578,
-        "4": 529,
-        "5": 536,
-        "6": 530,
-        "7": 528
-      },
-      "mhzUnderLoad": [
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496
-      ],
-      "foreignCoresBefore": 0.08
-    },
-    {
-      "alone": {
-        "0": 481,
-        "1": 465,
-        "2": 480,
-        "3": 473,
-        "4": 480,
-        "5": 480,
-        "6": 486,
-        "7": 467
-      },
-      "together": {
-        "0": 535,
-        "1": 540,
-        "2": 532,
+        "0": 549,
+        "1": 537,
+        "2": 596,
         "3": 533,
+        "4": 536,
+        "5": 545,
+        "6": 536,
+        "7": 547
+      },
+      "mhzUnderLoad": [
+        2496,
+        2496,
+        2496,
+        2496,
+        2496,
+        2496,
+        2496,
+        2496
+      ],
+      "foreignCoresBefore": 0.21
+    },
+    {
+      "alone": {
+        "0": 489,
+        "1": 476,
+        "2": 485,
+        "3": 487,
+        "4": 461,
+        "5": 484,
+        "6": 482,
+        "7": 488
+      },
+      "together": {
+        "0": 534,
+        "1": 568,
+        "2": 531,
+        "3": 535,
         "4": 531,
-        "5": 530,
-        "6": 533,
-        "7": 578
+        "5": 532,
+        "6": 565,
+        "7": 539
       },
       "mhzUnderLoad": [
         2496,
@@ -145,54 +112,87 @@
         2496
       ],
       "foreignCoresBefore": 0.15
+    },
+    {
+      "alone": {
+        "0": 481,
+        "1": 480,
+        "2": 484,
+        "3": 483,
+        "4": 482,
+        "5": 488,
+        "6": 484,
+        "7": 468
+      },
+      "together": {
+        "0": 532,
+        "1": 531,
+        "2": 585,
+        "3": 546,
+        "4": 534,
+        "5": 537,
+        "6": 530,
+        "7": 529
+      },
+      "mhzUnderLoad": [
+        2496,
+        2496,
+        2496,
+        2496,
+        2496,
+        2496,
+        2496,
+        2496
+      ],
+      "foreignCoresBefore": 0.09
     }
   ],
   "summary": {
     "overhead-c1": {
       "rps": {
-        "median": 10537.02959421891,
-        "min": 10330.786519050744,
-        "max": 10565.908646196716
+        "median": 10077.71088429019,
+        "min": 10047.681266399912,
+        "max": 10216.071909719627
       },
       "p50Ms": {
-        "median": 0.082784,
-        "min": 0.08247299999999999,
-        "max": 0.083532
+        "median": 0.08472800000000001,
+        "min": 0.0842,
+        "max": 0.085337
       },
       "p99Ms": {
-        "median": 0.222616,
-        "min": 0.22259600000000002,
-        "max": 0.226925
+        "median": 0.24098899999999998,
+        "min": 0.23281100000000002,
+        "max": 0.244533
       },
       "p999Ms": {
-        "median": 0.423944,
-        "min": 0.41659599999999997,
-        "max": 0.441415
+        "median": 0.455588,
+        "min": 0.430152,
+        "max": 0.495503
       },
       "ttfbP50Ms": {
-        "median": 0.079327,
-        "min": 0.079054,
-        "max": 0.08009200000000001
+        "median": 0.081218,
+        "min": 0.08066899999999999,
+        "max": 0.081787
       },
       "cpuMsPerRequest": {
-        "median": 0.061922589645404195,
-        "min": 0.061514001533118194,
-        "max": 0.06306140622580146
+        "median": 0.06389998263587428,
+        "min": 0.0637176456770367,
+        "max": 0.06409171883241607
       },
       "rssStartMb": {
-        "median": 26.8203125,
-        "min": 25.14453125,
-        "max": 31.12890625
+        "median": 27.38671875,
+        "min": 26.7578125,
+        "max": 33.28125
       },
       "rssPeakMb": {
-        "median": 37.484375,
-        "min": 37.3984375,
-        "max": 37.55859375
+        "median": 36.60546875,
+        "min": 36.02734375,
+        "max": 38.421875
       },
       "rssEndMb": {
-        "median": 31.90625,
-        "min": 27.16015625,
-        "max": 33.609375
+        "median": 32.35546875,
+        "min": 24.30859375,
+        "max": 33.96484375
       },
       "successRate": {
         "median": 1,
@@ -202,59 +202,74 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        483698,
-        486626,
-        473454
+      "writerBarrier": [
+        {
+          "events": 463384,
+          "committed": 463384,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 463092,
+          "committed": 463092,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 467400,
+          "committed": 467400,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "chat-stream": {
       "rps": {
-        "median": 55770.17942181719,
-        "min": 55035.36363418193,
-        "max": 56384.74929385517
+        "median": 55490.95918658713,
+        "min": 55357.623098206015,
+        "max": 56565.348299890626
       },
       "p50Ms": {
-        "median": 1.0438990000000001,
-        "min": 1.037837,
-        "max": 1.06003
+        "median": 1.047342,
+        "min": 1.034637,
+        "max": 1.050536
       },
       "p99Ms": {
-        "median": 3.045669,
-        "min": 2.975451,
-        "max": 3.088857
+        "median": 3.048966,
+        "min": 2.906808,
+        "max": 3.0985959999999997
       },
       "p999Ms": {
-        "median": 5.283281,
-        "min": 5.238886,
-        "max": 5.315445
+        "median": 5.396618,
+        "min": 5.049263,
+        "max": 5.506715
       },
       "ttfbP50Ms": {
-        "median": 1.031137,
-        "min": 1.026391,
-        "max": 1.047175
+        "median": 1.034256,
+        "min": 1.0214180000000002,
+        "max": 1.037881
       },
       "cpuMsPerRequest": {
-        "median": 0.057513251085320585,
-        "min": 0.05660357283454094,
-        "max": 0.05851395269834522
+        "median": 0.0572900816094684,
+        "min": 0.05681808138887465,
+        "max": 0.05770994401973273
       },
       "rssStartMb": {
-        "median": 48.37109375,
-        "min": 44.37109375,
-        "max": 50.4453125
+        "median": 50.16796875,
+        "min": 45.72265625,
+        "max": 54.29296875
       },
       "rssPeakMb": {
-        "median": 58.05859375,
-        "min": 57.6328125,
-        "max": 58.94140625
+        "median": 57.890625,
+        "min": 57.26953125,
+        "max": 59.24609375
       },
       "rssEndMb": {
-        "median": 48.78515625,
-        "min": 44.609375,
-        "max": 50.9140625
+        "median": 47.3046875,
+        "min": 46.57421875,
+        "max": 50.12890625
       },
       "successRate": {
         "median": 1,
@@ -264,59 +279,74 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        2568076,
-        2592836,
-        2531742
+      "writerBarrier": [
+        {
+          "events": 2547530,
+          "committed": 2547530,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2587190,
+          "committed": 2587190,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2545180,
+          "committed": 2545180,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "anthropic-json": {
       "rps": {
-        "median": 58884.25059694706,
-        "min": 58495.06809545493,
-        "max": 60576.304454169556
+        "median": 58085.27793622932,
+        "min": 58065.8286790403,
+        "max": 59081.02327017281
       },
       "p50Ms": {
-        "median": 0.9902839999999999,
-        "min": 0.96699,
-        "max": 1.0007480000000002
+        "median": 1.004648,
+        "min": 0.993985,
+        "max": 1.0049869999999999
       },
       "p99Ms": {
-        "median": 2.841283,
-        "min": 2.794813,
-        "max": 2.90276
+        "median": 2.861777,
+        "min": 2.75832,
+        "max": 2.942624
       },
       "p999Ms": {
-        "median": 5.214622,
-        "min": 5.075432999999999,
-        "max": 5.265573
+        "median": 5.311164,
+        "min": 4.9869509999999995,
+        "max": 5.324414
       },
       "ttfbP50Ms": {
-        "median": 0.9900939999999999,
-        "min": 0.966804,
-        "max": 1.0005490000000001
+        "median": 1.004448,
+        "min": 0.9937870000000001,
+        "max": 1.0048030000000001
       },
       "cpuMsPerRequest": {
-        "median": 0.056134226341826195,
-        "min": 0.05488057491734903,
-        "max": 0.05647530188390599
+        "median": 0.056455694459268235,
+        "min": 0.05597488534244952,
+        "max": 0.05661041786667838
       },
       "rssStartMb": {
-        "median": 54.9453125,
-        "min": 48.1015625,
-        "max": 59.75390625
+        "median": 51.1796875,
+        "min": 48.12890625,
+        "max": 54.66796875
       },
       "rssPeakMb": {
-        "median": 59.7890625,
-        "min": 59.6484375,
-        "max": 62.21484375
+        "median": 59.49609375,
+        "min": 58.02734375,
+        "max": 60.21484375
       },
       "rssEndMb": {
-        "median": 45.9296875,
-        "min": 43.87109375,
-        "max": 51.66796875
+        "median": 44.74609375,
+        "min": 38.43359375,
+        "max": 46.99609375
       },
       "successRate": {
         "median": 1,
@@ -326,59 +356,74 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        2713150,
-        2780812,
-        2691818
+      "writerBarrier": [
+        {
+          "events": 2679978,
+          "committed": 2679978,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2707608,
+          "committed": 2707608,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2662818,
+          "committed": 2662818,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "responses-stream": {
       "rps": {
-        "median": 53154.168230302734,
-        "min": 52803.93548143275,
-        "max": 53529.00096700272
+        "median": 52314.76837940277,
+        "min": 52293.228241932906,
+        "max": 52968.10283966261
       },
       "p50Ms": {
-        "median": 1.097757,
-        "min": 1.097553,
-        "max": 1.1065479999999999
+        "median": 1.11585,
+        "min": 1.105451,
+        "max": 1.116544
       },
       "p99Ms": {
-        "median": 3.184202,
-        "min": 3.06497,
-        "max": 3.268701
+        "median": 3.2270570000000003,
+        "min": 3.121188,
+        "max": 3.268481
       },
       "p999Ms": {
-        "median": 5.571222,
-        "min": 5.4746250000000005,
-        "max": 5.660787
+        "median": 5.372818,
+        "min": 5.348649,
+        "max": 5.505351
       },
       "ttfbP50Ms": {
-        "median": 1.0877759999999999,
-        "min": 1.086927,
-        "max": 1.0950879999999998
+        "median": 1.104061,
+        "min": 1.093555,
+        "max": 1.1044180000000001
       },
       "cpuMsPerRequest": {
-        "median": 0.06097400398781085,
-        "min": 0.06075368187859165,
-        "max": 0.06128272419839206
+        "median": 0.06168668895860829,
+        "min": 0.06092985987831016,
+        "max": 0.06211892648399994
       },
       "rssStartMb": {
-        "median": 51.66015625,
-        "min": 51,
-        "max": 51.859375
+        "median": 53.10546875,
+        "min": 47.11328125,
+        "max": 55.5078125
       },
       "rssPeakMb": {
-        "median": 59.09375,
-        "min": 58.72265625,
-        "max": 60.2109375
+        "median": 59.00390625,
+        "min": 57.76953125,
+        "max": 59.98828125
       },
       "rssEndMb": {
-        "median": 45.44921875,
-        "min": 41.30859375,
-        "max": 49.46875
+        "median": 49.8515625,
+        "min": 47.90234375,
+        "max": 52.69921875
       },
       "successRate": {
         "median": 1,
@@ -388,59 +433,74 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        2459074,
-        2466630,
-        2434422
+      "writerBarrier": [
+        {
+          "events": 2394140,
+          "committed": 2394140,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2442340,
+          "committed": 2442340,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2406784,
+          "committed": 2406784,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "agent-100k": {
       "rps": {
-        "median": 6968.8766430792,
-        "min": 6924.965369101868,
-        "max": 7011.889482166112
+        "median": 6809.377591498999,
+        "min": 6793.037213820394,
+        "max": 6852.050218204849
       },
       "p50Ms": {
-        "median": 4.506237,
-        "min": 4.479398,
-        "max": 4.536116
+        "median": 4.6196340000000005,
+        "min": 4.584075,
+        "max": 4.627476000000001
       },
       "p99Ms": {
-        "median": 7.892807,
-        "min": 7.823871,
-        "max": 7.935812
+        "median": 7.998013,
+        "min": 7.975902,
+        "max": 8.026717
       },
       "p999Ms": {
-        "median": 9.566259,
-        "min": 9.457170000000001,
-        "max": 9.574714
+        "median": 9.754311,
+        "min": 9.618631,
+        "max": 9.77852
       },
       "ttfbP50Ms": {
-        "median": 4.499722,
-        "min": 4.47363,
-        "max": 4.529677
+        "median": 4.613723,
+        "min": 4.57778,
+        "max": 4.621901
       },
       "cpuMsPerRequest": {
-        "median": 0.5574445496542423,
-        "min": 0.5544228356336262,
-        "max": 0.561190237282263
+        "median": 0.5705225140575223,
+        "min": 0.5667177354636317,
+        "max": 0.5721623690097728
       },
       "rssStartMb": {
-        "median": 57.12109375,
-        "min": 55.87109375,
-        "max": 58.0859375
+        "median": 58.09375,
+        "min": 54.98046875,
+        "max": 59.4765625
       },
       "rssPeakMb": {
-        "median": 67.58984375,
-        "min": 67.05078125,
-        "max": 67.9296875
+        "median": 67.484375,
+        "min": 66.890625,
+        "max": 68.4375
       },
       "rssEndMb": {
-        "median": 64.671875,
-        "min": 62.59375,
-        "max": 65.46875
+        "median": 63.765625,
+        "min": 63.2890625,
+        "max": 65.59375
       },
       "successRate": {
         "median": 1,
@@ -450,59 +510,74 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        321848,
-        321590,
-        319314
+      "writerBarrier": [
+        {
+          "events": 313652,
+          "committed": 313652,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 315502,
+          "committed": 315502,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 312794,
+          "committed": 312794,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "many-chunks": {
       "rps": {
-        "median": 3463.095671083236,
-        "min": 3443.5952118069845,
-        "max": 3465.2810951251845
+        "median": 3449.9031385133044,
+        "min": 3408.8413660105916,
+        "max": 3459.52476963181
       },
       "p50Ms": {
-        "median": 4.53178,
-        "min": 4.523677,
-        "max": 4.553438
+        "median": 4.5585189999999995,
+        "min": 4.55029,
+        "max": 4.6016010000000005
       },
       "p99Ms": {
-        "median": 7.598145,
-        "min": 7.52641,
-        "max": 7.601578
+        "median": 7.488746,
+        "min": 7.440554000000001,
+        "max": 7.65803
       },
       "p999Ms": {
-        "median": 9.510698,
-        "min": 9.382309,
-        "max": 9.723754
+        "median": 9.442245999999999,
+        "min": 9.403419999999999,
+        "max": 9.729952
       },
       "ttfbP50Ms": {
-        "median": 3.9621450000000005,
-        "min": 3.9509339999999997,
-        "max": 3.981691
+        "median": 3.9839690000000005,
+        "min": 3.9766489999999997,
+        "max": 4.020617
       },
       "cpuMsPerRequest": {
-        "median": 1.1262340511517814,
-        "min": 1.1255842132594776,
-        "max": 1.13233565093696
+        "median": 1.1316216529500402,
+        "min": 1.1276315979597442,
+        "max": 1.1439882697947212
       },
       "rssStartMb": {
-        "median": 62.71875,
-        "min": 60.12109375,
-        "max": 63.4296875
+        "median": 57.2890625,
+        "min": 56.6015625,
+        "max": 59.44140625
       },
       "rssPeakMb": {
-        "median": 62.71875,
-        "min": 60.12109375,
-        "max": 63.4296875
+        "median": 59.44140625,
+        "min": 57.55078125,
+        "max": 59.6796875
       },
       "rssEndMb": {
-        "median": 50.0234375,
-        "min": 49.09375,
-        "max": 57.140625
+        "median": 52.2265625,
+        "min": 47.70703125,
+        "max": 59.3359375
       },
       "successRate": {
         "median": 1,
@@ -512,59 +587,74 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        159494,
-        158520,
-        159146
+      "writerBarrier": [
+        {
+          "events": 156678,
+          "committed": 156678,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 158636,
+          "committed": 158636,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 159114,
+          "committed": 159114,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "rate-limited-key": {
       "rps": {
-        "median": 51415.89786603298,
-        "min": 50900.27728536935,
-        "max": 51723.839811402184
+        "median": 50026.91041196405,
+        "min": 49840.16440296686,
+        "max": 51199.37144009691
       },
       "p50Ms": {
-        "median": 1.1353820000000001,
-        "min": 1.126424,
-        "max": 1.138807
+        "median": 1.1674820000000001,
+        "min": 1.1404189999999998,
+        "max": 1.1713500000000001
       },
       "p99Ms": {
-        "median": 3.3282469999999997,
-        "min": 3.287957,
-        "max": 3.656234
+        "median": 3.470386,
+        "min": 3.3661350000000003,
+        "max": 3.490504
       },
       "p999Ms": {
-        "median": 5.7098770000000005,
-        "min": 5.692741000000001,
-        "max": 6.523025
+        "median": 5.851846,
+        "min": 5.657514,
+        "max": 5.91113
       },
       "ttfbP50Ms": {
-        "median": 1.122846,
-        "min": 1.1145289999999999,
-        "max": 1.127206
+        "median": 1.154279,
+        "min": 1.127994,
+        "max": 1.158792
       },
       "cpuMsPerRequest": {
-        "median": 0.06361195733662123,
-        "min": 0.06322960019021073,
-        "max": 0.06389120521108647
+        "median": 0.06547730879466586,
+        "min": 0.06413310940124205,
+        "max": 0.06601219535437043
       },
       "rssStartMb": {
-        "median": 50.36328125,
-        "min": 43.640625,
-        "max": 56.9296875
+        "median": 51.96875,
+        "min": 45.015625,
+        "max": 54.5625
       },
       "rssPeakMb": {
-        "median": 103.5546875,
-        "min": 100.25,
-        "max": 107.4453125
+        "median": 60.48828125,
+        "min": 60.20703125,
+        "max": 61.640625
       },
       "rssEndMb": {
-        "median": 78.37109375,
-        "min": 72.39453125,
-        "max": 94.625
+        "median": 50.40625,
+        "min": 44.38671875,
+        "max": 53.32421875
       },
       "successRate": {
         "median": 1,
@@ -574,59 +664,74 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        2365120,
-        2379812,
-        2344774
+      "writerBarrier": [
+        {
+          "events": 2307850,
+          "committed": 2307850,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2350166,
+          "committed": 2350166,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2304638,
+          "committed": 2304638,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "held-streams": {
       "rps": {
-        "median": 31.61096543850631,
-        "min": 31.59941719546641,
-        "max": 31.62990915776159
+        "median": 31.65512900540505,
+        "min": 31.434499504019648,
+        "max": 31.657804559250078
       },
       "p50Ms": {
-        "median": 30543.354530999997,
-        "min": 30537.64421,
-        "max": 30554.300911
+        "median": 30539.598335000002,
+        "min": 30537.077806999998,
+        "max": 30547.352084
       },
       "p99Ms": {
-        "median": 31570.437401,
-        "min": 31556.435483,
-        "max": 31571.927030000003
+        "median": 31534.603644,
+        "min": 31521.571561999997,
+        "max": 31764.652068
       },
       "p999Ms": {
-        "median": 31578.213431,
-        "min": 31577.582896,
-        "max": 31603.37475
+        "median": 31543.315573,
+        "min": 31528.115963,
+        "max": 31765.368075000002
       },
       "ttfbP50Ms": {
-        "median": 531.735129,
-        "min": 529.1602829999999,
-        "max": 543.306273
+        "median": 531.4928880000001,
+        "min": 530.485277,
+        "max": 532.4500039999999
       },
       "cpuMsPerRequest": {
-        "median": 0.9900000000000091,
-        "min": 0.9699999999999704,
-        "max": 1
+        "median": 0.9800000000000182,
+        "min": 0.9799999999999613,
+        "max": 1.0399999999999636
       },
       "rssStartMb": {
-        "median": 77.9375,
-        "min": 71.9921875,
-        "max": 94.625
+        "median": 50.40625,
+        "min": 44.390625,
+        "max": 53.328125
       },
       "rssPeakMb": {
-        "median": 100.5078125,
-        "min": 95.796875,
-        "max": 102.078125
+        "median": 73.21875,
+        "min": 70.22265625,
+        "max": 75.0859375
       },
       "rssEndMb": {
-        "median": 89.36328125,
-        "min": 85.75390625,
-        "max": 90.6171875
+        "median": 59.8203125,
+        "min": 58.7578125,
+        "max": 70.70703125
       },
       "successRate": {
         "median": 1,
@@ -636,43 +741,58 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        2000,
-        2000,
-        2000
+      "writerBarrier": [
+        {
+          "events": 2000,
+          "committed": 2000,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2000,
+          "committed": 2000,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 2000,
+          "committed": 2000,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "client-cancel": {
       "rps": {
-        "median": 99.97881838255971,
-        "min": 99.97852124935841,
-        "max": 99.98142618050859
+        "median": 99.98265650848876,
+        "min": 99.98160362988703,
+        "max": 99.98595499789793
       },
       "p50Ms": null,
       "p99Ms": null,
       "p999Ms": null,
       "ttfbP50Ms": null,
       "cpuMsPerRequest": {
-        "median": 0.23499999999998522,
-        "min": 0.21999999999999886,
+        "median": 0.21999999999999886,
+        "min": 0.2150000000000034,
         "max": 0.2400000000000091
       },
       "rssStartMb": {
-        "median": 89.37109375,
-        "min": 85.76171875,
-        "max": 90.625
+        "median": 59.83203125,
+        "min": 58.76171875,
+        "max": 70.71484375
       },
       "rssPeakMb": {
-        "median": 89.37109375,
-        "min": 85.76171875,
-        "max": 90.625
+        "median": 60.17578125,
+        "min": 59.83203125,
+        "max": 70.71484375
       },
       "rssEndMb": {
-        "median": 63.43359375,
-        "min": 62.65234375,
-        "max": 65.08203125
+        "median": 38.91796875,
+        "min": 35.90234375,
+        "max": 39.8828125
       },
       "successRate": {
         "median": 0,
@@ -682,72 +802,102 @@
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        4000,
-        4000,
-        4000
+      "writerBarrier": [
+        {
+          "events": 4000,
+          "committed": 4000,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 4000,
+          "committed": 4000,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 4000,
+          "committed": 4000,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
     },
     "early-cancel": {
       "rps": {
-        "median": 46038.26207165187,
-        "min": 45620.946878485964,
-        "max": 46553.18506416011
+        "median": 45326.99988824949,
+        "min": 43933.07592172857,
+        "max": 45756.987454366856
       },
       "p50Ms": {
-        "median": 0.9960060000000001,
-        "min": 0.98237,
-        "max": 1.003074
+        "median": 0.9995780000000001,
+        "min": 0.996023,
+        "max": 1.019247
       },
       "p99Ms": {
-        "median": 1.8456970000000001,
-        "min": 1.840616,
-        "max": 1.854724
+        "median": 1.863663,
+        "min": 1.851652,
+        "max": 1.870328
       },
       "p999Ms": {
-        "median": 1.9614760000000002,
-        "min": 1.958324,
-        "max": 1.9674509999999998
+        "median": 1.964717,
+        "min": 1.961704,
+        "max": 1.965785
       },
       "ttfbP50Ms": {
-        "median": 0.9808049999999999,
-        "min": 0.966386,
-        "max": 0.987146
+        "median": 0.9840770000000001,
+        "min": 0.980573,
+        "max": 1.0025259999999998
       },
       "cpuMsPerRequest": {
-        "median": 0.0694903713646241,
-        "min": 0.06798154939938898,
-        "max": 0.07064709981984828
+        "median": 0.07068801976485124,
+        "min": 0.07007142630808924,
+        "max": 0.07188775632133164
       },
       "rssStartMb": {
-        "median": 63.37109375,
-        "min": 62.65625,
-        "max": 65.0859375
+        "median": 37.82421875,
+        "min": 35.90625,
+        "max": 39.88671875
       },
       "rssPeakMb": {
-        "median": 95.47265625,
-        "min": 93.453125,
-        "max": 96.6484375
+        "median": 73.76953125,
+        "min": 67.79296875,
+        "max": 77.91796875
       },
       "rssEndMb": {
-        "median": 78.84375,
-        "min": 77.21484375,
-        "max": 86.890625
+        "median": 54.8828125,
+        "min": 50.65234375,
+        "max": 55.70703125
       },
       "successRate": {
-        "median": 0.5770928315591245,
-        "min": 0.5681429390214366,
-        "max": 0.5908050569394369
+        "median": 0.5641151497169128,
+        "min": 0.5291921832482244,
+        "max": 0.5698347586068234
       },
       "crashed": 0,
       "rowsMissing": 0,
       "rowsPending": 0,
-      "writerEnqueued": [
-        1848914,
-        1829126,
-        1811080
+      "writerBarrier": [
+        {
+          "events": 1817708,
+          "committed": 1817708,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 1798568,
+          "committed": 1798568,
+          "failed": 0,
+          "dropped": 0
+        },
+        {
+          "events": 1741102,
+          "committed": 1741102,
+          "failed": 0,
+          "dropped": 0
+        }
       ],
       "writerDropped": 0,
       "writerFailed": 0
@@ -759,28 +909,28 @@
     "concurrency": 1000,
     "requests": 1000,
     "successRate": 1,
-    "rps": 31.474083077608796,
+    "rps": 31.435257941993637,
     "latencyMs": {
-      "p50": 30718.840545,
-      "p90": 31577.091708,
-      "p99": 31730.608808,
-      "p999": 31763.069071,
-      "p9999": 31763.069071
+      "p50": 30563.554345,
+      "p90": 31568.304965,
+      "p99": 31775.948045,
+      "p999": 31799.258529,
+      "p9999": 31799.258529
     },
     "ttfbMs": {
-      "p50": 707.8887149999999,
-      "p99": 1723.2003310000002
+      "p50": 556.836749,
+      "p99": 1767.7598890000002
     },
     "status": {
       "200": 1000
     },
     "errors": {},
-    "cpuSeconds": 1.07,
-    "cpuMsPerRequest": 1.07,
+    "cpuSeconds": 1.09,
+    "cpuMsPerRequest": 1.09,
     "backingCpuMsPerRequest": null,
-    "rssStartMb": 12.23828125,
-    "rssPeakMb": 59.07421875,
-    "rssEndMb": 48.46875,
+    "rssStartMb": 12.02734375,
+    "rssPeakMb": 57.453125,
+    "rssEndMb": 46.625,
     "healthyAfter": true,
     "crashed": 0,
     "rows": {
@@ -789,14 +939,14 @@
       "pending": 0,
       "missing": 0,
       "writer": {
-        "enqueued": 2000,
+        "events": 2000,
         "committed": 2000,
-        "dropped": 0,
-        "failed": 0
+        "failed": 0,
+        "dropped": 0
       }
     },
-    "foreignCores": 0.13,
-    "windowFrom": 1794214087378,
+    "foreignCores": 0.18,
+    "windowFrom": 1794216670634,
     "gatewayMhz": [
       2496,
       2496,
@@ -810,46 +960,46 @@
       "name": "rate-limited-key",
       "what": "chat SSE, 1 chunk, 64 clients, key with request/token/concurrency limits",
       "concurrency": 64,
-      "requests": 1032385,
+      "requests": 1034876,
       "successRate": 1,
-      "rps": 51611.702572996575,
+      "rps": 51737.382841672785,
       "latencyMs": {
-        "p50": 1.135856,
-        "p90": 1.8840459999999999,
-        "p99": 3.23922,
-        "p999": 5.560674,
-        "p9999": 9.048962000000001
+        "p50": 1.1312659999999999,
+        "p90": 1.878207,
+        "p99": 3.287782,
+        "p999": 5.641151,
+        "p9999": 8.80856
       },
       "ttfbMs": {
-        "p50": 1.124266,
-        "p99": 3.222599
+        "p50": 1.119231,
+        "p99": 3.269574
       },
       "status": {
-        "200": 1032385
+        "200": 1034876
       },
       "errors": {},
-      "cpuSeconds": 65.48,
-      "cpuMsPerRequest": 0.06342595059013838,
+      "cpuSeconds": 65.75999999999999,
+      "cpuMsPerRequest": 0.06354384486643809,
       "backingCpuMsPerRequest": null,
-      "rssStartMb": 51.3203125,
-      "rssPeakMb": 95.09765625,
-      "rssEndMb": 72.62890625,
+      "rssStartMb": 48.8984375,
+      "rssPeakMb": 60.47265625,
+      "rssEndMb": 50.08984375,
       "healthyAfter": true,
       "crashed": 0,
       "rows": {
-        "answered": 1190136,
-        "done": 1190136,
+        "answered": 1184099,
+        "done": 1184099,
         "pending": 0,
         "missing": 0,
         "writer": {
-          "enqueued": 2380272,
-          "committed": 2380272,
-          "dropped": 0,
-          "failed": 0
+          "events": 2368198,
+          "committed": 2368198,
+          "failed": 0,
+          "dropped": 0
         }
       },
-      "foreignCores": 0.82,
-      "windowFrom": 1794214148930,
+      "foreignCores": 0.89,
+      "windowFrom": 1794216732503,
       "gatewayMhz": [
         2496,
         2496,
@@ -858,31 +1008,31 @@
       ],
       "threads": {
         "tokio-rt-worker": {
+          "cpu": 69,
+          "runqueue": 16
+        },
+        "tokio-rt-worker#2": {
+          "cpu": 68,
+          "runqueue": 16
+        },
+        "tokio-rt-worker#3": {
           "cpu": 68,
           "runqueue": 17
         },
-        "tokio-rt-worker#2": {
-          "cpu": 67,
-          "runqueue": 18
-        },
-        "tokio-rt-worker#3": {
-          "cpu": 67,
-          "runqueue": 19
-        },
         "tokio-rt-worker#4": {
-          "cpu": 66,
-          "runqueue": 19
+          "cpu": 68,
+          "runqueue": 16
         },
         "tokio-rt-worker#5": {
           "cpu": 27,
-          "runqueue": 5
-        },
-        "tokio-rt-worker#6": {
-          "cpu": 27,
           "runqueue": 6
         },
+        "tokio-rt-worker#6": {
+          "cpu": 26,
+          "runqueue": 5
+        },
         "omni-checkpoint": {
-          "cpu": 5,
+          "cpu": 6,
           "runqueue": 7
         }
       }
@@ -893,28 +1043,28 @@
       "concurrency": 1000,
       "requests": 1000,
       "successRate": 1,
-      "rps": 31.621103546887976,
+      "rps": 31.621670171081185,
       "latencyMs": {
-        "p50": 30535.084489,
-        "p90": 31575.795285,
-        "p99": 31577.054705,
-        "p999": 31583.82571,
-        "p9999": 31583.82571
+        "p50": 30538.705749,
+        "p90": 31568.817034,
+        "p99": 31570.773744000002,
+        "p999": 31571.045949,
+        "p9999": 31571.045949
       },
       "ttfbMs": {
-        "p50": 528.682767,
-        "p99": 1569.563676
+        "p50": 528.743152,
+        "p99": 1564.0066880000002
       },
       "status": {
         "200": 1000
       },
       "errors": {},
-      "cpuSeconds": 0.9499999999999886,
-      "cpuMsPerRequest": 0.9499999999999886,
+      "cpuSeconds": 0.9699999999999989,
+      "cpuMsPerRequest": 0.9699999999999989,
       "backingCpuMsPerRequest": null,
-      "rssStartMb": 72.50390625,
-      "rssPeakMb": 99.87890625,
-      "rssEndMb": 74.3984375,
+      "rssStartMb": 50.08984375,
+      "rssPeakMb": 73.74609375,
+      "rssEndMb": 69.1953125,
       "healthyAfter": true,
       "crashed": 0,
       "rows": {
@@ -923,14 +1073,14 @@
         "pending": 0,
         "missing": 0,
         "writer": {
-          "enqueued": 2000,
+          "events": 2000,
           "committed": 2000,
-          "dropped": 0,
-          "failed": 0
+          "failed": 0,
+          "dropped": 0
         }
       },
-      "foreignCores": 0.14,
-      "windowFrom": 1794214174043,
+      "foreignCores": 0.17,
+      "windowFrom": 1794216757596,
       "gatewayMhz": [
         2496,
         2496,
@@ -942,6 +1092,615 @@
   ],
   "previous": {
     "note": "Earlier rounds, with v4 request ids, kept for comparison: the 20k-capped zero-drop median of 3 (d6933714) and the shedding runs.",
+    "uncappedV7UnboundedWindows": {
+      "label": "rust-slice1 single @ 394287df: median of 3 full runs, uncapped, request ids req_<uuid v7>; every scenario 0 dropped, 0 failed, 0 missing, 0 pending (writer flush barrier)",
+      "summary": {
+        "overhead-c1": {
+          "rps": {
+            "median": 10537.02959421891,
+            "min": 10330.786519050744,
+            "max": 10565.908646196716
+          },
+          "p50Ms": {
+            "median": 0.082784,
+            "min": 0.08247299999999999,
+            "max": 0.083532
+          },
+          "p99Ms": {
+            "median": 0.222616,
+            "min": 0.22259600000000002,
+            "max": 0.226925
+          },
+          "p999Ms": {
+            "median": 0.423944,
+            "min": 0.41659599999999997,
+            "max": 0.441415
+          },
+          "ttfbP50Ms": {
+            "median": 0.079327,
+            "min": 0.079054,
+            "max": 0.08009200000000001
+          },
+          "cpuMsPerRequest": {
+            "median": 0.061922589645404195,
+            "min": 0.061514001533118194,
+            "max": 0.06306140622580146
+          },
+          "rssStartMb": {
+            "median": 26.8203125,
+            "min": 25.14453125,
+            "max": 31.12890625
+          },
+          "rssPeakMb": {
+            "median": 37.484375,
+            "min": 37.3984375,
+            "max": 37.55859375
+          },
+          "rssEndMb": {
+            "median": 31.90625,
+            "min": 27.16015625,
+            "max": 33.609375
+          },
+          "successRate": {
+            "median": 1,
+            "min": 1,
+            "max": 1
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            483698,
+            486626,
+            473454
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "chat-stream": {
+          "rps": {
+            "median": 55770.17942181719,
+            "min": 55035.36363418193,
+            "max": 56384.74929385517
+          },
+          "p50Ms": {
+            "median": 1.0438990000000001,
+            "min": 1.037837,
+            "max": 1.06003
+          },
+          "p99Ms": {
+            "median": 3.045669,
+            "min": 2.975451,
+            "max": 3.088857
+          },
+          "p999Ms": {
+            "median": 5.283281,
+            "min": 5.238886,
+            "max": 5.315445
+          },
+          "ttfbP50Ms": {
+            "median": 1.031137,
+            "min": 1.026391,
+            "max": 1.047175
+          },
+          "cpuMsPerRequest": {
+            "median": 0.057513251085320585,
+            "min": 0.05660357283454094,
+            "max": 0.05851395269834522
+          },
+          "rssStartMb": {
+            "median": 48.37109375,
+            "min": 44.37109375,
+            "max": 50.4453125
+          },
+          "rssPeakMb": {
+            "median": 58.05859375,
+            "min": 57.6328125,
+            "max": 58.94140625
+          },
+          "rssEndMb": {
+            "median": 48.78515625,
+            "min": 44.609375,
+            "max": 50.9140625
+          },
+          "successRate": {
+            "median": 1,
+            "min": 1,
+            "max": 1
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            2568076,
+            2592836,
+            2531742
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "anthropic-json": {
+          "rps": {
+            "median": 58884.25059694706,
+            "min": 58495.06809545493,
+            "max": 60576.304454169556
+          },
+          "p50Ms": {
+            "median": 0.9902839999999999,
+            "min": 0.96699,
+            "max": 1.0007480000000002
+          },
+          "p99Ms": {
+            "median": 2.841283,
+            "min": 2.794813,
+            "max": 2.90276
+          },
+          "p999Ms": {
+            "median": 5.214622,
+            "min": 5.075432999999999,
+            "max": 5.265573
+          },
+          "ttfbP50Ms": {
+            "median": 0.9900939999999999,
+            "min": 0.966804,
+            "max": 1.0005490000000001
+          },
+          "cpuMsPerRequest": {
+            "median": 0.056134226341826195,
+            "min": 0.05488057491734903,
+            "max": 0.05647530188390599
+          },
+          "rssStartMb": {
+            "median": 54.9453125,
+            "min": 48.1015625,
+            "max": 59.75390625
+          },
+          "rssPeakMb": {
+            "median": 59.7890625,
+            "min": 59.6484375,
+            "max": 62.21484375
+          },
+          "rssEndMb": {
+            "median": 45.9296875,
+            "min": 43.87109375,
+            "max": 51.66796875
+          },
+          "successRate": {
+            "median": 1,
+            "min": 1,
+            "max": 1
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            2713150,
+            2780812,
+            2691818
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "responses-stream": {
+          "rps": {
+            "median": 53154.168230302734,
+            "min": 52803.93548143275,
+            "max": 53529.00096700272
+          },
+          "p50Ms": {
+            "median": 1.097757,
+            "min": 1.097553,
+            "max": 1.1065479999999999
+          },
+          "p99Ms": {
+            "median": 3.184202,
+            "min": 3.06497,
+            "max": 3.268701
+          },
+          "p999Ms": {
+            "median": 5.571222,
+            "min": 5.4746250000000005,
+            "max": 5.660787
+          },
+          "ttfbP50Ms": {
+            "median": 1.0877759999999999,
+            "min": 1.086927,
+            "max": 1.0950879999999998
+          },
+          "cpuMsPerRequest": {
+            "median": 0.06097400398781085,
+            "min": 0.06075368187859165,
+            "max": 0.06128272419839206
+          },
+          "rssStartMb": {
+            "median": 51.66015625,
+            "min": 51,
+            "max": 51.859375
+          },
+          "rssPeakMb": {
+            "median": 59.09375,
+            "min": 58.72265625,
+            "max": 60.2109375
+          },
+          "rssEndMb": {
+            "median": 45.44921875,
+            "min": 41.30859375,
+            "max": 49.46875
+          },
+          "successRate": {
+            "median": 1,
+            "min": 1,
+            "max": 1
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            2459074,
+            2466630,
+            2434422
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "agent-100k": {
+          "rps": {
+            "median": 6968.8766430792,
+            "min": 6924.965369101868,
+            "max": 7011.889482166112
+          },
+          "p50Ms": {
+            "median": 4.506237,
+            "min": 4.479398,
+            "max": 4.536116
+          },
+          "p99Ms": {
+            "median": 7.892807,
+            "min": 7.823871,
+            "max": 7.935812
+          },
+          "p999Ms": {
+            "median": 9.566259,
+            "min": 9.457170000000001,
+            "max": 9.574714
+          },
+          "ttfbP50Ms": {
+            "median": 4.499722,
+            "min": 4.47363,
+            "max": 4.529677
+          },
+          "cpuMsPerRequest": {
+            "median": 0.5574445496542423,
+            "min": 0.5544228356336262,
+            "max": 0.561190237282263
+          },
+          "rssStartMb": {
+            "median": 57.12109375,
+            "min": 55.87109375,
+            "max": 58.0859375
+          },
+          "rssPeakMb": {
+            "median": 67.58984375,
+            "min": 67.05078125,
+            "max": 67.9296875
+          },
+          "rssEndMb": {
+            "median": 64.671875,
+            "min": 62.59375,
+            "max": 65.46875
+          },
+          "successRate": {
+            "median": 1,
+            "min": 1,
+            "max": 1
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            321848,
+            321590,
+            319314
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "many-chunks": {
+          "rps": {
+            "median": 3463.095671083236,
+            "min": 3443.5952118069845,
+            "max": 3465.2810951251845
+          },
+          "p50Ms": {
+            "median": 4.53178,
+            "min": 4.523677,
+            "max": 4.553438
+          },
+          "p99Ms": {
+            "median": 7.598145,
+            "min": 7.52641,
+            "max": 7.601578
+          },
+          "p999Ms": {
+            "median": 9.510698,
+            "min": 9.382309,
+            "max": 9.723754
+          },
+          "ttfbP50Ms": {
+            "median": 3.9621450000000005,
+            "min": 3.9509339999999997,
+            "max": 3.981691
+          },
+          "cpuMsPerRequest": {
+            "median": 1.1262340511517814,
+            "min": 1.1255842132594776,
+            "max": 1.13233565093696
+          },
+          "rssStartMb": {
+            "median": 62.71875,
+            "min": 60.12109375,
+            "max": 63.4296875
+          },
+          "rssPeakMb": {
+            "median": 62.71875,
+            "min": 60.12109375,
+            "max": 63.4296875
+          },
+          "rssEndMb": {
+            "median": 50.0234375,
+            "min": 49.09375,
+            "max": 57.140625
+          },
+          "successRate": {
+            "median": 1,
+            "min": 1,
+            "max": 1
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            159494,
+            158520,
+            159146
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "rate-limited-key": {
+          "rps": {
+            "median": 51415.89786603298,
+            "min": 50900.27728536935,
+            "max": 51723.839811402184
+          },
+          "p50Ms": {
+            "median": 1.1353820000000001,
+            "min": 1.126424,
+            "max": 1.138807
+          },
+          "p99Ms": {
+            "median": 3.3282469999999997,
+            "min": 3.287957,
+            "max": 3.656234
+          },
+          "p999Ms": {
+            "median": 5.7098770000000005,
+            "min": 5.692741000000001,
+            "max": 6.523025
+          },
+          "ttfbP50Ms": {
+            "median": 1.122846,
+            "min": 1.1145289999999999,
+            "max": 1.127206
+          },
+          "cpuMsPerRequest": {
+            "median": 0.06361195733662123,
+            "min": 0.06322960019021073,
+            "max": 0.06389120521108647
+          },
+          "rssStartMb": {
+            "median": 50.36328125,
+            "min": 43.640625,
+            "max": 56.9296875
+          },
+          "rssPeakMb": {
+            "median": 103.5546875,
+            "min": 100.25,
+            "max": 107.4453125
+          },
+          "rssEndMb": {
+            "median": 78.37109375,
+            "min": 72.39453125,
+            "max": 94.625
+          },
+          "successRate": {
+            "median": 1,
+            "min": 1,
+            "max": 1
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            2365120,
+            2379812,
+            2344774
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "held-streams": {
+          "rps": {
+            "median": 31.61096543850631,
+            "min": 31.59941719546641,
+            "max": 31.62990915776159
+          },
+          "p50Ms": {
+            "median": 30543.354530999997,
+            "min": 30537.64421,
+            "max": 30554.300911
+          },
+          "p99Ms": {
+            "median": 31570.437401,
+            "min": 31556.435483,
+            "max": 31571.927030000003
+          },
+          "p999Ms": {
+            "median": 31578.213431,
+            "min": 31577.582896,
+            "max": 31603.37475
+          },
+          "ttfbP50Ms": {
+            "median": 531.735129,
+            "min": 529.1602829999999,
+            "max": 543.306273
+          },
+          "cpuMsPerRequest": {
+            "median": 0.9900000000000091,
+            "min": 0.9699999999999704,
+            "max": 1
+          },
+          "rssStartMb": {
+            "median": 77.9375,
+            "min": 71.9921875,
+            "max": 94.625
+          },
+          "rssPeakMb": {
+            "median": 100.5078125,
+            "min": 95.796875,
+            "max": 102.078125
+          },
+          "rssEndMb": {
+            "median": 89.36328125,
+            "min": 85.75390625,
+            "max": 90.6171875
+          },
+          "successRate": {
+            "median": 1,
+            "min": 1,
+            "max": 1
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            2000,
+            2000,
+            2000
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "client-cancel": {
+          "rps": {
+            "median": 99.97881838255971,
+            "min": 99.97852124935841,
+            "max": 99.98142618050859
+          },
+          "p50Ms": null,
+          "p99Ms": null,
+          "p999Ms": null,
+          "ttfbP50Ms": null,
+          "cpuMsPerRequest": {
+            "median": 0.23499999999998522,
+            "min": 0.21999999999999886,
+            "max": 0.2400000000000091
+          },
+          "rssStartMb": {
+            "median": 89.37109375,
+            "min": 85.76171875,
+            "max": 90.625
+          },
+          "rssPeakMb": {
+            "median": 89.37109375,
+            "min": 85.76171875,
+            "max": 90.625
+          },
+          "rssEndMb": {
+            "median": 63.43359375,
+            "min": 62.65234375,
+            "max": 65.08203125
+          },
+          "successRate": {
+            "median": 0,
+            "min": 0,
+            "max": 0
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            4000,
+            4000,
+            4000
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        },
+        "early-cancel": {
+          "rps": {
+            "median": 46038.26207165187,
+            "min": 45620.946878485964,
+            "max": 46553.18506416011
+          },
+          "p50Ms": {
+            "median": 0.9960060000000001,
+            "min": 0.98237,
+            "max": 1.003074
+          },
+          "p99Ms": {
+            "median": 1.8456970000000001,
+            "min": 1.840616,
+            "max": 1.854724
+          },
+          "p999Ms": {
+            "median": 1.9614760000000002,
+            "min": 1.958324,
+            "max": 1.9674509999999998
+          },
+          "ttfbP50Ms": {
+            "median": 0.9808049999999999,
+            "min": 0.966386,
+            "max": 0.987146
+          },
+          "cpuMsPerRequest": {
+            "median": 0.0694903713646241,
+            "min": 0.06798154939938898,
+            "max": 0.07064709981984828
+          },
+          "rssStartMb": {
+            "median": 63.37109375,
+            "min": 62.65625,
+            "max": 65.0859375
+          },
+          "rssPeakMb": {
+            "median": 95.47265625,
+            "min": 93.453125,
+            "max": 96.6484375
+          },
+          "rssEndMb": {
+            "median": 78.84375,
+            "min": 77.21484375,
+            "max": 86.890625
+          },
+          "successRate": {
+            "median": 0.5770928315591245,
+            "min": 0.5681429390214366,
+            "max": 0.5908050569394369
+          },
+          "crashed": 0,
+          "rowsMissing": 0,
+          "rowsPending": 0,
+          "writerEnqueued": [
+            1848914,
+            1829126,
+            1811080
+          ],
+          "writerDropped": 0,
+          "writerFailed": 0
+        }
+      }
+    },
     "cappedV4At20000": {
       "label": "rust-slice1 single @ d6933714: median of 3 zero-drop full runs, every duration scenario capped at 20 000 req/s (--rate 20000)",
       "summary": {
@@ -1805,8 +2564,8 @@
   },
   "runs": [
     {
-      "label": "rust-slice1 single @ 394287df, v7 ids, uncapped, run 1",
-      "when": "2026-11-09T08:37:13.457Z",
+      "label": "rust-slice1 single @ ca80bcfa, v7 ids (method 3), bounded rate-limit windows, uncapped, run 1",
+      "when": "2026-11-09T09:38:44.395Z",
       "host": {
         "cpu": "13th Gen Intel(R) Core(TM) i5-13400",
         "cores": 8,
@@ -1832,42 +2591,42 @@
           "0-3"
         ]
       },
-      "binaryBytes": 6430816,
+      "binaryBytes": 6426720,
       "boot": {
-        "p50Ms": 26.683607999999367,
-        "maxMs": 27.489544999998543
+        "p50Ms": 26.339420999998765,
+        "maxMs": 27.11203200000091
       },
       "shutdownMs": {
-        "idleP50": 5.727460000000065,
-        "afterLoad": 8.477997999987565
+        "idleP50": 5.990880000001198,
+        "afterLoad": 7.5900130000081845
       },
-      "idleRssMb": 10.078125,
-      "finalRssMb": 86.89453125,
-      "dbBytesAfter": 6746136576,
+      "idleRssMb": 10.125,
+      "finalRssMb": 55.70703125,
+      "dbBytesAfter": 6622298112,
       "cliKeysList": {
-        "p50Ms": 99.57187899999553,
-        "maxMs": 102.50161799998023
+        "p50Ms": 98.95690200000536,
+        "maxMs": 101.7020500000217
       },
       "calibration": {
         "alone": {
-          "0": 480,
-          "1": 485,
-          "2": 479,
-          "3": 479,
-          "4": 476,
-          "5": 487,
-          "6": 481,
-          "7": 483
+          "0": 487,
+          "1": 477,
+          "2": 481,
+          "3": 484,
+          "4": 484,
+          "5": 481,
+          "6": 483,
+          "7": 489
         },
         "together": {
-          "0": 556,
-          "1": 589,
-          "2": 534,
-          "3": 536,
-          "4": 535,
-          "5": 538,
-          "6": 533,
-          "7": 533
+          "0": 549,
+          "1": 537,
+          "2": 596,
+          "3": 533,
+          "4": 536,
+          "5": 545,
+          "6": 536,
+          "7": 547
         },
         "mhzUnderLoad": [
           2496,
@@ -1879,7 +2638,7 @@
           2496,
           2496
         ],
-        "foreignCoresBefore": 0.23
+        "foreignCoresBefore": 0.21
       },
       "writerDropped": null,
       "scenarios": [
@@ -1887,46 +2646,46 @@
           "name": "overhead-c1",
           "what": "chat SSE, 1 chunk, one client: pure per-request overhead",
           "concurrency": 1,
-          "requests": 210747,
+          "requests": 201565,
           "successRate": 1,
-          "rps": 10537.02959421891,
+          "rps": 10077.71088429019,
           "latencyMs": {
-            "p50": 0.082784,
-            "p90": 0.122058,
-            "p99": 0.222616,
-            "p999": 0.41659599999999997,
-            "p9999": 0.8488330000000001
+            "p50": 0.08472800000000001,
+            "p90": 0.133352,
+            "p99": 0.244533,
+            "p999": 0.495503,
+            "p9999": 0.9656600000000001
           },
           "ttfbMs": {
-            "p50": 0.079327,
-            "p99": 0.21715600000000002
+            "p50": 0.081218,
+            "p99": 0.238598
           },
           "status": {
-            "200": 210747
+            "200": 201565
           },
           "errors": {},
-          "cpuSeconds": 13.049999999999999,
-          "cpuMsPerRequest": 0.061922589645404195,
+          "cpuSeconds": 12.879999999999999,
+          "cpuMsPerRequest": 0.06389998263587428,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 31.12890625,
-          "rssPeakMb": 37.55859375,
-          "rssEndMb": 27.16015625,
+          "rssStartMb": 33.28125,
+          "rssPeakMb": 36.60546875,
+          "rssEndMb": 24.30859375,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
-            "answered": 241849,
-            "done": 241849,
+            "answered": 231692,
+            "done": 231692,
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 483698,
-              "committed": 483698,
-              "dropped": 0,
-              "failed": 0
+              "events": 463384,
+              "committed": 463384,
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.34,
-          "windowFrom": 1794213172888,
+          "foreignCores": 0.4,
+          "windowFrom": 1794216863795,
           "gatewayMhz": [
             2496,
             2496,
@@ -1935,7 +2694,7 @@
           ],
           "threads": {
             "tokio-rt-worker": {
-              "cpu": 20,
+              "cpu": 19,
               "runqueue": 0
             },
             "tokio-rt-worker#2": {
@@ -1943,844 +2702,19 @@
               "runqueue": 0
             },
             "tokio-rt-worker#3": {
-              "cpu": 10,
+              "cpu": 15,
               "runqueue": 0
             },
             "tokio-rt-worker#4": {
-              "cpu": 6,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#5": {
               "cpu": 5,
               "runqueue": 0
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 5,
-              "runqueue": 0
-            },
-            "omni-checkpoint": {
-              "cpu": 1,
-              "runqueue": 0
-            }
-          }
-        },
-        {
-          "name": "chat-stream",
-          "what": "chat SSE, 1 chunk, 64 clients: throughput",
-          "concurrency": 64,
-          "requests": 1115569,
-          "successRate": 1,
-          "rps": 55770.17942181719,
-          "latencyMs": {
-            "p50": 1.0438990000000001,
-            "p90": 1.773944,
-            "p99": 3.045669,
-            "p999": 5.238886,
-            "p9999": 8.091199
-          },
-          "ttfbMs": {
-            "p50": 1.031137,
-            "p99": 3.027003
-          },
-          "status": {
-            "200": 1115569
-          },
-          "errors": {},
-          "cpuSeconds": 64.16,
-          "cpuMsPerRequest": 0.057513251085320585,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 50.4453125,
-          "rssPeakMb": 57.6328125,
-          "rssEndMb": 48.78515625,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1284038,
-            "done": 1284038,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2568076,
-              "committed": 2568076,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.89,
-          "windowFrom": 1794213197540,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 65,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 65,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 64,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 64,
-              "runqueue": 20
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 28,
-              "runqueue": 4
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 28,
-              "runqueue": 4
-            },
-            "omni-checkpoint": {
-              "cpu": 6,
-              "runqueue": 8
-            }
-          }
-        },
-        {
-          "name": "anthropic-json",
-          "what": "Anthropic non-streaming, translated from chat SSE, 64 clients",
-          "concurrency": 64,
-          "requests": 1177891,
-          "successRate": 1,
-          "rps": 58884.25059694706,
-          "latencyMs": {
-            "p50": 0.9902839999999999,
-            "p90": 1.673156,
-            "p99": 2.90276,
-            "p999": 5.214622,
-            "p9999": 8.059327999999999
-          },
-          "ttfbMs": {
-            "p50": 0.9900939999999999,
-            "p99": 2.902421
-          },
-          "status": {
-            "200": 1177891
-          },
-          "errors": {},
-          "cpuSeconds": 66.12,
-          "cpuMsPerRequest": 0.056134226341826195,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 54.9453125,
-          "rssPeakMb": 59.7890625,
-          "rssEndMb": 45.9296875,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1356575,
-            "done": 1356575,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2713150,
-              "committed": 2713150,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.75,
-          "windowFrom": 1794213222749,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 67,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 66,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 66,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 65,
-              "runqueue": 19
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 31,
-              "runqueue": 4
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 29,
-              "runqueue": 5
-            },
-            "omni-checkpoint": {
-              "cpu": 6,
-              "runqueue": 9
-            }
-          }
-        },
-        {
-          "name": "responses-stream",
-          "what": "Responses SSE, translated from chat SSE, 64 clients",
-          "concurrency": 64,
-          "requests": 1063240,
-          "successRate": 1,
-          "rps": 53154.168230302734,
-          "latencyMs": {
-            "p50": 1.097757,
-            "p90": 1.835715,
-            "p99": 3.268701,
-            "p999": 5.660787,
-            "p9999": 10.142061
-          },
-          "ttfbMs": {
-            "p50": 1.086927,
-            "p99": 3.241209
-          },
-          "status": {
-            "200": 1063240
-          },
-          "errors": {},
-          "cpuSeconds": 64.83000000000001,
-          "cpuMsPerRequest": 0.06097400398781085,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 51.859375,
-          "rssPeakMb": 60.2109375,
-          "rssEndMb": 41.30859375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1229537,
-            "done": 1229537,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2459074,
-              "committed": 2459074,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.86,
-          "windowFrom": 1794213247948,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 66,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 66,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 65,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 65,
-              "runqueue": 20
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 27,
-              "runqueue": 4
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 27,
-              "runqueue": 5
-            },
-            "omni-checkpoint": {
-              "cpu": 7,
-              "runqueue": 9
-            }
-          }
-        },
-        {
-          "name": "agent-100k",
-          "what": "Anthropic SSE with a ~100 KiB agent transcript, 32 clients",
-          "concurrency": 32,
-          "requests": 140272,
-          "successRate": 1,
-          "rps": 7011.889482166112,
-          "latencyMs": {
-            "p50": 4.479398,
-            "p90": 6.216476999999999,
-            "p99": 7.823871,
-            "p999": 9.566259,
-            "p9999": 27.603457000000002
-          },
-          "ttfbMs": {
-            "p50": 4.47363,
-            "p99": 7.816858
-          },
-          "status": {
-            "200": 140272
-          },
-          "errors": {},
-          "cpuSeconds": 77.77000000000001,
-          "cpuMsPerRequest": 0.5544228356336262,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 55.87109375,
-          "rssPeakMb": 67.9296875,
-          "rssEndMb": 62.59375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 160924,
-            "done": 160924,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 321848,
-              "committed": 321848,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.39,
-          "windowFrom": 1794213273159,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 97,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 96,
-              "runqueue": 1
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 95,
-              "runqueue": 2
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 92,
-              "runqueue": 5
             },
             "tokio-rt-worker#5": {
               "cpu": 4,
-              "runqueue": 4
+              "runqueue": 0
             },
             "tokio-rt-worker#6": {
               "cpu": 3,
-              "runqueue": 3
-            }
-          }
-        },
-        {
-          "name": "many-chunks",
-          "what": "Anthropic SSE, 2000 upstream chunks per reply, 16 clients",
-          "concurrency": 16,
-          "requests": 69284,
-          "successRate": 1,
-          "rps": 3463.095671083236,
-          "latencyMs": {
-            "p50": 4.53178,
-            "p90": 5.994847,
-            "p99": 7.52641,
-            "p999": 9.382309,
-            "p9999": 35.270702
-          },
-          "ttfbMs": {
-            "p50": 3.9621450000000005,
-            "p99": 6.826304
-          },
-          "status": {
-            "200": 69284
-          },
-          "errors": {},
-          "cpuSeconds": 78.03000000000003,
-          "cpuMsPerRequest": 1.1262340511517814,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 63.4296875,
-          "rssPeakMb": 63.4296875,
-          "rssEndMb": 57.140625,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 79747,
-            "done": 79747,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 159494,
-              "committed": 159494,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.37,
-          "windowFrom": 1794213297794,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 98,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 97,
-              "runqueue": 1
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 96,
-              "runqueue": 2
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 96,
-              "runqueue": 2
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 2,
-              "runqueue": 2
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 2,
-              "runqueue": 2
-            }
-          }
-        },
-        {
-          "name": "rate-limited-key",
-          "what": "chat SSE, 1 chunk, 64 clients, key with request/token/concurrency limits",
-          "concurrency": 64,
-          "requests": 1028423,
-          "successRate": 1,
-          "rps": 51415.89786603298,
-          "latencyMs": {
-            "p50": 1.138807,
-            "p90": 1.878378,
-            "p99": 3.287957,
-            "p999": 5.692741000000001,
-            "p9999": 11.805523
-          },
-          "ttfbMs": {
-            "p50": 1.127206,
-            "p99": 3.268908
-          },
-          "status": {
-            "200": 1028423
-          },
-          "errors": {},
-          "cpuSeconds": 65.42000000000002,
-          "cpuMsPerRequest": 0.06361195733662123,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 43.640625,
-          "rssPeakMb": 100.25,
-          "rssEndMb": 78.37109375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1182560,
-            "done": 1182560,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2365120,
-              "committed": 2365120,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.83,
-          "windowFrom": 1794213322402,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 68,
-              "runqueue": 16
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 68,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 66,
-              "runqueue": 19
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 66,
-              "runqueue": 19
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 28,
-              "runqueue": 5
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 28,
-              "runqueue": 6
-            },
-            "omni-checkpoint": {
-              "cpu": 6,
-              "runqueue": 8
-            }
-          }
-        },
-        {
-          "name": "held-streams",
-          "what": "1000 concurrent streams, 60 chunks 500 ms apart (~30 s each)",
-          "concurrency": 1000,
-          "requests": 1000,
-          "successRate": 1,
-          "rps": 31.59941719546641,
-          "latencyMs": {
-            "p50": 30543.354530999997,
-            "p90": 31520.578544,
-            "p99": 31570.437401,
-            "p999": 31577.582896,
-            "p9999": 31577.582896
-          },
-          "ttfbMs": {
-            "p50": 531.735129,
-            "p99": 1563.1571069999998
-          },
-          "status": {
-            "200": 1000
-          },
-          "errors": {},
-          "cpuSeconds": 0.9699999999999704,
-          "cpuMsPerRequest": 0.9699999999999704,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 77.9375,
-          "rssPeakMb": 102.078125,
-          "rssEndMb": 89.36328125,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1000,
-            "done": 1000,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2000,
-              "committed": 2000,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.14,
-          "windowFrom": 1794213347711,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {}
-        },
-        {
-          "name": "client-cancel",
-          "what": "200 clients abandoning 30 s streams after 2 s",
-          "concurrency": 200,
-          "requests": 2000,
-          "successRate": 0,
-          "rps": 99.97881838255971,
-          "latencyMs": {
-            "p50": null,
-            "p90": null,
-            "p99": null,
-            "p999": null,
-            "p9999": null
-          },
-          "ttfbMs": {
-            "p50": null,
-            "p99": null
-          },
-          "status": {},
-          "errors": {
-            "aborted due to deadline": 200,
-            "timeout": 1800
-          },
-          "cpuSeconds": 0.46999999999997044,
-          "cpuMsPerRequest": 0.23499999999998522,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 89.37109375,
-          "rssPeakMb": 89.37109375,
-          "rssEndMb": 65.08203125,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 0,
-            "done": 2000,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 4000,
-              "committed": 4000,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.12,
-          "windowFrom": 1794213380891,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {}
-        },
-        {
-          "name": "early-cancel",
-          "what": "64 clients abandoning 1-chunk requests after 1 ms",
-          "concurrency": 64,
-          "requests": 931135,
-          "successRate": 0.5908050569394369,
-          "rps": 46553.18506416011,
-          "latencyMs": {
-            "p50": 0.98237,
-            "p90": 1.502218,
-            "p99": 1.840616,
-            "p999": 1.9614760000000002,
-            "p9999": 2.460003
-          },
-          "ttfbMs": {
-            "p50": 0.966386,
-            "p99": 1.814707
-          },
-          "status": {
-            "200": 550085
-          },
-          "errors": {
-            "aborted due to deadline": 58,
-            "timeout": 380992
-          },
-          "cpuSeconds": 63.30000000000007,
-          "cpuMsPerRequest": 0.06798154939938898,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 65.0859375,
-          "rssPeakMb": 96.6484375,
-          "rssEndMb": 86.890625,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 550085,
-            "done": 924457,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 1848914,
-              "committed": 1848914,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 1.02,
-          "windowFrom": 1794213406451,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 65,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 65,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 65,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 64,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 26,
-              "runqueue": 5
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 26,
-              "runqueue": 4
-            },
-            "omni-checkpoint": {
-              "cpu": 6,
-              "runqueue": 8
-            }
-          }
-        }
-      ]
-    },
-    {
-      "label": "rust-slice1 single @ 394287df, v7 ids, uncapped, run 2",
-      "when": "2026-11-09T08:42:17.537Z",
-      "host": {
-        "cpu": "13th Gen Intel(R) Core(TM) i5-13400",
-        "cores": 8,
-        "memGb": 15,
-        "kernel": "6.12.0-211.69.1.el10_2.x86_64"
-      },
-      "config": {
-        "gateway": [
-          "/home/homebrew/code/omnigateway/target/release/omnigateway"
-        ],
-        "cli": [
-          "bun",
-          "apps/cli/src/index.ts"
-        ],
-        "duration": "20s",
-        "warmup": "3s",
-        "gatewayCpus": "0-3",
-        "upstreamCpus": "4-5",
-        "loadCpus": "6-7",
-        "mode": "single",
-        "replicas": 1,
-        "cpuSets": [
-          "0-3"
-        ]
-      },
-      "binaryBytes": 6430816,
-      "boot": {
-        "p50Ms": 26.41245699999854,
-        "maxMs": 27.013764999999694
-      },
-      "shutdownMs": {
-        "idleP50": 6.314856999999392,
-        "afterLoad": 7.2961360000190325
-      },
-      "idleRssMb": 10.15625,
-      "finalRssMb": 77.21484375,
-      "dbBytesAfter": 6798893056,
-      "cliKeysList": {
-        "p50Ms": 98.05557500000577,
-        "maxMs": 110.90466899995226
-      },
-      "calibration": {
-        "alone": {
-          "0": 481,
-          "1": 479,
-          "2": 480,
-          "3": 480,
-          "4": 481,
-          "5": 483,
-          "6": 482,
-          "7": 475
-        },
-        "together": {
-          "0": 531,
-          "1": 532,
-          "2": 529,
-          "3": 578,
-          "4": 529,
-          "5": 536,
-          "6": 530,
-          "7": 528
-        },
-        "mhzUnderLoad": [
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496
-        ],
-        "foreignCoresBefore": 0.08
-      },
-      "writerDropped": null,
-      "scenarios": [
-        {
-          "name": "overhead-c1",
-          "what": "chat SSE, 1 chunk, one client: pure per-request overhead",
-          "concurrency": 1,
-          "requests": 211334,
-          "successRate": 1,
-          "rps": 10565.908646196716,
-          "latencyMs": {
-            "p50": 0.08247299999999999,
-            "p90": 0.120476,
-            "p99": 0.22259600000000002,
-            "p999": 0.441415,
-            "p9999": 0.935654
-          },
-          "ttfbMs": {
-            "p50": 0.079054,
-            "p99": 0.21725
-          },
-          "status": {
-            "200": 211334
-          },
-          "errors": {},
-          "cpuSeconds": 13,
-          "cpuMsPerRequest": 0.061514001533118194,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 25.14453125,
-          "rssPeakMb": 37.484375,
-          "rssEndMb": 33.609375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 243313,
-            "done": 243313,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 486626,
-              "committed": 486626,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.34,
-          "windowFrom": 1794213477046,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 20,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 18,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 17,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 6,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 4,
               "runqueue": 0
             },
             "omni-checkpoint": {
@@ -2793,46 +2727,46 @@
           "name": "chat-stream",
           "what": "chat SSE, 1 chunk, 64 clients: throughput",
           "concurrency": 64,
-          "requests": 1127844,
+          "requests": 1110034,
           "successRate": 1,
-          "rps": 56384.74929385517,
+          "rps": 55490.95918658713,
           "latencyMs": {
-            "p50": 1.037837,
-            "p90": 1.732513,
-            "p99": 2.975451,
-            "p999": 5.283281,
-            "p9999": 9.220016
+            "p50": 1.050536,
+            "p90": 1.775958,
+            "p99": 3.048966,
+            "p999": 5.506715,
+            "p9999": 9.224082999999998
           },
           "ttfbMs": {
-            "p50": 1.026391,
-            "p99": 2.955326
+            "p50": 1.037881,
+            "p99": 3.026316
           },
           "status": {
-            "200": 1127844
+            "200": 1110034
           },
           "errors": {},
-          "cpuSeconds": 63.83999999999999,
-          "cpuMsPerRequest": 0.05660357283454094,
+          "cpuSeconds": 64.06,
+          "cpuMsPerRequest": 0.05770994401973273,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 44.37109375,
-          "rssPeakMb": 58.05859375,
-          "rssEndMb": 50.9140625,
+          "rssStartMb": 54.29296875,
+          "rssPeakMb": 57.890625,
+          "rssEndMb": 47.3046875,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
-            "answered": 1296418,
-            "done": 1296418,
+            "answered": 1273765,
+            "done": 1273765,
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 2592836,
-              "committed": 2592836,
-              "dropped": 0,
-              "failed": 0
+              "events": 2547530,
+              "committed": 2547530,
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.85,
-          "windowFrom": 1794213501696,
+          "foreignCores": 0.87,
+          "windowFrom": 1794216888442,
           "gatewayMhz": [
             2496,
             2496,
@@ -2841,109 +2775,28 @@
           ],
           "threads": {
             "tokio-rt-worker": {
-              "cpu": 64,
-              "runqueue": 18
+              "cpu": 66,
+              "runqueue": 17
             },
             "tokio-rt-worker#2": {
-              "cpu": 64,
-              "runqueue": 18
+              "cpu": 65,
+              "runqueue": 17
             },
             "tokio-rt-worker#3": {
-              "cpu": 64,
-              "runqueue": 19
+              "cpu": 65,
+              "runqueue": 18
             },
             "tokio-rt-worker#4": {
               "cpu": 63,
               "runqueue": 19
             },
             "tokio-rt-worker#5": {
-              "cpu": 29,
-              "runqueue": 5
+              "cpu": 28,
+              "runqueue": 4
             },
             "tokio-rt-worker#6": {
               "cpu": 28,
               "runqueue": 5
-            },
-            "omni-checkpoint": {
-              "cpu": 6,
-              "runqueue": 7
-            }
-          }
-        },
-        {
-          "name": "anthropic-json",
-          "what": "Anthropic non-streaming, translated from chat SSE, 64 clients",
-          "concurrency": 64,
-          "requests": 1211722,
-          "successRate": 1,
-          "rps": 60576.304454169556,
-          "latencyMs": {
-            "p50": 0.96699,
-            "p90": 1.595678,
-            "p99": 2.794813,
-            "p999": 5.265573,
-            "p9999": 6.921756
-          },
-          "ttfbMs": {
-            "p50": 0.966804,
-            "p99": 2.794537
-          },
-          "status": {
-            "200": 1211722
-          },
-          "errors": {},
-          "cpuSeconds": 66.5,
-          "cpuMsPerRequest": 0.05488057491734903,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 59.75390625,
-          "rssPeakMb": 62.21484375,
-          "rssEndMb": 43.87109375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1390406,
-            "done": 1390406,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2780812,
-              "committed": 2780812,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.75,
-          "windowFrom": 1794213526895,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 69,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 67,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 67,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 65,
-              "runqueue": 21
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 31,
-              "runqueue": 5
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 31,
-              "runqueue": 6
             },
             "omni-checkpoint": {
               "cpu": 6,
@@ -2952,789 +2805,49 @@
           }
         },
         {
-          "name": "responses-stream",
-          "what": "Responses SSE, translated from chat SSE, 64 clients",
-          "concurrency": 64,
-          "requests": 1070717,
-          "successRate": 1,
-          "rps": 53529.00096700272,
-          "latencyMs": {
-            "p50": 1.097553,
-            "p90": 1.800402,
-            "p99": 3.06497,
-            "p999": 5.4746250000000005,
-            "p9999": 9.619213
-          },
-          "ttfbMs": {
-            "p50": 1.0877759999999999,
-            "p99": 3.05162
-          },
-          "status": {
-            "200": 1070717
-          },
-          "errors": {},
-          "cpuSeconds": 65.05000000000001,
-          "cpuMsPerRequest": 0.06075368187859165,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 51,
-          "rssPeakMb": 58.72265625,
-          "rssEndMb": 49.46875,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1233315,
-            "done": 1233315,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2466630,
-              "committed": 2466630,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.87,
-          "windowFrom": 1794213552145,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 68,
-              "runqueue": 16
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 67,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 67,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 66,
-              "runqueue": 19
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 28,
-              "runqueue": 6
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 27,
-              "runqueue": 6
-            },
-            "omni-checkpoint": {
-              "cpu": 6,
-              "runqueue": 8
-            }
-          }
-        },
-        {
-          "name": "agent-100k",
-          "what": "Anthropic SSE with a ~100 KiB agent transcript, 32 clients",
-          "concurrency": 32,
-          "requests": 139404,
-          "successRate": 1,
-          "rps": 6968.8766430792,
-          "latencyMs": {
-            "p50": 4.506237,
-            "p90": 6.248932,
-            "p99": 7.892807,
-            "p999": 9.574714,
-            "p9999": 12.624730000000001
-          },
-          "ttfbMs": {
-            "p50": 4.499722,
-            "p99": 7.883724999999999
-          },
-          "status": {
-            "200": 139404
-          },
-          "errors": {},
-          "cpuSeconds": 77.70999999999998,
-          "cpuMsPerRequest": 0.5574445496542423,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 58.0859375,
-          "rssPeakMb": 67.05078125,
-          "rssEndMb": 64.671875,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 160795,
-            "done": 160795,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 321590,
-              "committed": 321590,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.39,
-          "windowFrom": 1794213577339,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 97,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 97,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 95,
-              "runqueue": 3
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 92,
-              "runqueue": 5
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 4,
-              "runqueue": 4
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 3,
-              "runqueue": 3
-            }
-          }
-        },
-        {
-          "name": "many-chunks",
-          "what": "Anthropic SSE, 2000 upstream chunks per reply, 16 clients",
-          "concurrency": 16,
-          "requests": 68893,
-          "successRate": 1,
-          "rps": 3443.5952118069845,
-          "latencyMs": {
-            "p50": 4.553438,
-            "p90": 6.033994,
-            "p99": 7.601578,
-            "p999": 9.510698,
-            "p9999": 12.590973
-          },
-          "ttfbMs": {
-            "p50": 3.981691,
-            "p99": 6.915198
-          },
-          "status": {
-            "200": 68893
-          },
-          "errors": {},
-          "cpuSeconds": 78.00999999999999,
-          "cpuMsPerRequest": 1.13233565093696,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 60.12109375,
-          "rssPeakMb": 60.12109375,
-          "rssEndMb": 49.09375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 79260,
-            "done": 79260,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 158520,
-              "committed": 158520,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.43,
-          "windowFrom": 1794213601978,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 98,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 97,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 96,
-              "runqueue": 2
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 96,
-              "runqueue": 2
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 2,
-              "runqueue": 2
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 2,
-              "runqueue": 2
-            }
-          }
-        },
-        {
-          "name": "rate-limited-key",
-          "what": "chat SSE, 1 chunk, 64 clients, key with request/token/concurrency limits",
-          "concurrency": 64,
-          "requests": 1034642,
-          "successRate": 1,
-          "rps": 51723.839811402184,
-          "latencyMs": {
-            "p50": 1.126424,
-            "p90": 1.875645,
-            "p99": 3.3282469999999997,
-            "p999": 5.7098770000000005,
-            "p9999": 13.171785
-          },
-          "ttfbMs": {
-            "p50": 1.1145289999999999,
-            "p99": 3.308716
-          },
-          "status": {
-            "200": 1034642
-          },
-          "errors": {},
-          "cpuSeconds": 65.42000000000002,
-          "cpuMsPerRequest": 0.06322960019021073,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 56.9296875,
-          "rssPeakMb": 107.4453125,
-          "rssEndMb": 94.625,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1189906,
-            "done": 1189906,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2379812,
-              "committed": 2379812,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.86,
-          "windowFrom": 1794213626599,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 69,
-              "runqueue": 16
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 67,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 67,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 66,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 27,
-              "runqueue": 4
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 26,
-              "runqueue": 5
-            },
-            "omni-checkpoint": {
-              "cpu": 5,
-              "runqueue": 7
-            }
-          }
-        },
-        {
-          "name": "held-streams",
-          "what": "1000 concurrent streams, 60 chunks 500 ms apart (~30 s each)",
-          "concurrency": 1000,
-          "requests": 1000,
-          "successRate": 1,
-          "rps": 31.62990915776159,
-          "latencyMs": {
-            "p50": 30554.300911,
-            "p90": 31554.860722,
-            "p99": 31556.435483,
-            "p999": 31578.213431,
-            "p9999": 31578.213431
-          },
-          "ttfbMs": {
-            "p50": 543.306273,
-            "p99": 1550.5859019999998
-          },
-          "status": {
-            "200": 1000
-          },
-          "errors": {},
-          "cpuSeconds": 1,
-          "cpuMsPerRequest": 1,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 94.625,
-          "rssPeakMb": 95.796875,
-          "rssEndMb": 90.6171875,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1000,
-            "done": 1000,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2000,
-              "committed": 2000,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.17,
-          "windowFrom": 1794213651809,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {}
-        },
-        {
-          "name": "client-cancel",
-          "what": "200 clients abandoning 30 s streams after 2 s",
-          "concurrency": 200,
-          "requests": 2000,
-          "successRate": 0,
-          "rps": 99.97852124935841,
-          "latencyMs": {
-            "p50": null,
-            "p90": null,
-            "p99": null,
-            "p999": null,
-            "p9999": null
-          },
-          "ttfbMs": {
-            "p50": null,
-            "p99": null
-          },
-          "status": {},
-          "errors": {
-            "aborted due to deadline": 200,
-            "timeout": 1800
-          },
-          "cpuSeconds": 0.4399999999999977,
-          "cpuMsPerRequest": 0.21999999999999886,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 90.625,
-          "rssPeakMb": 90.625,
-          "rssEndMb": 62.65234375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 0,
-            "done": 2000,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 4000,
-              "committed": 4000,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.14,
-          "windowFrom": 1794213684991,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {}
-        },
-        {
-          "name": "early-cancel",
-          "what": "64 clients abandoning 1-chunk requests after 1 ms",
-          "concurrency": 64,
-          "requests": 920847,
-          "successRate": 0.5770928315591245,
-          "rps": 46038.26207165187,
-          "latencyMs": {
-            "p50": 1.003074,
-            "p90": 1.531206,
-            "p99": 1.854724,
-            "p999": 1.9674509999999998,
-            "p9999": 3.031994
-          },
-          "ttfbMs": {
-            "p50": 0.987146,
-            "p99": 1.833917
-          },
-          "status": {
-            "200": 531379
-          },
-          "errors": {
-            "aborted due to deadline": 61,
-            "timeout": 389407
-          },
-          "cpuSeconds": 63.99000000000001,
-          "cpuMsPerRequest": 0.0694903713646241,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 62.65625,
-          "rssPeakMb": 95.47265625,
-          "rssEndMb": 77.21484375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 531379,
-            "done": 914563,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 1829126,
-              "committed": 1829126,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 1.11,
-          "windowFrom": 1794213710545,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 67,
-              "runqueue": 16
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 66,
-              "runqueue": 16
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 66,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 65,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 26,
-              "runqueue": 5
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 26,
-              "runqueue": 6
-            },
-            "omni-checkpoint": {
-              "cpu": 5,
-              "runqueue": 7
-            }
-          }
-        }
-      ]
-    },
-    {
-      "label": "rust-slice1 single @ 394287df, v7 ids, uncapped, run 3",
-      "when": "2026-11-09T08:47:05.366Z",
-      "host": {
-        "cpu": "13th Gen Intel(R) Core(TM) i5-13400",
-        "cores": 8,
-        "memGb": 15,
-        "kernel": "6.12.0-211.69.1.el10_2.x86_64"
-      },
-      "config": {
-        "gateway": [
-          "/home/homebrew/code/omnigateway/target/release/omnigateway"
-        ],
-        "cli": [
-          "bun",
-          "apps/cli/src/index.ts"
-        ],
-        "duration": "20s",
-        "warmup": "3s",
-        "gatewayCpus": "0-3",
-        "upstreamCpus": "4-5",
-        "loadCpus": "6-7",
-        "mode": "single",
-        "replicas": 1,
-        "cpuSets": [
-          "0-3"
-        ]
-      },
-      "binaryBytes": 6430816,
-      "boot": {
-        "p50Ms": 26.380600000000413,
-        "maxMs": 27.36218100000042
-      },
-      "shutdownMs": {
-        "idleP50": 5.245861999999761,
-        "afterLoad": 7.12125200004084
-      },
-      "idleRssMb": 9.87890625,
-      "finalRssMb": 78.84375,
-      "dbBytesAfter": 6663622656,
-      "cliKeysList": {
-        "p50Ms": 98.43087600002764,
-        "maxMs": 102.1523809999926
-      },
-      "calibration": {
-        "alone": {
-          "0": 481,
-          "1": 465,
-          "2": 480,
-          "3": 473,
-          "4": 480,
-          "5": 480,
-          "6": 486,
-          "7": 467
-        },
-        "together": {
-          "0": 535,
-          "1": 540,
-          "2": 532,
-          "3": 533,
-          "4": 531,
-          "5": 530,
-          "6": 533,
-          "7": 578
-        },
-        "mhzUnderLoad": [
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496
-        ],
-        "foreignCoresBefore": 0.15
-      },
-      "writerDropped": null,
-      "scenarios": [
-        {
-          "name": "overhead-c1",
-          "what": "chat SSE, 1 chunk, one client: pure per-request overhead",
-          "concurrency": 1,
-          "requests": 206624,
-          "successRate": 1,
-          "rps": 10330.786519050744,
-          "latencyMs": {
-            "p50": 0.083532,
-            "p90": 0.12670499999999998,
-            "p99": 0.226925,
-            "p999": 0.423944,
-            "p9999": 0.9271130000000001
-          },
-          "ttfbMs": {
-            "p50": 0.08009200000000001,
-            "p99": 0.222131
-          },
-          "status": {
-            "200": 206624
-          },
-          "errors": {},
-          "cpuSeconds": 13.030000000000001,
-          "cpuMsPerRequest": 0.06306140622580146,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 26.8203125,
-          "rssPeakMb": 37.3984375,
-          "rssEndMb": 31.90625,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 236727,
-            "done": 236727,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 473454,
-              "committed": 473454,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.34,
-          "windowFrom": 1794213764905,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 19,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 19,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 18,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 5,
-              "runqueue": 0
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 4,
-              "runqueue": 0
-            }
-          }
-        },
-        {
-          "name": "chat-stream",
-          "what": "chat SSE, 1 chunk, 64 clients: throughput",
-          "concurrency": 64,
-          "requests": 1100934,
-          "successRate": 1,
-          "rps": 55035.36363418193,
-          "latencyMs": {
-            "p50": 1.06003,
-            "p90": 1.787367,
-            "p99": 3.088857,
-            "p999": 5.315445,
-            "p9999": 7.768992
-          },
-          "ttfbMs": {
-            "p50": 1.047175,
-            "p99": 3.070297
-          },
-          "status": {
-            "200": 1100934
-          },
-          "errors": {},
-          "cpuSeconds": 64.42,
-          "cpuMsPerRequest": 0.05851395269834522,
-          "backingCpuMsPerRequest": null,
-          "rssStartMb": 48.37109375,
-          "rssPeakMb": 58.94140625,
-          "rssEndMb": 44.609375,
-          "healthyAfter": true,
-          "crashed": 0,
-          "rows": {
-            "answered": 1265871,
-            "done": 1265871,
-            "pending": 0,
-            "missing": 0,
-            "writer": {
-              "enqueued": 2531742,
-              "committed": 2531742,
-              "dropped": 0,
-              "failed": 0
-            }
-          },
-          "foreignCores": 0.87,
-          "windowFrom": 1794213789548,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
-          "threads": {
-            "tokio-rt-worker": {
-              "cpu": 67,
-              "runqueue": 17
-            },
-            "tokio-rt-worker#2": {
-              "cpu": 66,
-              "runqueue": 19
-            },
-            "tokio-rt-worker#3": {
-              "cpu": 65,
-              "runqueue": 18
-            },
-            "tokio-rt-worker#4": {
-              "cpu": 65,
-              "runqueue": 19
-            },
-            "tokio-rt-worker#5": {
-              "cpu": 28,
-              "runqueue": 6
-            },
-            "tokio-rt-worker#6": {
-              "cpu": 28,
-              "runqueue": 4
-            },
-            "omni-checkpoint": {
-              "cpu": 5,
-              "runqueue": 7
-            }
-          }
-        },
-        {
           "name": "anthropic-json",
           "what": "Anthropic non-streaming, translated from chat SSE, 64 clients",
           "concurrency": 64,
-          "requests": 1170069,
+          "requests": 1161796,
           "successRate": 1,
-          "rps": 58495.06809545493,
+          "rps": 58085.27793622932,
           "latencyMs": {
-            "p50": 1.0007480000000002,
-            "p90": 1.672188,
-            "p99": 2.841283,
-            "p999": 5.075432999999999,
-            "p9999": 8.381832000000001
+            "p50": 1.0049869999999999,
+            "p90": 1.6940119999999999,
+            "p99": 2.942624,
+            "p999": 5.324414,
+            "p9999": 7.630305000000001
           },
           "ttfbMs": {
-            "p50": 1.0005490000000001,
-            "p99": 2.841069
+            "p50": 1.0048030000000001,
+            "p99": 2.9421489999999997
           },
           "status": {
-            "200": 1170069
+            "200": 1161796
           },
           "errors": {},
-          "cpuSeconds": 66.08,
-          "cpuMsPerRequest": 0.05647530188390599,
+          "cpuSeconds": 65.59,
+          "cpuMsPerRequest": 0.056455694459268235,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 48.1015625,
-          "rssPeakMb": 59.6484375,
-          "rssEndMb": 51.66796875,
+          "rssStartMb": 48.12890625,
+          "rssPeakMb": 59.49609375,
+          "rssEndMb": 46.99609375,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
-            "answered": 1345909,
-            "done": 1345909,
+            "answered": 1339989,
+            "done": 1339989,
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 2691818,
-              "committed": 2691818,
-              "dropped": 0,
-              "failed": 0
+              "events": 2679978,
+              "committed": 2679978,
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.75,
-          "windowFrom": 1794213814658,
+          "foreignCores": 0.79,
+          "windowFrom": 1794216913649,
           "gatewayMhz": [
             2496,
             2496,
@@ -3743,19 +2856,19 @@
           ],
           "threads": {
             "tokio-rt-worker": {
-              "cpu": 67,
+              "cpu": 66,
               "runqueue": 18
             },
             "tokio-rt-worker#2": {
-              "cpu": 66,
-              "runqueue": 18
+              "cpu": 65,
+              "runqueue": 19
             },
             "tokio-rt-worker#3": {
               "cpu": 65,
               "runqueue": 19
             },
             "tokio-rt-worker#4": {
-              "cpu": 64,
+              "cpu": 65,
               "runqueue": 20
             },
             "tokio-rt-worker#5": {
@@ -3764,7 +2877,7 @@
             },
             "tokio-rt-worker#6": {
               "cpu": 29,
-              "runqueue": 5
+              "runqueue": 4
             },
             "omni-checkpoint": {
               "cpu": 6,
@@ -3776,46 +2889,46 @@
           "name": "responses-stream",
           "what": "Responses SSE, translated from chat SSE, 64 clients",
           "concurrency": 64,
-          "requests": 1056252,
+          "requests": 1046417,
           "successRate": 1,
-          "rps": 52803.93548143275,
+          "rps": 52314.76837940277,
           "latencyMs": {
-            "p50": 1.1065479999999999,
-            "p90": 1.838876,
-            "p99": 3.184202,
-            "p999": 5.571222,
-            "p9999": 13.889764000000001
+            "p50": 1.116544,
+            "p90": 1.87433,
+            "p99": 3.2270570000000003,
+            "p999": 5.372818,
+            "p9999": 9.543853
           },
           "ttfbMs": {
-            "p50": 1.0950879999999998,
-            "p99": 3.165414
+            "p50": 1.1044180000000001,
+            "p99": 3.207849
           },
           "status": {
-            "200": 1056252
+            "200": 1046417
           },
           "errors": {},
-          "cpuSeconds": 64.73000000000002,
-          "cpuMsPerRequest": 0.06128272419839206,
+          "cpuSeconds": 64.55000000000001,
+          "cpuMsPerRequest": 0.06168668895860829,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 51.66015625,
-          "rssPeakMb": 59.09375,
-          "rssEndMb": 45.44921875,
+          "rssStartMb": 55.5078125,
+          "rssPeakMb": 59.98828125,
+          "rssEndMb": 49.8515625,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
-            "answered": 1217211,
-            "done": 1217211,
+            "answered": 1197070,
+            "done": 1197070,
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 2434422,
-              "committed": 2434422,
-              "dropped": 0,
-              "failed": 0
+              "events": 2394140,
+              "committed": 2394140,
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.85,
-          "windowFrom": 1794213839892,
+          "foreignCores": 0.89,
+          "windowFrom": 1794216938980,
           "gatewayMhz": [
             2496,
             2496,
@@ -3825,26 +2938,26 @@
           "threads": {
             "tokio-rt-worker": {
               "cpu": 67,
-              "runqueue": 17
+              "runqueue": 16
             },
             "tokio-rt-worker#2": {
-              "cpu": 66,
-              "runqueue": 18
+              "cpu": 67,
+              "runqueue": 17
             },
             "tokio-rt-worker#3": {
               "cpu": 66,
               "runqueue": 18
             },
             "tokio-rt-worker#4": {
-              "cpu": 65,
-              "runqueue": 19
+              "cpu": 63,
+              "runqueue": 21
             },
             "tokio-rt-worker#5": {
-              "cpu": 27,
-              "runqueue": 6
+              "cpu": 28,
+              "runqueue": 4
             },
             "tokio-rt-worker#6": {
-              "cpu": 26,
+              "cpu": 27,
               "runqueue": 5
             },
             "omni-checkpoint": {
@@ -3857,46 +2970,46 @@
           "name": "agent-100k",
           "what": "Anthropic SSE with a ~100 KiB agent transcript, 32 clients",
           "concurrency": 32,
-          "requests": 138527,
+          "requests": 136226,
           "successRate": 1,
-          "rps": 6924.965369101868,
+          "rps": 6809.377591498999,
           "latencyMs": {
-            "p50": 4.536116,
-            "p90": 6.295268,
-            "p99": 7.935812,
-            "p999": 9.457170000000001,
-            "p9999": 11.523442
+            "p50": 4.6196340000000005,
+            "p90": 6.388854,
+            "p99": 8.026717,
+            "p999": 9.754311,
+            "p9999": 12.577121
           },
           "ttfbMs": {
-            "p50": 4.529677,
-            "p99": 7.925573999999999
+            "p50": 4.613723,
+            "p99": 8.01971
           },
           "status": {
-            "200": 138527
+            "200": 136226
           },
           "errors": {},
-          "cpuSeconds": 77.74000000000004,
-          "cpuMsPerRequest": 0.561190237282263,
+          "cpuSeconds": 77.72000000000003,
+          "cpuMsPerRequest": 0.5705225140575223,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 57.12109375,
-          "rssPeakMb": 67.58984375,
-          "rssEndMb": 65.46875,
+          "rssStartMb": 54.98046875,
+          "rssPeakMb": 66.890625,
+          "rssEndMb": 63.765625,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
-            "answered": 159657,
-            "done": 159657,
+            "answered": 156826,
+            "done": 156826,
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 319314,
-              "committed": 319314,
-              "dropped": 0,
-              "failed": 0
+              "events": 313652,
+              "committed": 313652,
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.39,
-          "windowFrom": 1794213865095,
+          "foreignCores": 0.42,
+          "windowFrom": 1794216964201,
           "gatewayMhz": [
             2496,
             2496,
@@ -3909,15 +3022,15 @@
               "runqueue": 1
             },
             "tokio-rt-worker#2": {
-              "cpu": 96,
-              "runqueue": 1
+              "cpu": 95,
+              "runqueue": 2
             },
             "tokio-rt-worker#3": {
               "cpu": 95,
-              "runqueue": 3
+              "runqueue": 2
             },
             "tokio-rt-worker#4": {
-              "cpu": 94,
+              "cpu": 95,
               "runqueue": 3
             },
             "tokio-rt-worker#5": {
@@ -3934,46 +3047,46 @@
           "name": "many-chunks",
           "what": "Anthropic SSE, 2000 upstream chunks per reply, 16 clients",
           "concurrency": 16,
-          "requests": 69324,
+          "requests": 68200,
           "successRate": 1,
-          "rps": 3465.2810951251845,
+          "rps": 3408.8413660105916,
           "latencyMs": {
-            "p50": 4.523677,
-            "p90": 5.964048,
-            "p99": 7.598145,
-            "p999": 9.723754,
-            "p9999": 12.994007
+            "p50": 4.6016010000000005,
+            "p90": 6.086864,
+            "p99": 7.65803,
+            "p999": 9.729952,
+            "p9999": 15.690498
           },
           "ttfbMs": {
-            "p50": 3.9509339999999997,
-            "p99": 6.909654000000001
+            "p50": 4.020617,
+            "p99": 6.969157999999999
           },
           "status": {
-            "200": 69324
+            "200": 68200
           },
           "errors": {},
-          "cpuSeconds": 78.03000000000003,
-          "cpuMsPerRequest": 1.1255842132594776,
+          "cpuSeconds": 78.01999999999998,
+          "cpuMsPerRequest": 1.1439882697947212,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 62.71875,
-          "rssPeakMb": 62.71875,
-          "rssEndMb": 50.0234375,
+          "rssStartMb": 59.44140625,
+          "rssPeakMb": 59.44140625,
+          "rssEndMb": 47.70703125,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
-            "answered": 79573,
-            "done": 79573,
+            "answered": 78339,
+            "done": 78339,
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 159146,
-              "committed": 159146,
-              "dropped": 0,
-              "failed": 0
+              "events": 156678,
+              "committed": 156678,
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.44,
-          "windowFrom": 1794213889732,
+          "foreignCores": 0.43,
+          "windowFrom": 1794216988832,
           "gatewayMhz": [
             2496,
             2496,
@@ -3994,8 +3107,8 @@
               "runqueue": 2
             },
             "tokio-rt-worker#4": {
-              "cpu": 95,
-              "runqueue": 3
+              "cpu": 96,
+              "runqueue": 2
             },
             "tokio-rt-worker#5": {
               "cpu": 2,
@@ -4011,46 +3124,46 @@
           "name": "rate-limited-key",
           "what": "chat SSE, 1 chunk, 64 clients, key with request/token/concurrency limits",
           "concurrency": 64,
-          "requests": 1018137,
+          "requests": 1000652,
           "successRate": 1,
-          "rps": 50900.27728536935,
+          "rps": 50026.91041196405,
           "latencyMs": {
-            "p50": 1.1353820000000001,
-            "p90": 1.8993120000000001,
-            "p99": 3.656234,
-            "p999": 6.523025,
-            "p9999": 14.052207000000001
+            "p50": 1.1674820000000001,
+            "p90": 1.943984,
+            "p99": 3.490504,
+            "p999": 5.851846,
+            "p9999": 9.642833999999999
           },
           "ttfbMs": {
-            "p50": 1.122846,
-            "p99": 3.634748
+            "p50": 1.154279,
+            "p99": 3.467011
           },
           "status": {
-            "200": 1018137
+            "200": 1000652
           },
           "errors": {},
-          "cpuSeconds": 65.04999999999995,
-          "cpuMsPerRequest": 0.06389120521108647,
+          "cpuSeconds": 65.51999999999998,
+          "cpuMsPerRequest": 0.06547730879466586,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 50.36328125,
-          "rssPeakMb": 103.5546875,
-          "rssEndMb": 72.39453125,
+          "rssStartMb": 45.015625,
+          "rssPeakMb": 60.20703125,
+          "rssEndMb": 50.40625,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
-            "answered": 1172387,
-            "done": 1172387,
+            "answered": 1153925,
+            "done": 1153925,
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 2344774,
-              "committed": 2344774,
-              "dropped": 0,
-              "failed": 0
+              "events": 2307850,
+              "committed": 2307850,
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.94,
-          "windowFrom": 1794213914352,
+          "foreignCores": 0.87,
+          "windowFrom": 1794217013447,
           "gatewayMhz": [
             2496,
             2496,
@@ -4059,12 +3172,12 @@
           ],
           "threads": {
             "tokio-rt-worker": {
-              "cpu": 69,
-              "runqueue": 16
+              "cpu": 68,
+              "runqueue": 17
             },
             "tokio-rt-worker#2": {
               "cpu": 67,
-              "runqueue": 17
+              "runqueue": 18
             },
             "tokio-rt-worker#3": {
               "cpu": 66,
@@ -4076,7 +3189,7 @@
             },
             "tokio-rt-worker#5": {
               "cpu": 28,
-              "runqueue": 6
+              "runqueue": 7
             },
             "tokio-rt-worker#6": {
               "cpu": 27,
@@ -4094,28 +3207,28 @@
           "concurrency": 1000,
           "requests": 1000,
           "successRate": 1,
-          "rps": 31.61096543850631,
+          "rps": 31.657804559250078,
           "latencyMs": {
-            "p50": 30537.64421,
-            "p90": 31569.79817,
-            "p99": 31571.927030000003,
-            "p999": 31603.37475,
-            "p9999": 31603.37475
+            "p50": 30547.352084,
+            "p90": 31518.702833,
+            "p99": 31521.571561999997,
+            "p999": 31528.115963,
+            "p9999": 31528.115963
           },
           "ttfbMs": {
-            "p50": 529.1602829999999,
-            "p99": 1565.417799
+            "p50": 532.4500039999999,
+            "p99": 1511.2663790000001
           },
           "status": {
             "200": 1000
           },
           "errors": {},
-          "cpuSeconds": 0.9900000000000091,
-          "cpuMsPerRequest": 0.9900000000000091,
+          "cpuSeconds": 0.9800000000000182,
+          "cpuMsPerRequest": 0.9800000000000182,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 71.9921875,
-          "rssPeakMb": 100.5078125,
-          "rssEndMb": 85.75390625,
+          "rssStartMb": 50.40625,
+          "rssPeakMb": 75.0859375,
+          "rssEndMb": 70.70703125,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
@@ -4124,14 +3237,14 @@
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 2000,
+              "events": 2000,
               "committed": 2000,
-              "dropped": 0,
-              "failed": 0
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.18,
-          "windowFrom": 1794213939659,
+          "foreignCores": 0.17,
+          "windowFrom": 1794217038659,
           "gatewayMhz": [
             2496,
             2496,
@@ -4146,7 +3259,7 @@
           "concurrency": 200,
           "requests": 2000,
           "successRate": 0,
-          "rps": 99.98142618050859,
+          "rps": 99.98160362988703,
           "latencyMs": {
             "p50": null,
             "p90": null,
@@ -4166,9 +3279,9 @@
           "cpuSeconds": 0.4800000000000182,
           "cpuMsPerRequest": 0.2400000000000091,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 85.76171875,
-          "rssPeakMb": 85.76171875,
-          "rssEndMb": 63.43359375,
+          "rssStartMb": 70.71484375,
+          "rssPeakMb": 70.71484375,
+          "rssEndMb": 39.8828125,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
@@ -4177,14 +3290,14 @@
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 4000,
+              "events": 4000,
               "committed": 4000,
-              "dropped": 0,
-              "failed": 0
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 0.13,
-          "windowFrom": 1794213972839,
+          "foreignCores": 0.15,
+          "windowFrom": 1794217071839,
           "gatewayMhz": [
             2496,
             2496,
@@ -4197,49 +3310,49 @@
           "name": "early-cancel",
           "what": "64 clients abandoning 1-chunk requests after 1 ms",
           "concurrency": 64,
-          "requests": 912564,
-          "successRate": 0.5681429390214366,
-          "rps": 45620.946878485964,
+          "requests": 915209,
+          "successRate": 0.5698347586068234,
+          "rps": 45756.987454366856,
           "latencyMs": {
-            "p50": 0.9960060000000001,
-            "p90": 1.5165739999999999,
-            "p99": 1.8456970000000001,
-            "p999": 1.958324,
-            "p9999": 2.362178
+            "p50": 1.019247,
+            "p90": 1.555822,
+            "p99": 1.863663,
+            "p999": 1.964717,
+            "p9999": 2.224304
           },
           "ttfbMs": {
-            "p50": 0.9808049999999999,
-            "p99": 1.823011
+            "p50": 1.0025259999999998,
+            "p99": 1.844627
           },
           "status": {
-            "200": 518431
+            "200": 521482
           },
           "errors": {
             "aborted due to deadline": 63,
-            "timeout": 394070
+            "timeout": 393664
           },
-          "cpuSeconds": 64.47000000000003,
-          "cpuMsPerRequest": 0.07064709981984828,
+          "cpuSeconds": 64.13000000000005,
+          "cpuMsPerRequest": 0.07007142630808924,
           "backingCpuMsPerRequest": null,
-          "rssStartMb": 63.37109375,
-          "rssPeakMb": 93.453125,
-          "rssEndMb": 78.84375,
+          "rssStartMb": 39.88671875,
+          "rssPeakMb": 73.76953125,
+          "rssEndMb": 55.70703125,
           "healthyAfter": true,
           "crashed": 0,
           "rows": {
-            "answered": 518431,
-            "done": 905540,
+            "answered": 521482,
+            "done": 908854,
             "pending": 0,
             "missing": 0,
             "writer": {
-              "enqueued": 1811080,
-              "committed": 1811080,
-              "dropped": 0,
-              "failed": 0
+              "events": 1817708,
+              "committed": 1817708,
+              "failed": 0,
+              "dropped": 0
             }
           },
-          "foreignCores": 1.06,
-          "windowFrom": 1794213998395,
+          "foreignCores": 1.1,
+          "windowFrom": 1794217097396,
           "gatewayMhz": [
             2496,
             2496,
@@ -4253,7 +3366,408 @@
             },
             "tokio-rt-worker#2": {
               "cpu": 67,
+              "runqueue": 16
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 66,
+              "runqueue": 16
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 65,
               "runqueue": 17
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 26,
+              "runqueue": 5
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 25,
+              "runqueue": 6
+            },
+            "omni-checkpoint": {
+              "cpu": 5,
+              "runqueue": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "label": "rust-slice1 single @ ca80bcfa, v7 ids (method 3), bounded rate-limit windows, uncapped, run 2",
+      "when": "2026-11-09T09:43:32.834Z",
+      "host": {
+        "cpu": "13th Gen Intel(R) Core(TM) i5-13400",
+        "cores": 8,
+        "memGb": 15,
+        "kernel": "6.12.0-211.69.1.el10_2.x86_64"
+      },
+      "config": {
+        "gateway": [
+          "/home/homebrew/code/omnigateway/target/release/omnigateway"
+        ],
+        "cli": [
+          "bun",
+          "apps/cli/src/index.ts"
+        ],
+        "duration": "20s",
+        "warmup": "3s",
+        "gatewayCpus": "0-3",
+        "upstreamCpus": "4-5",
+        "loadCpus": "6-7",
+        "mode": "single",
+        "replicas": 1,
+        "cpuSets": [
+          "0-3"
+        ]
+      },
+      "binaryBytes": 6426720,
+      "boot": {
+        "p50Ms": 26.542794000000868,
+        "maxMs": 27.02132200000051
+      },
+      "shutdownMs": {
+        "idleP50": 5.909426000000167,
+        "afterLoad": 6.662092000013217
+      },
+      "idleRssMb": 10.34375,
+      "finalRssMb": 54.8828125,
+      "dbBytesAfter": 6696542208,
+      "cliKeysList": {
+        "p50Ms": 99.32118000002811,
+        "maxMs": 106.58640500000911
+      },
+      "calibration": {
+        "alone": {
+          "0": 489,
+          "1": 476,
+          "2": 485,
+          "3": 487,
+          "4": 461,
+          "5": 484,
+          "6": 482,
+          "7": 488
+        },
+        "together": {
+          "0": 534,
+          "1": 568,
+          "2": 531,
+          "3": 535,
+          "4": 531,
+          "5": 532,
+          "6": 565,
+          "7": 539
+        },
+        "mhzUnderLoad": [
+          2496,
+          2496,
+          2496,
+          2496,
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "foreignCoresBefore": 0.15
+      },
+      "writerDropped": null,
+      "scenarios": [
+        {
+          "name": "overhead-c1",
+          "what": "chat SSE, 1 chunk, one client: pure per-request overhead",
+          "concurrency": 1,
+          "requests": 200962,
+          "successRate": 1,
+          "rps": 10047.681266399912,
+          "latencyMs": {
+            "p50": 0.085337,
+            "p90": 0.133567,
+            "p99": 0.24098899999999998,
+            "p999": 0.455588,
+            "p9999": 0.936998
+          },
+          "ttfbMs": {
+            "p50": 0.081787,
+            "p99": 0.23517500000000002
+          },
+          "status": {
+            "200": 200962
+          },
+          "errors": {},
+          "cpuSeconds": 12.879999999999999,
+          "cpuMsPerRequest": 0.06409171883241607,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 26.7578125,
+          "rssPeakMb": 38.421875,
+          "rssEndMb": 33.96484375,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 231546,
+            "done": 231546,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 463092,
+              "committed": 463092,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.38,
+          "windowFrom": 1794217152077,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 19,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 19,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 11,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 6,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 5,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 4,
+              "runqueue": 0
+            }
+          }
+        },
+        {
+          "name": "chat-stream",
+          "what": "chat SSE, 1 chunk, 64 clients: throughput",
+          "concurrency": 64,
+          "requests": 1131506,
+          "successRate": 1,
+          "rps": 56565.348299890626,
+          "latencyMs": {
+            "p50": 1.034637,
+            "p90": 1.739184,
+            "p99": 2.906808,
+            "p999": 5.049263,
+            "p9999": 9.256752
+          },
+          "ttfbMs": {
+            "p50": 1.0214180000000002,
+            "p99": 2.885679
+          },
+          "status": {
+            "200": 1131506
+          },
+          "errors": {},
+          "cpuSeconds": 64.28999999999999,
+          "cpuMsPerRequest": 0.05681808138887465,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 45.72265625,
+          "rssPeakMb": 57.26953125,
+          "rssEndMb": 50.12890625,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1293595,
+            "done": 1293595,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2587190,
+              "committed": 2587190,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.88,
+          "windowFrom": 1794217176724,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 66,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 64,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 64,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 64,
+              "runqueue": 20
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 29,
+              "runqueue": 5
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 28,
+              "runqueue": 4
+            },
+            "omni-checkpoint": {
+              "cpu": 6,
+              "runqueue": 9
+            }
+          }
+        },
+        {
+          "name": "anthropic-json",
+          "what": "Anthropic non-streaming, translated from chat SSE, 64 clients",
+          "concurrency": 64,
+          "requests": 1181780,
+          "successRate": 1,
+          "rps": 59081.02327017281,
+          "latencyMs": {
+            "p50": 0.993985,
+            "p90": 1.6509509999999998,
+            "p99": 2.75832,
+            "p999": 4.9869509999999995,
+            "p9999": 7.095784
+          },
+          "ttfbMs": {
+            "p50": 0.9937870000000001,
+            "p99": 2.758055
+          },
+          "status": {
+            "200": 1181780
+          },
+          "errors": {},
+          "cpuSeconds": 66.15,
+          "cpuMsPerRequest": 0.05597488534244952,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 54.66796875,
+          "rssPeakMb": 58.02734375,
+          "rssEndMb": 44.74609375,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1353804,
+            "done": 1353804,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2707608,
+              "committed": 2707608,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.79,
+          "windowFrom": 1794217201942,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 67,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 66,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 66,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 66,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 30,
+              "runqueue": 5
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 30,
+              "runqueue": 5
+            },
+            "omni-checkpoint": {
+              "cpu": 6,
+              "runqueue": 9
+            }
+          }
+        },
+        {
+          "name": "responses-stream",
+          "what": "Responses SSE, translated from chat SSE, 64 clients",
+          "concurrency": 64,
+          "requests": 1059579,
+          "successRate": 1,
+          "rps": 52968.10283966261,
+          "latencyMs": {
+            "p50": 1.105451,
+            "p90": 1.852568,
+            "p99": 3.121188,
+            "p999": 5.505351,
+            "p9999": 8.808556000000001
+          },
+          "ttfbMs": {
+            "p50": 1.093555,
+            "p99": 3.101529
+          },
+          "status": {
+            "200": 1059579
+          },
+          "errors": {},
+          "cpuSeconds": 64.56,
+          "cpuMsPerRequest": 0.06092985987831016,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 47.11328125,
+          "rssPeakMb": 57.76953125,
+          "rssEndMb": 52.69921875,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1221170,
+            "done": 1221170,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2442340,
+              "committed": 2442340,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.87,
+          "windowFrom": 1794217227158,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 66,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 66,
+              "runqueue": 18
             },
             "tokio-rt-worker#3": {
               "cpu": 66,
@@ -4261,10 +3775,434 @@
             },
             "tokio-rt-worker#4": {
               "cpu": 65,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 27,
+              "runqueue": 4
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 27,
+              "runqueue": 5
+            },
+            "omni-checkpoint": {
+              "cpu": 5,
+              "runqueue": 7
+            }
+          }
+        },
+        {
+          "name": "agent-100k",
+          "what": "Anthropic SSE with a ~100 KiB agent transcript, 32 clients",
+          "concurrency": 32,
+          "requests": 137070,
+          "successRate": 1,
+          "rps": 6852.050218204849,
+          "latencyMs": {
+            "p50": 4.584075,
+            "p90": 6.359771,
+            "p99": 7.975902,
+            "p999": 9.77852,
+            "p9999": 15.379261
+          },
+          "ttfbMs": {
+            "p50": 4.57778,
+            "p99": 7.968680000000001
+          },
+          "status": {
+            "200": 137070
+          },
+          "errors": {},
+          "cpuSeconds": 77.68,
+          "cpuMsPerRequest": 0.5667177354636317,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 58.09375,
+          "rssPeakMb": 68.4375,
+          "rssEndMb": 65.59375,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 157751,
+            "done": 157751,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 315502,
+              "committed": 315502,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.41,
+          "windowFrom": 1794217252356,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 97,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 96,
+              "runqueue": 1
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 95,
+              "runqueue": 3
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 93,
+              "runqueue": 4
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 4,
+              "runqueue": 4
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 3,
+              "runqueue": 3
+            }
+          }
+        },
+        {
+          "name": "many-chunks",
+          "what": "Anthropic SSE, 2000 upstream chunks per reply, 16 clients",
+          "concurrency": 16,
+          "requests": 69207,
+          "successRate": 1,
+          "rps": 3459.52476963181,
+          "latencyMs": {
+            "p50": 4.55029,
+            "p90": 5.951583,
+            "p99": 7.488746,
+            "p999": 9.442245999999999,
+            "p9999": 14.654932
+          },
+          "ttfbMs": {
+            "p50": 3.9766489999999997,
+            "p99": 6.787742000000001
+          },
+          "status": {
+            "200": 69207
+          },
+          "errors": {},
+          "cpuSeconds": 78.04000000000002,
+          "cpuMsPerRequest": 1.1276315979597442,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 57.2890625,
+          "rssPeakMb": 59.6796875,
+          "rssEndMb": 59.3359375,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 79318,
+            "done": 79318,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 158636,
+              "committed": 158636,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.42,
+          "windowFrom": 1794217276994,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 98,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 97,
+              "runqueue": 1
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 97,
+              "runqueue": 1
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 96,
+              "runqueue": 2
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 2,
+              "runqueue": 2
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 2,
+              "runqueue": 2
+            }
+          }
+        },
+        {
+          "name": "rate-limited-key",
+          "what": "chat SSE, 1 chunk, 64 clients, key with request/token/concurrency limits",
+          "concurrency": 64,
+          "requests": 1024120,
+          "successRate": 1,
+          "rps": 51199.37144009691,
+          "latencyMs": {
+            "p50": 1.1404189999999998,
+            "p90": 1.895487,
+            "p99": 3.3661350000000003,
+            "p999": 5.657514,
+            "p9999": 9.862160999999999
+          },
+          "ttfbMs": {
+            "p50": 1.127994,
+            "p99": 3.348032
+          },
+          "status": {
+            "200": 1024120
+          },
+          "errors": {},
+          "cpuSeconds": 65.68,
+          "cpuMsPerRequest": 0.06413310940124205,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 51.96875,
+          "rssPeakMb": 60.48828125,
+          "rssEndMb": 53.32421875,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1175083,
+            "done": 1175083,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2350166,
+              "committed": 2350166,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.84,
+          "windowFrom": 1794217301600,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 66,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 66,
+              "runqueue": 20
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 65,
+              "runqueue": 20
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 65,
               "runqueue": 19
             },
             "tokio-rt-worker#5": {
-              "cpu": 26,
+              "cpu": 29,
+              "runqueue": 5
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 27,
+              "runqueue": 6
+            },
+            "omni-checkpoint": {
+              "cpu": 7,
+              "runqueue": 9
+            }
+          }
+        },
+        {
+          "name": "held-streams",
+          "what": "1000 concurrent streams, 60 chunks 500 ms apart (~30 s each)",
+          "concurrency": 1000,
+          "requests": 1000,
+          "successRate": 1,
+          "rps": 31.434499504019648,
+          "latencyMs": {
+            "p50": 30537.077806999998,
+            "p90": 31548.104366,
+            "p99": 31764.652068,
+            "p999": 31765.368075000002,
+            "p9999": 31765.368075000002
+          },
+          "ttfbMs": {
+            "p50": 530.485277,
+            "p99": 1750.979243
+          },
+          "status": {
+            "200": 1000
+          },
+          "errors": {},
+          "cpuSeconds": 1.0399999999999636,
+          "cpuMsPerRequest": 1.0399999999999636,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 53.328125,
+          "rssPeakMb": 70.22265625,
+          "rssEndMb": 59.8203125,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1000,
+            "done": 1000,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2000,
+              "committed": 2000,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.17,
+          "windowFrom": 1794217326896,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {}
+        },
+        {
+          "name": "client-cancel",
+          "what": "200 clients abandoning 30 s streams after 2 s",
+          "concurrency": 200,
+          "requests": 2000,
+          "successRate": 0,
+          "rps": 99.98265650848876,
+          "latencyMs": {
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "p999": null,
+            "p9999": null
+          },
+          "ttfbMs": {
+            "p50": null,
+            "p99": null
+          },
+          "status": {},
+          "errors": {
+            "aborted due to deadline": 200,
+            "timeout": 1800
+          },
+          "cpuSeconds": 0.4300000000000068,
+          "cpuMsPerRequest": 0.2150000000000034,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 59.83203125,
+          "rssPeakMb": 59.83203125,
+          "rssEndMb": 35.90234375,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 0,
+            "done": 2000,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 4000,
+              "committed": 4000,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.16,
+          "windowFrom": 1794217360273,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {}
+        },
+        {
+          "name": "early-cancel",
+          "what": "64 clients abandoning 1-chunk requests after 1 ms",
+          "concurrency": 64,
+          "requests": 906660,
+          "successRate": 0.5641151497169128,
+          "rps": 45326.99988824949,
+          "latencyMs": {
+            "p50": 0.9995780000000001,
+            "p90": 1.5275670000000001,
+            "p99": 1.851652,
+            "p999": 1.961704,
+            "p9999": 2.4357010000000003
+          },
+          "ttfbMs": {
+            "p50": 0.9840770000000001,
+            "p99": 1.8293789999999999
+          },
+          "status": {
+            "200": 511433
+          },
+          "errors": {
+            "aborted due to deadline": 49,
+            "timeout": 395178
+          },
+          "cpuSeconds": 64.09000000000003,
+          "cpuMsPerRequest": 0.07068801976485124,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 35.90625,
+          "rssPeakMb": 77.91796875,
+          "rssEndMb": 54.8828125,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 511433,
+            "done": 899284,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 1798568,
+              "committed": 1798568,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 1.11,
+          "windowFrom": 1794217385827,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 66,
+              "runqueue": 17
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 66,
+              "runqueue": 16
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 65,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 65,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 27,
               "runqueue": 5
             },
             "tokio-rt-worker#6": {
@@ -4272,7 +4210,832 @@
               "runqueue": 6
             },
             "omni-checkpoint": {
+              "cpu": 6,
+              "runqueue": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "label": "rust-slice1 single @ ca80bcfa, v7 ids (method 3), bounded rate-limit windows, uncapped, run 3",
+      "when": "2026-11-09T09:48:21.022Z",
+      "host": {
+        "cpu": "13th Gen Intel(R) Core(TM) i5-13400",
+        "cores": 8,
+        "memGb": 15,
+        "kernel": "6.12.0-211.69.1.el10_2.x86_64"
+      },
+      "config": {
+        "gateway": [
+          "/home/homebrew/code/omnigateway/target/release/omnigateway"
+        ],
+        "cli": [
+          "bun",
+          "apps/cli/src/index.ts"
+        ],
+        "duration": "20s",
+        "warmup": "3s",
+        "gatewayCpus": "0-3",
+        "upstreamCpus": "4-5",
+        "loadCpus": "6-7",
+        "mode": "single",
+        "replicas": 1,
+        "cpuSets": [
+          "0-3"
+        ]
+      },
+      "binaryBytes": 6426720,
+      "boot": {
+        "p50Ms": 26.743846999999732,
+        "maxMs": 27.05163999999968
+      },
+      "shutdownMs": {
+        "idleP50": 6.118521000000328,
+        "afterLoad": 6.535981000051834
+      },
+      "idleRssMb": 10.25,
+      "finalRssMb": 50.65234375,
+      "dbBytesAfter": 6582521856,
+      "cliKeysList": {
+        "p50Ms": 101.9392569999909,
+        "maxMs": 107.3183339999523
+      },
+      "calibration": {
+        "alone": {
+          "0": 481,
+          "1": 480,
+          "2": 484,
+          "3": 483,
+          "4": 482,
+          "5": 488,
+          "6": 484,
+          "7": 468
+        },
+        "together": {
+          "0": 532,
+          "1": 531,
+          "2": 585,
+          "3": 546,
+          "4": 534,
+          "5": 537,
+          "6": 530,
+          "7": 529
+        },
+        "mhzUnderLoad": [
+          2496,
+          2496,
+          2496,
+          2496,
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "foreignCoresBefore": 0.09
+      },
+      "writerDropped": null,
+      "scenarios": [
+        {
+          "name": "overhead-c1",
+          "what": "chat SSE, 1 chunk, one client: pure per-request overhead",
+          "concurrency": 1,
+          "requests": 204339,
+          "successRate": 1,
+          "rps": 10216.071909719627,
+          "latencyMs": {
+            "p50": 0.0842,
+            "p90": 0.12984600000000002,
+            "p99": 0.23281100000000002,
+            "p999": 0.430152,
+            "p9999": 0.9761019999999999
+          },
+          "ttfbMs": {
+            "p50": 0.08066899999999999,
+            "p99": 0.22747199999999998
+          },
+          "status": {
+            "200": 204339
+          },
+          "errors": {},
+          "cpuSeconds": 13.02,
+          "cpuMsPerRequest": 0.0637176456770367,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 27.38671875,
+          "rssPeakMb": 36.02734375,
+          "rssEndMb": 32.35546875,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 233700,
+            "done": 233700,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 467400,
+              "committed": 467400,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.37,
+          "windowFrom": 1794217440493,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 21,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 19,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 15,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#4": {
               "cpu": 5,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 4,
+              "runqueue": 0
+            },
+            "omni-checkpoint": {
+              "cpu": 1,
+              "runqueue": 0
+            }
+          }
+        },
+        {
+          "name": "chat-stream",
+          "what": "chat SSE, 1 chunk, 64 clients: throughput",
+          "concurrency": 64,
+          "requests": 1107347,
+          "successRate": 1,
+          "rps": 55357.623098206015,
+          "latencyMs": {
+            "p50": 1.047342,
+            "p90": 1.7980889999999998,
+            "p99": 3.0985959999999997,
+            "p999": 5.396618,
+            "p9999": 13.1393
+          },
+          "ttfbMs": {
+            "p50": 1.034256,
+            "p99": 3.080838
+          },
+          "status": {
+            "200": 1107347
+          },
+          "errors": {},
+          "cpuSeconds": 63.44,
+          "cpuMsPerRequest": 0.0572900816094684,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 50.16796875,
+          "rssPeakMb": 59.24609375,
+          "rssEndMb": 46.57421875,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1272590,
+            "done": 1272590,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2545180,
+              "committed": 2545180,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.89,
+          "windowFrom": 1794217465136,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 66,
+              "runqueue": 17
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 65,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 65,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 64,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 28,
+              "runqueue": 5
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 28,
+              "runqueue": 5
+            },
+            "omni-checkpoint": {
+              "cpu": 6,
+              "runqueue": 7
+            }
+          }
+        },
+        {
+          "name": "anthropic-json",
+          "what": "Anthropic non-streaming, translated from chat SSE, 64 clients",
+          "concurrency": 64,
+          "requests": 1161447,
+          "successRate": 1,
+          "rps": 58065.8286790403,
+          "latencyMs": {
+            "p50": 1.004648,
+            "p90": 1.699539,
+            "p99": 2.861777,
+            "p999": 5.311164,
+            "p9999": 7.438037
+          },
+          "ttfbMs": {
+            "p50": 1.004448,
+            "p99": 2.861647
+          },
+          "status": {
+            "200": 1161447
+          },
+          "errors": {},
+          "cpuSeconds": 65.75,
+          "cpuMsPerRequest": 0.05661041786667838,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 51.1796875,
+          "rssPeakMb": 60.21484375,
+          "rssEndMb": 38.43359375,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1331409,
+            "done": 1331409,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2662818,
+              "committed": 2662818,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.78,
+          "windowFrom": 1794217490343,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 66,
+              "runqueue": 17
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 66,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 66,
+              "runqueue": 20
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 65,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 30,
+              "runqueue": 4
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 29,
+              "runqueue": 5
+            },
+            "omni-checkpoint": {
+              "cpu": 6,
+              "runqueue": 8
+            }
+          }
+        },
+        {
+          "name": "responses-stream",
+          "what": "Responses SSE, translated from chat SSE, 64 clients",
+          "concurrency": 64,
+          "requests": 1046058,
+          "successRate": 1,
+          "rps": 52293.228241932906,
+          "latencyMs": {
+            "p50": 1.11585,
+            "p90": 1.8815629999999999,
+            "p99": 3.268481,
+            "p999": 5.348649,
+            "p9999": 13.411100000000001
+          },
+          "ttfbMs": {
+            "p50": 1.104061,
+            "p99": 3.249046
+          },
+          "status": {
+            "200": 1046058
+          },
+          "errors": {},
+          "cpuSeconds": 64.98000000000002,
+          "cpuMsPerRequest": 0.06211892648399994,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 53.10546875,
+          "rssPeakMb": 59.00390625,
+          "rssEndMb": 47.90234375,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1203392,
+            "done": 1203392,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2406784,
+              "committed": 2406784,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.88,
+          "windowFrom": 1794217515561,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 66,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 66,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 66,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 66,
+              "runqueue": 20
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 29,
+              "runqueue": 6
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 28,
+              "runqueue": 6
+            },
+            "omni-checkpoint": {
+              "cpu": 5,
+              "runqueue": 8
+            }
+          }
+        },
+        {
+          "name": "agent-100k",
+          "what": "Anthropic SSE with a ~100 KiB agent transcript, 32 clients",
+          "concurrency": 32,
+          "requests": 135888,
+          "successRate": 1,
+          "rps": 6793.037213820394,
+          "latencyMs": {
+            "p50": 4.627476000000001,
+            "p90": 6.396218,
+            "p99": 7.998013,
+            "p999": 9.618631,
+            "p9999": 24.285535
+          },
+          "ttfbMs": {
+            "p50": 4.621901,
+            "p99": 7.992597000000001
+          },
+          "status": {
+            "200": 135888
+          },
+          "errors": {},
+          "cpuSeconds": 77.75,
+          "cpuMsPerRequest": 0.5721623690097728,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 59.4765625,
+          "rssPeakMb": 67.484375,
+          "rssEndMb": 63.2890625,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 156397,
+            "done": 156397,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 312794,
+              "committed": 312794,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.41,
+          "windowFrom": 1794217540764,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 97,
+              "runqueue": 0
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 95,
+              "runqueue": 2
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 94,
+              "runqueue": 3
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 94,
+              "runqueue": 3
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 4,
+              "runqueue": 3
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 3,
+              "runqueue": 3
+            }
+          }
+        },
+        {
+          "name": "many-chunks",
+          "what": "Anthropic SSE, 2000 upstream chunks per reply, 16 clients",
+          "concurrency": 16,
+          "requests": 69016,
+          "successRate": 1,
+          "rps": 3449.9031385133044,
+          "latencyMs": {
+            "p50": 4.5585189999999995,
+            "p90": 5.96027,
+            "p99": 7.440554000000001,
+            "p999": 9.403419999999999,
+            "p9999": 12.35503
+          },
+          "ttfbMs": {
+            "p50": 3.9839690000000005,
+            "p99": 6.736917
+          },
+          "status": {
+            "200": 69016
+          },
+          "errors": {},
+          "cpuSeconds": 78.09999999999997,
+          "cpuMsPerRequest": 1.1316216529500402,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 56.6015625,
+          "rssPeakMb": 57.55078125,
+          "rssEndMb": 52.2265625,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 79557,
+            "done": 79557,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 159114,
+              "committed": 159114,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.41,
+          "windowFrom": 1794217565401,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 97,
+              "runqueue": 1
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 97,
+              "runqueue": 1
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 96,
+              "runqueue": 1
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 95,
+              "runqueue": 2
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 2,
+              "runqueue": 2
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 2,
+              "runqueue": 2
+            }
+          }
+        },
+        {
+          "name": "rate-limited-key",
+          "what": "chat SSE, 1 chunk, 64 clients, key with request/token/concurrency limits",
+          "concurrency": 64,
+          "requests": 996937,
+          "successRate": 1,
+          "rps": 49840.16440296686,
+          "latencyMs": {
+            "p50": 1.1713500000000001,
+            "p90": 1.955911,
+            "p99": 3.470386,
+            "p999": 5.91113,
+            "p9999": 11.54013
+          },
+          "ttfbMs": {
+            "p50": 1.158792,
+            "p99": 3.4473759999999998
+          },
+          "status": {
+            "200": 996937
+          },
+          "errors": {},
+          "cpuSeconds": 65.81,
+          "cpuMsPerRequest": 0.06601219535437043,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 54.5625,
+          "rssPeakMb": 61.640625,
+          "rssEndMb": 44.38671875,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1152319,
+            "done": 1152319,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2304638,
+              "committed": 2304638,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.87,
+          "windowFrom": 1794217590008,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 68,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 67,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 67,
+              "runqueue": 18
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 67,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 29,
+              "runqueue": 6
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 27,
+              "runqueue": 7
+            },
+            "omni-checkpoint": {
+              "cpu": 8,
+              "runqueue": 9
+            }
+          }
+        },
+        {
+          "name": "held-streams",
+          "what": "1000 concurrent streams, 60 chunks 500 ms apart (~30 s each)",
+          "concurrency": 1000,
+          "requests": 1000,
+          "successRate": 1,
+          "rps": 31.65512900540505,
+          "latencyMs": {
+            "p50": 30539.598335000002,
+            "p90": 31531.564994,
+            "p99": 31534.603644,
+            "p999": 31543.315573,
+            "p9999": 31543.315573
+          },
+          "ttfbMs": {
+            "p50": 531.4928880000001,
+            "p99": 1530.032598
+          },
+          "status": {
+            "200": 1000
+          },
+          "errors": {},
+          "cpuSeconds": 0.9799999999999613,
+          "cpuMsPerRequest": 0.9799999999999613,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 44.390625,
+          "rssPeakMb": 73.21875,
+          "rssEndMb": 58.7578125,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 1000,
+            "done": 1000,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 2000,
+              "committed": 2000,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.17,
+          "windowFrom": 1794217615291,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {}
+        },
+        {
+          "name": "client-cancel",
+          "what": "200 clients abandoning 30 s streams after 2 s",
+          "concurrency": 200,
+          "requests": 2000,
+          "successRate": 0,
+          "rps": 99.98595499789793,
+          "latencyMs": {
+            "p50": null,
+            "p90": null,
+            "p99": null,
+            "p999": null,
+            "p9999": null
+          },
+          "ttfbMs": {
+            "p50": null,
+            "p99": null
+          },
+          "status": {},
+          "errors": {
+            "aborted due to deadline": 200,
+            "timeout": 1800
+          },
+          "cpuSeconds": 0.4399999999999977,
+          "cpuMsPerRequest": 0.21999999999999886,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 58.76171875,
+          "rssPeakMb": 60.17578125,
+          "rssEndMb": 38.91796875,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 0,
+            "done": 2000,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 4000,
+              "committed": 4000,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 0.16,
+          "windowFrom": 1794217648467,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {}
+        },
+        {
+          "name": "early-cancel",
+          "what": "64 clients abandoning 1-chunk requests after 1 ms",
+          "concurrency": 64,
+          "requests": 878731,
+          "successRate": 0.5291921832482244,
+          "rps": 43933.07592172857,
+          "latencyMs": {
+            "p50": 0.996023,
+            "p90": 1.554031,
+            "p99": 1.870328,
+            "p999": 1.965785,
+            "p9999": 2.465697
+          },
+          "ttfbMs": {
+            "p50": 0.980573,
+            "p99": 1.85077
+          },
+          "status": {
+            "200": 464989
+          },
+          "errors": {
+            "aborted due to deadline": 54,
+            "timeout": 413688
+          },
+          "cpuSeconds": 63.17000000000007,
+          "cpuMsPerRequest": 0.07188775632133164,
+          "backingCpuMsPerRequest": null,
+          "rssStartMb": 37.82421875,
+          "rssPeakMb": 67.79296875,
+          "rssEndMb": 50.65234375,
+          "healthyAfter": true,
+          "crashed": 0,
+          "rows": {
+            "answered": 464989,
+            "done": 870551,
+            "pending": 0,
+            "missing": 0,
+            "writer": {
+              "events": 1741102,
+              "committed": 1741102,
+              "failed": 0,
+              "dropped": 0
+            }
+          },
+          "foreignCores": 1.17,
+          "windowFrom": 1794217674020,
+          "gatewayMhz": [
+            2496,
+            2496,
+            2496,
+            2496
+          ],
+          "threads": {
+            "tokio-rt-worker": {
+              "cpu": 66,
+              "runqueue": 16
+            },
+            "tokio-rt-worker#2": {
+              "cpu": 66,
+              "runqueue": 16
+            },
+            "tokio-rt-worker#3": {
+              "cpu": 66,
+              "runqueue": 16
+            },
+            "tokio-rt-worker#4": {
+              "cpu": 64,
+              "runqueue": 19
+            },
+            "tokio-rt-worker#5": {
+              "cpu": 26,
+              "runqueue": 6
+            },
+            "tokio-rt-worker#6": {
+              "cpu": 25,
+              "runqueue": 4
+            },
+            "omni-checkpoint": {
+              "cpu": 6,
               "runqueue": 7
             }
           }
