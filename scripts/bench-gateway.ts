@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { probeText } from "./bench-probe";
+import { setupViaApi as apiSetup, smoke as smokeRequests, recoveryVerdict, type RecoverySample } from "./bench-probe";
 /**
  * Black-box latency, throughput, CPU and memory benchmark for the gateway.
  *
@@ -649,7 +649,8 @@ type ScenarioResult = {
   rssPeakMb: number;
   rssEndMb: number;
   /** Actual cancellation recovery observations; elapsed times include scheduler lag. */
-  recoverySamples: { elapsedMs: number; rssMb: number | null }[];
+  recoverySamples: RecoverySample[];
+  recoveryVerdict: "pass" | "miss" | "inconclusive" | null;
   healthyAfter: boolean;
   /** Replicas whose process was gone after the scenario. Each is restarted. */
   crashed: number;
@@ -1049,6 +1050,7 @@ async function runScenario(
   })();
 
   const { merged: report, perReplica } = await ohaFleet(scenario, key, flags.duration ?? "20s");
+  const recoveryStart = performance.now();
   sampling = false;
   await sampler;
   const after = fleetSample(pids);
@@ -1065,13 +1067,12 @@ async function runScenario(
   // Settle before the next scenario, then confirm the process still answers:
   // a scenario that leaves the gateway wedged is a result, not a crash. The
   // settle also lets the writer flush the scenario's last batch (≤ 200 ms).
-  const recoveryStart = performance.now();
-  const recoverySamples: { elapsedMs: number; rssMb: number | null }[] = [];
+  const recoverySamples: RecoverySample[] = [];
   if (scenario.clientTimeout !== undefined) {
     for (const at of [5000, 10000]) {
       await sleep(Math.max(0, recoveryStart + at - performance.now()));
       const sample = fleetSample(pids);
-      recoverySamples.push({ elapsedMs: performance.now() - recoveryStart, rssMb: sample === null ? null : sample.rssKb / 1024 });
+      recoverySamples.push({ deadlineMs: at, elapsedMs: performance.now() - recoveryStart, rssMb: sample === null ? null : sample.rssKb / 1024 });
     }
   } else {
     await sleep(1000);
@@ -1132,6 +1133,7 @@ async function runScenario(
     rssPeakMb: peak / 1024,
     rssEndMb: (settled?.rssKb ?? 0) / 1024,
     recoverySamples,
+    recoveryVerdict: scenario.clientTimeout === undefined ? null : recoveryVerdict(before === null ? null : before.rssKb / 1024, recoverySamples, crashed),
     healthyAfter,
     crashed,
     rows,
@@ -1191,46 +1193,11 @@ const NEVER_DENY = {
  * operator of a cluster has as well.
  */
 async function setupViaApi(): Promise<Record<"plain" | "limited", string>> {
-  const call = async (method: string, path: string, body: unknown, cookie?: string) => {
-    const res = await probeText(`${BASE}${path}`, {
-      signal: AbortSignal.timeout(10_000),
-      method,
-      headers: {
-        "content-type": "application/json",
-        ...(cookie === undefined ? {} : { cookie }),
-      },
-      body: JSON.stringify(body),
-    });
-    const text = res.text;
-    if (!res.ok) throw new Error(`${method} ${path} → ${res.status}: ${text}`);
-    return { res, json: text.length === 0 ? null : (JSON.parse(text) as unknown) };
-  };
-  const { res } = await call("POST", "/api/setup", { password: ADMIN_PASSWORD });
-  const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
-  await call(
-    "POST",
-    "/api/credentials",
-    {
-      provider: "custom",
-      apiKey: "sk-bench-upstream",
-      label: "bench upstream",
-      endpointId: "bench",
-      endpointLabel: "Bench",
-      origin: `http://127.0.0.1:${UPSTREAM_PORT}`,
-      protocol: "chat_completions",
-    },
-    cookie,
-  );
-  for (const [id, upstream] of Object.entries(BENCH_MODELS)) {
-    await call("PUT", `/api/models/${id}`, benchModel(id, upstream), cookie);
-  }
-  const plain = (await call("POST", "/api/keys", { label: "bench plain" }, cookie)).json as {
-    key: string;
-  };
-  const limited = (
-    await call("POST", "/api/keys", { label: "bench limited", limits: NEVER_DENY }, cookie)
-  ).json as { key: string };
-  return { plain: plain.key, limited: limited.key };
+  return apiSetup(BASE, ADMIN_PASSWORD, {
+    provider: "custom", apiKey: "sk-bench-upstream", label: "bench upstream",
+    endpointId: "bench", endpointLabel: "Bench", origin: `http://127.0.0.1:${UPSTREAM_PORT}`,
+    protocol: "chat_completions",
+  }, Object.fromEntries(Object.entries(BENCH_MODELS).map(([id, upstream]) => [id, benchModel(id, upstream)])), NEVER_DENY);
 }
 
 async function setup(): Promise<Record<"plain" | "limited", string>> {
@@ -1302,21 +1269,7 @@ async function smoke(key: string): Promise<void> {
     ["/v1/messages", agentBody("bench-c1")],
     ["/v1/responses", responsesBody("bench-c1")],
   ];
-  for (const [path, body] of cases) {
-    const res = await fetch(`${BASE}${path}`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${key}`,
-        "content-type": "application/json",
-        "anthropic-version": "2023-06-01",
-      },
-      body,
-    });
-    const text = await res.text();
-    if (res.status !== 200 || !text.includes("lorem ipsum")) {
-      throw new Error(`smoke ${path} failed: ${res.status} ${text.slice(0, 400)}`);
-    }
-  }
+  await smokeRequests(BASE, key, cases);
 }
 
 async function cliTimings(runs: number): Promise<{ p50Ms: number; maxMs: number }> {
