@@ -86,6 +86,25 @@ async fn a_head_of_exactly_16_kib_is_accepted() {
 }
 
 #[tokio::test]
+async fn ambiguous_response_framing_is_refused() {
+    for headers in [
+        "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n",
+        "Content-Length: 5\r\nContent-Length: 5\r\n",
+        "Content-Length: +5\r\n",
+    ] {
+        let port = one_shot(format!("HTTP/1.1 200 OK\r\n{headers}\r\nhello").into_bytes()).await;
+        let error = Client::new()
+            .send(request(port, "{}"))
+            .await
+            .expect_err(headers);
+        assert!(
+            matches!(error, HttpError::InvalidResponse(_)),
+            "{headers}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn error_text_budget_covers_every_framing_and_closes_unread_socket() {
     const LIMIT: usize = 1024 * 1024;
     for framing in ["length", "chunked", "close"] {

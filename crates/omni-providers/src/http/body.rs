@@ -235,6 +235,9 @@ impl ResponseBody {
         let mut from = 0;
         loop {
             if let Some(at) = self.buf[from..].windows(2).position(|w| w == b"\r\n") {
+                if from + at > MAX_LINE {
+                    return Err(HttpError::InvalidResponse("chunk line too long".into()));
+                }
                 let line = self.buf.split_to(from + at).freeze();
                 self.buf.advance(2);
                 return Ok(line);
@@ -447,19 +450,29 @@ fn parse_head(buf: &[u8]) -> Result<Option<Head>, HttpError> {
     };
     let status = res.code.unwrap_or(0);
     let mut headers = Headers::new();
-    let mut connection = None;
+    let mut connection: Option<String> = None;
     let mut chunked = false;
+    let mut transfer_encoding = false;
     let mut content_length = None;
     for h in res.headers.iter() {
         // node decodes header bytes as latin1.
         let value: String = h.value.iter().map(|&b| char::from(b)).collect();
         let value = value.trim_matches(|c| c == ' ' || c == '\t');
         if h.name.eq_ignore_ascii_case("transfer-encoding") {
+            transfer_encoding = true;
             chunked = value
                 .rsplit(',')
                 .next()
                 .is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked"));
         } else if h.name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some()
+                || value.is_empty()
+                || !value.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(HttpError::InvalidResponse(
+                    "invalid or duplicate content-length".into(),
+                ));
+            }
             let parsed = value
                 .parse::<u64>()
                 .map_err(|_| HttpError::InvalidResponse("content-length".into()))?;
@@ -470,9 +483,19 @@ fn parse_head(buf: &[u8]) -> Result<Option<Head>, HttpError> {
             }
             content_length = Some(parsed);
         } else if h.name.eq_ignore_ascii_case("connection") {
-            connection = Some(value.to_ascii_lowercase());
+            if let Some(previous) = &mut connection {
+                previous.push(',');
+                previous.push_str(&value.to_ascii_lowercase());
+            } else {
+                connection = Some(value.to_ascii_lowercase());
+            }
         }
         headers.append_received(h.name, value);
+    }
+    if transfer_encoding && content_length.is_some() {
+        return Err(HttpError::InvalidResponse(
+            "transfer-encoding with content-length".into(),
+        ));
     }
     Ok(Some(Head {
         status,
