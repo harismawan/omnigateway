@@ -63,10 +63,17 @@ pub fn create(conn: &Connection, key: &ApiKey) -> Result<(), StoreError> {
 
 pub fn edit(conn: &Connection, id: &str, edit: KeyEdit<'_>) -> Result<(), StoreError> {
     match edit {
-        KeyEdit::Limits(v) => conn.execute(
-            "UPDATE api_keys SET limits = ? WHERE id = ?",
-            rusqlite::params![v, id],
-        )?,
+        KeyEdit::Limits(v) => {
+            let parsed =
+                parse_limits(v).ok_or_else(|| StoreError::Corrupt("unreadable limits".into()))?;
+            let raw =
+                omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&parsed.to_json()))
+                    .expect("limits");
+            conn.execute(
+                "UPDATE api_keys SET limits = ? WHERE id = ?",
+                rusqlite::params![raw, id],
+            )?
+        }
         KeyEdit::Expiry(v) => conn.execute(
             "UPDATE api_keys SET expires_at = ? WHERE id = ?",
             rusqlite::params![v, id],

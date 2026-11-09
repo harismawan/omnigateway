@@ -28,6 +28,11 @@ pub fn create_key(store: &SqliteStore, input: CreateKey, now: i64) -> Result<Val
     if input.expiry.is_some_and(|v| v <= 0) {
         return Err("BAD_REQUEST: expiresAt: Too small: expected number to be >0".into());
     }
+    if input.expiry.is_some_and(|v| v > 8_640_000_000_000_000) {
+        return Err(
+            "BAD_REQUEST: expiresAt: Too big: expected number to be <=8640000000000000".into(),
+        );
+    }
     let policy = input.policy.as_deref().map(omni_ir::js::trim);
     if let Some(p) = policy {
         if p.is_empty() {
@@ -148,7 +153,11 @@ pub fn validate_limits(v: &Value, path: &str, root: bool) -> Result<(), String> 
                     "Invalid key in record".into(),
                 ));
             }
-            validate_limits(scope, &format!("{path}.models.{model}"), false)?;
+            validate_limits(
+                scope,
+                &format!("{path}.models.{}", safe_token(model)),
+                false,
+            )?;
         }
         if models.len() > 64 {
             return Err(err(
