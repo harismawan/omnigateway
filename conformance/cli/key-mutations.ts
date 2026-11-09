@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey, hashApiKey, keyUsable } from "../../packages/store/src/index.ts";
+import { requestLog } from "../../packages/testkit/src/index.ts";
 
 const root = mkdtempSync("/tmp/opencode/key-mutations-");
 const repo = resolve(import.meta.dir, "../..");
@@ -49,6 +50,33 @@ try {
   }
   writeFileSync(join(root, "policy"), "  Work only.\nRefuse roleplay.\n");
   const cases = [
+    ...["2030-03-10 02:30:00", "2030-11-03 01:30:00"].map((at) => [
+      "expiry",
+      "k",
+      "--at",
+      at,
+      "--json",
+    ]),
+    ...["2030-03-10 02:30:00", "2030-11-03 01:30:00"].map((at) => [
+      "expiry",
+      "k",
+      "--at",
+      at,
+      "--json",
+    ]),
+    ...[256, 257].map((n) => [
+      "limits",
+      "k",
+      "--model-limit",
+      `${"🌍".repeat(n)}:concurrency=1`,
+      "--json",
+    ]),
+    ...[64, 65].map((n) => [
+      "limits",
+      "k",
+      ...Array.from({ length: n }, (_, i) => ["--model-limit", `m${i}:concurrency=1`]).flat(),
+      "--json",
+    ]),
     ...["2030/01/01", "01/02/30", "2030-03-10T02:30:00", "2030-11-03T01:30:00"].map((at) => [
       "expiry",
       "k",
@@ -202,6 +230,16 @@ try {
     ["revoke", "k", "--yes", "--json"],
   ];
   for (const args of cases) {
+    if (
+      args.some((a) => a.startsWith("🌍") || a === "m0:concurrency=1") ||
+      args.join(" ") === "expiry k --at 2030/01/01 --json"
+    ) {
+      for (const dir of roots) {
+        const db = new Database(join(dir, "db"));
+        db.run("UPDATE api_keys SET limits='{}'");
+        db.close();
+      }
+    }
     const before = Date.now();
     const outputs = [],
       rows = [];
@@ -336,6 +374,90 @@ try {
     assert.deepEqual(rows[1], rows[0]);
   }
   console.log("4 unreadable-limit repair byte/DB comparisons passed");
+  const usageAt = Date.now() - 10000;
+  for (const dir of roots) {
+    const db = new Database(join(dir, "db"));
+    db.run("UPDATE api_keys SET limits=?,model_allowlist=NULL,revoked_at=NULL WHERE id='k'", [
+      '{"requests":{"1m":10,"5h":null},"tokens":{"1m":100},"spend":{"5h":2},"models":{"m":{"requests":{"1m":5}}}}',
+    ]);
+    db.close();
+    const store = await createStore({
+      path: join(dir, "db"),
+      encryptionKey: await deriveKey(secret),
+    });
+    await store.usage.append(
+      requestLog({
+        id: "usage",
+        apiKeyId: "k",
+        at: usageAt,
+        requestedModel: "m",
+        inputTokens: 10,
+        outputTokens: 20,
+        costUsd: 0.125,
+      }),
+    );
+    store.close();
+  }
+  for (const extra of [[], ["--json"], ["--set", "concurrency=2", "--json"]]) {
+    const results = [],
+      rows = [];
+    for (let i = 0; i < 2; i++) {
+      const dir = roots[i],
+        command = commands[i];
+      assert(dir && command);
+      const p = Bun.spawn(
+        [...command, "keys", "limits", "k", ...extra, "--root", dir, "--db", "db"],
+        { cwd: dir, env, stdout: "pipe", stderr: "pipe" },
+      );
+      results.push({
+        out: await new Response(p.stdout).text(),
+        err: await new Response(p.stderr).text(),
+        code: await p.exited,
+      });
+      const db = new Database(join(dir, "db"));
+      rows.push(db.query("SELECT * FROM api_keys").all());
+      db.close();
+    }
+    assert.deepEqual(results[1], results[0]);
+    assert.deepEqual(rows[1], rows[0]);
+  }
+  console.log("3 committed-usage/null-pruning comparisons passed");
+  for (const [args, answer] of [
+    [["expiry", "k", "--at", "2001-01-01"], ""],
+    [["limits", "k"], ""],
+    [["limits", "k", "--set", "concurrency=2"], ""],
+    [["revoke", "k"], "no"],
+    [["revoke", "k"], "yes"],
+  ] as const) {
+    const outputs = [];
+    for (let i = 0; i < 2; i++) {
+      const dir = roots[i],
+        command = commands[i];
+      assert(dir && command);
+      const db = new Database(join(dir, "db"));
+      db.run("UPDATE api_keys SET limits='broken',revoked_at=NULL WHERE id='k'");
+      db.close();
+      const p = Bun.spawn(
+        [
+          "python3",
+          join(repo, "conformance/cli/pty.py"),
+          answer,
+          ...command,
+          "keys",
+          ...args,
+          "--root",
+          dir,
+          "--db",
+          "db",
+        ],
+        { cwd: dir, env, stdout: "pipe", stderr: "pipe" },
+      );
+      outputs.push(JSON.parse(await new Response(p.stdout).text()));
+      assert.equal(await p.exited, 0);
+    }
+    assert.deepEqual(outputs[1], outputs[0], JSON.stringify(args));
+  }
+  console.log("5 PTY ANSI/confirmation comparisons passed");
   for (const flags of [
     [],
     ["--json"],

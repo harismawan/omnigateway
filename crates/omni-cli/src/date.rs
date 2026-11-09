@@ -188,10 +188,7 @@ fn legacy(raw: &str) -> Option<i64> {
     }
     for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
         if let Ok(date) = chrono::NaiveDateTime::parse_from_str(raw, format) {
-            return Local
-                .from_local_datetime(&date)
-                .earliest()
-                .map(|d| d.timestamp_millis());
+            return local(&date);
         }
     }
     if !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) {
@@ -204,10 +201,7 @@ fn legacy(raw: &str) -> Option<i64> {
             50..=99 => (1900 + n, 1),
             _ => (n, 1),
         };
-        return Local
-            .from_local_datetime(&NaiveDate::from_ymd_opt(year, month, 1)?.and_hms_opt(0, 0, 0)?)
-            .earliest()
-            .map(|d| d.timestamp_millis());
+        return local(&NaiveDate::from_ymd_opt(year, month, 1)?.and_hms_opt(0, 0, 0)?);
     }
     for format in ["%a, %d %b %Y %H:%M:%S %Z", "%d %b %Y %H:%M:%S %Z"] {
         if let Ok(d) = chrono::NaiveDateTime::parse_from_str(raw, format)
@@ -221,10 +215,7 @@ fn legacy(raw: &str) -> Option<i64> {
     }
     for format in ["%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y"] {
         if let Ok(date) = NaiveDate::parse_from_str(raw, format) {
-            return Local
-                .from_local_datetime(&date.and_hms_opt(0, 0, 0)?)
-                .earliest()
-                .map(|d| d.timestamp_millis());
+            return local(&date.and_hms_opt(0, 0, 0)?);
         }
     }
     None

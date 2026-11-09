@@ -145,11 +145,39 @@ pub fn validate_limits(v: &Value, path: &str, root: bool) -> Result<(), String> 
             }
         }
     }
+    if root
+        && let Some(value) = object.get("models")
+        && !value.is_object()
+    {
+        let kind = match value {
+            Value::Null => "null",
+            Value::Array(_) => "array",
+            Value::String(_) => "string",
+            Value::Bool(_) => "boolean",
+            _ => "number",
+        };
+        return Err(err(
+            &format!("{path}.models"),
+            format!("Invalid input: expected record, received {kind}"),
+        ));
+    }
+    if !root
+        && !object.values().any(|v| {
+            v.is_number()
+                || v.as_object()
+                    .is_some_and(|o| o.values().any(Value::is_number))
+        })
+    {
+        return Err(err(
+            path,
+            "a model override must set at least one limit; omit the model to remove it".into(),
+        ));
+    }
     if root && let Some(models) = object.get("models").and_then(Value::as_object) {
         for (model, scope) in omni_ir::jsjson::own_entries(models) {
             if model.is_empty() || model.chars().count() > 256 {
                 return Err(err(
-                    &format!("{path}.models.{model}"),
+                    &format!("{path}.models.{}", safe_token(model)),
                     "Invalid key in record".into(),
                 ));
             }
@@ -180,6 +208,64 @@ pub fn validate_limits(v: &Value, path: &str, root: bool) -> Result<(), String> 
 }
 fn unknown_keys(keys: &[&String]) -> String {
     format!("unrecognized key \"{}\"", safe_token(keys[0]))
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod mutation_tests {
+    use super::*;
+    #[test]
+    fn malformed_model_shapes_match_frozen_schema() {
+        for (value, detail) in [
+            (json!(null), "Invalid input: expected record, received null"),
+            (json!([]), "Invalid input: expected record, received array"),
+            (json!(3), "Invalid input: expected record, received number"),
+            (
+                json!("x"),
+                "Invalid input: expected record, received string",
+            ),
+        ] {
+            assert_eq!(
+                validate_limits(&json!({"models":value}), "limits", true).expect_err("invalid"),
+                format!("BAD_REQUEST: limits.models: {detail}")
+            );
+        }
+        for scope in [json!({}), json!({"concurrency":null})] {
+            assert_eq!(
+                validate_limits(&json!({"models":{"m":scope}}), "limits", true).expect_err("empty"),
+                "BAD_REQUEST: limits.models.m: a model override must set at least one limit; omit the model to remove it"
+            );
+        }
+    }
+    #[test]
+    fn captured_summary_survives_competing_write() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("db");
+        let store = SqliteStore::open(&path, 0).expect("store");
+        let other = SqliteStore::open(&path, 0).expect("other");
+        store.connection().execute("INSERT INTO api_keys(id,label,prefix,hash,limits,created_at) VALUES('k','before','p','h','{}',1)",[]).expect("seed");
+        let mut listing = list_keys(&store, 100).expect("list");
+        listing
+            .capture_mutation(&store, "k", 100, "smartRouting", true.into(), || {
+                set_smart_routing(&store, "k", true)?;
+                // Deterministic gate: rival commits after our write, before summary.
+                other
+                    .connection()
+                    .execute(
+                        "UPDATE api_keys SET label='after',smart_routing=0 WHERE id='k'",
+                        [],
+                    )
+                    .expect("rival");
+                Ok(())
+            })
+            .expect("mutation");
+        assert_eq!(listing.data["keys"][0]["label"], "before");
+        assert_eq!(listing.data["keys"][0]["smartRouting"], true);
+        assert_eq!(
+            list_keys(&store, 100).expect("persisted").data["keys"][0]["label"],
+            "after"
+        );
+    }
 }
 fn safe_token(s: &str) -> &str {
     if !s.is_empty()
@@ -324,6 +410,45 @@ pub struct KeyListing {
 }
 
 impl KeyListing {
+    /// Replace a mutation result with the pre-write target projection. Reading
+    /// after UPDATE would leak a concurrent writer's state into this response.
+    pub fn capture_mutation<F>(
+        &mut self,
+        store: &SqliteStore,
+        id: &str,
+        now: i64,
+        field: &str,
+        value: Value,
+        write: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let mut captured = list_keys(store, now)?;
+        let index = captured.data["keys"]
+            .as_array()
+            .expect("keys")
+            .iter()
+            .position(|k| k["id"] == id)
+            .ok_or("BAD_REQUEST: no such api key")?;
+        write()?;
+        captured.data["keys"][index][field] = value.clone();
+        if field == "modelAllowlist" {
+            captured.allowlists[index] = omni_ir::jsjson::JsValue::from(&value);
+        }
+        let key = &mut captured.data["keys"][index];
+        let mut usage = Vec::new();
+        scope_usage(store, id, &key["limits"], None, now, &mut usage).map_err(|e| e.to_string())?;
+        if let Some(models) = key["limits"]["models"].as_object() {
+            for (m, s) in omni_ir::jsjson::own_entries(models) {
+                scope_usage(store, id, s, Some(m), now, &mut usage).map_err(|e| e.to_string())?;
+            }
+        }
+        key["limitUsage"] = Value::Array(usage);
+        self.data["keys"] = Value::Array(vec![key.clone()]);
+        self.allowlists = vec![captured.allowlists[index].clone()];
+        Ok(())
+    }
     pub fn one_json(&self, index: usize) -> String {
         use omni_ir::jsjson::{JsValue, stringify_pretty};
         let mut data = JsValue::from(&self.data["keys"][index]);

@@ -15,3 +15,6 @@ omni-crypto = { path = "../omni-crypto" }
 omni-store = { path = "../omni-store" }
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -25,6 +25,16 @@ pub fn run(
 ) -> Result<String, (u8, String)> {
     let fail = |s: String| (1, s);
     let usage = |s: &str| (2, s.to_owned());
+    let color = !flags.contains_key("no-color")
+        && std::env::var("NO_COLOR").unwrap_or_default().is_empty()
+        && std::io::stdout().is_terminal();
+    let paint = |code, s: &str| {
+        if color {
+            format!("\x1b[{code}m{s}\x1b[0m")
+        } else {
+            s.into()
+        }
+    };
     if command == "create" {
         let entries: Vec<_> = allow
             .iter()
@@ -72,7 +82,10 @@ pub fn run(
                     .expect("created"),
             );
         }
-        eprintln!("this key is shown once and stored only as a hash");
+        eprintln!(
+            "{}",
+            paint(33, "this key is shown once and stored only as a hash")
+        );
         return Ok(created["key"].as_str().expect("key").into());
     }
     let id = positional
@@ -109,11 +122,24 @@ pub fn run(
                     )));
                 }
                 if !has("json") {
-                    eprintln!("the stored limits could not be read and are being replaced");
+                    eprintln!(
+                        "{}",
+                        paint(
+                            33,
+                            "the stored limits could not be read and are being replaced"
+                        )
+                    );
                 }
             }
             let limits = crate::limits::edit(&key["limits"], allow)?;
-            omni_control::keys::set_limits(&store, id, &limits).map_err(fail)?;
+            let normalized = omni_store::limits::parse_limits(&limits.to_string())
+                .map(|v| v.to_json())
+                .unwrap_or_else(|| limits.clone());
+            listing
+                .capture_mutation(&store, id, now, "limits", normalized, || {
+                    omni_control::keys::set_limits(&store, id, &limits)
+                })
+                .map_err(fail)?;
         }
         "expiry" if has("at") || has("never") => {
             if has("at") && has("never") {
@@ -129,10 +155,18 @@ pub fn run(
             } else {
                 None
             };
-            omni_control::keys::set_expiry(&store, id, at).map_err(fail)?;
+            listing
+                .capture_mutation(&store, id, now, "expiresAt", serde_json::json!(at), || {
+                    omni_control::keys::set_expiry(&store, id, at)
+                })
+                .map_err(fail)?;
         }
         "smart-routing" => {
-            omni_control::keys::set_smart_routing(&store, id, has("on")).map_err(fail)?
+            listing
+                .capture_mutation(&store, id, now, "smartRouting", has("on").into(), || {
+                    omni_control::keys::set_smart_routing(&store, id, has("on"))
+                })
+                .map_err(fail)?;
         }
         "models" if has("all") || has("none") || has("allow") => {
             if [has("all"), has("none"), has("allow")]
@@ -143,16 +177,24 @@ pub fn run(
             {
                 return Err(usage("--all, --none, and --allow cannot be combined"));
             }
-            omni_control::keys::set_models(
-                &store,
-                id,
-                if has("all") {
-                    None
-                } else {
-                    Some(if has("none") { &[] } else { allow })
-                },
-            )
-            .map_err(fail)?;
+            let value = if has("all") {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(if has("none") { &[][..] } else { allow })
+            };
+            listing
+                .capture_mutation(&store, id, now, "modelAllowlist", value, || {
+                    omni_control::keys::set_models(
+                        &store,
+                        id,
+                        if has("all") {
+                            None
+                        } else {
+                            Some(if has("none") { &[] } else { allow })
+                        },
+                    )
+                })
+                .map_err(fail)?;
         }
         "guardrail" if given == 1 => {
             let policy = if let Some(file) = flags.get("policy-file") {
@@ -163,12 +205,20 @@ pub fn run(
             } else {
                 flags.get("policy").cloned().unwrap_or_default()
             };
-            omni_control::keys::set_guardrail(
-                &store,
-                id,
-                if has("clear") { None } else { Some(&policy) },
-            )
-            .map_err(fail)?;
+            let value = if has("clear") {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(omni_ir::js::trim(&policy))
+            };
+            listing
+                .capture_mutation(&store, id, now, "guardrailPolicy", value, || {
+                    omni_control::keys::set_guardrail(
+                        &store,
+                        id,
+                        if has("clear") { None } else { Some(&policy) },
+                    )
+                })
+                .map_err(fail)?;
         }
         "revoke" => {
             let question = format!(
@@ -202,7 +252,6 @@ pub fn run(
         }
         _ => {}
     }
-    listing = omni_control::keys::list_keys(&store, now).map_err(fail)?;
     let index = listing.data["keys"]
         .as_array()
         .expect("key listing array")
@@ -227,7 +276,20 @@ pub fn run(
         key["prefix"].as_str().expect("stored prefix")
     );
     Ok(match command {
-        "limits" => crate::limits::human(key, &head),
+        "limits" => {
+            let text = crate::limits::human(key, &head);
+            if key["limits"].is_null() {
+                text.replacen("limits unreadable", &paint(31, "limits unreadable"), 1)
+            } else {
+                text.replace(
+                    "usage is counted from completed requests still inside each window",
+                    &paint(
+                        2,
+                        "usage is counted from completed requests still inside each window",
+                    ),
+                )
+            }
+        }
         "expiry" => {
             if key["expiresAt"].is_null() {
                 format!("{head}\nexpires: never")
@@ -238,9 +300,9 @@ pub fn run(
                     if key["revokedAt"].is_null()
                         && key["expiresAt"].as_f64().is_some_and(|v| v <= now as f64)
                     {
-                        " (expired)"
+                        format!(" {}", paint(31, "(expired)"))
                     } else {
-                        ""
+                        String::new()
                     }
                 )
             }
