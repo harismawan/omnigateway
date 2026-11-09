@@ -184,6 +184,10 @@ pub struct Options {
     /// The writer's queue capacity, if not [`WriterConfig`]'s default; tests
     /// shrink it.
     pub writer_capacity: Option<usize>,
+    /// Startup seed installation bound; includes all limited boot subjects.
+    pub boot_seed_timeout: Duration,
+    /// Deterministic seed scheduling delay for embedded/test startup probes.
+    pub seed_delay: Duration,
 }
 
 /// `idleTimeout: 255`.
@@ -198,6 +202,8 @@ impl Default for Options {
             bench_endpoints: false,
             bench_flush_timeout: Duration::from_secs(30),
             writer_capacity: None,
+            boot_seed_timeout: Duration::from_secs(30),
+            seed_delay: Duration::ZERO,
         }
     }
 }
@@ -256,13 +262,14 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     };
     let (holder, store) = holder;
 
-    let (commit_tx, commit_rx) = tokio::sync::mpsc::channel(4096);
+    let (commit_tx, mut commit_rx) = tokio::sync::mpsc::channel(4096);
     let writer = Writer::spawn(
         &path,
         WriterConfig {
             node_id: node_id.clone(),
             day_offset_minutes: offset,
             commit_sink: Some(commit_tx),
+            seed_delay: options.seed_delay,
             capacity: options
                 .writer_capacity
                 .unwrap_or(WriterConfig::default().capacity),
@@ -282,12 +289,52 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     }
 
     let limiter = RateLimiter::new();
-    let (asker, applier) = limiter.spawn_consumer(handle.clone(), commit_rx);
-    // Boot keys are pre-seeded by the preseeder's first pass.
-    let refresher = holder
-        .clone()
-        .spawn_refresher(store, Duration::from_millis(500));
-    let preseeder = spawn_preseeder(holder.clone(), limiter.clone(), Duration::from_millis(500));
+    // Before any listener/background consumer: serial ordered writer seeds,
+    // receiving and installing each result rather than merely queueing work.
+    // Per-key draining also keeps large boot snapshots within queue budgets.
+    tokio::time::timeout(options.boot_seed_timeout, async {
+        for key in holder.load().keys_by_hash.values() {
+            let Some(limits) = &key.limits else {
+                continue;
+            };
+            #[allow(clippy::cast_precision_loss)]
+            limiter.preseed(&key.id, limits, clock::now_ms() as f64);
+            for job in limiter.take_seed_jobs() {
+                let query = RateLimiter::seed_query(&job);
+                if !handle.seed(query.clone()) {
+                    return Err("boot seed writer queue unavailable".to_string());
+                }
+                loop {
+                    let event = commit_rx.recv().await.ok_or("boot seed sink closed")?;
+                    let installed = match &event {
+                        omni_store::writer::Committed::Seed {
+                            query: received,
+                            result,
+                        } => {
+                            result
+                                .as_ref()
+                                .map_err(|e| format!("boot seed failed: {e}"))?;
+                            received.subject == query.subject && received.tag == query.tag
+                        }
+                        omni_store::writer::Committed::Gap => {
+                            return Err("boot completion delivery gap".into());
+                        }
+                        _ => false,
+                    };
+                    limiter.apply(event);
+                    if installed {
+                        break;
+                    }
+                }
+            }
+            if !limiter.is_preseeded(&key.id, limits) {
+                return Err("boot seed capacity exceeded; not all windows installed".into());
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|_| "boot seed installation timed out".to_string())??;
     let miss_store = tokio::task::spawn_blocking({
         let path = path.clone();
         move || SqliteStore::open(&path, offset).map_err(|e| e.to_string())
@@ -299,6 +346,18 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         Arc::new(Mutex::new(miss_store)),
         MissConfig::default(),
     );
+
+    // All fallible startup work precedes task spawning. A failed bind drops
+    // the owned writer (which signals stop), with no detached refresher tasks.
+    let listener = TcpListener::bind((config.host.as_str(), config.port))
+        .await
+        .map_err(|e| format!("listen on {}:{} failed: {e}", config.host, config.port))?;
+    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let (asker, applier) = limiter.spawn_consumer(handle.clone(), commit_rx);
+    let refresher = holder
+        .clone()
+        .spawn_refresher(store, Duration::from_millis(500));
+    let preseeder = spawn_preseeder(holder.clone(), limiter.clone(), Duration::from_millis(500));
 
     let health = Arc::new(dispatch::HealthOverlay::default());
     let overlay_sweeper =
@@ -325,10 +384,6 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         bench_flush_timeout: options.bench_flush_timeout,
     });
 
-    let listener = TcpListener::bind((config.host.as_str(), config.port))
-        .await
-        .map_err(|e| format!("listen on {}:{} failed: {e}", config.host, config.port))?;
-    let addr = listener.local_addr().map_err(|e| e.to_string())?;
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");
 
     let (stop, mut stopped) = tokio::sync::watch::channel(false);

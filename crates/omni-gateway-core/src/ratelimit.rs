@@ -633,4 +633,25 @@ impl RateLimiter {
             self.prepare(key_id, limits, model, now);
         }
     }
+
+    /// Every configured long window has actually been installed, not merely
+    /// queued (important when a large snapshot exceeds pending-job capacity).
+    pub fn is_preseeded(&self, key_id: &str, limits: &LimitConfig) -> bool {
+        let state = self.lock();
+        std::iter::once("")
+            .chain(
+                limits
+                    .models
+                    .iter()
+                    .flat_map(|m| m.keys().map(String::as_str)),
+            )
+            .flat_map(|model| subjects_of(key_id, limits, model))
+            .filter(|s| any_long_limit(&s.limits))
+            .all(|s| {
+                state
+                    .long
+                    .get(&s.id)
+                    .is_some_and(|windows| windows.iter().all(|w| w.buckets.is_seeded()))
+            })
+    }
 }

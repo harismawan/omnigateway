@@ -184,6 +184,94 @@ async fn boot() -> Gw {
 }
 
 #[tokio::test]
+async fn exhausted_persisted_budget_rejects_first_request_after_boot() {
+    let f = fixture(&["c0"]);
+    add_key(&f.path, "kp", KEY, ",limits", ",'{\"tokens\":{\"5h\":1}}'");
+    let db = rusqlite::Connection::open(&f.path).expect("db");
+    db.execute("INSERT INTO request_logs (id,at,api_key_id,requested_model,status,duration_ms,input_tokens,state) VALUES ('old',?,'kp','m1',200,0,10,'done')",[omni_gateway::clock::now_ms()]).expect("persisted usage");
+    let env = [
+        ("OMNI_ENCRYPTION_KEY".into(), ENC.into()),
+        ("OMNI_DB_PATH".into(), f.path.to_str().expect("path").into()),
+        ("OMNI_PORT".into(), "1".into()),
+    ]
+    .into_iter()
+    .collect();
+    let mut config = load_config(&env, || 0).expect("config");
+    config.port = 0;
+    let began = std::time::Instant::now();
+    let running = start(
+        config,
+        Options {
+            seed_delay: Duration::from_millis(100),
+            ..Options::default()
+        },
+    )
+    .await
+    .expect("start");
+    assert!(
+        began.elapsed() >= Duration::from_millis(200),
+        "both long windows installed before readiness"
+    );
+    let (status, _, body) = call(
+        &format!("127.0.0.1:{}", running.addr.port()),
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", &format!("Bearer {KEY}"))],
+        r#"{"model":"m1","messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .await;
+    assert_eq!(status, 429, "first request: {body}");
+    running.shutdown();
+    running.wait().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn failed_boot_is_bounded_and_same_database_restarts_cleanly() {
+    let f = fixture(&["c0"]);
+    add_key(&f.path, "kp", KEY, ",limits", ",'{\"tokens\":{\"5h\":1}}'");
+    let env = [
+        ("OMNI_ENCRYPTION_KEY".into(), ENC.into()),
+        ("OMNI_DB_PATH".into(), f.path.to_str().expect("path").into()),
+        ("OMNI_PORT".into(), "1".into()),
+    ]
+    .into_iter()
+    .collect();
+    let make_config = || {
+        let mut c = load_config(&env, || 0).expect("config");
+        c.port = 0;
+        c
+    };
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        start(
+            make_config(),
+            Options {
+                seed_delay: Duration::from_millis(100),
+                boot_seed_timeout: Duration::from_millis(10),
+                ..Options::default()
+            },
+        ),
+    )
+    .await
+    .expect("bounded startup")
+    .expect_err("timeout");
+    assert!(error.contains("seed installation timed out"));
+    let occupied = TcpListener::bind("127.0.0.1:0").await.expect("occupy");
+    let mut config = make_config();
+    config.port = occupied.local_addr().expect("addr").port();
+    let error = start(config, Options::default())
+        .await
+        .expect_err("occupied port");
+    assert!(error.contains("listen on"));
+    drop(occupied);
+    let running = start(make_config(), Options::default())
+        .await
+        .expect("restart after failed starts");
+    running.shutdown();
+    running.wait().await.expect("clean stop");
+}
+
+#[tokio::test]
 async fn retained_output_overflow_closes_upstream_and_releases_admission() {
     for streaming in [false, true] {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
