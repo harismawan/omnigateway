@@ -1,84 +1,79 @@
-# CLI model mutations — partial implementation
+# CLI file-based model mutations
 
-Base: `8fc650f02e84529f262a8d8c9c7e1572e6953f0b`.
+Base `8fc650f02e84529f262a8d8c9c7e1572e6953f0b`; rm committed as `d3e095e2`.
 
-## Scope and outstanding work
+## Implemented scope
 
-Implemented `models rm <id>` through CLI/control/store, including lossless
-get-before-confirm, missing/empty IDs, nonterminal refusal, `-y`/`--yes`, terminal
-accept/decline, JSON/human output and help. Deletes only the named model row.
-Malformed JSON anywhere in the stored model list prevents deletion, matching TS;
-valid but schema-invalid targets do not prevent deletion. The store delete is
-idempotent; the CLI's second deletion correctly fails its initial lookup.
+- `models put <id> -f FILE`: UTF8 replacement decoding/BOM handling, operator JSON
+  parse, write-only model schema, path/body equality, custom endpoint credential
+  membership, built-in catalog auth restrictions, grandfathered provider/model
+  pairs and resolved-pin checks, single-statement atomic replacement.
+- Schema retains UTF16 string units through trim/validation/target persistence;
+  required strategy/alias/targets, provider format, safe integer bounds, prices,
+  optional cache/limits/pins, capability booleans, unknown-field stripping at
+  model/pricing/capability level and strict targets. Gateway projection unchanged.
+- Credential metadata reader does not decrypt/project secrets; retains providerData
+  through operator JSON rather than gateway serde normalization. Null/malformed
+  metadata and existing model rows retain observed TS errors.
+- `models rm`: get-before-confirm, missing/empty IDs, nonterminal refusal, yes
+  flags, PTY acceptance/decline, human/JSON output, unrelated-row preservation.
+  Store deletion is idempotent; repeated CLI removal fails initial lookup.
+- Help identifies file-only put scope. File/catalog conflict and missing-source
+  validation match TS. Catalog generation/from-catalog/dry-run remain deferred;
+  from-catalog explicitly fails, never succeeds as a stub. Plugins remain skipped.
 
-**The requested put-file/rm increment is incomplete.** `models put -f` is not
-implemented or advertised. Catalog/from-catalog/dry-run remain unimplemented.
-There is no successful stub. Controller must continue file-put implementation
-before treating the requested increment as complete; review this commit as rm only.
+## Evidence and measured sources
 
-Specific remaining implementation dependencies discovered in frozen authority:
+Owned evidence `/tmp/opencode/cli-model-mutations/`. Independent TS/Rust DB roots
+and raw byte/status/before-after every-table artifacts are retained under printed
+`model-puts-*` and `model-removals-*` paths. Migration timestamps fixed at seeding.
 
-- `packages/control/src/schemas.ts:124-189`: required strategy/isAlias/targets
-  (no defaults), strict target keys but stripping model/pricing/capability extras,
-  ordered Zod diagnostics, safe integer constraints, UTF-16 pin bounds and JS trim.
-- `packages/control/src/models.ts:183-214`: schema precedes path/body equality,
-  then credential endpoint membership, then whole-model-list parsing and auth
-  reachability. Existing-pair grandfathering excludes resolved pins; clearing a
-  dangling pin must retain the provider/model exemption.
-- The current Rust credential reader is the gateway projection: serde JSON
-  providerData, normalized auth types, secret decryption and typed columns. It
-  cannot be reused blindly for TS's raw operator metadata semantics. A dedicated
-  lossless metadata read is needed, without secret projection.
-- File-put needs built-in catalog auth metadata even though catalog *generation*
-  is deferred: qoder/antigravity OAuth-only, custom API-key-only, Kilo per-model
-  overrides, other/unknown-provider defaults. These checks are not optional.
-- Still required: file decoding/errors, aliases/flag conflicts, schema goldens,
-  atomic replacement and failure preservation, TS/Rust cross-read and all matrix
-  cases for put. No put conformance or write atomicity claim is made here.
+- `settled-put-matrix.log`: all six entrypoints/profiles PASS272, **1632** pairs.
+  Every pair independently reloaded and compared; failures preserve every table,
+  successful writes preserve all non-model tables (`put-artifacts-checked.log`).
+- Put coverage: valid replacements, all field types/missing/null, integer/price
+  bounds, built-ins/custom/unknown providers, endpoint/pin auth checks, trimming,
+  UTF16/lone surrogates, duplicate keys, JS overflow, deep20k ignored/invalid
+  fields, malformed files/stored rows/credentials, BOM/invalid UTF8, ignored file
+  strategy/alias flags, short/long aliases, conflicts, missing flags and IDs.
+- `put-crossread.json`: actual TS reads Rust DB and Rust reads TS DB, equal bytes.
+- `put-nonempty-preservation.json`: failed put retains seeded keys/history.
+  `pin-short-circuit.json`: resolved pin stops before later null providerData.
+  `put-utf16-endpoint.json`: lone-surrogate custom endpoint membership and model
+  persistence match TS byte-for-byte. `catalog-auth-authority.json` records every
+  built-in auth override; all identifiers checked against the port.
+- Store test checks replacement/deletion data_version invalidation/idempotence.
+  Snapshot5 tests pass with actual store put/remove and background refresh.
+  Control small-stack test checks deep invalid/unknown cleanup.
+- `final-removals.log`: all six legs PASS47 (**282** pairs,60 PTYs), independently
+  checked; nonempty unrelated keys/credentials/settings/history seeded.
+- `final-unit.log`: CLI2/control8/store65 pass, four existing ignored helpers.
+  Scoped all-target strict clippy, workspace fmt, Biome and frozen source diff pass.
+  Frozen TS model command8 and model pricing/pin/control34 tests pass.
+- `settled-manifest.sha256`:65 source/oracle/helper/binary paths checked. Prior rm
+  manifest verified before put edits; transition logs record changed paths before
+  replacement manifests were generated.
 
-These are unfinished engineering dependencies, not an external environment
-failure or a reason to narrow the approved contract silently.
+## Intermediate evidence and provenance caveats
 
-## Evidence
+`put-red.log` captures prior binary rejecting put; subsequent logs retain numeric
+diagnostic, pin endpoint resolution and malformed-row failures before correction.
+The first full put job failed when expanded audit cases reached older binaries;
+`put-matrix.log` is intermediate evidence, not a passing final matrix. The next
+full regression job (`final-put-matrix.log`, job sh_1c57ad7e4001keIGZB2XulvneF)
+overlaps the last put-only pin lookup short-circuit fix. The settled put-only six
+leg matrix was rerun afterward. That fix touches no other command; full regression
+results are valid for their unchanged paths, but are not claimed as a uniform
+single-binary put run. No production edits after settled put matrix.
 
-Evidence directory `/tmp/opencode/cli-model-mutations/`; raw paired artifacts are
-the `/tmp/opencode/model-removals-*` roots printed by the matrix. New oracle
-`conformance/cli/model-removals.ts` uses real frozen TS and Rust processes with
-independent initialized SQLite roots, byte buffers/status and before/after every
-table. Nonempty unrelated credentials, keys, settings and request history are
-seeded. Each successful deletion must change exactly the requested model row;
-every failure must preserve the whole database. PTYs use the existing fixed
-terminal helper. Corpus includes deep20k, lone-surrogate and overflow stored JSON,
-malformed unrelated rows, repeated deletion, Unicode IDs, and JS trim answers.
+Original rm manifest check occurred after six source edits; retained mismatches
+were independently checked against `git show` base contents (`base-hashes.log`).
+Initial nonexistent TS test path retained; corrected command tests pass.
 
-`/tmp/opencode/models-removals-red.log` retains the prior release rejecting rm.
-The first new-binary comparison caught `--yes=true`'s short-alias diagnostic;
-the correction is scoped to the new command. Prior manifest check was mistakenly
-run after source edits: six edited-source mismatches were reported and retained
-in `/tmp/opencode/models-mutations-prior-hashes.log`; all other entries matched.
-`base-hashes.log` independently checks tracked base contents via `git show`
-against that prior manifest before generating the new manifest.
-
-Store test verifies other-connection data_version invalidation and idempotence.
-Gateway snapshot regression now verifies deletion becomes visible after a poll.
-No gateway hotpath changes or broad performance benchmark.
-
-Final removal matrix: `final-removals.log` PASS47 in each of standalone, unified
-subcommand and argv0 symlink, debug and release (282 paired cases, 60 PTYs).
-All282 retained pairs independently reloaded and compared, including unrelated
-table preservation. Final confirmation uses byte-line reading and UTF8 replacement
-instead of rejecting invalid UTF8; matrix rerun after rebuilding all four binaries.
-Source/binary manifest includes63 paths and was checked after recording expected
-final source/binary changes in `final-hash-transition.log`.
-
-Focused final tests: CLI2/control7/store65 pass, four existing helpers/measurements
-ignored; strict scoped all-target clippy, workspace fmt and oracle Biome pass.
-Snapshot5 pass with removal refresh assertion; frozen TS model command tests8 pass.
-An initial nonexistent TS test-path invocation is retained in `ts-tests.log`;
-corrected successful run is `ts-model-tests.log`.
-
-Full regression job completed successfully: all six legs models262/keys135/
-key-mutations184/settings347. Transcript267 lines read. The job overlapped the
-rm-only input-decoding correction/rebuild, so it is regression evidence for the
-unchanged commands, not a uniform final-binary rm measurement; final-removals.log
-is the settled-source rm matrix. No file-put source is covered by these runs.
+Full regression job completed successfully; all280 transcript lines inspected.
+Each of six legs passed put272/rm47/modelreads262/keys135/keymutations184/settings347.
+Totals:1632 put,282 removal,1572 model reads,810 key listings,1104 key mutations,
+2082 settings comparisons. `check-final-evidence.py` verified all six run counts
+and reloaded1632 settled put pairs. Final65 manifest hashes rechecked successfully.
+No pending jobs or implementation blocker. No broad gateway benchmark (CLI-only).
+Controller scoped review follows completion; no full CLI/migration approval claim.

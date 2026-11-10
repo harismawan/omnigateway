@@ -442,11 +442,47 @@ pub fn run(
 ) -> Result<String, (u8, String)> {
     let show = command == "models-show";
     let remove = command == "models-rm";
-    if (show || remove) && args.first().is_none_or(String::is_empty) {
+    let put = command == "models-put";
+    if (show || remove || put) && args.first().is_none_or(String::is_empty) {
         return Err((2, "model id is required".into()));
     }
+    let input = if put {
+        if flags.contains_key("file") && flags.contains_key("from-catalog") {
+            return Err((2, "pass either -f or --from-catalog, not both".into()));
+        }
+        if let Some(file) = flags.get("file") {
+            let bytes = std::fs::read(file).map_err(|_| (1, format!("could not read {file}")))?;
+            let text = String::from_utf8_lossy(&bytes);
+            Some(
+                operator_json::parse(text.strip_prefix('\u{feff}').unwrap_or(&text))
+                    .map_err(|_| (1, format!("{file} is not valid JSON")))?,
+            )
+        } else if flags.contains_key("from-catalog") {
+            return Err((
+                1,
+                "models put --from-catalog is not implemented in the Rust CLI".into(),
+            ));
+        } else {
+            return Err((
+                2,
+                "pass -f <file> or --from-catalog <provider>:<model>".into(),
+            ));
+        }
+    } else {
+        None
+    };
     let run = || -> Result<String, String> {
         let store = crate::context::open(flags)?;
+        if let Some(input) = &input {
+            let id = &args[0];
+            omni_control::models::put(&store, id, input)?;
+            return Ok(if flags.contains_key("json") {
+                jsjson::stringify_pretty(&JsValue::from(&serde_json::json!({"id":id,"ok":true})))
+                    .expect("result")
+            } else {
+                format!("{id} saved")
+            });
+        }
         if remove {
             let id = &args[0];
             // Frozen control reads/parses every model before asking confirmation.

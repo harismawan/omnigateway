@@ -24,4 +24,11 @@ fn removal_invalidates_other_connection_and_is_idempotent() {
         models::operator_rows(reader.connection()).expect("read"),
         rows
     );
+    let before = reader.data_version().expect("version");
+    models::put(writer.connection(), "b", "[]", "weighted", false).expect("replace");
+    assert_ne!(before, reader.data_version().expect("version"));
+    let rows = models::operator_rows(reader.connection()).expect("read");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].2, "weighted");
+    assert!(!rows[0].3);
 }

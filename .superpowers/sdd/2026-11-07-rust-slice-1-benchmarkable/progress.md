@@ -1,5 +1,10 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-07-rust-slice-1-benchmarkable.md
 
+## CLI file put continuation
+- File-put schema/control/metadata/store integration implemented; settled all3 debug/release put272 PASS (1632 raw/status/wholeDB pairs reloaded), rm commit d3e095e2 retained. Cross-read both DB roots, nonempty unrelated key/history failed-write preservation, store data_version and snapshot put/remove refresh checked.
+- Focused CLI2/control8/store65 PASS; strictclippy/fmt/Biome PASS. Evidence /tmp/opencode/cli-model-mutations; settled-manifest.sha25665 hashes checked. Full regression job complete: all6legs put272/rm47/models262/keys135/mutations184/settings347 PASS;280-line transcript inspected and1632 settled put pairs reloaded. No pending jobs; controller scopedreview next. Catalog/fromcatalog/dryrun deferred explicitly.
+
+
 ## CLI model mutations — rm-only partial implementation
 - Implemented models rm through CLI/control/store; real TS independent-root byte/status/wholeDB47 cases across all3 debug/release entrypoints, including10 PTYs per run. Store data_version/idempotence and gateway snapshot removal verified.
 - Requested file-put remains unfinished: lossless credential metadata, ordered schema validation, endpoint/catalog-auth checks, atomic replacement and put goldens outstanding. Full dependency detail in cli-model-mutations-report.md. No successful put/catalog stub; no claim that approved increment is complete.

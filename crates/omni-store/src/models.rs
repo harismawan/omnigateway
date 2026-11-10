@@ -18,6 +18,31 @@ pub fn remove(conn: &Connection, id: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Schema-normalized write, separate from gateway and raw operator projections.
+pub fn put(
+    conn: &Connection,
+    id: &str,
+    targets: &str,
+    strategy: &str,
+    alias: bool,
+) -> Result<(), StoreError> {
+    conn.execute("INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET targets=excluded.targets,strategy=excluded.strategy,is_alias=excluded.is_alias", rusqlite::params![id,targets,strategy,alias])?;
+    Ok(())
+}
+
+pub type OperatorCredential = (String, String, String, String, String);
+/// Metadata only: do not decrypt or normalize operator credentials.
+pub fn operator_credentials(conn: &Connection) -> Result<Vec<OperatorCredential>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT id,provider,label,auth_type,provider_data FROM credentials ORDER BY tier,label",
+    )?;
+    Ok(stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
 /// `TargetPricing`: dollars per million tokens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

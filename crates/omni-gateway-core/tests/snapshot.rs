@@ -137,11 +137,7 @@ async fn the_refresher_picks_up_another_connections_commit_within_a_poll() {
     // Another process creates a key and fixes the broken model.
     let c = Connection::open(&path).expect("open");
     key_row(&c, "k2", "sk-omni-two", None, "{}");
-    c.execute(
-        "UPDATE virtual_models SET targets = ? WHERE id = 'broken'",
-        params![TARGETS],
-    )
-    .expect("fix");
+    omni_store::models::put(&c, "broken", TARGETS, "score", false).expect("fix");
 
     let mut seen = false;
     for _ in 0..40 {

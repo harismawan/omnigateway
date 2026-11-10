@@ -12,7 +12,7 @@ pub fn resolve(args: &[String]) -> Option<(String, Vec<String>)> {
     if args.get(i).map(String::as_str) == Some("models")
         && args
             .get(i + 1)
-            .is_some_and(|s| matches!(s.as_str(), "list" | "show" | "rm"))
+            .is_some_and(|s| matches!(s.as_str(), "list" | "show" | "rm" | "put"))
     {
         return Some((
             format!("models-{}", args[i + 1]),
@@ -76,6 +76,22 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             continue;
         }
         if !token.starts_with("--") {
+            if command == "models-put" && token.starts_with("-f") {
+                let value = if token.len() > 2 {
+                    token[2..].to_owned()
+                } else {
+                    let v = args
+                        .get(i)
+                        .ok_or("Option '-f, --file <value>' argument missing")?;
+                    if v.starts_with('-') && v != "-" {
+                        return Err("Option '-f' argument is ambiguous.\nDid you forget to specify the option argument for '-f'?\nTo specify an option argument starting with a dash use '--file=-XYZ' or '-f-XYZ'.".into());
+                    }
+                    i += 1;
+                    v.clone()
+                };
+                flags.insert("file".into(), value);
+                continue;
+            }
             for c in token[1..].chars() {
                 if matches!(c, 'y' | 'h') {
                     flags.insert(if c == 'y' { "yes" } else { "help" }.into(), "true".into());
@@ -90,6 +106,8 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             .map_or((&token[2..], None), |(k, v)| (k, Some(v)));
         match name {
             name if matches!(name, "root" | "db")
+                || (command == "models-put"
+                    && matches!(name, "file" | "from-catalog" | "strategy"))
                 || (command == "create"
                     && matches!(
                         name,
@@ -104,9 +122,16 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 let value = if let Some(v) = inline {
                     v.to_owned()
                 } else {
-                    let v = args
-                        .get(i)
-                        .ok_or_else(|| format!("Option '--{name} <value>' argument missing"))?;
+                    let v = args.get(i).ok_or_else(|| {
+                        format!(
+                            "Option '{} <value>' argument missing",
+                            if command == "models-put" && name == "file" {
+                                "-f, --file".into()
+                            } else {
+                                format!("--{name}")
+                            }
+                        )
+                    })?;
                     if v.starts_with('-') && v != "-" {
                         return Err(format!(
                             "Option '--{name}' argument is ambiguous.\nDid you forget to specify the option argument for '--{name}'?\nTo specify an option argument starting with a dash use '--{name}=-XYZ'."
@@ -129,6 +154,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 flags.insert(name.into(), value);
             }
             name if matches!(name, "json" | "no-color" | "yes" | "help" | "version")
+                || (command == "models-put" && name == "alias")
                 || (command == "create" && matches!(name, "smart-routing" | "no-bodies"))
                 || (command == "expiry" && name == "never")
                 || (command == "models" && matches!(name, "all" | "none"))
