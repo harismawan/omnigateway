@@ -12,6 +12,12 @@ use crate::vocab::Strategy;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+/// Delete only the named configuration row, retaining historical usage.
+pub fn remove(conn: &Connection, id: &str) -> Result<(), StoreError> {
+    conn.execute("DELETE FROM virtual_models WHERE id = ?1", [id])?;
+    Ok(())
+}
+
 /// `TargetPricing`: dollars per million tokens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

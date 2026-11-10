@@ -4,6 +4,7 @@ pub fn usage(command: &str) -> &'static str {
     match command {
         "models-list" => "models list",
         "models-show" => "models show <id>",
+        "models-rm" => "models rm <id>",
         "settings-get" => "settings get",
         "settings-set" => "settings set <path> <value>",
         "create" => {

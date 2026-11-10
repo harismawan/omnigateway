@@ -154,6 +154,16 @@ async fn the_refresher_picks_up_another_connections_commit_within_a_poll() {
         }
     }
     assert!(seen, "refresher never swapped in the new key");
+    omni_store::models::remove(&c, "broken").expect("operator removal");
+    let mut removed = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        if !holder.load().routing.models.contains_key("broken") {
+            removed = true;
+            break;
+        }
+    }
+    assert!(removed, "refresher never removed the deleted model");
     // The old snapshot a request already holds is untouched.
     assert!(matches!(
         before.authenticate(Some("sk-omni-two"), 0),

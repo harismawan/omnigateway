@@ -1,6 +1,9 @@
 use omni_control::{operator_json, settings_value::get};
 use omni_ir::jsjson::{self, JsValue};
-use std::{collections::HashMap, io::IsTerminal};
+use std::{
+    collections::HashMap,
+    io::{BufRead, IsTerminal},
+};
 
 fn prop<'a>(v: &'a JsValue, k: &str) -> &'a JsValue {
     static UNDEFINED: JsValue = JsValue::Undefined;
@@ -438,11 +441,44 @@ pub fn run(
     args: &[String],
 ) -> Result<String, (u8, String)> {
     let show = command == "models-show";
-    if show && args.first().is_none_or(String::is_empty) {
+    let remove = command == "models-rm";
+    if (show || remove) && args.first().is_none_or(String::is_empty) {
         return Err((2, "model id is required".into()));
     }
     let run = || -> Result<String, String> {
         let store = crate::context::open(flags)?;
+        if remove {
+            let id = &args[0];
+            // Frozen control reads/parses every model before asking confirmation.
+            omni_control::models::get(&store, id)?;
+            if !flags.contains_key("yes") {
+                let question = format!("delete virtual model \"{id}\"?");
+                if !std::io::stdin().is_terminal() {
+                    return Err(format!("{question} — refusing without --yes"));
+                }
+                eprintln!("{question} [y/N] ");
+                let mut answer = Vec::new();
+                std::io::stdin()
+                    .lock()
+                    .read_until(b'\n', &mut answer)
+                    .map_err(|e| e.to_string())?;
+                let answer = String::from_utf8_lossy(&answer)
+                    .trim_matches(omni_ir::js::is_js_whitespace)
+                    .to_lowercase();
+                if answer != "y" && answer != "yes" {
+                    return Err("cancelled".into());
+                }
+            }
+            omni_control::models::remove(&store, id)?;
+            return Ok(if flags.contains_key("json") {
+                jsjson::stringify_pretty(&JsValue::from(
+                    &serde_json::json!({"id": id, "removed": true}),
+                ))
+                .expect("removal result")
+            } else {
+                format!("{id} removed")
+            });
+        }
         let color = !flags.contains_key("no-color")
             && std::env::var("NO_COLOR").unwrap_or_default().is_empty()
             && std::io::stdout().is_terminal();

@@ -12,7 +12,7 @@ pub fn resolve(args: &[String]) -> Option<(String, Vec<String>)> {
     if args.get(i).map(String::as_str) == Some("models")
         && args
             .get(i + 1)
-            .is_some_and(|s| matches!(s.as_str(), "list" | "show"))
+            .is_some_and(|s| matches!(s.as_str(), "list" | "show" | "rm"))
     {
         return Some((
             format!("models-{}", args[i + 1]),
@@ -136,6 +136,9 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 || (command == "smart-routing" && matches!(name, "on" | "off")) =>
             {
                 if inline.is_some() {
+                    if command == "models-rm" && name == "yes" {
+                        return Err("Option '-y, --yes' does not take an argument".into());
+                    }
                     return Err(format!("Option '--{name}' does not take an argument"));
                 }
                 flags.insert(name.into(), "true".into());

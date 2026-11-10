@@ -18,7 +18,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     let Some((command, rest)) = args::resolve(&argv) else {
         if help || argv.iter().all(|s| s.starts_with('-')) {
             println!(
-                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set; models list, show\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
+                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set; models list, show, rm\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
             );
             return ExitCode::SUCCESS;
         }
@@ -40,6 +40,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             match command.as_str() {
                 "models-list" => "List virtual models and their targets",
                 "models-show" => "Show one virtual model's targets and pricing",
+                "models-rm" => "Delete a virtual model",
                 "settings-get" => "Show routing and retention settings",
                 "settings-set" =>
                     "Change one setting, e.g. weights.cost 0.4, rtkEnabled true, or guardrailModel null",

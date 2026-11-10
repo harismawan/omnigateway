@@ -33,3 +33,7 @@ pub fn get(store: &SqliteStore, id: &str) -> Result<JsValue, String> {
         })
         .ok_or_else(|| format!("MODEL_UNAVAILABLE: no virtual model \"{id}\""))
 }
+
+pub fn remove(store: &SqliteStore, id: &str) -> Result<(), String> {
+    omni_store::models::remove(store.connection(), id).map_err(|e| e.to_string())
+}

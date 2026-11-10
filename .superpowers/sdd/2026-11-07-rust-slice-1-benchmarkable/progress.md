@@ -1,5 +1,11 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-07-rust-slice-1-benchmarkable.md
 
+## CLI model mutations — rm-only partial implementation
+- Implemented models rm through CLI/control/store; real TS independent-root byte/status/wholeDB47 cases across all3 debug/release entrypoints, including10 PTYs per run. Store data_version/idempotence and gateway snapshot removal verified.
+- Requested file-put remains unfinished: lossless credential metadata, ordered schema validation, endpoint/catalog-auth checks, atomic replacement and put goldens outstanding. Full dependency detail in cli-model-mutations-report.md. No successful put/catalog stub; no claim that approved increment is complete.
+- Evidence /tmp/opencode/cli-model-mutations; controller review/continuation required.
+
+
 ## Settings fixround2 — e979bc19, verification complete
 - Important surrogate persistence corruption: operator parser preservesUTF16 values/keys, settings merges compareoriginalunits, knownstrings retainunits through trim/validation/write. HumanUTF8replacement onlyatoutput; gateway unchanged.
 - Corpus347 (prior331 retained), mutations184/list135 PASS all3 entrypoints debug/release. Exactreview unrelatedset preserves lonehigh value/distinctkeys/capture. CLI1/control7/store7, IR18+JSONvectors3+JSsemantics8 PASS; strictclippy/fmt/Biome PASS. Complete190-line transcript read;33 hashes and2082 retained settings-table/output pairs verified under /tmp/opencode/settings-fixround2. No pending jobs; controller scoped re-review next.
