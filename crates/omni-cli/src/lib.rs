@@ -5,6 +5,7 @@ mod date;
 mod limits;
 mod mutations;
 mod output;
+mod settings;
 use std::{io::IsTerminal, process::ExitCode};
 
 pub fn run(argv: Vec<String>) -> ExitCode {
@@ -16,7 +17,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     let Some((command, rest)) = args::resolve(&argv) else {
         if help || argv.iter().all(|s| s.starts_with('-')) {
             println!(
-                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
+                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
             );
             return ExitCode::SUCCESS;
         }
@@ -36,6 +37,9 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             "omni {}\n\n{}",
             mutations::usage(&command),
             match command.as_str() {
+                "settings-get" => "Show routing and retention settings",
+                "settings-set" =>
+                    "Change one setting, e.g. weights.cost 0.4, rtkEnabled true, or guardrailModel null",
                 "models" => "Show or replace one key's allowed models",
                 "expiry" => "Show or replace one key's expiry",
                 "create" => "Mint a gateway API key, printed once",
@@ -52,7 +56,11 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
-                mutations::run(&command, &flags, &positional, &allow)
+                if command.starts_with("settings-") {
+                    settings::run(&command, &flags, &positional)
+                } else {
+                    mutations::run(&command, &flags, &positional, &allow)
+                }
             });
         return match result {
             Ok(out) => {

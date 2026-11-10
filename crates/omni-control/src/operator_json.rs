@@ -99,6 +99,15 @@ pub fn parse(text: &str) -> Result<JsValue, String> {
     Ok(root)
 }
 
+/// String(value), sharing Array.join's iterative coercion for JSON values.
+pub fn string(value: &JsValue) -> Result<String, String> {
+    if matches!(value, JsValue::Null) {
+        Ok("null".into())
+    } else {
+        join(value)
+    }
+}
+
 /// Array.join's recursive ToString, traversed without the native stack.
 fn join(value: &JsValue) -> Result<String, String> {
     let mut out = String::new();

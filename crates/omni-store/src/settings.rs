@@ -320,6 +320,29 @@ impl Settings {
     }
 }
 
+/// `ConfigRepo.putSettings`: merge the validated patch and commit one row.
+pub fn put(conn: &Connection, patch: &Value) -> Result<Value, StoreError> {
+    let mut next = get(conn)?.json;
+    if let (Some(current), Some(patch)) = (next.as_object_mut(), patch.as_object()) {
+        for (key, value) in patch {
+            if key == "weights" {
+                if let (Some(weights), Some(update)) = (
+                    current.get_mut(key).and_then(Value::as_object_mut),
+                    value.as_object(),
+                ) {
+                    weights.extend(update.clone());
+                }
+            } else {
+                current.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let raw =
+        omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&next)).expect("settings JSON");
+    conn.execute("INSERT INTO settings(key,value) VALUES ('settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&raw])?;
+    Ok(next)
+}
+
 /// `ConfigRepo.getSettings`.
 pub fn get(conn: &Connection) -> Result<Settings, StoreError> {
     // A non-text value (only a hand edit writes one) parses in TS to a

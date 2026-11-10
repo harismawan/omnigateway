@@ -2,6 +2,8 @@ use std::{collections::HashMap, io::IsTerminal};
 
 pub fn usage(command: &str) -> &'static str {
     match command {
+        "settings-get" => "settings get",
+        "settings-set" => "settings set <path> <value>",
         "create" => {
             "keys create [--label L] [--allow <model> ...] [--limit <d>:<w>=N ...] [--model-limit <model>:<d>:<w>=N ...] [--expires <when>] [--policy <text>] [--smart-routing] [--no-bodies]"
         }

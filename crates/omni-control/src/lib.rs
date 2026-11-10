@@ -3,3 +3,4 @@
 pub mod config;
 pub mod keys;
 pub mod operator_json;
+pub mod settings;

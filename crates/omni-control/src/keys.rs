@@ -280,7 +280,7 @@ mod mutation_tests {
         );
     }
 }
-fn safe_token(s: &str) -> &str {
+pub(crate) fn safe_token(s: &str) -> &str {
     if !s.is_empty()
         && s.len() <= 64
         && s.bytes()
