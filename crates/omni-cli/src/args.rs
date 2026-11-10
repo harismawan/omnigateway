@@ -76,15 +76,32 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             continue;
         }
         if !token.starts_with("--") {
-            if command == "models-put" && token.starts_with("-f") {
-                let value = if token.len() > 2 {
-                    token[2..].to_owned()
+            let file_at = token
+                .char_indices()
+                .skip(1)
+                .find(|(_, c)| *c == 'f')
+                .map(|(i, _)| i);
+            if command == "models-put"
+                && let Some(at) = file_at
+            {
+                for c in token[1..at].chars() {
+                    if matches!(c, 'y' | 'h') {
+                        flags.insert(if c == 'y' { "yes" } else { "help" }.into(), "true".into());
+                    } else {
+                        return Err(unknown(&format!("-{c}")));
+                    }
+                }
+                let value = if token.len() > at + 1 {
+                    token[at + 1..].to_owned()
                 } else {
                     let v = args
                         .get(i)
                         .ok_or("Option '-f, --file <value>' argument missing")?;
                     if v.starts_with('-') && v != "-" {
-                        return Err("Option '-f' argument is ambiguous.\nDid you forget to specify the option argument for '-f'?\nTo specify an option argument starting with a dash use '--file=-XYZ' or '-f-XYZ'.".into());
+                        let alias = if at == 1 { "-f" } else { "f" };
+                        return Err(format!(
+                            "Option '{alias}' argument is ambiguous.\nDid you forget to specify the option argument for '{alias}'?\nTo specify an option argument starting with a dash use '--file=-XYZ' or '{alias}-XYZ'."
+                        ));
                     }
                     i += 1;
                     v.clone()

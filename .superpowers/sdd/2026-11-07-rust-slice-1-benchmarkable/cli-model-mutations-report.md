@@ -1,5 +1,51 @@
 # CLI file-based model mutations
 
+## Fix round1 — verified, base61b8575d
+
+Complete review read. I1: grandfather pair identity now uses lossless iterative
+UTF16 coercion for strings, nested arrays, numbers, booleans, null and objects;
+own noncallable toString still errors. No human UTF8 formatter participates.
+M1: unknown target fields choose JS numeric-property order. M2: valued -f works
+after boolean flags in short clusters, including separate arguments and actual
+TS cluster-specific ambiguous-argument diagnostics.
+
+Evidence `/tmp/opencode/model-fix1/`: prior65 hashes verified before edits;
+red-I1/M1/M2 logs capture each review finding before fixes. Expanded put302 focused
+GREEN includes distinct surrogates/replacement rejection, unchanged surrogate
+grandfather success, malformed stored array/primitive/object coercion, mixed auth
+siblings, disabled resolved pins, wrong-auth repinning, cross-provider/endpoint
+dangling pins, later failing target and ordered null-metadata failure. Successful
+puts now retain nonempty key/history rows in the main wholeDB oracle.
+
+Job `sh_1c59c1c39001pgBaXOhVTlOvWf` completed successfully; all280 lines of
+`verification.log` inspected. Binaries remained unchanged throughout that matrix.
+Launch manifest extends all control/store/provider/CLI/IR source files plus
+bun.lock/Cargo.lock/package.json (including currently dirty user bun.lock as read
+authority only). Existing user files untouched. Snapshot5 passes.
+
+Clippy correction applied during the matrix: args.rs now uses `if let Some(at)`
+instead of `is_some` plus `expect`; equivalent condition/binding, no behavior
+change. `pre-clippy-hashes.log` verifies launch hashes before that edit and
+`clippy-source-transition.log` verifies args.rs is the sole changed manifest path;
+no binaries rebuilt during matrix. Strict clippy/fmt/Biome pass after correction.
+After completion all4 binaries rebuilt; `final-put.log` passes302 in each of six
+legs. Both launch and final1812 put pairs reloaded, checking raw bytes/status and
+wholeDB transitions. All1572 retained model-read pairs also reloaded. Full matrix
+passes put302/rm47/modelreads262/keys135/mutations184/settings347 each leg; focused
+CLI2/control8/store65, snapshot5, frozen TS CLI8/control34 pass. Four existing
+store helpers/measurements ignored. Strict clippy/fmt/Biome pass. Final285 hashes
+verified after recording only args.rs and four binaries in the hash transition.
+
+Finding map: I1 `models.rs` + `operator_json::coerce_units`, RED `red-I1.log`,
+GREEN surrogate/nested-array/primitive/object cases in model-puts.ts; M1
+`model_schema.rs`, RED `red-M1.log`, GREEN numeric9/2 traversal; M2 `args.rs`,
+RED `red-M2.log`, GREEN attached/separate/missing/ambiguous clustered -f cases.
+`red-map.json` links the exact paired raw failure artifacts. Independent review
+repro files read in place without modification. No production gateway changes.
+No pending jobs or blocker; controller scoped re-review next. Catalog generation,
+from-catalog, dry-run and plugins retain the documented deferrals; no full
+migration-readiness claim. Commit is the commit recording this fix section.
+
 Base `8fc650f02e84529f262a8d8c9c7e1572e6953f0b`; rm committed as `d3e095e2`.
 
 ## Implemented scope

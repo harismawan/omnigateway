@@ -28,6 +28,12 @@ for (const dir of roots) {
   const db = new Database(join(dir, "db"));
   db.run("UPDATE migrations SET applied_at=1700000000000");
   db.run("INSERT INTO settings VALUES ('adminPasswordHash','secret-sentinel')");
+  db.run(
+    "INSERT INTO api_keys(id,label,prefix,hash,created_at) VALUES ('keep','keep','keep','keep',1)",
+  );
+  db.run(
+    "INSERT INTO request_logs(id,at,requested_model,status,duration_ms) VALUES ('keep',1,'m',200,1)",
+  );
   db.close();
 }
 function snapshot(db: Database) {
@@ -257,4 +263,106 @@ for (const dir of roots) {
 await compare(
   JSON.stringify({ ...model, targets: [{ ...target, provider: "qoder", credentialId: "pin" }] }),
 );
+function reset(
+  old: unknown,
+  accounts: Array<[string, string, string, string, number]> = [["pin", "qoder", "apiKey", "{}", 1]],
+) {
+  for (const dir of roots) {
+    const db = new Database(join(dir, "db"));
+    db.run("DELETE FROM credentials");
+    db.run("DELETE FROM virtual_models");
+    if (old !== undefined)
+      db.run("INSERT INTO virtual_models VALUES ('m',?,'score',0)", [JSON.stringify(old)]);
+    for (const [id, provider, auth, data, enabled] of accounts)
+      db.run(
+        "INSERT INTO credentials(id,provider,label,auth_type,provider_data,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,1,1)",
+        [id, provider, id, auth, data, enabled],
+      );
+    db.close();
+  }
+}
+const q = { ...target, provider: "qoder" };
+const group = process.env.MODEL_FIX_GROUP;
+for (const old of [123, true, null, {}, [null, "x"], { toString: 1 }]) {
+  reset([{ ...q, model: old }]);
+  await compare(
+    JSON.stringify({
+      ...model,
+      targets: [
+        {
+          ...q,
+          model:
+            typeof old === "object" &&
+            old !== null &&
+            "toString" in old &&
+            Object.hasOwn(old, "toString")
+              ? "x"
+              : String(old),
+        },
+      ],
+    }),
+  );
+}
+if (!group || group === "I1") {
+  for (const old of ["\ud800", ["\ud800"], [["\ud800"]]]) {
+    for (const next of ["\ud801", "�", "\ud800"]) {
+      reset([{ ...q, model: old }]);
+      await compare(JSON.stringify({ ...model, targets: [{ ...q, model: next }] }));
+    }
+  }
+  for (const pin of [undefined, "pin", "oauth", "missing"]) {
+    reset(
+      [{ ...q, model: "\ud800" }],
+      [
+        ["pin", "qoder", "apiKey", "{}", 1],
+        ["oauth", "qoder", "oauth", "{}", 0],
+      ],
+    );
+    await compare(
+      JSON.stringify({ ...model, targets: [{ ...q, model: "\ud800", credentialId: pin }] }),
+    );
+  }
+  for (const accounts of [
+    [
+      ["pin", "openai", "oauth", "{}", 1],
+      ["key", "qoder", "apiKey", "{}", 1],
+    ],
+    [
+      ["pin", "qoder", "oauth", '{"endpointId":"other"}', 1],
+      ["key", "qoder", "apiKey", "{}", 1],
+    ],
+  ] as Array<Array<[string, string, string, string, number]>>) {
+    reset(undefined, accounts);
+    await compare(JSON.stringify({ ...model, targets: [{ ...q, credentialId: "pin" }] }));
+  }
+  reset(undefined, [["pin", "qoder", "oauth", "{}", 0]]);
+  await compare(JSON.stringify({ ...model, targets: [{ ...q, credentialId: "pin" }] }));
+  reset(undefined);
+  await compare(JSON.stringify({ ...model, targets: [target, q] }));
+  reset(undefined, [
+    ["a", "qoder", "apiKey", "null", 1],
+    ["pin", "qoder", "oauth", "{}", 1],
+  ]);
+  await compare(JSON.stringify({ ...model, targets: [{ ...q, credentialId: "pin" }] }));
+}
+if (!group || group === "M1") {
+  reset(undefined, []);
+  await compare(
+    JSON.stringify({ ...model, targets: [target] }).replace(
+      '"provider":"openai"',
+      '"9":0,"2":0,"provider":"openai"',
+    ),
+  );
+}
+if (!group || group === "M2") {
+  reset(undefined, []);
+  for (const args of [
+    ["put", "m", "-yfmodel.json"],
+    ["put", "m", "-yf", "model.json"],
+    ["put", "m", "-yyfmodel.json"],
+    ["put", "m", "-yf"],
+    ["put", "m", "-yf", "--json"],
+  ])
+    await compare(JSON.stringify(model), args);
+}
 console.log(`PASS ${count} put comparisons`);

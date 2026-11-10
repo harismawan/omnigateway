@@ -241,7 +241,10 @@ fn target(v: &JsValue, path: &str) -> Result<JsValue, String> {
     };
     if let Some((k, _)) = fields
         .iter()
-        .find(|(k, _)| !keys.iter().any(|s| k.iter().copied().eq(s.encode_utf16())))
+        .filter(|(k, _)| !keys.iter().any(|s| k.iter().copied().eq(s.encode_utf16())))
+        .min_by_key(|(k, _)| {
+            omni_ir::jsjson::array_index(&String::from_utf16_lossy(k)).map_or((1, 0), |n| (0, n))
+        })
     {
         return Err(error(
             path,

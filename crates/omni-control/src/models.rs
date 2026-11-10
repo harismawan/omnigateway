@@ -81,12 +81,20 @@ pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String>
         Some(JsValue::Array(a))=>a.as_slice(),
         Some(_)=> return Err("(stored?.targets ?? []).map is not a function. (In '(stored?.targets ?? []).map(pairOf)', '(stored?.targets ?? []).map' is undefined)".into()),
     };
-    let pair = |v: &JsValue| -> Result<String, String> {
+    let pair = |v: &JsValue| -> Result<Vec<u16>, String> {
         if matches!(v, JsValue::Null) {
             return Err("null is not an object (evaluating 'target.provider')".into());
         }
-        let value = |k| get(v, k).map_or(Ok("undefined".into()), crate::operator_json::string);
-        Ok(format!("{}\0{}", value("provider")?, value("model")?))
+        let value = |k| {
+            get(v, k).map_or_else(
+                || Ok("undefined".encode_utf16().collect::<Vec<_>>()),
+                crate::operator_json::coerce_units,
+            )
+        };
+        let mut pair = value("provider")?;
+        pair.push(0);
+        pair.extend(value("model")?);
+        Ok(pair)
     };
     let pairs = pairs.iter().map(pair).collect::<Result<Vec<_>, _>>()?;
     for t in targets {

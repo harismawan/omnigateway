@@ -136,6 +136,58 @@ pub fn string(value: &JsValue) -> Result<String, String> {
     }
 }
 
+/// Lossless String(value) for identity, with iterative Array.join coercion.
+/// Human-output UTF8 replacement must never participate in equality decisions.
+pub fn coerce_units(value: &JsValue) -> Result<Vec<u16>, String> {
+    let mut out = Vec::new();
+    let mut pending = vec![Some((value, true))];
+    while let Some(next) = pending.pop() {
+        let Some((v, root)) = next else {
+            out.push(44);
+            continue;
+        };
+        match v {
+            JsValue::String(s) => out.extend_from_slice(s),
+            JsValue::Array(a) => {
+                for (i, v) in a.iter().enumerate().rev() {
+                    pending.push(Some((v, false)));
+                    if i > 0 {
+                        pending.push(None);
+                    }
+                }
+            }
+            JsValue::Null | JsValue::Undefined if !root => {}
+            JsValue::Undefined => out.extend("undefined".encode_utf16()),
+            JsValue::Null => out.extend("null".encode_utf16()),
+            JsValue::Bool(b) => out.extend(if *b { "true" } else { "false" }.encode_utf16()),
+            JsValue::Number(n) => {
+                let mut text = String::new();
+                if n.is_infinite() {
+                    text.push_str(if n.is_sign_negative() {
+                        "-Infinity"
+                    } else {
+                        "Infinity"
+                    });
+                } else {
+                    omni_ir::jsjson::write_number(*n, &mut text);
+                }
+                out.extend(text.encode_utf16());
+            }
+            JsValue::Object(fields) => {
+                if fields
+                    .iter()
+                    .any(|(k, _)| k.iter().copied().eq("toString".encode_utf16()))
+                {
+                    return Err("No default value".into());
+                }
+                out.extend("[object Object]".encode_utf16());
+            }
+            JsValue::Function => out.extend("[object Object]".encode_utf16()),
+        }
+    }
+    Ok(out)
+}
+
 /// Array.join's recursive ToString, traversed without the native stack.
 fn join(value: &JsValue) -> Result<String, String> {
     let mut out = String::new();
