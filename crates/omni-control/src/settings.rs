@@ -1,11 +1,11 @@
 //! Operator settings validation; gateway read normalization remains in the store.
+use crate::settings_value as sv;
+use omni_ir::jsjson::JsValue;
 use omni_store::SqliteStore;
 use serde_json::{Map, Value};
 
-pub fn get(store: &SqliteStore) -> Result<Value, String> {
-    omni_store::settings::get(store.connection())
-        .map(|s| s.json)
-        .map_err(|e| e.to_string())
+pub fn get(store: &SqliteStore) -> Result<JsValue, String> {
+    sv::read(store)
 }
 
 fn kind(v: &Value) -> &'static str {
@@ -21,11 +21,30 @@ fn kind(v: &Value) -> &'static str {
 fn error(path: &str, message: impl std::fmt::Display) -> String {
     format!("BAD_REQUEST: {path}: {message}")
 }
-pub fn put(store: &SqliteStore, input: &Value) -> Result<Value, String> {
-    if !input.is_object() {
+pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
+    let defaults = omni_store::settings::default_settings_json();
+    let mut input = Map::new();
+    // Schema order matters: do not prevalidate later fields before earlier ones.
+    for key in defaults.as_object().expect("defaults").keys() {
+        if let Some(v) = sv::get(raw, key) {
+            let v = if key == "weights" {
+                // Store normalization guarantees six finite primitive weights.
+                serde_json::from_str(&omni_ir::jsjson::stringify(v).expect("weights"))
+                    .unwrap_or(Value::Null)
+            } else {
+                sv::shallow(v)
+            };
+            input.insert(key.clone(), v);
+        }
+    }
+    let input = Value::Object(input);
+    if !matches!(raw, JsValue::Object(_)) {
         return Err(error(
             "(root)",
-            format!("Invalid input: expected object, received {}", kind(input)),
+            format!(
+                "Invalid input: expected object, received {}",
+                kind(&sv::shallow(raw))
+            ),
         ));
     }
     let defaults = omni_store::settings::default_settings_json();
@@ -96,7 +115,18 @@ pub fn put(store: &SqliteStore, input: &Value) -> Result<Value, String> {
             let n = v.as_f64().ok_or_else(|| {
                 error(
                     key,
-                    format!("Invalid input: expected number, received {}", kind(&v)),
+                    format!(
+                        "Invalid input: expected number, received {}",
+                        match sv::get(raw, key) {
+                            Some(JsValue::Number(n)) if n.is_infinite() =>
+                                if n.is_sign_negative() {
+                                    "-Infinity"
+                                } else {
+                                    "Infinity"
+                                },
+                            _ => kind(&v),
+                        }
+                    ),
                 )
             })?;
             if n.fract() != 0.0 {
@@ -186,7 +216,7 @@ pub fn put(store: &SqliteStore, input: &Value) -> Result<Value, String> {
         }
         patch.insert(key.clone(), v);
     }
-    omni_store::settings::put(store.connection(), &Value::Object(patch)).map_err(|e| e.to_string())
+    sv::write(store, &Value::Object(patch))
 }
 
 #[cfg(test)]
@@ -196,17 +226,24 @@ mod tests {
     fn rejects_before_write_and_normalizes_saved_strings() {
         let store = SqliteStore::open(":memory:", 0).expect("store");
         let mut input = get(&store).expect("defaults");
-        input["maxAttempts"] = serde_json::json!(0);
+        sv::set(&mut input, "maxAttempts", JsValue::Number(0.0));
         assert!(put(&store, &input).is_err());
         let rows: i64 = store
             .connection()
             .query_row("SELECT count(*) FROM settings", [], |r| r.get(0))
             .expect("rows");
         assert_eq!(rows, 0);
-        input["maxAttempts"] = serde_json::json!(3);
-        input["guardrailModel"] = serde_json::json!("  model  ");
+        sv::set(&mut input, "maxAttempts", JsValue::Number(3.0));
+        sv::set(
+            &mut input,
+            "guardrailModel",
+            JsValue::from(&serde_json::json!("  model  ")),
+        );
         let saved = put(&store, &input).expect("save");
-        assert_eq!(saved["guardrailModel"], "model");
+        assert_eq!(
+            sv::get(&saved, "guardrailModel"),
+            Some(&JsValue::from(&serde_json::json!("model")))
+        );
         assert_eq!(get(&store).expect("read"), saved);
     }
 }

@@ -168,6 +168,22 @@ for (const raw of [
   '{"maxAttempts":false}',
   '{"maxAttempts":1.5}',
   '{"extra":{"nested":{"toString":null}}}',
+  ...["1e400", "-1e400"].flatMap((n) => [
+    `{"maxAttempts":${n},"bodyLoggingEnabled":true}`,
+    `{"extra":${n},"bodyLoggingEnabled":true}`,
+    `{"weights":{"cost":${n}},"bodyLoggingEnabled":true}`,
+    `{"guardrailModel":${n},"bodyLoggingEnabled":true}`,
+  ]),
+  ...[130, 1000].flatMap((depth) => {
+    const deep = `${"[".repeat(depth)}0${"]".repeat(depth)}`;
+    return [
+      `{"extra":${deep},"bodyLoggingEnabled":true}`,
+      `{"maxAttempts":${deep},"bodyLoggingEnabled":true}`,
+      `{"weights":${deep},"bodyLoggingEnabled":true}`,
+      `{"extra":${deep},"extra":2,"bodyLoggingEnabled":true}`,
+      `{"extra":${deep},"maxAttempts":1e400,"bodyLoggingEnabled":true}`,
+    ];
+  }),
 ]) {
   for (const dir of roots) {
     const db = new Database(join(dir, "db"));

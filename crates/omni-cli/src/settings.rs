@@ -1,3 +1,4 @@
+use omni_control::settings_value as sv;
 use omni_ir::{
     js,
     jsjson::{self, JsValue},
@@ -5,8 +6,8 @@ use omni_ir::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-fn text(v: &Value) -> Result<String, (u8, String)> {
-    omni_control::operator_json::string(&JsValue::from(v)).map_err(|e| (1, e))
+fn text(v: &JsValue) -> Result<String, (u8, String)> {
+    omni_control::operator_json::string(v).map_err(|e| (1, e))
 }
 pub fn run(
     command: &str,
@@ -30,16 +31,16 @@ pub fn run(
         let mut parts = path.split('.');
         let head = parts.next().expect("head");
         let tail = parts.next();
-        if current.get(head).is_none() {
+        if sv::get(&current, head).is_none() {
             return Err((2, format!("no setting \"{path}\"")));
         }
         if tail.is_some() && head != "weights" {
             return Err((2, format!("\"{head}\" has no sub-settings")));
         }
         let existing = if let Some(tail) = tail {
-            current[head].get(tail)
+            sv::get(sv::get(&current, head).expect("head"), tail)
         } else {
-            current.get(head)
+            sv::get(&current, head)
         };
         let trimmed = js::trim(raw);
         let nullable = tail.is_none()
@@ -48,12 +49,12 @@ pub fn run(
                 .is_some_and(Value::is_null);
         let value = if nullable && trimmed == "null" {
             Value::Null
-        } else if nullable || existing.is_some_and(Value::is_string) {
+        } else if nullable || matches!(existing, Some(JsValue::String(_))) {
             if trimmed.is_empty() {
                 return Err((2, format!("{path} must not be blank")));
             }
             Value::String(trimmed.into())
-        } else if existing.is_some_and(Value::is_boolean) {
+        } else if matches!(existing, Some(JsValue::Bool(_))) {
             match trimmed.to_lowercase().as_str() {
                 "true" => Value::Bool(true),
                 "false" => Value::Bool(false),
@@ -66,30 +67,34 @@ pub fn run(
             }
             json!(n)
         };
+        let value = JsValue::from(&value);
         human = format!("{path} = {}", text(&value)?);
         if let Some(tail) = tail {
-            current["weights"][tail] = value;
+            let mut weights = sv::get(&current, "weights").expect("weights").clone();
+            sv::set(&mut weights, tail, value);
+            sv::set(&mut current, "weights", weights);
         } else {
-            current[head] = value;
+            sv::set(&mut current, head, value);
         }
         current = omni_control::settings::put(&store, &current).map_err(|e| (1, e))?;
     }
     if flags.contains_key("json") {
-        return Ok(
-            jsjson::stringify_pretty(&JsValue::from(&json!({"settings":current})))
-                .expect("settings"),
-        );
+        return Ok(jsjson::stringify_pretty(&JsValue::Object(vec![(
+            "settings".encode_utf16().collect(),
+            current,
+        )]))
+        .expect("settings"));
     }
     if set {
         return Ok(human);
     }
     let mut rows = Vec::new();
-    for (k, v) in jsjson::own_entries(current.as_object().expect("settings")) {
-        if let Some(o) = v.as_object() {
-            for (inner, value) in jsjson::own_entries(o) {
+    for (k, v) in entries(&current) {
+        if matches!(v, JsValue::Object(_)) {
+            for (inner, value) in entries(v) {
                 rows.push((format!("{k}.{inner}"), text(value)?));
             }
-        } else if let Some(a) = v.as_array() {
+        } else if let JsValue::Array(a) = v {
             for (i, value) in a.iter().enumerate() {
                 rows.push((format!("{k}.{i}"), text(value)?));
             }
@@ -107,4 +112,21 @@ pub fn run(
         .map(|(k, v)| format!("{k}{}  {v}", " ".repeat(width - js::utf16_len(&k))))
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn entries(value: &JsValue) -> Vec<(String, &JsValue)> {
+    let JsValue::Object(fields) = value else {
+        return vec![];
+    };
+    let mut entries: Vec<_> = fields
+        .iter()
+        .map(|(k, v)| (String::from_utf16_lossy(k), v))
+        .collect();
+    entries.sort_by_key(|(k, _)| {
+        k.parse::<u32>()
+            .ok()
+            .filter(|n| *n != u32::MAX && n.to_string() == *k)
+            .map_or((1, 0), |n| (0, n))
+    });
+    entries
 }

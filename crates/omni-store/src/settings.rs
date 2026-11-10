@@ -321,6 +321,24 @@ impl Settings {
 }
 
 /// `ConfigRepo.putSettings`: merge the validated patch and commit one row.
+pub fn operator_raw(conn: &Connection) -> Result<Option<String>, StoreError> {
+    Ok(conn
+        .query_row("SELECT value FROM settings WHERE key='settings'", [], |r| {
+            Ok(match r.get_ref(0)? {
+                rusqlite::types::ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
+                _ => None,
+            })
+        })
+        .optional()?
+        .flatten())
+}
+
+pub fn write_operator_raw(conn: &Connection, raw: &str) -> Result<(), StoreError> {
+    conn.execute("INSERT INTO settings(key,value) VALUES ('settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [raw])?;
+    Ok(())
+}
+
+/// `ConfigRepo.putSettings`: merge the validated patch and commit one row.
 pub fn put(conn: &Connection, patch: &Value) -> Result<Value, StoreError> {
     let mut next = get(conn)?.json;
     if let (Some(current), Some(patch)) = (next.as_object_mut(), patch.as_object()) {
