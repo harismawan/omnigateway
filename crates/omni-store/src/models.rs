@@ -101,6 +101,24 @@ pub struct VirtualModel {
 
 const T: &str = "virtual_models";
 
+/// Raw operator rows, without routing validation or strategy normalization.
+pub type OperatorModelRow = (Option<String>, String, String, bool);
+
+pub fn operator_rows(conn: &Connection) -> Result<Vec<OperatorModelRow>, StoreError> {
+    let mut stmt = conn.prepare_cached("SELECT * FROM virtual_models ORDER BY id")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        out.push((
+            row::opt_text(r, T, "id")?,
+            row::text(r, T, "targets")?,
+            row::text(r, T, "strategy")?,
+            row::flag(r, "is_alias")?,
+        ));
+    }
+    Ok(out)
+}
+
 /// One `virtual_models` row this build could not read, named by its id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRowError {

@@ -9,6 +9,16 @@ pub fn resolve(args: &[String]) -> Option<(String, Vec<String>)> {
             i += 1;
         }
     }
+    if args.get(i).map(String::as_str) == Some("models")
+        && args
+            .get(i + 1)
+            .is_some_and(|s| matches!(s.as_str(), "list" | "show"))
+    {
+        return Some((
+            format!("models-{}", args[i + 1]),
+            args[..i].iter().chain(&args[i + 2..]).cloned().collect(),
+        ));
+    }
     if args.get(i).map(String::as_str) == Some("settings")
         && args
             .get(i + 1)

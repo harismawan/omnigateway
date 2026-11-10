@@ -65,7 +65,7 @@ fn paint(color: bool, ok: bool, s: &str) -> String {
         s.into()
     }
 }
-fn width(s: &str) -> usize {
+pub(crate) fn width(s: &str) -> usize {
     let mut rest = s;
     let mut width = 0;
     while !rest.is_empty() {

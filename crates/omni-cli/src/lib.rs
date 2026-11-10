@@ -3,6 +3,7 @@ mod args;
 mod context;
 mod date;
 mod limits;
+mod models;
 mod mutations;
 mod output;
 mod settings;
@@ -17,7 +18,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     let Some((command, rest)) = args::resolve(&argv) else {
         if help || argv.iter().all(|s| s.starts_with('-')) {
             println!(
-                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
+                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set; models list, show\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
             );
             return ExitCode::SUCCESS;
         }
@@ -37,6 +38,8 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             "omni {}\n\n{}",
             mutations::usage(&command),
             match command.as_str() {
+                "models-list" => "List virtual models and their targets",
+                "models-show" => "Show one virtual model's targets and pricing",
                 "settings-get" => "Show routing and retention settings",
                 "settings-set" =>
                     "Change one setting, e.g. weights.cost 0.4, rtkEnabled true, or guardrailModel null",
@@ -56,7 +59,9 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
-                if command.starts_with("settings-") {
+                if command.starts_with("models-") {
+                    models::run(&command, &flags, &positional)
+                } else if command.starts_with("settings-") {
                     settings::run(&command, &flags, &positional)
                 } else {
                     mutations::run(&command, &flags, &positional, &allow)

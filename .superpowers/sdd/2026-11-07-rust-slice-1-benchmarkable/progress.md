@@ -448,3 +448,17 @@ parameter expansion. Same1mspolicy25bootmedian31.72→26.71ms.3freshfulluncapped
 deferred. Actualgateway env/options verified untimed. Rustbinary unchanged from
 523suite/clippy/fmt/rebuiltTS E2E. New publication/evidence/tmp/opencode/startup-
 acceptance. Controllerfinalreview required,no readiness. Canonicalreport top.
+
+## CLI models list/show increment — worker verification
+
+Base2f95f51d. Added standalone/unified/argv0 models list/show dispatch and separate
+lossless operator model projection; gateway normalized reader unchanged. Frozen TS
+raw-byte/read-only whole-DB corpus covers pricing/pins/capabilities/unknown/deep/
+UTF16/error edges plus fixed PTYs. Evidence `/tmp/opencode/cli-model-reads`;
+details `cli-model-reads-report.md`. Final matrix and controller independent review
+status recorded in that report. No model mutations/catalog/dry-run or full migration
+readiness claim. Existing progress entries and unrelated user work preserved.
+Final debug/release all3entrypoints PASS models155/keyslist135/mutations184/
+settings347 each.930modelpairs60sourcebinaryhashes reverified; CLI1/control7/
+store64 PASS, strictclippy/fmt/Biome/frozenTSdiff clean. Complete249-line transcript
+read; no pending jobs/blocker. Controller independentreview next.
