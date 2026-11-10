@@ -1,5 +1,10 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-07-rust-slice-1-benchmarkable.md
 
+## Settings fixround1 — 00acb21b, verification complete
+- Important destructive fallback fixed with operator-only stack-safe JS ownership; ±Infinity survives until validation/serialization, deep unknowns and capture flags survive valid writes, invalid writes preserve all settings-table rows. Gateway parser/admission unchanged.
+- Real TS corpus331 focused GREEN; RED get and independent review's exact failed-set/deep-write evidence retained. Control small-stack20k success/duplicate/error cleanup PASS; scopedclippy/fmt/Biome and focused CLI/store PASS.
+- Canonical cli-settings-report.md supersedes the prior limitation waiver. Full rebuilt debug/release all3 entrypoint settings331/keys184/list135 PASS; focusedCLI1/control6/store7, strictclippy/fmt/Biome PASS. All33 manifest hashes and1986 retained raw-output/settings-table pairs verified; completed194-line transcript under /tmp/opencode/settings-fixround1. No pending jobs; controller scoped re-review next.
+
 ## CLI foundation fix round 3
 - `58333799`: fallible iterative object coercion returns TS No default value for own noncallable toString; JSON unaffected, gateway unchanged.
 - RED8/135 → GREEN135 each standalone/subcommand/symlink (405 raw-byte comparisons). Control2/IR18 pass, including deep error/duplicate teardown and pretty-output small-stack coverage; strict clippy/fmt/Biome pass.
