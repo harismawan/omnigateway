@@ -71,7 +71,7 @@ async function compare(args: string[], pty = false, rootEnv = false) {
     assert.deepEqual(rows, before, "read-only whole database");
     assert(!out.includes("secret-sentinel"));
     db.close();
-    const result = { out, err, code, rows };
+    const result = { out, err, code, before, rows };
     await Bun.write(join(root, `${count}-${i}.json`), JSON.stringify({ args, pty, ...result }));
     results.push(result);
   }
@@ -205,6 +205,70 @@ for (const raw of [
     ["show", "missing"],
   ])
     await compare(args);
+}
+for (const field of ["contextWindow", "maxOutputTokens"]) {
+  for (const value of [
+    [1000, 2000],
+    [[1000], null, [], [false, "x", {}]],
+    [],
+    { toLocaleString: null },
+    { toLocaleString: 42 },
+    { toLocaleString: "abc" },
+    { toLocaleString: {} },
+    { toLocaleString: [] },
+    { toString: 42 },
+    [{ toLocaleString: null }],
+    [[{ toString: null }]],
+    true,
+    "\ud800",
+  ]) {
+    seed(JSON.stringify([{ ...target, [field]: value }]));
+    await compare(["show", "a😀"]);
+    await compare(["show", "a😀", "--json"]);
+  }
+  for (const leaf of ["1000", '{"toLocaleString":null}', '{"toString":42}']) {
+    seed(
+      `[${JSON.stringify(target).slice(0, -1)},"${field}":${"[".repeat(1000)}${leaf}${"]".repeat(1000)}}]`,
+    );
+    await compare(["show", "a😀"]);
+    await compare(["show", "a😀", "--json"]);
+  }
+}
+for (const [contextWindow, maxOutputTokens] of [
+  [{ toLocaleString: null, toString: 42 }, { toString: null }],
+  [[1000, { toString: 42 }, { toLocaleString: null }], { toLocaleString: 42 }],
+  [[null, null, [], [null, 2000]], { valueOf: 42 }],
+  [{ toLocaleString: "\ud800" }, { toString: 42 }],
+]) {
+  seed(JSON.stringify([{ ...target, contextWindow, maxOutputTokens }]));
+  await compare(["show", "a😀"]);
+  await compare(["show", "a😀", "--json"]);
+}
+for (const field of ["contextWindow", "maxOutputTokens"]) {
+  seed(`[${JSON.stringify(target).slice(0, -1)},"${field}":[1e400,-1e400,-0,null,1000]}]`);
+  await compare(["show", "a😀"]);
+}
+for (const tail of ["\ufeff", "\u0085", "\u001c", "\u00a0"]) {
+  seed(
+    JSON.stringify([
+      { ...target, provider: `provider${tail}`, capabilities: { [`tail${tail}`]: true } },
+    ]),
+  );
+  await compare(["list"]);
+  await compare(["show", "a😀"]);
+}
+for (const method of [null, 42, "abc", {}, []]) {
+  seed(JSON.stringify({ some: method, map: method }));
+  await compare(["list"]);
+  await compare(["show", "a😀"]);
+  for (const field of ["input", "output", "cacheRead"]) {
+    seed(
+      JSON.stringify([
+        { ...target, costPerMTok: { ...target.costPerMTok, [field]: { toFixed: method } } },
+      ]),
+    );
+    await compare(["show", "a😀"]);
+  }
 }
 seed("[]");
 for (const dir of roots) {

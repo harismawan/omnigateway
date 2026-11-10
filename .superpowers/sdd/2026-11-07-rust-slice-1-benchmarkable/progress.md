@@ -462,3 +462,17 @@ Final debug/release all3entrypoints PASS models155/keyslist135/mutations184/
 settings347 each.930modelpairs60sourcebinaryhashes reverified; CLI1/control7/
 store64 PASS, strictclippy/fmt/Biome/frozenTSdiff clean. Complete249-line transcript
 read; no pending jobs/blocker. Controller independentreview next.
+
+## Models reads fixround1 — I1/M1/M2
+
+Base7c7067ba; full review read. Iterative JSON locale-method dispatch fixes array
+limits and shadowed methods on both token fields; JS trimEnd and actual method
+descriptions fixed. Prior60hashes verified before new generation. RED retained;
+whole-DB before snapshots now retained with raw result pairs. Evidence
+`/tmp/opencode/models-fixround1`, canonical `cli-model-reads-report.md`.
+Final verification status in report; controller scopedre-review follows, no full
+migration readiness claim.
+Final all3debug/release models262/keys135/mutations184/settings347 PASS each.
+1572retainedmodelpairs inclbeforeDBsnapshots and60hashes verified;250-line final
+transcript read. CLI2/control7/store64 PASS, strictclippy/fmt/Biome/frozenTSdiff
+clean. No pendingjobs/blocker. I1/M1/M2 ready for controller scopedre-review.

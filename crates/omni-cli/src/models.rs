@@ -26,13 +26,31 @@ fn targets(v: &JsValue, show: bool) -> Result<&[JsValue], String> {
     match prop(v, "targets") {
         JsValue::Array(a) => {
             if !show && a.iter().any(|v| matches!(v, JsValue::Null)) {
-                return Err(format!("null is not an object (evaluating '{}')", if show { "target.credentialId" } else { "t.provider" }));
+                return Err(format!(
+                    "null is not an object (evaluating '{}')",
+                    if show {
+                        "target.credentialId"
+                    } else {
+                        "t.provider"
+                    }
+                ));
             }
             Ok(a)
-        },
-        JsValue::Null => Err(format!("null is not an object (evaluating 'model.targets.{}')", if show { "some" } else { "length" })),
-        _ if !show => Err("model.targets.map is not a function. (In 'model.targets.map((t) => t.provider)', 'model.targets.map' is undefined)".into()),
-        _ => Err("model.targets.some is not a function. (In 'model.targets.some((target) => target.credentialId !== void 0)', 'model.targets.some' is undefined)".into()),
+        }
+        JsValue::Null => Err(format!(
+            "null is not an object (evaluating 'model.targets.{}')",
+            if show { "some" } else { "length" }
+        )),
+        value if !show => Err(method_error(
+            "model.targets.map",
+            "(t) => t.provider",
+            prop(value, "map"),
+        )),
+        value => Err(method_error(
+            "model.targets.some",
+            "(target) => target.credentialId !== void 0",
+            prop(value, "some"),
+        )),
     }
 }
 fn provider(v: &JsValue, color: bool) -> Result<String, String> {
@@ -79,7 +97,7 @@ fn table(headers: &[&str], right: &[usize], rows: Vec<Vec<String>>) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join("  ")
-                .trim_end()
+                .trim_end_matches(omni_ir::js::is_js_whitespace)
                 .to_owned()
         })
         .collect::<Vec<_>>()
@@ -113,9 +131,73 @@ fn fixed(n: f64) -> String {
     )
 }
 fn price(v: &JsValue) -> Result<String, String> {
-    match v { JsValue::Undefined => Ok("—".into()), JsValue::Number(n) => Ok(fixed(*n)), JsValue::Null => Err("null is not an object (evaluating 'value.toFixed')".into()), _ => Err("value.toFixed is not a function. (In 'value.toFixed(2)', 'value.toFixed' is undefined)".into()) }
+    match v {
+        JsValue::Undefined => Ok("—".into()),
+        JsValue::Number(n) => Ok(fixed(*n)),
+        JsValue::Null => Err("null is not an object (evaluating 'value.toFixed')".into()),
+        _ => Err(method_error("value.toFixed", "2", prop(v, "toFixed"))),
+    }
 }
-fn tokens(v: &JsValue) -> Result<String, String> {
+fn method_error(path: &str, args: &str, method: &JsValue) -> String {
+    let description = match method {
+        JsValue::Object(_) => "an instance of Object".into(),
+        JsValue::Array(_) => "an instance of Array".into(),
+        JsValue::Undefined => "undefined".into(),
+        JsValue::String(units) => format!("\"{}\"", String::from_utf16_lossy(units)),
+        JsValue::Number(n) if !n.is_finite() => text(method).expect("number"),
+        _ => jsjson::stringify(method).expect("JSON value"),
+    };
+    format!("{path} is not a function. (In '{path}({args})', '{path}' is {description})")
+}
+
+/// Data-only JSON method dispatch. Array locale conversion calls each element's
+/// locale method (null/undefined contribute empty cells), not Array.toString.
+/// An explicit work stack also makes deeply nested success/error cleanup safe.
+fn tokens(value: &JsValue) -> Result<String, String> {
+    if matches!(value, JsValue::Undefined) {
+        return Ok("—".into());
+    }
+    let mut out = String::new();
+    let mut pending = vec![Some((value, true))];
+    while let Some(item) = pending.pop() {
+        let Some((v, direct)) = item else {
+            out.push(',');
+            continue;
+        };
+        match v {
+            JsValue::Null | JsValue::Undefined if !direct => {}
+            JsValue::Null => {
+                return Err("null is not an object (evaluating 'value.toLocaleString')".into());
+            }
+            JsValue::Array(a) => {
+                for (i, v) in a.iter().enumerate().rev() {
+                    pending.push(Some((v, false)));
+                    if i > 0 {
+                        pending.push(None);
+                    }
+                }
+            }
+            JsValue::Object(_) => {
+                if let Some(method) = get(v, "toLocaleString") {
+                    return Err(if direct {
+                        method_error("value.toLocaleString", "\"en-US\"", method)
+                    } else {
+                        "toLocaleString is not callable".into()
+                    });
+                }
+                if get(v, "toString").is_some() {
+                    return Err("Type error".into());
+                }
+                out.push_str("[object Object]");
+            }
+            JsValue::Number(_) => out.push_str(&number_tokens(v)?),
+            _ => out.push_str(&text(v)?),
+        }
+    }
+    Ok(out)
+}
+
+fn number_tokens(v: &JsValue) -> Result<String, String> {
     let JsValue::Number(n) = v else {
         return match v {
             JsValue::Undefined => Ok("—".into()),
@@ -185,6 +267,7 @@ fn tokens(v: &JsValue) -> Result<String, String> {
     }
     Ok(out)
 }
+
 fn capabilities(v: &JsValue) -> Result<String, String> {
     if let JsValue::String(s) = v {
         return Ok(if s.is_empty() {
@@ -298,8 +381,10 @@ fn human(model: &JsValue, color: bool) -> Result<String, String> {
                     }
                     JsValue::Number(_) => {}
                     _ => {
-                        return Err(format!(
-                            "{path}.toFixed is not a function. (In '{path}.toFixed(2)', '{path}.toFixed' is undefined)"
+                        return Err(method_error(
+                            &format!("{path}.toFixed"),
+                            "2",
+                            prop(value, "toFixed"),
                         ));
                     }
                 }
@@ -435,4 +520,30 @@ pub fn run(
         ))
     };
     run().map_err(|e| (1, e))
+}
+
+#[cfg(test)]
+mod locale_tests {
+    #[test]
+    fn deep_locale_success_and_error_cleanup_use_bounded_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                for (leaf, expected) in [
+                    ("1000", Ok("1,000".into())),
+                    (
+                        r#"{"toLocaleString":null}"#,
+                        Err("toLocaleString is not callable".into()),
+                    ),
+                    (r#"{"toString":42}"#, Err("Type error".into())),
+                ] {
+                    let raw = format!("{}{}{}", "[".repeat(20_000), leaf, "]".repeat(20_000));
+                    let value = omni_control::operator_json::parse(&raw).expect("JSON");
+                    assert_eq!(super::tokens(&value), expected);
+                }
+            })
+            .expect("thread")
+            .join()
+            .expect("bounded stack");
+    }
 }

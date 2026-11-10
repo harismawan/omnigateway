@@ -1,5 +1,52 @@
 # CLI models list/show increment
 
+## Fix round1 — review I1/M1/M2
+
+Base `7c7067ba5c41222f64c6a1215561dfa4b3e5858d`; complete independent review read.
+Evidence: `/tmp/opencode/models-fixround1/`. Prior manifest verified **before**
+edits or new manifest generation: all60 entries OK (`prior-hashes.log`).
+
+- I1: token limits now follow data-only JSON locale-method dispatch. Numbers keep
+  existing en-US formatting; arrays recursively locale-format elements, retaining
+  comma positions for empty arrays/null elements. JSON cannot encode sparse holes;
+  parsed arrays are dense, with null/undefined elements contributing empty text.
+  Ordinary objects inherit Object.toLocaleString; own noncallable locale methods
+  fail before toString, and noncallable own toString produces TS `Type error`.
+  Direct calls and nested array calls retain distinct JSC error messages. Explicit
+  work stack preserves deep traversal and cleanup; 20k-depth success and both
+  error paths pass on a256KiB stack. Both contextWindow/maxOutputTokens covered.
+- M1: model table lines use ECMAScript trailing whitespace, including FEFF and
+  excluding U+0085/U+001C. Provider and capability tails covered against real TS.
+- M2: targets.some/map and required/optional price.toFixed failures describe the
+  actual stored noncallable method. Objects/arrays/strings/null/numbers tested;
+  lone-surrogate diagnostic text uses output encoding while stored JSON remains
+  exact UTF-16. No shared operator/gateway parsing changes.
+
+`red.log` retains actual prior-binary array-limit mismatch. Expanded corpus adds
+direct/nested/empty/null arrays, object method shadowing, both-field failure order,
+deep successful/error cleanup, overflow/signed-zero nested numbers, whitespace and
+method descriptions. Every result now retains **before** and after whole-DB rows
+for historical read-only auditing. Original155 cases remain active.
+
+Final verification COMPLETE: all3 entrypoints in both debug/release PASS models262,
+keys-list135, mutations184, settings347 each. Totals1572 model pairs (24PTYs),
+810 key listings,1104 key mutations,2082 settings comparisons. CLI2/control7/
+store64 tests pass (four existing store helpers/measurements ignored); strict
+all-target scoped clippy, workspace fmt, Biome and frozen-source diff pass.
+Frozen CLI models-show4 tests also pass. Complete250-line `verification.log` read.
+Reloaded all1572 retained pairs, verifying both output equality and before/after
+whole-DB preservation; all60 new source/binary hashes checked after generation.
+No pending jobs or blocker. Initial clippy test-module placement failure is retained
+in `clippy.log`, corrected before final matrix. Final implementation commit is the
+commit adding this fix section; exact provenance in `provenance.txt` in evidence.
+
+Binary SHA256 (debug omni/gateway, release omni/gateway):
+`e53fbc44497d7aa16075ac16f20112d014c8ad4d4e49159eb140e922ebd2cd6c`,
+`5f85a278c6dfbf7e50817c760400331e7a13f3d079b9c51ef16d257d2c341546`,
+`ccbe9497728a66fbfc151594ed6ef5d942cfb6beb679d9a209e8923354148dd2`,
+`4835978cb7714e0d6e9e370a56a8cda989fa977c3de630b9ea1549ed7ee7583a`.
+Controller scoped re-review follows this fix; no full migration readiness claim.
+
 Base: `2f95f51d8f7cd8fef5e0fa2c076fd1810d0d5563`.
 
 ## Scope
