@@ -52,9 +52,7 @@ pub fn parse(text: &str) -> Result<JsValue, String> {
                     i += 1;
                 }
                 i += 1;
-                // Preserve the existing documented lone-surrogate replacement.
-                let v = omni_ir::js::parse_json(&text[start..i]).expect("validated string");
-                let units: Vec<u16> = v.as_str().expect("string").encode_utf16().collect();
+                let units = string_units(&text[start + 1..i - 1]);
                 if let Some(Frame::Object(_, key @ None)) = frames.last_mut() {
                     *key = Some(units);
                     continue;
@@ -97,6 +95,36 @@ pub fn parse(text: &str) -> Result<JsValue, String> {
         }
     }
     Ok(root)
+}
+
+/// JSON string contents after syntax validation. Escaped UTF-16 units are data,
+/// including unpaired surrogates; only literal UTF-8 needs transcoding.
+fn string_units(text: &str) -> Vec<u16> {
+    let mut units = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            units.extend_from_slice(c.encode_utf16(&mut [0; 2]));
+            continue;
+        }
+        let c = chars.next().expect("validated escape");
+        units.push(match c {
+            'u' => {
+                let mut unit = 0;
+                for _ in 0..4 {
+                    unit = unit * 16 + chars.next().expect("hex").to_digit(16).expect("hex") as u16;
+                }
+                unit
+            }
+            'b' => 8,
+            'f' => 12,
+            'n' => 10,
+            'r' => 13,
+            't' => 9,
+            _ => c as u16,
+        });
+    }
+    units
 }
 
 /// String(value), sharing Array.join's iterative coercion for JSON values.
@@ -224,6 +252,19 @@ pub fn models_detail(value: &JsValue) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn utf16_values_keys_pairs_and_duplicates_are_lossless() {
+        let value = parse(r#"{"\ud800":"\udc00","�":1,"\ud801":2,"\ud800":3,"pair":"\ud83d\ude00","literal":"😀","escapes":"\b\f\n\r\t\\\"\/"}"#).expect("parse");
+        assert_eq!(
+            omni_ir::jsjson::stringify(&value).expect("json"),
+            "{\"\\ud800\":3,\"�\":1,\"\\ud801\":2,\"pair\":\"😀\",\"literal\":\"😀\",\"escapes\":\"\\b\\f\\n\\r\\t\\\\\\\"/\"}"
+        );
+        let value = parse(r#"["\ud800","\udc00","�","\ud83d\ude00"]"#).expect("parse");
+        assert_eq!(
+            omni_ir::jsjson::stringify(&value).expect("json"),
+            "[\"\\ud800\",\"\\udc00\",\"�\",\"😀\"]"
+        );
+    }
     #[test]
     fn deep_coercion_error_and_pretty_listing_drop_on_small_stack() {
         std::thread::Builder::new().stack_size(256 * 1024).spawn(|| {

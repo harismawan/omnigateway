@@ -168,6 +168,10 @@ for (const raw of [
   '{"maxAttempts":false}',
   '{"maxAttempts":1.5}',
   '{"extra":{"nested":{"toString":null}}}',
+  '{"bodyLoggingEnabled":true,"extra":"\\ud800","\\ud800":1,"\\ud801":2}',
+  '{"extra":"\\udc00","�":1,"\\ud800":2,"\\ud800":3,"😀":"\\ud83d\\ude00"}',
+  '{"guardrailModel":" \\ud800 ","smartRouterPolicy":" \\udc00 ","smartRouterLocalModel":"\\ud801","smartRouterClassifierModel":"\\ud83d\\ude00"}',
+  '{"maxAttempts":0,"extra":"\\ud800","\\ud800":1,"\\ud801":2}',
   ...["1e400", "-1e400"].flatMap((n) => [
     `{"maxAttempts":${n},"bodyLoggingEnabled":true}`,
     `{"extra":${n},"bodyLoggingEnabled":true}`,

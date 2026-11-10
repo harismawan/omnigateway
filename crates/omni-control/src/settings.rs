@@ -216,7 +216,7 @@ pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
         }
         patch.insert(key.clone(), v);
     }
-    sv::write(store, &Value::Object(patch))
+    sv::write(store, &Value::Object(patch), raw)
 }
 
 #[cfg(test)]

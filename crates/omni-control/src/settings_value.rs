@@ -14,14 +14,14 @@ pub fn get<'a>(v: &'a JsValue, key: &str) -> Option<&'a JsValue> {
     }
 }
 pub fn set(v: &mut JsValue, key: &str, value: JsValue) {
+    set_units(v, &key.encode_utf16().collect::<Vec<_>>(), value);
+}
+fn set_units(v: &mut JsValue, key: &[u16], value: JsValue) {
     if let JsValue::Object(fields) = v {
-        if let Some((_, old)) = fields
-            .iter_mut()
-            .find(|(k, _)| k.iter().copied().eq(key.encode_utf16()))
-        {
+        if let Some((_, old)) = fields.iter_mut().find(|(k, _)| k == key) {
             *old = value;
         } else {
-            fields.push((key.encode_utf16().collect(), value));
+            fields.push((key.to_vec(), value));
         }
     }
 }
@@ -69,7 +69,7 @@ pub fn read(store: &SqliteStore) -> Result<JsValue, String> {
     let mut out = defaults;
     if let JsValue::Object(fields) = &stored {
         for (k, v) in fields {
-            set(&mut out, &String::from_utf16_lossy(k), v.clone());
+            set_units(&mut out, k, v.clone());
         }
     }
     for key in [
@@ -89,11 +89,29 @@ pub fn read(store: &SqliteStore) -> Result<JsValue, String> {
         "smartRouterPolicy",
         "smartRouterTimeoutMs",
     ] {
-        set(&mut out, key, JsValue::from(&normalized[key]));
+        let value = match get(&stored, key) {
+            Some(JsValue::String(units))
+                if matches!(
+                    key,
+                    "guardrailModel" | "smartRouterClassifierModel" | "smartRouterLocalModel"
+                ) && !trim_units(units).is_empty() =>
+            {
+                JsValue::String(units.clone())
+            }
+            Some(JsValue::String(units))
+                if key == "smartRouterPolicy"
+                    && !trim_units(units).is_empty()
+                    && trim_units(units).len() <= 4000 =>
+            {
+                JsValue::String(trim_units(units).to_vec())
+            }
+            _ => JsValue::from(&normalized[key]),
+        };
+        set(&mut out, key, value);
     }
     Ok(out)
 }
-pub fn write(store: &SqliteStore, patch: &Value) -> Result<JsValue, String> {
+pub fn write(store: &SqliteStore, patch: &Value, original: &JsValue) -> Result<JsValue, String> {
     // TS putSettings reads again after validation, then merges the patch.
     let mut next = read(store)?;
     for (k, v) in patch.as_object().expect("validated patch") {
@@ -104,13 +122,33 @@ pub fn write(store: &SqliteStore, patch: &Value) -> Result<JsValue, String> {
             }
             set(&mut next, k, weights);
         } else {
-            set(&mut next, k, JsValue::from(v));
+            let value = match get(original, k) {
+                Some(JsValue::String(units)) if v.is_string() => {
+                    JsValue::String(trim_units(units).to_vec())
+                }
+                _ => JsValue::from(v),
+            };
+            set(&mut next, k, value);
         }
     }
     let raw = jsjson::stringify(&next).expect("settings");
     omni_store::settings::write_operator_raw(store.connection(), &raw)
         .map_err(|e| e.to_string())?;
     Ok(next)
+}
+
+pub fn trim_units(mut units: &[u16]) -> &[u16] {
+    let whitespace = |u: u16| {
+        char::from_u32(u32::from(u))
+            .is_some_and(|c| omni_ir::js::trim(c.encode_utf8(&mut [0; 4])).is_empty())
+    };
+    while units.first().is_some_and(|u| whitespace(*u)) {
+        units = &units[1..];
+    }
+    while units.last().is_some_and(|u| whitespace(*u)) {
+        units = &units[..units.len() - 1];
+    }
+    units
 }
 
 #[cfg(test)]
