@@ -10,10 +10,10 @@ fn local_civil(stamp: i64, year: i64) -> Option<i64> {
     // range use a calendar-equivalent future year for recurring timezone rules,
     // then apply that offset to the original (still unclipped) JS civil instant.
     let equivalent = 2400 + year.rem_euclid(400);
-    let shift = civil(year, 1, 1) - civil(equivalent, 1, 1);
-    let mapped = stamp - shift;
+    let shift = civil(year, 1, 1)?.checked_sub(civil(equivalent, 1, 1)?)?;
+    let mapped = stamp.checked_sub(shift)?;
     let date = chrono::DateTime::from_timestamp_millis(mapped)?;
-    local(&date.naive_utc()).map(|v| v + shift)
+    local(&date.naive_utc())?.checked_add(shift)
 }
 
 fn local(naive: &chrono::NaiveDateTime) -> Option<i64> {
@@ -22,7 +22,7 @@ fn local(naive: &chrono::NaiveDateTime) -> Option<i64> {
         // Some host local-time adapters return a single side of a fold.
         // Validate earlier candidates by roundtripping through the timezone.
         for minutes in 1..=1440 {
-            let candidate = stamp - i64::from(minutes) * 60000;
+            let candidate = stamp.checked_sub(i64::from(minutes) * 60000)?;
             if Local
                 .timestamp_millis_opt(candidate)
                 .single()
@@ -39,27 +39,35 @@ fn local(naive: &chrono::NaiveDateTime) -> Option<i64> {
     for minutes in 1..=1440 {
         let before = naive.checked_sub_signed(chrono::Duration::minutes(minutes))?;
         if let Some(date) = Local.from_local_datetime(&before).earliest() {
-            return Some(
-                naive.and_utc().timestamp_millis()
-                    - i64::from(date.offset().local_minus_utc()) * 1000,
-            );
+            return naive
+                .and_utc()
+                .timestamp_millis()
+                .checked_sub(i64::from(date.offset().local_minus_utc()) * 1000);
         }
     }
     None
 }
 
-fn civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = year - i64::from(month <= 2);
+fn civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    // Wide arithmetic before subtraction or multiplication: even an i64 year
+    // cannot overflow this i128 calculation. Narrow only the completed result.
+    let (year, month, day) = (i128::from(year), i128::from(month), i128::from(day));
+    let y = year - i128::from(month <= 2);
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let mp = month + if month > 2 { -3 } else { 9 };
-    (era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + (153 * mp + 2) / 5 + day - 1 - 719468)
-        * 86400000
+    i64::try_from(
+        (era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + (153 * mp + 2) / 5 + day - 1 - 719468)
+            * 86400000,
+    )
+    .ok()
 }
 
 pub fn parse(raw: &str) -> Option<i64> {
     let result = iso(raw).or_else(|| legacy(raw))?;
-    (result.abs() <= 8_640_000_000_000_000).then_some(result)
+    (-8_640_000_000_000_000..=8_640_000_000_000_000)
+        .contains(&result)
+        .then_some(result)
 }
 
 fn iso(raw: &str) -> Option<i64> {
@@ -94,7 +102,7 @@ fn iso(raw: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let base = civil(year, month, day);
+    let base = civil(year, month, day)?;
     let Some(time) = time else {
         return Some(base);
     };
@@ -159,9 +167,9 @@ fn iso(raw: &str) -> Option<i64> {
     if h > 24 || m > 59 || s > 59 || h == 24 && (m != 0 || s != 0 || ms != 0) {
         return None;
     }
-    let stamp = base + ((h * 60 + m) * 60 + s) * 1000 + ms;
+    let stamp = base.checked_add(((h * 60 + m) * 60 + s) * 1000 + ms)?;
     match offset {
-        Some(offset) => Some(stamp - offset),
+        Some(offset) => stamp.checked_sub(offset),
         None => local_civil(stamp, year),
     }
 }
@@ -196,7 +204,7 @@ fn legacy(raw: &str) -> Option<i64> {
             return None;
         }
         return local_civil(
-            civil(i64::from(y), i64::from(m), i64::from(d)),
+            civil(i64::from(y), i64::from(m), i64::from(d))?,
             i64::from(y),
         );
     }
@@ -236,4 +244,27 @@ fn legacy(raw: &str) -> Option<i64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_civil_never_wraps_and_timeclip_retains_boundary() {
+        for year in [i64::MIN, i64::MAX, 584557000, i64::from(i32::MAX)] {
+            assert_eq!(civil(year, 1, 1), None);
+        }
+        assert_eq!(parse("584557000/01/01"), None);
+        assert_eq!(parse("2147483647/01/01"), None);
+        assert_eq!(
+            parse("+275760-09-13T00:00:00Z"),
+            Some(8_640_000_000_000_000)
+        );
+        assert_eq!(parse("+275760-09-13T00:00:00.001Z"), None);
+        assert_eq!(
+            parse("+275760-09-13T01:00:00+01:00"),
+            Some(8_640_000_000_000_000)
+        );
+    }
 }
