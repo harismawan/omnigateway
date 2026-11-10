@@ -1,5 +1,9 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-07-rust-slice-1-benchmarkable.md
 
+## Settings fixround2 — e979bc19, verification complete
+- Important surrogate persistence corruption: operator parser preservesUTF16 values/keys, settings merges compareoriginalunits, knownstrings retainunits through trim/validation/write. HumanUTF8replacement onlyatoutput; gateway unchanged.
+- Corpus347 (prior331 retained), mutations184/list135 PASS all3 entrypoints debug/release. Exactreview unrelatedset preserves lonehigh value/distinctkeys/capture. CLI1/control7/store7, IR18+JSONvectors3+JSsemantics8 PASS; strictclippy/fmt/Biome PASS. Complete190-line transcript read;33 hashes and2082 retained settings-table/output pairs verified under /tmp/opencode/settings-fixround2. No pending jobs; controller scoped re-review next.
+
 ## Settings fixround1 — 00acb21b, verification complete
 - Important destructive fallback fixed with operator-only stack-safe JS ownership; ±Infinity survives until validation/serialization, deep unknowns and capture flags survive valid writes, invalid writes preserve all settings-table rows. Gateway parser/admission unchanged.
 - Real TS corpus331 focused GREEN; RED get and independent review's exact failed-set/deep-write evidence retained. Control small-stack20k success/duplicate/error cleanup PASS; scopedclippy/fmt/Biome and focused CLI/store PASS.

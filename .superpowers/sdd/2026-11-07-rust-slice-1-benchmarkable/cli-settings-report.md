@@ -1,5 +1,48 @@
 # CLI settings get/set increment
 
+## Fix round2 — UTF-16 persistence (e979bc19)
+
+Binary SHA256 debug omni/gateway, release omni/gateway:
+`a9137e5677760f7f2545127bc7877e5426afe9a52ce78babcc7283d2caa18335`,
+`7e4f1969148e273fd30ef3fb6763ed1a2c63bc2f05d5a496b8433abeeb75bc26`,
+`bc9fa8cce75c9ba692548671881a6ff4110c4b6c8c459dc40bcbad83f78199f4`,
+`e7a96968dcae09f797219240d1e5d2de11c46caf2382bd23ecda3535ab82fd68`.
+
+Base7aa25f99; full r1 review read. Important surrogate corruption addressed:
+- Shared operator string parser now decodes JSON escapes directly into UTF-16
+  units for values AND property names. Literal Unicode encodes to the same units;
+  valid pairs serialize as astral characters; lone units remain escaped.
+- Settings spread/merge compares and copies original key units. Distinct surrogate
+  keys and literal replacement-character keys stay distinct; duplicates replace
+  the prior value in its original slot.
+- Known model/policy strings retain original UTF-16 through store normalization,
+  schema validation and write. Trim is on JS whitespace units; shallow validation
+  preserves UTF-16 lengths. Human output alone uses lossy UTF-8 encoding.
+- Gateway normalization unchanged. Existing deep/duplicate/error cleanup tests
+  remain active, including20k depth on256KiB stack.
+
+RED `/tmp/opencode/settings-fixround2/red.log`; GREEN `green.log`: corpus347
+(prior331 preserved), independent TS/Rust roots, exact raw output/status and every
+settings-table row. Added lonehigh/lowliteralreplacement/distinctkeys/astralpairs/
+duplicates/knownstrings and failed-set unchanged-row cases. Control7/IR18 and
+focused CLI/store tests PASS; strictclippy/fmt/Biome PASS. Final rebuilt all3
+debug/release entrypoints each PASS settings347, preserved mutations184/list135.
+Totals2082 settings,1104 mutations,810 list comparisons. CLI1/control7/store7
+PASS. Complete190-line transcript read; all33 source/binary manifest hashes and
+all2082 retained output/settings-table pairs verified by check-artifacts.py.
+Manifest source e979bc19; provenance in same evidence directory. No pending jobs;
+controller scoped re-review next, no full-migration readiness claim.
+Original shared-parser string limitation is superseded by this fix, not waived.
+Exact review `set rtkEnabled true` independently seeded repro PASS (`exact.ts`,
+`exact.log`, raw results); frozen CLI settings16 PASS. Comparison scope remains
+all settings-table rows, not a whole-database diff. Controller re-review follows
+finished verification; full migration scope remains incomplete.
+IR JSON vectors3 PASS (`ir-json-vectors.log`); initial command used nonexistent
+test target `jsjson`, exited101 before running tests, then corrected to
+`jsjson_vectors`. Both transcripts retained.
+Frozen control schema6 and store config7+1skip also PASS this round.
+IR JS semantics8 PASS (shared JS trim/number behavior).
+
 ## Fix round 1 — Important destructive fallback
 
 Implementation commit: `00acb21b` (base `cd3e7bd1`).
@@ -52,8 +95,7 @@ compared from disk, including raw output buffers and settings-table rows.
 
 Remaining migration scope remains full CLI/admin/providers/cluster work. This
 fix does not waive the settings contract for deep or overflow values. The shared
-operator parser retains its previously documented lone-surrogate replacement;
-no new claim about that separate string edge is made by these overflow/depth tests.
+operator parser's prior lone-surrogate limitation is resolved in round2 above.
 
 Base: `09bb601acc449b31d1aae9a294b67f0ffc8290c3`.
 Implementation commit: `cd3e7bd1` (`feat(cli): add settings get and set`).
