@@ -445,27 +445,20 @@ fn human(model: &JsValue, color: bool) -> Result<String, String> {
         )
     ))
 }
-/// Plugin providers are not ported. The frozen CLI imports every plugin
-/// directory and merges its providers into the catalog; rather than answer
-/// from the built-ins alone, refuse whenever `<root>/plugins` holds one.
+/// Plugin providers are not ported. Frozen TS imports a plugin's server entry
+/// only after discovery finds a loadable, schema-valid manifest declaring the
+/// `provider` capability; every earlier stop leaves exactly the built-ins and
+/// catalog/put print nothing about it. Rust matches those cases and refuses
+/// only where TS would import plugin code that could contribute a provider.
 fn refuse_plugins(root: &std::path::Path) -> Result<(), String> {
-    let dir = root.join("plugins");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(());
-    };
-    let mut found: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter(|e| std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    found.sort();
+    let found = omni_control::plugins::provider_plugins(root);
     if found.is_empty() {
         return Ok(());
     }
     Err(format!(
-        "plugin providers are not supported by this Rust CLI; found {} in {}",
+        "plugin providers are not supported by this Rust CLI; {} in {} declares one",
         found.join(", "),
-        dir.display()
+        root.join("plugins").display()
     ))
 }
 

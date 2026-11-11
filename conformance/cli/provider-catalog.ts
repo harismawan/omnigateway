@@ -10,8 +10,9 @@
  * repository's pinned Biome so `biome check` accepts it unchanged. Registry
  * order, catalog order, labels, pricing, API and OAuth limits, model auth,
  * capabilities and presentation are all carried. Plugin providers are not:
- * they are installation state, and the Rust CLI refuses to run catalog
- * commands while a plugin directory exists rather than omit them silently.
+ * they are installation state. The Rust CLI matches frozen discovery for
+ * plugins that contribute no provider and refuses only where frozen TS would
+ * import a provider-capable plugin's code, rather than omit it silently.
  */
 import { strict as assert } from "node:assert";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -28,6 +29,17 @@ const plain = JSON.parse(JSON.stringify(PROVIDER_DESCRIPTORS));
 assert.deepEqual(plain, { ...PROVIDER_DESCRIPTORS });
 for (const [id, descriptor] of Object.entries(PROVIDER_DESCRIPTORS))
   assert.equal(descriptor.id, id);
+// Every row prices all five token classes and states both limits (OAuth limits
+// too, where present): the frozen types require them, so the catalog table's
+// dash for an absent price or limit is unreachable from built-in data.
+const finite = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+for (const { catalog } of Object.values(PROVIDER_DESCRIPTORS))
+  for (const row of catalog.models) {
+    for (const k of ["input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h"] as const)
+      assert(finite(row.pricing[k]), `${row.id} pricing.${k}`);
+    for (const limits of [row.limits, ...(row.oauthLimits ? [row.oauthLimits] : [])])
+      assert(finite(limits.contextWindow) && finite(limits.maxOutputTokens), `${row.id} limits`);
+  }
 
 const formatted = Bun.spawnSync(["bunx", "biome", "format", `--stdin-file-path=${target}`], {
   cwd: repo,

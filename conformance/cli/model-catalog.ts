@@ -3,10 +3,13 @@
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
 import {
+  chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -56,8 +59,8 @@ for (const dir of roots) {
   db.close();
   // The database `--root` alone resolves to, for the ambient OMNI_DB_PATH cases.
   copyFileSync(join(dir, "db"), join(dir, "omnigateway.db"));
-  // Files, never directories: the frozen CLI's plugin reader skips them, so the
-  // registry is exactly the built-ins on both sides.
+  // A plain file in the plugins directory: discovery lists only directories,
+  // so the registry is exactly the built-ins on both sides.
   mkdirSync(join(dir, "plugins"));
   writeFileSync(join(dir, "plugins", "README"), "not a plugin");
 }
@@ -213,7 +216,13 @@ for (const id of ids) {
 await compare(["catalog"], { pty: true });
 await compare(["catalog", "--json"], { pty: true });
 await compare(["catalog", "--no-color"], { pty: true });
-await compare(["catalog", "--provider", "openai"], { pty: true, extraEnv: { NO_COLOR: "x" } });
+// pty.py drops the ambient NO_COLOR; PTY_NO_COLOR reaches the terminal as NO_COLOR.
+for (const value of ["x", "0", ""])
+  await compare(["catalog", "--provider", "openai"], {
+    pty: true,
+    extraEnv: { PTY_NO_COLOR: value },
+  });
+await compare(["catalog"], { pty: true, extraEnv: { PTY_NO_COLOR: "1" } });
 await compare(["catalog", "--provider", "openai"], { rootEnv: true });
 await compare(["catalog", "--provider", "kimi"], { prefix: ["--json"] });
 // Catalog never opens the store, so configuration it cannot load is irrelevant.
@@ -380,32 +389,255 @@ await compare(put("kimi:k3", "--yes=x"));
 await compare(put("kimi:k3", "--help=x"));
 reset();
 
-// Documented divergence, not a golden: plugin providers are unported. Frozen TS
-// imports every plugin directory and merges its providers in; Rust refuses
-// rather than answer from the built-ins alone. Every table stays unchanged.
-const rustRoot = roots[1];
-const rustCommand = commands[1];
-assert(rustRoot && rustCommand);
-mkdirSync(join(rustRoot, "plugins", "acme"));
-for (const args of [["catalog"], ["catalog", "--json"], put("kimi:k3"), put("nope:x")]) {
-  const before = snapshot(join(rustRoot, "db"));
-  const p = Bun.spawn([...rustCommand, "--root", rustRoot, "--db", "db", "models", ...args], {
-    cwd: rustRoot,
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const out = await new Response(p.stdout).text();
-  const err = await new Response(p.stderr).text();
-  assert.equal(await p.exited, 1, JSON.stringify(args));
-  assert.equal(out, "");
-  assert.equal(
-    err,
-    `plugin providers are not supported by this Rust CLI; found acme in ${join(rustRoot, "plugins")}\n`,
-  );
-  assert.deepEqual(snapshot(join(rustRoot, "db")), before);
+// --------------------------------------------- plugin discovery, no providers
+// Frozen discovery imports a plugin's server entry only when its directory name
+// is a plugin id, its manifest reads, parses and passes the schema, declares
+// `provider`, is loadable and names a server entry. Every other installation
+// has exactly the built-in registry; catalog and put print no plugin failures.
+// Each server.js here writes a sentinel into the root if it is ever imported,
+// which the unchanged-file-list check would catch.
+const valid = { id: "acme", name: "Acme", version: "1.0.0", api: 3, server: "server.js" };
+const provider = { ...valid, capabilities: ["provider"], origins: ["https://upstream.test"] };
+const sentinel = (dir: string) =>
+  `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(dir, "imported"))}, "yes");\nexport default { setup() { return {}; } };\n`;
+type Setup = (pluginsDir: string, rootDir: string) => void;
+function plugins(setup: Setup) {
+  for (const dir of roots) {
+    const home = join(dir, "plugins");
+    rmSync(home, { recursive: true, force: true });
+    mkdirSync(home);
+    writeFileSync(join(home, "README"), "not a plugin");
+    setup(home, dir);
+  }
 }
-console.log("PASS plugin refusal 4 Rust-only checks");
+const place =
+  (name: string, manifest: unknown, files: Record<string, string | null> = {}): Setup =>
+  (home, dir) => {
+    const at = join(home, name);
+    mkdirSync(at, { recursive: true });
+    if (manifest !== undefined)
+      writeFileSync(
+        join(at, "omni-plugin.json"),
+        typeof manifest === "string" ? manifest : JSON.stringify(manifest),
+      );
+    for (const [file, text] of Object.entries({ "server.js": sentinel(dir), ...files }))
+      if (text === null) mkdirSync(join(at, file), { recursive: true });
+      else writeFileSync(join(at, file), text);
+  };
+const noProviders: Array<[string, Setup]> = [
+  ["no plugins dir", (home) => rmSync(home, { recursive: true })],
+  [
+    "plugins is a file",
+    (home) => {
+      rmSync(home, { recursive: true });
+      writeFileSync(home, "x");
+    },
+  ],
+  ["empty subdirectory", (home) => mkdirSync(join(home, "acme"))],
+  [
+    "non-id directories",
+    (home) => {
+      for (const name of ["BAD", ".hidden", "-x", "a".repeat(33), "é", "1a"])
+        place(name, provider)(home, join(home, ".."));
+    },
+  ],
+  ["broken symlink", (home) => symlinkSync(join(home, "missing"), join(home, "acme"))],
+  ["no manifest", place("acme", undefined)],
+  ["manifest is a directory", place("acme", undefined, { "omni-plugin.json": null })],
+  ["empty manifest", place("acme", "")],
+  ["broken JSON", place("acme", '{"id":"acme","ca')],
+  ["BOM manifest", place("acme", `\ufeff${JSON.stringify(provider)}`)],
+  ...(["null", "[]", '"acme"', "3"] as const).map((raw): [string, Setup] => [
+    `JSON ${raw}`,
+    place("acme", raw),
+  ]),
+  ["server-only, no capabilities", place("acme", valid)],
+  ["empty capabilities", place("acme", { ...valid, capabilities: [] })],
+  ["storage capability", place("acme", { ...valid, capabilities: ["storage", "files"] })],
+  [
+    "net:outbound only",
+    place("acme", { ...valid, capabilities: ["net:outbound"], origins: ["https://a.test"] }),
+  ],
+  [
+    "UI-only plugin",
+    place(
+      "acme",
+      { id: "acme", name: "Acme", version: "1", api: 3, ui: "ui.js", sdk: "^1" },
+      { "ui.js": "x" },
+    ),
+  ],
+  [
+    "UI-only plugin, unloadable",
+    place("acme", { id: "acme", name: "Acme", version: "1", api: 99, ui: "gone.js", sdk: "^9" }),
+  ],
+  // Provider-capable but schema-invalid: never imported.
+  ["provider without origins", place("acme", { ...valid, capabilities: ["provider"] })],
+  ["provider, empty origins", place("acme", { ...provider, origins: [] })],
+  ...[
+    "https://upstream.test/path",
+    "HTTPS://upstream.test",
+    "https://Upstream.test",
+    "https://upstream.test:443",
+    "http://upstream.test:80",
+    "https://upstream.test?q",
+    "https://upstream.test#f",
+    "ftp://upstream.test",
+    "https://",
+    "upstream.test",
+    "",
+  ].map((origin): [string, Setup] => [
+    `provider origin ${origin}`,
+    place("acme", { ...provider, origins: [origin] }),
+  ]),
+  ["provider, unknown key", place("acme", { ...provider, extra: 1 })],
+  [
+    "provider, __proto__ key",
+    place("acme", `{"__proto__":{},${JSON.stringify(provider).slice(1)}`),
+  ],
+  ["provider, name too long", place("acme", { ...provider, name: `${"😀".repeat(64)}x` })],
+  ["provider, empty name", place("acme", { ...provider, name: "" })],
+  ["provider, long version", place("acme", { ...provider, version: "1".repeat(33) })],
+  ["provider, fractional api", place("acme", { ...provider, api: 3.5 })],
+  ["provider, string api", place("acme", { ...provider, api: "3" })],
+  ["provider, negative api", place("acme", { ...provider, api: -1 })],
+  ["provider, bad capability", place("acme", { ...provider, capabilities: ["provider", "x"] })],
+  ["provider, null capabilities", place("acme", { ...provider, capabilities: null })],
+  ["provider, ui without sdk", place("acme", { ...provider, ui: "ui.js" })],
+  ["provider, empty sdk", place("acme", { ...provider, sdk: "" })],
+  ["provider, defaults array", place("acme", { ...provider, defaults: [] })],
+  ["provider, defaults null", place("acme", { ...provider, defaults: null })],
+  ["provider, nav extra", place("acme", { ...provider, nav: { label: "x", y: 1 } })],
+  ["provider, long nav", place("acme", { ...provider, nav: { label: "x".repeat(33) } })],
+  ["provider, absolute server", place("acme", { ...provider, server: "/server.js" })],
+  ["provider, dotdot server", place("acme", { ...provider, server: "a/../server.js" })],
+  ["provider, empty server", place("acme", { ...provider, server: "" })],
+  ["provider, uppercase id", place("acme", { ...provider, id: "Acme" })],
+  ["provider, no entries", place("acme", { ...provider, server: undefined })],
+  // Valid provider manifests that are not loadable, or have no server entry.
+  ["provider, id mismatch", place("acme", { ...provider, id: "other" })],
+  ["provider, old api", place("acme", { ...provider, api: 2 })],
+  ["provider, missing server file", place("acme", { ...provider, server: "gone.js" })],
+  ["provider, server is a directory", place("acme", { ...provider, server: "lib" }, { lib: null })],
+  ["provider, server is the plugin dir", place("acme", { ...provider, server: "." })],
+  [
+    "provider, ui-only entry",
+    place("acme", { ...provider, server: undefined, ui: "ui.js", sdk: "^1" }, { "ui.js": "x" }),
+  ],
+];
+for (const [name, setup] of noProviders) {
+  plugins(setup);
+  for (const args of [
+    ["catalog", "--provider", "kimi", "--json"],
+    ["catalog", "--provider", "kimi"],
+    put("kimi:k3", "--json"),
+    put("nope:x"),
+  ]) {
+    try {
+      await compare(args, { readOnly: args[0] === "catalog" });
+    } catch (e) {
+      console.error(`case: ${name}`);
+      throw e;
+    }
+  }
+}
+// Unreadable manifest: TS reads null and records a failure; nothing is imported.
+plugins(place("acme", provider));
+for (const dir of roots) chmodSync(join(dir, "plugins", "acme", "omni-plugin.json"), 0);
+await compare(["catalog", "--provider", "kimi", "--json"]);
+await compare(put("kimi:k3"));
+for (const dir of roots) chmodSync(join(dir, "plugins", "acme", "omni-plugin.json"), 0o644);
+
+// ------------------------------------------- actual provider plugins: refused
+// Documented divergence, not a golden. A plugin that passes every check above
+// is imported by frozen TS, which merges whatever providers it declares. Rust
+// cannot run plugin code, so it refuses rather than answer from the built-ins
+// alone. Each case first proves TS imports the entry, then that Rust refuses
+// without importing or writing.
+const declaring = (dir: string) =>
+  `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "imported"))}, "yes");
+export default {
+  providers: [{
+    descriptor: {
+      id: "acme",
+      capabilities: { tools: true, images: false, reasoning: false },
+      writeOverInput: { fiveMinute: 0, oneHour: 0 },
+      catalog: { defaultModel: "acme-1", authTypes: ["apiKey"], models: [{
+        id: "acme-1", label: "Acme One",
+        pricing: { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
+        limits: { contextWindow: 123000, maxOutputTokens: 4096 },
+      }] },
+      modelPrefixes: [],
+      presentation: { label: "Acme", order: 90, tone: "cyan", colour: { light: "x", dark: "y" } },
+    },
+    codec: { buildRequest: () => ({}), decode: async function* () {} },
+  }],
+  setup() { return {}; },
+};
+`;
+let refused = 0;
+for (const [name, files, contributes] of [
+  ["declares a provider", (dir: string) => ({ "server.js": declaring(dir) }), true],
+  ["imports but declares none", (dir: string) => ({ "server.js": sentinel(dir) }), false],
+  [
+    "valid via symlinked directory and odd entry spelling",
+    (dir: string) => ({ "server.js": declaring(dir) }),
+    true,
+  ],
+] as const) {
+  const [tsRoot, rustRoot] = roots;
+  const [tsCommand, rustCommand] = commands;
+  assert(tsRoot && rustRoot && tsCommand && rustCommand);
+  const symlinked = name.startsWith("valid via symlinked");
+  for (const dir of roots) {
+    const home = join(dir, "plugins");
+    rmSync(home, { recursive: true, force: true });
+    rmSync(join(dir, "imported"), { force: true });
+    rmSync(join(dir, "elsewhere"), { recursive: true, force: true });
+    mkdirSync(home);
+    const at = symlinked ? join(dir, "elsewhere") : join(home, "acme");
+    place(
+      "",
+      { ...provider, ...(symlinked ? { server: "./server.js", sdk: "^99", ui: "gone.js" } : {}) },
+      files(dir),
+    )(at, dir);
+    if (symlinked) symlinkSync(at, join(home, "acme"));
+  }
+  const ts = Bun.spawn(
+    [...tsCommand, "--root", tsRoot, "--db", "db", "models", "catalog", "--json"],
+    { cwd: tsRoot, env, stdout: "pipe", stderr: "pipe" },
+  );
+  const tsOut = await new Response(ts.stdout).text();
+  assert.equal(await ts.exited, 0, name);
+  assert(existsSync(join(tsRoot, "imported")), `${name}: TS imported the plugin`);
+  assert.equal(tsOut.includes('"provider": "acme"'), contributes, name);
+  for (const args of [["catalog"], ["catalog", "--json"], put("kimi:k3"), put("nope:x")]) {
+    const before = snapshot(join(rustRoot, "db"));
+    const p = Bun.spawn([...rustCommand, "--root", rustRoot, "--db", "db", "models", ...args], {
+      cwd: rustRoot,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(p.stdout).text();
+    const err = await new Response(p.stderr).text();
+    assert.equal(await p.exited, 1, JSON.stringify(args));
+    assert.equal(out, "");
+    assert.equal(
+      err,
+      `plugin providers are not supported by this Rust CLI; acme in ${join(rustRoot, "plugins")} declares one\n`,
+    );
+    assert.deepEqual(snapshot(join(rustRoot, "db")), before);
+    assert(!existsSync(join(rustRoot, "imported")), "Rust never imports plugin code");
+    refused++;
+  }
+}
+for (const dir of roots) {
+  rmSync(join(dir, "imported"), { force: true });
+  rmSync(join(dir, "elsewhere"), { recursive: true, force: true });
+}
+plugins(() => {});
+console.log(`PASS plugin refusal ${refused} Rust-only checks`);
 if (red > 0) {
   console.log(`RED ${red} of ${count} catalog comparisons`);
   process.exit(1);

@@ -16,6 +16,9 @@ attrs[3] &= ~termios.ECHO
 termios.tcsetattr(slave, termios.TCSANOW, attrs)
 env = dict(os.environ)
 env.pop("NO_COLOR", None)
+# Opt-in: PTY_NO_COLOR becomes NO_COLOR inside the terminal, for suppression cases.
+if "PTY_NO_COLOR" in env:
+    env["NO_COLOR"] = env.pop("PTY_NO_COLOR")
 env["TERM"] = "xterm-256color"
 p = subprocess.Popen(sys.argv[2:], stdin=slave, stdout=slave, stderr=slave, env=env)
 os.close(slave)
