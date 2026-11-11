@@ -79,8 +79,8 @@ const MUTANTS: Mutant[] = [
   {
     name: "unicode-case-folding",
     file: `${RTK}/jsre.rs`,
-    from: '    Ok(if multiline { format!("(?m:{out})") } else { out })',
-    to: '    let out = if icase { format!("(?i:{out})") } else { out };\n    Ok(if multiline { format!("(?m:{out})") } else { out })',
+    from: '    Ok(if multiline {\n        format!("(?m:{out})")',
+    to: '    let out = if icase { format!("(?i:{out})") } else { out };\n    Ok(if multiline {\n        format!("(?m:{out})")',
   },
   // Detection and naming (lib.rs).
   {
