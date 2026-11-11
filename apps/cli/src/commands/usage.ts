@@ -1,6 +1,20 @@
-import { exportLogs, type LogFilterInput, pageLogs, queryUsage } from "@omni/control";
+import {
+  exportLogs,
+  getLog,
+  type LogFilterInput,
+  pageLogs,
+  queryUsage,
+  sessionSummary,
+} from "@omni/control";
 import type { RequestLog, RequestLogCursor } from "@omni/store";
-import { boolFlag, numberFlag, type Parsed, stringFlag, UsageError } from "../args.ts";
+import {
+  boolFlag,
+  numberFlag,
+  type Parsed,
+  requirePositional,
+  stringFlag,
+  UsageError,
+} from "../args.ts";
 import { type Command, state } from "../command.ts";
 import { emit, formatTime, formatUsd, paint, table } from "../output.ts";
 import { serviceLogs } from "../service.ts";
@@ -89,6 +103,10 @@ const LOG_FILTER_OPTIONS = {
   account: { type: "string" },
   key: { type: "string" },
   "error-code": { type: "string" },
+  session: { type: "string" },
+  turn: { type: "string" },
+  agent: { type: "string" },
+  tag: { type: "string" },
 } as const;
 
 /**
@@ -119,6 +137,10 @@ function logFilters(values: Parsed["values"]): LogFilterInput {
     credentialId: stringFlag(values, "account"),
     apiKeyId: stringFlag(values, "key"),
     errorCode: stringFlag(values, "error-code"),
+    session: stringFlag(values, "session"),
+    turn: stringFlag(values, "turn"),
+    agent: stringFlag(values, "agent"),
+    tag: stringFlag(values, "tag"),
   };
 }
 
@@ -304,5 +326,104 @@ export const logsExport: Command = {
     })) {
       writer.raw(chunk);
     }
+  },
+};
+
+export const logsSessions: Command = {
+  usage: "logs sessions --since T --until T [--key ID] [--agent NAME]",
+  summary: "Per-session request, token and cost totals, highest cost first",
+  options: {
+    since: { type: "string" },
+    until: { type: "string" },
+    key: { type: "string" },
+    agent: { type: "string" },
+  },
+  async run(args, { ctx, writer }) {
+    const since = stringFlag(args.values, "since");
+    const until = stringFlag(args.values, "until");
+    // Required here as in the API: a grouped read over raw rows with no range
+    // is a read of the whole retention window.
+    if (since === undefined || until === undefined) {
+      throw new UsageError("logs sessions needs --since and --until");
+    }
+    const sessions = await sessionSummary(await ctx.store(), {
+      since: instant(since, 0),
+      until: instant(until, 0),
+      apiKeyId: stringFlag(args.values, "key"),
+      agent: stringFlag(args.values, "agent"),
+    });
+    emit(ctx, writer, { sessions }, () =>
+      sessions.length === 0
+        ? "no sessions in this window"
+        : table(
+            [
+              { header: "SESSION" },
+              { header: "AGENT" },
+              { header: "KEY" },
+              { header: "LAST" },
+              { header: "REQUESTS", align: "right" },
+              { header: "TURNS", align: "right" },
+              { header: "FAILED", align: "right" },
+              { header: "TOKENS", align: "right" },
+              { header: "COST", align: "right" },
+            ],
+            sessions.map((row) => [
+              row.sessionId,
+              row.agent ?? "—",
+              row.apiKeyId ?? "—",
+              paint(ctx, "dim", formatTime(row.lastAt)),
+              String(row.requests),
+              String(row.turns),
+              String(row.failed),
+              `${row.inputTokens}+${row.outputTokens}`,
+              formatUsd(row.costUsd),
+            ]),
+          ),
+    );
+  },
+};
+
+export const logsShow: Command = {
+  usage: "logs show <request-id>",
+  summary: "Everything recorded about one request, its trace and ids included",
+  options: {},
+  async run(args, { ctx, writer }) {
+    const id = requirePositional(args, 0, "request id");
+    const log = await getLog(await ctx.store(), id);
+    if (log === null) throw new UsageError(`no request ${id} in the retained log`);
+    const dash = (value: string | null): string => value ?? "—";
+    emit(ctx, writer, { log }, () =>
+      [
+        ["request", log.id],
+        ["at", formatTime(log.at)],
+        ["state", log.state],
+        ["requested", log.requestedModel || "—"],
+        [
+          "resolved",
+          log.resolvedProvider === null ? "—" : `${log.resolvedProvider}/${log.resolvedModel}`,
+        ],
+        ["status", log.errorCode === null ? String(log.status) : `${log.status} ${log.errorCode}`],
+        ["attempts", String(log.attempts)],
+        ["tokens", `${log.inputTokens}+${log.outputTokens}`],
+        ["cost", formatUsd(log.costUsd)],
+        ["session", dash(log.sessionId)],
+        ["turn", dash(log.turnId)],
+        ["agent", dash(log.agent)],
+        ["tags", log.tags.length === 0 ? "—" : log.tags.join(", ")],
+        [
+          "metadata",
+          Object.keys(log.traceMetadata).length === 0
+            ? "—"
+            : Object.entries(log.traceMetadata)
+                .map(([key, value]) => `${key}=${value}`)
+                .join(", "),
+        ],
+        ["client id", dash(log.clientRequestId)],
+        ["provider id", dash(log.upstreamRequestId)],
+        ["degradations", log.degradations.length === 0 ? "—" : log.degradations.join(", ")],
+      ]
+        .map(([label, value]) => `${paint(ctx, "dim", (label ?? "").padEnd(13))}${value}`)
+        .join("\n"),
+    );
   },
 };

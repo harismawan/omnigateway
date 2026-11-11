@@ -30,10 +30,12 @@ import { requestLog } from "@omni/testkit";
  * operator row.
  */
 const CLIENT_LOG_FIELDS = [
+  "agent",
   "at",
   "attempts",
   "cacheReadTokens",
   "cacheWriteTokens",
+  "clientRequestId",
   "costUsd",
   "degradations",
   "durationMs",
@@ -46,9 +48,13 @@ const CLIENT_LOG_FIELDS = [
   "resolvedProvider",
   "rtkApplied",
   "rtkEstimatedTokensSaved",
+  "sessionId",
   "state",
   "status",
+  "tags",
+  "traceMetadata",
   "ttftMs",
+  "turnId",
 ] as const;
 
 test("the client log projection carries exactly the columns the console mirrors", () => {
@@ -75,6 +81,8 @@ test("the operator's identity and RTK accounting stay off the client row", () =>
     "rtkFilterHits",
     "rtkOriginalCodeUnits",
     "rtkCompressedCodeUnits",
+    // The provider's request id names a request on the operator's account.
+    "upstreamRequestId",
   ]) {
     expect({ field, present: field in projected }).toEqual({ field, present: false });
   }

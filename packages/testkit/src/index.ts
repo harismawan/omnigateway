@@ -22,7 +22,14 @@ import type {
   Target,
   VirtualModel,
 } from "@omni/store";
-import { createStore, DEFAULT_SETTINGS, deriveKey, generateApiKey, hashApiKey } from "@omni/store";
+import {
+  createStore,
+  DEFAULT_SETTINGS,
+  deriveKey,
+  EMPTY_TRACE,
+  generateApiKey,
+  hashApiKey,
+} from "@omni/store";
 
 let seq = 0;
 
@@ -270,6 +277,7 @@ export function requestLog(overrides: Partial<RequestLog> & { id: string }): Req
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    ...EMPTY_TRACE,
     ...overrides,
   };
 }

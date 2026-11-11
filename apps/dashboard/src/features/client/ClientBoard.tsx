@@ -11,6 +11,7 @@ import {
   useClientQuotaHistory,
   useClientSummary,
   useClientUsage,
+  useLogSessions,
   useTrimToHead,
 } from "../../api/queries.ts";
 import {
@@ -44,6 +45,7 @@ import { Table, Td, Th, Tr } from "../../ui/Table.tsx";
 import { groupReadings } from "../keys/limits.ts";
 import { LogFilterBar } from "../logs/LogFilterBar.tsx";
 import { RequestDetail, RequestTable, useCurrentTime } from "../logs/RequestTable.tsx";
+import { SessionsTable } from "../logs/SessionsTable.tsx";
 import { chartSpanOf, WindowChart } from "../quota/WindowChart.tsx";
 import { SummaryDeck } from "../usage/SummaryDeck.tsx";
 import { RANGES, type RangeId, rangeOf, startOfDay } from "../usage/shared.ts";
@@ -277,6 +279,17 @@ export function ClientBoard() {
   const series = useClientUsage({ ...common, groupBy: range.by }, cadence(60_000, "res:usage"));
   const byModel = useClientUsage({ ...common, groupBy: "model" }, cadence(60_000, "res:usage"));
   const logs = useClientLogPages(filters, limit, cadence(LOG_CADENCE_MS, "res:logs"));
+  // The key's own sessions over the board's range, capped at the gateway's
+  // 31-day ceiling on a grouped read. Scoped by the route, never by a param.
+  // Open-ended, ending at fetch time, so new requests keep counting.
+  const sessions = useLogSessions(
+    { since: null, until: null, spanMs: Math.min(range.ms, 31 * 86_400_000) },
+    true,
+    true,
+    cadence(LOG_CADENCE_MS, "res:logs"),
+  );
+  const filterSession = (sessionId: string) =>
+    setFilters((current) => ({ ...current, session: sessionId }));
   // Loading scrollback stops the poll and the push, so the panel says so and
   // offers the way back rather than leaving a frozen head to be read as a key
   // that has served nothing since.
@@ -674,6 +687,30 @@ export function ClientBoard() {
       </Section>
 
       <Section
+        legend="Sessions"
+        meta={`${(sessions.data ?? []).length} in range`}
+        query={{
+          isLoading: sessions.isLoading,
+          isError: sessions.isError,
+          error: sessions.error,
+          refetch: () => void sessions.refetch(),
+        }}
+        failure="Could not read your sessions"
+        empty={{
+          legend: "No sessions",
+          message: "None of your requests in this range carried a session.",
+        }}
+        isEmpty={(sessions.data ?? []).length === 0}
+      >
+        <ScrollX>
+          <SessionsTable
+            sessions={sessions.data ?? []}
+            onOpen={(session) => filterSession(session.sessionId)}
+          />
+        </ScrollX>
+      </Section>
+
+      <Section
         legend="Recent requests"
         meta={`${rows.length} shown`}
         actions={
@@ -736,7 +773,7 @@ export function ClientBoard() {
         <ScrollX>
           {/* No `names`: the account that served a request is the operator's
               infrastructure, and this session cannot read the labels anyway. */}
-          <RequestTable rows={rows} now={now} onOpen={setOpen} />
+          <RequestTable rows={rows} now={now} onOpen={setOpen} onSession={filterSession} />
         </ScrollX>
       </Section>
 

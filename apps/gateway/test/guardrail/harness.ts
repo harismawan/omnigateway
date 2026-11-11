@@ -86,7 +86,12 @@ export type Harness = {
   classifierCalled: () => Promise<void>;
   call: (
     surface: Surface,
-    opts?: { stream?: boolean; body?: Record<string, unknown>; signal?: AbortSignal },
+    opts?: {
+      stream?: boolean;
+      body?: Record<string, unknown>;
+      signal?: AbortSignal;
+      headers?: Record<string, string>;
+    },
   ) => Promise<Response>;
 };
 
@@ -208,7 +213,11 @@ export async function guardrailHarness(
     app.handle(
       new Request(`http://localhost${PATH[surface]}`, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${raw}` },
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${raw}`,
+          ...callOpts.headers,
+        },
         body: JSON.stringify({
           ...bodyFor(surface, callOpts.stream ?? false),
           ...callOpts.body,

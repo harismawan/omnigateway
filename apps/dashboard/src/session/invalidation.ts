@@ -72,6 +72,9 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
     predicate: (query) =>
       (query.queryKey[0] === "logs" && query.queryKey[1] !== "body") ||
       (query.queryKey[0] === "client" && query.queryKey[1] === "logs") ||
+      // The Sessions summaries total the same rows, so they move with them.
+      query.queryKey[0] === "logSessions" ||
+      (query.queryKey[0] === "client" && query.queryKey[1] === "sessions") ||
       ((query.queryKey[0] === "logPages" ||
         (query.queryKey[0] === "client" && query.queryKey[1] === "logPages")) &&
         isHeadPage(query.state.data)),

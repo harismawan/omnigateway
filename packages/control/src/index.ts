@@ -128,11 +128,14 @@ export {
   exportHeader,
   exportLogs,
   exportRow,
+  getLog,
   type LogExportFormat,
   type LogExportInput,
   type LogFilterInput,
   type LogPage,
   pageLogs,
+  type SessionSummaryInput,
+  sessionSummary,
 } from "./logs.ts";
 export {
   type ModelLimits,

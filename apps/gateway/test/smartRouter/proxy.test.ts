@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ErrorCode } from "@omni/ir";
 import { buildSnapshot } from "@omni/router";
 import { createStore, deriveKey, type RequestLog } from "@omni/store";
+import { unwatched } from "../../src/dispatch/upstreamRequestId.ts";
 import { anthropicErrorBody } from "../../src/egress/anthropic.ts";
 import { openaiErrorBody } from "../../src/egress/openai.ts";
 import { responsesErrorBody } from "../../src/egress/responses.ts";
@@ -518,12 +519,12 @@ test("classifier requests carry no ponytail or RTK and go through the bare trans
   expect(JSON.stringify(h.externalCalls[0]?.request.system)).toContain(
     "You are a lazy senior developer.",
   );
-  expect(h.externalCalls[0]?.http).not.toBe(transport);
+  expect(unwatched(h.externalCalls[0]?.http ?? transport)).not.toBe(transport);
   expect(h.classifierCalls.length).toBeGreaterThan(0);
   for (const call of h.classifierCalls) {
     expect(call.request.system).toEqual([{ type: "text", text: CONFIDENTIALITY_INSTRUCTION }]);
     expect(JSON.stringify(call.request)).not.toContain("lazy senior developer");
-    expect(call.http).toBe(transport);
+    expect(unwatched(call.http)).toBe(transport);
   }
   // RTK would have collapsed the repeated lines before the classifier saw them.
   expect(h.classifierCalls.map(sentText).join("\n")).toContain("case passed\ncase passed");
@@ -876,5 +877,19 @@ test("a guardrail-only screen that throws warns with the usage policy reason", a
     { requestId: "req_1", reason: "usage policy check threw" },
   ]);
   for (const line of h.logger.lines) expect(line).not.toContain("LEAKED-STORE-TEXT");
+  h.store.close();
+});
+
+test("the smart-router check row carries the parent's trace", async () => {
+  const h = await smartRouterHarness();
+  const res = await h.call("openai", {
+    body: bodyWith("openai", SECRET),
+    headers: { "x-omni-session-id": "job-7", "x-omni-metadata": "owner:ops" },
+  });
+  expect(res.status).toBe(200);
+  const rows = await h.store.usage.recent(50);
+  const check = rows.find((r) => r.degradations.includes("smart-router:classifier"));
+  expect(check).toMatchObject({ sessionId: "job-7", traceMetadata: { owner: "ops" } });
+  expect(await rowOf(h, "req_1")).toMatchObject({ sessionId: "job-7" });
   h.store.close();
 });

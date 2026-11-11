@@ -48,6 +48,17 @@ export type ClientRequestLog = {
   degradations: string[];
   rtkApplied: boolean;
   rtkEstimatedTokensSaved: number;
+  /**
+   * The trace the key holder's own client sent, handed back as sent. The
+   * provider's request id (`upstreamRequestId`) is deliberately absent: it
+   * names a request on the operator's provider account.
+   */
+  sessionId: string | null;
+  turnId: string | null;
+  agent: RequestLog["agent"];
+  tags: string[];
+  traceMetadata: Record<string, string>;
+  clientRequestId: string | null;
 };
 
 /**
@@ -97,5 +108,11 @@ export function toClientLog(log: RequestLog): ClientRequestLog {
     degradations: log.degradations.filter(isClientVisibleDegradation),
     rtkApplied: log.rtkApplied,
     rtkEstimatedTokensSaved: log.rtkEstimatedTokensSaved,
+    sessionId: log.sessionId,
+    turnId: log.turnId,
+    agent: log.agent,
+    tags: [...log.tags],
+    traceMetadata: { ...log.traceMetadata },
+    clientRequestId: log.clientRequestId,
   };
 }

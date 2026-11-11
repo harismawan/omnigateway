@@ -65,10 +65,25 @@ const TERMS = [
   { prefix: "resolved", field: "resolvedModel" },
   { prefix: "requested", field: "requestedModel" },
   { prefix: "error", field: "errorCode" },
+  // Exact, unlike the four above: ids copied off a row. A session id is itself
+  // `<agent>:<id>`, which is why everything after the first colon is the value.
+  { prefix: "session", field: "session" },
+  { prefix: "turn", field: "turn" },
+  { prefix: "agent", field: "agent" },
+  { prefix: "tag", field: "tag" },
 ] as const satisfies ReadonlyArray<{ prefix: string; field: keyof LogFilters }>;
 
 /** What the box writes, and the only keys it may clear. */
-const TERM_FIELDS = ["model", "resolvedModel", "requestedModel", "errorCode"] as const;
+const TERM_FIELDS = [
+  "model",
+  "resolvedModel",
+  "requestedModel",
+  "errorCode",
+  "session",
+  "turn",
+  "agent",
+  "tag",
+] as const;
 
 type TermFilters = Pick<LogFilters, (typeof TERM_FIELDS)[number]>;
 
@@ -120,6 +135,10 @@ export function formatTerms(filters: LogFilters): string {
   if (filters.resolvedModel !== undefined) parts.push(`resolved:${filters.resolvedModel}`);
   if (filters.requestedModel !== undefined) parts.push(`requested:${filters.requestedModel}`);
   if (filters.errorCode !== undefined) parts.push(`error:${filters.errorCode}`);
+  if (filters.session !== undefined) parts.push(`session:${filters.session}`);
+  if (filters.turn !== undefined) parts.push(`turn:${filters.turn}`);
+  if (filters.agent !== undefined) parts.push(`agent:${filters.agent}`);
+  if (filters.tag !== undefined) parts.push(`tag:${filters.tag}`);
   return parts.join(" ");
 }
 
