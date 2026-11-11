@@ -139,7 +139,7 @@ pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String>
         if have.is_empty() {
             continue;
         }
-        let reach = model_auths(&provider, &model_id);
+        let reach = crate::catalog::model_auths(&provider, &model_id);
         if reach.iter().any(|a| have.contains(a)) {
             continue;
         }
@@ -170,7 +170,7 @@ pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String>
         };
         return Err(format!(
             "BAD_REQUEST: {provider} serves \"{model_id}\" to {} credentials only, and {holds} — {fix}",
-            phrase(reach)
+            phrase(&reach)
         ));
     }
     let strategy = crate::operator_json::string(get(&model, "strategy").expect("schema"))?;
@@ -184,36 +184,4 @@ pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String>
         get(&model, "isAlias") == Some(&JsValue::Bool(true)),
     )
     .map_err(|e| e.to_string())
-}
-
-fn model_auths(provider: &str, model: &str) -> &'static [&'static str] {
-    match provider {
-        "qoder" | "antigravity" => &["oauth"],
-        "custom" => &["apiKey"],
-        "kilo"
-            if matches!(
-                model,
-                "nvidia/nemotron-3-ultra-550b-a55b:free"
-                    | "nvidia/nemotron-3.5-lightning:free"
-                    | "dots-studio/dots-3-note-preview:free"
-                    | "cohere/north-mini-code:free"
-                    | "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
-                    | "stepfun/step-3.7-flash:free"
-                    | "nvidia/nemotron-3-super-120b-a12b:free"
-                    | "tencent/hy3:free"
-                    | "poolside/laguna-s-2.1:free"
-                    | "poolside/laguna-xs-2.1:free"
-                    | "liquid/lfm-2.5-2.6b:free"
-                    | "nvidia/nemotron-3.5-content-safety:free"
-                    | "kilo-auto/frontier"
-                    | "kilo-auto/balanced"
-                    | "kilo-auto/efficient"
-                    | "kilo-auto/small"
-                    | "kilo-auto/free"
-            ) =>
-        {
-            &["apiKey"]
-        }
-        _ => &["oauth", "apiKey"],
-    }
 }

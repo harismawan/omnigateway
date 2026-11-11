@@ -5,6 +5,7 @@ pub fn usage(command: &str) -> &'static str {
         "models-list" => "models list",
         "models-show" => "models show <id>",
         "models-rm" => "models rm <id>",
+        "models-catalog" => "models catalog [--provider P]",
         "models-put" => "models put <id> (-f model.json | --from-catalog <provider>:<model> ...)",
         "settings-get" => "settings get",
         "settings-set" => "settings set <path> <value>",

@@ -19,7 +19,20 @@ fn absolute(base: &Path, value: &str) -> PathBuf {
     }
     out
 }
+/// `createContext`: installation root, database path and deferred config.
+/// Resolving prints the ambient-database warning, as TS does before a command
+/// runs; opening the store is a separate, later step.
+pub struct Context {
+    pub root: PathBuf,
+    path: PathBuf,
+    config: Result<Config, omni_control::config::ConfigError>,
+}
+
 pub fn open(flags: &HashMap<String, String>) -> Result<omni_store::SqliteStore, String> {
+    resolve(flags)?.open()
+}
+
+pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
     let mut env = process_env();
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let flag_root = flags.get("root").filter(|s| !s.is_empty());
@@ -90,17 +103,23 @@ pub fn open(flags: &HashMap<String, String>) -> Result<omni_store::SqliteStore, 
             path.display()
         );
     }
-    let Config {
-        day_offset_minutes, ..
-    } = config.map_err(|e| e.to_string())?;
-    // No encrypted fields are read. Keep config validation, defer the existing
-    // crypto KDF until a future command actually needs credentials.
-    omni_store::SqliteStore::open(path, day_offset_minutes).map_err(|e| match &e {
-        omni_store::StoreError::Sqlite(sql)
-            if sql.sqlite_error_code() == Some(rusqlite::ErrorCode::CannotOpen) =>
-        {
-            "unable to open database file".into()
-        }
-        _ => e.to_string(),
-    })
+    Ok(Context { root, path, config })
+}
+
+impl Context {
+    pub fn open(self) -> Result<omni_store::SqliteStore, String> {
+        let Config {
+            day_offset_minutes, ..
+        } = self.config.map_err(|e| e.to_string())?;
+        // No encrypted fields are read. Keep config validation, defer the existing
+        // crypto KDF until a future command actually needs credentials.
+        omni_store::SqliteStore::open(self.path, day_offset_minutes).map_err(|e| match &e {
+            omni_store::StoreError::Sqlite(sql)
+                if sql.sqlite_error_code() == Some(rusqlite::ErrorCode::CannotOpen) =>
+            {
+                "unable to open database file".into()
+            }
+            _ => e.to_string(),
+        })
+    }
 }

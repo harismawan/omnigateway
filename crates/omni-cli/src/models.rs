@@ -56,16 +56,26 @@ fn targets(v: &JsValue, show: bool) -> Result<&[JsValue], String> {
         )),
     }
 }
+/// `provider()`: the descriptor's tone through the CLI's own escape table,
+/// cyan for an unknown provider or a tone this terminal cannot paint.
 fn provider(v: &JsValue, color: bool) -> Result<String, String> {
     let s = text(v)?;
-    let code = match s.as_str() {
-        "anthropic" => "35",
-        "openai" => "32",
-        "kimi" => "34",
-        "grok" => "33",
-        "kilo" => "38;5;208",
-        "antigravity" | "qoder" => "38;5;99",
-        "muse" => "38;5;33",
+    let tone = omni_control::catalog::descriptor(&s)
+        .and_then(|d| get(d, "presentation"))
+        .and_then(|p| get(p, "tone"));
+    let code = match tone {
+        Some(JsValue::String(t)) => match String::from_utf16_lossy(t).as_str() {
+            "dim" => "2",
+            "red" => "31",
+            "green" => "32",
+            "yellow" => "33",
+            "blue" => "34",
+            "magenta" => "35",
+            "orange" => "38;5;208",
+            "violet" => "38;5;99",
+            "azure" => "38;5;33",
+            _ => "36",
+        },
         _ => "36",
     };
     Ok(if color {
@@ -435,14 +445,130 @@ fn human(model: &JsValue, color: bool) -> Result<String, String> {
         )
     ))
 }
+/// Plugin providers are not ported. The frozen CLI imports every plugin
+/// directory and merges its providers into the catalog; rather than answer
+/// from the built-ins alone, refuse whenever `<root>/plugins` holds one.
+fn refuse_plugins(root: &std::path::Path) -> Result<(), String> {
+    let dir = root.join("plugins");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(());
+    };
+    let mut found: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|e| std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    found.sort();
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "plugin providers are not supported by this Rust CLI; found {} in {}",
+        found.join(", "),
+        dir.display()
+    ))
+}
+
+fn catalog(only: Option<&str>, json: bool, color: bool) -> Result<String, String> {
+    let rows = omni_control::catalog::rows(only);
+    if json {
+        let models = rows
+            .iter()
+            .map(|(id, m)| {
+                let JsValue::Object(fields) = m else {
+                    unreachable!("generated row")
+                };
+                let mut fields = fields.clone();
+                fields.push((
+                    "provider".encode_utf16().collect(),
+                    JsValue::String(id.encode_utf16().collect()),
+                ));
+                JsValue::Object(fields)
+            })
+            .collect();
+        return Ok(jsjson::stringify_pretty(&JsValue::Object(vec![(
+            "models".encode_utf16().collect(),
+            JsValue::Array(models),
+        )]))
+        .expect("catalog JSON"));
+    }
+    let mut table_rows = Vec::new();
+    for (id, m) in &rows {
+        let pricing = prop(m, "pricing");
+        let limits = prop(m, "limits");
+        // `choiceLimits(entry, "oauth")`: the OAuth backend's figures, else the API's.
+        let oauth = match prop(m, "oauthLimits") {
+            JsValue::Undefined => limits,
+            o => o,
+        };
+        let mut row = vec![
+            provider(&JsValue::String(id.encode_utf16().collect()), color)?,
+            text(prop(m, "id"))?,
+            text(prop(m, "label"))?,
+        ];
+        for key in [
+            "input",
+            "output",
+            "cacheRead",
+            "cacheWrite5m",
+            "cacheWrite1h",
+        ] {
+            row.push(price(prop(pricing, key))?);
+        }
+        row.push(tokens(prop(limits, "contextWindow"))?);
+        row.push(
+            if prop(oauth, "contextWindow") == prop(limits, "contextWindow") {
+                "—".into()
+            } else {
+                tokens(prop(oauth, "contextWindow"))?
+            },
+        );
+        row.push(tokens(prop(limits, "maxOutputTokens"))?);
+        table_rows.push(row);
+    }
+    Ok(table(
+        &[
+            "PROVIDER",
+            "MODEL",
+            "LABEL",
+            "IN $/MTOK",
+            "OUT $/MTOK",
+            "CACHE R",
+            "CACHE W 5M",
+            "CACHE W 1H",
+            "CONTEXT",
+            "CONTEXT OAUTH",
+            "MAX OUT",
+        ],
+        &(3..11).collect::<Vec<_>>(),
+        table_rows,
+    ))
+}
+
 pub fn run(
     command: &str,
     flags: &HashMap<String, String>,
     args: &[String],
+    specs: &[String],
 ) -> Result<String, (u8, String)> {
     let show = command == "models-show";
     let remove = command == "models-rm";
     let put = command == "models-put";
+    // `createContext` runs before the command: root resolution and the
+    // ambient-database warning precede every command error.
+    let ctx = crate::context::resolve(flags).map_err(|e| (1, e))?;
+    let color = !flags.contains_key("no-color")
+        && std::env::var("NO_COLOR").unwrap_or_default().is_empty()
+        && std::io::stdout().is_terminal();
+    if command == "models-catalog" {
+        refuse_plugins(&ctx.root).map_err(|e| (1, e))?;
+        return catalog(
+            flags.get("provider").map(String::as_str),
+            flags.contains_key("json"),
+            color,
+        )
+        .map_err(|e| (1, e));
+    }
     if (show || remove || put) && args.first().is_none_or(String::is_empty) {
         return Err((2, "model id is required".into()));
     }
@@ -458,10 +584,25 @@ pub fn run(
                     .map_err(|_| (1, format!("{file} is not valid JSON")))?,
             )
         } else if flags.contains_key("from-catalog") {
-            return Err((
-                1,
-                "models put --from-catalog is not implemented in the Rust CLI".into(),
-            ));
+            refuse_plugins(&ctx.root).map_err(|e| (1, e))?;
+            let targets = specs
+                .iter()
+                .map(|spec| omni_control::catalog::target(spec))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| (2, e))?;
+            let field = |k: &str, v: JsValue| (k.encode_utf16().collect(), v);
+            let units = |s: &str| JsValue::String(s.encode_utf16().collect());
+            // The draft `putModel` validates: strategy defaults only when the
+            // flag is absent, so a blank or unknown one reaches the schema.
+            Some(JsValue::Object(vec![
+                field("id", units(&args[0])),
+                field(
+                    "strategy",
+                    units(flags.get("strategy").map_or("score", String::as_str)),
+                ),
+                field("isAlias", JsValue::Bool(flags.contains_key("alias"))),
+                field("targets", JsValue::Array(targets)),
+            ]))
         } else {
             return Err((
                 2,
@@ -472,7 +613,7 @@ pub fn run(
         None
     };
     let run = || -> Result<String, String> {
-        let store = crate::context::open(flags)?;
+        let store = ctx.open()?;
         if let Some(input) = &input {
             let id = &args[0];
             omni_control::models::put(&store, id, input)?;
@@ -515,9 +656,6 @@ pub fn run(
                 format!("{id} removed")
             });
         }
-        let color = !flags.contains_key("no-color")
-            && std::env::var("NO_COLOR").unwrap_or_default().is_empty()
-            && std::io::stdout().is_terminal();
         let models = if show {
             vec![omni_control::models::get(&store, &args[0])?]
         } else {

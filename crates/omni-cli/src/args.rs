@@ -12,7 +12,7 @@ pub fn resolve(args: &[String]) -> Option<(String, Vec<String>)> {
     if args.get(i).map(String::as_str) == Some("models")
         && args
             .get(i + 1)
-            .is_some_and(|s| matches!(s.as_str(), "list" | "show" | "rm" | "put"))
+            .is_some_and(|s| matches!(s.as_str(), "list" | "show" | "rm" | "put" | "catalog"))
     {
         return Some((
             format!("models-{}", args[i + 1]),
@@ -88,7 +88,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                     if matches!(c, 'y' | 'h') {
                         flags.insert(if c == 'y' { "yes" } else { "help" }.into(), "true".into());
                     } else {
-                        return Err(unknown(&format!("-{c}")));
+                        return Err(unknown(&c.to_string()));
                     }
                 }
                 let value = if token.len() > at + 1 {
@@ -109,11 +109,18 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 flags.insert("file".into(), value);
                 continue;
             }
+            // Node names a lone short option with its dash, and an unknown
+            // character inside a cluster without one.
+            let cluster = token[1..].chars().count() > 1;
             for c in token[1..].chars() {
                 if matches!(c, 'y' | 'h') {
                     flags.insert(if c == 'y' { "yes" } else { "help" }.into(), "true".into());
                 } else {
-                    return Err(unknown(&format!("-{c}")));
+                    return Err(unknown(&if cluster {
+                        c.to_string()
+                    } else {
+                        format!("-{c}")
+                    }));
                 }
             }
             continue;
@@ -125,6 +132,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             name if matches!(name, "root" | "db")
                 || (command == "models-put"
                     && matches!(name, "file" | "from-catalog" | "strategy"))
+                || (command == "models-catalog" && name == "provider")
                 || (command == "create"
                     && matches!(
                         name,
@@ -157,7 +165,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                     i += 1;
                     v.clone()
                 };
-                if name == "allow" {
+                if name == "allow" || name == "from-catalog" {
                     allow.push(value.clone());
                 }
                 if command == "create" && matches!(name, "limit" | "model-limit") {
@@ -179,10 +187,15 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 || (command == "smart-routing" && matches!(name, "on" | "off")) =>
             {
                 if inline.is_some() {
-                    if command == "models-rm" && name == "yes" {
-                        return Err("Option '-y, --yes' does not take an argument".into());
-                    }
-                    return Err(format!("Option '--{name}' does not take an argument"));
+                    // Global short aliases are named in every command's diagnostic.
+                    return Err(format!(
+                        "Option '{}' does not take an argument",
+                        match name {
+                            "yes" => "-y, --yes".into(),
+                            "help" => "-h, --help".into(),
+                            _ => format!("--{name}"),
+                        }
+                    ));
                 }
                 flags.insert(name.into(), "true".into());
             }

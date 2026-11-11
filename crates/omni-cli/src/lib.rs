@@ -18,7 +18,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     let Some((command, rest)) = args::resolve(&argv) else {
         if help || argv.iter().all(|s| s.starts_with('-')) {
             println!(
-                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set; models list, show, rm, put -f FILE (catalog generation deferred)\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
+                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set; models list, show, rm, catalog, put (-f FILE | --from-catalog; built-in providers only, plugin providers refused)\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
             );
             return ExitCode::SUCCESS;
         }
@@ -41,8 +41,8 @@ pub fn run(argv: Vec<String>) -> ExitCode {
                 "models-list" => "List virtual models and their targets",
                 "models-show" => "Show one virtual model's targets and pricing",
                 "models-rm" => "Delete a virtual model",
-                "models-put" =>
-                    "Create or replace a virtual model from -f FILE (catalog generation is not implemented)",
+                "models-put" => "Create or replace a virtual model",
+                "models-catalog" => "List the built-in model catalog and its list pricing",
                 "settings-get" => "Show routing and retention settings",
                 "settings-set" =>
                     "Change one setting, e.g. weights.cost 0.4, rtkEnabled true, or guardrailModel null",
@@ -63,7 +63,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
                 if command.starts_with("models-") {
-                    models::run(&command, &flags, &positional)
+                    models::run(&command, &flags, &positional, &allow)
                 } else if command.starts_with("settings-") {
                     settings::run(&command, &flags, &positional)
                 } else {
