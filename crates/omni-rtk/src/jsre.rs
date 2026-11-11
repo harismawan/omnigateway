@@ -80,6 +80,15 @@ impl JsRegex {
     }
 
     /// `String.prototype.match` without `g`: each group as a slice of `text`.
+    ///
+    /// **Not a general UTF-16 capture.** A JS group may start or end between
+    /// the two halves of a surrogate pair, which no `&str` slice can express.
+    /// Such an endpoint maps to the astral char's *start*, so a group that
+    /// splits a pair loses (or gains) half a char relative to JS. Every
+    /// current caller captures fields delimited by ASCII (`:`, `-`, digits,
+    /// tree glyphs) or a whole remainder (`.+$`), so no split can occur; any
+    /// new pattern whose group can end inside an astral char needs a
+    /// different capture representation, not this one.
     pub(crate) fn captures<'t>(&self, text: &'t str) -> Option<Vec<Option<&'t str>>> {
         match transcode(text) {
             None => {
@@ -111,7 +120,9 @@ impl JsRegex {
         }
     }
 
-    /// `text.replace(/…/, replacement)` (first match; `$n` as `${n}`).
+    /// `text.replace(/…/, replacement)` (first match; `$n` as `${n}`). The
+    /// same surrogate-split restriction as [`JsRegex::captures`] applies to
+    /// the match span and every referenced group.
     pub(crate) fn replace_first<'t>(&self, text: &'t str, replacement: &str) -> Cow<'t, str> {
         match transcode(text) {
             None => self.0.replacen(text, 1, replacement),

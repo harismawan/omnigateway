@@ -30,7 +30,9 @@ pub struct Charge {
 
 /// `ParserBudget`: one record allowance (100,000) and one allocation
 /// allowance (three times the input's code units) shared by every parser that
-/// touches one tool result. Once exceeded, every later charge fails too.
+/// touches one tool result. The two counters are independent: each only
+/// grows, so once one allowance is exceeded every later charge *to that
+/// counter* fails, while the other counter is unaffected.
 #[derive(Debug)]
 pub struct ParserBudget {
     records: Cell<u64>,
@@ -210,13 +212,29 @@ pub fn render_selection(
     })
 }
 
-/// `selectBlock`.
+/// `selectBlock`: charges `end - start + 1` records, then selects the rows.
+///
+/// Total over every `ParsedBlock`, including ones no parser produces. TS
+/// computes the count in doubles; this matches it without unchecked
+/// arithmetic:
+/// - `start == end + 1`: TS charges 0 and returns true, selecting nothing.
+///   Same here.
+/// - `start > end + 1`: TS charges a *negative* count, crediting the shared
+///   budget. The port charges 0 instead. Crediting would let a malformed
+///   helper call widen every later parser's allowance, and the budget only
+///   ever shrinks here. No internal caller can build such a block, so this
+///   deviation is unreachable from `transform_request`.
+/// - a span too long for `usize` (`start = 0, end = usize::MAX`) saturates,
+///   fails the charge and selects nothing, as TS fails its huge charge.
 pub fn select_block(
     input: &BoundedText<'_>,
     selected: &mut BTreeSet<usize>,
     block: &ParsedBlock<'_>,
 ) -> bool {
-    let count = block.end - block.start + 1;
+    let count = block
+        .end
+        .checked_sub(block.start)
+        .map_or(0, |span| span.saturating_add(1));
     if !input.budget.charge_records(count) {
         return false;
     }
@@ -317,6 +335,58 @@ mod tests {
         assert!(budget.charge_code_units(3));
         assert!(!budget.charge_code_units(1));
         assert!(scan_text("😀").is_some());
+    }
+
+    fn block(start: usize, end: usize) -> ParsedBlock<'static> {
+        ParsedBlock {
+            start,
+            end,
+            severity: Severity::Error,
+            identity: "",
+        }
+    }
+
+    fn records(budget: &ParserBudget) -> u64 {
+        budget
+            .charges()
+            .iter()
+            .filter(|c| c.kind == ChargeKind::Records)
+            .map(|c| c.count)
+            .sum()
+    }
+
+    /// TS `selectBlock` on `{start: 1, end: 0}` charges `0` and returns true
+    /// with nothing selected; on `{start: 0, end: MAX}` it charges a huge
+    /// count and returns false. Neither may panic here.
+    #[test]
+    fn select_block_handles_reversed_and_overflowing_ranges_without_panicking() {
+        let input = BoundedText {
+            text: "x",
+            lines: vec!["x"],
+            budget: ParserBudget::recording(1),
+        };
+        let mut selected = BTreeSet::new();
+        assert!(select_block(&input, &mut selected, &block(1, 0)));
+        assert!(selected.is_empty());
+        assert_eq!(records(&input.budget), 0);
+
+        assert!(!select_block(&input, &mut selected, &block(0, usize::MAX)));
+        assert!(selected.is_empty());
+
+        // Deeper reversals select nothing and charge nothing.
+        let fresh = BoundedText {
+            text: "x",
+            lines: vec!["x"],
+            budget: ParserBudget::recording(1),
+        };
+        assert!(select_block(&fresh, &mut selected, &block(7, 2)));
+        assert!(selected.is_empty());
+        assert_eq!(records(&fresh.budget), 0);
+
+        // A valid block is unchanged.
+        assert!(select_block(&fresh, &mut selected, &block(0, 0)));
+        assert_eq!(selected, BTreeSet::from([0]));
+        assert_eq!(records(&fresh.budget), 1);
     }
 
     #[test]
