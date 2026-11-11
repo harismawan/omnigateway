@@ -29,11 +29,23 @@ if (JSON.stringify(before.frozenSources) !== JSON.stringify(after.frozenSources)
   failed = true;
 }
 
-const SECTIONS = ["transform", "classify", "extract", "scan", "filters"];
+// Every case section either file has: a section the old file had must keep
+// all its cases, and a new section counts as purely added.
+const isSection = (value: unknown): value is { id: string }[] =>
+  Array.isArray(value) && value.every((c) => typeof (c as { id?: unknown }).id === "string");
+const names = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(
+  (name) => isSection(before[name]) || isSection(after[name]),
+);
 const summary: string[] = [];
-for (const name of SECTIONS) {
-  const oldCases = (before[name] ?? []) as { id: string }[];
-  const newCases = new Map(((after[name] ?? []) as { id: string }[]).map((c) => [c.id, c]));
+for (const name of names) {
+  const oldCases = isSection(before[name]) ? before[name] : [];
+  const newList = isSection(after[name]) ? after[name] : [];
+  if (before[name] !== undefined && !isSection(after[name])) {
+    console.error(`${name}: section removed`);
+    failed = true;
+  }
+  const newCases = new Map(newList.map((c) => [c.id, c]));
+  const oldIds = new Set(oldCases.map((c) => c.id));
   let changed = 0;
   let removed = 0;
   for (const c of oldCases) {
@@ -45,7 +57,12 @@ for (const name of SECTIONS) {
     console.error(`${name}: ${removed} removed, ${changed} changed`);
     failed = true;
   }
-  summary.push(`${name} +${newCases.size - oldCases.length + removed}`);
+  const added = newList.filter((c) => !oldIds.has(c.id)).length;
+  summary.push(`${name} +${added}`);
 }
-console.log(`unchanged cases preserved; added: ${summary.join(", ")}`);
+console.log(
+  failed
+    ? `NOT ADDITIVE: existing cases were removed or changed (see above); added: ${summary.join(", ")}`
+    : `additive: every existing case preserved; added: ${summary.join(", ")}`,
+);
 process.exit(failed ? 1 : 0);

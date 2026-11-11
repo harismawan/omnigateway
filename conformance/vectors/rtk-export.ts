@@ -60,10 +60,41 @@ const skipped = { loneSurrogate: 0, duplicate: 0 };
 
 // ---------------------------------------------------------------- utilities
 
-const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+/**
+ * Whether any string value or object key in `value` holds a lone surrogate.
+ * Inspects the strings themselves: `JSON.stringify` escapes lone surrogates
+ * as `\udXXX`, so a regex over the serialized form can never see one.
+ * Iterative, so arbitrarily nested inputs cannot exhaust the stack.
+ */
 function hasLone(value: unknown): boolean {
-  return LONE.test(JSON.stringify(value) ?? "");
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const item = stack.pop();
+    if (typeof item === "string") {
+      if (!item.isWellFormed()) return true;
+    } else if (Array.isArray(item)) {
+      stack.push(...item);
+    } else if (item !== null && typeof item === "object") {
+      for (const [key, child] of Object.entries(item)) {
+        if (!key.isWellFormed()) return true;
+        stack.push(child);
+      }
+    }
+  }
+  return false;
 }
+
+// The screen must see a lone surrogate wherever it sits, and only then.
+for (const [probe, lone] of [
+  ["\ud800", true],
+  [{ text: "\udc00x" }, true],
+  [[{ "\ud83d": 1 }], true],
+  [{ deep: [[["a\ud800"]]] }, true],
+  [{ text: "😀 é" }, false],
+  [["\ud83d\ude00"], false],
+] as const)
+  if (hasLone(probe) !== lone)
+    throw new Error(`hasLone self-check failed on ${JSON.stringify(probe)}`);
 
 function caseId(input: unknown): string {
   return new Bun.CryptoHasher("sha256").update(JSON.stringify(input)).digest("hex").slice(0, 20);
@@ -151,6 +182,18 @@ function expectTransform(request: ChatRequest) {
           if (block.content !== original.content) changes.push([m, b, block.content]);
       });
     });
+  // The vector records only `changes`; consumers rebuild the expected
+  // request as the input with those changes applied and compare it whole.
+  // Prove that rebuild equals what the frozen build actually returned, so a
+  // change anywhere else (a message, a block, an id, a field) cannot hide.
+  const rebuilt = JSON.parse(before) as ChatRequest;
+  for (const [m, b, content] of changes) {
+    const block = rebuilt.messages[m]?.content[b];
+    if (block?.type !== "toolResult") throw new Error(`change [${m}, ${b}] is not a tool result`);
+    block.content = content;
+  }
+  if (JSON.stringify(rebuilt) !== JSON.stringify(result.request))
+    throw new Error("recorded changes do not reconstruct the frozen transformRequest result");
   return { unchanged: result.request === request, changes, report: result.report };
 }
 
@@ -1278,6 +1321,7 @@ const sections: Record<string, Entry[]> = {
   extract: [],
   scan: [],
   filters: [],
+  scanBoundary: [],
 };
 const seen = new Set<string>();
 
@@ -1377,6 +1421,25 @@ for (const text of [
 ]) {
   add("scan", "corpus", { text }, scanText(text)?.lines ?? null);
 }
+// The scan's own row boundary, isolated from the parsers behind it: 100,000
+// rows is the last that scans. `expected` is the row count (or null), not the
+// rows, so the vector stays small; consumers rebuild the text as `count`
+// copies of `row` joined by `separator`.
+for (const count of [99_999, 100_000, 100_001]) {
+  for (const [row, separator] of [
+    ["r", "\n"],
+    ["😀", "\r\n"],
+    ["", "\r"],
+  ] as const) {
+    const text = Array.from({ length: count }, () => row).join(separator);
+    const scanned = scanText(text);
+    if (scanned?.lines.some((line) => line !== row))
+      throw new Error("scan boundary vector rows are not uniform");
+    add("scanBoundary", "limit", { row, separator, count }, scanned?.lines.length ?? null);
+  }
+}
+// scanText's other allowance (code units, 3x the input) cannot bind: its
+// rows are disjoint slices of the input, so they total at most 1x.
 
 const f = rand(0xf11_7e75);
 for (let n = 0; n < 900; n++) {
@@ -1403,10 +1466,13 @@ const document = {
   ...sections,
 };
 const json = JSON.stringify(document);
-writeFileSync(out, Bun.gzipSync(new TextEncoder().encode(json), { level: 9 }));
+const utf8 = new TextEncoder().encode(json);
+const gzipped = Bun.gzipSync(utf8, { level: 9 });
+writeFileSync(out, gzipped);
 const counts = Object.entries(sections)
   .map(([name, entries]) => `${name}=${entries.length}`)
   .join(" ");
 console.log(
-  `wrote ${out}: ${counts}; skipped ${JSON.stringify(skipped)}; ${json.length} bytes raw`,
+  `wrote ${out}: ${counts}; skipped ${JSON.stringify(skipped)}; ` +
+    `${utf8.length} UTF-8 bytes JSON (${json.length} UTF-16 units), ${gzipped.length} bytes gzip`,
 );

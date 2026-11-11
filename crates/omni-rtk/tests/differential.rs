@@ -11,7 +11,7 @@ use omni_rtk::filters::shared::{BoundedText, ParserBudget, scan_text};
 use omni_rtk::filters::{
     build, diagnostics, docker, git, listings, packages, search, status, tests,
 };
-use omni_rtk::{RtkConfig, extract_command, transform_request};
+use omni_rtk::{RtkConfig, RtkTransformResult, extract_command, transform_request};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::io::Read;
@@ -65,69 +65,192 @@ fn classification_json(c: &CommandClassification) -> Value {
     out
 }
 
+/// Compares one transform result with its TS case; `Err` names the first
+/// divergence.
+fn check_transform(
+    case: &Value,
+    request: &ChatRequest,
+    result: &RtkTransformResult<'_>,
+) -> Result<(), String> {
+    let expected = &case["expected"];
+    let unchanged = matches!(result.request, Cow::Borrowed(_));
+    if unchanged != expected["unchanged"].as_bool().unwrap_or(false) {
+        return Err(format!(
+            "unchanged {unchanged}, TS {}",
+            expected["unchanged"]
+        ));
+    }
+    // The whole expected request: the input with each recorded TS change
+    // applied (the exporter asserts this reconstructs TS's return exactly).
+    let mut want = request.clone();
+    for change in expected["changes"].as_array().ok_or("changes")? {
+        let at = |i: usize| {
+            change[i]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or("change index")
+        };
+        let (m, b) = (at(0)?, at(1)?);
+        let content = change[2].as_str().ok_or("change content")?;
+        match want
+            .messages
+            .get_mut(m)
+            .and_then(|msg| msg.content.get_mut(b))
+        {
+            Some(ContentBlock::ToolResult(block)) => content.clone_into(&mut block.content),
+            _ => return Err(format!("change [{m}, {b}] is not a tool result")),
+        }
+    }
+    if result.request.as_ref() != &want {
+        return Err(if result.request.messages.len() == want.messages.len() {
+            "returned request differs from TS".to_owned()
+        } else {
+            format!(
+                "returned {} messages, TS {}",
+                result.request.messages.len(),
+                want.messages.len()
+            )
+        });
+    }
+    let r = &result.report;
+    let report = json!({
+        "applied": r.applied,
+        "filterHits": r.filter_hits,
+        "originalCodeUnits": r.original_code_units,
+        "compressedCodeUnits": r.compressed_code_units,
+        "estimatedTokensSaved": r.estimated_tokens_saved,
+        "filters": r.filters.iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+        "skippedInternalErrors": r.skipped_internal_errors,
+    });
+    let mut ts = expected["report"].clone();
+    // JSON numbers: TS writes integral doubles without a fraction.
+    if let Some(saved) = ts["estimatedTokensSaved"].as_f64() {
+        ts["estimatedTokensSaved"] = json!(saved);
+    }
+    if report != ts {
+        return Err(format!("report {report} != TS {ts}"));
+    }
+    Ok(())
+}
+
+fn case_request(case: &Value) -> Result<ChatRequest, String> {
+    serde_json::from_value(case["request"].clone())
+        .map_err(|e| format!("request does not deserialize: {e}"))
+}
+
 #[test]
 fn transform_request_matches_ts() {
     let cases = section("transform");
     let mut failures = Vec::new();
     for case in cases {
         let id = case["id"].as_str().unwrap_or("?");
-        let request: ChatRequest = match serde_json::from_value(case["request"].clone()) {
-            Ok(r) => r,
-            Err(e) => {
-                failures.push(format!("{id}: request does not deserialize: {e}"));
-                continue;
-            }
-        };
-        let expected = &case["expected"];
-        let result = transform_request(&request, &RtkConfig { enabled: true });
-        let unchanged = matches!(result.request, Cow::Borrowed(_));
-        if unchanged != expected["unchanged"].as_bool().unwrap_or(false) {
-            failures.push(format!(
-                "{id}: unchanged {unchanged}, TS {}",
-                expected["unchanged"]
-            ));
-            continue;
-        }
-        let mut changes = Vec::new();
-        for (m, (out, inp)) in result
-            .request
-            .messages
-            .iter()
-            .zip(&request.messages)
-            .enumerate()
-        {
-            for (b, (ob, ib)) in out.content.iter().zip(&inp.content).enumerate() {
-                if let (ContentBlock::ToolResult(o), ContentBlock::ToolResult(i)) = (ob, ib)
-                    && o.content != i.content
-                {
-                    changes.push(json!([m, b, o.content]));
-                }
-            }
-        }
-        if Value::Array(changes) != expected["changes"] {
-            failures.push(format!("{id}: rewritten tool results differ"));
-            continue;
-        }
-        let r = &result.report;
-        let report = json!({
-            "applied": r.applied,
-            "filterHits": r.filter_hits,
-            "originalCodeUnits": r.original_code_units,
-            "compressedCodeUnits": r.compressed_code_units,
-            "estimatedTokensSaved": r.estimated_tokens_saved,
-            "filters": r.filters.iter().map(|f| f.as_str()).collect::<Vec<_>>(),
-            "skippedInternalErrors": r.skipped_internal_errors,
+        let checked = case_request(case).and_then(|request| {
+            let result = transform_request(&request, &RtkConfig { enabled: true });
+            check_transform(case, &request, &result)
         });
-        let mut ts = expected["report"].clone();
-        // JSON numbers: TS writes integral doubles without a fraction.
-        if let Some(saved) = ts["estimatedTokensSaved"].as_f64() {
-            ts["estimatedTokensSaved"] = json!(saved);
-        }
-        if report != ts {
-            failures.push(format!("{id}: report {report} != TS {ts}"));
+        if let Err(e) = checked {
+            failures.push(format!("{id}: {e}"));
         }
     }
     report_failures("transform", cases.len(), &failures);
+}
+
+/// The ways a wrong port could rewrite a request beyond tool-result text.
+/// Each is applied to the correct output of every applied case; the checker
+/// must reject every tampered result it is given.
+const TAMPERS: [&str; 6] = [
+    "drop-last-message",
+    "append-message",
+    "drop-first-block",
+    "rename-tool-result-id",
+    "change-tool-use-input",
+    "change-model",
+];
+
+fn tamper(kind: &str, request: &mut ChatRequest) -> bool {
+    use omni_ir::request::{Message, Role};
+    match kind {
+        "drop-last-message" => request.messages.pop().is_some(),
+        "append-message" => {
+            request.messages.push(Message {
+                role: Role::User,
+                content: Vec::new(),
+            });
+            true
+        }
+        "drop-first-block" => request
+            .messages
+            .iter_mut()
+            .find(|m| !m.content.is_empty())
+            .map(|m| m.content.remove(0))
+            .is_some(),
+        "rename-tool-result-id" => request
+            .messages
+            .iter_mut()
+            .flat_map(|m| &mut m.content)
+            .any(|b| {
+                if let ContentBlock::ToolResult(r) = b {
+                    r.tool_use_id.push_str("-tampered");
+                    true
+                } else {
+                    false
+                }
+            }),
+        "change-tool-use-input" => request
+            .messages
+            .iter_mut()
+            .flat_map(|m| &mut m.content)
+            .any(|b| {
+                if let ContentBlock::ToolUse(u) = b {
+                    u.input = json!({ "command": "tampered" });
+                    true
+                } else {
+                    false
+                }
+            }),
+        "change-model" => {
+            request.model.push_str("-tampered");
+            true
+        }
+        other => panic!("unknown tamper {other}"),
+    }
+}
+
+#[test]
+fn harness_rejects_requests_tampered_beyond_tool_result_text() {
+    let mut tried = [0usize; TAMPERS.len()];
+    let mut accepted: Vec<String> = Vec::new();
+    for case in section("transform") {
+        if case["expected"]["unchanged"].as_bool() != Some(false) {
+            continue;
+        }
+        let request = case_request(case).expect("request");
+        let honest = transform_request(&request, &RtkConfig { enabled: true });
+        check_transform(case, &request, &honest).expect("honest result passes");
+        for (n, kind) in TAMPERS.iter().enumerate() {
+            let mut forged = honest.request.clone().into_owned();
+            if !tamper(kind, &mut forged) {
+                continue;
+            }
+            tried[n] += 1;
+            let result = RtkTransformResult {
+                request: Cow::Owned(forged),
+                report: honest.report.clone(),
+            };
+            if check_transform(case, &request, &result).is_ok() {
+                accepted.push(format!("{kind} on {}", case["id"]));
+            }
+        }
+    }
+    for (n, kind) in TAMPERS.iter().enumerate() {
+        assert!(tried[n] > 0, "{kind}: no applicable case");
+    }
+    assert!(
+        accepted.is_empty(),
+        "{} tampered results accepted (tried {tried:?}), e.g. {:?}",
+        accepted.len(),
+        &accepted[..accepted.len().min(6)]
+    );
 }
 
 #[test]
@@ -180,6 +303,29 @@ fn scan_text_matches_ts() {
         }
     }
     report_failures("scan", cases.len(), &failures);
+}
+
+#[test]
+fn scan_text_row_boundary_matches_ts() {
+    let cases = section("scanBoundary");
+    let mut failures = Vec::new();
+    for case in cases {
+        let row = case["row"].as_str().expect("row");
+        let separator = case["separator"].as_str().expect("separator");
+        let count = usize::try_from(case["count"].as_u64().expect("count")).expect("usize");
+        let text = vec![row; count].join(separator);
+        let actual = scan_text(&text).map_or(Value::Null, |s| {
+            assert!(s.lines.iter().all(|l| *l == row), "uniform rows");
+            json!(s.lines.len())
+        });
+        if actual != case["expected"] {
+            failures.push(format!(
+                "{count} x {row:?}: {actual} != TS {}",
+                case["expected"]
+            ));
+        }
+    }
+    report_failures("scanBoundary", cases.len(), &failures);
 }
 
 fn grep_mode(value: &Value) -> GrepMode {
