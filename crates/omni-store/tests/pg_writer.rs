@@ -6,7 +6,7 @@
 mod common;
 
 use common::pg::{TestDb, base_url, table_rows};
-use common::{bun_available, bun_script, ts};
+use common::{bun_required, bun_script, ts};
 use omni_store::pg::{PgConfig, PgStore};
 use omni_store::writer::{
     BreakerTransition, Committed, HealthMeasurement, LogEvent, PendingLog, RequestLog, RouteTarget,
@@ -111,6 +111,19 @@ fn health_sequence() -> Vec<WriteEvent> {
         measure("cred-1", "haiku", 2, Some(T0 as f64 + 60_001.5)),
         measure("cred-3", "seeded", 9, None),
         transition("cred-ghost", "sonnet", Open, 3),
+        // A valid measurement, then a transition Postgres refuses (failures
+        // out of INTEGER range): TS keeps the measurement and rejects only
+        // the transition, whatever the batch boundaries.
+        measure("cred-1", "mixed", 2, None),
+        BreakerTransition(CredentialHealth {
+            credential_id: "cred-1".into(),
+            model: "mixed".into(),
+            breaker_state: Open,
+            consecutive_failures: i64::from(i32::MAX) + 1,
+            opened_at: Some(T0 as f64),
+            rate_limited_until: None,
+        })
+        .into(),
     ]
 }
 
@@ -251,7 +264,7 @@ fn run_ts(dir: &std::path::Path, url: &str, offset: i64, events: &[WriteEvent]) 
         ts("conformance/store/pg-usage-writer.ts")
     );
     let out = bun_script(dir, &script, &input.to_string());
-    assert!(out.contains("\"healthFailures\":1"), "ts driver: {out}");
+    assert!(out.contains("\"healthFailures\":2"), "ts driver: {out}");
 }
 
 fn config(offset: i64, max_batch: usize) -> WriterConfig {
@@ -273,7 +286,10 @@ async fn run_rust(store: PgStore, cfg: WriterConfig, events: &[WriteEvent]) -> u
     let stats = writer.close().await.expect("close");
     assert_eq!(stats.dropped, 0);
     assert_eq!(stats.failed, 0);
-    assert_eq!(stats.health_refused, 1, "the ghost credential, as in TS");
+    assert_eq!(
+        stats.health_refused, 2,
+        "the ghost credential and the out-of-range transition, as in TS"
+    );
     stats.batches
 }
 
@@ -291,7 +307,7 @@ async fn rows_equal_what_the_ts_postgres_store_writes() {
     let Some(base) = base_url("rows_equal_what_the_ts_postgres_store_writes") else {
         return;
     };
-    if !bun_available("rows_equal_what_the_ts_postgres_store_writes") {
+    if !bun_required("rows_equal_what_the_ts_postgres_store_writes") {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
@@ -333,7 +349,7 @@ async fn ts_and_rust_continue_each_others_rows() {
     let Some(base) = base_url("ts_and_rust_continue_each_others_rows") else {
         return;
     };
-    if !bun_available("ts_and_rust_continue_each_others_rows") {
+    if !bun_required("ts_and_rust_continue_each_others_rows") {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
@@ -703,8 +719,16 @@ async fn a_value_postgres_refuses_fails_only_its_own_event() {
     assert!(h.send(LogEvent::Finish(done("good", T0, Some("key-1"), "m", 1))));
     assert!(h.send(measure("cred-1", "nan", 1, Some(f64::NAN))));
     assert!(h.send(measure("cred-1", "ok", 1, Some(1.5))));
+    // Resolved by a barrier, so the close has nothing left to lose.
+    let b = h.flush().await.expect("barrier");
+    assert_eq!(
+        (b.watermark, b.committed, b.failed, b.refused, b.dropped),
+        (5, 4, 1, 1, 0),
+        "the refused finish is failed (and refused), never committed"
+    );
     let stats = writer.close().await.expect("close");
-    assert_eq!((stats.failed, stats.batches), (0, 1));
+    assert_eq!((stats.failed, stats.refused, stats.batches), (1, 1, 1));
+    assert_eq!(stats.written, 4, "the refused event is not written");
     assert_eq!(stats.health_refused, 1, "the NaN instant");
     let c = db.client().await;
     let rows: Vec<(String, String)> = c
@@ -759,4 +783,156 @@ async fn url_options_are_kept_beside_the_statement_timeout() {
     let (timeout, path): (String, String) = (row.get(0), row.get(1));
     assert_eq!(timeout, "1234ms");
     assert_eq!(path, "public,pg_catalog");
+}
+
+/// A refused log event is accounted for as such: counted `refused` (and
+/// `failed`, since it is not persisted), never `written` or committed;
+/// resolved as failed in a barrier; and when it is among the events a
+/// close waits on, the close fails, as for any other unpersisted event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_log_event_is_counted_failed_and_refused_not_written() {
+    let Some(base) = base_url("a_refused_log_event_is_counted_failed_and_refused_not_written")
+    else {
+        return;
+    };
+    let db = TestDb::create(&base, "log_refused").await;
+    let store = prepare(&db, 0).await;
+    let refused = || {
+        let mut l = done("bad", T0, Some("key-1"), "m", 1);
+        l.status = i64::from(i32::MAX) + 1;
+        LogEvent::Finish(l)
+    };
+
+    // Through a barrier.
+    let writer = Writer::spawn_postgres(store.clone(), config(0, 512)).expect("spawn");
+    let h = writer.handle();
+    assert!(h.send(refused()));
+    let b = h.flush().await.expect("barrier");
+    assert_eq!(
+        (b.watermark, b.committed, b.failed, b.refused, b.dropped),
+        (1, 0, 1, 1, 0)
+    );
+    assert_eq!(b.committed + b.failed + b.dropped, b.watermark);
+    let stats = writer.close().await.expect("nothing lost on close");
+    assert_eq!(
+        (
+            stats.enqueued,
+            stats.written,
+            stats.failed,
+            stats.refused,
+            stats.batches
+        ),
+        (1, 0, 1, 1, 1)
+    );
+
+    // On close.
+    let writer = Writer::spawn_postgres(store, config(0, 512)).expect("spawn");
+    let h = writer.handle();
+    assert!(h.send(refused()));
+    assert!(h.send(LogEvent::Finish(done("good", T0, Some("key-1"), "m", 1))));
+    let closed = writer.close().await;
+    assert!(
+        matches!(&closed, Err(e) if e.to_string().contains("1 queued events failed")),
+        "{closed:?}"
+    );
+    let stats = h.stats();
+    assert_eq!((stats.written, stats.failed, stats.refused), (1, 1, 1));
+    let c = db.client().await;
+    let rows: Vec<String> = c
+        .query("SELECT id FROM request_logs ORDER BY id", &[])
+        .await
+        .expect("rows")
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(rows, ["good"], "isolation: the valid event still lands");
+}
+
+/// The hourly rollup's read-set guard on its own: another session inserts
+/// the very `usage_rollup` row the batch read as absent and commits while
+/// the batch's upsert waits on it. Nothing else conflicts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hourly_guard_adds_onto_a_row_inserted_after_the_read() {
+    let Some(base) = base_url("the_hourly_guard_adds_onto_a_row_inserted_after_the_read") else {
+        return;
+    };
+    let db = TestDb::create(&base, "guard_hourly").await;
+    let store = prepare(&db, 0).await;
+    let hour = T0.div_euclid(3_600_000);
+    let mut other = db.client().await;
+    let tx = other.transaction().await.expect("tx");
+    tx.execute(
+        "INSERT INTO usage_rollup VALUES ('key-h', $1, 10, 1, 1, 1, 1, 0.5)",
+        &[&hour],
+    )
+    .await
+    .expect("rollup");
+    let writer = Writer::spawn_postgres(store, config(0, 512)).expect("spawn");
+    assert!(
+        writer
+            .handle()
+            .send(LogEvent::Finish(done("h1", T0, Some("key-h"), "m", 1)))
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    tx.commit().await.expect("commit");
+    let stats = writer.close().await.expect("close");
+    assert_eq!((stats.failed, stats.written), (0, 1));
+    let (requests, input): (i64, i64) = other
+        .query_one(
+            "SELECT requests, input_tokens FROM usage_rollup WHERE api_key_id = 'key-h' AND hour = $1",
+            &[&hour],
+        )
+        .await
+        .map(|r| (r.get(0), r.get(1)))
+        .expect("rollup");
+    assert_eq!(
+        (requests, input),
+        (11, 1 + 101),
+        "added onto, not overwritten"
+    );
+}
+
+/// The daily rollup's guard on its own, likewise.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_daily_guard_adds_onto_a_row_inserted_after_the_read() {
+    let Some(base) = base_url("the_daily_guard_adds_onto_a_row_inserted_after_the_read") else {
+        return;
+    };
+    let db = TestDb::create(&base, "guard_daily").await;
+    let store = prepare(&db, 0).await;
+    let day = omni_store::rollup::start_of_day_ms(T0, 0);
+    let mut other = db.client().await;
+    let tx = other.transaction().await.expect("tx");
+    tx.execute(
+        "INSERT INTO usage_daily (day, provider, credential_id, requested_model, resolved_model,
+                                  api_key_id, requests, input_tokens)
+         VALUES ($1, 'anthropic', 'cred-1', 'm', 'm-upstream', '', 10, 1)",
+        &[&day],
+    )
+    .await
+    .expect("daily");
+    let writer = Writer::spawn_postgres(store, config(0, 512)).expect("spawn");
+    // Anonymous, so no hourly row is involved at all.
+    assert!(
+        writer
+            .handle()
+            .send(LogEvent::Finish(done("d1", T0, None, "m", 1)))
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    tx.commit().await.expect("commit");
+    let stats = writer.close().await.expect("close");
+    assert_eq!((stats.failed, stats.written), (0, 1));
+    let (requests, input): (i64, i64) = other
+        .query_one(
+            "SELECT requests, input_tokens FROM usage_daily WHERE day = $1 AND api_key_id = ''",
+            &[&day],
+        )
+        .await
+        .map(|r| (r.get(0), r.get(1)))
+        .expect("daily");
+    assert_eq!(
+        (requests, input),
+        (11, 1 + 101),
+        "added onto, not overwritten"
+    );
 }

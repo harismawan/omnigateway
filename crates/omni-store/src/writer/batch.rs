@@ -41,6 +41,10 @@ pub(crate) struct Outcome {
     /// The rows this batch completed, as stored, in completion order: what
     /// the rate limiter is debited with once the batch has committed.
     pub(crate) completions: Vec<Completion>,
+    /// Indices (into the batch's events) of log events refused for their
+    /// values and so not persisted, while the rest of the batch committed.
+    /// Always empty on SQLite, which stores any value.
+    pub(crate) refused: Vec<usize>,
 }
 
 /// The stored completed row's figures as a [`Completion`].
@@ -586,6 +590,7 @@ pub(crate) fn write(
     Ok(Outcome {
         health_refused,
         completions,
+        refused: Vec::new(),
     })
 }
 

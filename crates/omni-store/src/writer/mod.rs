@@ -19,6 +19,16 @@
 //! failure is transient (`SQLITE_BUSY`/`SQLITE_LOCKED`), and otherwise counted
 //! as failed and reported with `tracing::error!`.
 //!
+//! **Breaker health.** [`HealthWriter`] is the immediate path: failures and
+//! transitions as mutations applied by [`crate::Store::update_health`] (the
+//! shared atomic read-modify-write), one at a time, through a bounded queue
+//! of its own, never behind a log batch. The batch path's
+//! [`BreakerTransition`] / [`HealthMeasurement`] events remain for the
+//! single-node SQLite gateway, which routes from its own snapshot; on a
+//! shared Postgres they would write absolute rows computed from one
+//! replica's view, so the cluster integration sends breaker changes through
+//! [`HealthWriter`] instead.
+//!
 //! **Postgres.** [`Writer::spawn_postgres`] runs the same task over a pool;
 //! each batch is one transaction whose `request_logs` and rollup writes are
 //! single `INSERT … SELECT FROM unnest(...)` upserts (`pg_batch.rs`). A row
@@ -28,6 +38,7 @@
 mod batch;
 mod epoch;
 mod events;
+mod health;
 mod num;
 mod pg_batch;
 mod sql;
@@ -36,6 +47,9 @@ mod task;
 pub use events::{
     BreakerTransition, Committed, Completion, HealthMeasurement, LogEvent, PendingLog, RequestLog,
     RouteTarget, SeedQuery, SeedRows, WriteEvent,
+};
+pub use health::{
+    HealthCommitted, HealthHandle, HealthMutation, HealthStats, HealthWriter, HealthWriterConfig,
 };
 pub use task::{
     Barrier, BarrierError, Writer, WriterConfig, WriterHandle, WriterStats, queue_slot_bytes,

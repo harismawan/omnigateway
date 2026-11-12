@@ -179,3 +179,75 @@ pub fn list_health(conn: &Connection) -> Result<Vec<CredentialHealth>, StoreErro
     }
     Ok(out)
 }
+
+/// `UPSERT_HEALTH` in `packages/store/src/sqlite/credentials.ts`.
+const UPSERT_HEALTH: &str = "INSERT INTO credential_health
+   (credential_id, model, breaker_state, consecutive_failures, opened_at,
+    rate_limited_until)
+ VALUES (?,?,?,?,?,?)
+ ON CONFLICT (credential_id, model) DO UPDATE SET
+   breaker_state = excluded.breaker_state,
+   consecutive_failures = excluded.consecutive_failures,
+   opened_at = excluded.opened_at,
+   rate_limited_until = excluded.rate_limited_until";
+
+/// `CredentialRepo.updateHealth` on SQLite: read the stored row, apply the
+/// mutation, write it, in one `IMMEDIATE` transaction (the write lock is
+/// taken first, so no other connection can land between the read and the
+/// write). [`StoreError::Refused`] for a row the foreign key refuses (no
+/// such credential); nothing is written then, as TS's call throws.
+pub fn update_health(
+    conn: &Connection,
+    credential_id: &str,
+    model: &str,
+    apply: &(dyn Fn(Option<CredentialHealth>) -> CredentialHealth + Send + Sync),
+) -> Result<CredentialHealth, StoreError> {
+    use rusqlite::OptionalExtension as _;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let current = conn
+            .prepare_cached(
+                "SELECT * FROM credential_health WHERE credential_id = ? AND model = ?",
+            )?
+            .query_row([credential_id, model], |r| {
+                Ok((|| {
+                    Ok::<_, StoreError>(CredentialHealth {
+                        credential_id: row::text(r, H, "credential_id")?,
+                        model: row::text(r, H, "model")?,
+                        breaker_state: BreakerState::parse(&row::text(r, H, "breaker_state")?),
+                        consecutive_failures: row::integer(r, H, "consecutive_failures")?,
+                        opened_at: row::opt_number(r, H, "opened_at")?,
+                        rate_limited_until: row::opt_number(r, H, "rate_limited_until")?,
+                    })
+                })())
+            })
+            .optional()?
+            .transpose()?;
+        let next = apply(current);
+        match conn
+            .prepare_cached(UPSERT_HEALTH)?
+            .execute(rusqlite::params![
+                next.credential_id,
+                next.model,
+                next.breaker_state.as_str(),
+                next.consecutive_failures,
+                next.opened_at.map(crate::js::bind_number),
+                next.rate_limited_until.map(crate::js::bind_number),
+            ]) {
+            Ok(_) => Ok(next),
+            Err(rusqlite::Error::SqliteFailure(e, msg))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(StoreError::Refused(msg.unwrap_or_else(|| e.to_string())))
+            }
+            Err(e) => Err(e.into()),
+        }
+    })();
+    match &result {
+        Ok(_) => conn.execute_batch("COMMIT")?,
+        Err(_) => {
+            conn.execute_batch("ROLLBACK").ok();
+        }
+    }
+    result
+}

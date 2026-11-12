@@ -6,7 +6,7 @@
 mod common;
 
 use common::pg::{TestDb, base_url, contents, schema};
-use common::{bun_available, bun_script, ts};
+use common::{bun_required, bun_script, ts};
 use omni_store::pg::migrate::{LATEST_MIGRATION, MIGRATION_LOCK, MIGRATIONS};
 use omni_store::pg::{PgConfig, PgStore};
 use std::time::Duration;
@@ -162,7 +162,7 @@ async fn every_partial_state_finishes_exactly_as_ts_would() {
     let Some(base) = base_url("every_partial_state_finishes_exactly_as_ts_would") else {
         return;
     };
-    if !bun_available("every_partial_state_finishes_exactly_as_ts_would") {
+    if !bun_required("every_partial_state_finishes_exactly_as_ts_would") {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
@@ -281,7 +281,7 @@ async fn a_rust_and_a_ts_migrator_serialise_on_the_same_lock() {
     let Some(base) = base_url("a_rust_and_a_ts_migrator_serialise_on_the_same_lock") else {
         return;
     };
-    if !bun_available("a_rust_and_a_ts_migrator_serialise_on_the_same_lock") {
+    if !bun_required("a_rust_and_a_ts_migrator_serialise_on_the_same_lock") {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");

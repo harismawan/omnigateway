@@ -6,7 +6,7 @@
 mod common;
 
 use common::pg::{TestDb, base_url};
-use common::{bun_available, bun_script, canon, ts};
+use common::{bun_required, bun_script, canon, ts};
 use omni_store::keys::{ApiKey, KeyEdit};
 use omni_store::limits::parse_limits;
 use omni_store::pg::bodies::DetailState;
@@ -68,7 +68,7 @@ async fn rust_reads_a_database_the_ts_store_wrote() {
     let Some(base) = base_url("rust_reads_a_database_the_ts_store_wrote") else {
         return;
     };
-    if !bun_available("rust_reads_a_database_the_ts_store_wrote") {
+    if !bun_required("rust_reads_a_database_the_ts_store_wrote") {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
@@ -318,7 +318,7 @@ async fn the_ts_store_reads_a_database_rust_wrote() {
     let Some(base) = base_url("the_ts_store_reads_a_database_rust_wrote") else {
         return;
     };
-    if !bun_available("the_ts_store_reads_a_database_rust_wrote") {
+    if !bun_required("the_ts_store_reads_a_database_rust_wrote") {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");

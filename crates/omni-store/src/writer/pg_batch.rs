@@ -23,8 +23,12 @@
 //! - **Health.** The touched pairs are locked with the advisory lock
 //!   `updateHealth` takes (`hashtext(credential|model)`), in a fixed order.
 //!   A pair whose credential does not exist is what `updateHealth`'s foreign
-//!   key throws on, as is a value its columns cannot hold; either is skipped
-//!   and counted (`health_refused`), without aborting the batch.
+//!   key throws on, as is a value its columns cannot hold; either event is
+//!   skipped and counted (`health_refused`, per event), without aborting the
+//!   batch, and without displacing a valid event before it.
+//! - **Refused logs.** A log event with a value Postgres would refuse is
+//!   left out (its row stays as it was) and reported in
+//!   [`Outcome::refused`]; the task counts it refused and failed.
 //!   Every transition is applied in order and the last measurement per pair
 //!   after them, as on SQLite.
 
@@ -217,10 +221,18 @@ impl Logs {
 
     /// [`Self::apply`], where a log Postgres would refuse a value of (an
     /// `INTEGER` out of range) changes nothing, as TS's `begin`/`append`
-    /// throws for that request alone and `beginLog`/`finishLog` swallow it.
-    fn apply_logged(&mut self, event: &LogEvent, node_id: &str) {
-        if let Err(e) = self.apply(event, node_id) {
-            tracing::warn!(reason = %e, "request log event refused; the row is left as it was");
+    /// throws for that request alone. `false` when refused: the caller
+    /// accounts for it as refused (and so failed), never as written.
+    fn apply_logged(&mut self, event: &LogEvent, node_id: &str) -> bool {
+        match self.apply(event, node_id) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    reason = %e,
+                    "request log event refused; the row is left as it was"
+                );
+                false
+            }
         }
     }
 
@@ -931,20 +943,25 @@ async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u
         .map(|r| r.try_get(0))
         .collect::<Result<_, _>>()?;
 
-    let mut measured: IndexMap<(&str, &str), &HealthMeasurement> = IndexMap::new();
+    // Each event is validated where it stands, as TS's sequential
+    // `updateHealth` calls each throw (or not) on their own: a refused event
+    // never displaces one that would have landed before it.
+    let mut measured: IndexMap<(&str, &str), (&HealthMeasurement, i32)> = IndexMap::new();
     let mut refused = 0;
     let transition = c.prepare_cached(UPSERT_HEALTH).await?;
     for e in events {
         match e {
             WriteEvent::BreakerTransition(BreakerTransition(h)) => {
-                measured.shift_remove(&(h.credential_id.as_str(), h.model.as_str()));
                 let Some(failures) =
                     health_ok(h.consecutive_failures, h.opened_at, h.rate_limited_until)
                         .filter(|_| known.contains(&h.credential_id))
                 else {
+                    // Refused: the measurement before it still stands.
                     refused += 1;
                     continue;
                 };
+                // Only a transition that lands overwrites what came before.
+                measured.shift_remove(&(h.credential_id.as_str(), h.model.as_str()));
                 c.execute(
                     &transition,
                     &[
@@ -959,19 +976,21 @@ async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u
                 .await?;
             }
             WriteEvent::HealthMeasurement(m) => {
-                measured.insert((&m.credential_id, &m.model), m);
+                match health_ok(m.consecutive_failures, None, m.rate_limited_until)
+                    .filter(|_| known.contains(&m.credential_id))
+                {
+                    Some(failures) => {
+                        measured.insert((&m.credential_id, &m.model), (m, failures));
+                    }
+                    // Refused: the measurement before it still stands.
+                    None => refused += 1,
+                }
             }
             WriteEvent::Log(_) | WriteEvent::Seed(_) => {}
         }
     }
     let measurement = c.prepare_cached(UPSERT_MEASUREMENT).await?;
-    for m in measured.values() {
-        let Some(failures) = health_ok(m.consecutive_failures, None, m.rate_limited_until)
-            .filter(|_| known.contains(&m.credential_id))
-        else {
-            refused += 1;
-            continue;
-        };
+    for (m, failures) in measured.values() {
         c.execute(
             &measurement,
             &[&m.credential_id, &m.model, &failures, &m.rate_limited_until],
@@ -990,9 +1009,12 @@ pub(crate) async fn write(
 ) -> Result<Outcome, StoreError> {
     let tx = client.transaction().await?;
     let mut logs = Logs::load(&tx, events).await?;
-    for e in events {
-        if let WriteEvent::Log(l) = e {
-            logs.apply_logged(l, node_id);
+    let mut refused = Vec::new();
+    for (i, e) in events.iter().enumerate() {
+        if let WriteEvent::Log(l) = e
+            && !logs.apply_logged(l, node_id)
+        {
+            refused.push(i);
         }
     }
     logs.write(&tx).await?;
@@ -1050,5 +1072,6 @@ pub(crate) async fn write(
     Ok(Outcome {
         health_refused,
         completions,
+        refused,
     })
 }

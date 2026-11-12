@@ -20,6 +20,11 @@ pub enum StoreError {
         #[source]
         source: Box<StoreError>,
     },
+    /// A write the database refuses for its values (a missing credential, a
+    /// number its column cannot hold): what the TS repository throws on for
+    /// that call alone. Not transient; retrying changes nothing.
+    #[error("refused: {0}")]
+    Refused(String),
     /// A row the TS reader would also have thrown on.
     #[error("unreadable row: {0}")]
     Corrupt(String),

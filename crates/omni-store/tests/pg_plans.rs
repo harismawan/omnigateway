@@ -33,6 +33,26 @@ async fn the_narrowed_reads_seek_the_model_window_index() {
     c.batch_execute("SET enable_seqscan = off")
         .await
         .expect("set");
+    let seeks_on_model = |plan: &str| {
+        plan.lines()
+            .any(|l| l.contains("Index Cond:") && l.contains("requested_model = "))
+    };
+    // The assertion bites: the same rows read through a model predicate the
+    // index cannot seek (TS's own example) leave the model as a filter.
+    {
+        let (k, m, z) = ("k1", "opus", 0_i64);
+        let unseekable =
+            SUM_SINCE_MODEL.replace("requested_model = $2", "(requested_model || '') = $2");
+        assert_ne!(unseekable, SUM_SINCE_MODEL);
+        let plan: Vec<String> = c
+            .query(&format!("EXPLAIN {unseekable}"), &[&k, &m, &z])
+            .await
+            .expect("explain")
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert!(!seeks_on_model(&plan.join("\n")), "{plan:?}");
+    }
     let (k, m, z, g, cap) = ("k1", "opus", 0_i64, 60_000_i64, 10_i64);
     let cases: [(&str, Vec<&(dyn ToSql + Sync)>); 3] = [
         (SUM_SINCE_MODEL, vec![&k, &m, &z]),
@@ -52,6 +72,8 @@ async fn the_narrowed_reads_seek_the_model_window_index() {
             plan.contains("idx_request_logs_key_model_at"),
             "{sql}\n{plan}"
         );
-        assert!(plan.contains("requested_model = "), "{plan}");
+        // As TS's `/Index Cond: .*requested_model = /`: the model is part of
+        // the seek, not a residual filter applied row by row.
+        assert!(seeks_on_model(&plan), "{plan}");
     }
 }

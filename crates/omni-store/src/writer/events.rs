@@ -150,8 +150,9 @@ pub struct HealthMeasurement {
 /// Never coalesced: every transition is applied in order, so the row a batch
 /// leaves is the row TS leaves applying them one by one. In single mode routing
 /// reads the in-process snapshot, so riding the batch is enough; the cluster
-/// slice routes these through an immediate path instead, because other
-/// replicas route on them.
+/// slice routes these through the immediate path instead
+/// ([`super::HealthWriter`], a mutation applied under the shared lock),
+/// because other replicas route on them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BreakerTransition(pub CredentialHealth);
 

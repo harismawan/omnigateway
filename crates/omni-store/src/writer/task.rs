@@ -150,6 +150,10 @@ pub struct WriterStats {
     /// Health rows the foreign key refused: no such credential, which TS's
     /// `updateHealth` would also have thrown on.
     pub health_refused: u64,
+    /// Log events refused for their values (Postgres: a number its column
+    /// cannot hold) while the rest of their batch committed. Not persisted:
+    /// each is also counted in `failed`, never in `written`.
+    pub refused: u64,
     /// Committed completions the commit sink had no room for.
     pub sink_dropped: u64,
     /// Seed results the commit sink had no room for.
@@ -173,6 +177,7 @@ struct Counters {
     written: AtomicU64,
     failed: AtomicU64,
     health_refused: AtomicU64,
+    refused: AtomicU64,
     sink_dropped: AtomicU64,
     seeds_dropped: AtomicU64,
 }
@@ -190,6 +195,7 @@ impl Counters {
             written: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             health_refused: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
             sink_dropped: AtomicU64::new(0),
             seeds_dropped: AtomicU64::new(0),
         }
@@ -204,6 +210,7 @@ impl Counters {
             written: self.written.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             health_refused: self.health_refused.load(Ordering::Relaxed),
+            refused: self.refused.load(Ordering::Relaxed),
             sink_dropped: self.sink_dropped.load(Ordering::Relaxed),
             seeds_dropped: self.seeds_dropped.load(Ordering::Relaxed),
         }
@@ -312,11 +319,14 @@ impl Drop for BusyGuard {
 /// barrier's prefix (every event whose producer entered an epoch up to the
 /// barrier's, see `epoch.rs`): `watermark` events, of which `committed +
 /// failed + dropped == watermark`, exactly, whatever was sent meanwhile.
+/// `refused` is the part of `failed` the database refused for its values
+/// while the rest of their batch committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Barrier {
     pub watermark: u64,
     pub committed: u64,
     pub failed: u64,
+    pub refused: u64,
     pub dropped: u64,
 }
 
@@ -627,7 +637,7 @@ impl Drop for Writer {
 /// class: another writer won a row race ([`StoreError::Conflict`]), a
 /// serialization failure or deadlock, a lock or statement timeout, or no
 /// connection to be had right now (pool wait, a dropped connection).
-fn transient(e: &StoreError) -> bool {
+pub(crate) fn transient(e: &StoreError) -> bool {
     match e {
         StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _)) => {
             matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
@@ -687,26 +697,22 @@ impl Sink {
     async fn flush_ordered(&mut self, events: Vec<Tagged>) -> Result<u64, StoreError> {
         let mut lost = 0;
         let mut run = Vec::with_capacity(events.len());
-        let mut epochs = std::collections::BTreeMap::new();
+        let mut tags = Vec::with_capacity(events.len());
         for (e, epoch) in events {
             match e {
                 WriteEvent::Seed(q) => {
-                    let l = self.flush(std::mem::take(&mut run)).await?;
-                    resolve(std::mem::take(&mut epochs), l, &self.counters);
-                    lost += l;
+                    let flushed = self.flush(std::mem::take(&mut run)).await?;
+                    lost += resolve(&std::mem::take(&mut tags), &flushed, &self.counters);
                     self.seed(q).await?;
                 }
                 other => {
-                    if let Some(epoch) = epoch {
-                        *epochs.entry(epoch).or_default() += 1;
-                    }
+                    tags.push(epoch);
                     run.push(other);
                 }
             }
         }
-        let l = self.flush(run).await?;
-        resolve(epochs, l, &self.counters);
-        lost += l;
+        let flushed = self.flush(run).await?;
+        lost += resolve(&tags, &flushed, &self.counters);
         Ok(lost)
     }
 
@@ -825,12 +831,14 @@ impl Sink {
     }
 
     /// Writes `events` off the async threads, retrying a busy database with
-    /// backoff. Returns how many events were lost (0 when it committed). Only
-    /// losing the connection itself ends the writer.
-    async fn flush(&mut self, mut events: Vec<WriteEvent>) -> Result<u64, StoreError> {
+    /// backoff. Returns what became of them. Only losing the connection
+    /// itself ends the writer.
+    async fn flush(&mut self, mut events: Vec<WriteEvent>) -> Result<Flushed, StoreError> {
         let n = events.len() as u64;
         if n == 0 {
-            return Ok(0);
+            return Ok(Flushed::Committed {
+                refused: Vec::new(),
+            });
         }
         let mut attempt = 1;
         loop {
@@ -880,11 +888,22 @@ impl Sink {
             match result {
                 Ok(outcome) => {
                     self.deliver(outcome.completions);
+                    let refused = outcome.refused.len() as u64;
                     c.batches.fetch_add(1, Ordering::Relaxed);
-                    c.written.fetch_add(n, Ordering::Relaxed);
+                    c.written.fetch_add(n - refused, Ordering::Relaxed);
+                    c.failed.fetch_add(refused, Ordering::Relaxed);
+                    c.refused.fetch_add(refused, Ordering::Relaxed);
                     c.health_refused
                         .fetch_add(outcome.health_refused, Ordering::Relaxed);
-                    return Ok(0);
+                    if refused > 0 {
+                        tracing::error!(
+                            count = refused,
+                            "request log events refused for their values; they are lost (count events)"
+                        );
+                    }
+                    return Ok(Flushed::Committed {
+                        refused: outcome.refused,
+                    });
                 }
                 Err(e) if transient(&e) && attempt < MAX_ATTEMPTS => {
                     let delay = RETRY_BASE * 2u32.pow(attempt - 1);
@@ -906,7 +925,7 @@ impl Sink {
                         reason = %e,
                         "request log batch failed to persist; its events are lost (count events)"
                     );
-                    return Ok(n);
+                    return Ok(Flushed::Lost);
                 }
             }
         }
@@ -947,27 +966,73 @@ fn take(q: Queued, batch: &mut Vec<Tagged>, barriers: &mut Vec<Pending>) {
 /// An event and its barrier epoch (`None` for a seed).
 type Tagged = (WriteEvent, Option<u64>);
 
-/// Committed and failed counts per epoch, and the total of epochs already
-/// answered.
-#[derive(Debug, Default)]
-struct Resolved {
-    by_epoch: std::collections::BTreeMap<u64, (u64, u64)>,
-    answered: (u64, u64),
+/// What became of one transaction's events.
+#[derive(Debug)]
+enum Flushed {
+    /// The transaction committed; these events (by index) were refused for
+    /// their values and are not in it.
+    Committed { refused: Vec<usize> },
+    /// The transaction did not commit: every event is lost.
+    Lost,
 }
 
-/// After one transaction: its events committed, or (`lost > 0`) failed,
-/// counted against their epochs. A transaction commits or fails as a whole.
-fn resolve(epochs: std::collections::BTreeMap<u64, u64>, lost: u64, counters: &Counters) {
+/// Per epoch, and folded: events committed, failed, and refused (a subset
+/// of failed).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Tally {
+    committed: u64,
+    failed: u64,
+    refused: u64,
+}
+
+impl Tally {
+    fn add(&mut self, o: Self) {
+        self.committed += o.committed;
+        self.failed += o.failed;
+        self.refused += o.refused;
+    }
+}
+
+/// Resolved counts per epoch not yet folded into a barrier's answer, and the
+/// total of epochs already answered.
+#[derive(Debug, Default)]
+struct Resolved {
+    by_epoch: std::collections::BTreeMap<u64, Tally>,
+    answered: Tally,
+}
+
+/// After one transaction: each event (tagged with its epoch, `None` for
+/// none) committed, failed with it, or refused alone, counted against its
+/// epoch. Returns how many were lost.
+fn resolve(tags: &[Option<u64>], flushed: &Flushed, counters: &Counters) -> u64 {
     let mut resolved = counters
         .resolved
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (epoch, n) in epochs {
-        let e = resolved.by_epoch.entry(epoch).or_default();
-        if lost == 0 {
-            e.0 += n;
-        } else {
-            e.1 += n;
+    let refused: std::collections::HashSet<usize> = match flushed {
+        Flushed::Committed { refused } => refused.iter().copied().collect(),
+        Flushed::Lost => std::collections::HashSet::new(),
+    };
+    let mut lost = 0;
+    for (i, epoch) in tags.iter().enumerate() {
+        let one = match flushed {
+            Flushed::Lost => Tally {
+                failed: 1,
+                ..Tally::default()
+            },
+            Flushed::Committed { .. } if refused.contains(&i) => Tally {
+                failed: 1,
+                refused: 1,
+                ..Tally::default()
+            },
+            Flushed::Committed { .. } => Tally {
+                committed: 1,
+                ..Tally::default()
+            },
+        };
+        lost += one.failed;
+        if let Some(epoch) = epoch {
+            resolved.by_epoch.entry(*epoch).or_default().add(one);
         }
     }
     // No future barrier can ask for a prefix older than the previous
@@ -976,10 +1041,10 @@ fn resolve(epochs: std::collections::BTreeMap<u64, u64>, lost: u64, counters: &C
     let floor = counters.epochs.current().saturating_sub(1);
     let later = resolved.by_epoch.split_off(&floor);
     let older = std::mem::replace(&mut resolved.by_epoch, later);
-    for (c, f) in older.values() {
-        resolved.answered.0 += c;
-        resolved.answered.1 += f;
+    for t in older.values() {
+        resolved.answered.add(*t);
     }
+    lost
 }
 
 /// Answers barriers once the batch before them is written.
@@ -992,23 +1057,23 @@ fn answer(barriers: Vec<Pending>, counters: &Counters) {
     for b in barriers {
         // Fold every epoch up to the barrier's into the answered total, so
         // the map holds only the epochs after it.
-        let (committed, failed) = {
+        let tally = {
             let mut resolved = counters
                 .resolved
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let later = resolved.by_epoch.split_off(&(b.epoch + 1));
             let upto = std::mem::replace(&mut resolved.by_epoch, later);
-            for (c, f) in upto.values() {
-                resolved.answered.0 += c;
-                resolved.answered.1 += f;
+            for t in upto.values() {
+                resolved.answered.add(*t);
             }
             resolved.answered
         };
         let answer = Barrier {
             watermark: b.produced.events,
-            committed,
-            failed,
+            committed: tally.committed,
+            failed: tally.failed,
+            refused: tally.refused,
             dropped: b.produced.dropped,
         };
         // Free the one-barrier slot before the caller is woken, so a caller
@@ -1159,13 +1224,19 @@ mod epoch_accounting_tests {
             // Cancellation before settlement, or refusal after settlement,
             // leaves exactly this state; no answer() is called.
             c.epochs.leave(delayed, false);
-            resolve([(e, 1)].into(), 0, &c);
+            resolve(
+                &[Some(e)],
+                &Flushed::Committed {
+                    refused: Vec::new(),
+                },
+                &c,
+            );
             let prefix = c.epochs.prefix(e, before);
             assert_eq!(prefix.events, n + 1);
             let r = c.resolved.lock().expect("resolved");
             assert!(r.by_epoch.len() <= 2);
             assert_eq!(
-                r.answered.0 + r.by_epoch.values().map(|v| v.0).sum::<u64>(),
+                r.answered.committed + r.by_epoch.values().map(|v| v.committed).sum::<u64>(),
                 prefix.events
             );
         }

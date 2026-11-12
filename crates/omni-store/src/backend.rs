@@ -191,6 +191,29 @@ impl Store {
         }
     }
 
+    /// `updateHealth(credentialId, model, apply)`: the shared atomic
+    /// read-modify-write a breaker failure or transition goes through (see
+    /// [`crate::writer::HealthWriter`] for the immediate path that calls it).
+    pub async fn update_health(
+        &self,
+        credential_id: &str,
+        model: &str,
+        apply: crate::writer::HealthMutation,
+    ) -> Result<CredentialHealth, StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let (id, model) = (credential_id.to_owned(), model.to_owned());
+                on_sqlite!(store, |s| crate::credentials::update_health(
+                    s.connection(),
+                    &id,
+                    &model,
+                    &*apply
+                ))
+            }
+            Self::Postgres(pg) => pg.update_health(credential_id, model, &*apply).await,
+        }
+    }
+
     /// `heartbeat` then `sweepPending`'s read: the boot sweep's completions.
     pub async fn sweep_pending(
         &self,

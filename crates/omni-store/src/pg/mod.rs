@@ -24,6 +24,7 @@
 //! (`prepare_cached`).
 
 pub mod bodies;
+pub mod health;
 pub mod migrate;
 mod rows;
 pub mod usage;
@@ -38,8 +39,8 @@ use omni_crypto::field::FieldKey;
 use std::time::Duration;
 use tokio_postgres::NoTls;
 
-/// How the pool is sized and bounded.
-#[derive(Debug, Clone)]
+/// How the pool is sized and bounded. `Debug` redacts the URL's password.
+#[derive(Clone)]
 pub struct PgConfig {
     /// A `postgres://` URL (`OMNI_DATABASE_URL`).
     pub url: String,
@@ -51,6 +52,18 @@ pub struct PgConfig {
     pub connect_timeout: Duration,
     /// `statement_timeout` on every pooled connection.
     pub statement_timeout: Duration,
+}
+
+impl std::fmt::Debug for PgConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgConfig")
+            .field("url", &redacted(&self.url))
+            .field("max_connections", &self.max_connections)
+            .field("wait_timeout", &self.wait_timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .finish()
+    }
 }
 
 impl PgConfig {
@@ -77,20 +90,44 @@ impl PgConfig {
 }
 
 /// The URL as it may be shown: host and database, never the password
-/// (`redacted` in `store.ts`).
+/// (`redacted` in `store.ts`). Both places libpq takes one are masked: the
+/// authority's `user:password@`, and a `password=` query parameter.
 pub fn redacted(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return "postgres://<unparseable>".to_owned();
     };
-    let (authority, tail) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
-    let Some((userinfo, host)) = authority.rsplit_once('@') else {
-        return url.to_owned();
+    // The authority ends at the first `/`, `?` or `#`.
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let authority = match authority.rsplit_once('@') {
+        Some((userinfo, host)) => match userinfo.split_once(':') {
+            Some((user, _)) => format!("{user}:***@{host}"),
+            None => authority.to_owned(),
+        },
+        None => authority.to_owned(),
     };
-    let user = userinfo.split_once(':').map_or(userinfo, |(u, _)| u);
-    if user.len() == userinfo.len() {
-        return url.to_owned();
-    }
-    format!("{scheme}://{user}:***@{host}{tail}")
+    let tail = match tail.split_once('?') {
+        None => tail.to_owned(),
+        Some((path, query)) => {
+            let (query, fragment) = query
+                .split_once('#')
+                .map_or((query, None), |(q, f)| (q, Some(f)));
+            let masked: Vec<String> = query
+                .split('&')
+                .map(|pair| match pair.split_once('=') {
+                    Some((k, _)) if k.eq_ignore_ascii_case("password") => format!("{k}=***"),
+                    _ => pair.to_owned(),
+                })
+                .collect();
+            let mut t = format!("{path}?{}", masked.join("&"));
+            if let Some(f) = fragment {
+                t.push('#');
+                t.push_str(f);
+            }
+            t
+        }
+    };
+    format!("{scheme}://{authority}{tail}")
 }
 
 /// A migrated Postgres database behind a bounded pool. Cheap to clone.
@@ -376,5 +413,28 @@ mod tests {
         assert_eq!(redacted("postgres://db/omni"), "postgres://db/omni");
         assert_eq!(redacted("postgres://u@db/omni"), "postgres://u@db/omni");
         assert_eq!(redacted("nope"), "postgres://<unparseable>");
+        assert_eq!(
+            redacted("postgres://db/omni?user=u&password=hunter2&sslmode=require"),
+            "postgres://db/omni?user=u&password=***&sslmode=require"
+        );
+        assert_eq!(
+            redacted("postgresql://u:p%40ss@db?PASSWORD=x"),
+            "postgresql://u:***@db?PASSWORD=***"
+        );
+        assert_eq!(
+            redacted("postgres://u:p@db:5432"),
+            "postgres://u:***@db:5432"
+        );
+    }
+
+    #[test]
+    fn config_debug_never_shows_the_password() {
+        let c = super::PgConfig::new("postgres://omni:hunter2@db/omni?password=hunter3");
+        let shown = format!("{c:?}");
+        assert!(!shown.contains("hunter"), "{shown}");
+        let s = crate::StoreConfig::Postgres(c);
+        let shown = format!("{s:?} {s:#?}");
+        assert!(!shown.contains("hunter"), "{shown}");
+        assert!(shown.contains("omni:***@db"), "{shown}");
     }
 }
