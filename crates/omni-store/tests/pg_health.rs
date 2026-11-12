@@ -514,9 +514,13 @@ async fn panics_then_valid(store: omni_store::Store) -> HealthStats {
         "m",
         Arc::new(|current: Option<CredentialHealth>| {
             let mut h = current.unwrap_or_else(|| blank("c1", "m"));
-            // Overflows in a checked (debug) build, as the review describes.
+            // Arithmetic that overflows panics in every profile (`checked_add`
+            // then `expect`), not only where overflow checks are on.
             let big = std::hint::black_box(i64::MAX);
-            h.consecutive_failures += big;
+            h.consecutive_failures = h
+                .consecutive_failures
+                .checked_add(big)
+                .expect("failure count overflow");
             h
         })
     ));
@@ -772,5 +776,62 @@ async fn sends_during_close_are_refused_or_applied_never_lost() {
     assert_eq!(
         health_row(&db, "m").await.map(|r| i64::from(r.1)),
         Some(i64::try_from(ok).expect("ok"))
+    );
+}
+
+/// A SQLite COMMIT that fails (here a deferred foreign key, checked only at
+/// COMMIT) is rolled back by the transaction guard: the connection is left
+/// out of any transaction and the next call on the same `Store` proceeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_sqlite_commit_rolls_back_and_the_next_call_proceeds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("omni.db");
+    let store = omni_store::Store::open(omni_store::StoreConfig::Sqlite { path: path.clone() }, 0)
+        .await
+        .expect("open");
+    let conn = rusqlite::Connection::open(&path).expect("conn");
+    conn.execute(
+        "INSERT INTO credentials (id, provider, label, auth_type, created_at, updated_at)
+         VALUES ('c1', 'anthropic', 'one', 'apiKey', 1, 1)",
+        [],
+    )
+    .expect("credential");
+    // Test-only: a deferred foreign key, so a violating row is refused at
+    // COMMIT rather than at the INSERT.
+    conn.execute_batch(
+        "CREATE TABLE commit_guard (credential_id TEXT REFERENCES credentials (id)
+                                      DEFERRABLE INITIALLY DEFERRED);
+         CREATE TRIGGER commit_guard AFTER INSERT ON credential_health
+           WHEN NEW.consecutive_failures = 7
+           BEGIN INSERT INTO commit_guard VALUES ('nobody'); END;",
+    )
+    .expect("deferred guard");
+    drop(conn);
+    let err = store
+        .update_health(
+            "c1",
+            "m",
+            Arc::new(|_| CredentialHealth {
+                consecutive_failures: 7,
+                ..blank("c1", "m")
+            }),
+        )
+        .await
+        .expect_err("refused at COMMIT");
+    // The deferred check fires at COMMIT, not at the INSERT: rusqlite
+    // reports SQLITE_CONSTRAINT_FOREIGNKEY from the COMMIT statement.
+    assert!(
+        matches!(&err, StoreError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+        "{err:?}"
+    );
+    store
+        .update_health("c1", "m", plus(1))
+        .await
+        .expect("the connection is not left inside a transaction");
+    let rows = store.list_health().await.expect("health");
+    assert_eq!(
+        rows[0].consecutive_failures, 1,
+        "the refused row never landed"
     );
 }

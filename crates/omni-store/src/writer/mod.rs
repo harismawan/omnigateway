@@ -51,7 +51,7 @@ pub use events::{
 pub(crate) use health::panic_message;
 pub use health::{
     HealthCommitted, HealthHandle, HealthMutation, HealthStats, HealthWriter, HealthWriterConfig,
-    HealthWriterError,
+    HealthWriterError, Observed,
 };
 pub use task::{
     Barrier, BarrierError, Writer, WriterConfig, WriterHandle, WriterStats, queue_slot_bytes,

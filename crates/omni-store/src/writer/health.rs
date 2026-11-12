@@ -43,10 +43,22 @@
 //! - `abandoned`: still queued or in flight when the worker itself ended
 //!   abnormally (reported only by a failed [`HealthWriter::close`]).
 //!
-//! **Close boundary.** [`HealthWriter::close`] marks the writer closing
-//! before anything else, so a `send` that starts after `close` is called is
-//! refused (`false`, counted `dropped`). A send racing the call may still be
-//! accepted; anything accepted is applied before `close` returns.
+//! **Close boundary.** [`HealthWriter::close`] marks the writer closing when
+//! it is called (before its future is first polled), so a `send` that
+//! starts after that is refused (`false`, counted `dropped`).
+//!
+//! Admission is settled before the counters are read. Each `send` registers
+//! itself in flight *before* it looks at the closing flag, and leaves only
+//! after it has accounted for its job (`enqueued` or `dropped`). `close`
+//! sets the flag, then waits (asynchronously) for the in-flight count to
+//! reach zero, and only then stops and joins the worker. The two sides use
+//! the store-then-load pattern on sequentially consistent atomics, so either
+//! the sender sees the flag and refuses, or `close` sees the sender and
+//! waits for it. A sender never waits for `close` or for the database. So a
+//! send racing `close` is either refused or accepted, accounted, and
+//! (normally) applied before `close` returns, and the final counters hold
+//! `enqueued == written + refused + failed + uncertain + panicked`
+//! (+ `abandoned` after an abnormal end).
 
 use crate::backend::Store;
 use crate::credentials::CredentialHealth;
@@ -54,7 +66,7 @@ use crate::error::StoreError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
@@ -68,13 +80,26 @@ pub enum HealthCommitted {
     /// rounding).
     Written { row: CredentialHealth },
     /// COMMIT's outcome is unknown and the mutation was not re-applied.
-    /// `reconciled` is the row read back afterwards (`None` when there is
-    /// none, or the re-read failed too); publish that, not a guess.
+    /// `observed` is one later read of the row: an observation, not an
+    /// acknowledgement. It may already include other replicas' writes, or
+    /// precede the server finishing this COMMIT, so it never says whether
+    /// this mutation landed.
     Uncertain {
         credential_id: String,
         model: String,
-        reconciled: Option<CredentialHealth>,
+        observed: Observed,
     },
+}
+
+/// What the re-read after an uncertain commit saw.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Observed {
+    /// The row, as read then.
+    Row(CredentialHealth),
+    /// No row for the pair, as read then. Not a reset to closed.
+    Absent,
+    /// The re-read failed too; nothing is known.
+    Unknown(String),
 }
 
 /// How the health path is bounded.
@@ -163,6 +188,12 @@ pub struct HealthWriterError {
 #[derive(Debug, Default)]
 struct Counters {
     closing: AtomicBool,
+    /// Senders between registering and accounting for their job.
+    in_flight: AtomicU64,
+    /// Woken when `in_flight` drops to zero.
+    settled: Notify,
+    #[cfg(test)]
+    hooks: hooks::Hooks,
     enqueued: AtomicU64,
     dropped: AtomicU64,
     written: AtomicU64,
@@ -222,21 +253,30 @@ impl HealthHandle {
     /// full, writer closing or closed), counted. Nothing here but a flag
     /// check and a `try_send`.
     pub fn send(&self, credential_id: &str, model: &str, apply: HealthMutation) -> bool {
-        if self.counters.closing.load(Ordering::SeqCst) {
-            Counters::bump(&self.counters.dropped);
-            return false;
-        }
-        let job = Job {
-            credential_id: credential_id.to_owned(),
-            model: model.to_owned(),
-            apply,
-        };
-        let ok = self.tx.try_send(job).is_ok();
-        Counters::bump(if ok {
-            &self.counters.enqueued
+        let c = &self.counters;
+        // Register first, then look at the flag (see the module docs): a
+        // `close` that set the flag before this load is refused below; one
+        // that sets it after waits for this send to leave.
+        c.in_flight.fetch_add(1, Ordering::SeqCst);
+        let ok = if c.closing.load(Ordering::SeqCst) {
+            false
         } else {
-            &self.counters.dropped
-        });
+            let job = Job {
+                credential_id: credential_id.to_owned(),
+                model: model.to_owned(),
+                apply,
+            };
+            let ok = self.tx.try_send(job).is_ok();
+            #[cfg(test)]
+            if ok {
+                c.hooks.after_publish();
+            }
+            ok
+        };
+        Counters::bump(if ok { &c.enqueued } else { &c.dropped });
+        if c.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            c.settled.notify_waiters();
+        }
         ok
     }
 
@@ -278,17 +318,35 @@ impl HealthWriter {
         self.handle.clone()
     }
 
-    /// Refuses new sends from here on, applies everything already accepted,
-    /// and returns the final counters. `Err` when the worker ended
-    /// abnormally (it panicked or was cancelled): the error carries the
-    /// counters, with the accepted mutations it never resolved in
-    /// `abandoned`.
-    pub async fn close(self) -> Result<HealthStats, HealthWriterError> {
+    /// Refuses new sends from the call on (the flag is set here, not when
+    /// the returned future is first polled), waits for sends already in
+    /// flight to account for themselves, applies everything accepted, and
+    /// returns the final counters. `Err` when the worker ended abnormally
+    /// (it panicked or was cancelled): the error carries the counters, with
+    /// the accepted mutations it never resolved in `abandoned`.
+    pub fn close(
+        self,
+    ) -> impl std::future::Future<Output = Result<HealthStats, HealthWriterError>> + Send {
         let Self { handle, stop, task } = self;
         handle.counters.closing.store(true, Ordering::SeqCst);
-        // An Err means the task already ended; the join says how.
-        stop.send(()).ok();
-        finish(task.await, &handle.counters)
+        async move {
+            let c = &handle.counters;
+            loop {
+                let settled = c.settled.notified();
+                tokio::pin!(settled);
+                // Registered before the check, so a sender leaving between
+                // the check and the await still wakes it.
+                settled.as_mut().enable();
+                if c.in_flight.load(Ordering::SeqCst) == 0 {
+                    break;
+                }
+                settled.await;
+            }
+            // Every accepted job is now queued and counted. An Err means the
+            // task already ended; the join says how.
+            stop.send(()).ok();
+            finish(task.await, c)
+        }
     }
 }
 
@@ -362,6 +420,8 @@ async fn run(
             job = rx.recv() => job,
         };
         let Some(job) = job else { break };
+        #[cfg(test)]
+        counters.hooks.on_job();
         let dropped = counters.dropped.load(Ordering::SeqCst);
         if dropped > warned.map_or(0, |w| w.1)
             && warned.is_none_or(|w| w.0.elapsed() >= config.drop_warn_interval)
@@ -393,13 +453,14 @@ async fn run(
                 Err(StoreError::UncertainCommit(reason)) => {
                     // Never re-applied: it may have committed.
                     Counters::bump(&counters.uncertain);
-                    let reconciled = store
-                        .read_health(&job.credential_id, &job.model)
-                        .await
-                        .unwrap_or_else(|e| {
+                    let observed = match store.read_health(&job.credential_id, &job.model).await {
+                        Ok(Some(row)) => Observed::Row(row),
+                        Ok(None) => Observed::Absent,
+                        Err(e) => {
                             tracing::warn!(reason = %e, "health re-read after an uncertain commit failed");
-                            None
-                        });
+                            Observed::Unknown(e.to_string())
+                        }
+                    };
                     tracing::error!(
                         credentialId = %job.credential_id,
                         reason = %reason,
@@ -411,7 +472,7 @@ async fn run(
                         HealthCommitted::Uncertain {
                             credential_id: job.credential_id.clone(),
                             model: job.model.clone(),
-                            reconciled,
+                            observed,
                         },
                     );
                     break;
@@ -469,5 +530,169 @@ mod tests {
         );
         let ok = finish(Ok(()), &c).expect("normal end");
         assert_eq!(ok.abandoned, 0);
+    }
+}
+
+#[cfg(test)]
+mod hooks {
+    //! Test-only seams: pause a sender between publishing its job and
+    //! accounting for it, and end the worker abnormally on its next job.
+    use std::sync::{Arc, Condvar, Mutex};
+
+    #[derive(Debug, Default)]
+    pub(super) struct Pause {
+        state: Mutex<(bool, bool)>, // (parked, released)
+        cv: Condvar,
+    }
+
+    impl Pause {
+        pub(super) fn wait_until_parked(&self) {
+            let mut s = self.state.lock().expect("pause");
+            while !s.0 {
+                s = self.cv.wait(s).expect("pause");
+            }
+        }
+
+        pub(super) fn release(&self) {
+            self.state.lock().expect("pause").1 = true;
+            self.cv.notify_all();
+        }
+
+        fn park(&self) {
+            let mut s = self.state.lock().expect("pause");
+            s.0 = true;
+            self.cv.notify_all();
+            while !s.1 {
+                s = self.cv.wait(s).expect("pause");
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub(super) struct Hooks {
+        pause: Mutex<Option<Arc<Pause>>>,
+        kill: std::sync::atomic::AtomicBool,
+    }
+
+    impl Hooks {
+        pub(super) fn pause_next_send(&self) -> Arc<Pause> {
+            let p = Arc::new(Pause::default());
+            *self.pause.lock().expect("hooks") = Some(Arc::clone(&p));
+            p
+        }
+
+        pub(super) fn kill_worker_on_next_job(&self) {
+            self.kill.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        pub(super) fn after_publish(&self) {
+            let p = self.pause.lock().expect("hooks").take();
+            if let Some(p) = p {
+                p.park();
+            }
+        }
+
+        pub(super) fn on_job(&self) {
+            if self.kill.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                panic!("health worker killed by a test hook");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    /// A migrated SQLite store with no credentials: a mutation on `ghost`
+    /// is refused by the foreign key, deterministically.
+    async fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("omni.db");
+        let store = Store::open(crate::StoreConfig::Sqlite { path }, 0)
+            .await
+            .expect("open");
+        (dir, store)
+    }
+
+    fn ghost() -> HealthMutation {
+        Arc::new(|_| CredentialHealth {
+            credential_id: "ghost".into(),
+            model: "m".into(),
+            breaker_state: crate::BreakerState::Closed,
+            consecutive_failures: 1,
+            opened_at: None,
+            rate_limited_until: None,
+        })
+    }
+
+    /// The window the review names: a sender has published its job but not
+    /// yet accounted for it when `close` runs. `close` waits for that
+    /// sender, so the final counters are exact. Normal close.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_waits_for_a_sender_paused_between_publish_and_accounting() {
+        let (_dir, store) = store().await;
+        let writer = HealthWriter::spawn(store, HealthWriterConfig::default());
+        let h = writer.handle();
+        let paused = h.counters.hooks.pause_next_send();
+        let sender = std::thread::spawn(move || h.send("ghost", "m", ghost()));
+        let p = Arc::clone(&paused);
+        tokio::task::spawn_blocking(move || p.wait_until_parked())
+            .await
+            .expect("parked");
+        // The job is queued; the sender has not counted it yet.
+        let closing = tokio::spawn(writer.close());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!closing.is_finished(), "close waits for the paused sender");
+        paused.release();
+        assert!(sender.join().expect("sender"), "the send was accepted");
+        let stats = closing.await.expect("join").expect("close");
+        assert_eq!((stats.enqueued, stats.refused), (1, 1), "{stats:?}");
+        assert_eq!(stats.enqueued, stats.resolved(), "{stats:?}");
+    }
+
+    /// The same window, with the worker ending abnormally on that job: the
+    /// accepted, unresolved job is counted abandoned.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn abnormal_close_counts_a_job_published_by_a_paused_sender_as_abandoned() {
+        let (_dir, store) = store().await;
+        let writer = HealthWriter::spawn(store, HealthWriterConfig::default());
+        let h = writer.handle();
+        h.counters.hooks.kill_worker_on_next_job();
+        let paused = h.counters.hooks.pause_next_send();
+        let sender = std::thread::spawn(move || h.send("ghost", "m", ghost()));
+        let p = Arc::clone(&paused);
+        tokio::task::spawn_blocking(move || p.wait_until_parked())
+            .await
+            .expect("parked");
+        let closing = tokio::spawn(writer.close());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!closing.is_finished(), "close waits for the paused sender");
+        paused.release();
+        assert!(sender.join().expect("sender"));
+        let err = closing.await.expect("join").expect_err("the worker died");
+        assert_eq!(
+            (
+                err.stats.enqueued,
+                err.stats.abandoned,
+                err.stats.resolved()
+            ),
+            (1, 1, 0),
+            "{:?}",
+            err.stats
+        );
+    }
+
+    /// A send that starts after `close` is called (its future not yet
+    /// polled) is refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_send_after_close_is_called_is_refused_before_the_future_is_polled() {
+        let (_dir, store) = store().await;
+        let writer = HealthWriter::spawn(store, HealthWriterConfig::default());
+        let h = writer.handle();
+        let closing = writer.close();
+        assert!(!h.send("ghost", "m", ghost()));
+        let stats = closing.await.expect("close");
+        assert_eq!((stats.enqueued, stats.dropped), (0, 1));
     }
 }

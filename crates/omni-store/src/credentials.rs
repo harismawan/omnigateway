@@ -226,15 +226,12 @@ pub fn update_health(
         }
         Err(e) => return Err(e.into()),
     }
-    // `Transaction::commit` consumes the guard without rolling back when
-    // COMMIT fails (`SQLITE_BUSY` leaves the transaction open), so roll
-    // back explicitly then.
-    if let Err(e) = tx.execute_batch("COMMIT") {
-        drop(tx); // rolls back: still inside the transaction
-        return Err(e.into());
-    }
-    // Committed: dropping the guard now finds autocommit and does nothing.
-    drop(tx);
+    // `Transaction::commit(self)` consumes the guard. If COMMIT fails (say
+    // `SQLITE_BUSY`, which leaves SQLite's transaction open), the guard is
+    // dropped on the way out, and rusqlite 0.41's `Drop` rolls back
+    // whenever the connection is not in autocommit; after a successful
+    // COMMIT it is, and the drop does nothing.
+    tx.commit()?;
     Ok(next)
 }
 

@@ -8,20 +8,30 @@
 //! failure on the same row therefore both count; neither overwrites the
 //! other with a value computed from a stale snapshot.
 //!
-//! **Retry boundary.** Every error before COMMIT is sent leaves nothing
-//! committed: the server rolls an open transaction back when the statement
-//! fails or the connection goes. So does a COMMIT the server *answers* with
-//! an error (it carries a SQLSTATE). Those are safe to retry. A COMMIT whose
-//! answer never arrives (closed connection, I/O error) is
-//! [`StoreError::UncertainCommit`]: it may have committed, and re-applying
-//! a non-idempotent mutation (`failures + 1`) would count it twice.
+//! **Retry boundary.** Before COMMIT is attempted, no error can commit this
+//! transaction: a failed statement aborts it, and a lost session rolls it
+//! back. Those are ordinary (retryable where transient) errors.
 //!
-//! Frozen TS does the same at that point: Bun's `sql.begin` rejects when
-//! the COMMIT's connection is lost, `updateHealth` throws, and the gateway's
-//! `persistHealth` callers log "failed to persist credential health" and
-//! move on. Nothing re-applies the transition. The Rust health path keeps
-//! that (no re-application) and adds a reconciliation re-read, so the caller
-//! learns what the row now holds.
+//! At COMMIT, only an answer that *positively establishes* non-commit is
+//! treated as such ([`commit_rejection`]): an `ErrorResponse` of severity
+//! ERROR (not FATAL or PANIC, which end the session) whose SQLSTATE says
+//! the transaction was rejected: class 40 (serialization failure,
+//! deadlock: retryable), or a deferred constraint checked at COMMIT
+//! (class 23: a refusal of the values, as TS's call throws). Everything
+//! else at COMMIT is [`StoreError::UncertainCommit`]: a connection-level
+//! error (closed, I/O, unexpected message), any FATAL/PANIC answer, the
+//! shutdown codes 57P01/57P02/57P03 whatever their severity, and any other
+//! code. The server may have committed before sending any of those, and
+//! re-applying a non-idempotent mutation (`failures + 1`) would count it
+//! twice. A connection closed before COMMIT could even be queued lands
+//! here too: the client cannot tell it from a lost acknowledgement, so it
+//! is conservatively uncertain, never retried.
+//!
+//! Frozen TS does not re-apply either: `updateHealth` awaits `sql.begin`
+//! and has no retry loop, so a lost COMMIT acknowledgement makes it throw
+//! once. What the gateway then does depends on the call site (see the d1
+//! report, fix round 3). The Rust health path keeps the no-re-application
+//! and adds a re-read, reported as an observation, not an acknowledgement.
 
 use super::PgStore;
 use crate::credentials::CredentialHealth;
@@ -65,6 +75,72 @@ fn refusal(e: &tokio_postgres::Error) -> Option<String> {
         e.as_db_error()
             .map_or_else(|| e.to_string(), |d| d.message().to_owned())
     })
+}
+
+/// How a COMMIT's error is to be read: what positively establishes that
+/// the transaction did not commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitRejection {
+    /// Class 40 at severity ERROR: rolled back, retry.
+    Retryable,
+    /// A deferred constraint checked at COMMIT (class 23) at severity
+    /// ERROR: rolled back, the values are refused.
+    Refused,
+}
+
+/// Whether a COMMIT error positively establishes non-commit, judged by
+/// severity and SQLSTATE together (never by the mere presence of a code).
+/// `None`: the outcome is unknown.
+pub(crate) fn commit_rejection(e: &tokio_postgres::Error) -> Option<CommitRejection> {
+    let db = e.as_db_error()?;
+    classify_commit(db.parsed_severity(), db.severity(), db.code())
+}
+
+/// [`commit_rejection`] on the fields of an `ErrorResponse`.
+fn classify_commit(
+    parsed: Option<tokio_postgres::error::Severity>,
+    raw: &str,
+    code: &SqlState,
+) -> Option<CommitRejection> {
+    use tokio_postgres::error::Severity;
+    // FATAL and PANIC end the session (or the server): whatever the code,
+    // they say nothing about whether this COMMIT landed first. A server
+    // that did not send `V` (pre-9.6) is judged by its `S`, which may be
+    // localised, so only the untranslated `ERROR` counts there.
+    let error = match parsed {
+        Some(s) => matches!(s, Severity::Error),
+        None => raw == "ERROR",
+    };
+    if !error {
+        return None;
+    }
+    // The shutdown codes are never rollback evidence, whatever the severity.
+    if [
+        SqlState::ADMIN_SHUTDOWN,
+        SqlState::CRASH_SHUTDOWN,
+        SqlState::CANNOT_CONNECT_NOW,
+    ]
+    .contains(code)
+    {
+        return None;
+    }
+    match code.code().get(..2) {
+        Some("40") => Some(CommitRejection::Retryable),
+        Some("23") => Some(CommitRejection::Refused),
+        _ => None,
+    }
+}
+
+/// A COMMIT's error as the caller should act on it.
+fn commit_error(e: tokio_postgres::Error) -> StoreError {
+    match commit_rejection(&e) {
+        Some(CommitRejection::Retryable) => StoreError::Postgres(e),
+        Some(CommitRejection::Refused) => StoreError::Refused(
+            e.as_db_error()
+                .map_or_else(|| e.to_string(), |d| d.message().to_owned()),
+        ),
+        None => StoreError::UncertainCommit(e.to_string()),
+    }
 }
 
 impl PgStore {
@@ -137,10 +213,7 @@ impl PgStore {
         }
         match tx.commit().await {
             Ok(()) => Ok(next),
-            // The server answered the COMMIT with an error: rolled back.
-            Err(e) if e.code().is_some() => Err(StoreError::Postgres(e)),
-            // No answer: committed or not, nobody here knows.
-            Err(e) => Err(StoreError::UncertainCommit(e.to_string())),
+            Err(e) => Err(commit_error(e)),
         }
     }
 
@@ -168,5 +241,109 @@ impl PgStore {
             opened_at: instant(r.try_get(2)?),
             rate_limited_until: instant(r.try_get(3)?),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommitRejection, classify_commit};
+    use tokio_postgres::error::{Severity, SqlState};
+
+    #[test]
+    fn only_an_error_level_rejection_is_evidence_of_rollback() {
+        use CommitRejection::{Refused, Retryable};
+        let cases: [(Option<Severity>, &str, SqlState, Option<CommitRejection>); 14] = [
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::T_R_SERIALIZATION_FAILURE,
+                Some(Retryable),
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::T_R_DEADLOCK_DETECTED,
+                Some(Retryable),
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::CHECK_VIOLATION,
+                Some(Refused),
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::FOREIGN_KEY_VIOLATION,
+                Some(Refused),
+            ),
+            // Session-ending severities, whatever the code.
+            (
+                Some(Severity::Fatal),
+                "FATAL",
+                SqlState::T_R_SERIALIZATION_FAILURE,
+                None,
+            ),
+            (
+                Some(Severity::Panic),
+                "PANIC",
+                SqlState::CHECK_VIOLATION,
+                None,
+            ),
+            (
+                Some(Severity::Fatal),
+                "FATAL",
+                SqlState::ADMIN_SHUTDOWN,
+                None,
+            ),
+            // Shutdown codes, even at ERROR.
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::ADMIN_SHUTDOWN,
+                None,
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::CRASH_SHUTDOWN,
+                None,
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::CANNOT_CONNECT_NOW,
+                None,
+            ),
+            // Anything else is unknown, including a statement timeout at
+            // COMMIT and codes the client cannot interpret.
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::QUERY_CANCELED,
+                None,
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::from_code("XX000"),
+                None,
+            ),
+            // No `V` field: only the untranslated `S` = ERROR counts.
+            (
+                None,
+                "ERROR",
+                SqlState::T_R_SERIALIZATION_FAILURE,
+                Some(Retryable),
+            ),
+            (None, "FEHLER", SqlState::T_R_SERIALIZATION_FAILURE, None),
+        ];
+        for (parsed, raw, code, want) in cases {
+            assert_eq!(
+                classify_commit(parsed, raw, &code),
+                want,
+                "{parsed:?} {raw} {code:?}"
+            );
+        }
     }
 }

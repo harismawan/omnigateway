@@ -1,21 +1,35 @@
-//! A Postgres wire-protocol TCP proxy that can lose one COMMIT
-//! acknowledgement: armed, it forwards the next simple-query `COMMIT` to the
-//! server, swallows the server's answer (so the commit has happened), and
-//! closes the client's connection before the client hears of it.
+//! A Postgres wire-protocol TCP proxy that can fault the next COMMIT in one
+//! of three ways ([`Fault`]), and refuse new connections.
 //!
 //! Plain `NoTls` connections only: the client's first packet is the startup
 //! message (an `SSLRequest`, if one comes, is forwarded as any other
 //! untyped startup packet), then typed messages `type:u8 len:u32 body`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
+/// What happens to the next simple-query `COMMIT` any connection sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Fault {
+    /// Forward it; swallow the server's answer (so it committed); close.
+    LoseAck = 1,
+    /// Forward it; swallow the server's answer; send the client a
+    /// `FATAL 57P01` ErrorResponse (as a server shutting down sends), close.
+    FatalAfterCommit = 2,
+    /// Do not forward it; close both sides. The server sees the session end
+    /// inside the transaction and rolls it back.
+    DropBeforeCommit = 3,
+}
+
 #[derive(Debug, Default)]
 struct State {
-    armed: AtomicBool,
+    armed: AtomicU8,
     fired: AtomicU64,
+    /// Once a fault fires, refuse (accept and close) new connections.
+    refuse_after_fire: AtomicBool,
 }
 
 /// The running proxy; dropped, it stops accepting.
@@ -41,6 +55,11 @@ impl Proxy {
         let s = Arc::clone(&state);
         let accept = tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
+                if s.refuse_after_fire.load(Ordering::SeqCst) && s.fired.load(Ordering::SeqCst) > 0
+                {
+                    drop(client);
+                    continue;
+                }
                 let upstream = upstream.clone();
                 let s = Arc::clone(&s);
                 tokio::spawn(async move {
@@ -57,12 +76,22 @@ impl Proxy {
         }
     }
 
-    /// Loses the acknowledgement of the next COMMIT any connection sends.
-    pub fn arm_commit_loss(&self) {
-        self.state.armed.store(true, Ordering::SeqCst);
+    /// Faults the next COMMIT any connection sends.
+    pub fn arm(&self, fault: Fault) {
+        self.state.armed.store(fault as u8, Ordering::SeqCst);
     }
 
-    /// How many acknowledgements were lost so far.
+    /// Loses the acknowledgement of the next COMMIT.
+    pub fn arm_commit_loss(&self) {
+        self.arm(Fault::LoseAck);
+    }
+
+    /// After the armed fault fires, refuse every new connection.
+    pub fn refuse_after_fire(&self) {
+        self.state.refuse_after_fire.store(true, Ordering::SeqCst);
+    }
+
+    /// How many faults fired so far.
     pub fn fired(&self) -> u64 {
         self.state.fired.load(Ordering::SeqCst)
     }
@@ -79,16 +108,38 @@ async fn read_exact_or_eof(r: &mut tokio::net::tcp::OwnedReadHalf, buf: &mut [u8
     r.read_exact(buf).await.is_ok()
 }
 
+/// `ErrorResponse` with severity FATAL, SQLSTATE 57P01.
+fn fatal_admin_shutdown() -> Vec<u8> {
+    let mut fields = Vec::new();
+    for (t, v) in [
+        (b'S', "FATAL"),
+        (b'V', "FATAL"),
+        (b'C', "57P01"),
+        (b'M', "terminating connection due to administrator command"),
+    ] {
+        fields.push(t);
+        fields.extend_from_slice(v.as_bytes());
+        fields.push(0);
+    }
+    fields.push(0);
+    let mut out = vec![b'E'];
+    out.extend_from_slice(&u32::try_from(fields.len() + 4).expect("len").to_be_bytes());
+    out.extend_from_slice(&fields);
+    out
+}
+
 async fn pump(client: TcpStream, server: TcpStream, state: Arc<State>) {
-    let (mut cr, mut cw) = client.into_split();
+    let (mut cr, cw) = client.into_split();
     let (mut sr, mut sw) = server.into_split();
-    // Set (before the COMMIT is forwarded) when this connection is to lose
-    // the answer to it.
-    let losing = Arc::new(AtomicBool::new(false));
+    // The fault this connection took on (0: none), set before the COMMIT is
+    // forwarded (or withheld).
+    let fault = Arc::new(AtomicU8::new(0));
+    let cw = Arc::new(tokio::sync::Mutex::new(cw));
 
     let to_server = {
-        let losing = Arc::clone(&losing);
+        let fault = Arc::clone(&fault);
         let state = Arc::clone(&state);
+        let cw = Arc::clone(&cw);
         tokio::spawn(async move {
             // Startup packets: `len:u32 body`, until the startup message
             // itself (anything but an SSLRequest, code 80877103).
@@ -122,11 +173,16 @@ async fn pump(client: TcpStream, server: TcpStream, state: Arc<State>) {
                 if !read_exact_or_eof(&mut cr, &mut body).await {
                     return;
                 }
-                if head[0] == b'Q'
-                    && body.strip_suffix(&[0]) == Some(b"COMMIT".as_slice())
-                    && state.armed.swap(false, Ordering::SeqCst)
-                {
-                    losing.store(true, Ordering::SeqCst);
+                if head[0] == b'Q' && body.strip_suffix(&[0]) == Some(b"COMMIT".as_slice()) {
+                    let armed = state.armed.swap(0, Ordering::SeqCst);
+                    if armed == Fault::DropBeforeCommit as u8 {
+                        state.fired.fetch_add(1, Ordering::SeqCst);
+                        // Close both sides without forwarding the COMMIT.
+                        sw.shutdown().await.ok();
+                        cw.lock().await.shutdown().await.ok();
+                        return;
+                    }
+                    fault.store(armed, Ordering::SeqCst);
                 }
                 if sw.write_all(&head).await.is_err() || sw.write_all(&body).await.is_err() {
                     return;
@@ -140,16 +196,24 @@ async fn pump(client: TcpStream, server: TcpStream, state: Arc<State>) {
         if n == 0 {
             break;
         }
-        if losing.load(Ordering::SeqCst) {
-            // The server has answered the COMMIT, so it committed (or said
-            // why not): the client never hears which.
+        let f = fault.load(Ordering::SeqCst);
+        if f != 0 {
+            // The server has answered the COMMIT: it committed (or said why
+            // not). The client never hears which.
             state.fired.fetch_add(1, Ordering::SeqCst);
+            if f == Fault::FatalAfterCommit as u8 {
+                cw.lock()
+                    .await
+                    .write_all(&fatal_admin_shutdown())
+                    .await
+                    .ok();
+            }
             break;
         }
-        if cw.write_all(&buf[..n]).await.is_err() {
+        if cw.lock().await.write_all(&buf[..n]).await.is_err() {
             break;
         }
     }
     to_server.abort();
-    cw.shutdown().await.ok();
+    cw.lock().await.shutdown().await.ok();
 }
