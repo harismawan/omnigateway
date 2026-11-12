@@ -136,3 +136,102 @@ setup/login/status/logout + unported `/api` fallthrough + plugin 501, and 413-of
   (`/home/linuxbrew/.linuxbrew/lib/faketime/libfaketimeMT.so.1`); the driver needs it.
 - `/api/client/login` (client sessions over HTTP) is A8; client-session behaviour is covered by
   unit tests only so far.
+
+## Fix round 1
+
+Review `a4-review.md` (gpt-6-astra#high); controller ruling in `progress.md`. Base 9b04c3a1 (D1 merged
+on top of ebb4d240; no A4 files touched by it). Evidence: `/tmp/opencode/a4-fix1/`.
+
+**I1: the hashing bound now limits running Argon2 jobs.** `AdminAuth::hashing` takes an owned
+permit from an `Arc<Semaphore>` (`acquire_owned`) and moves it into the `spawn_blocking` closure.
+The permit is released only when the closure exits. Before this, the permit belonged to the
+awaiting future: dropping it (a client hang-up) freed the slot while `spawn_blocking` work, which
+cannot be cancelled, kept running.
+- `admin_auth::tests::hashing_bound_survives_cancelled_waiters`: deterministic. 2 permits; 4 waves
+  of 2 jobs, each a blocking closure parked on a gate that counts itself in and out; every awaiting
+  task is aborted once its wave has had the chance to start. RED (permit held by the future):
+  **"8 blocking jobs ran at once with 2 permits"**. GREEN: peak ≤ 2. Once the gate opens all
+  permits come back, so cancellation never strands one.
+- `tests::a_hung_up_login_keeps_its_hashing_slot_until_argon2_finishes` (lib, real server over
+  TCP): the stored admin hash is a Bun-written argon2id with t=40, so verification runs for
+  seconds. A login is sent, the test waits until a permit is held, then drops the socket.
+  RED: **idle permits back to 8 (all) after the hang-up** while Argon2 still ran. GREEN: still
+  `permits − 1` 300 ms after the hang-up, and back to all once the job ends.
+- Logs: `i1-red-final.log` (both fail), `i1-green-final.log` (both pass); the gate test was
+  repeated 5× with no flake.
+
+**Minor 1: `POST /api/setup` reports every `setInitialPassword` failure as 400 BAD_REQUEST with
+the described message,** as frozen `admin.ts:225-230` does (ruling: TS parity).
+- Store errors now carry `describeError` of what `bun:sqlite` would throw: SQLite's own
+  `sqlite3_errmsg` text, or `SQLiteError` (the error's name) when that text is empty. Probed
+  against the TS binary with refusal triggers on the `adminPasswordHash` insert:
+  - `RAISE(ABORT,'review write denied')` → `"review write denied"`
+  - `RAISE(FAIL,'')` → `"SQLiteError"`
+  - a NOT NULL failure inside the trigger → `"NOT NULL constraint failed: x.a"`
+  - `RAISE(IGNORE)` → 409 (the row was not written)
+- **Secrets.** SQLite messages contain neither the SQL, the bound values nor the database path,
+  so no password, stored hash, key or path can appear. The single exception needs the operator to
+  install a trigger whose message is `NEW.value`. That echoes the new hash of the password this
+  caller just sent (never stored), and TS echoes exactly that too (probed). Other failures in the
+  path are the argon2 crate's parameter errors and a blocking-task join error; neither carries
+  input.
+- Other routes still redact any non-password failure to `500 INTERNAL "internal error"`, as
+  `apiErrorResponse` does for non-`GatewayError`s.
+- Driver: 4 new configs (`setup-store-abort`, `-fail-empty`, `-ignore`, `-constraint`). Each
+  installs the trigger in the copied database before boot, then runs setup, then status (still
+  unconfigured), then login (401). Rust test: `a_store_refused_setup_is_bad_request_with_sqlite_s_message`
+  (tests/server.rs) and `store_failures_carry_sqlite_s_message_only` (unit).
+
+**Minor 2: the 413 rows assert TS's exact bytes.** TS must be exactly `413` with no headers and
+no body (`TS_413`); Rust must be exactly `413` + `content-length: 0` (`RUST_413`, the documented
+framing exception). This is no longer a status-only check. All 4 rows pass.
+
+**Added coverage.**
+- **Persistent concurrent first setup.** Unit test `concurrent_first_setups_have_one_persistent_winner`:
+  8 parallel `set_initial_password` calls on a multi-thread runtime produce exactly one winner. A
+  fresh connection then reads that winner's hash, and only the winner's password verifies and logs
+  in. Driver configs `setup-race-1/2`: 8 concurrent `POST /api/setup` against each binary give
+  `200 ×1, 409 ×7` with the TS 409 body; afterwards exactly one password logs in, and it is the
+  setup winner's. The log comparison sorts lines for race configs, because which password wins is
+  the scheduler's choice.
+- **Guard truth table.** `api::tests::guards_admit_exactly_their_principals` runs
+  `require_admin` / `require_reader` / `require_client` against admin, viewer and client
+  principals, no cookie, an unknown token, and an expired session:
+
+  | principal | admin guard | reader guard | client guard |
+  |---|---|---|---|
+  | admin | ok | admin | `client session required` |
+  | viewer | `admin session required` | viewer | `client session required` |
+  | client | `admin session required` | `admin session required` | `k1` |
+  | none / unknown / expired | `admin session required` | `admin session required` | `client session required` |
+
+- **Invalidation scope.** `changing_the_admin_password_ends_every_session` now also holds a client
+  session whose key stays usable. The password change ends it too, and the KV is empty afterwards,
+  so "every kind" is now tested. `viewer_password_changes_spare_admin_and_client_sessions`
+  confirms a viewer-password change ends only viewer sessions.
+- Driver robustness: before comparing log lines, the driver waits until each boot's log file
+  contains its shutdown line, because the stdout file can trail process exit.
+
+**Inherited race (deferred to D2, per ruling).** A login (or viewer login) can read the old hash,
+finish Argon2 after a concurrent `set_password` / `set_viewer_password` has deleted sessions by
+prefix, and then issue a session that survives the change. TS has the same ordering: a store
+read, a slow verify, then `issue`, with no generation check. Prefix deletion gives sequential
+invalidation, not linearizable invalidation. D2's shared session store should decide whether to
+add a credential generation (stamped into each session and checked on `verify`) or an atomic
+issue-if-generation. The `SessionKv` trait does not guarantee either today.
+
+**Verification (final binary `rust-fix1`):**
+- `conformance/e2e/admin-auth.ts`:
+  - RED, the A4 binary with the final driver: 206 equal / 4 asserted / **6 failures** (the 3
+    store-error setups, each a DIFF plus a LOGS line).
+  - GREEN: **212 equal / 4 asserted (exact bytes both sides) / 0 failures**, 116 distinct tokens.
+- `cargo test --workspace --no-fail-fast`: **846 passed / 0 failed / 7 ignored** (839 at
+  9b04c3a1, plus 7 new). One earlier run stopped on the unrelated
+  `omni-gateway-core` snapshot test `the_refresher_picks_up_another_connections_commit_within_a_poll`
+  (timing, 1 s window). That run overlapped surface.ts and run.ts, and an even earlier attempt hit
+  ENOSPC. The test then passed 5/5 alone and in the full rerun. Flagged as a possible load-sensitive flake.
+- `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all --check` clean;
+  Biome on the driver clean.
+- `conformance/e2e/surface.ts`: 606 equal / 61 expected / 0 failures (unchanged).
+  `conformance/e2e/run.ts`: all rows equal.
+- `/v1` path unchanged by this round.
