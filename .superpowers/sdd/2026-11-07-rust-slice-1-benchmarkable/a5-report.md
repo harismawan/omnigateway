@@ -137,3 +137,137 @@ log lines are equal, and that each raw key appears in exactly one response, its 
 - Out of scope: dry-run (A12), credentials (A6), usage/logs/console/nodes/agent-setup (A7).
 - Disk: freed about 9.6 GB of stale debug test executables and incremental caches (regenerable) to
   get through linking; 2.4 GB free at the end.
+
+## Fix round 1
+
+Review `a5-review.md`; ruling in `progress.md`. Base 51a54e5a (D2 merged on 2cd757cb). Code commit
+427dbcb1. Evidence: `/tmp/opencode/a5-fix1/`. TS answers for every new case were taken first from
+the frozen binary (`probe/probe*.ts`).
+
+**Correction to the first report.** Its final driver report file (`green-report.txt`) came from an
+earlier 686-equal run. The matching log said 688/0. This round keeps the log and report of the same
+run together: `green.log` and `green-report.txt` are both **811 equal / 0 failures**.
+
+**I1: model identity is exact JS UTF-16 throughout.**
+- **Store read** (`omni-store/keys.rs`): allowlist entries and `models` keys that contain a lone
+  surrogate are no longer folded into U+FFFD. They are kept as exact UTF-16 in
+  `ApiKey::lone_allowlist` and `LimitConfig::lone_models`. Well-formed entries stay `String`s.
+  Collisions are no longer possible: `"\ud800"`, `"\udc00"` and U+FFFD are three different
+  entries.
+  - Lone override keys get every schema rule: 1..=256 code points, a strict scope that limits
+    something, `__proto__` refused, and a 64-override cap that counts them too.
+  - A lone key anywhere outside `models` makes the matrix unreadable, as zod's strict object does.
+  - The lossless JSON parser moved from omni-control into `omni_ir::jsjson::parse_js`, so there
+    is one copy; omni-control re-exports it.
+- **Ingress:** `Ingested::model_lone` carries the request model's exact units (after JS `trim` and
+  `[1m]` folding) when it holds a lone surrogate. It is only computed when the lossy model contains
+  U+FFFD, so the ordinary path has no extra work.
+- **Allowlist:** `ApiKey::allows(model, lone)` checks the chat routes and `count_tokens`. A
+  well-formed model is matched against the well-formed entries only. A lone model is matched
+  against the lone entries only.
+- **`/v1/models`:** stored model ids are UTF-8, so only well-formed entries can match one. An
+  allowlist `["\ud800"]` sees no U+FFFD model, as in TS.
+- **A lone-surrogate model the key admits** (chat or responses): TS always fails with its URIError
+  (`encodeURIComponent` at admission, or in every case at the completion's debit).
+  - Rust refuses with the same `500 INTERNAL "String contained an illegal UTF-16 sequence."`, but
+    before admission or dispatch.
+  - TS sends the request upstream first and then crashes. Its 500 is sometimes the bare
+    `text/plain` body Elysia writes when the error escapes its catch. Rust always answers in the
+    dialect's JSON. This is the documented difference.
+- **`count_tokens`** follows TS's rule exactly: a 500 only when an override names that exact
+  model; otherwise it is judged against the key-wide limits alone.
+- **Evidence:**
+  - `tests/key_identity.rs::a_lone_surrogate_never_matches…`: RED fails, GREEN passes. It covers
+    `/v1/models` visibility, 401s for U+FFFD (escaped and literal), distinct surrogates,
+    whitespace and `[1m]` forms, the U+FFFD override's own 1/min (429) not shared by `\ud801`, and
+    the `\ud800` override's 500.
+  - Store unit tests cover distinct override keys and the schema rules.
+  - An ingress vector covers every surface, duplicate `model` keys and surrogate pairs.
+  - Driver config `key-identity` has 65 comparisons.
+
+**I2: one unreadable key row never stops boot or refresh** (shared snapshot layer, SQLite and
+Postgres).
+- `SnapshotData.api_keys` is `Vec<Result<ApiKey, KeyRowError>>`, read with
+  `keys::list_entries` / `pg::list_key_entries`. Misses use `find_entry_by_hash`.
+- A row TS's `toKey` would throw on (an allowlist `JSON.parse` refuses) becomes that key's entry.
+  The key is refused at auth as `INTERNAL` with JavaScriptCore's exact message (`JSON Parse error:
+  Expected '}'`), as TS's `findByHash` throw is answered. Every other key, model and setting still
+  loads and refreshes.
+- Dates are read as the JS numbers TS compares (INTEGER, REAL or TEXT):
+  - `expiresAt > now` stays exact for integer `now`, using the ceiling of a fraction;
+  - a non-null `revokedAt` is revoked;
+  - unparseable or non-text `limits` mark the key unreadable instead of failing the row.
+- The admin listing still fails on a bad row, as TS's `keys.list()` does.
+- The `api key limits unreadable` log now follows TS's `toKey`: once per read of the row, usable or
+  not. The log comparison in the driver caught this.
+- **Evidence:**
+  - Store test `an_unreadable_row_is_isolated_in_the_snapshot_read`.
+  - Core test `one_unreadable_key_never_poisons_boot_or_refresh`: a revocation, a model and a
+    settings change all land despite the bad row.
+  - HTTP tests `one_unreadable_key_row_does_not_stop_boot` and
+    `a_corrupt_key_does_not_freeze_revocation_of_another`: both RED, both GREEN.
+  - Driver configs:
+    - `boot-bad-keys`: bad allowlist, fractional dates, fractional revoked and unreadable limits,
+      all present at boot.
+    - `live-poison`: A is served; B is corrupted live and refused within 412 ms; A is revoked over
+      `/api` and refused in 478 ms; a model is put and listed in 490 ms.
+    - `odd-rows` and `broken-rows` now boot with every bad row in place. The after-boot SQL
+      workaround is removed, except for `provider_data = null`, which neither build's routing
+      snapshot reads.
+
+**I3: lossless `revokedAt`.** `OperatorKey.revoked_at` is read as stored, like the other two dates
+(an INTEGER as an integer, a REAL as its number, TEXT as a string). The admin summaries, post-edit
+summaries and CLI listing print it unchanged.
+- **Evidence:** `tests/key_identity.rs::summaries_carry_fractional_dates_as_numbers` (RED 500,
+  GREEN) covers INTEGER, fractional REAL and NULL for all three dates, on the listing and on an
+  edit. The driver's `odd-rows` adds `odd-frac` and `odd-null` rows with edits.
+
+**Minors**
+- **Deadlines** (`admitted`, `listed`): each binary is now checked on its own. An answer counts
+  only if the request both started and finished within 1 s of the step's start. A miss is a
+  `DEADLINE` failure even if both binaries miss.
+- **`content-length`** is validated against the body's length, then masked.
+- **Secrets:** each raw key must be seen exactly once, in the step that minted it, and no foreign
+  raw key may appear.
+- **Boot refusals:** a binary that refuses to boot fails that config step by step instead of
+  aborting the run. This is how RED is measured on the A5 binary.
+- **Sequential mints** are spaced 3 ms apart. TS and Rust order same-millisecond ties differently;
+  the order follows SQLite's row order, and the concurrent-mint step is still compared by DB dump.
+- **Whole-DB claim, narrowed.** The per-step dump covers every table except `nodes`,
+  `request_logs`, `usage_rollup`, `usage_daily` and `migrations`. Salted password hashes are
+  classified rather than compared. These are written on the gateways' own clocks; `run.ts`
+  compares them.
+- **Failed-boot test:** the phase under test (the 10 ms seed bound) is still asserted through the
+  error it produces. The outer timeout is now 30 s, only to catch a hang, and failures report the
+  elapsed time.
+
+**RED → GREEN** (`conformance/e2e/admin-routes.ts`, final driver):
+
+| run | binary | result |
+|---|---|---|
+| RED | `rust-a5` (5da6af7e) | 721 equal / **61 failures** (key-identity 20, boot-bad-keys 12, odd-rows 13, broken-rows 9, live-poison 7) (`red.log`) |
+| GREEN | 427dbcb1 release | **811 equal / 0 failures**, 38 raw keys, each seen once in its own mint (`green.log`, `green-report.txt`) |
+
+**Gates**
+- `cargo test --workspace --no-fail-fast`: **978 passed / 0 failed / 7 ignored**
+  (`workspace.log`; count includes D2's crates).
+- `cargo clippy --workspace --all-targets -- -D warnings` clean (`clippy.log`); `cargo fmt --check`
+  clean (`fmt.log`); Biome clean (`biome.log`).
+- Drivers:
+  - `admin-auth.ts`: 212 equal / 4 expected / 0 failures.
+  - `surface.ts`: 606 equal / 61 expected / 0 failures.
+  - `run.ts`: all rows equal.
+- CLI suites: keys-list 135, key-mutations 16, settings 347, model-puts 302, all PASS.
+
+**Concerns / known differences**
+- **Lone-surrogate model a key admits:** Rust refuses before dispatch with TS's message. TS
+  dispatches (possibly upstream) and then 500s, sometimes as `text/plain` with a different stored
+  row status. Rust's direction is safe: nothing is claimed or spent.
+- **Rows stored as U+FFFD:** a row from such a request stores `requested_model` as U+FFFD (SQLite
+  UTF-8, as in TS). A later seed of a real U+FFFD override reads it in both builds. Rust's in-memory
+  debit also counts it, where TS's throws before the model subject. This applies only to rows from
+  requests that ended in that 500.
+- **Bad key in the snapshot:** until a repair, a bad key's refusal comes from the snapshot, which
+  catches a corruption within one poll (≤ 500 ms). TS reads the row on every request.
+- **Repair path:** a bad key cannot be repaired over `/api` in either build, because the edit
+  reads the row first.
