@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 omni-cli = { path = "../omni-cli" }
+omni-control = { path = "../omni-control" }
 omni-crypto = { path = "../omni-crypto" }
 omni-dialects = { path = "../omni-dialects" }
 omni-gateway-core = { path = "../omni-gateway-core" }
@@ -29,7 +30,9 @@ foldhash = "0.2"
 httpdate = "1"
 subtle = "2.6"
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+url = "2.5"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "signal", "io-util"] }
 # 1.11.1: fixes the 1.10 regression that stranded a chunked body's terminator
 # in the write buffer (hyperium/hyper#4143; `tests/http1_flush.rs`).

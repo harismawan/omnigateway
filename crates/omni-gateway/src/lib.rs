@@ -6,6 +6,8 @@
 //! SIGTERM/SIGINT stop accepting, let connections drain up to TS's 5 s
 //! deadline, flush the writer, and exit 0. A second signal exits 1.
 
+pub mod admin_auth;
+pub mod api;
 pub mod clock;
 pub mod dispatch;
 pub mod finish;
@@ -417,6 +419,21 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         Arc::new(Mutex::new(miss_store)),
         MissConfig::default(),
     );
+    // The admin surface's own connection: password rows and client-session
+    // key checks, never on the request path's.
+    let admin_store = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || SqliteStore::open(&path, offset).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let admin = {
+        let now: admin_auth::Clock = Arc::new(clock::now_ms);
+        // Sessions live in this process: a restart ends every one (spec:
+        // in-process store for a single node; D2 plugs a shared one in).
+        let kv = Arc::new(admin_auth::MemoryKv::new(now.clone()));
+        admin_auth::AdminAuth::new(admin_store, kv, now, admin_auth::SESSION_TTL_MS)
+    };
 
     // `dashboardDir()`: `OMNI_STATIC_DIR` taken literally when set. Without
     // it TS tries `./public` and `../../dashboard/dist` beside its bundle;
@@ -484,6 +501,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         bench_flush_timeout: options.bench_flush_timeout,
         metrics_token: config.metrics_token.clone(),
         static_root,
+        admin,
+        base_url_https: api::base_url_is_https(&config.base_url),
     });
 
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");

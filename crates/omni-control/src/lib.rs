@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 //! Shared operator configuration and storage operations, without gateway runtime.
+pub mod admin_password;
 pub mod catalog;
 pub mod config;
 pub mod keys;

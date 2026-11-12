@@ -23,6 +23,8 @@ base64 = "0.22"
 rand = "0.9"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
+# Console passwords: argon2id PHC strings, as `Bun.password` writes them.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 
 [dev-dependencies]
 serde_json.workspace = true

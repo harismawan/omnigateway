@@ -9,7 +9,9 @@ pub mod cch;
 pub mod cloak;
 pub mod codex;
 pub mod field;
+pub mod password;
 pub mod qoder;
+pub mod session;
 
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";

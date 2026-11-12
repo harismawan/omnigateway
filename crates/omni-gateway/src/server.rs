@@ -375,6 +375,10 @@ pub struct App {
     pub metrics_token: Option<String>,
     /// `realpath` of the dashboard directory at boot; `None` when absent.
     pub static_root: Option<std::path::PathBuf>,
+    /// The session authority behind every `/api` route.
+    pub admin: crate::admin_auth::AdminAuth,
+    /// Whether `baseUrl` (`OMNI_BASE_URL`) is https: `Secure` on the cookie.
+    pub base_url_https: bool,
 }
 
 impl std::fmt::Debug for App {
@@ -461,6 +465,11 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Bo
         path.as_str()
     };
     let method = req.method().clone();
+    // Bun refuses a declared body over `maxRequestBodySize` before routing,
+    // on every route but `/v1/*` (whose own limit is stricter).
+    if !route.starts_with("/v1/") && crate::api::declares_oversized_body(&req) {
+        return Ok(crate::api::payload_too_large());
+    }
     let get = matches!(method, Method::GET | Method::HEAD);
     let res = match (method.clone(), route) {
         (Method::GET | Method::HEAD, "/health") => health(&app),
@@ -474,6 +483,9 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Bo
             metrics(&app, &req)
         }
         (_, r) if is_plugin_api(r) => plugins_unsupported(),
+        (m, r) if let Some(api) = crate::api::route(&m, r) => {
+            crate::api::serve(app, api, req).await
+        }
         (Method::GET | Method::HEAD, r) if is_plugin_asset(&path, r) => plugin_asset_not_found(),
         _ if get => crate::static_files::serve(app.static_root.as_deref(), &path, &req).await,
         _ => not_found_other(),
@@ -492,7 +504,9 @@ fn stamp_date(res: &mut Response<Body>) {
         static CACHE: std::cell::RefCell<(u64, Option<HeaderValue>)> =
             const { std::cell::RefCell::new((0, None)) };
     }
-    if res.headers().contains_key(hyper::header::DATE) {
+    if res.headers().contains_key(hyper::header::DATE)
+        || res.extensions().get::<crate::api::NoDate>().is_some()
+    {
         return;
     }
     let now = std::time::SystemTime::now();
@@ -751,7 +765,7 @@ fn is_body_idle(e: &GatewayError) -> bool {
 
 /// A response that makes hyper close the connection without an answer:
 /// the body errors at once, which aborts the exchange.
-fn hang_up() -> Response<Body> {
+pub(crate) fn hang_up() -> Response<Body> {
     let s = futures_util::stream::iter([Err::<Frame<Bytes>, _>(std::io::Error::other(BODY_IDLE))]);
     let mut res = Response::new(http_body_util::BodyExt::boxed_unsync(StreamBody::new(s)));
     res.headers_mut()

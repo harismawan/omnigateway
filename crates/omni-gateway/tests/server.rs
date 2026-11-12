@@ -1747,3 +1747,158 @@ async fn a_client_abort_before_the_upstream_head_is_one_upstream_observation() {
     running.shutdown();
     running.wait().await.expect("stop");
 }
+
+fn set_cookie(h: &[(String, String)]) -> Option<String> {
+    h.iter()
+        .find(|(k, _)| k == "set-cookie")
+        .map(|(_, v)| v.clone())
+}
+
+fn token_of(cookie: &str) -> String {
+    cookie
+        .strip_prefix("omni_admin=")
+        .and_then(|r| r.split(';').next())
+        .expect("token")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn admin_setup_login_status_logout_end_to_end() {
+    let g = boot().await;
+    let anon =
+        r#"{"configured":false,"authenticated":false,"principal":null,"viewerConfigured":false}"#;
+    let (s, h, b) = call(&g.base, "GET", "/api/status", &[], "").await;
+    assert_eq!((s, b.as_str()), (200, anon));
+    assert!(
+        h.iter()
+            .any(|(k, v)| k == "content-type" && v == "application/json;charset=utf-8")
+    );
+
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/api/setup",
+        &[],
+        r#"{"password":"short"}"#,
+    )
+    .await;
+    assert_eq!(s, 400);
+    assert_eq!(
+        b,
+        r#"{"error":{"code":"BAD_REQUEST","message":"admin password must be at least 12 characters"}}"#
+    );
+    let (s, h, b) = call(
+        &g.base,
+        "POST",
+        "/api/setup",
+        &[("x-forwarded-proto", "https")],
+        r#"{"password":"correct-horse-battery"}"#,
+    )
+    .await;
+    assert_eq!((s, b.as_str()), (200, r#"{"ok":true}"#));
+    let cookie = set_cookie(&h).expect("cookie");
+    assert!(
+        cookie.ends_with("; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=43200"),
+        "{cookie}"
+    );
+    let a = token_of(&cookie);
+    let (s, _, _) = call(
+        &g.base,
+        "POST",
+        "/api/setup",
+        &[],
+        r#"{"password":"correct-horse-battery"}"#,
+    )
+    .await;
+    assert_eq!(s, 409);
+
+    let admin = format!("omni_admin={a}");
+    let (_, _, b) = call(&g.base, "GET", "/api/status", &[("cookie", &admin)], "").await;
+    assert_eq!(
+        b,
+        r#"{"configured":true,"authenticated":true,"principal":{"kind":"admin"},"viewerConfigured":false}"#
+    );
+
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/api/login",
+        &[],
+        r#"{"password":"nope-nope-nope"}"#,
+    )
+    .await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            401,
+            r#"{"error":{"code":"AUTH","message":"invalid password"}}"#
+        )
+    );
+    let (s, _, b) = call(&g.base, "POST", "/api/login", &[], "{bad").await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            400,
+            r#"{"error":{"code":"BAD_REQUEST","message":"invalid JSON body"}}"#
+        )
+    );
+
+    let (s, h, _) = call(&g.base, "POST", "/api/logout", &[("cookie", &admin)], "").await;
+    assert_eq!(s, 200);
+    assert_eq!(
+        set_cookie(&h).as_deref(),
+        Some("omni_admin=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+    );
+    let (_, _, b) = call(&g.base, "GET", "/api/status", &[("cookie", &admin)], "").await;
+    assert!(b.contains("\"authenticated\":false"), "{b}");
+
+    // Unported `/api` paths keep their fallthrough answers.
+    let (s, _, b) = call(&g.base, "GET", "/api/keys", &[], "").await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            404,
+            r#"{"error":{"code":"NOT_FOUND","message":"no route for /api/keys"}}"#
+        )
+    );
+    let (s, _, b) = call(&g.base, "POST", "/api/keys", &[], "").await;
+    assert_eq!((s, b.as_str()), (404, "NOT_FOUND"));
+    let (s, _, _) = call(&g.base, "POST", "/api/plugins", &[], "").await;
+    assert_eq!(s, 501);
+    drop(stop(g).await);
+}
+
+#[tokio::test]
+async fn oversized_declared_bodies_are_413_off_v1_only() {
+    let g = boot().await;
+    let big = (128u64 * 1024 * 1024 + 1).to_string();
+    for path in ["/api/login", "/api/logout", "/api/nope", "/anything"] {
+        let mut s = TcpStream::connect(&g.base).await.expect("connect");
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nhost: x\r\nconnection: close\r\ncontent-length: {big}\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await.expect("write");
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.expect("read");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.starts_with("HTTP/1.1 413 "), "{path}: {text}");
+        assert!(
+            !text.to_ascii_lowercase().contains("\r\ndate:"),
+            "{path}: {text}"
+        );
+    }
+    // `/v1/*` keeps its own (smaller) limit and dialect error.
+    let mut s = TcpStream::connect(&g.base).await.expect("connect");
+    let req = format!(
+        "POST /v1/messages HTTP/1.1\r\nhost: x\r\nconnection: close\r\nauthorization: {}\r\ncontent-length: {big}\r\n\r\n",
+        bearer(&g)
+    );
+    s.write_all(req.as_bytes()).await.expect("write");
+    // A pre-routing 413 would answer at once; `/v1` instead waits for the
+    // body it was promised.
+    let mut buf = vec![0u8; 512];
+    let early = tokio::time::timeout(Duration::from_millis(500), s.read(&mut buf)).await;
+    assert!(early.is_err(), "/v1 answered before its body: {early:?}");
+    drop(s);
+    drop(stop(g).await);
+}
