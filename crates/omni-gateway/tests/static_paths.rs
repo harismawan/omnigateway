@@ -21,8 +21,8 @@ fn pathname_and_decode_match_bun() {
         let target = c["target"].as_str().expect("target");
         let pathname = c["pathname"].as_str().expect("pathname");
         let decoded = c["decoded"].as_str();
-        // Backslash targets never reach the router (hyper's URI parser
-        // refuses them with 400); the normalizer still matches WHATWG.
+        // Backslash targets reach the router (hyper accepts `\` in a
+        // request-target) and normalize to `/`, as WHATWG URL does.
         let got = normalize_path(target);
         if got != pathname {
             failed.push(format!("{target:?}: pathname {got:?} != {pathname:?}"));
@@ -88,4 +88,112 @@ fn content_types_are_the_frozen_runtime_table() {
     assert!(!content_type("/r/index.html").1);
     assert_eq!(types.get("text/html"), Some(&false));
     assert!(content_type("/r/noext").1);
+}
+
+use omni_gateway::static_files::{Decision, decide};
+
+/// A2 fix round 1 (I1, a documented security divergence from TS): the SPA
+/// fallback's `index.html` is canonicalized and contained exactly like a
+/// requested file. A root whose `index.html` links outside answers 404 for a
+/// missing navigation route, where frozen TS serves the outside file.
+#[test]
+fn spa_fallback_index_must_stay_inside_the_root() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path().join("dash");
+    std::fs::create_dir(&root).expect("root");
+    std::fs::write(dir.path().join("secret.txt"), "TOP SECRET\n").expect("secret");
+    std::os::unix::fs::symlink("../secret.txt", root.join("index.html")).expect("link");
+    let root = std::fs::canonicalize(&root).expect("canon");
+    for path in ["/missing/route", "/", "/index.html"] {
+        assert_eq!(
+            decide(Some(&root), path, Some("text/html")),
+            Decision::NotFound,
+            "{path}"
+        );
+    }
+    // An index linking to a file inside the root is still served.
+    std::fs::write(root.join("real.html"), "<p>ok</p>").expect("real");
+    std::fs::remove_file(root.join("index.html")).expect("rm");
+    std::os::unix::fs::symlink("real.html", root.join("index.html")).expect("link");
+    match decide(Some(&root), "/missing/route", Some("text/html")) {
+        Decision::File {
+            path, content_type, ..
+        } => {
+            assert_eq!(path, root.join("real.html"));
+            assert_eq!(content_type, "text/html");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A2 I2, ruling "keep TS parity": only `/api` and `/v1` are refused before
+/// disk. `/metrics` with no token, `/metrics/x` and `/health/x` are dashboard
+/// paths like any other, so a navigation request gets the SPA index and a
+/// file with that name is served, as frozen TS does.
+#[test]
+fn reserved_route_names_are_dashboard_paths_as_in_ts() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = std::fs::canonicalize(dir.path()).expect("canon");
+    std::fs::write(root.join("index.html"), "<p>index</p>").expect("index");
+    std::fs::write(root.join("metrics"), "a file named metrics").expect("file");
+    for path in ["/health/x", "/metrics/x"] {
+        assert!(
+            matches!(decide(Some(&root), path, Some("text/html")), Decision::File { ref path, .. } if path.ends_with("index.html")),
+            "{path}"
+        );
+        assert_eq!(
+            decide(Some(&root), path, None),
+            Decision::NotFound,
+            "{path}"
+        );
+    }
+    assert!(matches!(
+        decide(Some(&root), "/metrics", None),
+        Decision::File { ref path, .. } if path.ends_with("metrics")
+    ));
+    for path in ["/api", "/api/x", "/v1", "/v1/x"] {
+        assert_eq!(
+            decide(Some(&root), path, Some("text/html")),
+            Decision::NotFound,
+            "{path}"
+        );
+    }
+}
+
+/// `OMNI_STATIC_DIR` may be relative: it resolves against the working
+/// directory, as `path.resolve` does, and a missing one disables serving.
+#[test]
+fn a_relative_static_dir_resolves_against_the_working_directory() {
+    let cwd = std::env::current_dir().expect("cwd");
+    let rel = "tests";
+    assert_eq!(
+        omni_gateway::static_files::resolve_root(rel),
+        Some(std::fs::canonicalize(cwd.join(rel)).expect("canon"))
+    );
+    assert_eq!(
+        omni_gateway::static_files::resolve_root("definitely/missing/dir"),
+        None
+    );
+}
+
+/// The routing fast path borrows a plain path and normalizes the rest.
+#[test]
+fn pathname_borrows_plain_paths() {
+    use std::borrow::Cow;
+    for p in [
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/health",
+        "/metrics",
+    ] {
+        assert!(
+            matches!(omni_gateway::static_files::pathname(p), Cow::Borrowed(_)),
+            "{p}"
+        );
+    }
+    assert_eq!(
+        omni_gateway::static_files::pathname("/x/../v1/models"),
+        "/v1/models"
+    );
+    assert_eq!(omni_gateway::static_files::pathname("/a%2e%2e"), "/a%2e%2e");
 }

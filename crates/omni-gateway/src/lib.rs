@@ -167,7 +167,7 @@ fn default_static_dir() -> String {
 /// load `<root>/plugins/<id>` (each directory, in sorted order; `root` is
 /// `OMNI_ROOT`, else the database's directory), one `warn` per entry; then
 /// TS's `plugins resolved` line with the count actually loaded, zero.
-fn warn_plugins(root: Option<&str>, database_path: &str) {
+pub fn warn_plugins(root: Option<&str>, database_path: &str) {
     let root = root.map_or_else(
         || {
             std::path::Path::new(database_path)

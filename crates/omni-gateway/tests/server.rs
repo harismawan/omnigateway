@@ -1616,3 +1616,134 @@ async fn plugin_routes_are_unsupported() {
     assert_eq!(s, 404);
     stop(g).await;
 }
+
+/// An upstream that reads the request and never answers: the head never
+/// arrives, so only cancellation ends the attempt.
+async fn silent_upstream() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                while matches!(s.read(&mut buf).await, Ok(n) if n > 0) {}
+            });
+        }
+    });
+    port
+}
+
+async fn metrics_gw(
+    port: u16,
+    deadline_ms: Option<&str>,
+) -> (Fixture, omni_gateway::Running, String) {
+    let f = fixture(&["c0"]);
+    let c = rusqlite::Connection::open(&f.path).expect("open");
+    c.execute(
+        "UPDATE credentials SET provider_data=? WHERE id='c0'",
+        rusqlite::params![format!(
+            "{{\"endpointId\":\"e0\",\"origin\":\"http://127.0.0.1:{port}\",\"protocol\":\"chat_completions\"}}"
+        )],
+    )
+    .expect("origin");
+    c.execute(
+        "INSERT OR REPLACE INTO virtual_models (id, targets, strategy) VALUES ('m1', ?, 'priority')",
+        rusqlite::params![
+            "[{\"provider\":\"custom\",\"endpointId\":\"e0\",\"model\":\"silent\",\"tier\":1,\"weight\":1,\
+             \"costPerMTok\":{\"input\":1,\"output\":2},\"capabilities\":{\"tools\":true,\"images\":true,\"reasoning\":true}}]"
+        ],
+    )
+    .expect("model");
+    drop(c);
+    if let Some(ms) = deadline_ms {
+        set_setting(&f.path, "requestDeadlineMs", ms);
+    }
+    add_key(&f.path, "kp", KEY, "", "");
+    let env: std::collections::HashMap<String, String> = [
+        ("OMNI_ENCRYPTION_KEY", ENC),
+        ("OMNI_DB_PATH", f.path.to_str().expect("path")),
+        ("OMNI_PORT", "1"),
+        ("OMNI_DAY_OFFSET_MINUTES", "0"),
+        ("OMNI_METRICS_TOKEN", "tok"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect();
+    let mut config = load_config(&env, || 0).expect("config");
+    config.port = 0;
+    let running = start(config, Options::default()).await.expect("start");
+    let base = format!("127.0.0.1:{}", running.addr.port());
+    (f, running, base)
+}
+
+async fn upstream_count(base: &str) -> Option<u64> {
+    let (_, _, body) = call(
+        base,
+        "GET",
+        "/metrics",
+        &[("authorization", "Bearer tok")],
+        "",
+    )
+    .await;
+    body.lines()
+        .find_map(|l| l.strip_prefix("omni_upstream_duration_seconds_count{provider=\"custom\"} "))
+        .map(|v| v.parse().expect("count"))
+}
+
+/// TS's `nodeHttpClient` traces a destroyed request once, from its error
+/// event (`trace(undefined, true)`): a request deadline that fires before the
+/// upstream head is still one `omni_upstream_duration_seconds` observation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deadline_before_the_upstream_head_is_one_upstream_observation() {
+    let port = silent_upstream().await;
+    let (_f, running, base) = metrics_gw(port, Some("300")).await;
+    let req = r#"{"model":"m1","stream":false,"messages":[{"role":"user","content":"hi"}]}"#;
+    let (s, _, _) = call(
+        &base,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            ("authorization", &format!("Bearer {KEY}")),
+            ("content-type", "application/json"),
+        ],
+        req,
+    )
+    .await;
+    assert_eq!(s, 504);
+    assert_eq!(upstream_count(&base).await, Some(1));
+    running.shutdown();
+    running.wait().await.expect("stop");
+}
+
+/// A client that hangs up before the upstream head: the attempt is
+/// cancelled, and TS's `onAbort` destroy → error → `trace` still counts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_abort_before_the_upstream_head_is_one_upstream_observation() {
+    let port = silent_upstream().await;
+    let (_f, running, base) = metrics_gw(port, None).await;
+    let req = r#"{"model":"m1","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let mut s = TcpStream::connect(&base).await.expect("connect");
+    let head = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nhost: x\r\nauthorization: Bearer {KEY}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{req}",
+        req.len()
+    );
+    s.write_all(head.as_bytes()).await.expect("write");
+    // Let the attempt reach the silent upstream, then hang up.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        upstream_count(&base).await,
+        None,
+        "no head yet, no observation yet"
+    );
+    drop(s);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if upstream_count(&base).await == Some(1) || tokio::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(upstream_count(&base).await, Some(1));
+    running.shutdown();
+    running.wait().await.expect("stop");
+}

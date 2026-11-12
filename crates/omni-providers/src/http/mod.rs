@@ -215,14 +215,18 @@ impl Client {
         let target = wire::parse_target(&req.url)?;
         let (bytes, facts) = wire::encode(&req.method, &target, &req.headers, req.body.as_bytes())?;
         let started = Instant::now();
-        let started_ms = epoch_ms();
+        // `trace()`, once: on the response head, on a transport error, or —
+        // as TS's `onAbort` destroy → `error` → `trace(undefined, true)` —
+        // when this future is dropped before either (a request deadline or a
+        // client hang-up cancelling the attempt).
+        let traced = self.on_head.as_ref().map(|hook| HeadTrace {
+            hook: hook.clone(),
+            provider: req.provider.clone(),
+            started_ms: epoch_ms(),
+        });
         let result = self.exchange(&target, &bytes, facts).await;
+        drop(traced);
         let duration_ms = started.elapsed().as_millis();
-        if let Some(hook) = &self.on_head {
-            // `now() - startedAt` over `Date.now()`: whole milliseconds of
-            // wall clock, never negative here.
-            hook(&req.provider, epoch_ms().saturating_sub(started_ms));
-        }
         match &result {
             Ok(res) => tracing::debug!(
                 provider = %req.provider,
@@ -278,6 +282,23 @@ impl HttpClient for Client {
         req: HttpRequest,
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
         Box::pin(Client::send(self, req))
+    }
+}
+
+/// Fires `onResponseHead` exactly once, when dropped: after the exchange
+/// returned, or when the pending exchange was cancelled.
+struct HeadTrace {
+    hook: OnResponseHead,
+    provider: String,
+    started_ms: u64,
+}
+
+impl Drop for HeadTrace {
+    fn drop(&mut self) {
+        // Wall-clock whole milliseconds, as TS's `now() - startedAt`, but
+        // saturated at zero: a backwards clock step is not a duration, and
+        // a negative observation would land in the first bucket as if real.
+        (self.hook)(&self.provider, epoch_ms().saturating_sub(self.started_ms));
     }
 }
 

@@ -1161,6 +1161,7 @@ dependencies = [
  "rand",
  "rusqlite",
  "serde_json",
+ "subtle",
  "tempfile",
  "tokio",
  "tracing",

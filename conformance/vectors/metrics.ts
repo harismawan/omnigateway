@@ -318,6 +318,61 @@ const cases: { name: string; maxSeries: number; ops: Op[] }[] = [
     ],
   },
   {
+    // A label object: a repeated key keeps its first position and last value,
+    // and the deduplicated set is the series identity (and one raw series).
+    name: "repeated-label-keys",
+    maxSeries: 2,
+    ops: [
+      {
+        op: "add",
+        name: "omni_requests_total",
+        labels: [
+          ["a", "old"],
+          ["b", "x"],
+          ["a", "new"],
+        ],
+      },
+      {
+        op: "add",
+        name: "omni_requests_total",
+        labels: [
+          ["a", "new"],
+          ["b", "x"],
+        ],
+        value: 2,
+      },
+      {
+        op: "add",
+        name: "omni_requests_total",
+        labels: [
+          ["b", "x"],
+          ["a", "new"],
+          ["a", "new"],
+        ],
+      },
+      {
+        op: "add",
+        name: "omni_cost_usd_total",
+        labels: [
+          ["api_key_id", "k1"],
+          ["api_key_id", "k2"],
+        ],
+        value: 0.5,
+      },
+      { op: "add", name: "omni_cost_usd_total", labels: [["api_key_id", "k2"]], value: 0.25 },
+      {
+        op: "add",
+        name: "omni_cost_usd_total",
+        labels: [
+          ["api_key_id", "k3"],
+          ["m", "1"],
+          ["api_key_id", "k4"],
+        ],
+        value: 1,
+      },
+    ],
+  },
+  {
     name: "cap-folds-api-keys",
     maxSeries: 6,
     ops: [

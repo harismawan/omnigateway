@@ -75,3 +75,54 @@ async fn dropped_log_events_write_no_line_per_request() {
         per_event.first()
     );
 }
+
+/// Plugins are never loaded (spec non-goal). Boot warns once per plugin
+/// directory, sorted, with the release wording; a plain file and a symlink
+/// (TS's `Dirent.isDirectory()` does not follow it) are ignored; a valid
+/// plugin's server entry is never read or run; and `plugins resolved` says 0.
+#[test]
+fn plugin_directories_warn_once_each_and_never_run() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let plugins = dir.path().join("plugins");
+    for id in ["beta", "alpha", "gamma"] {
+        std::fs::create_dir_all(plugins.join(id)).expect("dir");
+    }
+    std::fs::write(plugins.join("README"), "not a plugin").expect("file");
+    std::os::unix::fs::symlink("alpha", plugins.join("zlink")).expect("link");
+    // A valid manifest whose server entry is a FIFO: opening it for reading
+    // (let alone importing it) blocks until a writer appears, so a loader
+    // that touched plugin code would hang this test instead of passing.
+    nix::unistd::mkfifo(
+        &plugins.join("gamma/blocker.js"),
+        nix::sys::stat::Mode::S_IRWXU,
+    )
+    .expect("fifo");
+    std::fs::write(
+        plugins.join("gamma/omni-plugin.json"),
+        r#"{"id":"gamma","name":"Gamma","version":"1.0.0","api":3,"server":"blocker.js"}"#,
+    )
+    .expect("manifest");
+
+    let (lines, _guard) = capture();
+    omni_gateway::warn_plugins(Some(dir.path().to_str().expect("path")), "/nowhere/omni.db");
+    let lines = lines.lock().expect("lines").clone();
+    let warns: Vec<&String> = lines.iter().filter(|l| l.contains(" WARN ")).collect();
+    assert_eq!(warns.len(), 3, "{lines:#?}");
+    for (line, id) in warns.iter().zip(["alpha", "beta", "gamma"]) {
+        assert!(
+            line.ends_with(&format!(
+                "WARN  plugin skipped  plugin={id} reason=\"plugins are not supported in this release\""
+            )),
+            "{line}"
+        );
+    }
+    let resolved = lines.last().expect("resolved");
+    assert!(
+        resolved.ends_with(&format!(
+            "INFO  plugins resolved  count=0 path={}",
+            plugins.display()
+        )),
+        "{resolved}"
+    );
+    assert_eq!(lines.len(), 4, "{lines:#?}");
+}

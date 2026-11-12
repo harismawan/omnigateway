@@ -449,8 +449,9 @@ fn not_found_other() -> Response<Body> {
 ///
 /// Routes match `new URL(request.url).pathname`, as Elysia's do: dot
 /// segments (and their `%2e` spellings) resolved and the path encode set
-/// applied. Plain paths, which is every `/v1/*` call a client makes, borrow
-/// the request's own path.
+/// applied. A plain path (every `/v1/*` call a client makes) skips
+/// normalization; the one copy below is the same `to_owned` the router made
+/// before normalization existed, needed because handlers take `req` by value.
 pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
     let path = crate::static_files::pathname(req.uri().path()).into_owned();
     // Elysia matches a route with one trailing slash as the route itself.
@@ -547,19 +548,21 @@ fn plugins_unsupported() -> Response<Body> {
 }
 
 /// `GET /metrics`: `authorization` must be exactly `Bearer <token>`,
-/// compared in constant time over equal lengths; anything else is a bare 401.
+/// compared in constant time over equal lengths (the length itself is not
+/// secret, as in TS); anything else is a bare 401.
 fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
     let Some(token) = &app.metrics_token else {
         return not_found_get(req.uri().path());
     };
     let supplied = header(req, "authorization").unwrap_or_default();
     let expected = format!("Bearer {token}");
+    // `timingSafeEqual` after a length check, as TS: `subtle`'s comparison
+    // is written to resist the optimizer turning it into an early exit.
     let ok = supplied.len() == expected.len()
-        && supplied
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0;
+        && bool::from(subtle::ConstantTimeEq::ct_eq(
+            supplied.as_bytes(),
+            expected.as_bytes(),
+        ));
     if !ok {
         let mut res = Response::new(full(Bytes::new()));
         *res.status_mut() = StatusCode::UNAUTHORIZED;

@@ -31,14 +31,25 @@
  *   Series names, labels, `_count`, the `+Inf` bucket and every other sample
  *   are compared exactly.
  *
- * Divergences that are this harness's own and not the gateway's: Bun answers
- * a request-target containing `\`, `<`, `>` or `` ` `` after rewriting it,
- * while hyper refuses it with 400 before any route. Those targets are run and
- * recorded as an expected divergence (`expectDiff`), never as equal.
+ * Divergences, each asserted exactly (an expected-divergence row passes only
+ * if both exchanges succeeded, TS's answer has the stated status, and Rust's
+ * is the stated answer byte for byte; a transport error is never equal and
+ * never an expected divergence):
+ * - hyper refuses a request-target containing `<`, `>` or `` ` `` with a bare
+ *   400 before any route; Bun rewrites and answers it. (Backslashes do reach
+ *   the router and compare equal.)
+ * - the spec's plugin 501, where TS answers from its live plugin surface;
+ * - a directory: Rust gives Bun's production 500, TS without `NODE_ENV` its
+ *   development stack page (compared equal against production TS);
+ * - fix round 1 (A2 I1, a security divergence): a dashboard `index.html` that
+ *   links outside the root is never served; TS serves the outside file for
+ *   any missing navigation route.
  */
+import { Database } from "bun:sqlite";
 import {
   copyFileSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -84,7 +95,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const frame = (model: string, choice: string) =>
   `data: {"id":"chatcmpl-s","object":"chat.completion.chunk","created":0,"model":"${model}","choices":[${choice}]}\n\n`;
 const chunk = (s: string) => `${Buffer.byteLength(s).toString(16)}\r\n${s}\r\n`;
-function answer(model: string): string {
+function answer(model: string): string | null {
+  // Reads the request and never answers: only cancellation ends the attempt.
+  if (model === "silent") return null;
   if (model === "fail500") {
     const b = '{"error":{"message":"boom"}}';
     return `HTTP/1.1 500 X\r\ncontent-type: application/json\r\ncontent-length: ${b.length}\r\nConnection: keep-alive\r\n\r\n${b}`;
@@ -115,7 +128,8 @@ Bun.listen<{ buf: Buffer }>({
         if (s.data.buf.length < end + 4 + len) return;
         const body = s.data.buf.subarray(end + 4, end + 4 + len).toString("latin1");
         s.data.buf = s.data.buf.subarray(end + 4 + len);
-        s.write(answer(/"model":"([^"]*)"/.exec(body)?.[1] ?? ""));
+        const reply = answer(/"model":"([^"]*)"/.exec(body)?.[1] ?? "");
+        if (reply !== null) s.write(reply);
       }
     },
   },
@@ -192,6 +206,7 @@ async function seed(): Promise<Record<string, string>> {
     "other-model": [t("ok", "ok", 1)],
     "fo-500": [t("bad", "fail500", 1), t("ok", "ok", 2)],
     dead: [t("bad", "fail500", 1)],
+    silent: [t("ok", "silent", 1)],
   };
   for (const [id, targets] of Object.entries(models)) {
     const file = join(seedRoot, `${id}.json`);
@@ -241,12 +256,42 @@ function dashboard(dir: string, outside: string): void {
   symlinkSync(join(dir, "missing-target"), join(dir, "dangling.txt"));
 }
 
+/** A dashboard whose `index.html` links outside its root (A2 I1). */
+function escapingDashboard(dir: string): void {
+  mkdirSync(join(dir, "assets"), { recursive: true });
+  writeFileSync(join(dir, "assets/app.js"), "x");
+  symlinkSync("../outside/secret.txt", join(dir, "index.html"));
+}
+
 function plugins(root: string): void {
-  // Two plugin directories and a plain file: TS loads neither (no manifest),
-  // the Rust gateway warns once per directory and loads nothing.
+  // Two directories without manifests, a plain file, a symlink to a plugin
+  // directory, and `gamma`: a valid plugin whose `setup` writes a marker file
+  // beside it. TS loads gamma (and runs setup); Rust must warn once per real
+  // directory (alpha, beta, gamma), ignore the file and the symlink, and never
+  // run setup — the marker must not exist after a Rust run.
   mkdirSync(join(root, "plugins/alpha"), { recursive: true });
   mkdirSync(join(root, "plugins/beta"), { recursive: true });
+  mkdirSync(join(root, "plugins/gamma"), { recursive: true });
   writeFileSync(join(root, "plugins/README"), "not a plugin");
+  symlinkSync("alpha", join(root, "plugins/zlink"));
+  writeFileSync(
+    join(root, "plugins/gamma/omni-plugin.json"),
+    JSON.stringify({ id: "gamma", name: "Gamma", version: "1.0.0", api: 3, server: "server.js" }),
+  );
+  writeFileSync(
+    join(root, "plugins/gamma/server.js"),
+    [
+      'import { writeFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      "export default {",
+      "  setup() {",
+      '    writeFileSync(join(import.meta.dir, "setup-ran"), "ran");',
+      "    return { routes: [] };",
+      "  },",
+      "};",
+      "",
+    ].join("\n"),
+  );
 }
 
 // ------------------------------------------------------------ raw HTTP
@@ -258,9 +303,19 @@ function raw(
   method = "GET",
   headers: [string, string][] = [],
   body = "",
+  abortAfterMs?: number,
 ): Promise<Ex> {
   return new Promise((res, rej) => {
     const s = connect(PORT, "127.0.0.1");
+    let aborted = false;
+    if (abortAfterMs !== undefined)
+      setTimeout(() => {
+        // Resolved first: `destroy` emits `close`, which must not resolve
+        // with whatever partial answer had arrived.
+        aborted = true;
+        res({ status: -1, head: [], body: Buffer.from("aborted") });
+        s.destroy();
+      }, abortAfterMs);
     const chunks: Buffer[] = [];
     const timer = setTimeout(() => {
       s.destroy();
@@ -273,6 +328,7 @@ function raw(
     });
     s.on("close", () => {
       clearTimeout(timer);
+      if (aborted) return;
       const all = Buffer.concat(chunks);
       const end = all.indexOf("\r\n\r\n");
       if (end < 0) return res({ status: 0, head: [], body: all });
@@ -396,6 +452,10 @@ type Row = {
   name: string;
   /** Compared on status alone (bodies carry ids `run.ts` masks and checks). */
   statusOnly?: boolean;
+  /** Hang up this long after sending; the row records `aborted`. */
+  abortAfterMs?: number;
+  /** Wait before sending (lets a cancelled attempt settle). */
+  settleMs?: number;
   /** The divergence is the spec's: the Rust answer must be exactly this. */
   rust?: string;
   target: string;
@@ -403,10 +463,22 @@ type Row = {
   headers?: [string, string][];
   body?: string;
   kind?: "plain" | "metrics" | "metrics-head" | "health";
-  /** Hyper refuses what Bun rewrites; recorded, required to differ. */
+  /** An asserted divergence: why, TS's status, and Rust's exact answer. */
   expectDiff?: string;
+  tsStatus?: number;
+  rustExact?: string;
 };
 const html: [string, string] = ["accept", "text/html,application/xhtml+xml"];
+/** hyper's answer to a request-target it refuses: no body, no date. */
+const HYPER_400 = "400\ncontent-length: 0\n\n";
+/** Bun's production-mode 500 for a file response that is a directory. */
+const DIR_500 = (head: boolean) =>
+  `500\ncontent-length: 21\ncontent-type: text/plain${head ? "" : "\ndate: <date>"}\n\n${head ? "" : "Something went wrong!"}`;
+/** TS's 404 for an unrouted GET of `path`. */
+const notFound = (path: string, head = false) => {
+  const b = `{"error":{"code":"NOT_FOUND","message":"no route for ${path}"}}`;
+  return `404\ncontent-length: ${b.length}\ncontent-type: application/json;charset=utf-8${head ? "" : "\ndate: <date>"}\n\n${head ? "" : b}`;
+};
 const auth: [string, string] = ["authorization", `Bearer ${TOKEN}`];
 
 function staticRows(prefix: string): Row[] {
@@ -535,7 +607,12 @@ function staticRows(prefix: string): Row[] {
   }
   add("/\u00fc", { headers: [html] });
   for (const t of ["/a<b>", "/a`b"]) {
-    add(t, { headers: [html], expectDiff: "hyper refuses a request-target Bun rewrites (400)" });
+    add(t, {
+      headers: [html],
+      expectDiff: "hyper refuses a request-target Bun rewrites (400)",
+      tsStatus: prefix === "nodir " ? 404 : 200,
+      rustExact: HYPER_400,
+    });
   }
   // HEAD, ranges, conditionals, other methods.
   for (const t of [
@@ -708,6 +785,9 @@ function traffic(keys: Record<string, string>): Row[] {
 
 // ------------------------------------------------------------ running
 
+/** A failed exchange: never equal to anything, never an expected divergence. */
+const TRANSPORT_ERROR = "TRANSPORT-ERROR";
+
 type Config = {
   label: string;
   staticDir: string | null;
@@ -716,6 +796,10 @@ type Config = {
   tsEnv?: Record<string, string>;
   /** `OMNI_METRICS_MAX_SERIES`, for both. */
   capEnv?: string;
+  /** Pass `OMNI_STATIC_DIR` relative to the gateway's cwd. */
+  relativeStatic?: boolean;
+  /** `requestDeadlineMs` written to the copied database before boot. */
+  deadlineMs?: number;
   rows: (keys: Record<string, string>) => Row[];
 };
 
@@ -741,11 +825,30 @@ async function runOne(
   const root = join(work, `${cfg.label}-${label}`);
   cpSync(fixture, root, { recursive: true, verbatimSymlinks: true });
   copyFileSync(join(seedRoot, "omni.db"), join(root, "omni.db"));
+  if (cfg.deadlineMs !== undefined) {
+    const d = new Database(join(root, "omni.db"));
+    const cur = d.query("SELECT value FROM settings WHERE key = 'settings'").get() as {
+      value: string;
+    } | null;
+    const next = {
+      ...(JSON.parse(cur?.value ?? "{}") as object),
+      requestDeadlineMs: cfg.deadlineMs,
+    };
+    d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('settings', ?)", [
+      JSON.stringify(next),
+    ]);
+    d.close();
+  }
   const e: Record<string, string | undefined> = {
     ...env,
     OMNI_DB_PATH: join(root, "omni.db"),
     OMNI_ROOT: root,
-    OMNI_STATIC_DIR: cfg.staticDir === null ? undefined : join(root, cfg.staticDir),
+    OMNI_STATIC_DIR:
+      cfg.staticDir === null
+        ? undefined
+        : cfg.relativeStatic
+          ? cfg.staticDir
+          : join(root, cfg.staticDir),
     OMNI_METRICS_TOKEN: cfg.metrics ? TOKEN : undefined,
     OMNI_VERSION: "9.9.9-conformance",
     ...(cfg.capEnv === undefined ? {} : { OMNI_METRICS_MAX_SERIES: cfg.capEnv }),
@@ -764,10 +867,18 @@ async function runOne(
     for (const row of cfg.rows(keys)) {
       if (flags.only !== undefined && !row.name.includes(flags.only)) continue;
       let x: Ex;
+      if (row.settleMs !== undefined) await sleep(row.settleMs);
       try {
-        x = await raw(row.target, row.method, row.headers, row.body);
+        x = await raw(row.target, row.method, row.headers, row.body, row.abortAfterMs);
       } catch (err) {
-        results.set(row.name, `ERROR ${String(err)}`);
+        results.set(row.name, `${TRANSPORT_ERROR} ${String(err)}`);
+        continue;
+      }
+      if (row.abortAfterMs !== undefined) {
+        results.set(
+          row.name,
+          x.status === -1 ? "aborted" : `${TRANSPORT_ERROR} answered before abort`,
+        );
         continue;
       }
       results.set(
@@ -784,13 +895,17 @@ async function runOne(
     proc.kill("SIGTERM");
     await proc.exited;
   }
-  return results;
+  const marker = existsSync(join(root, "plugins/gamma/setup-ran"));
+  const log = await Bun.file(join(out, `${cfg.label}-${label}.log`)).text();
+  return { results, marker, log };
 }
 
 const fixture = join(work, "fixture");
 mkdirSync(join(fixture, "outside"), { recursive: true });
 mkdirSync(join(fixture, "dash"), { recursive: true });
 dashboard(join(fixture, "dash"), join(fixture, "outside"));
+mkdirSync(join(fixture, "evil"), { recursive: true });
+escapingDashboard(join(fixture, "evil"));
 plugins(fixture);
 
 const keys = await seed();
@@ -841,7 +956,116 @@ const configs: Config[] = [
       directoryRows.map((r) => ({
         ...r,
         expectDiff: "Bun development-mode error page (stack trace)",
+        tsStatus: 500,
+        rustExact: DIR_500(r.method === "HEAD"),
       })),
+  },
+  // A2 I1: the SPA fallback never serves an index.html that escapes the root.
+  {
+    label: "evil-index",
+    staticDir: "evil",
+    metrics: false,
+    rows: () =>
+      ["/missing/route", "/", "/index.html"].flatMap((t): Row[] =>
+        [
+          { m: "GET", h: [html] as [string, string][] },
+          { m: "HEAD", h: [html] as [string, string][] },
+          { m: "GET", h: [html, ["range", "bytes=0-3"]] as [string, string][] },
+        ].map(({ m, h }) => {
+          // TS serves the outside file for a missing navigation route only:
+          // `/` maps to `/index.html`, which TS's realpath check refuses too.
+          const escapes = t === "/missing/route";
+          return {
+            name: `evil ${m} ${t} ${h.length > 1 ? "range" : ""}`,
+            target: t,
+            method: m,
+            headers: h,
+            ...(escapes
+              ? {
+                  expectDiff: "security: escaping SPA index is never served",
+                  tsStatus: h.length > 1 ? 206 : 200,
+                  rustExact: notFound(t, m === "HEAD"),
+                }
+              : {}),
+          };
+        }),
+      ),
+  },
+  // `OMNI_STATIC_DIR` relative to the gateway's working directory.
+  {
+    label: "relative",
+    staticDir: "dash",
+    relativeStatic: true,
+    metrics: false,
+    rows: () => [
+      { name: "relative GET /", target: "/", headers: [html] },
+      { name: "relative GET /plain.txt", target: "/plain.txt" },
+      { name: "relative GET /nested", target: "/nested", headers: [html] },
+      { name: "relative GET /escape.txt", target: "/escape.txt" },
+    ],
+  },
+  // A1 I2: an upstream attempt cancelled before its head is still one
+  // `omni_upstream_duration_seconds` observation (TS: once-guarded trace from
+  // the destroyed request's error event), for a request deadline and a client
+  // hang-up. Counts are compared exactly.
+  {
+    label: "cancel",
+    staticDir: null,
+    metrics: true,
+    deadlineMs: 300,
+    rows: (k) => [
+      {
+        name: "cancel deadline",
+        target: "/v1/chat/completions",
+        method: "POST",
+        headers: [
+          ["authorization", `Bearer ${k.k1}`],
+          ["content-type", "application/json"],
+        ],
+        body: JSON.stringify({
+          model: "silent",
+          stream: false,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+        statusOnly: true,
+      },
+      {
+        name: "cancel metrics after deadline",
+        target: "/metrics",
+        headers: [auth],
+        kind: "metrics",
+      },
+    ],
+  },
+  // The same for a client hang-up before the head, with no deadline.
+  {
+    label: "abort",
+    staticDir: null,
+    metrics: true,
+    rows: (k) => [
+      {
+        name: "cancel client abort",
+        target: "/v1/chat/completions",
+        method: "POST",
+        headers: [
+          ["authorization", `Bearer ${k.k2}`],
+          ["content-type", "application/json"],
+        ],
+        body: JSON.stringify({
+          model: "silent",
+          stream: true,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+        abortAfterMs: 150,
+      },
+      {
+        name: "cancel metrics after abort",
+        target: "/metrics",
+        headers: [auth],
+        kind: "metrics",
+        settleMs: 700,
+      },
+    ],
   },
   {
     label: "unset",
@@ -859,13 +1083,45 @@ let equal = 0;
 let expected = 0;
 const report: string[] = [];
 for (const cfg of configs) {
-  const ts = await runOne("ts", resolve(REPO, flags.ts as string), cfg, keys, fixture);
-  const rs = await runOne("rust", resolve(REPO, flags.rust as string), cfg, keys, fixture);
+  const tsRun = await runOne("ts", resolve(REPO, flags.ts as string), cfg, keys, fixture);
+  const rsRun = await runOne("rust", resolve(REPO, flags.rust as string), cfg, keys, fixture);
+  const [ts, rs] = [tsRun.results, rsRun.results];
+  // Plugins (spec non-goal): TS runs gamma's setup; Rust never does, and
+  // warns once per plugin directory with the release wording.
+  {
+    const warns = [
+      ...rsRun.log.matchAll(
+        /WARN {2}plugin skipped {2}plugin=(\S+) reason="plugins are not supported in this release"/g,
+      ),
+    ].map((m) => m[1]);
+    const loaded = /INFO {2}plugins resolved {2}count=0 path=\S+\/plugins\n/.test(rsRun.log);
+    const problems: string[] = [];
+    if (JSON.stringify(warns) !== JSON.stringify(["alpha", "beta", "gamma"]))
+      problems.push(`warnings ${JSON.stringify(warns)}`);
+    if (!loaded) problems.push("no `plugins resolved count=0` line");
+    if (rsRun.marker) problems.push("Rust ran a plugin's setup");
+    if (!tsRun.marker) problems.push("TS did not run gamma's setup (fixture not loadable?)");
+    if (/plugin (loaded|unavailable)/.test(rsRun.log)) problems.push("Rust logged a plugin load");
+    if (problems.length > 0) {
+      failures++;
+      report.push(`PLUGINS ${cfg.label}: ${problems.join("; ")}`);
+    } else equal++;
+  }
   const rows = cfg.rows(keys);
   for (const row of rows) {
     const a = ts.get(row.name);
     const b = rs.get(row.name);
     if (a === undefined && b === undefined) continue;
+    if (
+      a === undefined ||
+      b === undefined ||
+      a.startsWith(TRANSPORT_ERROR) ||
+      b.startsWith(TRANSPORT_ERROR)
+    ) {
+      failures++;
+      report.push(`TRANSPORT ${cfg.label}: ${row.name}\n--- ts\n${a}\n--- rust\n${b}\n`);
+      continue;
+    }
     const same = a === b;
     if (row.rust !== undefined) {
       if (b === row.rust && a !== b) {
@@ -880,9 +1136,13 @@ for (const cfg of configs) {
       continue;
     }
     if (row.expectDiff !== undefined) {
-      if (same) {
+      const tsStatusOk = row.tsStatus === undefined || a.split("\n")[0] === String(row.tsStatus);
+      const rustOk = row.rustExact === undefined || b === row.rustExact;
+      if (same || !tsStatusOk || !rustOk) {
         failures++;
-        report.push(`UNEXPECTED-EQUAL ${cfg.label}: ${row.name}`);
+        report.push(
+          `${same ? "UNEXPECTED-EQUAL" : "WRONG-DIVERGENCE"} ${cfg.label}: ${row.name} (${row.expectDiff})\n--- want ts status ${row.tsStatus}, rust\n${row.rustExact}\n--- ts\n${a}\n--- rust\n${b}\n`,
+        );
       } else {
         expected++;
         report.push(

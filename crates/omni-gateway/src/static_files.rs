@@ -10,8 +10,13 @@
 //!   generated `data/static-mime.tsv`), plus whether Bun's server attaches a
 //!   `content-disposition: filename=` for that type.
 //!
-//! Serving reads the directory from disk per request, as `app.ts` does, but
-//! only on this route: `/v1/*`, `/health` and `/metrics` never reach it.
+//! Serving reads the directory from disk per request, as `app.ts` does, on
+//! the catch-all only. Implemented routes (`/v1/*` POSTs, `GET /v1/models`,
+//! exact `/health`, `/metrics` when a token is set) are matched first and
+//! never touch it. The catch-all refuses `/api` and `/v1` paths before any
+//! filesystem work, as TS's two-prefix guard does; everything else is a
+//! dashboard path, so `/metrics` with no token, `/metrics/x` and `/health/x`
+//! are stat'ed under the root and can get the SPA index (TS parity, ruled).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -322,8 +327,19 @@ pub fn decide(root: Option<&Path>, raw_path: &str, accept: Option<&str>) -> Deci
     if decoded.starts_with("/assets/") || !navigation {
         return Decision::NotFound;
     }
-    let index = root.join("index.html");
-    // `Bun.file(index).size`: follows symlinks; 0 when missing.
+    // **Security divergence from TS** (A2 review I1): `app.ts` serves
+    // `resolve(staticRoot, "index.html")` without the realpath check every
+    // other file gets, so an `index.html` linking outside the root is served
+    // for any navigation route. Here it is canonicalized and contained like
+    // a requested file; an escaping index answers 404, as TS answers a
+    // request for `/index.html` itself.
+    let Ok(index) = std::fs::canonicalize(root.join("index.html")) else {
+        return Decision::NotFound;
+    };
+    if index == root || !index.starts_with(root) {
+        return Decision::NotFound;
+    }
+    // `Bun.file(index).size`: 0 when missing.
     let size = std::fs::metadata(&index).map_or(0, |m| m.len());
     if size == 0 {
         return Decision::NotFound;

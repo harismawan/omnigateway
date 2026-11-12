@@ -569,6 +569,47 @@
       "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{a=\"1\"} 4.01\n# HELP omni_ttft_seconds Streaming time to first token in seconds.\n# TYPE omni_ttft_seconds histogram\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.005\"} 0\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.01\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.025\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.05\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.1\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.25\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.5\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"1\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"2.5\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"5\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"10\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"30\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"60\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"+Inf\"} 2\nomni_ttft_seconds_sum{a=\"1\"} 7.01\nomni_ttft_seconds_count{a=\"1\"} 2\n"
     },
     {
+      "name": "repeated-label-keys",
+      "maxSeries": 2,
+      "ops": [
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [["a", "old"], ["b", "x"], ["a", "new"]]
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [["a", "new"], ["b", "x"]],
+          "value": 2
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [["b", "x"], ["a", "new"], ["a", "new"]]
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["api_key_id", "k1"], ["api_key_id", "k2"]],
+          "value": 0.5
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["api_key_id", "k2"]],
+          "value": 0.25
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["api_key_id", "k3"], ["m", "1"], ["api_key_id", "k4"]],
+          "value": 1
+        }
+      ],
+      "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{a=\"new\",b=\"x\"} 4\n# HELP omni_cost_usd_total Request cost in US dollars.\n# TYPE omni_cost_usd_total counter\nomni_cost_usd_total{api_key_id=\"k2\"} 0.75\nomni_cost_usd_total{api_key_id=\"other\",m=\"1\"} 1\n# HELP omni_metrics_series_folded_total Metric series folded into api_key_id other.\n# TYPE omni_metrics_series_folded_total counter\nomni_metrics_series_folded_total 1\n"
+    },
+    {
       "name": "cap-folds-api-keys",
       "maxSeries": 6,
       "ops": [

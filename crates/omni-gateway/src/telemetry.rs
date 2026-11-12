@@ -13,15 +13,29 @@
 //!   Series without `api_key_id` are never folded and always count.
 //! - Metrics render in definition order; a metric with no series is omitted.
 //!
-//! **Hot path.** Every write resolves its raw series through an immutable
-//! index read without a lock (`arc_swap`), then updates atomics. The mutex is
-//! taken only to create a series (or for a series created since the index was
-//! last published), and by a scrape. A raw series' resolution never changes
-//! once made — the raw count only grows, so a folded series stays folded — so
-//! caching the resolution is exact.
+//! **Hot path.** Every write resolves its raw series through an immutable,
+//! sharded index read without a lock (`arc_swap`), then updates atomics. The
+//! creation mutex is taken only to create a series; the new entry is published
+//! to its shard before the lock is released, so an established series is
+//! always lock-free. A raw series' resolution never changes once made — the
+//! raw count only grows, so a folded series stays folded — so caching it is
+//! exact. A scrape takes the creation lock only to copy the series lists,
+//! then formats without it.
+//!
+//! **Coherent histograms.** A histogram is two buffers and a hot index
+//! (Prometheus `client_golang`'s scheme): writers bump an observation counter
+//! carrying the hot index and write the hot buffer, its count last; a scrape
+//! (serialized per series) flips the index, waits until the cold buffer's
+//! count equals the observations started before the flip, reads it, and folds
+//! it into the new hot buffer. A scrape therefore sees whole observations
+//! only: finite buckets ≤ `+Inf` == `_count`, and `_sum` of the same set.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::hash::BuildHasher as _;
+use std::sync::atomic::{
+    AtomicU64,
+    Ordering::{Acquire, Relaxed, Release, SeqCst},
+};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use arc_swap::ArcSwap;
@@ -101,15 +115,127 @@ impl Metric {
     }
 }
 
-/// One stored series. Values are `f64` bits; histogram buckets are counted
-/// per bucket (the first boundary the value fits) and summed at render, which
-/// is TS's cumulative count for every value but `NaN`, which fits none.
+/// Adds `v` to an `f64` stored as bits.
+fn add_f64(cell: &AtomicU64, v: f64) {
+    let mut cur = cell.load(Relaxed);
+    loop {
+        let next = (f64::from_bits(cur) + v).to_bits();
+        match cell.compare_exchange_weak(cur, next, Relaxed, Relaxed) {
+            Ok(_) => return,
+            Err(seen) => cur = seen,
+        }
+    }
+}
+
+/// One histogram buffer: per-bucket counts (the first boundary a value
+/// fits; summed at render into TS's cumulative counts, `NaN` fitting none),
+/// the sum, and the observations completed, written last.
+#[derive(Debug, Default)]
+struct Counts {
+    buckets: [AtomicU64; 13],
+    sum: AtomicU64,
+    count: AtomicU64,
+}
+
+/// The hot index in the top bit, observations started below it.
+const HOT_BIT: u64 = 1 << 63;
+
+/// A histogram's two buffers. See the module documentation.
+#[derive(Debug, Default)]
+struct Histogram {
+    hot: AtomicU64,
+    counts: [Counts; 2],
+    /// Serializes snapshots (scrapes) and the non-hot-path `add`/`set`.
+    scrape: Mutex<()>,
+}
+
+/// A coherent read of one histogram.
+struct HistSnapshot {
+    buckets: [u64; 13],
+    sum: f64,
+    count: u64,
+}
+
+impl Histogram {
+    fn observe(&self, v: f64) {
+        let n = self.hot.fetch_add(1, SeqCst);
+        let c = &self.counts[usize::from(n & HOT_BIT != 0)];
+        if let Some(i) = BUCKETS.iter().position(|edge| v <= *edge) {
+            c.buckets[i].fetch_add(1, Relaxed);
+        }
+        add_f64(&c.sum, v);
+        // Last: a scrape that sees this count sees the bucket and the sum.
+        c.count.fetch_add(1, Release);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ()> {
+        self.scrape.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Flips the hot index, waits out writers still in the old buffer, folds
+    /// it into the new one and returns what it held. Caller holds `scrape`.
+    fn swap(&self) -> HistSnapshot {
+        let n = self.hot.fetch_add(HOT_BIT, SeqCst);
+        let started = n & !HOT_BIT;
+        let old = usize::from(n & HOT_BIT != 0);
+        let (cold, hot) = (&self.counts[old], &self.counts[1 - old]);
+        // Every observation started before the flip lands in `cold`; each
+        // is a handful of atomics, so this wait is short.
+        let mut spins = 0u32;
+        while cold.count.load(Acquire) != started {
+            spins += 1;
+            if spins < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        let mut buckets = [0u64; 13];
+        for (i, b) in cold.buckets.iter().enumerate() {
+            buckets[i] = b.swap(0, Relaxed);
+            hot.buckets[i].fetch_add(buckets[i], Relaxed);
+        }
+        let sum = f64::from_bits(cold.sum.swap(0f64.to_bits(), Relaxed));
+        add_f64(&hot.sum, sum);
+        cold.count.store(0, Relaxed);
+        hot.count.fetch_add(started, Release);
+        HistSnapshot {
+            buckets,
+            sum,
+            count: started,
+        }
+    }
+
+    fn snapshot(&self) -> HistSnapshot {
+        let _g = self.lock();
+        self.swap()
+    }
+
+    /// `add` on a histogram's value (its sum, as TS stores it). Not a path
+    /// any recording site takes; serialized with scrapes so it is not lost.
+    fn add(&self, v: f64) {
+        let _g = self.lock();
+        let hot = usize::from(self.hot.load(SeqCst) & HOT_BIT != 0);
+        add_f64(&self.counts[hot].sum, v);
+    }
+
+    /// `set` on a histogram's value: the sum becomes `v`, counts kept. The
+    /// swap first folds both buffers into the hot one, so its sum is the
+    /// whole value being replaced.
+    fn set(&self, v: f64) {
+        let _g = self.lock();
+        let _folded = self.swap();
+        let hot = usize::from(self.hot.load(SeqCst) & HOT_BIT != 0);
+        self.counts[hot].sum.store(v.to_bits(), Relaxed);
+    }
+}
+
+/// One stored series: a counter or gauge value (`f64` bits), or a histogram.
 #[derive(Debug)]
 struct Series {
     labels: Box<[(Box<str>, Box<str>)]>,
     value: AtomicU64,
-    count: AtomicU64,
-    buckets: Option<Box<[AtomicU64; 13]>>,
+    hist: Option<Box<Histogram>>,
 }
 
 impl Series {
@@ -117,37 +243,30 @@ impl Series {
         Self {
             labels,
             value: AtomicU64::new(0f64.to_bits()),
-            count: AtomicU64::new(0),
-            buckets: (metric.kind() == Kind::Histogram)
-                .then(|| Box::new(std::array::from_fn(|_| AtomicU64::new(0)))),
+            hist: (metric.kind() == Kind::Histogram).then(Box::default),
         }
     }
 
     fn add(&self, v: f64) {
-        let mut cur = self.value.load(Relaxed);
-        loop {
-            let next = (f64::from_bits(cur) + v).to_bits();
-            match self
-                .value
-                .compare_exchange_weak(cur, next, Relaxed, Relaxed)
-            {
-                Ok(_) => return,
-                Err(seen) => cur = seen,
-            }
+        match &self.hist {
+            Some(h) => h.add(v),
+            None => add_f64(&self.value, v),
         }
     }
 
     fn set(&self, v: f64) {
-        self.value.store(v.to_bits(), Relaxed);
+        match &self.hist {
+            Some(h) => h.set(v),
+            None => self.value.store(v.to_bits(), Relaxed),
+        }
     }
 
     fn observe(&self, v: f64) {
-        self.add(v);
-        self.count.fetch_add(1, Relaxed);
-        if let Some(b) = &self.buckets
-            && let Some(i) = BUCKETS.iter().position(|edge| v <= *edge)
-        {
-            b[i].fetch_add(1, Relaxed);
+        match &self.hist {
+            Some(h) => h.observe(v),
+            // TS's `observe` on a counter or gauge adds the value and keeps a
+            // count and buckets that a non-histogram never renders.
+            None => add_f64(&self.value, v),
         }
     }
 }
@@ -169,9 +288,23 @@ impl Op {
     }
 }
 
-/// Raw series key → the series it resolved to. `foldhash`: the index is
-/// probed on every write, and the keys are this process's own label sets.
+/// Raw series key → the series it resolved to, for one shard. `foldhash`:
+/// the index is probed on every write, and the keys are this process's own
+/// label sets.
 type Index = HashMap<Arc<str>, Arc<Series>, foldhash::fast::RandomState>;
+
+/// Index shards: a creation republishes one shard, so the copy is a
+/// 1/`SHARDS` slice of the resolved series, not all of them.
+const SHARDS: usize = 256;
+
+fn shard_of(key: &str) -> usize {
+    static PICK: std::sync::OnceLock<foldhash::fast::FixedState> = std::sync::OnceLock::new();
+    #[allow(clippy::cast_possible_truncation)]
+    let h = PICK
+        .get_or_init(foldhash::fast::FixedState::default)
+        .hash_one(key) as usize;
+    h % SHARDS
+}
 
 /// One metric's series: normalized key → series, and creation order.
 type Table = (HashMap<Box<str>, Arc<Series>>, Vec<Arc<Series>>);
@@ -182,20 +315,21 @@ struct State {
     raw_series: HashSet<Arc<str>>,
     /// `folded`: raw keys already counted as folded.
     folded: HashSet<Arc<str>>,
-    /// Every resolved raw key, folded or not; the index is a copy of this.
-    resolved: Index,
+    /// Every resolved raw key, folded or not, by shard; each published
+    /// shard is a copy of its entry here.
+    resolved: Vec<Index>,
     /// Per metric, normalized key → series, and the series in creation order.
     tables: Vec<Table>,
-    /// `resolved.len()` when the index was last published.
-    published: usize,
 }
 
 /// `createMetricRegistry`.
 #[derive(Debug)]
 pub struct Registry {
     max_series: f64,
-    index: ArcSwap<Index>,
+    index: Box<[ArcSwap<Index>]>,
     state: Mutex<State>,
+    /// Writes that took the creation lock (test hook).
+    locked: AtomicU64,
 }
 
 thread_local! {
@@ -203,14 +337,20 @@ thread_local! {
 }
 
 /// The identity of a label set: metric, then pairs sorted by name, each
-/// length-prefixed so no two sets share a key.
+/// length-prefixed so no two sets share a key. A repeated name counts once
+/// with its last value, as the label object TS builds from it does.
 fn write_key(metric: Metric, labels: &[(&str, &str)], out: &mut String) {
     out.clear();
     let mut sorted: smallvec_like::Pairs<'_> = smallvec_like::Pairs::from(labels);
     sorted.sort();
     push_decimal(out, metric.index() as u64);
     out.push('|');
-    for (k, v) in sorted.iter() {
+    let mut it = sorted.iter().peekable();
+    while let Some((k, v)) = it.next() {
+        // Stable sort: the last of a run of equal names is the last written.
+        if it.peek().is_some_and(|(next, _)| next == k) {
+            continue;
+        }
         push_decimal(out, k.len() as u64);
         out.push(':');
         out.push_str(k);
@@ -265,10 +405,11 @@ mod smallvec_like {
     }
 
     impl<'a> Pairs<'a> {
+        /// Stable, so repeated names keep their write order.
         pub fn sort(&mut self) {
             match &mut self.spill {
-                Some(v) => v.sort_unstable_by(|a, b| a.0.cmp(b.0)),
-                None => self.inline[..self.len].sort_unstable_by(|a, b| a.0.cmp(b.0)),
+                Some(v) => v.sort_by(|a, b| a.0.cmp(b.0)),
+                None => self.inline[..self.len].sort_by(|a, b| a.0.cmp(b.0)),
             }
         }
 
@@ -281,22 +422,31 @@ mod smallvec_like {
     }
 }
 
-/// Republish the index on every new series while it is small, then once
-/// it has grown by an eighth: copying stays linear overall, and a stale
-/// index only sends a recently created series' writers through the lock.
-fn should_publish(resolved: usize, published: usize) -> bool {
-    resolved <= 1024 || resolved - published >= resolved / 8
+/// `{ ...labels }`: a repeated name keeps its first position, last value.
+fn dedupe<'a>(labels: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut out: Vec<(&str, &str)> = Vec::with_capacity(labels.len());
+    for &(k, v) in labels {
+        match out.iter_mut().find(|(pk, _)| *pk == k) {
+            Some(p) => p.1 = v,
+            None => out.push((k, v)),
+        }
+    }
+    out
 }
 
 impl Registry {
     pub fn new(max_series: f64) -> Self {
         Self {
             max_series,
-            index: ArcSwap::from_pointee(Index::default()),
+            index: (0..SHARDS)
+                .map(|_| ArcSwap::from_pointee(Index::default()))
+                .collect(),
             state: Mutex::new(State {
+                resolved: (0..SHARDS).map(|_| Index::default()).collect(),
                 tables: (0..DEFINITIONS.len()).map(|_| Default::default()).collect(),
                 ..State::default()
             }),
+            locked: AtomicU64::new(0),
         }
     }
 
@@ -329,18 +479,18 @@ impl Registry {
                 }
             };
             write_key(metric, labels, key);
-            if let Some(series) = self.index.load().get(key.as_str()) {
+            let shard = shard_of(key);
+            if let Some(series) = self.index[shard].load().get(key.as_str()) {
                 op.apply(series);
                 return;
             }
-            let mut st = self.lock();
-            let series = self.resolve(&mut st, metric, labels, key);
+            self.locked.fetch_add(1, Relaxed);
+            let series = {
+                let mut st = self.lock();
+                self.resolve(&mut st, metric, labels, key)
+            };
+            // Outside the lock: a histogram `set` waits on its scrape lock.
             op.apply(&series);
-            if st.resolved.len() != st.published && should_publish(st.resolved.len(), st.published)
-            {
-                st.published = st.resolved.len();
-                self.index.store(Arc::new(st.resolved.clone()));
-            }
         });
     }
 
@@ -352,10 +502,13 @@ impl Registry {
         labels: &[(&str, &str)],
         raw: &str,
     ) -> Arc<Series> {
-        if let Some(s) = st.resolved.get(raw) {
+        let shard = shard_of(raw);
+        if let Some(s) = st.resolved[shard].get(raw) {
             return s.clone();
         }
         let raw: Arc<str> = Arc::from(raw);
+        let labels = dedupe(labels);
+        let labels = labels.as_slice();
         let has_key = labels.iter().any(|(k, _)| *k == "api_key_id");
         #[allow(clippy::cast_precision_loss)]
         let under_cap = (st.raw_series.len() as f64) < self.max_series;
@@ -386,33 +539,71 @@ impl Registry {
         let series = match table.get(nkey.as_str()) {
             Some(s) => s.clone(),
             None => {
-                // An object's keys: a repeated name keeps its first position
-                // and its last value.
-                let mut pairs: Vec<(Box<str>, Box<str>)> = Vec::with_capacity(normalized.len());
-                for (k, v) in normalized {
-                    match pairs.iter_mut().find(|(pk, _)| &**pk == k) {
-                        Some(p) => p.1 = v.into(),
-                        None => pairs.push((k.into(), v.into())),
-                    }
-                }
+                let pairs: Vec<(Box<str>, Box<str>)> = normalized
+                    .into_iter()
+                    .map(|(k, v)| (k.into(), v.into()))
+                    .collect();
                 let s = Arc::new(Series::new(metric, pairs.into_boxed_slice()));
                 table.insert(nkey.into_boxed_str(), s.clone());
                 order.push(s.clone());
                 s
             }
         };
-        st.resolved.insert(raw, series.clone());
+        st.resolved[shard].insert(raw, series.clone());
+        // Published before the lock is released: an established series is
+        // never left to the slow path.
+        self.index[shard].store(Arc::new(st.resolved[shard].clone()));
         series
+    }
+
+    /// Test hook: whether a write of this label set resolves without the lock.
+    #[doc(hidden)]
+    pub fn is_lock_free(&self, metric: Metric, labels: &[(&str, &str)]) -> bool {
+        let mut key = String::new();
+        write_key(metric, labels, &mut key);
+        self.index[shard_of(&key)].load().contains_key(key.as_str())
+    }
+
+    /// Test hook: how many writes have taken the creation lock.
+    #[doc(hidden)]
+    pub fn locked_writes(&self) -> u64 {
+        self.locked.load(Relaxed)
+    }
+
+    /// Test hook: whether a render holds the creation lock while it formats.
+    #[doc(hidden)]
+    pub fn render_holds_creation_lock(&self) -> bool {
+        let mut held = false;
+        self.render_with(&mut || {
+            held = matches!(
+                self.state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+        });
+        held
     }
 
     /// `renderPrometheus(snapshot())`.
     pub fn render(&self) -> String {
-        let st = self.lock();
+        self.render_with(&mut || {})
+    }
+
+    /// Copies the series lists under the creation lock, then formats without
+    /// it; `probe` runs once mid-format.
+    fn render_with(&self, probe: &mut dyn FnMut()) -> String {
+        let lists: Vec<Vec<Arc<Series>>> = {
+            let st = self.lock();
+            st.tables.iter().map(|(_, order)| order.clone()).collect()
+        };
+        let mut probe = Some(probe);
         let mut out = String::new();
         for (metric, name, kind, help) in DEFINITIONS {
-            let order = &st.tables[metric.index()].1;
+            let order = &lists[metric.index()];
             if order.is_empty() {
                 continue;
+            }
+            if let Some(p) = probe.take() {
+                p();
             }
             out.push_str("# HELP ");
             out.push_str(name);
@@ -424,26 +615,25 @@ impl Registry {
             out.push_str(kind.as_str());
             out.push('\n');
             for s in order {
-                let value = f64::from_bits(s.value.load(Relaxed));
-                match (&s.buckets, kind) {
-                    (Some(buckets), Kind::Histogram) => {
-                        let count = s.count.load(Relaxed);
+                match (&s.hist, kind) {
+                    (Some(h), Kind::Histogram) => {
+                        let snap = h.snapshot();
                         let mut cumulative = 0u64;
                         for (i, le) in BUCKET_LABELS.iter().enumerate() {
-                            cumulative += buckets[i].load(Relaxed);
+                            cumulative += snap.buckets[i];
                             sample(&mut out, name, "_bucket", &s.labels, Some(le));
                             push_u64(&mut out, cumulative);
                         }
                         sample(&mut out, name, "_bucket", &s.labels, Some("+Inf"));
-                        push_u64(&mut out, count);
+                        push_u64(&mut out, snap.count);
                         sample(&mut out, name, "_sum", &s.labels, None);
-                        push_number(&mut out, value);
+                        push_number(&mut out, snap.sum);
                         sample(&mut out, name, "_count", &s.labels, None);
-                        push_u64(&mut out, count);
+                        push_u64(&mut out, snap.count);
                     }
                     _ => {
                         sample(&mut out, name, "", &s.labels, None);
-                        push_number(&mut out, value);
+                        push_number(&mut out, f64::from_bits(s.value.load(Relaxed)));
                     }
                 }
             }
