@@ -13,7 +13,8 @@ Implementer opus-pr. Controller review (gpt-6-astra#high) pending.
   (`OMNI_METRICS_MAX_SERIES`; raw series are counted, past the cap a new raw series carrying
   `api_key_id` folds to `"other"`, and each raw series counts one `omni_metrics_series_folded_total`
   the first time it folds), and empty metrics omitted.
-- Hot path: no lock. A write resolves its raw series through an immutable `ArcSwap` index, then
+- Hot path *(as first submitted; corrected in Fix round 1, I3: series created between index
+  republications stayed on the mutex)*: a write resolves its raw series through an immutable `ArcSwap` index, then
   updates atomics (f64 bits CAS-add, histogram per-bucket counters summed at render). The mutex
   is taken only to create a series, or for one created since the index was last republished, and
   by a scrape. A raw series' resolution never changes once made, so caching it is exact.
@@ -37,7 +38,8 @@ Implementer opus-pr. Controller review (gpt-6-astra#high) pending.
 **A2 — static serving + plugins** (`crates/omni-gateway/src/static_files.rs`, `server.rs`, `lib.rs`)
 - Routing now matches `new URL(request.url).pathname` as Elysia does: dot segments (including
   `%2e` spellings) resolved, `\` read as `/`, the WHATWG path percent-encode set applied. Plain
-  paths (every `/v1/*` call) borrow the request path with no allocation.
+  paths (every `/v1/*` call) skip normalization. *(Corrected in Fix round 1: they are still
+  copied once with `into_owned`, the same single `to_owned` the router made before; "no allocation" was wrong.)*
 - The `/*` catch-all as `app.ts` defines it: `%2f`/`%5c` → 404; `decodeURIComponent` (a throw →
   404); `/api`, `/v1` and their subpaths → 404; `/` → `index.html`; lexical containment, then
   `realpath` containment (symlink escapes → 404); a regular file of size > 0 is served with
@@ -57,7 +59,10 @@ Implementer opus-pr. Controller review (gpt-6-astra#high) pending.
 - Directory: `OMNI_STATIC_DIR` is taken literally. Otherwise `<exe dir>/public`, then the checkout's
   `apps/dashboard/dist`, matching TS's two candidates relative to its bundle. Logged as TS logs it
   (`dashboard directory resolved|absent path=`). It is resolved with `realpath` once at boot. Disk
-  is touched only on the catch-all (blocking threads); `/v1/*`, `/health` and `/metrics` never reach it.
+  is touched only on the catch-all (blocking threads). *(Corrected in Fix round 1: implemented routes
+  — `/v1/*`, exact `/health`, `/metrics` when a token is set — never reach it, and `/api`, `/v1` are
+  refused before disk; `/metrics` with no token, `/metrics/*` and `/health/*` are dashboard paths
+  and do reach disk and the SPA index, as in TS — ruled TS parity, pinned by a test.)*
 - Plugins (spec non-goal): no plugin code is read or run. At boot, one `WARN plugin skipped
   plugin=<id> reason="plugins are not supported in this release"` per directory in
   `$OMNI_ROOT/plugins` (else beside the DB), sorted, symlinks not followed; then TS's
@@ -82,7 +87,7 @@ pinned Bun 1.4.4 sources consulted (Range, MIME, extension, error page): `bun-so
 | `cargo test --workspace` | **547 passed, 0 failed, 78 suites** (baseline 523) |
 | `cargo clippy --workspace --all-targets -D warnings`, `cargo fmt --check` | clean |
 | Biome on new TS/JSON; drift checks (`static-mime --check`, metrics/paths JSON regenerate byte-equal) | clean / no drift |
-| **surface conformance** (`conformance/e2e/surface.ts`, real TS vs Rust binaries, 7 configs) | RED vs 9f22ec23 binary: 317 equal, **301 failures** → GREEN: **582 equal, 58 expected divergences, 0 failures** |
+| **surface conformance** (`conformance/e2e/surface.ts`, real TS vs Rust binaries, 6 configs — "7" was a miscount; 10 after Fix round 1) | RED vs 9f22ec23 binary: 317 equal, **301 failures** → GREEN: **582 equal, 58 expected divergences, 0 failures** |
 | existing E2E `conformance/e2e/run.ts` on final binary | **all rows equal** (47 pass, 0 FAIL) |
 | frozen TS (`apps/`, `packages/`) diff | none |
 
@@ -105,7 +110,9 @@ sample compare exactly. Traffic responses compare on status (their bodies carry 
 already covers). One header is dropped: `connection: close`, which hyper echoes to the harness's
 own `connection: close` requests.
 
-The 58 expected divergences, each asserted (never counted as equal):
+The 58 expected divergences, each required to differ. *(Fix round 1: the plugin rows were exact,
+but directory and hyper-400 rows only had to differ, and a transport error could pass. They are now
+exact; see Fix round 1.)*
 - 36 plugin rows: spec 501 body exactly; TS answers 401/404 from its live plugin surface.
 - 18 directory rows against dev-mode TS (Bun's stack-trace page). The same rows compare **equal**
   to TS run with `NODE_ENV=production` (config `dirs-prod`).
@@ -157,3 +164,96 @@ Their medians were overhead-c1 before/after/on 9661/9710/9505 and chat-stream 51
 5. `omni_inflight` is set from per-provider load slots at scrape. In-flight streams at scrape time were not
    compared black-box (TS and Rust hold slots for different instants); a unit test pins the `Map` order.
 6. hyper 400s on `<`, `>`, `` ` `` in the request-target (and, probed, on a raw non-UTF-8 byte such as 0xFC), where Bun rewrites and serves them (pre-existing, recorded). UTF-8 `/ü` compares equal.
+
+## Fix round 1 (reviews a1-review.md, a2-review.md; rulings in progress.md)
+
+Code commit `bb6d3401` (on top of RTK merge c7fdf1f3). Evidence: `/tmp/opencode/a1-a2-fix1/`.
+Binary `rust-fix1` sha256 `85d2380a246650e79cbe7a7ea7707f52c7d108c79d14db06a18931e2effb9e09`.
+
+### A1
+- **I1, coherent histograms.** Each histogram now has two buffers and a hot index (the
+  `client_golang` scheme). A writer bumps an observation counter that carries the hot index, then
+  writes bucket and sum to the hot buffer, with its count written last (`Release`). A scrape,
+  serialized per series, flips the index, waits until the cold buffer's count equals the
+  observations started before the flip, reads that buffer and folds it into the new hot one. A
+  scrape therefore sees only whole observations. RED (`tests/metrics_concurrency.rs`, 4 writers +
+  scraper, fixed 0.25 value): the old code showed finite buckets 5 > `+Inf` 2 within 6 scrapes.
+  GREEN: every scrape is coherent (buckets ≤ `+Inf` == `_count`, `_sum == 0.25 × count`), and the
+  quiescent totals are exact.
+- **I2, upstream observation on cancel.** A once-only drop guard (`HeadTrace`) is armed when the
+  exchange starts. It fires `onResponseHead` once, on the head, on a transport error, or when the
+  pending future is dropped by a request deadline or a client hang-up. This mirrors TS's
+  `onAbort` → destroy → error → `trace(undefined, true)`. RED: no observation, for both the
+  in-process deadline and the client-abort tests. GREEN: 1 each, and surface `cancel`/`abort`
+  configs compare the counts against TS exactly (TS 1, Rust 1).
+- **I3, lock-free established series.** The index is now 256 `ArcSwap` shards. Each creation
+  republishes its shard before the creation lock is released, so no series is ever left on the
+  slow path, and the copy is 1/256 of the series. A scrape copies the series lists under the lock
+  and formats without it. RED: series #1337 of 1500 was not published, and the render held the
+  lock. GREEN: 1500 stable series, 4 writers and a concurrent scraper, with zero locked writes and
+  exact totals; the lock is free mid-render.
+- **Minors.** Repeated label keys are deduped (first position, last value) before identity and raw
+  counting; a new TS vector `repeated-label-keys` was RED 1/14 and is now GREEN 14/14. The bearer
+  check uses `subtle::ConstantTimeEq` after the length check (crate already in the lockfile). The
+  saturating elapsed time is kept and documented at `HeadTrace::drop`, as ruled: a backwards clock
+  step is not a duration.
+
+### A2
+- **I1, escaping SPA index (security divergence from TS, as ruled).** The fallback `index.html` is
+  canonicalized and contained like any requested file; an escaping index answers 404. The unit
+  test RED served the outside file and is GREEN. The surface `evil-index` config covers
+  GET/HEAD/Range on a missing route: TS answers 200/200/206 with the outside bytes, Rust gives the
+  exact 404, and these are asserted as 3 security divergences. `/` and `/index.html` were already
+  refused by TS too, and compare equal.
+- **I2, reserved routes (TS parity kept, as ruled).** `/metrics` with no token, `/metrics/*` and
+  `/health/*` are dashboard paths and reach disk and the SPA index, exactly as in TS. This is
+  pinned by `reserved_route_names_are_dashboard_paths_as_in_ts`. The report's earlier "never
+  reaches disk" claim is corrected above.
+- **Minors.**
+  - Routing comment and report corrected: plain paths skip normalization but are still copied
+    once, the same as the baseline.
+  - `pathname` borrow is tested.
+  - surface.ts divergences are now exact: TS status plus Rust's exact bytes (hyper `400`
+    no-body; Bun production 500 `Something went wrong!`; the 404 for the escaping index). Any
+    transport error fails the row, and an abort row resolves before `close`.
+  - Stale backslash comments fixed; the config count is corrected (there are now 10).
+  - Relative `OMNI_STATIC_DIR` is covered by the surface `relative` config and by a unit test.
+  - Plugin boot is asserted in every surface config and in `drop_warnings.rs`: one warning per
+    real directory (alpha, beta, gamma), sorted, with the release wording; `count=0`; a file and
+    a symlink are ignored; no load line. The valid `gamma` plugin's `setup` writes a marker under
+    TS and never under Rust. The unit test's server entry is a FIFO, so any read would hang it.
+    A mutation (following symlinks) is caught.
+
+### Verification (final binary rust-fix1)
+
+| check | result |
+|---|---|
+| RED on pre-fix code | metrics_concurrency 3/3 fail; metrics vector 1/14 differ; SPA unit fail; I2 server tests 2/2 fail; surface vs `rust-after`: 5 failures (3 escaping index, 2 cancel counts) |
+| `cargo test --workspace` | **742 passed, 0 failed, 84 suites** (includes the merged RTK crate) |
+| clippy `-D warnings`, fmt, Biome | clean |
+| surface conformance (10 configs) | **606 equal, 61 asserted divergences, 0 failures** (36 plugin 501, 18 dev-mode directory, 4 hyper-400, 3 escaping index) |
+| `conformance/e2e/run.ts` | all rows equal (47 pass, 0 FAIL) |
+
+### Quiet-host bench (4 interleaved rounds, 10:54–11:15; `top` 86.9 % → 97.6 % idle; every run 100 % ok, 0 missing/pending, writer 0/0)
+
+| scenario | binary | req/s (4 runs) | median | Δ vs before | CPU ms/req | p99 ms |
+|---|---|---|---:|---:|---:|---:|
+| overhead-c1 | before 9f22ec23 | 9754 / 9963 / 9872 / 9973 | 9918 | — | 0.0655 | 0.240 |
+| overhead-c1 | fix1, metrics off | 9858 / 9933 / 9788 / 9614 | 9823 | −1.0 % | 0.0665 | 0.240 |
+| overhead-c1 | fix1, metrics on | 9707 / 9829 / 9614 / 9401 | 9660 | **−2.6 %** | 0.0680 | 0.240 |
+| overhead-c1 | A1 (6e63d9f3), metrics on | 9759 / 9837 / 9649 / 9660 | 9710 | −2.1 % | 0.0670 | 0.240 |
+| chat-stream | before 9f22ec23 | 52245 / 52067 / 52637 / 52212 | 52228 | — | 0.0620 | 3.275 |
+| chat-stream | fix1, metrics off | 52851 / 50920 / 52558 / 53068 | 52704 | +0.9 % | 0.0620 | 3.250 |
+| chat-stream | fix1, metrics on | 51017 / 51230 / 51456 / 51536 | 51343 | −1.7 % | 0.0640 | 3.170 |
+| chat-stream | A1 (6e63d9f3), metrics on | 50554 / 52328 / 51859 / 51842 | 51850 | −0.7 % | 0.0630 | 3.255 |
+
+Reading:
+- **Metrics off.** No regression on chat-stream (+0.9 %). On overhead-c1 it is −1.0 % with CPU
+  +0.001 ms/req, inside the before runs' own 2.2 % spread (9754–9973).
+- **Metrics on, chat-stream.** −1.7 %, within the ≤2 % ruling.
+- **Metrics on, overhead-c1 (the single-client per-request-cost scenario).** −2.6 %, about 2.5 µs
+  CPU per request. That is over the ≤2 % ruling, as A1 was (−2.1 % in this run, −3.3 % in the
+  first quiet run). The fix1 and A1 builds differ by 0.5 %, within noise, so the coherence and
+  lock-free changes did not measurably add cost; the cost is recording 9 series per request.
+  **Acceptance is the controller's decision.** A further reduction would mean recording through
+  pre-resolved per-request handles rather than per-call label keys; that was not attempted this round.
