@@ -25,6 +25,7 @@ use hyper::body::Incoming;
 use hyper::header::{HeaderMap, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use omni_ir::error::{ErrorCode, GatewayError};
+use omni_ir::jsjson::JsValue;
 
 use crate::admin_auth::{ADMIN_COOKIE, AdminAuth, AuthError, Principal};
 use crate::server::{App, Body, full};
@@ -37,12 +38,14 @@ pub const API_BODY_LIMIT: u64 = 128 * 1024 * 1024;
 const JSON_UTF8: &str = "application/json;charset=utf-8";
 
 /// A matched `/api` route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Status,
     Setup,
     Login,
     Logout,
+    /// Keys, models, catalog, settings and passwords (A5).
+    Admin(crate::admin_routes::Admin),
 }
 
 /// The `/api` route for a method and normalized path, if one is ported.
@@ -53,7 +56,7 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
         (&Method::POST, "/api/setup") => Some(Route::Setup),
         (&Method::POST, "/api/login") => Some(Route::Login),
         (&Method::POST, "/api/logout") => Some(Route::Logout),
-        _ => None,
+        _ => crate::admin_routes::route(method, path).map(Route::Admin),
     }
 }
 
@@ -64,6 +67,7 @@ pub async fn serve(app: Arc<App>, route: Route, req: Request<Incoming>) -> Respo
         Route::Setup => setup(&app, req).await,
         Route::Login => login(&app, req).await,
         Route::Logout => logout(&app, &req).await,
+        Route::Admin(admin) => crate::admin_routes::serve(&app, admin, req).await,
     };
     result.unwrap_or_else(|e| e.into_response())
 }
@@ -107,6 +111,16 @@ pub enum ApiError {
 impl ApiError {
     fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         ApiError::Gateway(GatewayError::new(code, message))
+    }
+
+    /// `throw new GatewayError(code, message)`.
+    pub fn gateway(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(code, message)
+    }
+
+    /// Anything not a `GatewayError`: `500 INTERNAL "internal error"`.
+    pub fn internal() -> Self {
+        internal()
     }
 
     /// `apiErrorResponse`: a non-`GatewayError` never reaches here, it is
@@ -159,7 +173,12 @@ fn json(status: u16, body: String, cookie: Option<String>) -> Response<Body> {
     res
 }
 
-const OK: &str = "{\"ok\":true}";
+pub(crate) const OK: &str = "{\"ok\":true}";
+
+/// A 200 JSON answer (a handler's returned object).
+pub(crate) fn json_ok(body: String) -> Response<Body> {
+    json(200, body, None)
+}
 
 fn conflict() -> ApiError {
     ApiError::Response(Box::new(error_response(
@@ -343,6 +362,21 @@ pub async fn read_json_fields(
         return Err(ApiError::new(ErrorCode::BadRequest, "invalid JSON body"));
     }
     Ok(top_level_fields(&text, names))
+}
+
+/// `readJson(request)`: the whole body as `request.json()` parses it, kept
+/// as a JS value (lone surrogates, `1e400` as Infinity, duplicate keys last
+/// wins, any depth). A body `JSON.parse` refuses is `BAD_REQUEST "invalid
+/// JSON body"`.
+pub async fn read_json(req: Request<Incoming>, idle: Duration) -> Result<JsValue, ApiError> {
+    let text = read_text(req, idle).await?;
+    // Whitespace around the value is JSON; `operator_json` wants none.
+    let trimmed = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
+    if trimmed.is_empty() || omni_ir::jsc_json::parse_error(&text).is_some() {
+        return Err(ApiError::new(ErrorCode::BadRequest, "invalid JSON body"));
+    }
+    omni_control::operator_json::parse(trimmed)
+        .map_err(|_| ApiError::new(ErrorCode::BadRequest, "invalid JSON body"))
 }
 
 /// Reads the named top-level members of JSON text already known valid.

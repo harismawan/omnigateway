@@ -8,7 +8,6 @@ use super::query_rows;
 use crate::credentials::{Credential, CredentialHealth, CredentialSecrets, Secret};
 use crate::error::StoreError;
 use crate::keys::{self, ApiKey, KeyEdit, OperatorKey};
-use crate::limits::parse_limits;
 use crate::models::{self, ModelRowError, OperatorCredential, OperatorModelRow, VirtualModel};
 use crate::quota::{QuotaWindow, WindowType};
 use crate::settings::{self, Settings};
@@ -38,7 +37,7 @@ fn to_key(r: &Row) -> Result<ApiKey, StoreError> {
         hash: r.try_get("hash")?,
         model_allowlist,
         // `parseLimits`: unreadable marks the key rather than failing the read.
-        limits: parse_limits(&limits),
+        limits: keys::parse_stored_limits(&limits),
         body_logging_opt_out: r.try_get("body_logging_opt_out")?,
         created_at: r.try_get("created_at")?,
         revoked_at: r.try_get("revoked_at")?,
@@ -178,7 +177,7 @@ fn to_operator_key(r: &Row) -> Result<OperatorKey, StoreError> {
         prefix: r.try_get("prefix")?,
         hash: r.try_get("hash")?,
         model_allowlist: None,
-        limits: parse_limits(&limits),
+        limits: keys::parse_stored_limits(&limits),
         body_logging_opt_out: r.try_get("body_logging_opt_out")?,
         created_at: 0,
         revoked_at: r.try_get("revoked_at")?,
@@ -189,6 +188,7 @@ fn to_operator_key(r: &Row) -> Result<OperatorKey, StoreError> {
     Ok(OperatorKey {
         key,
         allowlist_json: r.try_get("model_allowlist")?,
+        limits_json: limits,
         created_at: date("created_at")?,
         expires_at: date("expires_at")?,
     })

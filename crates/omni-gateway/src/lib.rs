@@ -7,6 +7,7 @@
 //! deadline, flush the writer, and exit 0. A second signal exits 1.
 
 pub mod admin_auth;
+pub mod admin_routes;
 pub mod api;
 pub mod clock;
 pub mod dispatch;
@@ -427,6 +428,13 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     })
     .await
     .map_err(|e| e.to_string())??;
+    // The admin routes' config connection: keys, models, settings.
+    let control_store = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || SqliteStore::open(&path, offset).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     let admin = {
         let now: admin_auth::Clock = Arc::new(clock::now_ms);
         // Sessions live in this process: a restart ends every one (spec:
@@ -503,6 +511,10 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         static_root,
         admin,
         base_url_https: api::base_url_is_https(&config.base_url),
+        control: admin_routes::ControlStore::new(control_store),
+        body_logging_allowed: config.body_logging_allowed,
+        day_offset_minutes: offset,
+        reported_catalog_problems: std::sync::Mutex::default(),
     });
 
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");

@@ -27,10 +27,15 @@ pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
     // Schema order matters: do not prevalidate later fields before earlier ones.
     for key in defaults.as_object().expect("defaults").keys() {
         if let Some(v) = sv::get(raw, key) {
-            let v = if key == "weights" {
-                // Store normalization guarantees six finite primitive weights.
-                serde_json::from_str(&omni_ir::jsjson::stringify(v).expect("weights"))
-                    .unwrap_or(Value::Null)
+            let v = if let (true, JsValue::Object(fields)) = (key == "weights", v) {
+                // One level, shallowly: a weight is validated as a number, and
+                // any other member only needs its name (an unrecognized key).
+                Value::Object(
+                    fields
+                        .iter()
+                        .map(|(k, v)| (String::from_utf16_lossy(k), sv::shallow(v)))
+                        .collect(),
+                )
             } else {
                 sv::shallow(v)
             };
@@ -43,7 +48,7 @@ pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
             "(root)",
             format!(
                 "Invalid input: expected object, received {}",
-                kind(&sv::shallow(raw))
+                crate::body_schema::received(Some(raw))
             ),
         ));
     }
@@ -84,22 +89,32 @@ pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
         let v = input.get(key).unwrap_or(&Value::Null);
         let mut v = v.clone();
         if key == "weights" {
-            let weights = v.as_object().ok_or_else(|| {
-                error(
-                    key,
-                    format!("Invalid input: expected object, received {}", kind(&v)),
-                )
-            })?;
+            let weights = match sv::get(raw, "weights") {
+                Some(JsValue::Object(_)) => v.as_object().cloned().unwrap_or_default(),
+                other => {
+                    return Err(error(
+                        key,
+                        format!(
+                            "Invalid input: expected object, received {}",
+                            crate::body_schema::received(other)
+                        ),
+                    ));
+                }
+            };
+            let raw_weights = sv::get(raw, "weights");
             for k in ["tier", "health", "quota", "cost", "latency", "load"] {
-                let w = weights.get(k).unwrap_or(&Value::Null);
-                if !w.is_number() {
+                let w = raw_weights.and_then(|r| sv::get(r, k));
+                if !matches!(w, Some(JsValue::Number(n)) if n.is_finite()) {
                     return Err(error(
                         &format!("weights.{k}"),
-                        format!("Invalid input: expected number, received {}", kind(w)),
+                        format!(
+                            "Invalid input: expected number, received {}",
+                            crate::body_schema::received(w)
+                        ),
                     ));
                 }
             }
-            if let Some(k) = omni_ir::jsjson::own_entries(weights)
+            if let Some(k) = omni_ir::jsjson::own_entries(&weights)
                 .into_iter()
                 .map(|(k, _)| k)
                 .find(|k| {
@@ -174,7 +189,10 @@ pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
             if !v.is_boolean() {
                 return Err(error(
                     key,
-                    format!("Invalid input: expected boolean, received {}", kind(&v)),
+                    format!(
+                        "Invalid input: expected boolean, received {}",
+                        crate::body_schema::received(sv::get(raw, key))
+                    ),
                 ));
             }
         } else if key == "ponytailMode" {
@@ -187,11 +205,14 @@ pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
                     "Invalid option: expected one of \"off\"|\"lite\"|\"full\"|\"ultra\"",
                 ));
             }
-        } else if !(default.is_null() && v.is_null()) {
+        } else if !(default.is_null() && matches!(sv::get(raw, key), Some(JsValue::Null))) {
             let s = v.as_str().ok_or_else(|| {
                 error(
                     key,
-                    format!("Invalid input: expected string, received {}", kind(&v)),
+                    format!(
+                        "Invalid input: expected string, received {}",
+                        crate::body_schema::received(sv::get(raw, key))
+                    ),
                 )
             })?;
             let s = omni_ir::js::trim(s);
@@ -206,7 +227,8 @@ pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
                     "Too small: expected string to have >=1 characters",
                 ));
             }
-            if omni_ir::js::utf16_len(s) > max {
+            // zod 4.6 measures `max` in code points.
+            if s.chars().count() > max {
                 return Err(error(
                     key,
                     format!("Too big: expected string to have <={max} characters"),

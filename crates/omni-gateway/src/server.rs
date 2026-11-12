@@ -379,6 +379,36 @@ pub struct App {
     pub admin: crate::admin_auth::AdminAuth,
     /// Whether `baseUrl` (`OMNI_BASE_URL`) is https: `Secure` on the cookie.
     pub base_url_https: bool,
+    /// The admin routes' own store connection (keys, models, settings).
+    pub control: crate::admin_routes::ControlStore,
+    /// `OMNI_BODY_LOGGING_ALLOWED`, reported on `/api/settings`.
+    pub body_logging_allowed: bool,
+    /// The daily-bucket offset, reported on `/api/settings`.
+    pub day_offset_minutes: i64,
+    /// Catalog problems already logged, one line each per process.
+    pub reported_catalog_problems: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl App {
+    /// `reportCatalogProblem`: `provider catalog repaired`, once per
+    /// distinct `field provider` per process.
+    pub fn report_catalog_problems(&self, problems: Vec<omni_control::api::CatalogProblem>) {
+        if problems.is_empty() {
+            return;
+        }
+        let mut seen = self
+            .reported_catalog_problems
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for p in problems {
+            if seen.insert(format!("{} {}", p.field, p.provider)) {
+                tracing::warn!(
+                    reason = %format!("{} {}: not a CSS colour; served neutral grey instead", p.provider, p.field),
+                    "provider catalog repaired"
+                );
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for App {

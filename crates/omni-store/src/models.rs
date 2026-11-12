@@ -199,8 +199,13 @@ pub(crate) fn model_from_parts(
     strategy: &str,
     is_alias: bool,
 ) -> Result<VirtualModel, String> {
-    let raw: serde_json::Value = serde_json::from_str(targets)
-        .map_err(|e| format!("unreadable row: {T}.targets: not JSON ({e})"))?;
+    // A lone surrogate escape (valid to `JSON.parse`) reads as U+FFFD.
+    let raw: serde_json::Value = omni_ir::js::parse_json(targets).ok_or_else(|| {
+        let e = serde_json::from_str::<serde_json::Value>(targets)
+            .err()
+            .map_or_else(String::new, |e| e.to_string());
+        format!("unreadable row: {T}.targets: not JSON ({e})")
+    })?;
     let targets = serde_json::from_value(raw)
         .map_err(|e| format!("virtual_models.targets: not a Target[] ({e})"))?;
     Ok(VirtualModel {

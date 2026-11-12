@@ -13,10 +13,13 @@ workspace = true
 omni-ir = { path = "../omni-ir" }
 omni-crypto = { path = "../omni-crypto" }
 omni-store = { path = "../omni-store" }
+omni-ratelimit = { path = "../omni-ratelimit" }
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 url = "2.5"
 rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+icu_collator = "2.4"
 
 [dev-dependencies]
 tempfile = "3"

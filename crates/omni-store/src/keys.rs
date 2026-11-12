@@ -2,6 +2,13 @@
 
 use crate::error::StoreError;
 use crate::limits::{LimitConfig, parse_limits};
+
+/// `parseLimits`' `JSON.parse` then `parseLimitConfig`, where a lone
+/// surrogate escape (valid to `JSON.parse`, and storable through `/api`)
+/// reads as U+FFFD instead of making the whole key unreadable.
+pub(crate) fn parse_stored_limits(raw: &str) -> Option<LimitConfig> {
+    parse_limits(raw).or_else(|| parse_limits(&omni_ir::js::replace_lone_surrogates(raw)?))
+}
 use crate::row;
 use rusqlite::{Connection, OptionalExtension as _, Row};
 use serde::Serialize;
@@ -130,7 +137,11 @@ pub(crate) fn parse_allowlist(
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+    // A lone surrogate escape (valid to `JSON.parse`) reads as U+FFFD.
+    let parsed: serde_json::Value = omni_ir::js::parse_json(&raw).ok_or_else(|| {
+        let e = serde_json::from_str::<serde_json::Value>(&raw)
+            .err()
+            .map_or_else(String::new, |e| e.to_string());
         StoreError::Corrupt(format!("api_keys.model_allowlist of {id}: not JSON ({e})"))
     })?;
     Ok(match parsed {
@@ -163,7 +174,7 @@ fn read_key(r: &Row<'_>, operator: bool) -> Result<ApiKey, StoreError> {
         },
     )?;
     // `parseLimits`: unreadable marks the key rather than failing the read.
-    let limits = parse_limits(&row::text(r, T, "limits")?);
+    let limits = parse_stored_limits(&row::text(r, T, "limits")?);
     Ok(ApiKey {
         label: row::text(r, T, "label")?,
         prefix: row::text(r, T, "prefix")?,
@@ -194,6 +205,9 @@ fn read_key(r: &Row<'_>, operator: bool) -> Result<ApiKey, StoreError> {
 pub struct OperatorKey {
     pub key: ApiKey,
     pub allowlist_json: Option<String>,
+    /// The stored `limits` text, unparsed: the HTTP listing re-reads it with
+    /// JS string semantics (lone surrogates included), which serde cannot.
+    pub limits_json: String,
     pub created_at: serde_json::Value,
     pub expires_at: serde_json::Value,
 }
@@ -222,11 +236,49 @@ pub fn operator_rows(conn: &Connection, id: Option<&str>) -> Result<Vec<Operator
         out.push(OperatorKey {
             key: read_key(r, true)?,
             allowlist_json: row::opt_text(r, T, "model_allowlist")?,
+            limits_json: row::text(r, T, "limits")?,
             created_at: date("created_at")?,
             expires_at: date("expires_at")?,
         });
     }
     Ok(out)
+}
+
+/// One new key's columns, already encoded as `KeyRepo.create` encodes
+/// them (`JSON.stringify` of the allowlist and of the parsed limits).
+///
+/// For callers that validated the input with JS string semantics (the
+/// `/api` surface): text that cannot be round-tripped through serde, such as
+/// a lone surrogate escaped in a model name, is written exactly as given.
+#[derive(Debug, Clone, Copy)]
+pub struct NewKeyColumns<'a> {
+    pub id: &'a str,
+    pub label: &'a str,
+    pub prefix: &'a str,
+    pub hash: &'a str,
+    pub model_allowlist: Option<&'a str>,
+    pub limits: &'a str,
+    pub body_logging_opt_out: bool,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub guardrail_policy: Option<&'a str>,
+    pub smart_routing: bool,
+}
+
+/// `KeyRepo.create` with pre-encoded columns (see [`NewKeyColumns`]).
+pub fn create_columns(conn: &Connection, k: &NewKeyColumns<'_>) -> Result<(), StoreError> {
+    conn.execute("INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,body_logging_opt_out,created_at,revoked_at,expires_at,guardrail_policy,smart_routing) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)",rusqlite::params![k.id,k.label,k.prefix,k.hash,k.model_allowlist,k.limits,i64::from(k.body_logging_opt_out),k.created_at,k.expires_at,k.guardrail_policy,i64::from(k.smart_routing)])?;
+    Ok(())
+}
+
+/// `KeyRepo.setLimits` for a matrix the caller already ran through
+/// `parseLimitConfig` and encoded: written as given (see [`NewKeyColumns`]).
+pub fn set_limits_encoded(conn: &Connection, id: &str, limits: &str) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE api_keys SET limits = ? WHERE id = ?",
+        rusqlite::params![limits, id],
+    )?;
+    Ok(())
 }
 
 /// Control writes inspect the target row with TS's raw allowlist semantics,

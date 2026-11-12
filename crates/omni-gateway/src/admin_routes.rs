@@ -1,0 +1,413 @@
+//! `routes/admin.ts`'s keys, models, catalog, settings and password
+//! handlers (roadmap A5), on the router [`crate::api`] owns.
+//!
+//! Each handler does what TS's does in the same order: the guard
+//! (`requireReader` for reads, `requireAdmin` for writes), the body
+//! (`readJson` / `readJsonRecord`), one `@omni/control` operation, and the
+//! JSON answer. The operations are `omni_control::api`'s, shared with
+//! nothing request-path: they run on the blocking pool against the control
+//! connection ([`ControlStore`]), never the `/v1` one.
+//!
+//! A config write commits to SQLite, which moves `PRAGMA data_version` on
+//! the snapshot refresher's connection: the routing snapshot (and so `/v1`
+//! key admission and model resolution) picks it up on its next poll.
+//! Unlike TS there is no in-process `emit`: the poll is the one path, for a
+//! write from this process and from any other alike.
+use std::sync::{Arc, Mutex};
+
+use hyper::body::Incoming;
+use hyper::{Request, Response};
+use omni_control::api::{self as ops, Failure, KeyEdit};
+use omni_ir::error::ErrorCode;
+use omni_ir::jsjson::JsValue;
+use omni_store::SqliteStore;
+
+use crate::api::{ApiError, json_ok, read_json, read_json_fields, require_admin, require_reader};
+use crate::server::{App, Body};
+
+/// The connection the admin routes' config reads and writes use: its own,
+/// opened at boot, behind a mutex (admin traffic is light), and only ever
+/// touched on the blocking pool.
+#[derive(Clone)]
+pub struct ControlStore(Arc<Mutex<SqliteStore>>);
+
+impl std::fmt::Debug for ControlStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlStore").finish_non_exhaustive()
+    }
+}
+
+impl ControlStore {
+    pub fn new(store: SqliteStore) -> Self {
+        Self(Arc::new(Mutex::new(store)))
+    }
+
+    /// One operation on the blocking pool. A failure that is not a
+    /// `GatewayError` is `500 INTERNAL "internal error"` and logged here (TS
+    /// logs nothing; the reason is useful and carries no request data).
+    async fn run<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&SqliteStore) -> Result<T, Failure> + Send + 'static,
+    ) -> Result<T, ApiError> {
+        let store = self.0.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            let guard = store
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            f(&guard)
+        })
+        .await;
+        match joined {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(failure(e)),
+            Err(e) => {
+                tracing::error!(reason = %e, "admin route task failed");
+                Err(ApiError::internal())
+            }
+        }
+    }
+}
+
+fn failure(e: Failure) -> ApiError {
+    match e.code.and_then(ErrorCode::parse) {
+        Some(code) => ApiError::gateway(code, e.message),
+        None => {
+            tracing::error!(reason = %e.message, "admin route failed");
+            ApiError::internal()
+        }
+    }
+}
+
+/// The routes this module serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admin {
+    ListModels,
+    PutModel(Option<String>),
+    RemoveModel(Option<String>),
+    Catalog,
+    ListKeys,
+    CreateKey,
+    EditKey(Option<String>, KeyEdit),
+    RevokeKey(Option<String>),
+    GetSettings,
+    PutSettings,
+    Password,
+    ViewerPassword,
+}
+
+/// `fast-decode-uri-component`, which Elysia's router runs on every path
+/// parameter: `None` where it returns `null` (a bad escape or ill-formed
+/// UTF-8). The router matched on the raw (normalized) path, so `%2F` in a
+/// parameter is a `/` in the id and never a segment break.
+pub fn decode_param(raw: &str) -> Option<String> {
+    if !raw.contains('%') {
+        return Some(raw.to_owned());
+    }
+    crate::static_files::decode_uri_component(raw)
+}
+
+/// The admin route for a method and normalized path, if it is one.
+/// `HEAD` reaches every `GET` route, as Elysia's does.
+pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
+    use hyper::Method as M;
+    let get = matches!(*method, M::GET | M::HEAD);
+    let param = |rest: &str| (!rest.is_empty() && !rest.contains('/')).then(|| decode_param(rest));
+    match path {
+        "/api/models" if get => return Some(Admin::ListModels),
+        "/api/catalog" if get => return Some(Admin::Catalog),
+        "/api/keys" if get => return Some(Admin::ListKeys),
+        "/api/keys" if *method == M::POST => return Some(Admin::CreateKey),
+        "/api/settings" if get => return Some(Admin::GetSettings),
+        "/api/settings" if *method == M::PUT => return Some(Admin::PutSettings),
+        "/api/settings/password" if *method == M::PUT => return Some(Admin::Password),
+        "/api/settings/viewer-password" if *method == M::PUT => {
+            return Some(Admin::ViewerPassword);
+        }
+        _ => {}
+    }
+    if let Some(rest) = path.strip_prefix("/api/models/") {
+        let id = param(rest)?;
+        return match *method {
+            M::PUT => Some(Admin::PutModel(id)),
+            M::DELETE => Some(Admin::RemoveModel(id)),
+            _ => None,
+        };
+    }
+    let rest = path.strip_prefix("/api/keys/")?;
+    if *method == M::DELETE {
+        return param(rest).map(Admin::RevokeKey);
+    }
+    if *method != M::PUT {
+        return None;
+    }
+    let (id, edit) = rest.split_once('/')?;
+    if id.is_empty() {
+        return None;
+    }
+    let edit = match edit {
+        "limits" => KeyEdit::Limits,
+        "models" => KeyEdit::Models,
+        "expiry" => KeyEdit::Expiry,
+        "guardrail" => KeyEdit::Guardrail,
+        "smart-routing" => KeyEdit::SmartRouting,
+        _ => return None,
+    };
+    Some(Admin::EditKey(decode_param(id), edit))
+}
+
+/// Serves a matched admin route.
+pub async fn serve(
+    app: &App,
+    route: Admin,
+    req: Request<Incoming>,
+) -> Result<Response<Body>, ApiError> {
+    let control = app.control.clone();
+    let now = crate::clock::now_ms();
+    match route {
+        Admin::ListModels => {
+            require_reader(req.headers(), &app.admin).await?;
+            Ok(json_ok(control.run(ops::list_models).await?))
+        }
+        Admin::Catalog => {
+            require_reader(req.headers(), &app.admin).await?;
+            let (body, problems) = control
+                .run(|s| {
+                    let accounts = ops::accounts(s)?;
+                    let mut problems = Vec::new();
+                    let body = ops::catalog(&accounts, &mut |p| problems.push(p))?;
+                    Ok((body, problems))
+                })
+                .await?;
+            app.report_catalog_problems(problems);
+            Ok(json_ok(body))
+        }
+        Admin::PutModel(id) => {
+            require_admin(req.headers(), &app.admin).await?;
+            let body = read_json(req, app.idle_timeout).await?;
+            control
+                .run(move |s| ops::put_model(s, id.as_deref(), &body))
+                .await?;
+            Ok(json_ok(crate::api::OK.to_owned()))
+        }
+        Admin::RemoveModel(id) => {
+            require_admin(req.headers(), &app.admin).await?;
+            control
+                .run(move |s| ops::remove_model(s, id.as_deref()))
+                .await?;
+            Ok(json_ok(crate::api::OK.to_owned()))
+        }
+        Admin::ListKeys => {
+            require_reader(req.headers(), &app.admin).await?;
+            Ok(json_ok(control.run(move |s| ops::list_keys(s, now)).await?))
+        }
+        Admin::CreateKey => {
+            require_admin(req.headers(), &app.admin).await?;
+            let body = read_json(req, app.idle_timeout).await?;
+            let now = crate::clock::now_ms();
+            Ok(json_ok(
+                control.run(move |s| ops::create_key(s, &body, now)).await?,
+            ))
+        }
+        Admin::EditKey(id, edit) => {
+            require_admin(req.headers(), &app.admin).await?;
+            let body = read_json(req, app.idle_timeout).await?;
+            let now = crate::clock::now_ms();
+            Ok(json_ok(
+                control
+                    .run(move |s| ops::edit_key(s, id.as_deref(), edit, &body, now))
+                    .await?,
+            ))
+        }
+        Admin::RevokeKey(id) => {
+            require_admin(req.headers(), &app.admin).await?;
+            let now = crate::clock::now_ms();
+            control
+                .run(move |s| ops::revoke_key(s, id.as_deref(), now))
+                .await?;
+            Ok(json_ok(crate::api::OK.to_owned()))
+        }
+        Admin::GetSettings => {
+            require_reader(req.headers(), &app.admin).await?;
+            let settings = control.run(ops::settings).await?;
+            let viewer = app.admin.is_viewer_configured().await?;
+            let models = {
+                let settings = settings.clone();
+                control
+                    .run(move |s| ops::smart_router_models(s, &settings))
+                    .await?
+            };
+            Ok(json_ok(ops::settings_body(
+                settings,
+                app.body_logging_allowed,
+                app.day_offset_minutes,
+                viewer,
+                models,
+            )))
+        }
+        Admin::PutSettings => {
+            require_admin(req.headers(), &app.admin).await?;
+            let body = read_json(req, app.idle_timeout).await?;
+            control.run(move |s| ops::put_settings(s, &body)).await?;
+            Ok(json_ok(crate::api::OK.to_owned()))
+        }
+        Admin::Password => change_password(app, req).await,
+        Admin::ViewerPassword => viewer_password(app, req).await,
+    }
+}
+
+/// `PUT /api/settings/password`: the current password, then a new one;
+/// success ends every session, this caller's included.
+async fn change_password(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
+    require_admin(req.headers(), &app.admin).await?;
+    let fields = read_json_fields(req, app.idle_timeout, &["current", "password"]).await?;
+    let (Some(current), Some(password)) = (fields.string("current"), fields.string("password"))
+    else {
+        return Err(ApiError::gateway(
+            ErrorCode::BadRequest,
+            "current and password are required",
+        ));
+    };
+    // `catch (error) { throw BAD_REQUEST(describeError(error)) }`: the
+    // length rule's message, or a store failure's.
+    let changed = match app.admin.change_password(current, password).await {
+        Ok(changed) => changed,
+        Err(
+            crate::admin_auth::AuthError::Password(message)
+            | crate::admin_auth::AuthError::Internal(message),
+        ) => {
+            return Err(ApiError::gateway(ErrorCode::BadRequest, message));
+        }
+    };
+    if !changed {
+        tracing::info!(
+            reason = "invalid credentials",
+            "admin password change refused"
+        );
+        return Err(ApiError::gateway(
+            ErrorCode::Auth,
+            "current password is incorrect",
+        ));
+    }
+    tracing::info!("admin password changed");
+    Ok(json_ok(crate::api::OK.to_owned()))
+}
+
+/// `PUT /api/settings/viewer-password`: a string sets it, `null` clears it;
+/// either ends viewer sessions only.
+async fn viewer_password(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
+    require_admin(req.headers(), &app.admin).await?;
+    let body = read_json(req, app.idle_timeout).await?;
+    // `readJsonRecord`: any object (arrays included); `"password" in body`.
+    let field = match &body {
+        JsValue::Object(fields) => fields
+            .iter()
+            .rev()
+            .find(|(k, _)| k.iter().copied().eq("password".encode_utf16()))
+            .map(|(_, v)| v),
+        JsValue::Array(_) => None,
+        _ => {
+            return Err(ApiError::gateway(
+                ErrorCode::BadRequest,
+                "password is required, and may be null",
+            ));
+        }
+    };
+    let password = match field {
+        None => {
+            return Err(ApiError::gateway(
+                ErrorCode::BadRequest,
+                "password is required, and may be null",
+            ));
+        }
+        Some(JsValue::Null) => None,
+        // Hashed as its UTF-8 encoding: a lone surrogate is U+FFFD, as
+        // Argon2 sees it in TS too. The length rule counts UTF-16 units.
+        Some(JsValue::String(units)) => Some(units.clone()),
+        Some(_) => {
+            return Err(ApiError::gateway(
+                ErrorCode::BadRequest,
+                "password must be a string or null",
+            ));
+        }
+    };
+    let cleared = password.is_none();
+    let text = password.as_deref().map(String::from_utf16_lossy);
+    match app.admin.set_viewer_password(text.as_deref()).await {
+        Ok(()) => {}
+        Err(
+            crate::admin_auth::AuthError::Password(message)
+            | crate::admin_auth::AuthError::Internal(message),
+        ) => return Err(ApiError::gateway(ErrorCode::BadRequest, message)),
+    }
+    tracing::info!(
+        "{}",
+        if cleared {
+            "viewer access removed"
+        } else {
+            "viewer password set"
+        }
+    );
+    Ok(json_ok(crate::api::OK.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::Method;
+
+    #[test]
+    fn routes_match_elysia_s_table() {
+        let r = |m: Method, p: &str| route(&m, p);
+        assert_eq!(r(Method::GET, "/api/models"), Some(Admin::ListModels));
+        assert_eq!(r(Method::HEAD, "/api/models"), Some(Admin::ListModels));
+        assert_eq!(r(Method::POST, "/api/models"), None);
+        assert_eq!(
+            r(Method::PUT, "/api/models/a%2Fb"),
+            Some(Admin::PutModel(Some("a/b".into())))
+        );
+        assert_eq!(
+            r(Method::PUT, "/api/models/%ZZ"),
+            Some(Admin::PutModel(None))
+        );
+        assert_eq!(
+            r(Method::PUT, "/api/models/%ED%A0%80"),
+            Some(Admin::PutModel(None))
+        );
+        assert_eq!(r(Method::PUT, "/api/models/"), None);
+        assert_eq!(r(Method::PUT, "/api/models/a/b"), None);
+        assert_eq!(r(Method::GET, "/api/models/x"), None);
+        assert_eq!(
+            r(Method::DELETE, "/api/models/x"),
+            Some(Admin::RemoveModel(Some("x".into())))
+        );
+        assert_eq!(
+            r(Method::PUT, "/api/keys/k/limits"),
+            Some(Admin::EditKey(Some("k".into()), KeyEdit::Limits))
+        );
+        assert_eq!(
+            r(Method::PUT, "/api/keys/k/smart-routing"),
+            Some(Admin::EditKey(Some("k".into()), KeyEdit::SmartRouting))
+        );
+        assert_eq!(r(Method::PUT, "/api/keys/k/other"), None);
+        assert_eq!(r(Method::PUT, "/api/keys//limits"), None);
+        assert_eq!(r(Method::PUT, "/api/keys/k/limits/x"), None);
+        assert_eq!(r(Method::POST, "/api/keys/k/limits"), None);
+        assert_eq!(
+            r(Method::DELETE, "/api/keys/k"),
+            Some(Admin::RevokeKey(Some("k".into())))
+        );
+        assert_eq!(r(Method::DELETE, "/api/keys/k/x"), None);
+        assert_eq!(r(Method::GET, "/api/keys/k"), None);
+        assert_eq!(r(Method::PUT, "/api/settings"), Some(Admin::PutSettings));
+        assert_eq!(r(Method::POST, "/api/settings"), None);
+        assert_eq!(
+            r(Method::PUT, "/api/settings/password"),
+            Some(Admin::Password)
+        );
+        assert_eq!(
+            r(Method::PUT, "/api/settings/viewer-password"),
+            Some(Admin::ViewerPassword)
+        );
+        assert_eq!(r(Method::GET, "/api/settings/password"), None);
+    }
+}

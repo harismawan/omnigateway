@@ -15,7 +15,6 @@ fn kind(v: &JsValue) -> &'static str {
         JsValue::Function => "function",
         JsValue::Null => "null",
         JsValue::Bool(_) => "boolean",
-        JsValue::Number(n) if !n.is_finite() => "number",
         JsValue::Number(_) => "number",
         JsValue::String(_) => "string",
         JsValue::Array(_) => "array",
@@ -28,7 +27,10 @@ fn typed(v: &JsValue, expected: &str, path: &str) -> Result<(), String> {
     } else {
         Err(error(
             path,
-            format!("Invalid input: expected {expected}, received {}", kind(v)),
+            format!(
+                "Invalid input: expected {expected}, received {}",
+                crate::body_schema::received(Some(v))
+            ),
         ))
     }
 }

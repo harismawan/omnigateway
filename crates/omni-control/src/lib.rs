@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 //! Shared operator configuration and storage operations, without gateway runtime.
 pub mod admin_password;
+pub mod api;
+pub mod body_schema;
 pub mod catalog;
 pub mod config;
+#[cfg(test)]
+mod http_oracle_tests;
 pub mod keys;
 mod model_schema;
 pub mod models;

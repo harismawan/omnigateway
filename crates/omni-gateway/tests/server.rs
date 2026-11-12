@@ -1853,15 +1853,15 @@ async fn admin_setup_login_status_logout_end_to_end() {
     assert!(b.contains("\"authenticated\":false"), "{b}");
 
     // Unported `/api` paths keep their fallthrough answers.
-    let (s, _, b) = call(&g.base, "GET", "/api/keys", &[], "").await;
+    let (s, _, b) = call(&g.base, "GET", "/api/credentials", &[], "").await;
     assert_eq!(
         (s, b.as_str()),
         (
             404,
-            r#"{"error":{"code":"NOT_FOUND","message":"no route for /api/keys"}}"#
+            r#"{"error":{"code":"NOT_FOUND","message":"no route for /api/credentials"}}"#
         )
     );
-    let (s, _, b) = call(&g.base, "POST", "/api/keys", &[], "").await;
+    let (s, _, b) = call(&g.base, "POST", "/api/credentials", &[], "").await;
     assert_eq!((s, b.as_str()), (404, "NOT_FOUND"));
     let (s, _, _) = call(&g.base, "POST", "/api/plugins", &[], "").await;
     assert_eq!(s, 501);
@@ -1932,5 +1932,161 @@ async fn a_store_refused_setup_is_bad_request_with_sqlite_s_message() {
     );
     let (_, _, b) = call(&g.base, "GET", "/api/status", &[], "").await;
     assert!(b.starts_with(r#"{"configured":false,"#), "{b}");
+    drop(stop(g).await);
+}
+
+/// A5: keys, models, settings and passwords over `/api`, end to end: the
+/// guards, a mint whose raw key authenticates on `/v1` within the
+/// snapshot's poll, an edit, a revocation that stops it, and a password
+/// change that ends the caller's own session.
+#[tokio::test]
+async fn admin_keys_models_settings_and_passwords_end_to_end() {
+    let g = boot().await;
+    let (_, h, _) = call(
+        &g.base,
+        "POST",
+        "/api/setup",
+        &[],
+        r#"{"password":"correct-horse-battery"}"#,
+    )
+    .await;
+    let admin = format!("omni_admin={}", token_of(&set_cookie(&h).expect("cookie")));
+    let ck = [("cookie", admin.as_str())];
+
+    let (s, _, b) = call(&g.base, "GET", "/api/keys", &[], "").await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            401,
+            r#"{"error":{"code":"AUTH","message":"admin session required"}}"#
+        )
+    );
+    let (s, _, b) = call(&g.base, "POST", "/api/keys", &ck, r#"{"label":""}"#).await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            400,
+            r#"{"error":{"code":"BAD_REQUEST","message":"label: Too small: expected string to have >=1 characters"}}"#
+        )
+    );
+    let (s, _, b) = call(&g.base, "POST", "/api/keys", &ck, r#"{"label":"api"}"#).await;
+    assert_eq!(s, 200, "{b}");
+    let created: serde_json::Value = serde_json::from_str(&b).expect("json");
+    let raw = created["key"].as_str().expect("key").to_owned();
+    let id = created["id"].as_str().expect("id").to_owned();
+    assert_eq!(created["prefix"].as_str(), Some(&raw[..12]));
+
+    // The snapshot refresher sees the commit within its poll (500 ms).
+    let bearer_raw = format!("Bearer {raw}");
+    let mut admitted = false;
+    for _ in 0..50 {
+        let (s, _, _) = call(
+            &g.base,
+            "GET",
+            "/v1/models",
+            &[("authorization", &bearer_raw)],
+            "",
+        )
+        .await;
+        if s == 200 {
+            admitted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(admitted, "a minted key is admitted within 1 s");
+
+    let (s, _, b) = call(&g.base, "GET", "/api/keys", &ck, "").await;
+    assert_eq!(s, 200);
+    assert!(!b.contains(&raw), "the listing never carries a raw key");
+    let (s, _, b) = call(
+        &g.base,
+        "PUT",
+        &format!("/api/keys/{id}/limits"),
+        &ck,
+        r#"{"limits":{"requests":{"1m":5}}}"#,
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert!(
+        b.contains(r#""limitUsage":[{"dimension":"requests","window":"1m","limit":5,"used":0,"model":null}]"#),
+        "{b}"
+    );
+    let (s, _, b) = call(
+        &g.base,
+        "PUT",
+        "/api/keys/nope/limits",
+        &ck,
+        r#"{"limits":{}}"#,
+    )
+    .await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            400,
+            r#"{"error":{"code":"BAD_REQUEST","message":"no such api key"}}"#
+        )
+    );
+    let (s, _, _) = call(&g.base, "DELETE", &format!("/api/keys/{id}"), &ck, "").await;
+    assert_eq!(s, 200);
+    let mut refused = false;
+    for _ in 0..50 {
+        let (s, _, _) = call(
+            &g.base,
+            "GET",
+            "/v1/models",
+            &[("authorization", &bearer_raw)],
+            "",
+        )
+        .await;
+        if s == 401 {
+            refused = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(refused, "a revoked key is refused within 1 s");
+
+    let (s, _, b) = call(&g.base, "PUT", "/api/models/m", &ck, r#"{"id":"x"}"#).await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            400,
+            r#"{"error":{"code":"BAD_REQUEST","message":"strategy: Invalid option: expected one of \"score\"|\"priority\"|\"roundRobin\"|\"weighted\""}}"#
+        )
+    );
+    let (s, _, b) = call(&g.base, "GET", "/api/settings", &ck, "").await;
+    assert_eq!(s, 200);
+    assert!(
+        b.ends_with(r#""viewerConfigured":false,"smartRouterModels":{"classifier":"unset","local":"unset"}}"#),
+        "{b}"
+    );
+
+    let (s, _, b) = call(
+        &g.base,
+        "PUT",
+        "/api/settings/password",
+        &ck,
+        r#"{"current":"correct-horse-battery","password":"short"}"#,
+    )
+    .await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            400,
+            r#"{"error":{"code":"BAD_REQUEST","message":"admin password must be at least 12 characters"}}"#
+        )
+    );
+    let (s, _, _) = call(
+        &g.base,
+        "PUT",
+        "/api/settings/password",
+        &ck,
+        r#"{"current":"correct-horse-battery","password":"another-password-1"}"#,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, _, _) = call(&g.base, "GET", "/api/keys", &ck, "").await;
+    assert_eq!(s, 401, "a password change ends the caller's own session");
     drop(stop(g).await);
 }

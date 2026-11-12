@@ -93,3 +93,43 @@ fn minted_secret_roundtrips_only_as_hash() {
         2
     );
 }
+
+/// A5: the `/api` surface stores what `JSON.stringify` writes for a client's
+/// JS strings, lone surrogate escapes included. `JSON.parse` reads them, so a
+/// key, a model and the settings row carrying one stay readable: the key is
+/// admitted (not marked unreadable), the model is routable, the settings
+/// keep their other fields.
+#[test]
+fn lone_surrogate_escapes_in_stored_json_read_as_js_does() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("db");
+    let store = omni_store::SqliteStore::open(&path, 0).expect("store");
+    let c = store.connection();
+    c.execute(
+        r#"INSERT INTO api_keys(id,label,prefix,hash,created_at,limits,model_allowlist) VALUES('k','k','p','h',1,'{"models":{"\ud800":{"concurrency":1}}}','["\ud800","b"]')"#,
+        [],
+    )
+    .expect("key");
+    c.execute(
+        r#"INSERT INTO virtual_models VALUES('m','[{"provider":"anthropic","model":"\udc00x","tier":1,"weight":1,"costPerMTok":{"input":0,"output":0},"capabilities":{"tools":true,"images":false,"reasoning":false}}]','score',0)"#,
+        [],
+    )
+    .expect("model");
+    c.execute(
+        r#"INSERT INTO settings(key,value) VALUES('settings','{"maxAttempts":7,"x":"\ud800"}')"#,
+        [],
+    )
+    .expect("settings");
+    let key = keys::find_by_hash(c, "h").expect("read").expect("key");
+    assert!(key.limits.is_some(), "limits read, not unreadable");
+    assert_eq!(
+        key.model_allowlist.as_deref(),
+        Some(&["\u{fffd}".to_owned(), "b".to_owned()][..])
+    );
+    let models = omni_store::models::list(c).expect("models");
+    assert!(models[0].is_ok(), "{models:?}");
+    assert_eq!(
+        omni_store::settings::get(c).expect("settings").json["maxAttempts"],
+        7
+    );
+}

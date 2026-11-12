@@ -518,6 +518,7 @@ fn project_keys(
         allowlist_json: raw,
         created_at,
         expires_at,
+        ..
     } in rows
     {
         allowlists.push(match raw {

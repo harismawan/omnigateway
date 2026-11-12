@@ -165,7 +165,9 @@ pub fn settings_json(raw: Option<&str>) -> Value {
     let Some(raw) = raw else {
         return default_settings_json();
     };
-    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+    // `JSON.parse` accepts a lone surrogate escape (the `/api` surface
+    // stores what a client sent); serde does not, so retry with it replaced.
+    let Some(parsed) = omni_ir::js::parse_json(raw) else {
         return default_settings_json();
     };
     let stored = match parsed {
