@@ -12,7 +12,8 @@ use common::pg::{TestDb, base_url};
 use common::{bun_required, bun_script, ts};
 use omni_store::pg::{PgConfig, PgStore};
 use omni_store::writer::{
-    HealthCommitted, HealthWriter, HealthWriterConfig, LogEvent, RequestLog, Writer, WriterConfig,
+    HealthCommitted, HealthStats, HealthWriter, HealthWriterConfig, LogEvent, RequestLog, Writer,
+    WriterConfig,
 };
 use omni_store::{BreakerState, CredentialHealth, StoreError};
 use std::sync::Arc;
@@ -193,7 +194,10 @@ async fn concurrent_failures_from_two_replicas_accumulate() {
         }
     };
     tokio::join!(send(ha), send(hb));
-    let (sa, sb) = (wa.close().await, wb.close().await);
+    let (sa, sb) = (
+        wa.close().await.expect("close a"),
+        wb.close().await.expect("close b"),
+    );
     assert_eq!((sa.written, sb.written), (n, n), "{sa:?} {sb:?}");
     assert_eq!(sa.failed + sb.failed + sa.refused + sb.refused, 0);
     let (_, failures, _) = health_row(&db, "m").await.expect("row");
@@ -300,7 +304,9 @@ async fn a_transition_lands_while_the_log_writer_is_blocked() {
         .expect("committed while the log batch is blocked")
         .expect("sink open");
     let latency = started.elapsed();
-    let HealthCommitted { row } = committed;
+    let HealthCommitted::Written { row } = committed else {
+        panic!("written: {committed:?}");
+    };
     assert_eq!(row.breaker_state, BreakerState::Open);
     assert_eq!(
         health_row(&db, "m").await,
@@ -319,7 +325,7 @@ async fn a_transition_lands_while_the_log_writer_is_blocked() {
     println!("transition latency with the log writer blocked: {latency:?}");
     lock.rollback().await.expect("release");
     logs.close().await.expect("log close");
-    let stats = health.close().await;
+    let stats = health.close().await.expect("health close");
     assert_eq!((stats.written, stats.failed), (1, 0));
 }
 
@@ -356,7 +362,7 @@ async fn a_transition_lands_while_log_batches_fail() {
         assert!(health.handle().send("c1", "m", Arc::new(fail(3))));
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let hs = health.close().await;
+    let hs = health.close().await.expect("health close");
     assert_eq!((hs.written, hs.failed), (5, 0));
     // Failed before the close, so counted rather than failing the close.
     let ls = logs.close().await.expect("close");
@@ -415,7 +421,7 @@ async fn the_health_queue_is_bounded_and_accounts_for_every_mutation() {
     assert_eq!(accepted, 2);
     assert!(h.send("ghost", "m", Arc::new(|_| blank("ghost", "m"))) || h.stats().dropped > 0);
     lock.rollback().await.expect("release");
-    let stats = health.close().await;
+    let stats = health.close().await.expect("health close");
     assert_eq!(stats.written, 3, "{stats:?}");
     assert!(stats.dropped >= 3, "{stats:?}");
     assert_eq!(stats.failed, 0);
@@ -435,7 +441,7 @@ async fn the_health_queue_is_bounded_and_accounts_for_every_mutation() {
             .send("ghost", "m", Arc::new(|_| blank("ghost", "m")))
     );
     assert!(health.handle().send("c1", "m", Arc::new(fail(10))));
-    let stats = health.close().await;
+    let stats = health.close().await.expect("health close");
     assert_eq!(
         (stats.written, stats.refused, stats.failed, stats.dropped),
         (1, 1, 0, 0)
@@ -467,10 +473,300 @@ async fn update_health_on_sqlite_reads_applies_and_writes_atomically() {
             .handle()
             .send("ghost", "m", Arc::new(|_| blank("ghost", "m")))
     );
-    let stats = health.close().await;
+    let stats = health.close().await.expect("health close");
     assert_eq!((stats.written, stats.refused), (4, 1));
     let rows = store.list_health().await.expect("health");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].consecutive_failures, 4);
     assert_eq!(rows[0].breaker_state, BreakerState::Open);
+}
+
+fn plus(n: i64) -> omni_store::writer::HealthMutation {
+    Arc::new(move |current| {
+        let mut h = current.unwrap_or_else(|| blank("c1", "m"));
+        h.consecutive_failures += n;
+        h
+    })
+}
+
+fn times(n: i64) -> omni_store::writer::HealthMutation {
+    Arc::new(move |current| {
+        let mut h = current.unwrap_or_else(|| blank("c1", "m"));
+        h.consecutive_failures *= n;
+        h
+    })
+}
+
+/// A mutation that panics, and one whose checked arithmetic overflows, roll
+/// back, are counted `panicked`, and the next mutation goes through on the
+/// same writer (and so the same pooled connections).
+async fn panics_then_valid(store: omni_store::Store) -> HealthStats {
+    let health = HealthWriter::spawn(store, HealthWriterConfig::default());
+    let h = health.handle();
+    assert!(h.send("c1", "m", plus(1)));
+    assert!(h.send("c1", "m", Arc::new(|_| panic!("mutation bug"))));
+    assert!(h.send(
+        "c1",
+        "m",
+        Arc::new(|current: Option<CredentialHealth>| {
+            let mut h = current.unwrap_or_else(|| blank("c1", "m"));
+            // Overflows in a checked (debug) build, as the review describes.
+            let big = std::hint::black_box(i64::MAX);
+            h.consecutive_failures += big;
+            h
+        })
+    ));
+    assert!(h.send("c1", "m", plus(1)));
+    health
+        .close()
+        .await
+        .expect("the worker survives a mutation panic")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_mutation_rolls_back_and_the_next_one_lands_on_postgres() {
+    let Some(base) = base_url("a_panicking_mutation_rolls_back_and_the_next_one_lands_on_postgres")
+    else {
+        return;
+    };
+    let db = TestDb::create(&base, "health_panic").await;
+    let mut cfg = PgConfig::new(&db.url);
+    // One connection: the valid mutation after the panics reuses it.
+    cfg.max_connections = 1;
+    drop(store_with_credential(&db).await);
+    let store = PgStore::open(cfg, 0).await.expect("open");
+    let stats = panics_then_valid(omni_store::Store::Postgres(store.clone())).await;
+    assert_eq!(
+        (
+            stats.enqueued,
+            stats.written,
+            stats.panicked,
+            stats.failed,
+            stats.abandoned
+        ),
+        (4, 2, 2, 0, 0),
+        "{stats:?}"
+    );
+    assert_eq!(health_row(&db, "m").await.map(|r| r.1), Some(2));
+    // The pair's advisory lock went with the rolled-back transaction: a
+    // direct update on another connection does not wait.
+    let other = PgStore::open(PgConfig::new(&db.url), 0)
+        .await
+        .expect("other");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        other.update_health("c1", "m", &|c| {
+            let mut h = c.expect("row");
+            h.consecutive_failures += 1;
+            h
+        }),
+    )
+    .await
+    .expect("lock free")
+    .expect("update");
+    // And the direct call surfaces a panic as an error, not an unwind or a
+    // held lock: the next call on the same one-connection pool proceeds.
+    let facade = omni_store::Store::Postgres(store.clone());
+    let err = facade
+        .update_health("c1", "m", Arc::new(|_| panic!("direct")))
+        .await
+        .expect_err("panicked");
+    assert!(
+        matches!(err, StoreError::Panicked(ref m) if m.contains("direct")),
+        "{err}"
+    );
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        facade.update_health("c1", "m", plus(1)),
+    )
+    .await
+    .expect("no held lock or stuck connection")
+    .expect("update");
+    assert_eq!(health_row(&db, "m").await.map(|r| r.1), Some(4));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_mutation_rolls_back_and_the_next_one_lands_on_sqlite() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("omni.db");
+    let store = omni_store::Store::open(omni_store::StoreConfig::Sqlite { path: path.clone() }, 0)
+        .await
+        .expect("open");
+    rusqlite::Connection::open(&path)
+        .expect("conn")
+        .execute(
+            "INSERT INTO credentials (id, provider, label, auth_type, created_at, updated_at)
+             VALUES ('c1', 'anthropic', 'one', 'apiKey', 1, 1)",
+            [],
+        )
+        .expect("credential");
+    // The facade directly: a panic is an error, and the same Store (the same
+    // connection) takes the next transaction.
+    let err = store
+        .update_health("c1", "m", Arc::new(|_| panic!("direct")))
+        .await
+        .expect_err("panicked");
+    assert!(
+        matches!(err, StoreError::Panicked(ref m) if m.contains("direct")),
+        "{err}"
+    );
+    store
+        .update_health("c1", "m", plus(1))
+        .await
+        .expect("the connection is not left inside a transaction");
+    // Another connection can write at once: the write lock was released.
+    let other = rusqlite::Connection::open(&path).expect("other");
+    other
+        .busy_timeout(Duration::from_millis(10))
+        .expect("timeout");
+    other
+        .execute(
+            "UPDATE credential_health SET consecutive_failures = consecutive_failures",
+            [],
+        )
+        .expect("write lock free");
+    drop(other);
+    let stats = panics_then_valid(store.clone()).await;
+    assert_eq!(
+        (
+            stats.enqueued,
+            stats.written,
+            stats.panicked,
+            stats.failed,
+            stats.abandoned
+        ),
+        (4, 2, 2, 0, 0),
+        "{stats:?}"
+    );
+    assert_eq!(
+        store.list_health().await.expect("health")[0].consecutive_failures,
+        3
+    );
+}
+
+/// FIFO with non-commutative mutations: (+1, ×3, +2, ×2) from 0 is 10 only
+/// in send order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_commutative_mutations_apply_in_send_order() {
+    let Some(base) = base_url("non_commutative_mutations_apply_in_send_order") else {
+        return;
+    };
+    let db = TestDb::create(&base, "health_fifo").await;
+    let store = store_with_credential(&db).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let health = HealthWriter::spawn(
+        omni_store::Store::Postgres(store),
+        HealthWriterConfig {
+            commit_sink: Some(tx),
+            ..HealthWriterConfig::default()
+        },
+    );
+    let h = health.handle();
+    for m in [plus(1), times(3), plus(2), times(2)] {
+        assert!(h.send("c1", "m", m));
+    }
+    health.close().await.expect("close");
+    assert_eq!(health_row(&db, "m").await.map(|r| r.1), Some(10));
+    let mut seen = Vec::new();
+    while let Ok(HealthCommitted::Written { row }) = rx.try_recv() {
+        seen.push(row.consecutive_failures);
+    }
+    assert_eq!(seen, [1, 3, 5, 10], "the sink hears them in commit order");
+}
+
+/// A full sink and a closed sink each count the notification as dropped;
+/// the commits themselves are unaffected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_and_closed_sinks_count_dropped_notifications_only() {
+    let Some(base) = base_url("full_and_closed_sinks_count_dropped_notifications_only") else {
+        return;
+    };
+    let db = TestDb::create(&base, "health_sinks").await;
+    let store = store_with_credential(&db).await;
+    // Full: room for one.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let health = HealthWriter::spawn(
+        omni_store::Store::Postgres(store.clone()),
+        HealthWriterConfig {
+            commit_sink: Some(tx),
+            ..HealthWriterConfig::default()
+        },
+    );
+    for _ in 0..3 {
+        assert!(health.handle().send("c1", "m", plus(1)));
+    }
+    let stats = health.close().await.expect("close");
+    assert_eq!((stats.written, stats.sink_dropped), (3, 2), "{stats:?}");
+    assert!(matches!(rx.try_recv(), Ok(HealthCommitted::Written { .. })));
+    // Closed: the receiver is gone.
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    drop(rx);
+    let health = HealthWriter::spawn(
+        omni_store::Store::Postgres(store),
+        HealthWriterConfig {
+            commit_sink: Some(tx),
+            ..HealthWriterConfig::default()
+        },
+    );
+    for _ in 0..2 {
+        assert!(health.handle().send("c1", "m", plus(1)));
+    }
+    let stats = health.close().await.expect("close");
+    assert_eq!((stats.written, stats.sink_dropped), (2, 2), "{stats:?}");
+    assert_eq!(health_row(&db, "m").await.map(|r| r.1), Some(5));
+}
+
+/// Sends racing `close` from another task: each is either refused (counted
+/// dropped) or accepted and applied before `close` returns; none is lost.
+/// A send after `close` was called is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sends_during_close_are_refused_or_applied_never_lost() {
+    let Some(base) = base_url("sends_during_close_are_refused_or_applied_never_lost") else {
+        return;
+    };
+    let db = TestDb::create(&base, "health_close").await;
+    let store = store_with_credential(&db).await;
+    let health = HealthWriter::spawn(
+        omni_store::Store::Postgres(store),
+        HealthWriterConfig::default(),
+    );
+    let h = health.handle();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sender = {
+        let (h, stop) = (h.clone(), Arc::clone(&stop));
+        tokio::spawn(async move {
+            let (mut ok, mut refused) = (0_u64, 0_u64);
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if h.send("c1", "m", plus(1)) {
+                    ok += 1;
+                } else {
+                    refused += 1;
+                }
+                tokio::task::yield_now().await;
+            }
+            (ok, refused)
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let stats = health.close().await.expect("close");
+    // After close was called, every send is refused.
+    assert!(!h.send("c1", "m", plus(1)));
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (ok, refused) = sender.await.expect("sender");
+    assert!(ok > 0, "some sends landed before the close");
+    assert!(refused > 0, "some sends raced the close and were refused");
+    assert_eq!(stats.enqueued, ok, "{stats:?}");
+    assert_eq!(
+        stats.written, ok,
+        "every accepted send applied before close returned"
+    );
+    assert_eq!(
+        h.stats().dropped,
+        refused + 1,
+        "refused sends (and the one after close) are counted"
+    );
+    assert_eq!(
+        health_row(&db, "m").await.map(|r| i64::from(r.1)),
+        Some(i64::try_from(ok).expect("ok"))
+    );
 }

@@ -25,6 +25,15 @@ pub enum StoreError {
     /// that call alone. Not transient; retrying changes nothing.
     #[error("refused: {0}")]
     Refused(String),
+    /// A COMMIT was sent and its answer never arrived (the connection went
+    /// with it): the transaction may or may not have committed. Never
+    /// retried blindly; a non-idempotent write would apply twice.
+    #[error("commit outcome unknown: {0}")]
+    UncertainCommit(String),
+    /// A caller-supplied closure (a health mutation) panicked; whatever
+    /// transaction it ran in was rolled back as it unwound.
+    #[error("panicked: {0}")]
+    Panicked(String),
     /// A row the TS reader would also have thrown on.
     #[error("unreadable row: {0}")]
     Corrupt(String),

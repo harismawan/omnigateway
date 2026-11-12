@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod pg;
+pub mod proxy;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

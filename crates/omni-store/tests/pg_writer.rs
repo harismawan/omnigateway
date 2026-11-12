@@ -649,6 +649,11 @@ async fn a_row_another_writer_inserted_after_the_read_is_added_to_not_overwritte
     let store = prepare(&db, 0).await;
     let hour = T0.div_euclid(3_600_000);
     let mut other = db.client().await;
+    let other_pid: i32 = other
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("pid")
+        .get(0);
     let tx = other.transaction().await.expect("tx");
     tx.execute(
         "INSERT INTO usage_rollup VALUES ('key-race', $1, 10, 1, 1, 1, 1, 0.5)",
@@ -666,8 +671,8 @@ async fn a_row_another_writer_inserted_after_the_read_is_added_to_not_overwritte
     let h = writer.handle();
     assert!(h.send(pending("z", T0, Some("key-race"), "ours")));
     assert!(h.send(LogEvent::Finish(done("y", T0, Some("key-race"), "m", 1))));
-    // The batch closes at 200 ms and waits on the uncommitted rows.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The batch read `z` as absent and its log upsert now waits on it.
+    wait_for_blocked(&db, other_pid, "INSERT INTO request_logs").await;
     tx.commit().await.expect("commit");
     let stats = writer.close().await.expect("close");
     assert_eq!(stats.failed, 0);
@@ -860,6 +865,11 @@ async fn the_hourly_guard_adds_onto_a_row_inserted_after_the_read() {
     let store = prepare(&db, 0).await;
     let hour = T0.div_euclid(3_600_000);
     let mut other = db.client().await;
+    let other_pid: i32 = other
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("pid")
+        .get(0);
     let tx = other.transaction().await.expect("tx");
     tx.execute(
         "INSERT INTO usage_rollup VALUES ('key-h', $1, 10, 1, 1, 1, 1, 0.5)",
@@ -873,7 +883,8 @@ async fn the_hourly_guard_adds_onto_a_row_inserted_after_the_read() {
             .handle()
             .send(LogEvent::Finish(done("h1", T0, Some("key-h"), "m", 1)))
     );
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The batch read the hourly row as absent; its upsert waits on it.
+    wait_for_blocked(&db, other_pid, "INSERT INTO usage_rollup").await;
     tx.commit().await.expect("commit");
     let stats = writer.close().await.expect("close");
     assert_eq!((stats.failed, stats.written), (0, 1));
@@ -902,6 +913,11 @@ async fn the_daily_guard_adds_onto_a_row_inserted_after_the_read() {
     let store = prepare(&db, 0).await;
     let day = omni_store::rollup::start_of_day_ms(T0, 0);
     let mut other = db.client().await;
+    let other_pid: i32 = other
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("pid")
+        .get(0);
     let tx = other.transaction().await.expect("tx");
     tx.execute(
         "INSERT INTO usage_daily (day, provider, credential_id, requested_model, resolved_model,
@@ -918,7 +934,8 @@ async fn the_daily_guard_adds_onto_a_row_inserted_after_the_read() {
             .handle()
             .send(LogEvent::Finish(done("d1", T0, None, "m", 1)))
     );
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The batch read the daily row as absent; its upsert waits on it.
+    wait_for_blocked(&db, other_pid, "INSERT INTO usage_daily").await;
     tx.commit().await.expect("commit");
     let stats = writer.close().await.expect("close");
     assert_eq!((stats.failed, stats.written), (0, 1));
@@ -935,4 +952,35 @@ async fn the_daily_guard_adds_onto_a_row_inserted_after_the_read() {
         (11, 1 + 101),
         "added onto, not overwritten"
     );
+}
+
+/// Waits (with a deadline) until a backend other than `holder_pid` is
+/// blocked on a lock `holder_pid` holds, running a statement that starts
+/// with `prefix`: the writer's upsert has read the row as absent and is now
+/// waiting on the uncommitted conflicting insert. Proves the race happened
+/// rather than assuming a sleep was long enough.
+async fn wait_for_blocked(db: &TestDb, holder_pid: i32, prefix: &str) {
+    let probe = db.client().await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let n: i64 = probe
+            .query_one(
+                "SELECT COUNT(*) FROM pg_stat_activity
+                  WHERE $1 = ANY(pg_blocking_pids(pid))
+                    AND wait_event_type = 'Lock'
+                    AND ltrim(query) LIKE $2 || '%'",
+                &[&holder_pid, &prefix],
+            )
+            .await
+            .expect("pg_stat_activity")
+            .get(0);
+        if n > 0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no backend blocked behind {holder_pid} on `{prefix}…` within 10 s"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

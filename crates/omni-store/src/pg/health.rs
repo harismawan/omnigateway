@@ -7,6 +7,21 @@
 //! what is stored *now*, then `UPSERT_HEALTH`. Two replicas recording a
 //! failure on the same row therefore both count; neither overwrites the
 //! other with a value computed from a stale snapshot.
+//!
+//! **Retry boundary.** Every error before COMMIT is sent leaves nothing
+//! committed: the server rolls an open transaction back when the statement
+//! fails or the connection goes. So does a COMMIT the server *answers* with
+//! an error (it carries a SQLSTATE). Those are safe to retry. A COMMIT whose
+//! answer never arrives (closed connection, I/O error) is
+//! [`StoreError::UncertainCommit`]: it may have committed, and re-applying
+//! a non-idempotent mutation (`failures + 1`) would count it twice.
+//!
+//! Frozen TS does the same at that point: Bun's `sql.begin` rejects when
+//! the COMMIT's connection is lost, `updateHealth` throws, and the gateway's
+//! `persistHealth` callers log "failed to persist credential health" and
+//! move on. Nothing re-applies the transition. The Rust health path keeps
+//! that (no re-application) and adds a reconciliation re-read, so the caller
+//! learns what the row now holds.
 
 use super::PgStore;
 use crate::credentials::CredentialHealth;
@@ -55,8 +70,13 @@ fn refusal(e: &tokio_postgres::Error) -> Option<String> {
 impl PgStore {
     /// `updateHealth(credentialId, model, apply)`: reads the stored row under
     /// the pair's lock, applies `apply`, writes the result, all in one
-    /// transaction, and returns the row written (as proposed, so a
-    /// fractional instant comes back fractional, as TS's does).
+    /// transaction, and returns the row `apply` proposed. That is what was
+    /// written except where the column rounds it: a fractional instant comes
+    /// back fractional, as TS's does, and is stored rounded to the BIGINT.
+    ///
+    /// A panic in `apply` unwinds through here: the dropped transaction
+    /// sends ROLLBACK (releasing the pair's lock) before its connection is
+    /// reused.
     ///
     /// [`StoreError::Refused`] when the database refuses the values (no such
     /// credential, a count or instant its columns cannot hold); nothing is
@@ -115,7 +135,38 @@ impl PgStore {
         {
             return Err(refusal(&e).map_or(StoreError::Postgres(e), StoreError::Refused));
         }
-        tx.commit().await?;
-        Ok(next)
+        match tx.commit().await {
+            Ok(()) => Ok(next),
+            // The server answered the COMMIT with an error: rolled back.
+            Err(e) if e.code().is_some() => Err(StoreError::Postgres(e)),
+            // No answer: committed or not, nobody here knows.
+            Err(e) => Err(StoreError::UncertainCommit(e.to_string())),
+        }
+    }
+
+    /// The stored health row for one pair, or `None`.
+    pub async fn read_health(
+        &self,
+        credential_id: &str,
+        model: &str,
+    ) -> Result<Option<CredentialHealth>, StoreError> {
+        let c = self.client().await?;
+        let read = c
+            .prepare_cached(
+                "SELECT breaker_state, consecutive_failures, opened_at, rate_limited_until
+                   FROM credential_health WHERE credential_id = $1 AND model = $2",
+            )
+            .await?;
+        let Some(r) = c.query_opt(&read, &[&credential_id, &model]).await? else {
+            return Ok(None);
+        };
+        Ok(Some(CredentialHealth {
+            credential_id: credential_id.to_owned(),
+            model: model.to_owned(),
+            breaker_state: BreakerState::parse(r.try_get(0)?),
+            consecutive_failures: i64::from(r.try_get::<_, i32>(1)?),
+            opened_at: instant(r.try_get(2)?),
+            rate_limited_until: instant(r.try_get(3)?),
+        }))
     }
 }

@@ -115,7 +115,9 @@ pub fn redacted(url: &str) -> String {
             let masked: Vec<String> = query
                 .split('&')
                 .map(|pair| match pair.split_once('=') {
-                    Some((k, _)) if k.eq_ignore_ascii_case("password") => format!("{k}=***"),
+                    // The driver percent-decodes a key before looking it up
+                    // (`pass%77ord` is `password`), so it is judged decoded.
+                    Some((k, _)) if is_password_key(k) => format!("{k}=***"),
                     _ => pair.to_owned(),
                 })
                 .collect();
@@ -128,6 +130,30 @@ pub fn redacted(url: &str) -> String {
         }
     };
     format!("{scheme}://{authority}{tail}")
+}
+
+/// Whether a query key names the password once percent-decoded, as
+/// tokio-postgres decodes it (`percent_decode`, then UTF-8) before matching
+/// `password`. Matched case-insensitively (wider than the driver's exact
+/// match), and a key that does not decode is treated as one, to be safe.
+fn is_password_key(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(h) = bytes.get(i + 1..i + 3)
+            && let Ok(h) = std::str::from_utf8(h)
+            && let Ok(b) = u8::from_str_radix(h, 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).map_or(true, |k| k.eq_ignore_ascii_case("password"))
 }
 
 /// A migrated Postgres database behind a bounded pool. Cheap to clone.
@@ -425,11 +451,30 @@ mod tests {
             redacted("postgres://u:p@db:5432"),
             "postgres://u:***@db:5432"
         );
+        // The driver percent-decodes keys: these are all its `password`.
+        for key in ["pass%77ord", "%70%61%73%73%77%6F%72%64", "PASS%57ORD"] {
+            let url = format!("postgres://u@db/omni?{key}=secret&sslmode=disable");
+            assert_eq!(
+                redacted(&url),
+                format!("postgres://u@db/omni?{key}=***&sslmode=disable")
+            );
+        }
+        // A key that does not decode to UTF-8 is masked rather than trusted.
+        assert_eq!(redacted("postgres://db?%ff=x"), "postgres://db?%ff=***");
+        assert_eq!(
+            redacted("postgres://db?passwords=x"),
+            "postgres://db?passwords=x"
+        );
     }
 
     #[test]
     fn config_debug_never_shows_the_password() {
-        let c = super::PgConfig::new("postgres://omni:hunter2@db/omni?password=hunter3");
+        let c = super::PgConfig::new(
+            "postgres://omni:hunter2@db/omni?password=hunter3&pass%77ord=hunter4",
+        );
+        // The driver reads that key as the password.
+        let parsed: tokio_postgres::Config = c.url.parse().expect("parses");
+        assert_eq!(parsed.get_password(), Some(b"hunter4".as_slice()));
         let shown = format!("{c:?}");
         assert!(!shown.contains("hunter"), "{shown}");
         let s = crate::StoreConfig::Postgres(c);

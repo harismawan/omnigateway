@@ -56,7 +56,13 @@ macro_rules! on_sqlite {
             $body
         })
         .await
-        .map_err(|e| StoreError::Writer(format!("store read panicked: {e}")))?
+        .map_err(|e| {
+            if e.is_panic() {
+                StoreError::Panicked(crate::writer::panic_message(e.into_panic()))
+            } else {
+                StoreError::Writer(format!("store task: {e}"))
+            }
+        })?
     }};
 }
 
@@ -194,6 +200,8 @@ impl Store {
     /// `updateHealth(credentialId, model, apply)`: the shared atomic
     /// read-modify-write a breaker failure or transition goes through (see
     /// [`crate::writer::HealthWriter`] for the immediate path that calls it).
+    /// A panic in `apply` rolls the transaction back and is returned as
+    /// [`StoreError::Panicked`] on both backends.
     pub async fn update_health(
         &self,
         credential_id: &str,
@@ -210,7 +218,40 @@ impl Store {
                     &*apply
                 ))
             }
-            Self::Postgres(pg) => pg.update_health(credential_id, model, &*apply).await,
+            // In a task of its own, so a panic in `apply` is this call's
+            // `StoreError::Panicked` (as on SQLite) rather than the caller's
+            // unwind; the transaction rolls back as the task unwinds.
+            Self::Postgres(pg) => {
+                let (pg, id, model) = (pg.clone(), credential_id.to_owned(), model.to_owned());
+                tokio::spawn(async move { pg.update_health(&id, &model, &*apply).await })
+                    .await
+                    .map_err(|e| {
+                        if e.is_panic() {
+                            StoreError::Panicked(crate::writer::panic_message(e.into_panic()))
+                        } else {
+                            StoreError::Writer(format!("health mutation task: {e}"))
+                        }
+                    })?
+            }
+        }
+    }
+
+    /// The stored health row for one pair (the uncertain-commit re-read).
+    pub async fn read_health(
+        &self,
+        credential_id: &str,
+        model: &str,
+    ) -> Result<Option<CredentialHealth>, StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let (id, model) = (credential_id.to_owned(), model.to_owned());
+                on_sqlite!(store, |s| crate::credentials::read_health(
+                    s.connection(),
+                    &id,
+                    &model
+                ))
+            }
+            Self::Postgres(pg) => pg.read_health(credential_id, model).await,
         }
     }
 

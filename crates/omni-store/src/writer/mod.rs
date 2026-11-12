@@ -48,8 +48,10 @@ pub use events::{
     BreakerTransition, Committed, Completion, HealthMeasurement, LogEvent, PendingLog, RequestLog,
     RouteTarget, SeedQuery, SeedRows, WriteEvent,
 };
+pub(crate) use health::panic_message;
 pub use health::{
     HealthCommitted, HealthHandle, HealthMutation, HealthStats, HealthWriter, HealthWriterConfig,
+    HealthWriterError,
 };
 pub use task::{
     Barrier, BarrierError, Writer, WriterConfig, WriterHandle, WriterStats, queue_slot_bytes,
