@@ -114,28 +114,35 @@ The 58 expected divergences, each asserted (never counted as equal):
 
 ## Benchmark (same rig, `run-rust-gateway.sh`, `--only overhead-c1,chat-stream --boots 1`, interleaved)
 
-Medians of 3 interleaved rounds (before → after → after with `OMNI_METRICS_TOKEN` set, ×3);
-every run 100 % ok, 0 rows missing/pending, writer 0 dropped / 0 failed. Calibration and foreign
-load were matched across rounds (foreign ≈0.46 / 0.97 cores).
+### Quiet host (authoritative): 4 interleaved rounds, 10:06–10:22
 
-| scenario | binary | req/s (3 runs) | median | CPU ms/req median | p99 ms median |
-|---|---|---|---:|---:|---:|
-| overhead-c1 | before 9f22ec23 | 9627 / 9661 / 9717 | 9661 | 0.066 | 0.25 |
-| overhead-c1 | after, metrics off (default) | 9760 / 9635 / 9710 | 9710 | 0.067 | 0.25 |
-| overhead-c1 | after, metrics on | 9624 / 9401 / 9505 | 9505 | 0.068 | 0.25 |
-| chat-stream | before 9f22ec23 | 50937 / 51545 / 51978 | 51545 | 0.062 | 3.57 |
-| chat-stream | after, metrics off (default) | 51045 / 51722 / 51241 | 51241 | 0.063 | 3.51 |
-| chat-stream | after, metrics on | 50664 / 50756 / 50745 | 50745 | 0.064 | 3.52 |
+Taken after the controller removed a stray headless Chrome (~3.25 cores). `top` before:
+97.6 % idle, load 0.27; after: 98.8 % idle. The binaries were not rebuilt:
+`rust-before` 9ca7e135…ad43e (9f22ec23), `rust-after` 07261e49…cf8 (6e63d9f3). Every run was
+100 % ok, with 0 rows missing or pending and writer 0 dropped / 0 failed. The bench's `foreign` column reads
+≈0.4 (c1) and ≈0.9 (c64) on this quiet host too, so it is the harness's unattributed
+kernel/network time, not outside load. Raw logs: `/tmp/opencode/a1-a2/bench/{before,after,aftermetrics}-{1..4}.*`, `summary.txt`.
 
-- Metrics off (the default, as the bench and TS run): within run-to-run noise on both scenarios
-  (throughput −0.6 % / +0.5 %, CPU +0.001 ms/req, p99 equal or lower).
-- Metrics on: −1.6 % throughput, +0.002 ms (≈2 µs) CPU per request, p99 unchanged. That is the
-  cost of recording 9 series per request (`record` + `http_head`). Isolated by
-  `examples/metrics_cost.rs`: 0.82 µs per request on one thread, 1.30 µs per request per thread with
-  4 threads writing the same series (atomic contention on shared counters, no lock). TS takes
-  its registry `Map` writes on its single event loop.
-- Earlier pre-change baseline runs `before-1/2` (same rig, earlier, more foreign load) are kept for
-  reference; one intermediate pair was superseded by these after a final edit (`bench/old/`).
+| scenario | binary | req/s (4 runs) | median | Δ vs before | CPU ms/req | p99 ms |
+|---|---|---|---:|---:|---:|---:|
+| overhead-c1 | before 9f22ec23 | 9584 / 9594 / 9573 / 9737 | 9589 | — | 0.0665 | 0.25 |
+| overhead-c1 | after, metrics off | 9257 / 9645 / 9477 / 9491 | 9484 | −1.1 % | 0.0685 | 0.255 |
+| overhead-c1 | after, metrics on | 8871 / 9451 / 9100 / 9463 | 9276 | **−3.3 %** | 0.0705 | 0.26 |
+| chat-stream | before 9f22ec23 | 50546 / 50073 / 48296 / 51530 | 50310 | — | 0.0635 | 3.51 |
+| chat-stream | after, metrics off | 50377 / 51758 / 50523 / 50747 | 50635 | +0.6 % | 0.064 | 3.44 |
+| chat-stream | after, metrics on | 50372 / 50164 / 48750 / 48599 | 49457 | −1.7 % | 0.0665 | 3.43 |
+
+Reading: metrics off is within run-to-run spread on chat-stream (+0.6 %). On overhead-c1 it is
+−1.1 % with CPU +0.002 ms/req, at the edge of the spread (the 9257 run is the outlier; the other
+three are within 1.2 % of the before median). Metrics on: chat-stream −1.7 % (within the
+controller's ≤2 % ruling), but overhead-c1 **−3.3 %, outside it**, at +0.004 ms CPU/req. This is
+carried into fix round 1, whose hot-path changes (I1/I3) are re-benched.
+
+### Contaminated (supplementary only)
+
+Rounds 1–5 of the first pass ran while a headless Playwright Chrome used ~3.25 cores. They are kept
+for reference in `/tmp/opencode/a1-a2/bench/contaminated/` and must not be used for acceptance.
+Their medians were overhead-c1 before/after/on 9661/9710/9505 and chat-stream 51545/51241/50745.
 
 ## Concerns
 
