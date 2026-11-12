@@ -1,96 +1,130 @@
-//! The command connection: one TCP connection to the server, one ordered
-//! submission queue, one writer and one reader.
+//! The command connection: one ordered, bounded submission queue in front of
+//! one `redis` crate [`MultiplexedConnection`] per connection generation.
+//!
+//! **Wire.** Encoding, reply parsing and request/reply pairing are the
+//! `redis` crate's (`MultiplexedConnection`: a bounded mpsc into one driver
+//! task that writes in channel order and answers replies in FIFO order;
+//! replies decoded incrementally by its `combine` codec). This module owns
+//! only what that type cannot give: ordering across *callers*, a hard
+//! bound, retirement of a silent socket, and shutdown draining. Evidence for
+//! the ordering argument is recorded in `d2-report.md` ("Fix round 2").
 //!
 //! **Ordering.** Every command — awaited calls and detached releases alike —
-//! is pushed onto one queue synchronously, under one lock, at the moment it
-//! is submitted (an awaited call: its first poll; a detached release: the
-//! call itself, which is not async). The writer writes the queue in order
-//! and the server executes one connection's commands in order, so a release
-//! submitted before an admission is executed before it. Nothing is reordered
-//! by capacity: a full queue *refuses* (counted, logged) rather than parking
-//! a sender that a later submission can overtake.
+//! is pushed onto [`State::pending`] synchronously, under one lock, at the
+//! moment it is submitted (an awaited call: its first poll; a detached
+//! release: the call itself, which is not async). One *writer* task pops
+//! the queue in order and hands each submission to the multiplexed
+//! connection, waiting until that submission is inside the crate's send
+//! channel before taking the next. A single sender into a FIFO channel
+//! feeding one writer to one socket preserves order, and the server
+//! executes one connection's commands in order. So a release whose call has
+//! returned is executed before any command submitted after it. Nothing is
+//! reordered by capacity: a full queue *refuses* (counted, logged) rather
+//! than parking a submitter that a later one could overtake.
 //!
-//! **Script cache misses.** An awaited `EVALSHA` answered `NOSCRIPT` is sent
-//! again whole (`EVAL`) ahead of everything not yet written; the caller has
-//! not returned, so nothing it orders against has been submitted. A detached
-//! release is sent as `EVAL` from the start, so it never needs a second
-//! round trip a later command could overtake. Redis caches an `EVAL`'d script
-//! by digest, so this costs bytes, not a recompile.
+//! **Script cache misses.** Detached releases are sent as `EVAL` from the
+//! start, so they never need a second round trip. An awaited `EVALSHA`
+//! answered `NOSCRIPT` is resubmitted once as `EVAL`, at the back of the
+//! queue; its caller has not returned, so a command the caller orders
+//! against has not been submitted, but *other* callers' later commands may
+//! run before the retry.
 //!
-//! **Boundedness.** `queue_capacity` bounds queued plus in-flight commands.
-//! Admissions (awaited calls) may use all but `release_reserve` of it, so a
-//! saturated connection still takes releases; past the full capacity a
-//! release is refused. Every awaited call is bounded by `command_timeout`.
+//! **Boundedness.** The budget is in commands *and* bytes, charged at
+//! submission and returned when the reply arrives (or the op is settled):
+//! - `queue_capacity` commands (a pipeline costs its length) and
+//!   `queue_bytes` request bytes, queued plus in flight;
+//! - awaited calls may use all but `release_reserve` commands and
+//!   `release_reserve_bytes` bytes of it, so a connection saturated by
+//!   admissions still takes the releases that free them;
+//! - one request may be at most `max_request_bytes`, one pipeline at most
+//!   `max_pipeline_len` commands;
+//! - replies are decoded by the `redis` crate, under the reply guard
+//!   (`guard.rs`): one reply at most `max_reply_bytes` and
+//!   `max_reply_elements`, nesting 16, header lines 4 KiB, lengths `-1` or
+//!   non-negative; a violation drops the connection.
 //!
-//! **Retirement.** The reader keeps a watchdog: when anything is in flight
-//! and no reply has arrived for `command_timeout`, the connection is
-//! *suspect*. A suspect connection is retired — closed, and a new one opened
-//! — when a fresh probe connection to the same server is answered within
-//! the connect timeout: the server is alive and only this socket is dead
-//! (blackholed: open, nothing forwarded). When the probe also gets no answer
+//! Every awaited call is bounded by `command_timeout`.
+//!
+//! **Retirement.** A watchdog marks the connection suspect when commands
+//! are outstanding and no reply has arrived for `command_timeout`. A suspect
+//! connection is retired — dropped (which ends its driver task and closes
+//! the socket) and replaced — when a fresh probe connection to the same
+//! server is answered within the connect timeout and the old connection
+//! still stays silent through a short grace period: the server is alive and
+//! only this socket is dead (blackholed). When the probe also gets no answer
 //! (the server itself is stalled — a long script, a pause), the connection
 //! is kept, so the replies it is owed still arrive in order; callers have
 //! been answered by their own deadlines meanwhile. An idle connection is
-//! PINGed every `heartbeat`, so a silently dead socket is found while idle
-//! too. Policy for what was outstanding on a retired connection:
+//! PINGed every `heartbeat`. Policy for what was outstanding when a
+//! generation ends:
 //! - awaited calls fail (`Fault::Connection`/`NotConnected`) — their callers
 //!   have been answered from memory, and a call never crosses a reconnect;
 //! - idempotent releases (named gauge slot, compare-and-delete of a lock or
 //!   lease token) are kept, in order, and written first on the next
-//!   connection, whether or not they reached the old one;
+//!   connection, whether or not they reached the old one (executed-but-
+//!   reply-lost included: running one twice is harmless by construction);
 //! - a non-idempotent release (unnamed gauge slot: `ZPOPMIN`) that was
-//!   already written may or may not have landed; it is not replayed (that
-//!   could drop a second slot), and is counted and logged — the slot's TTL
-//!   bounds an unreleased one;
-//! - a command written to a retired socket may still execute later (a server
-//!   that was only slow reads it after we close): for a window or gauge
-//!   claim that over-counts, the permitted direction; a lock `SET NX` that
-//!   lands so is released by the token-safe cleanup the lock path queues,
-//!   or failing that expires at its TTL.
+//!   already handed to the connection may or may not have run; it is not
+//!   replayed (that could drop a second slot), and is counted and logged —
+//!   the slot's TTL bounds an unreleased one;
+//! - a command written to a retired socket may still execute later (a
+//!   server that was only slow reads it after we close): a window or gauge
+//!   claim then over-counts, the permitted direction; a lock `SET NX` that
+//!   lands so is not ordered against cleanup sent on the new connection and
+//!   may hold the lock until its TTL.
 //!
-//! **Shutdown.** `close` stops admissions at once; queued releases are still
-//! written and their replies awaited for up to `drain_timeout`, after which
+//! **Shutdown.** `close` records the drain deadline (`drain_timeout` from
+//! that moment) and stops admissions at once; queued releases are still
+//! written and their replies awaited until the deadline, after which
 //! anything left is counted, logged, and left to its TTL.
-//!
-//! The connection speaks RESP2 (`resp.rs`) over plain TCP. TLS and Unix
-//! sockets are not supported (the URL is refused at connect with a fault).
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use redis::{ConnectionAddr, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use redis::aio::MultiplexedConnection;
+use redis::{AsyncConnectionConfig, Cmd, ErrorKind, Pipeline, RedisError, ServerErrorKind, Value};
 use tokio::sync::{Notify, oneshot, watch};
 
-use super::resp::{self, Reply};
 use super::scripts::CoordScript;
 use super::{Fault, RedisCoordOptions};
 
 pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-/// One submission: the bytes, how many replies they produce, and who wants
-/// them.
+/// One submission and what it costs against the budget.
 struct Op {
-    bytes: Arc<[u8]>,
-    replies: usize,
-    got: Vec<Reply>,
+    /// Sequence number within the queue's lifetime; reply routing uses it.
+    id: u64,
+    /// Taken by the writer when handed over, except for releases, which keep
+    /// it (one `EVAL`, `max_request_bytes` at most) to be replayed.
+    req: Option<Wire>,
+    cost: Cost,
     kind: OpKind,
+}
+
+#[derive(Clone)]
+enum Wire {
+    One(Cmd),
+    Many(Pipeline),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Cost {
+    commands: usize,
+    bytes: usize,
 }
 
 enum OpKind {
     Call {
-        tx: oneshot::Sender<Result<Vec<Reply>, Fault>>,
-        /// `EVAL` bytes to send once on `NOSCRIPT`.
-        retry: Option<Arc<[u8]>>,
+        tx: oneshot::Sender<Result<Value, Fault>>,
+        /// `EVAL` to send once on `NOSCRIPT`.
+        retry: Option<Cmd>,
     },
     Release {
-        /// Safe to send twice (see the module comment).
+        /// Safe to run twice (see the module comment).
         idempotent: bool,
     },
     Ping,
@@ -99,12 +133,15 @@ enum OpKind {
 /// Why a detached release was not queued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
-    /// Queue at capacity.
+    /// Queue at capacity (commands or bytes), or the release is larger than
+    /// one request may be.
     Full,
     /// No connection and the release is not safe to hold for the next one.
     Down,
     /// The coordinator is closing.
     Closed,
+    /// Not a release this API can make safely (a blank named holder).
+    Invalid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,15 +153,25 @@ enum Mode {
 
 struct State {
     mode: Mode,
+    next_id: u64,
     pending: VecDeque<Op>,
+    /// Handed to the connection, reply not yet in.
     in_flight: VecDeque<Op>,
+    /// Charged for `pending` + `in_flight`.
+    used: Cost,
     /// The last reply, or when the connection last went from idle to busy.
     last_progress: Instant,
 }
 
 impl State {
-    fn outstanding(&self) -> usize {
-        self.pending.len() + self.in_flight.len()
+    fn charge(&mut self, cost: Cost) {
+        self.used.commands += cost.commands;
+        self.used.bytes += cost.bytes;
+    }
+
+    fn refund(&mut self, cost: Cost) {
+        self.used.commands = self.used.commands.saturating_sub(cost.commands);
+        self.used.bytes = self.used.bytes.saturating_sub(cost.bytes);
     }
 }
 
@@ -137,17 +184,13 @@ enum End {
 
 /// A request for `call`.
 pub(crate) enum Request {
-    One(Vec<u8>),
+    One(Cmd),
     /// `EVALSHA`, with the `EVAL` to send on `NOSCRIPT`.
     Eval {
-        by_sha: Vec<u8>,
-        whole: Vec<u8>,
+        by_sha: Cmd,
+        whole: Cmd,
     },
-    /// Several commands written together; `replies` replies come back.
-    Many {
-        bytes: Vec<u8>,
-        replies: usize,
-    },
+    Many(Pipeline),
 }
 
 pub(crate) struct Link {
@@ -156,8 +199,12 @@ pub(crate) struct Link {
     pub(crate) scripts: Vec<CoordScript>,
     state: Mutex<State>,
     wake_writer: Notify,
+    /// A reply came in or an op was settled: the watchdog and drain read it.
+    progress: Notify,
     pub(crate) connected: watch::Sender<bool>,
     pub(crate) shutdown: watch::Sender<bool>,
+    /// Set once, by the first `close`.
+    drain_deadline: Mutex<Option<tokio::time::Instant>>,
     stopped: watch::Sender<bool>,
     healthy: AtomicBool,
     faults: AtomicU64,
@@ -167,6 +214,36 @@ pub(crate) struct Link {
     /// A debit went to memory while Redis was away (TS `lostDebit`).
     lost_debit: AtomicBool,
     pub(crate) runtime: tokio::runtime::Handle,
+}
+
+/// The size of a request on the wire, as the `redis` crate packs it.
+fn wire_cost(req: &Wire) -> Cost {
+    match req {
+        Wire::One(cmd) => Cost {
+            commands: 1,
+            bytes: packed_len(cmd),
+        },
+        Wire::Many(pipe) => Cost {
+            commands: pipe.len(),
+            bytes: pipe.cmd_iter().map(packed_len).sum(),
+        },
+    }
+}
+
+fn packed_len(cmd: &Cmd) -> usize {
+    // `*<n>\r\n` then `$<len>\r\n<arg>\r\n` per argument; the digits are
+    // bounded by 20 each, so this over-estimates by at most a few bytes.
+    let args = cmd.args_iter();
+    let mut n = 1 + 20 + 2;
+    for arg in args {
+        let len = match arg {
+            redis::Arg::Simple(a) => a.len(),
+            // A cursor argument (`Arg` is non-exhaustive): a u64 in decimal.
+            _ => 20,
+        };
+        n += 1 + 20 + 2 + len + 2;
+    }
+    n
 }
 
 impl Link {
@@ -181,13 +258,17 @@ impl Link {
             scripts,
             state: Mutex::new(State {
                 mode: Mode::Down,
+                next_id: 0,
                 pending: VecDeque::new(),
                 in_flight: VecDeque::new(),
+                used: Cost::default(),
                 last_progress: Instant::now(),
             }),
             wake_writer: Notify::new(),
+            progress: Notify::new(),
             connected: watch::Sender::new(false),
             shutdown: watch::Sender::new(false),
+            drain_deadline: Mutex::new(None),
             stopped: watch::Sender::new(false),
             healthy: AtomicBool::new(false),
             faults: AtomicU64::new(0),
@@ -216,20 +297,43 @@ impl Link {
         self.releases_dropped.load(Ordering::SeqCst)
     }
 
+    /// Commands queued or awaiting replies (a pipeline counts its length).
     pub(crate) fn outstanding(&self) -> usize {
-        self.state().outstanding()
+        self.state().used.commands
+    }
+
+    /// Request bytes queued or awaiting replies.
+    pub(crate) fn outstanding_bytes(&self) -> usize {
+        self.state().used.bytes
     }
 
     pub(crate) fn note_lost_debit(&self) {
         self.lost_debit.store(true, Ordering::SeqCst);
     }
 
-    /// Stops admissions now; the link task drains releases (bounded by
-    /// `drain_timeout`) and stops.
+    /// Stops admissions now and fixes the drain deadline (`drain_timeout`
+    /// from this call); the link task drains releases until then and stops.
     pub(crate) fn close(&self) {
+        {
+            let mut deadline = self
+                .drain_deadline
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if deadline.is_none() {
+                *deadline = Some(tokio::time::Instant::now() + self.opts.drain_timeout);
+            }
+        }
         self.state().mode = Mode::Closing;
         self.shutdown.send_replace(true);
         self.wake_writer.notify_one();
+        self.progress.notify_waiters();
+    }
+
+    fn drain_deadline(&self) -> Option<tokio::time::Instant> {
+        *self
+            .drain_deadline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Waits until the link task has drained and stopped.
@@ -300,10 +404,15 @@ impl Link {
     }
 
     /// Submits `req` (synchronously, on the first poll) and waits for its
-    /// replies under the command deadline. Every outcome is accounted
-    /// (`healthy`, `faults`).
-    pub(crate) async fn call(self: &Arc<Self>, req: Request) -> Result<Vec<Reply>, Fault> {
-        let outcome = self.call_quiet(req).await;
+    /// reply until `deadline`. Every outcome is accounted *after* the reply
+    /// is classified: a server error reply is a fault (`Fault::Server`), not
+    /// a success.
+    pub(crate) async fn call_until(
+        self: &Arc<Self>,
+        req: Request,
+        deadline: tokio::time::Instant,
+    ) -> Result<Value, Fault> {
+        let outcome = self.call_quiet(req, deadline).await;
         match &outcome {
             Ok(_) => self.succeeded(),
             Err(fault) => self.fault(fault),
@@ -311,97 +420,125 @@ impl Link {
         outcome
     }
 
-    async fn call_quiet(&self, req: Request) -> Result<Vec<Reply>, Fault> {
+    /// [`Link::call_until`] with the command deadline from now.
+    pub(crate) async fn call(self: &Arc<Self>, req: Request) -> Result<Value, Fault> {
+        let deadline = tokio::time::Instant::now() + self.opts.command_timeout;
+        self.call_until(req, deadline).await
+    }
+
+    async fn call_quiet(
+        &self,
+        req: Request,
+        deadline: tokio::time::Instant,
+    ) -> Result<Value, Fault> {
         let (tx, rx) = oneshot::channel();
-        let (bytes, replies, retry) = match req {
-            Request::One(b) => (b, 1, None),
-            Request::Eval { by_sha, whole } => (by_sha, 1, Some(Arc::from(whole))),
-            Request::Many { bytes, replies } => (bytes, replies, None),
+        let (wire, retry) = match req {
+            Request::One(cmd) => (Wire::One(cmd), None),
+            Request::Eval { by_sha, whole } => (Wire::One(by_sha), Some(whole)),
+            Request::Many(pipe) => (Wire::Many(pipe), None),
         };
-        {
-            let mut st = self.state();
-            if st.mode != Mode::Up {
-                return Err(Fault::NotConnected);
-            }
-            let room = self
-                .opts
-                .queue_capacity
-                .saturating_sub(self.opts.release_reserve);
-            if st.outstanding() >= room {
-                return Err(Fault::Saturated);
-            }
-            st.pending.push_back(Op {
-                bytes: Arc::from(bytes),
-                replies,
-                got: Vec::with_capacity(replies),
-                kind: OpKind::Call { tx, retry },
-            });
-        }
-        self.wake_writer.notify_one();
-        match tokio::time::timeout(self.opts.command_timeout, rx).await {
+        self.submit(wire, OpKind::Call { tx, retry }, false)?;
+        match tokio::time::timeout_at(deadline, rx).await {
             Err(_) => Err(Fault::TimedOut),
             Ok(Err(_)) => Err(Fault::Connection("retired".to_owned())),
             Ok(Ok(out)) => out,
         }
     }
 
-    /// Queues `bytes` (one command, sent whole) as a release, ordered ahead
-    /// of every later submission. Not async: queued when this returns.
-    pub(crate) fn release(&self, bytes: Vec<u8>, idempotent: bool) -> Result<(), Refused> {
-        let refused = {
-            let mut st = self.state();
-            match st.mode {
-                Mode::Closing => Some(Refused::Closed),
-                Mode::Down if !idempotent => Some(Refused::Down),
-                _ if st.outstanding() >= self.opts.queue_capacity => Some(Refused::Full),
-                _ => {
-                    st.pending.push_back(Op {
-                        bytes: Arc::from(bytes),
-                        replies: 1,
-                        got: Vec::with_capacity(1),
-                        kind: OpKind::Release { idempotent },
-                    });
-                    None
-                }
-            }
-        };
-        match refused {
-            None => {
-                self.wake_writer.notify_one();
-                Ok(())
-            }
-            Some(r) => {
-                self.release_dropped(
-                    1,
-                    match r {
-                        Refused::Full => "queue full",
-                        Refused::Down => "disconnected",
-                        Refused::Closed => "closing",
-                    },
-                );
-                Err(r)
-            }
+    /// Charges and queues one op, or refuses it. `release` ops may use the
+    /// reserve; awaited calls may not.
+    fn submit(&self, req: Wire, kind: OpKind, release: bool) -> Result<(), Fault> {
+        self.submit_op(req, kind, release)
+            .map_err(|(fault, _)| fault)
+    }
+
+    /// [`Link::submit`], handing a refused op's kind back to the caller.
+    fn submit_op(&self, req: Wire, kind: OpKind, release: bool) -> Result<(), (Fault, OpKind)> {
+        let cost = wire_cost(&req);
+        if cost.bytes > self.opts.max_request_bytes
+            || (matches!(req, Wire::Many(_)) && cost.commands > self.opts.max_pipeline_len)
+        {
+            return Err((Fault::TooLarge, kind));
         }
+        {
+            let mut st = self.state();
+            let idempotent = matches!(kind, OpKind::Release { idempotent: true });
+            match st.mode {
+                Mode::Up => {}
+                Mode::Down if release && idempotent => {}
+                Mode::Closing if release => return Err((Fault::Closing, kind)),
+                _ => return Err((Fault::NotConnected, kind)),
+            }
+            let (cmds, bytes) = if release {
+                (self.opts.queue_capacity, self.opts.queue_bytes)
+            } else {
+                (
+                    self.opts
+                        .queue_capacity
+                        .saturating_sub(self.opts.release_reserve),
+                    self.opts
+                        .queue_bytes
+                        .saturating_sub(self.opts.release_reserve_bytes),
+                )
+            };
+            if st.used.commands + cost.commands > cmds || st.used.bytes + cost.bytes > bytes {
+                return Err((Fault::Saturated, kind));
+            }
+            st.charge(cost);
+            let id = st.next_id;
+            st.next_id += 1;
+            st.pending.push_back(Op {
+                id,
+                req: Some(req),
+                cost,
+                kind,
+            });
+        }
+        self.wake_writer.notify_one();
+        Ok(())
+    }
+
+    /// Queues one `EVAL` as a release, ordered ahead of every later
+    /// submission. Not async: queued when this returns.
+    pub(crate) fn release(&self, cmd: Cmd, idempotent: bool) -> Result<(), Refused> {
+        let refused = match self.submit(Wire::One(cmd), OpKind::Release { idempotent }, true) {
+            Ok(()) => return Ok(()),
+            Err(Fault::Closing) => Refused::Closed,
+            Err(Fault::NotConnected) => Refused::Down,
+            Err(_) => Refused::Full,
+        };
+        self.release_dropped(
+            1,
+            match refused {
+                Refused::Full => "queue full",
+                Refused::Down => "disconnected",
+                Refused::Closed => "closing",
+                Refused::Invalid => "invalid",
+            },
+        );
+        Err(refused)
+    }
+
+    /// Counts a release the caller's own validation refused.
+    pub(crate) fn release_invalid(&self) -> Refused {
+        self.release_dropped(1, "invalid");
+        Refused::Invalid
     }
 
     /// The link task: keeps one connection serving until shutdown, then
-    /// drains and stops. Draining (writing queued releases and awaiting
-    /// their replies, reconnecting once if need be) is bounded by one
-    /// `drain_timeout` from the moment `close` is called.
+    /// drains (writing queued releases and awaiting their replies,
+    /// reconnecting if need be) until the deadline `close` recorded.
     pub(crate) async fn maintain(self: Arc<Self>) {
         let mut shutdown = self.shutdown.subscribe();
         let mut delay = self.opts.reconnect_min;
-        let mut drain_deadline: Option<tokio::time::Instant> = None;
         loop {
-            if drain_deadline.is_none() && *shutdown.borrow_and_update() {
-                drain_deadline = Some(tokio::time::Instant::now() + self.opts.drain_timeout);
-            }
-            if let Some(deadline) = drain_deadline
+            let draining = self.drain_deadline();
+            if let Some(deadline) = draining
                 && (self.state().pending.is_empty() || tokio::time::Instant::now() >= deadline)
             {
                 break;
             }
-            let opened = match drain_deadline {
+            let opened = match draining {
                 Some(deadline) => tokio::time::timeout_at(deadline, self.open())
                     .await
                     .unwrap_or(Err(Fault::TimedOut)),
@@ -411,7 +548,7 @@ impl Link {
                 },
             };
             match opened {
-                Ok((stream, leftover)) => {
+                Ok(conn) => {
                     {
                         let mut st = self.state();
                         if st.mode == Mode::Down {
@@ -422,9 +559,7 @@ impl Link {
                     self.healthy.store(true, Ordering::SeqCst);
                     self.connected.send_replace(true);
                     delay = self.opts.reconnect_min;
-                    let end = self
-                        .serve_until(stream, leftover, &mut drain_deadline)
-                        .await;
+                    let end = self.serve_until_drained(conn).await;
                     self.connected.send_replace(false);
                     self.retire(&end);
                     match end {
@@ -435,8 +570,8 @@ impl Link {
                 }
                 Err(fault) => {
                     self.fault(&fault);
-                    if drain_deadline.is_some() {
-                        break;
+                    if self.drain_deadline().is_some() {
+                        continue;
                     }
                     tokio::select! {
                         () = tokio::time::sleep(delay) => {}
@@ -450,218 +585,245 @@ impl Link {
     }
 
     /// `serve`, cut off at the drain deadline once shutdown begins.
-    async fn serve_until(
-        &self,
-        stream: TcpStream,
-        leftover: Vec<u8>,
-        drain_deadline: &mut Option<tokio::time::Instant>,
-    ) -> End {
-        let serve = self.serve(stream, leftover);
+    async fn serve_until_drained(self: &Arc<Self>, conn: Conn) -> End {
+        let serve = self.serve(conn);
         tokio::pin!(serve);
-        if drain_deadline.is_none() {
+        if self.drain_deadline().is_none() {
             let mut shutdown = self.shutdown.subscribe();
             tokio::select! {
                 end = &mut serve => return end,
                 _ = shutdown.wait_for(|s| *s) => {}
             }
         }
-        let deadline = *drain_deadline
-            .get_or_insert_with(|| tokio::time::Instant::now() + self.opts.drain_timeout);
+        let Some(deadline) = self.drain_deadline() else {
+            return End::Broken("closed without a deadline".to_owned());
+        };
         tokio::select! {
             end = &mut serve => end,
             () = tokio::time::sleep_until(deadline) => End::Broken("drain timeout".to_owned()),
         }
     }
 
-    /// Runs one connection generation until it breaks, stalls, or (closing)
-    /// has nothing left outstanding.
-    async fn serve(&self, stream: TcpStream, leftover: Vec<u8>) -> End {
-        let (read, write) = stream.into_split();
-        tokio::select! {
-            end = self.write_loop(write) => end,
-            end = self.read_loop(read, leftover) => end,
-        }
+    /// One connection generation: the writer hands ops to the connection in
+    /// queue order; replies come back on per-op tasks; the watchdog decides
+    /// retirement. Ends when the connection breaks, stalls, or (closing) has
+    /// nothing outstanding.
+    async fn serve(self: &Arc<Self>, conn: Conn) -> End {
+        let (broke_tx, mut broke_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let replies = tokio::task::JoinSet::new();
+        let replies = Arc::new(Mutex::new(replies));
+        let writer = self.write_loop(conn.conn.clone(), broke_tx, Arc::clone(&replies));
+        let watchdog = self.watchdog();
+        let end = tokio::select! {
+            end = writer => end,
+            end = watchdog => end,
+            kind = broke_rx.recv() => End::Broken(kind.unwrap_or_else(|| "closed".to_owned())),
+        };
+        // The reply tasks go first, then the driver (closing the socket).
+        replies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .abort_all();
+        drop(conn);
+        end
     }
 
-    async fn write_loop(&self, mut write: OwnedWriteHalf) -> End {
-        let mut buf = Vec::new();
+    async fn write_loop(
+        self: &Arc<Self>,
+        conn: MultiplexedConnection,
+        broke: tokio::sync::mpsc::UnboundedSender<String>,
+        replies: Arc<Mutex<tokio::task::JoinSet<()>>>,
+    ) -> End {
         loop {
-            let (batch, closing_and_idle) = {
+            let next = {
                 let mut st = self.state();
-                if st.in_flight.is_empty() && !st.pending.is_empty() {
-                    st.last_progress = Instant::now();
+                if st.mode == Mode::Closing && st.used.commands == 0 {
+                    return End::Drained;
                 }
-                let mut batch = Vec::with_capacity(st.pending.len());
-                while let Some(op) = st.pending.pop_front() {
-                    batch.push(Arc::clone(&op.bytes));
-                    st.in_flight.push_back(op);
+                match st.pending.pop_front() {
+                    Some(mut op) => {
+                        if st.in_flight.is_empty() {
+                            st.last_progress = Instant::now();
+                        }
+                        let id = op.id;
+                        let (req, retry) = match &mut op.kind {
+                            OpKind::Call { retry, .. } => (op.req.take(), retry.take()),
+                            OpKind::Ping => (op.req.take(), None),
+                            OpKind::Release { .. } => (op.req.clone(), None),
+                        };
+                        st.in_flight.push_back(op);
+                        req.map(|req| (id, req, retry))
+                    }
+                    None => None,
                 }
-                (batch, st.mode == Mode::Closing && st.outstanding() == 0)
             };
-            if closing_and_idle {
-                return End::Drained;
+            // Finished reply tasks are reaped here, so the set holds at most
+            // the outstanding ops.
+            {
+                let mut set = replies.lock().unwrap_or_else(PoisonError::into_inner);
+                while set.try_join_next().is_some() {}
             }
-            if batch.is_empty() {
+            let Some((id, req, retry)) = next else {
                 tokio::select! {
                     () = self.wake_writer.notified() => {}
                     () = tokio::time::sleep(self.opts.heartbeat) => self.ping_if_idle(),
                 }
                 continue;
-            }
-            buf.clear();
-            for bytes in &batch {
-                buf.extend_from_slice(bytes);
-            }
-            if let Err(e) = write.write_all(&buf).await {
-                return End::Broken(format!("{:?}", e.kind()));
+            };
+            // Hand the op to the connection *on this task*, polling its
+            // request future here until it is inside the crate's send channel
+            // (see `Handoff`); only then does its reply wait move to a task
+            // of its own. The next op is handed over strictly after this one,
+            // by this one task, so the channel — and the socket — see the
+            // queue's order.
+            let mut fut = request(&conn, &req);
+            let handed = Handoff { fut: &mut fut }.await;
+            let me = Arc::clone(self);
+            let broke = broke.clone();
+            match handed {
+                Some(reply) => me.reply(id, reply, retry, &broke),
+                None => {
+                    replies
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .spawn(async move {
+                            let reply = fut.await;
+                            me.reply(id, reply, retry, &broke);
+                        });
+                }
             }
         }
     }
 
     fn ping_if_idle(&self) {
         let mut st = self.state();
-        if st.mode == Mode::Up && st.outstanding() == 0 {
+        if st.mode == Mode::Up && st.used.commands == 0 {
+            let req = Wire::One(redis::cmd("PING"));
+            let cost = wire_cost(&req);
+            st.charge(cost);
+            let id = st.next_id;
+            st.next_id += 1;
             st.pending.push_back(Op {
-                bytes: Arc::from(redis::cmd("PING").get_packed_command()),
-                replies: 1,
-                got: Vec::with_capacity(1),
+                id,
+                req: Some(req),
+                cost,
                 kind: OpKind::Ping,
             });
+            drop(st);
+            self.wake_writer.notify_one();
         }
     }
 
-    async fn read_loop(&self, mut read: OwnedReadHalf, mut buf: Vec<u8>) -> End {
-        let mut chunk = vec![0_u8; 16 * 1024];
-        let tick = (self.opts.command_timeout / 4).max(Duration::from_millis(5));
-        let mut watchdog = tokio::time::interval(tick);
-        // While the connection is suspect: a probe of the server on a fresh
-        // connection. This socket keeps being read meanwhile, and any byte
-        // on it clears the suspicion.
-        let mut probe: Option<AbortOnDrop> = None;
-        loop {
-            // Replies already buffered (the handshake's leftover, or a read
-            // that carried several).
-            loop {
-                match resp::parse(&buf) {
-                    Err(resp::ProtocolError) => return End::Broken("protocol".to_owned()),
-                    Ok(None) => break,
-                    Ok(Some((reply, used))) => {
-                        buf.drain(..used);
-                        if let Err(end) = self.deliver(reply) {
-                            return end;
-                        }
-                    }
-                }
+    /// Settles the op `id` with its reply. A `NOSCRIPT` on an awaited
+    /// `EVALSHA` is resubmitted once as `EVAL`.
+    fn reply(
+        &self,
+        id: u64,
+        reply: Result<Value, RedisError>,
+        retry: Option<Cmd>,
+        broke: &tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        if let Err(e) = &reply
+            && is_connection_error(e)
+        {
+            // The generation is over; `retire` settles every op, this one
+            // included. The receiver is gone only if serve already ended.
+            if broke.send(format!("{:?}", e.kind())).is_err() {
+                tracing::trace!(coord = "redis", "reply after the generation ended");
             }
-            tokio::select! {
-                n = read.read(&mut chunk) => {
-                    probe = None;
-                    match n {
-                        Ok(0) => return End::Broken("closed".to_owned()),
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                        Err(e) => return End::Broken(format!("{:?}", e.kind())),
-                    }
-                }
-                answered = async {
-                    match probe.as_mut() {
-                        Some(p) => (&mut p.0).await.unwrap_or(false),
-                        None => std::future::pending().await,
-                    }
-                }, if probe.is_some() => {
-                    probe = None;
-                    // The server answers a fresh connection while this one,
-                    // owing replies, has been silent past the deadline: only
-                    // this socket is dead. If the server too is stalled, keep
-                    // the connection; its replies will come in order.
-                    //
-                    // A server that was stalled and just resumed answers the
-                    // probe and this socket at about the same moment; a short
-                    // grace read keeps a connection that is flowing again.
-                    if answered {
-                        let grace = (self.opts.command_timeout / 4).max(Duration::from_millis(20));
-                        match tokio::time::timeout(grace, read.read(&mut chunk)).await {
-                            Ok(Ok(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
-                            Ok(Ok(_)) => return End::Broken("closed".to_owned()),
-                            Ok(Err(e)) => return End::Broken(format!("{:?}", e.kind())),
-                            Err(_) => return End::Stalled,
-                        }
-                    }
-                }
-                _ = watchdog.tick(), if probe.is_none() => {
-                    let silent = {
-                        let st = self.state();
-                        !st.in_flight.is_empty()
-                            && st.last_progress.elapsed() > self.opts.command_timeout
-                    };
-                    if silent {
-                        let client = self.client.clone();
-                        let timeout = self.opts.connect_timeout;
-                        probe = Some(AbortOnDrop(self.runtime.spawn(async move {
-                            matches!(
-                                tokio::time::timeout(timeout, probe_server(&client)).await,
-                                Ok(Ok(()))
-                            )
-                        })));
-                    }
-                }
-            }
+            return;
         }
-    }
-
-    /// Hands one reply to the op it answers.
-    fn deliver(&self, reply: Reply) -> Result<(), End> {
-        let done = {
+        let op = {
             let mut st = self.state();
             st.last_progress = Instant::now();
-            let Some(op) = st.in_flight.front_mut() else {
-                return Err(End::Broken("unsolicited reply".to_owned()));
+            let Some(at) = st.in_flight.iter().position(|op| op.id == id) else {
+                return;
             };
-            op.got.push(reply);
-            if op.got.len() < op.replies {
-                return Ok(());
-            }
-            let Some(op) = st.in_flight.pop_front() else {
-                return Ok(());
+            let Some(op) = st.in_flight.remove(at) else {
+                return;
             };
-            if st.mode == Mode::Closing && st.outstanding() == 0 {
-                // The writer decides when a drain is done.
+            st.refund(op.cost);
+            if st.mode == Mode::Closing && st.used.commands == 0 {
+                // `notify_one` stores a permit: the writer cannot miss it.
                 self.wake_writer.notify_one();
             }
-            // A cache miss on an awaited EVALSHA: send it whole, ahead of
-            // everything not yet written.
-            match op.kind {
-                OpKind::Call {
-                    tx,
-                    retry: Some(whole),
-                } if is_noscript(&op.got) => {
-                    st.pending.push_front(Op {
-                        bytes: whole,
-                        replies: 1,
-                        got: Vec::with_capacity(1),
-                        kind: OpKind::Call { tx, retry: None },
-                    });
-                    drop(st);
-                    self.wake_writer.notify_one();
-                    return Ok(());
-                }
-                kind => (kind, op.got),
-            }
+            op
         };
-        match done {
-            (OpKind::Call { tx, .. }, got) => {
+        self.progress.notify_waiters();
+        match (op.kind, reply) {
+            // A cache miss on an awaited EVALSHA: resubmitted once as EVAL,
+            // at the back of the queue, answering the same caller.
+            (OpKind::Call { tx, .. }, Err(e)) if is_noscript(&e) && retry.is_some() => {
+                let Some(whole) = retry else { return };
+                let kind = OpKind::Call { tx, retry: None };
+                if let Err((fault, OpKind::Call { tx, .. })) =
+                    self.submit_op(Wire::One(whole), kind, false)
+                    && tx.send(Err(fault)).is_err()
+                {
+                    tracing::trace!(coord = "redis", "retry after the deadline");
+                }
+            }
+            (OpKind::Call { tx, .. }, reply) => {
+                let out = reply.map_err(|e| server_fault(&e));
                 // The caller may have given up at its deadline.
-                if tx.send(Ok(got)).is_err() {
+                if tx.send(out).is_err() {
                     tracing::trace!(coord = "redis", "reply after the caller's deadline");
                 }
             }
-            (OpKind::Release { .. }, got) => {
-                if got.iter().any(Result::is_err) {
-                    self.release_dropped(1, "server error");
-                }
-            }
-            (OpKind::Ping, _) => {}
+            (OpKind::Release { .. }, Err(_)) => self.release_dropped(1, "server error"),
+            (OpKind::Release { .. } | OpKind::Ping, Ok(_)) | (OpKind::Ping, Err(_)) => {}
         }
-        Ok(())
+    }
+
+    /// Watches the connection while it serves; returns when it must be
+    /// retired.
+    async fn watchdog(&self) -> End {
+        let tick = (self.opts.command_timeout / 4).max(Duration::from_millis(5));
+        let mut interval = tokio::time::interval(tick);
+        loop {
+            interval.tick().await;
+            let silent = {
+                let st = self.state();
+                !st.in_flight.is_empty() && st.last_progress.elapsed() > self.opts.command_timeout
+            };
+            if !silent {
+                continue;
+            }
+            let client = self.client.clone();
+            let timeout = self.opts.connect_timeout;
+            let limits = self.limits();
+            let mut probe = AbortOnDrop(self.runtime.spawn(async move {
+                matches!(
+                    tokio::time::timeout(timeout, probe_server(&client, limits)).await,
+                    Ok(Ok(()))
+                )
+            }));
+            // Any reply on this connection meanwhile clears the suspicion.
+            let answered = loop {
+                let before = self.state().last_progress;
+                tokio::select! {
+                    alive = &mut probe.0 => break alive.unwrap_or(false),
+                    () = self.progress.notified() => {
+                        if self.state().last_progress != before {
+                            break false;
+                        }
+                    }
+                }
+            };
+            if !answered {
+                continue;
+            }
+            // The server answers a fresh connection while this one, owing
+            // replies, has been silent past the deadline. A server that was
+            // stalled and just resumed answers both at about the same time;
+            // a short grace keeps a connection that is flowing again.
+            let before = self.state().last_progress;
+            let grace = (self.opts.command_timeout / 4).max(Duration::from_millis(20));
+            tokio::time::sleep(grace).await;
+            if self.state().last_progress == before {
+                return End::Stalled;
+            }
+        }
     }
 
     /// Ends a generation: the outstanding work is settled by the policy in
@@ -675,28 +837,45 @@ impl Link {
             let mut keep = VecDeque::new();
             let mut calls = Vec::new();
             let mut uncertain = 0;
-            for mut op in st.in_flight.drain(..) {
+            let mut refund = Cost::default();
+            for op in st.in_flight.drain(..).collect::<Vec<_>>() {
                 match op.kind {
-                    OpKind::Call { tx, .. } => calls.push((tx, true)),
-                    OpKind::Release { idempotent: true } => {
-                        op.got.clear();
-                        keep.push_back(op);
+                    OpKind::Call { tx, .. } => {
+                        refund.commands += op.cost.commands;
+                        refund.bytes += op.cost.bytes;
+                        calls.push((tx, true));
                     }
-                    OpKind::Release { idempotent: false } => uncertain += 1,
-                    OpKind::Ping => {}
+                    OpKind::Release { idempotent: true } => keep.push_back(op),
+                    OpKind::Release { idempotent: false } => {
+                        refund.commands += op.cost.commands;
+                        refund.bytes += op.cost.bytes;
+                        uncertain += 1;
+                    }
+                    OpKind::Ping => {
+                        refund.commands += op.cost.commands;
+                        refund.bytes += op.cost.bytes;
+                    }
                 }
             }
-            let pending: Vec<Op> = st.pending.drain(..).collect();
-            for op in pending {
+            for op in st.pending.drain(..).collect::<Vec<_>>() {
                 match op.kind {
-                    OpKind::Call { tx, .. } => calls.push((tx, false)),
+                    OpKind::Call { tx, .. } => {
+                        refund.commands += op.cost.commands;
+                        refund.bytes += op.cost.bytes;
+                        calls.push((tx, false));
+                    }
                     OpKind::Release { .. } => keep.push_back(op),
-                    OpKind::Ping => {}
+                    OpKind::Ping => {
+                        refund.commands += op.cost.commands;
+                        refund.bytes += op.cost.bytes;
+                    }
                 }
             }
+            st.refund(refund);
             st.pending = keep;
             (calls, uncertain)
         };
+        self.progress.notify_waiters();
         for (tx, written) in calls {
             let fault = if written {
                 Fault::Connection(match end {
@@ -722,6 +901,7 @@ impl Link {
             let mut left = 0;
             let mut ops: Vec<Op> = st.in_flight.drain(..).collect();
             ops.extend(st.pending.drain(..));
+            st.used = Cost::default();
             for op in ops {
                 match op.kind {
                     OpKind::Call { tx, .. } => {
@@ -740,118 +920,171 @@ impl Link {
         self.stopped.send_replace(true);
     }
 
-    /// Connects, authenticates, selects the database and loads every script
-    /// (TS `loadScripts`), under the connect timeout. Returns the stream and
-    /// any bytes read past the handshake.
-    async fn open(&self) -> Result<(TcpStream, Vec<u8>), Fault> {
-        let handshake = handshake(&self.client, Some(&self.scripts));
-        match tokio::time::timeout(self.opts.connect_timeout, handshake).await {
+    /// The reply bounds every connection's guard enforces.
+    fn limits(&self) -> super::guard::Limits {
+        super::guard::Limits {
+            reply_bytes: self.opts.max_reply_bytes,
+            reply_nodes: self.opts.max_reply_elements,
+            depth: 16,
+            line: 4 * 1024,
+        }
+    }
+
+    /// Connects (the `redis` crate's handshake: AUTH, SELECT) and loads
+    /// every script (TS `loadScripts`), checking each digest, under the
+    /// connect timeout.
+    async fn open(&self) -> Result<Conn, Fault> {
+        let attempt = async {
+            let mut conn =
+                connect(&self.client, self.limits(), self.opts.queue_capacity + 1).await?;
+            for script in &self.scripts {
+                let sha: Result<String, RedisError> = redis::cmd("SCRIPT")
+                    .arg("LOAD")
+                    .arg(script.source)
+                    .query_async(&mut conn.conn)
+                    .await;
+                match sha {
+                    Ok(sha) if sha == script.sha => {}
+                    Ok(_) => return Err(Fault::Server("script digest mismatch".to_owned())),
+                    Err(e) if is_connection_error(&e) => {
+                        return Err(Fault::Connection(format!("{:?}", e.kind())));
+                    }
+                    Err(e) => return Err(server_fault(&e)),
+                }
+            }
+            Ok(conn)
+        };
+        match tokio::time::timeout(self.opts.connect_timeout, attempt).await {
             Err(_) => Err(Fault::TimedOut),
             Ok(out) => out,
         }
     }
 }
 
-/// Connects, authenticates, selects the database and (with `scripts`)
-/// loads every script, checking each digest. Returns the stream and any
-/// bytes read past the handshake.
-async fn handshake(
+/// One connection generation: the `redis` crate's multiplexed connection
+/// over a [`Guarded`](super::guard::Guarded) socket, and its driver task,
+/// which is aborted (closing the socket) when this is dropped.
+pub(crate) struct Conn {
+    pub(crate) conn: MultiplexedConnection,
+    driver: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        self.driver.abort();
+    }
+}
+
+/// Connects over plain TCP, wraps the socket in the reply guard, and runs
+/// the `redis` crate's handshake (AUTH, SELECT) on it. Our deadlines only:
+/// the crate's own response timeout is off. The send channel is sized above
+/// the queue's command capacity so the writer never finds it full.
+async fn connect(
     client: &redis::Client,
-    scripts: Option<&[CoordScript]>,
-) -> Result<(TcpStream, Vec<u8>), Fault> {
+    limits: super::guard::Limits,
+    send_queue: usize,
+) -> Result<Conn, Fault> {
     let info = client.get_connection_info();
     let (host, port) = match info.addr() {
-        ConnectionAddr::Tcp(host, port) => (host.clone(), *port),
+        redis::ConnectionAddr::Tcp(host, port) => (host.clone(), *port),
         _ => return Err(Fault::Connection("unsupported address".to_owned())),
     };
-    let settings = info.redis_settings();
-    let mut hello = Vec::new();
-    let mut expect: Vec<Option<&CoordScript>> = Vec::new();
-    if let Some(password) = settings.password() {
-        let mut auth = redis::cmd("AUTH");
-        if let Some(user) = settings.username() {
-            auth.arg(user);
-        }
-        auth.arg(password);
-        hello.extend(auth.get_packed_command());
-        expect.push(None);
-    }
-    if settings.db() != 0 {
-        hello.extend(redis::cmd("SELECT").arg(settings.db()).get_packed_command());
-        expect.push(None);
-    }
-    for script in scripts.into_iter().flatten() {
-        hello.extend(
-            redis::cmd("SCRIPT")
-                .arg("LOAD")
-                .arg(script.source)
-                .get_packed_command(),
-        );
-        expect.push(Some(script));
-    }
-    let mut stream = TcpStream::connect((host.as_str(), port))
+    let stream = tokio::net::TcpStream::connect((host.as_str(), port))
         .await
         .map_err(|e| Fault::Connection(format!("{:?}", e.kind())))?;
     stream
         .set_nodelay(true)
         .map_err(|e| Fault::Connection(format!("{:?}", e.kind())))?;
-    stream
-        .write_all(&hello)
-        .await
-        .map_err(|e| Fault::Connection(format!("{:?}", e.kind())))?;
-    let mut buf = Vec::new();
-    for want in expect {
-        let reply = read_reply(&mut stream, &mut buf).await?;
-        match (reply, want) {
-            (Err(e), _) => return Err(Fault::Server(e.code)),
-            (Ok(Value::BulkString(sha)), Some(script)) if sha == script.sha.as_bytes() => {}
-            (Ok(_), Some(_)) => {
-                return Err(Fault::Server("script digest mismatch".to_owned()));
-            }
-            (Ok(_), None) => {}
+    let guarded = super::guard::Guarded::new(stream, limits);
+    let config = AsyncConnectionConfig::new()
+        .set_response_timeout(None)
+        .set_pipeline_buffer_size(send_queue.max(1));
+    let (conn, driver) =
+        MultiplexedConnection::new_with_config(info.redis_settings(), guarded, config)
+            .await
+            .map_err(|e| {
+                if is_connection_error(&e) {
+                    Fault::Connection(format!("{:?}", e.kind()))
+                } else {
+                    server_fault(&e)
+                }
+            })?;
+    Ok(Conn {
+        conn,
+        driver: tokio::spawn(driver),
+    })
+}
+
+/// The request future for `req`: the `redis` crate's `query_async`, which
+/// sends into the connection's channel and then awaits the reply.
+fn request(conn: &MultiplexedConnection, req: &Wire) -> BoxFuture<Result<Value, RedisError>> {
+    let mut conn = conn.clone();
+    match req {
+        Wire::One(cmd) => {
+            let cmd = cmd.clone();
+            Box::pin(async move { cmd.query_async::<Value>(&mut conn).await })
+        }
+        Wire::Many(pipe) => {
+            let pipe = pipe.clone();
+            Box::pin(async move {
+                pipe.query_async::<Vec<Value>>(&mut conn)
+                    .await
+                    .map(Value::Array)
+            })
         }
     }
-    Ok((stream, buf))
+}
+
+/// Polls a request future until it is *in the send channel*: resolves to
+/// `Some(reply)` if it completed outright, `None` once it is waiting on its
+/// reply.
+///
+/// Why one poll suffices (redis-rs 1.4.0, `MultiplexedConnection`, no
+/// concurrency limiter, no client cache, response timeout off — all as
+/// `connect` configures it): `query_async` → `send_packed_command(s)` →
+/// `Pipeline::send_recv`, whose first await is `mpsc::Sender::send` on the
+/// connection's bounded channel and whose second is the reply `oneshot`.
+/// `send` completes on its first poll whenever the channel has a free slot
+/// and the task's cooperative budget is not exhausted. The budget is lifted
+/// by polling under [`tokio::task::coop::unconstrained`]; the channel always
+/// has a free slot because it is sized `queue_capacity + 1` and at most
+/// `queue_capacity` ops are ever outstanding, each one channel message (the
+/// driver may lag in *draining* it, but never has more than that queued).
+/// So the first `Pending` is the reply wait.
+///
+/// This is an assumption about redis-rs internals, so it is pinned twice:
+/// `Cargo.toml` pins `redis = "=1.4.0"` (an upgrade must re-check it), and
+/// `round2::releases_precede_later_admissions_under_concurrent_load` fails
+/// if a release is ever overtaken under contention.
+struct Handoff<'a> {
+    fut: &'a mut BoxFuture<Result<Value, RedisError>>,
+}
+
+impl Future for Handoff<'_> {
+    type Output = Option<Result<Value, RedisError>>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let fut = &mut *self.fut;
+        let polled = tokio::task::coop::unconstrained(fut.as_mut());
+        tokio::pin!(polled);
+        match polled.poll(cx) {
+            std::task::Poll::Ready(out) => std::task::Poll::Ready(Some(out)),
+            std::task::Poll::Pending => std::task::Poll::Ready(None),
+        }
+    }
 }
 
 /// A `PING` answered on a fresh connection: the server is alive.
-async fn probe_server(client: &redis::Client) -> Result<(), Fault> {
-    let (mut stream, mut buf) = handshake(client, None).await?;
-    stream
-        .write_all(&redis::cmd("PING").get_packed_command())
-        .await
-        .map_err(|e| Fault::Connection(format!("{:?}", e.kind())))?;
-    match read_reply(&mut stream, &mut buf).await? {
-        Ok(_) => Ok(()),
-        Err(e) => Err(Fault::Server(e.code)),
-    }
+async fn probe_server(client: &redis::Client, limits: super::guard::Limits) -> Result<(), Fault> {
+    let mut probe = connect(client, limits, 4).await?;
+    let pong: Result<Value, RedisError> = redis::cmd("PING").query_async(&mut probe.conn).await;
+    pong.map(drop).map_err(|e| server_fault(&e))
 }
 
-/// Reads one reply from a stream being handshaken (no queue yet).
-async fn read_reply(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<Reply, Fault> {
-    let mut chunk = [0_u8; 4 * 1024];
-    loop {
-        match resp::parse(buf) {
-            Err(resp::ProtocolError) => return Err(Fault::Connection("protocol".to_owned())),
-            Ok(Some((reply, used))) => {
-                buf.drain(..used);
-                return Ok(reply);
-            }
-            Ok(None) => {
-                let n = stream
-                    .read(&mut chunk)
-                    .await
-                    .map_err(|e| Fault::Connection(format!("{:?}", e.kind())))?;
-                if n == 0 {
-                    return Err(Fault::Connection("closed".to_owned()));
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-        }
-    }
-}
-
-/// A spawned probe that dies with the read loop that started it.
+/// A spawned probe that dies with the watchdog that started it.
 struct AbortOnDrop(tokio::task::JoinHandle<bool>);
 
 impl Drop for AbortOnDrop {
@@ -860,17 +1093,23 @@ impl Drop for AbortOnDrop {
     }
 }
 
-fn is_noscript(got: &[Reply]) -> bool {
-    matches!(got, [Err(e)] if e.code == "NOSCRIPT")
+pub(crate) fn is_noscript(e: &RedisError) -> bool {
+    e.kind() == ErrorKind::Server(ServerErrorKind::NoScript)
 }
 
-/// The single reply of a one-command call.
-pub(crate) fn one(mut replies: Vec<Reply>) -> Result<Value, Fault> {
-    match replies.pop() {
-        Some(Ok(v)) if replies.is_empty() => Ok(v),
-        Some(Err(e)) => Err(Fault::Server(e.code)),
-        _ => Err(Fault::Server("unexpected reply count".to_owned())),
-    }
+/// Whether the connection the error came from is unusable.
+fn is_connection_error(e: &RedisError) -> bool {
+    e.is_io_error() || e.is_connection_dropped() || e.is_unrecoverable_error()
+}
+
+/// A server error reply as a fault: its code (`NOSCRIPT`, `WRONGTYPE`,
+/// `ERR`…), never its text — a script error's text can carry argument
+/// values. A pipeline error carries its first command's code.
+pub(crate) fn server_fault(e: &RedisError) -> Fault {
+    Fault::Server(
+        e.code()
+            .map_or_else(|| format!("{:?}", e.kind()), str::to_owned),
+    )
 }
 
 /// TS `reseedAfterOutage`: debits made while Redis was away were dropped by
@@ -878,13 +1117,14 @@ pub(crate) fn one(mut replies: Vec<Reply>) -> Result<Value, Fault> {
 /// reseeds from the store. Boxed: it calls `call`, which spawns it.
 fn reseed_after_outage(link: Arc<Link>) -> BoxFuture<()> {
     Box::pin(async move {
+        let deadline = tokio::time::Instant::now() + link.opts.command_timeout * 10;
         let pattern = format!("{}*", super::key("b", ""));
         let outcome = async {
-            let keys = scan(&link, &pattern).await?;
+            let keys = scan(&link, &pattern, deadline).await?;
             for chunk in keys.chunks(512) {
                 let mut unlink = redis::cmd("UNLINK");
                 unlink.arg(chunk);
-                one(link.call(Request::One(unlink.get_packed_command())).await?)?;
+                link.call_until(Request::One(unlink), deadline).await?;
             }
             Ok::<_, Fault>(())
         };
@@ -894,10 +1134,16 @@ fn reseed_after_outage(link: Arc<Link>) -> BoxFuture<()> {
     })
 }
 
-/// Every key matching `pattern`: `SCAN`, never `KEYS`. Each page is one
-/// bounded call.
-pub(crate) async fn scan(link: &Arc<Link>, pattern: &str) -> Result<Vec<String>, Fault> {
-    let mut out = Vec::new();
+/// Every key matching `pattern`: `SCAN`, never `KEYS`, every page under the
+/// one `deadline`. Keys found are deduplicated (`SCAN` may repeat one), and
+/// at most `MAX_SCAN_KEYS` are collected: past that it is `Fault::TooLarge`.
+pub(crate) async fn scan(
+    link: &Arc<Link>,
+    pattern: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<String>, Fault> {
+    const MAX_SCAN_KEYS: usize = 1_000_000;
+    let mut out = HashSet::new();
     let mut cursor = "0".to_owned();
     loop {
         let mut cmd = redis::cmd("SCAN");
@@ -906,7 +1152,7 @@ pub(crate) async fn scan(link: &Arc<Link>, pattern: &str) -> Result<Vec<String>,
             .arg(pattern)
             .arg("COUNT")
             .arg(1_000);
-        let page = one(link.call(Request::One(cmd.get_packed_command())).await?)?;
+        let page = link.call_until(Request::One(cmd), deadline).await?;
         let Value::Array(mut parts) = page else {
             return Err(Fault::Server("unexpected reply to SCAN".to_owned()));
         };
@@ -916,12 +1162,15 @@ pub(crate) async fn scan(link: &Arc<Link>, pattern: &str) -> Result<Vec<String>,
         };
         for key in keys {
             if let Value::BulkString(k) = key {
-                out.push(String::from_utf8_lossy(&k).into_owned());
+                out.insert(String::from_utf8_lossy(&k).into_owned());
             }
+        }
+        if out.len() > MAX_SCAN_KEYS {
+            return Err(Fault::TooLarge);
         }
         cursor = String::from_utf8_lossy(&next).into_owned();
         if cursor == "0" {
-            return Ok(out);
+            return Ok(out.into_iter().collect());
         }
     }
 }

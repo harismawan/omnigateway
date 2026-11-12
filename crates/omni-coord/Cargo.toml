@@ -20,7 +20,9 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "net", "io-util"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 uuid = { version = "1", default-features = false, features = ["v4"] }
-redis = { version = "1.4", default-features = false, features = ["tokio-comp", "script"] }
+# Pinned exactly: `redis::link::Handoff` relies on how this version sends
+# (one poll puts a request in the connection channel). Re-check on upgrade.
+redis = { version = "=1.4.0", default-features = false, features = ["tokio-comp", "script"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "process", "io-util"] }

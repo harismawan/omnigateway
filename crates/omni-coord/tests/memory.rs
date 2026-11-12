@@ -179,3 +179,102 @@ async fn rollback_stays_exact_with_many_distinct_live_stamps() {
     let next = coord.window_claim("k", w, 70_000.0).await;
     assert_eq!(next.before.used, 69_999.0);
 }
+
+/// M2: non-finite inputs behave as the frozen TS does. Recorded from Bun
+/// (`/tmp/opencode/d2-fix2/ts-window-nan.out`): claims at 1000, NaN, 30000,
+/// 2000, rollback NaN, 65000, 70000, 200000 give (used, resetAt)
+/// (0,1000) (0,NaN) (0,30000) (1,90000) (2,90000) (3,90000) (0,200000).
+#[tokio::test]
+async fn non_finite_stamps_behave_as_ts() {
+    let coord = MemoryCoord::new(ManualClock::at(0.0).clock());
+    let w = 60_000.0;
+    let mut got = Vec::new();
+    for at in [1_000.0, f64::NAN, 30_000.0, 2_000.0] {
+        let c = coord.window_claim("k", w, at).await;
+        got.push((c.before.used, c.before.reset_at));
+    }
+    coord.window_rollback("k", f64::NAN).await;
+    for at in [65_000.0, 70_000.0, 200_000.0] {
+        let c = coord.window_claim("k", w, at).await;
+        got.push((c.before.used, c.before.reset_at));
+    }
+    let want = [
+        (0.0, 1_000.0),
+        (0.0, f64::NAN),
+        (0.0, 30_000.0),
+        (1.0, 90_000.0),
+        (2.0, 90_000.0),
+        (3.0, 90_000.0),
+        (0.0, 200_000.0),
+    ];
+    assert_eq!(got.len(), want.len());
+    for (i, ((u, r), (wu, wr))) in got.iter().zip(want.iter()).enumerate() {
+        assert_eq!(u, wu, "claim {i}");
+        assert!(
+            r == wr || (r.is_nan() && wr.is_nan()),
+            "claim {i}: {r} vs {wr}"
+        );
+    }
+}
+
+/// M2: the cap boundary. Exactly `WINDOW_KEY_CAP` claims are stored; the
+/// next is answered with the true count but not stored (fail-open); once
+/// stamps age out, claims are stored again.
+#[tokio::test]
+async fn the_window_cap_fails_open_and_recovers() {
+    use omni_coord::memory::WINDOW_KEY_CAP;
+    let coord = MemoryCoord::new(ManualClock::at(0.0).clock());
+    let w = 1_000_000.0;
+    let cap = WINDOW_KEY_CAP as f64;
+    for i in 0..WINDOW_KEY_CAP {
+        coord.window_claim("k", w, i as f64).await;
+    }
+    // At the cap: answered with the full count, not stored.
+    let over = coord.window_claim("k", w, cap).await;
+    assert_eq!(over.before.used, cap);
+    let next = coord.window_claim("k", w, cap + 1.0).await;
+    assert_eq!(next.before.used, cap, "the over-cap claim was not stored");
+    // Rolling back the unstored claim finds nothing to remove...
+    coord.window_rollback("k", cap).await;
+    assert_eq!(coord.window_claim("k", w, cap + 2.0).await.before.used, cap);
+    // ...except when a stored claim shares its stamp: then that one goes.
+    coord.window_rollback("k", cap - 1.0).await;
+    assert_eq!(
+        coord.window_claim("k", w, cap + 3.0).await.before.used,
+        cap - 1.0
+    );
+    // That freed slot was taken by the claim just made (stored).
+    assert_eq!(coord.window_claim("k", w, cap + 4.0).await.before.used, cap);
+    // Expiry: stamps 0..=half age out (`stamp <= now - w`), and claims are
+    // stored again: each new claim adds one, in a window where nothing else
+    // ages between the two.
+    let half = (WINDOW_KEY_CAP / 2) as f64;
+    let later = w + half;
+    let after = coord.window_claim("k", w, later).await;
+    assert!(
+        after.before.used < cap && after.before.used > 0.0,
+        "{}",
+        after.before.used
+    );
+    // Same instant: nothing more ages out, so the count is exactly one more.
+    let again = coord.window_claim("k", w, later).await;
+    assert_eq!(
+        again.before.used,
+        after.before.used + 1.0,
+        "stored again below the cap"
+    );
+}
+
+/// M2: duplicate stamps below the cap: rollback removes exactly one.
+#[tokio::test]
+async fn rollback_of_a_duplicated_stamp_removes_exactly_one() {
+    let coord = MemoryCoord::new(ManualClock::at(0.0).clock());
+    for _ in 0..3 {
+        coord.window_claim("k", 60_000.0, 5.0).await;
+    }
+    coord.window_rollback("k", 5.0).await;
+    assert_eq!(
+        coord.window_claim("k", 60_000.0, 6.0).await.before.used,
+        2.0
+    );
+}

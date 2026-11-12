@@ -191,8 +191,15 @@ pub fn host_port(base: &str) -> String {
 /// not produce: one socket that is silently dead.
 pub struct Proxy {
     pub port: u16,
-    conns: Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>>,
+    conns: Arc<Mutex<Vec<Flow>>>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+/// One proxied connection's two directions, each freezable on its own.
+#[derive(Clone)]
+struct Flow {
+    up: Arc<std::sync::atomic::AtomicBool>,
+    down: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Proxy {
@@ -201,7 +208,7 @@ impl Proxy {
             .await
             .expect("bind proxy");
         let port = listener.local_addr().expect("addr").port();
-        let conns: Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>> = Arc::default();
+        let conns: Arc<Mutex<Vec<Flow>>> = Arc::default();
         let tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
         let target = target.to_owned();
         let (c, t) = (Arc::clone(&conns), Arc::clone(&tasks));
@@ -210,14 +217,17 @@ impl Proxy {
                 let Ok(server) = tokio::net::TcpStream::connect(&target).await else {
                     continue;
                 };
-                let frozen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flow = Flow {
+                    up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                };
                 c.lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .push(Arc::clone(&frozen));
+                    .push(flow.clone());
                 let (cr, cw) = client.into_split();
                 let (sr, sw) = server.into_split();
-                let up = tokio::spawn(pump(cr, sw, Arc::clone(&frozen)));
-                let down = tokio::spawn(pump(sr, cw, frozen));
+                let up = tokio::spawn(pump(cr, sw, flow.up));
+                let down = tokio::spawn(pump(sr, cw, flow.down));
                 t.lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .extend([up, down]);
@@ -233,8 +243,19 @@ impl Proxy {
     /// Blackholes every connection established so far. Returns how many.
     pub fn freeze_existing(&self) -> usize {
         let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
-        for frozen in conns.iter() {
-            frozen.store(true, Ordering::SeqCst);
+        for flow in conns.iter() {
+            flow.up.store(true, Ordering::SeqCst);
+            flow.down.store(true, Ordering::SeqCst);
+        }
+        conns.len()
+    }
+
+    /// Drops only *replies* on every connection established so far: requests
+    /// still reach the server and execute, their answers never arrive.
+    pub fn drop_replies_existing(&self) -> usize {
+        let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        for flow in conns.iter() {
+            flow.down.store(true, Ordering::SeqCst);
         }
         conns.len()
     }
@@ -286,4 +307,53 @@ async fn pump(
         std::future::pending::<()>().await;
     }
     drop(to);
+}
+
+/// A fake server: accepts connections and runs `script` on each, given the
+/// connection's read and write halves, so a test can send hostile or slow
+/// replies. Returns the port and the accept task.
+pub async fn fake_server<F, Fut>(script: F) -> (u16, tokio::task::JoinHandle<()>)
+where
+    F: Fn(tokio::net::tcp::OwnedReadHalf, tokio::net::tcp::OwnedWriteHalf) -> Fut
+        + Send
+        + Sync
+        + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake server");
+    let port = listener.local_addr().expect("addr").port();
+    let script = Arc::new(script);
+    let task = tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            let (r, w) = sock.into_split();
+            tokio::spawn(script(r, w));
+        }
+    });
+    (port, task)
+}
+
+/// Reads one RESP2 request (an array of bulk strings, what clients send),
+/// or `None` at EOF. Enough for a fake server; not a general parser.
+pub async fn read_request(
+    r: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+) -> Option<Vec<String>> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut line = String::new();
+    if r.read_line(&mut line).await.ok()? == 0 {
+        return None;
+    }
+    let n: usize = line.trim().strip_prefix('*')?.parse().ok()?;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        line.clear();
+        r.read_line(&mut line).await.ok()?;
+        let len: usize = line.trim().strip_prefix('$')?.parse().ok()?;
+        let mut buf = vec![0_u8; len + 2];
+        r.read_exact(&mut buf).await.ok()?;
+        buf.truncate(len);
+        out.push(String::from_utf8_lossy(&buf).into_owned());
+    }
+    Some(out)
 }

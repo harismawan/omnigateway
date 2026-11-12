@@ -5,19 +5,29 @@
 //! poll, which is what makes the visibility property hold without a lock
 //! across an await.
 //!
-//! Windows are TS's `SlidingWindow` exactly: one stamp per claim in arrival
-//! order, aged out as a prefix (`stamp <= now - window`), `used` the count
-//! that survives, `resetAt` the oldest survivor plus the window, rollback
-//! removing one stamp equal to the one given, scanning from the newest and
-//! stopping at the first smaller one. A backdated claim (stamped before
-//! later ones) is a finite count and its rollback removes it, as in TS.
+//! Lock waits are the exception to "completes on the first poll": a
+//! contended `lock` waits (bounded by its `wait`).
+//!
+//! Windows are TS's `SlidingWindow`, comparison for comparison, for every
+//! `f64` including NaN and infinities: one stamp per claim in arrival order;
+//! aged out as a prefix while `!(stamp > now - window)` (TS's loop
+//! condition, so a NaN stamp or a NaN `now` ages out as in TS); `used` the
+//! count that survives; `resetAt` the oldest survivor plus the window;
+//! rollback removing one stamp equal to the one given, scanning from the
+//! newest and stopping at the first one `< at` (so a NaN `at` removes
+//! nothing). A backdated claim is a finite count and its rollback removes
+//! it. `tests/memory.rs` checks these against outputs recorded from the
+//! frozen TS in Bun.
 //!
 //! The one bound TS does not have: a key holds at most
 //! [`WINDOW_KEY_CAP`] live stamps. Past it a claim is still answered with
 //! the true count before it, but is not stored — the count then reads
 //! *lower* than the claims made, so the cap fails open (admits) rather than
-//! refusing; the ring catches up as stamps age out. A rollback of a claim
-//! that was not stored finds nothing, as for an aged-out one.
+//! refusing; the ring catches up as stamps age out, and below the cap every
+//! claim is stored again. Rolling back a claim that was not stored is not
+//! always a no-op: rollback removes *a* stamp equal to the one given, so if
+//! a stored claim has the same stamp, that one goes (the count drops by one
+//! more than the claims stored — still the fail-open direction).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -61,7 +71,12 @@ impl Ring {
     /// reports what is left.
     fn count(&mut self, now: f64) -> usize {
         let cutoff = now - self.window_ms;
-        while self.stamps.front().is_some_and(|s| *s <= cutoff) {
+        // TS: `for (stamp of stamps) { if (stamp > cutoff) break; aged++ }`.
+        while self
+            .stamps
+            .front()
+            .is_some_and(|s| s.partial_cmp(&cutoff) != Some(std::cmp::Ordering::Greater))
+        {
             self.stamps.pop_front();
         }
         if self.stamps.capacity() > 64 && self.stamps.capacity() > 4 * self.stamps.len() {

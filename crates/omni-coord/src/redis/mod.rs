@@ -37,8 +37,8 @@
 //! | kv | `omni:kv:<name>` | STRING value, `PX` |
 //! | pubsub | channel `omni:pubsub` | JSON `{"topic","payload"}` |
 
+mod guard;
 mod link;
-mod resp;
 pub mod scripts;
 
 use std::collections::BTreeMap;
@@ -101,6 +101,13 @@ pub enum Fault {
     /// The submission queue is at its admission capacity.
     #[error("command queue full")]
     Saturated,
+    /// The request is larger than one request may be (bytes, or pipeline
+    /// length), or a `SCAN` found more keys than one operation may collect.
+    #[error("request too large")]
+    TooLarge,
+    /// The coordinator is closing; nothing new is accepted.
+    #[error("closing")]
+    Closing,
 }
 
 impl Fault {
@@ -113,6 +120,8 @@ impl Fault {
             Self::Connection(_) => "connection",
             Self::Server(_) => "server error",
             Self::Saturated => "queue full",
+            Self::TooLarge => "too large",
+            Self::Closing => "closing",
         }
     }
 }
@@ -135,11 +144,25 @@ pub struct RedisCoordOptions {
     pub lock_poll: Duration,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
-    /// Queued plus in-flight commands on the command connection.
+    /// Queued plus in-flight commands on the command connection (a
+    /// pipeline counts its length).
     pub queue_capacity: usize,
     /// Of `queue_capacity`, what only releases may use, so a connection
     /// saturated by admissions still takes the releases that free them.
     pub release_reserve: usize,
+    /// Queued plus in-flight request bytes.
+    pub queue_bytes: usize,
+    /// Of `queue_bytes`, what only releases may use.
+    pub release_reserve_bytes: usize,
+    /// The largest single request (a pipeline: all of it), in bytes.
+    pub max_request_bytes: usize,
+    /// The longest pipeline [`Remote::pipeline`] accepts.
+    pub max_pipeline_len: usize,
+    /// The largest single reply the server may send, in bytes; past it the
+    /// connection is dropped and replaced.
+    pub max_reply_bytes: usize,
+    /// The most elements (scalars and aggregates) in a single reply.
+    pub max_reply_elements: usize,
     /// How long `close` keeps writing queued releases.
     pub drain_timeout: Duration,
     /// How often the idle command connection and the pub/sub connection are
@@ -166,6 +189,12 @@ impl Default for RedisCoordOptions {
             heartbeat: Duration::from_millis(1_000),
             queue_capacity: 4_096,
             release_reserve: 1_024,
+            queue_bytes: 16 * 1024 * 1024,
+            release_reserve_bytes: 4 * 1024 * 1024,
+            max_request_bytes: 1024 * 1024,
+            max_pipeline_len: 1_024,
+            max_reply_bytes: 16 * 1024 * 1024,
+            max_reply_elements: 1_000_000,
             drain_timeout: Duration::from_millis(1_000),
             extra_scripts: Vec::new(),
         }
@@ -284,8 +313,7 @@ impl Remote {
     }
 
     /// `EVALSHA`, or `EVAL` once on `NOSCRIPT` (a server that lost its script
-    /// cache), resent ahead of anything not yet written. Keys and args go as
-    /// given.
+    /// cache). Keys and args go as given.
     pub async fn eval(
         &self,
         script: &CoordScript,
@@ -293,25 +321,21 @@ impl Remote {
         args: &[String],
     ) -> Result<Value, Fault> {
         let (by_sha, whole) = eval_cmds(script, keys, args);
-        let req = Request::Eval {
-            by_sha: by_sha.get_packed_command(),
-            whole: whole.get_packed_command(),
-        };
-        link::one(self.link.call(req).await?)
+        self.link.call(Request::Eval { by_sha, whole }).await
     }
 
-    /// Any one command, under the deadline.
+    /// Any one command, under the deadline. A server error reply is
+    /// `Fault::Server` and counts as a fault.
     pub async fn query(&self, cmd: redis::Cmd) -> Result<Value, Fault> {
-        link::one(
-            self.link
-                .call(Request::One(cmd.get_packed_command()))
-                .await?,
-        )
+        self.link.call(Request::One(cmd)).await
     }
 
     /// A pipeline in one round trip, under the deadline — D3's 100 ms load
-    /// publish is one of these. Any command's error fails the call. Not for
-    /// `MULTI` pipelines (`Fault::Server`).
+    /// publish is one of these. It costs its length and its bytes against the
+    /// queue; past `max_pipeline_len` or `max_request_bytes` it is
+    /// `Fault::TooLarge`. Commands marked `.ignore()` are left out of the
+    /// result, as `Pipeline::query_async` does; any command's error fails the
+    /// call (and counts as a fault). Not for `MULTI` pipelines.
     pub async fn pipeline(&self, pipe: redis::Pipeline) -> Result<Vec<Value>, Fault> {
         if pipe.is_transaction() {
             return Err(Fault::Server("transactions unsupported".to_owned()));
@@ -319,29 +343,23 @@ impl Remote {
         if pipe.is_empty() {
             return Ok(Vec::new());
         }
-        let req = Request::Many {
-            bytes: pipe.get_packed_pipeline(),
-            replies: pipe.len(),
-        };
-        self.link
-            .call(req)
-            .await?
-            .into_iter()
-            .map(|r| r.map_err(|e| Fault::Server(e.code)))
-            .collect()
+        match self.link.call(Request::Many(pipe)).await? {
+            Value::Array(values) => Ok(values),
+            _ => Err(parse_err("pipeline")),
+        }
     }
 
     /// Queues a release script — `EVAL`, sent whole so a lost script cache
     /// cannot reorder it — ahead of every command submitted after this
     /// returns, and does not wait for it (TS `void evalScript(...)`).
     ///
-    /// `idempotent` says the script is safe to run twice (a named gauge
+    /// `idempotent` asserts the script is safe to run twice (a named gauge
     /// slot; a token compare-and-delete): such a release is kept across a
-    /// reconnect, and queued even while disconnected, to be written first on
-    /// the next connection. A non-idempotent one (unnamed `GAUGE_RELEASE`) is
-    /// refused while disconnected and not replayed.
+    /// reconnect — replayed even if it had run and only its reply was lost —
+    /// and queued even while disconnected. A non-idempotent one (unnamed
+    /// `GAUGE_RELEASE`) is refused while disconnected and never replayed.
     ///
-    /// On refusal (queue full, closing, or down) the release is counted in
+    /// On refusal (queue full, closing, down) the release is counted in
     /// [`Remote::releases_dropped`] and logged, and what it would have
     /// released is held until its TTL.
     pub fn eval_detached(
@@ -352,7 +370,7 @@ impl Remote {
         idempotent: bool,
     ) -> Result<(), Refused> {
         let (_, whole) = eval_cmds(script, keys, args);
-        self.link.release(whole.get_packed_command(), idempotent)
+        self.link.release(whole, idempotent)
     }
 
     /// Releases not delivered since boot (refused, or lost with a retired
@@ -361,19 +379,31 @@ impl Remote {
         self.link.releases_dropped()
     }
 
-    /// Commands queued or awaiting replies on the command connection.
+    /// Commands queued or awaiting replies on the command connection (a
+    /// pipeline counts its length).
     pub fn outstanding(&self) -> usize {
         self.link.outstanding()
     }
 
+    /// Request bytes queued or awaiting replies.
+    pub fn outstanding_bytes(&self) -> usize {
+        self.link.outstanding_bytes()
+    }
+
     /// Detached [`GAUGE_RELEASE`](scripts::GAUGE_RELEASE): the concurrency
-    /// release D3 sends at stream end. Named slots are idempotent.
+    /// release D3 sends at stream end. A named release (`ZREM` of that
+    /// holder) is idempotent and replay-safe; an unnamed one (`ZPOPMIN`) is
+    /// not. `Some("")` is the unnamed sentinel on the wire and is refused
+    /// ([`Refused::Invalid`], counted), as the `Coord` gauge refuses it.
     pub fn gauge_release_detached(
         &self,
         name: &str,
         now: f64,
         holder: Option<&str>,
     ) -> Result<(), Refused> {
+        if holder == Some("") {
+            return Err(self.link.release_invalid());
+        }
         self.eval_detached(
             &scripts::GAUGE_RELEASE,
             &[key("g", name)],
@@ -732,15 +762,17 @@ impl Remote {
         self.query(cmd).await.map(drop)
     }
 
-    /// `SCAN` + `UNLINK` of every `omni:kv:<prefix>*`. Each page and each
-    /// `UNLINK` is one bounded call.
+    /// `SCAN` + `UNLINK` of every `omni:kv:<prefix>*`, the whole operation
+    /// under one `command_timeout` (TS wraps it in one deadline too): every
+    /// page and every `UNLINK` gets what is left of it. Up to 1 000 000 keys.
     pub async fn kv_del_prefix(&self, prefix: &str) -> Result<(), Fault> {
+        let deadline = tokio::time::Instant::now() + self.link.opts.command_timeout;
         let pattern = format!("{}*", glob_escape(&key("kv", prefix)));
-        let found = link::scan(&self.link, &pattern).await?;
+        let found = link::scan(&self.link, &pattern, deadline).await?;
         for chunk in found.chunks(512) {
             let mut unlink = redis::cmd("UNLINK");
             unlink.arg(chunk);
-            self.query(unlink).await?;
+            self.link.call_until(Request::One(unlink), deadline).await?;
         }
         Ok(())
     }

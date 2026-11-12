@@ -14,16 +14,26 @@
 //! future is polled: creating `coord.window_claim(..)` and dropping it, or
 //! holding it unpolled, records nothing, and two futures are issued in the
 //! order they are first polled, not the order they were created. Within that:
-//! - `MemoryCoord` completes every call on its first poll (no yield);
-//! - `RedisCoord` submits the command to the connection's single ordered
-//!   queue on its first poll, before the first yield; the server executes
-//!   one connection's commands in queue order, each script atomically. So
-//!   among calls on one coordinator, first-polled-first-executed.
+//! - `MemoryCoord` applies every call's effect on its first poll; all but a
+//!   contended `lock` also complete there (a contended lock waits).
+//! - `RedisCoord` submits a command to the connection's single ordered queue
+//!   on its first poll, and the queue is written to the server in order;
+//!   the server executes one connection's commands in order, each script
+//!   atomically. Two exceptions: a call refused at submission (queue full,
+//!   disconnected — answered from memory or as a fault) is not executed at
+//!   all; and an `EVALSHA` answered `NOSCRIPT` is resubmitted as `EVAL`
+//!   behind whatever other callers queued meanwhile, so its effect may land
+//!   after theirs. A call's effect is ordered before the *same caller's*
+//!   later calls, since the caller has not returned.
 //! - The non-async release paths (`Coord::unlock_detached`,
 //!   `redis::Remote::{gauge_release_detached, lock_release_detached,
-//!   eval_detached}`) are queued when the call returns: a release whose call
-//!   has returned is executed before any command first polled after it.
-//!   This is the guarantee a stream-end concurrency release relies on.
+//!   eval_detached}`) are queued when the call returns `Ok`, and are sent as
+//!   `EVAL` (never `NOSCRIPT`): a release whose call has returned `Ok` is
+//!   executed before any command first polled after it, on that connection.
+//!   This is the guarantee a stream-end concurrency release relies on. A
+//!   release that returns `Err(Refused)` is not executed (counted, logged,
+//!   held until its TTL); one queued when its connection is retired is
+//!   replayed on the next only if idempotent.
 //! - Cancelling an awaited Redis call after its first poll does not
 //!   withdraw the command; it may still execute.
 //!
