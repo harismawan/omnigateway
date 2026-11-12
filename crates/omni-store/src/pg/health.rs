@@ -14,18 +14,32 @@
 //!
 //! At COMMIT, only an answer that *positively establishes* non-commit is
 //! treated as such ([`commit_rejection`]): an `ErrorResponse` of severity
-//! ERROR (not FATAL or PANIC, which end the session) whose SQLSTATE says
-//! the transaction was rejected: class 40 (serialization failure,
-//! deadlock: retryable), or a deferred constraint checked at COMMIT
-//! (class 23: a refusal of the values, as TS's call throws). Everything
-//! else at COMMIT is [`StoreError::UncertainCommit`]: a connection-level
-//! error (closed, I/O, unexpected message), any FATAL/PANIC answer, the
-//! shutdown codes 57P01/57P02/57P03 whatever their severity, and any other
-//! code. The server may have committed before sending any of those, and
-//! re-applying a non-idempotent mutation (`failures + 1`) would count it
-//! twice. A connection closed before COMMIT could even be queued lands
-//! here too: the client cannot tell it from a lost acknowledgement, so it
-//! is conservatively uncertain, never retried.
+//! ERROR (not FATAL or PANIC, which end the session) whose SQLSTATE is on
+//! an explicit allowlist:
+//! - [`COMMIT_RETRYABLE`], `40001` (serialization failure) and `40P01`
+//!   (deadlock detected): the two codes PostgreSQL's "Serialization
+//!   Failure Handling" (PostgreSQL 17 docs, §13.5) names for retrying the
+//!   whole transaction (40001 always, 40P01 "advisable"); both abort and
+//!   roll back the transaction that receives them. Retried, through the
+//!   same list in the writers' shared classifier, so the label here and
+//!   the retry there cannot disagree;
+//! - class 23, a deferred constraint checked at COMMIT: a refusal of the
+//!   values, as TS's call throws. Not retried.
+//!
+//! Everything else at COMMIT is [`StoreError::UncertainCommit`]: a
+//! connection-level error (closed, I/O, unexpected message), any
+//! FATAL/PANIC answer, and every other code. That includes the rest of
+//! class 40: `40003` (statement completion unknown) says in so many words
+//! that the outcome is unknown, and `40000`/`40002` carry no documented
+//! rollback-and-retry contract. It includes the shutdown codes
+//! 57P01/57P02/57P03, `57014` (a statement timeout during COMMIT) and
+//! anything the client does not recognise. The server may have committed
+//! before sending any of those, and re-applying a non-idempotent mutation
+//! (`failures + 1`) would count it twice; treating a real rollback as
+//! uncertain costs at most one reported, un-retried mutation. A connection
+//! closed before COMMIT could even be queued lands here too: the client
+//! cannot tell it from a lost acknowledgement, so it is conservatively
+//! uncertain, never retried.
 //!
 //! Frozen TS does not re-apply either: `updateHealth` awaits `sql.begin`
 //! and has no retry loop, so a lost COMMIT acknowledgement makes it throw
@@ -77,11 +91,22 @@ fn refusal(e: &tokio_postgres::Error) -> Option<String> {
     })
 }
 
+/// The SQLSTATEs that, at severity ERROR, establish that a COMMIT rolled
+/// back and may be retried: serialization failure and deadlock, the pair
+/// PostgreSQL's documentation names for retrying a transaction (§13.5).
+/// The writers' shared retry classifier (`writer::task::transient`)
+/// retries exactly these from class 40, by this list, so a
+/// [`CommitRejection::Retryable`] is always retried.
+pub(crate) const COMMIT_RETRYABLE: [SqlState; 2] = [
+    SqlState::T_R_SERIALIZATION_FAILURE,
+    SqlState::T_R_DEADLOCK_DETECTED,
+];
+
 /// How a COMMIT's error is to be read: what positively establishes that
 /// the transaction did not commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitRejection {
-    /// Class 40 at severity ERROR: rolled back, retry.
+    /// A [`COMMIT_RETRYABLE`] code at severity ERROR: rolled back, retry.
     Retryable,
     /// A deferred constraint checked at COMMIT (class 23) at severity
     /// ERROR: rolled back, the values are refused.
@@ -114,20 +139,15 @@ fn classify_commit(
     if !error {
         return None;
     }
-    // The shutdown codes are never rollback evidence, whatever the severity.
-    if [
-        SqlState::ADMIN_SHUTDOWN,
-        SqlState::CRASH_SHUTDOWN,
-        SqlState::CANNOT_CONNECT_NOW,
-    ]
-    .contains(code)
-    {
-        return None;
-    }
-    match code.code().get(..2) {
-        Some("40") => Some(CommitRejection::Retryable),
-        Some("23") => Some(CommitRejection::Refused),
-        _ => None,
+    // An allowlist, not a class: the rest of class 40 (40003 "statement
+    // completion unknown" above all), the shutdown codes and anything
+    // unrecognised are not rollback evidence.
+    if COMMIT_RETRYABLE.contains(code) {
+        Some(CommitRejection::Retryable)
+    } else if code.code().starts_with("23") {
+        Some(CommitRejection::Refused)
+    } else {
+        None
     }
 }
 
@@ -252,7 +272,7 @@ mod tests {
     #[test]
     fn only_an_error_level_rejection_is_evidence_of_rollback() {
         use CommitRejection::{Refused, Retryable};
-        let cases: [(Option<Severity>, &str, SqlState, Option<CommitRejection>); 14] = [
+        let cases: [(Option<Severity>, &str, SqlState, Option<CommitRejection>); 18] = [
             (
                 Some(Severity::Error),
                 "ERROR",
@@ -315,6 +335,32 @@ mod tests {
                 SqlState::CANNOT_CONNECT_NOW,
                 None,
             ),
+            // The rest of class 40 is not on the allowlist: completion
+            // unknown above all, and the codes with no retry contract.
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::T_R_STATEMENT_COMPLETION_UNKNOWN,
+                None,
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::TRANSACTION_ROLLBACK,
+                None,
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::T_R_INTEGRITY_CONSTRAINT_VIOLATION,
+                None,
+            ),
+            (
+                Some(Severity::Error),
+                "ERROR",
+                SqlState::from_code("40999"),
+                None,
+            ),
             // Anything else is unknown, including a statement timeout at
             // COMMIT and codes the client cannot interpret.
             (
@@ -344,6 +390,35 @@ mod tests {
                 want,
                 "{parsed:?} {raw} {code:?}"
             );
+        }
+    }
+
+    /// The label and the behaviour agree: across every class-40 code (and
+    /// the shutdown and timeout codes the writer retries before COMMIT), a
+    /// COMMIT error is labelled `Retryable` exactly when the writers'
+    /// shared classifier retries its code. Anything labelled otherwise
+    /// becomes `UncertainCommit` or `Refused` and never reaches the
+    /// classifier.
+    #[test]
+    fn the_commit_retry_label_matches_the_writer_retry_classifier() {
+        let codes = [
+            "40000", "40001", "40002", "40003", "40P01", "40999", "57P01", "57P03", "57014",
+            "55P03", "23514",
+        ];
+        for code in codes {
+            let code = SqlState::from_code(code);
+            let label = classify_commit(Some(Severity::Error), "ERROR", &code);
+            let retried = crate::writer::transient_sqlstate(&code);
+            if label == Some(CommitRejection::Retryable) {
+                assert!(retried, "{code:?} is labelled retryable but not retried");
+            }
+            if code.code().starts_with("40") {
+                assert_eq!(
+                    label == Some(CommitRejection::Retryable),
+                    retried,
+                    "{code:?}: class-40 label and retry disagree"
+                );
+            }
         }
     }
 }

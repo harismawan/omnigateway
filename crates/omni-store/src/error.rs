@@ -25,9 +25,11 @@ pub enum StoreError {
     /// that call alone. Not transient; retrying changes nothing.
     #[error("refused: {0}")]
     Refused(String),
-    /// A COMMIT was sent and its answer never arrived (the connection went
-    /// with it): the transaction may or may not have committed. Never
-    /// retried blindly; a non-idempotent write would apply twice.
+    /// A COMMIT whose outcome is unknown: its answer never arrived (the
+    /// connection went with it), or was an error that does not establish a
+    /// rollback (see `pg::health`). The transaction may or may not have
+    /// committed. Never retried blindly; a non-idempotent write would apply
+    /// twice.
     #[error("commit outcome unknown: {0}")]
     UncertainCommit(String),
     /// A caller-supplied closure (a health mutation) panicked; whatever

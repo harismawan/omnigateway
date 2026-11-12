@@ -53,6 +53,8 @@ pub use health::{
     HealthCommitted, HealthHandle, HealthMutation, HealthStats, HealthWriter, HealthWriterConfig,
     HealthWriterError, Observed,
 };
+#[cfg(test)]
+pub(crate) use task::transient_sqlstate;
 pub use task::{
     Barrier, BarrierError, Writer, WriterConfig, WriterHandle, WriterStats, queue_slot_bytes,
 };

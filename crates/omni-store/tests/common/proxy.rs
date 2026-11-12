@@ -1,5 +1,5 @@
 //! A Postgres wire-protocol TCP proxy that can fault the next COMMIT in one
-//! of three ways ([`Fault`]), and refuse new connections.
+//! of four ways ([`Fault`]), and refuse new connections.
 //!
 //! Plain `NoTls` connections only: the client's first packet is the startup
 //! message (an `SSLRequest`, if one comes, is forwarded as any other
@@ -22,6 +22,10 @@ pub enum Fault {
     /// Do not forward it; close both sides. The server sees the session end
     /// inside the transaction and rolls it back.
     DropBeforeCommit = 3,
+    /// Forward it; swallow the server's answer (so it committed); send the
+    /// client an `ERROR 40003` (statement completion unknown)
+    /// ErrorResponse, close.
+    CompletionUnknownAfterCommit = 4,
 }
 
 #[derive(Debug, Default)]
@@ -108,14 +112,14 @@ async fn read_exact_or_eof(r: &mut tokio::net::tcp::OwnedReadHalf, buf: &mut [u8
     r.read_exact(buf).await.is_ok()
 }
 
-/// `ErrorResponse` with severity FATAL, SQLSTATE 57P01.
-fn fatal_admin_shutdown() -> Vec<u8> {
+/// An `ErrorResponse` with this severity (`S` and `V`), SQLSTATE, message.
+fn error_response(severity: &str, code: &str, message: &str) -> Vec<u8> {
     let mut fields = Vec::new();
     for (t, v) in [
-        (b'S', "FATAL"),
-        (b'V', "FATAL"),
-        (b'C', "57P01"),
-        (b'M', "terminating connection due to administrator command"),
+        (b'S', severity),
+        (b'V', severity),
+        (b'C', code),
+        (b'M', message),
     ] {
         fields.push(t);
         fields.extend_from_slice(v.as_bytes());
@@ -201,12 +205,23 @@ async fn pump(client: TcpStream, server: TcpStream, state: Arc<State>) {
             // The server has answered the COMMIT: it committed (or said why
             // not). The client never hears which.
             state.fired.fetch_add(1, Ordering::SeqCst);
-            if f == Fault::FatalAfterCommit as u8 {
-                cw.lock()
-                    .await
-                    .write_all(&fatal_admin_shutdown())
-                    .await
-                    .ok();
+            let answer = if f == Fault::FatalAfterCommit as u8 {
+                Some(error_response(
+                    "FATAL",
+                    "57P01",
+                    "terminating connection due to administrator command",
+                ))
+            } else if f == Fault::CompletionUnknownAfterCommit as u8 {
+                Some(error_response(
+                    "ERROR",
+                    "40003",
+                    "statement completion unknown",
+                ))
+            } else {
+                None
+            };
+            if let Some(answer) = answer {
+                cw.lock().await.write_all(&answer).await.ok();
             }
             break;
         }

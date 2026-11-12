@@ -644,26 +644,32 @@ pub(crate) fn transient(e: &StoreError) -> bool {
         }
         StoreError::Conflict(_) | StoreError::Pool(_) => true,
         StoreError::Postgres(e) => {
-            use tokio_postgres::error::SqlState;
             // A lost connection or a socket error is transient; a client-side
             // conversion error (no SQLSTATE, not I/O) is a bug, not retried.
             let io = std::error::Error::source(e).is_some_and(|s| s.is::<std::io::Error>());
-            e.is_closed()
-                || io
-                || e.code().is_some_and(|c| {
-                    [
-                        SqlState::T_R_SERIALIZATION_FAILURE,
-                        SqlState::T_R_DEADLOCK_DETECTED,
-                        SqlState::LOCK_NOT_AVAILABLE,
-                        SqlState::QUERY_CANCELED,
-                        SqlState::ADMIN_SHUTDOWN,
-                        SqlState::CANNOT_CONNECT_NOW,
-                    ]
-                    .contains(c)
-                })
+            e.is_closed() || io || e.code().is_some_and(transient_sqlstate)
         }
         _ => false,
     }
+}
+
+/// The SQLSTATEs [`transient`] retries. From class 40, exactly the COMMIT
+/// allowlist ([`crate::pg::health::COMMIT_RETRYABLE`]: serialization
+/// failure, deadlock); the rest are errors a statement *before* COMMIT
+/// returns (a lock or statement timeout, a server shutting down or not yet
+/// accepting), which cannot have committed. A COMMIT's own error reaches
+/// this only when it is on that allowlist: the health path turns every
+/// other one into `UncertainCommit` or `Refused` first.
+pub(crate) fn transient_sqlstate(c: &tokio_postgres::error::SqlState) -> bool {
+    use tokio_postgres::error::SqlState;
+    crate::pg::health::COMMIT_RETRYABLE.contains(c)
+        || [
+            SqlState::LOCK_NOT_AVAILABLE,
+            SqlState::QUERY_CANCELED,
+            SqlState::ADMIN_SHUTDOWN,
+            SqlState::CANNOT_CONNECT_NOW,
+        ]
+        .contains(c)
 }
 
 /// Where a batch goes: the SQLite connection the writer owns (`None` only

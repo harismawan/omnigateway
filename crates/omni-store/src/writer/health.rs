@@ -28,16 +28,25 @@
 //! - `written`: committed;
 //! - `refused`: the database refused its values (no such credential, a
 //!   value its columns cannot hold); not retried;
-//! - `failed`: a failure known to have rolled back (lock or statement
-//!   timeout, serialization failure or deadlock, a connection lost before
-//!   COMMIT was sent, a COMMIT the server answered with an error), after
-//!   the retries (`retried` counts the extra attempts), or a permanent error;
-//! - `uncertain`: COMMIT was sent and its answer lost with the connection.
-//!   It may have committed, so it is **never re-applied** (a `+1` would
-//!   count twice). The row is re-read once and reported to the sink as
-//!   [`HealthCommitted::Uncertain`] with what the database now holds. That is
-//!   what frozen TS amounts to on the same fault: `updateHealth` throws,
-//!   `persistHealth`'s callers log it, nothing re-applies the transition;
+//! - `failed`: a failure known to have rolled back (a lock or statement
+//!   timeout or a lost connection before COMMIT; at COMMIT, only a
+//!   serialization failure `40001` or deadlock `40P01` at severity ERROR),
+//!   after the retries (`retried` counts the extra attempts), or a
+//!   permanent error;
+//! - `uncertain`: COMMIT's outcome is unknown: its answer was lost with
+//!   the connection, or was any error not on the rollback allowlist
+//!   (FATAL/PANIC, `40003` statement completion unknown, any other code;
+//!   see `pg::health`). It may have committed, so it is **never
+//!   re-applied** (a `+1` would count twice). The row is re-read once and
+//!   reported to the sink as [`HealthCommitted::Uncertain`] with what that
+//!   read saw. Frozen TS does not re-apply either: `updateHealth` has no
+//!   retry loop and throws once. What happens to that throw depends on the
+//!   `persistHealth` call site in `apps/gateway/src/dispatch/index.ts`:
+//!   only the post-error-event write (821) catches and logs it; the success
+//!   writes (750, 866) turn it into that attempt's failure; the half-open
+//!   probe (586) and failure (940) writes propagate it out of `run()`. The
+//!   writer matches the store-level rule (no re-application), not those
+//!   call-site consequences, which belong to the gateway integration;
 //! - `panicked`: the mutation closure panicked (an arithmetic overflow, say).
 //!   Its transaction rolled back as it unwound; the next mutation proceeds;
 //! - `abandoned`: still queued or in flight when the worker itself ended
@@ -49,7 +58,11 @@
 //!
 //! Admission is settled before the counters are read. Each `send` registers
 //! itself in flight *before* it looks at the closing flag, and leaves only
-//! after it has accounted for its job (`enqueued` or `dropped`). `close`
+//! after it has accounted for its job (`enqueued` or `dropped`). Leaving is
+//! a guard's drop, so it happens on an unwind too, and a rejected job is
+//! dropped only after the sender has left: a destructor the closure's
+//! captures run (it may be the last reference) cannot keep `close`
+//! waiting, whether it panics or blocks. `close`
 //! sets the flag, then waits (asynchronously) for the in-flight count to
 //! reach zero, and only then stops and joins the worker. The two sides use
 //! the store-then-load pattern on sequentially consistent atomics, so either
@@ -158,7 +171,7 @@ pub struct HealthStats {
     pub refused: u64,
     /// Not committed: known rolled back, after the retries.
     pub failed: u64,
-    /// COMMIT sent, answer lost: not re-applied, re-read and reported.
+    /// COMMIT's outcome unknown: not re-applied, re-read and reported.
     pub uncertain: u64,
     /// The mutation closure panicked; rolled back.
     pub panicked: u64,
@@ -227,6 +240,25 @@ impl Counters {
     }
 }
 
+/// One sender's registration in `in_flight`, released on drop, so an unwind
+/// out of `send` cannot leave `close` waiting for a sender that is gone.
+struct Admission<'a>(&'a Counters);
+
+impl<'a> Admission<'a> {
+    fn enter(c: &'a Counters) -> Self {
+        c.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self(c)
+    }
+}
+
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        if self.0.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.settled.notify_waiters();
+        }
+    }
+}
+
 struct Job {
     credential_id: String,
     model: String,
@@ -252,31 +284,39 @@ impl HealthHandle {
     /// Queues `apply` for (`credential_id`, `model`). `false`: dropped (queue
     /// full, writer closing or closed), counted. Nothing here but a flag
     /// check and a `try_send`.
+    ///
+    /// A rejected `apply` is dropped last, after the rejection is counted
+    /// and the admission released: dropping it may run a destructor of
+    /// whatever the closure captured (it may hold the last reference), and
+    /// such a destructor, panicking or blocking, must not hold up `close`.
     pub fn send(&self, credential_id: &str, model: &str, apply: HealthMutation) -> bool {
-        let c = &self.counters;
+        let c = &*self.counters;
         // Register first, then look at the flag (see the module docs): a
         // `close` that set the flag before this load is refused below; one
         // that sets it after waits for this send to leave.
-        c.in_flight.fetch_add(1, Ordering::SeqCst);
-        let ok = if c.closing.load(Ordering::SeqCst) {
-            false
+        let admission = Admission::enter(c);
+        let rejected = if c.closing.load(Ordering::SeqCst) {
+            Some(apply)
         } else {
             let job = Job {
                 credential_id: credential_id.to_owned(),
                 model: model.to_owned(),
                 apply,
             };
-            let ok = self.tx.try_send(job).is_ok();
-            #[cfg(test)]
-            if ok {
-                c.hooks.after_publish();
+            match self.tx.try_send(job) {
+                Ok(()) => {
+                    #[cfg(test)]
+                    c.hooks.after_publish();
+                    None
+                }
+                // Keep only the closure; the job's strings drop here.
+                Err(e) => Some(e.into_inner().apply),
             }
-            ok
         };
+        let ok = rejected.is_none();
         Counters::bump(if ok { &c.enqueued } else { &c.dropped });
-        if c.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
-            c.settled.notify_waiters();
-        }
+        drop(admission);
+        drop(rejected);
         ok
     }
 
@@ -558,6 +598,11 @@ mod hooks {
             self.cv.notify_all();
         }
 
+        /// Parks the calling thread until [`Self::release`].
+        pub(super) fn park_here(&self) {
+            self.park();
+        }
+
         fn park(&self) {
             let mut s = self.state.lock().expect("pause");
             s.0 = true;
@@ -626,6 +671,21 @@ mod admission_tests {
         })
     }
 
+    /// Polls `close`'s future directly, several times, while a sender is
+    /// parked between publishing and accounting: each poll must be
+    /// `Pending`. Polling it here (not spawning it and sleeping) proves the
+    /// future reached its wait, whatever the scheduler does.
+    async fn assert_pending_while_parked<F: std::future::Future>(mut close: std::pin::Pin<&mut F>) {
+        for i in 0..5 {
+            let polled = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(close.as_mut().poll(cx).is_pending())
+            })
+            .await;
+            assert!(polled, "close waits for the paused sender (poll {i})");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// The window the review names: a sender has published its job but not
     /// yet accounted for it when `close` runs. `close` waits for that
     /// sender, so the final counters are exact. Normal close.
@@ -641,12 +701,11 @@ mod admission_tests {
             .await
             .expect("parked");
         // The job is queued; the sender has not counted it yet.
-        let closing = tokio::spawn(writer.close());
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(!closing.is_finished(), "close waits for the paused sender");
+        let mut closing = Box::pin(writer.close());
+        assert_pending_while_parked(closing.as_mut()).await;
         paused.release();
         assert!(sender.join().expect("sender"), "the send was accepted");
-        let stats = closing.await.expect("join").expect("close");
+        let stats = closing.await.expect("close");
         assert_eq!((stats.enqueued, stats.refused), (1, 1), "{stats:?}");
         assert_eq!(stats.enqueued, stats.resolved(), "{stats:?}");
     }
@@ -665,12 +724,11 @@ mod admission_tests {
         tokio::task::spawn_blocking(move || p.wait_until_parked())
             .await
             .expect("parked");
-        let closing = tokio::spawn(writer.close());
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(!closing.is_finished(), "close waits for the paused sender");
+        let mut closing = Box::pin(writer.close());
+        assert_pending_while_parked(closing.as_mut()).await;
         paused.release();
         assert!(sender.join().expect("sender"));
-        let err = closing.await.expect("join").expect_err("the worker died");
+        let err = closing.await.expect_err("the worker died");
         assert_eq!(
             (
                 err.stats.enqueued,
@@ -694,5 +752,101 @@ mod admission_tests {
         assert!(!h.send("ghost", "m", ghost()));
         let stats = closing.await.expect("close");
         assert_eq!((stats.enqueued, stats.dropped), (0, 1));
+    }
+
+    /// Panics when dropped: a value a mutation closure captures.
+    struct Bomb;
+
+    impl Drop for Bomb {
+        fn drop(&mut self) {
+            panic!("a captured value's destructor panicked");
+        }
+    }
+
+    /// A send the full queue rejects owns the only reference to a closure
+    /// whose captured value panics on drop. That panic reaches the producer
+    /// (caught here), but only after the rejection is counted and the
+    /// admission released: `close` still completes, and the counters add up.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_panicking_destructor_in_a_rejected_send_does_not_strand_close() {
+        let (_dir, store) = store().await;
+        let writer = HealthWriter::spawn(
+            store,
+            HealthWriterConfig {
+                capacity: 1,
+                ..HealthWriterConfig::default()
+            },
+        );
+        let h = writer.handle();
+        // Current-thread runtime, no yield since the spawn: the worker has
+        // not run, so this fills the queue.
+        assert!(h.send("ghost", "m", ghost()));
+        let bomb = Bomb;
+        let rejected: HealthMutation = Arc::new(move |c| {
+            let _held = &bomb;
+            ghost()(c)
+        });
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.send("ghost", "m", rejected)
+        }));
+        let payload = caught.expect_err("the destructor's panic reaches the producer");
+        assert!(
+            panic_message(payload).contains("destructor panicked"),
+            "the Bomb's panic"
+        );
+        let stats = tokio::time::timeout(Duration::from_secs(5), writer.close())
+            .await
+            .expect("close is not stranded by the rejected send")
+            .expect("close");
+        assert_eq!(h.counters.in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            (
+                stats.enqueued,
+                stats.dropped,
+                stats.refused,
+                stats.resolved()
+            ),
+            (1, 1, 1, 1),
+            "{stats:?}"
+        );
+    }
+
+    /// Blocks in its destructor until released, saying when it got there.
+    struct Stall(Arc<hooks::Pause>);
+
+    impl Drop for Stall {
+        fn drop(&mut self) {
+            self.0.park_here();
+        }
+    }
+
+    /// A rejected send whose closure's captured value *blocks* in its
+    /// destructor: the rejection is already counted and the admission
+    /// released when that destructor runs, so `close` completes while the
+    /// sender is still stuck in it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_blocking_destructor_in_a_rejected_send_does_not_hold_close() {
+        let (_dir, store) = store().await;
+        let writer = HealthWriter::spawn(store, HealthWriterConfig::default());
+        let h = writer.handle();
+        let closing = writer.close();
+        let stall = Arc::new(hooks::Pause::default());
+        let held = Stall(Arc::clone(&stall));
+        let rejected: HealthMutation = Arc::new(move |c| {
+            let _held = &held;
+            ghost()(c)
+        });
+        let sender = std::thread::spawn(move || h.send("ghost", "m", rejected));
+        let s = Arc::clone(&stall);
+        tokio::task::spawn_blocking(move || s.wait_until_parked())
+            .await
+            .expect("the destructor is running");
+        let stats = tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("close does not wait for the rejected job's destructor")
+            .expect("close");
+        assert_eq!((stats.enqueued, stats.dropped), (0, 1), "{stats:?}");
+        stall.release();
+        assert!(!sender.join().expect("sender"), "refused");
     }
 }
