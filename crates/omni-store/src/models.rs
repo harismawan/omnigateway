@@ -186,13 +186,27 @@ pub fn list(conn: &Connection) -> Result<Vec<Result<VirtualModel, ModelRowError>
 }
 
 fn read_model(r: &rusqlite::Row<'_>, id: &str) -> Result<VirtualModel, String> {
-    let raw = row::json(r, T, "targets").map_err(|e| e.to_string())?;
+    let targets = row::text(r, T, "targets").map_err(|e| e.to_string())?;
+    let strategy = row::text(r, T, "strategy").map_err(|e| e.to_string())?;
+    let is_alias = row::flag(r, "is_alias").map_err(|e| e.to_string())?;
+    model_from_parts(id, &targets, &strategy, is_alias)
+}
+
+/// One `virtual_models` row from its stored cells, whichever backend held it.
+pub(crate) fn model_from_parts(
+    id: &str,
+    targets: &str,
+    strategy: &str,
+    is_alias: bool,
+) -> Result<VirtualModel, String> {
+    let raw: serde_json::Value = serde_json::from_str(targets)
+        .map_err(|e| format!("unreadable row: {T}.targets: not JSON ({e})"))?;
     let targets = serde_json::from_value(raw)
         .map_err(|e| format!("virtual_models.targets: not a Target[] ({e})"))?;
     Ok(VirtualModel {
         targets,
-        strategy: Strategy::parse(&row::text(r, T, "strategy").map_err(|e| e.to_string())?),
-        is_alias: row::flag(r, "is_alias").map_err(|e| e.to_string())?,
+        strategy: Strategy::parse(strategy),
+        is_alias,
         id: id.to_owned(),
     })
 }

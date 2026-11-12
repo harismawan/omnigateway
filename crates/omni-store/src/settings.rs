@@ -340,7 +340,14 @@ pub fn write_operator_raw(conn: &Connection, raw: &str) -> Result<(), StoreError
 
 /// `ConfigRepo.putSettings`: merge the validated patch and commit one row.
 pub fn put(conn: &Connection, patch: &Value) -> Result<Value, StoreError> {
-    let mut next = get(conn)?.json;
+    let (next, raw) = merged(get(conn)?.json, patch);
+    conn.execute("INSERT INTO settings(key,value) VALUES ('settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&raw])?;
+    Ok(next)
+}
+
+/// `{ ...current, ...patch, weights: { ...current.weights, ...patch.weights } }`
+/// and its `JSON.stringify`, as `putSettings` stores it on either backend.
+pub(crate) fn merged(mut next: Value, patch: &Value) -> (Value, String) {
     if let (Some(current), Some(patch)) = (next.as_object_mut(), patch.as_object()) {
         for (key, value) in patch {
             if key == "weights" {
@@ -357,8 +364,7 @@ pub fn put(conn: &Connection, patch: &Value) -> Result<Value, StoreError> {
     }
     let raw =
         omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&next)).expect("settings JSON");
-    conn.execute("INSERT INTO settings(key,value) VALUES ('settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&raw])?;
-    Ok(next)
+    (next, raw)
 }
 
 /// `ConfigRepo.getSettings`.

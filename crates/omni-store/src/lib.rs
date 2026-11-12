@@ -1,10 +1,11 @@
-//! The SQLite store: migrations shared with the TS build, and the reads the
-//! gateway builds its in-memory snapshot from.
+//! The SQLite and Postgres stores: migrations shared with the TS build, and
+//! the reads the gateway builds its in-memory snapshot from.
 //!
 //! A database written by either build is opened by the other and continued
 //! from its migration id. Nothing here runs on the request path; the gateway
 //! reads a [`SnapshotData`] at boot and on change, and serves from memory.
 
+mod backend;
 pub mod credentials;
 mod error;
 mod js;
@@ -14,6 +15,7 @@ pub mod keys;
 pub use omni_ratelimit::limits;
 pub mod migrate;
 pub mod models;
+pub mod pg;
 pub mod quota;
 pub mod rollup;
 mod row;
@@ -22,6 +24,7 @@ pub mod usage;
 mod vocab;
 pub mod writer;
 
+pub use backend::{Engine, OwnedKeyEdit, Store, StoreConfig};
 pub use credentials::{Credential, CredentialHealth, CredentialSecrets, Secret};
 pub use error::StoreError;
 pub use keys::ApiKey;

@@ -150,6 +150,10 @@ pub struct WriterStats {
     /// Health rows the foreign key refused: no such credential, which TS's
     /// `updateHealth` would also have thrown on.
     pub health_refused: u64,
+    /// Log events refused for their values (Postgres: a number its column
+    /// cannot hold) while the rest of their batch committed. Not persisted:
+    /// each is also counted in `failed`, never in `written`.
+    pub refused: u64,
     /// Committed completions the commit sink had no room for.
     pub sink_dropped: u64,
     /// Seed results the commit sink had no room for.
@@ -173,6 +177,7 @@ struct Counters {
     written: AtomicU64,
     failed: AtomicU64,
     health_refused: AtomicU64,
+    refused: AtomicU64,
     sink_dropped: AtomicU64,
     seeds_dropped: AtomicU64,
 }
@@ -190,6 +195,7 @@ impl Counters {
             written: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             health_refused: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
             sink_dropped: AtomicU64::new(0),
             seeds_dropped: AtomicU64::new(0),
         }
@@ -204,6 +210,7 @@ impl Counters {
             written: self.written.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             health_refused: self.health_refused.load(Ordering::Relaxed),
+            refused: self.refused.load(Ordering::Relaxed),
             sink_dropped: self.sink_dropped.load(Ordering::Relaxed),
             seeds_dropped: self.seeds_dropped.load(Ordering::Relaxed),
         }
@@ -312,11 +319,14 @@ impl Drop for BusyGuard {
 /// barrier's prefix (every event whose producer entered an epoch up to the
 /// barrier's, see `epoch.rs`): `watermark` events, of which `committed +
 /// failed + dropped == watermark`, exactly, whatever was sent meanwhile.
+/// `refused` is the part of `failed` the database refused for its values
+/// while the rest of their batch committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Barrier {
     pub watermark: u64,
     pub committed: u64,
     pub failed: u64,
+    pub refused: u64,
     pub dropped: u64,
 }
 
@@ -536,12 +546,47 @@ impl Writer {
         let (tx, rx) = mpsc::channel(config.capacity.max(1));
         let (shutdown, stop) = oneshot::channel();
         let counters = Arc::new(Counters::new());
-        let task = tokio::spawn(run(conn, rx, stop, config, Arc::clone(&counters)));
+        let task = tokio::spawn(run(
+            Backend::Sqlite(Some(conn)),
+            rx,
+            stop,
+            config,
+            Arc::clone(&counters),
+        ));
         Ok(Self {
             handle: WriterHandle { tx, counters },
             shutdown: Some(shutdown),
             task,
             checkpointer,
+        })
+    }
+
+    /// The same writer over a (migrated) Postgres store: each batch takes a
+    /// pooled connection for its one transaction (`pg_batch.rs`). Batching,
+    /// barriers, seeds, the commit sink and the drop and failure accounting
+    /// are the SQLite writer's, unchanged. `busy_timeout`,
+    /// `checkpoint_every` and `wal_autocheckpoint` are SQLite's and ignored;
+    /// the pool's statement and wait timeouts bound a stalled server instead,
+    /// and a timed-out batch is retried like a busy one.
+    pub fn spawn_postgres(
+        store: crate::pg::PgStore,
+        config: WriterConfig,
+    ) -> Result<Self, StoreError> {
+        let (tx, rx) = mpsc::channel(config.capacity.max(1));
+        let (shutdown, stop) = oneshot::channel();
+        let counters = Arc::new(Counters::new());
+        let task = tokio::spawn(run(
+            Backend::Postgres(store),
+            rx,
+            stop,
+            config,
+            Arc::clone(&counters),
+        ));
+        Ok(Self {
+            handle: WriterHandle { tx, counters },
+            shutdown: Some(shutdown),
+            task,
+            checkpointer: None,
         })
     }
 
@@ -588,18 +633,55 @@ impl Drop for Writer {
 }
 
 /// `SQLITE_BUSY` / `SQLITE_LOCKED`: another connection holds the lock, and
-/// the same batch may well commit a moment later.
-fn transient(e: &StoreError) -> bool {
-    matches!(
-        e,
-        StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _))
-            if matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-    )
+/// the same batch may well commit a moment later. On Postgres the same
+/// class: another writer won a row race ([`StoreError::Conflict`]), a
+/// serialization failure or deadlock, a lock or statement timeout, or no
+/// connection to be had right now (pool wait, a dropped connection).
+pub(crate) fn transient(e: &StoreError) -> bool {
+    match e {
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _)) => {
+            matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+        }
+        StoreError::Conflict(_) | StoreError::Pool(_) => true,
+        StoreError::Postgres(e) => {
+            // A lost connection or a socket error is transient; a client-side
+            // conversion error (no SQLSTATE, not I/O) is a bug, not retried.
+            let io = std::error::Error::source(e).is_some_and(|s| s.is::<std::io::Error>());
+            e.is_closed() || io || e.code().is_some_and(transient_sqlstate)
+        }
+        _ => false,
+    }
 }
 
-/// Owns the connection between batches; `None` only while one is in flight.
+/// The SQLSTATEs [`transient`] retries. From class 40, exactly the COMMIT
+/// allowlist ([`crate::pg::health::COMMIT_RETRYABLE`]: serialization
+/// failure, deadlock); the rest are errors a statement *before* COMMIT
+/// returns (a lock or statement timeout, a server shutting down or not yet
+/// accepting), which cannot have committed. A COMMIT's own error reaches
+/// this only when it is on that allowlist: the health path turns every
+/// other one into `UncertainCommit` or `Refused` first.
+pub(crate) fn transient_sqlstate(c: &tokio_postgres::error::SqlState) -> bool {
+    use tokio_postgres::error::SqlState;
+    crate::pg::health::COMMIT_RETRYABLE.contains(c)
+        || [
+            SqlState::LOCK_NOT_AVAILABLE,
+            SqlState::QUERY_CANCELED,
+            SqlState::ADMIN_SHUTDOWN,
+            SqlState::CANNOT_CONNECT_NOW,
+        ]
+        .contains(c)
+}
+
+/// Where a batch goes: the SQLite connection the writer owns (`None` only
+/// while a batch is in flight on the blocking pool), or a Postgres pool.
+enum Backend {
+    Sqlite(Option<Connection>),
+    Postgres(crate::pg::PgStore),
+}
+
+/// Owns the connection between batches.
 struct Sink {
-    conn: Option<Connection>,
+    backend: Backend,
     node_id: Arc<str>,
     day_offset_minutes: i64,
     counters: Arc<Counters>,
@@ -621,54 +703,68 @@ impl Sink {
     async fn flush_ordered(&mut self, events: Vec<Tagged>) -> Result<u64, StoreError> {
         let mut lost = 0;
         let mut run = Vec::with_capacity(events.len());
-        let mut epochs = std::collections::BTreeMap::new();
+        let mut tags = Vec::with_capacity(events.len());
         for (e, epoch) in events {
             match e {
                 WriteEvent::Seed(q) => {
-                    let l = self.flush(std::mem::take(&mut run)).await?;
-                    resolve(std::mem::take(&mut epochs), l, &self.counters);
-                    lost += l;
+                    let flushed = self.flush(std::mem::take(&mut run)).await?;
+                    lost += resolve(&std::mem::take(&mut tags), &flushed, &self.counters);
                     self.seed(q).await?;
                 }
                 other => {
-                    if let Some(epoch) = epoch {
-                        *epochs.entry(epoch).or_default() += 1;
-                    }
+                    tags.push(epoch);
                     run.push(other);
                 }
             }
         }
-        let l = self.flush(run).await?;
-        resolve(epochs, l, &self.counters);
-        lost += l;
+        let flushed = self.flush(run).await?;
+        lost += resolve(&tags, &flushed, &self.counters);
         Ok(lost)
     }
 
     /// One seed read, in one read transaction on the writer's connection.
     async fn seed(&mut self, query: SeedQuery) -> Result<(), StoreError> {
-        let conn = self
-            .conn
-            .take()
-            .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
         let q = query.clone();
         let delay = self.seed_delay;
-        let (conn, result) = tokio::task::spawn_blocking(move || {
-            if !delay.is_zero() {
-                std::thread::sleep(delay);
+        let result = match &mut self.backend {
+            Backend::Sqlite(slot) => {
+                let conn = slot
+                    .take()
+                    .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
+                let (conn, result) = tokio::task::spawn_blocking(move || {
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                    let r = crate::usage::seed_rows(
+                        &conn,
+                        &q.api_key_id,
+                        q.since_ms,
+                        q.grain_ms,
+                        q.requested_model.as_deref(),
+                        q.stamp_cap,
+                    );
+                    (conn, r)
+                })
+                .await
+                .map_err(|e| StoreError::Writer(format!("seed read panicked: {e}")))?;
+                *slot = Some(conn);
+                result
             }
-            let r = crate::usage::seed_rows(
-                &conn,
-                &q.api_key_id,
-                q.since_ms,
-                q.grain_ms,
-                q.requested_model.as_deref(),
-                q.stamp_cap,
-            );
-            (conn, r)
-        })
-        .await
-        .map_err(|e| StoreError::Writer(format!("seed read panicked: {e}")))?;
-        self.conn = Some(conn);
+            Backend::Postgres(store) => {
+                if !delay.is_zero() {
+                    sleep(delay).await;
+                }
+                store
+                    .seed_rows(
+                        &q.api_key_id,
+                        q.since_ms,
+                        q.grain_ms,
+                        q.requested_model.as_deref(),
+                        q.stamp_cap,
+                    )
+                    .await
+            }
+        };
         let result = result
             .map(|(buckets, stamps)| SeedRows { buckets, stamps })
             .map_err(|e| e.to_string());
@@ -741,46 +837,79 @@ impl Sink {
     }
 
     /// Writes `events` off the async threads, retrying a busy database with
-    /// backoff. Returns how many events were lost (0 when it committed). Only
-    /// losing the connection itself ends the writer.
-    async fn flush(&mut self, mut events: Vec<WriteEvent>) -> Result<u64, StoreError> {
+    /// backoff. Returns what became of them. Only losing the connection
+    /// itself ends the writer.
+    async fn flush(&mut self, mut events: Vec<WriteEvent>) -> Result<Flushed, StoreError> {
         let n = events.len() as u64;
         if n == 0 {
-            return Ok(0);
+            return Ok(Flushed::Committed {
+                refused: Vec::new(),
+            });
         }
         let mut attempt = 1;
         loop {
-            let mut conn = self
-                .conn
-                .take()
-                .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
             let node_id = Arc::clone(&self.node_id);
             let offset = self.day_offset_minutes;
-            let (conn, back, result) = tokio::task::spawn_blocking(move || {
-                let phase = Instant::now();
-                let result = batch::write(&mut conn, &events, &node_id, offset);
-                if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
-                    eprintln!(
-                        "writer_phase sql_us={} events={}",
-                        phase.elapsed().as_micros(),
-                        events.len()
-                    );
+            let result = match &mut self.backend {
+                Backend::Sqlite(slot) => {
+                    let mut conn = slot
+                        .take()
+                        .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
+                    let (conn, back, result) = tokio::task::spawn_blocking(move || {
+                        let phase = Instant::now();
+                        let result = batch::write(&mut conn, &events, &node_id, offset);
+                        if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
+                            eprintln!(
+                                "writer_phase sql_us={} events={}",
+                                phase.elapsed().as_micros(),
+                                events.len()
+                            );
+                        }
+                        (conn, events, result)
+                    })
+                    .await
+                    .map_err(|e| StoreError::Writer(format!("batch write panicked: {e}")))?;
+                    *slot = Some(conn);
+                    events = back;
+                    result
                 }
-                (conn, events, result)
-            })
-            .await
-            .map_err(|e| StoreError::Writer(format!("batch write panicked: {e}")))?;
-            self.conn = Some(conn);
-            events = back;
+                Backend::Postgres(store) => {
+                    let phase = Instant::now();
+                    let result = async {
+                        let mut client = store.client().await?;
+                        super::pg_batch::write(&mut client, &events, &node_id, offset).await
+                    }
+                    .await;
+                    if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
+                        eprintln!(
+                            "writer_phase sql_us={} events={}",
+                            phase.elapsed().as_micros(),
+                            events.len()
+                        );
+                    }
+                    result
+                }
+            };
             let c = Arc::clone(&self.counters);
             match result {
                 Ok(outcome) => {
                     self.deliver(outcome.completions);
+                    let refused = outcome.refused.len() as u64;
                     c.batches.fetch_add(1, Ordering::Relaxed);
-                    c.written.fetch_add(n, Ordering::Relaxed);
+                    c.written.fetch_add(n - refused, Ordering::Relaxed);
+                    c.failed.fetch_add(refused, Ordering::Relaxed);
+                    c.refused.fetch_add(refused, Ordering::Relaxed);
                     c.health_refused
                         .fetch_add(outcome.health_refused, Ordering::Relaxed);
-                    return Ok(0);
+                    if refused > 0 {
+                        tracing::error!(
+                            count = refused,
+                            "request log events refused for their values; they are lost (count events)"
+                        );
+                    }
+                    return Ok(Flushed::Committed {
+                        refused: outcome.refused,
+                    });
                 }
                 Err(e) if transient(&e) && attempt < MAX_ATTEMPTS => {
                     let delay = RETRY_BASE * 2u32.pow(attempt - 1);
@@ -802,7 +931,7 @@ impl Sink {
                         reason = %e,
                         "request log batch failed to persist; its events are lost (count events)"
                     );
-                    return Ok(n);
+                    return Ok(Flushed::Lost);
                 }
             }
         }
@@ -843,27 +972,73 @@ fn take(q: Queued, batch: &mut Vec<Tagged>, barriers: &mut Vec<Pending>) {
 /// An event and its barrier epoch (`None` for a seed).
 type Tagged = (WriteEvent, Option<u64>);
 
-/// Committed and failed counts per epoch, and the total of epochs already
-/// answered.
-#[derive(Debug, Default)]
-struct Resolved {
-    by_epoch: std::collections::BTreeMap<u64, (u64, u64)>,
-    answered: (u64, u64),
+/// What became of one transaction's events.
+#[derive(Debug)]
+enum Flushed {
+    /// The transaction committed; these events (by index) were refused for
+    /// their values and are not in it.
+    Committed { refused: Vec<usize> },
+    /// The transaction did not commit: every event is lost.
+    Lost,
 }
 
-/// After one transaction: its events committed, or (`lost > 0`) failed,
-/// counted against their epochs. A transaction commits or fails as a whole.
-fn resolve(epochs: std::collections::BTreeMap<u64, u64>, lost: u64, counters: &Counters) {
+/// Per epoch, and folded: events committed, failed, and refused (a subset
+/// of failed).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Tally {
+    committed: u64,
+    failed: u64,
+    refused: u64,
+}
+
+impl Tally {
+    fn add(&mut self, o: Self) {
+        self.committed += o.committed;
+        self.failed += o.failed;
+        self.refused += o.refused;
+    }
+}
+
+/// Resolved counts per epoch not yet folded into a barrier's answer, and the
+/// total of epochs already answered.
+#[derive(Debug, Default)]
+struct Resolved {
+    by_epoch: std::collections::BTreeMap<u64, Tally>,
+    answered: Tally,
+}
+
+/// After one transaction: each event (tagged with its epoch, `None` for
+/// none) committed, failed with it, or refused alone, counted against its
+/// epoch. Returns how many were lost.
+fn resolve(tags: &[Option<u64>], flushed: &Flushed, counters: &Counters) -> u64 {
     let mut resolved = counters
         .resolved
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (epoch, n) in epochs {
-        let e = resolved.by_epoch.entry(epoch).or_default();
-        if lost == 0 {
-            e.0 += n;
-        } else {
-            e.1 += n;
+    let refused: std::collections::HashSet<usize> = match flushed {
+        Flushed::Committed { refused } => refused.iter().copied().collect(),
+        Flushed::Lost => std::collections::HashSet::new(),
+    };
+    let mut lost = 0;
+    for (i, epoch) in tags.iter().enumerate() {
+        let one = match flushed {
+            Flushed::Lost => Tally {
+                failed: 1,
+                ..Tally::default()
+            },
+            Flushed::Committed { .. } if refused.contains(&i) => Tally {
+                failed: 1,
+                refused: 1,
+                ..Tally::default()
+            },
+            Flushed::Committed { .. } => Tally {
+                committed: 1,
+                ..Tally::default()
+            },
+        };
+        lost += one.failed;
+        if let Some(epoch) = epoch {
+            resolved.by_epoch.entry(*epoch).or_default().add(one);
         }
     }
     // No future barrier can ask for a prefix older than the previous
@@ -872,10 +1047,10 @@ fn resolve(epochs: std::collections::BTreeMap<u64, u64>, lost: u64, counters: &C
     let floor = counters.epochs.current().saturating_sub(1);
     let later = resolved.by_epoch.split_off(&floor);
     let older = std::mem::replace(&mut resolved.by_epoch, later);
-    for (c, f) in older.values() {
-        resolved.answered.0 += c;
-        resolved.answered.1 += f;
+    for t in older.values() {
+        resolved.answered.add(*t);
     }
+    lost
 }
 
 /// Answers barriers once the batch before them is written.
@@ -888,23 +1063,23 @@ fn answer(barriers: Vec<Pending>, counters: &Counters) {
     for b in barriers {
         // Fold every epoch up to the barrier's into the answered total, so
         // the map holds only the epochs after it.
-        let (committed, failed) = {
+        let tally = {
             let mut resolved = counters
                 .resolved
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let later = resolved.by_epoch.split_off(&(b.epoch + 1));
             let upto = std::mem::replace(&mut resolved.by_epoch, later);
-            for (c, f) in upto.values() {
-                resolved.answered.0 += c;
-                resolved.answered.1 += f;
+            for t in upto.values() {
+                resolved.answered.add(*t);
             }
             resolved.answered
         };
         let answer = Barrier {
             watermark: b.produced.events,
-            committed,
-            failed,
+            committed: tally.committed,
+            failed: tally.failed,
+            refused: tally.refused,
             dropped: b.produced.dropped,
         };
         // Free the one-barrier slot before the caller is woken, so a caller
@@ -926,7 +1101,7 @@ fn stop_arrived(stop: &mut oneshot::Receiver<()>) -> bool {
 }
 
 async fn run(
-    conn: Connection,
+    backend: Backend,
     mut rx: mpsc::Receiver<Queued>,
     mut stop: oneshot::Receiver<()>,
     config: WriterConfig,
@@ -934,7 +1109,7 @@ async fn run(
 ) -> Result<(), StoreError> {
     let max_batch = config.max_batch.max(1);
     let mut sink = Sink {
-        conn: Some(conn),
+        backend,
         node_id: Arc::from(config.node_id.as_str()),
         day_offset_minutes: config.day_offset_minutes,
         counters: Arc::clone(&counters),
@@ -1055,13 +1230,19 @@ mod epoch_accounting_tests {
             // Cancellation before settlement, or refusal after settlement,
             // leaves exactly this state; no answer() is called.
             c.epochs.leave(delayed, false);
-            resolve([(e, 1)].into(), 0, &c);
+            resolve(
+                &[Some(e)],
+                &Flushed::Committed {
+                    refused: Vec::new(),
+                },
+                &c,
+            );
             let prefix = c.epochs.prefix(e, before);
             assert_eq!(prefix.events, n + 1);
             let r = c.resolved.lock().expect("resolved");
             assert!(r.by_epoch.len() <= 2);
             assert_eq!(
-                r.answered.0 + r.by_epoch.values().map(|v| v.0).sum::<u64>(),
+                r.answered.committed + r.by_epoch.values().map(|v| v.committed).sum::<u64>(),
                 prefix.events
             );
         }

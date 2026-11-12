@@ -2,6 +2,9 @@
 
 #![allow(dead_code)]
 
+pub mod pg;
+pub mod proxy;
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -15,19 +18,35 @@ pub fn repo_root() -> PathBuf {
         .expect("repo root")
 }
 
-/// True when `bun` runs. Otherwise prints why the caller is skipping.
-pub fn bun_available(test: &str) -> bool {
-    let ok = Command::new("bun")
+fn bun_runs() -> bool {
+    Command::new("bun")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
+
+/// True when `bun` runs. Otherwise prints why the caller is skipping.
+pub fn bun_available(test: &str) -> bool {
+    let ok = bun_runs();
     if !ok {
         println!("skipping {test}: `bun` is not on PATH, so the TS side cannot run");
     }
     ok
+}
+
+/// For a Postgres cross-read whose server is configured: Bun is required,
+/// and its absence fails the test rather than skipping it, so a configured
+/// conformance job can never pass without the TS side having run.
+pub fn bun_required(test: &str) -> bool {
+    assert!(
+        bun_runs(),
+        "{test}: OMNI_TEST_DATABASE_URL is set, so this cross-read must run against \
+         the frozen TS store, but `bun` is not on PATH"
+    );
+    true
 }
 
 fn run(mut cmd: Command, stdin: &str, what: &str) -> String {
