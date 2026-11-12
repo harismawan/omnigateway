@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod pg;
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
