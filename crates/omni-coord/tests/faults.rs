@@ -342,16 +342,17 @@ async fn killed_connections_reconnect_and_resubscribe_without_duplicates() {
     let mut killer = admin(&format!("{base}/0")).await;
     let a = RedisCoord::connect(&db.url, opts(500)).await.expect("a");
     let b = RedisCoord::connect(&db.url, opts(500)).await.expect("b");
-    let (frames, _f) = counter(&a, "t");
+    let t = common::unique("t");
+    let (frames, _f) = counter(&a, &t);
     let (hellos, _h) = counter(&a, RECONNECTED_TOPIC);
-    b.publish("t", "before").await;
+    b.publish(&t, "before").await;
     assert!(
         until(Duration::from_secs(2), || async {
             !frames.lock().expect("f").is_empty()
         })
         .await
     );
-    assert_eq!(take(&frames), vec!["t=before"]);
+    assert_eq!(take(&frames), vec![format!("{t}=before")]);
 
     assert!(kill_clients_on_db(&mut killer, db.index).await >= 4);
     // Calls during the gap are bounded and answered (from memory if need be).
@@ -381,9 +382,9 @@ async fn killed_connections_reconnect_and_resubscribe_without_duplicates() {
     );
     assert_eq!(take(&hellos), vec!["coord:reconnected="]);
     take(&frames);
-    assert_eq!(b.remote().publish("t", "after").await, Ok(()));
+    assert_eq!(b.remote().publish(&t, "after").await, Ok(()));
     sleep_ms(200).await;
-    assert_eq!(take(&frames), vec!["t=after"], "exactly once");
+    assert_eq!(take(&frames), vec![format!("{t}=after")], "exactly once");
     assert!(a.healthy());
     a.close();
     b.close();
@@ -458,9 +459,28 @@ async fn a_lost_script_cache_is_answered_by_sending_the_script_whole() {
 
 // --- a stopped and a paused server (disposable container) -----------------
 
+/// The disposable container the stop/pause tests own. With
+/// `OMNI_TEST_REQUIRE_REDIS=1` its absence fails rather than skips.
 fn docker_target() -> Option<(String, String)> {
-    let name = std::env::var("OMNI_TEST_REDIS_DOCKER").ok()?;
-    let url = std::env::var("OMNI_TEST_REDIS_DOCKER_URL").ok()?;
+    let target = std::env::var("OMNI_TEST_REDIS_DOCKER")
+        .ok()
+        .zip(std::env::var("OMNI_TEST_REDIS_DOCKER_URL").ok());
+    assert!(
+        target.is_some() || std::env::var_os("OMNI_TEST_REQUIRE_REDIS").is_none(),
+        "OMNI_TEST_REQUIRE_REDIS is set but OMNI_TEST_REDIS_DOCKER(_URL) is not"
+    );
+    target
+}
+
+/// The container's server, emptied: a run must not read an earlier run's
+/// keys (a fixed key in a 60 s window otherwise accumulates across runs).
+async fn docker_server() -> Option<(String, String)> {
+    let (name, url) = docker_target()?;
+    let mut conn = admin(&url).await;
+    let _: () = redis::cmd("FLUSHALL")
+        .query_async(&mut conn)
+        .await
+        .expect("flushall");
     Some((name, url))
 }
 
@@ -480,14 +500,15 @@ async fn docker(args: &[&str]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_server_fails_open_and_a_restarted_one_is_rejoined() {
     let _serial = SERIAL.lock().await;
-    let Some((name, url)) = docker_target() else {
+    let Some((name, url)) = docker_server().await else {
         eprintln!("skipped: set OMNI_TEST_REDIS_DOCKER(+_URL) to a disposable container");
         return;
     };
     let a = RedisCoord::connect(&url, opts(300)).await.expect("a");
     let b = RedisCoord::connect(&url, opts(300)).await.expect("b");
     assert!(a.healthy() && a.remote().listening());
-    let (frames, _f) = counter(&a, "t");
+    let t = common::unique("t");
+    let (frames, _f) = counter(&a, &t);
     let (hellos, _h) = counter(&a, RECONNECTED_TOPIC);
     take(&hellos);
     a.kv_set("sess:x", "v", 60_000).await.expect("kv set");
@@ -531,7 +552,7 @@ async fn a_stopped_server_fails_open_and_a_restarted_one_is_rejoined() {
         .await
     );
     take(&frames);
-    assert_eq!(b.remote().publish("t", "back").await, Ok(()));
+    assert_eq!(b.remote().publish(&t, "back").await, Ok(()));
     assert!(
         until(Duration::from_secs(2), || async {
             !frames.lock().expect("f").is_empty()
@@ -539,7 +560,7 @@ async fn a_stopped_server_fails_open_and_a_restarted_one_is_rejoined() {
         .await
     );
     sleep_ms(100).await;
-    assert_eq!(take(&frames), vec!["t=back"]);
+    assert_eq!(take(&frames), vec![format!("{t}=back")]);
     assert!(a.healthy());
     a.close();
     b.close();
@@ -550,7 +571,7 @@ async fn a_stopped_server_fails_open_and_a_restarted_one_is_rejoined() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paused_server_is_bounded_by_the_deadline_and_recovers() {
     let _serial = SERIAL.lock().await;
-    let Some((name, url)) = docker_target() else {
+    let Some((name, url)) = docker_server().await else {
         return;
     };
     let quick = || RedisCoordOptions {
@@ -559,7 +580,8 @@ async fn a_paused_server_is_bounded_by_the_deadline_and_recovers() {
     };
     let a = RedisCoord::connect(&url, quick()).await.expect("a");
     let b = RedisCoord::connect(&url, quick()).await.expect("b");
-    let (frames, _f) = counter(&a, "t");
+    let t = common::unique("t");
+    let (frames, _f) = counter(&a, &t);
     let (hellos, _h) = counter(&a, RECONNECTED_TOPIC);
     a.window_claim("p", 60_000.0, 1.0).await;
     assert!(a.healthy() && a.remote().listening());
@@ -579,8 +601,8 @@ async fn a_paused_server_is_bounded_by_the_deadline_and_recovers() {
     // The pub/sub heartbeat notices the silent server and stops claiming to
     // listen, so a publish goes through memory (still reaching this process).
     assert!(until(Duration::from_secs(2), || async { !a.remote().listening() }).await);
-    a.publish("t", "local").await;
-    assert_eq!(take(&frames), vec!["t=local"]);
+    a.publish(&t, "local").await;
+    assert_eq!(take(&frames), vec![format!("{t}=local")]);
     docker(&["unpause", &name]).await;
     assert!(
         until(Duration::from_secs(5), || async {
@@ -600,7 +622,7 @@ async fn a_paused_server_is_bounded_by_the_deadline_and_recovers() {
         })
         .await
     );
-    assert_eq!(b.remote().publish("t", "shared").await, Ok(()));
+    assert_eq!(b.remote().publish(&t, "shared").await, Ok(()));
     assert!(
         until(Duration::from_secs(2), || async {
             !frames.lock().expect("f").is_empty()
@@ -608,11 +630,14 @@ async fn a_paused_server_is_bounded_by_the_deadline_and_recovers() {
         .await
     );
     sleep_ms(100).await;
-    assert_eq!(take(&frames), vec!["t=shared"]);
-    // The claims that landed late on the server are there (over-count, the
-    // permitted direction): 1 before the pause plus the one sent into it.
+    assert_eq!(take(&frames), vec![format!("{t}=shared")]);
+    // The claim sent into the pause was answered from memory; on the server
+    // it lands late (1 before the pause + it = 2, an over-count: the
+    // permitted direction) unless its connection was retired first, which
+    // may discard it. Never more than was sent, never less than before.
     let claim = a.remote().window_claim("p", 60_000.0, 3.0).await;
-    assert_eq!(claim.map(|c| c.before.used), Ok(2.0));
+    let used = claim.map(|c| c.before.used);
+    assert!(matches!(used, Ok(1.0 | 2.0)), "{used:?}");
     a.close();
     b.close();
 }

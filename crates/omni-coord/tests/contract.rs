@@ -366,29 +366,38 @@ async fn lease_is_held_by_one_holder_until_it_lapses_or_is_released(
     assert!(c.lease_acquire("job", "a", 1_000).await);
 }
 
+/// Logical databases do not isolate pub/sub, so every topic here is unique
+/// to the test run (`common::unique`).
 async fn pubsub_delivers_to_exact_and_pattern_subscribers(c: &dyn Coord, _: &ManualClock) {
+    let res = common::unique("res");
+    let console = common::unique("console");
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let s1 = Arc::clone(&seen);
     let off_exact = c.subscribe(
-        "res",
+        &res,
         Arc::new(move |t, p| s1.lock().expect("seen").push(format!("exact:{t}:{p}"))),
     );
     let s2 = Arc::clone(&seen);
     let off_pattern = c.subscribe(
-        "console:*",
+        &format!("{console}:*"),
         Arc::new(move |t, p| s2.lock().expect("seen").push(format!("pattern:{t}:{p}"))),
     );
-    c.publish("res", "1").await;
-    c.publish("console:node-a", "2").await;
-    c.publish("other", "3").await;
+    c.publish(&res, "1").await;
+    c.publish(&format!("{console}:node-a"), "2").await;
+    c.publish(&common::unique("other"), "3").await;
     sleep_ms(50).await;
     off_exact.unsubscribe();
-    c.publish("res", "4").await;
+    c.publish(&res, "4").await;
     sleep_ms(50).await;
     drop(off_pattern);
     let mut got = seen.lock().expect("seen").clone();
     got.sort();
-    assert_eq!(got, vec!["exact:res:1", "pattern:console:node-a:2"]);
+    let mut want = vec![
+        format!("exact:{res}:1"),
+        format!("pattern:{console}:node-a:2"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
 }
 
 async fn incr_is_monotonic_from_1(c: &dyn Coord, _: &ManualClock) {
@@ -493,14 +502,15 @@ async fn a_holder_whose_slot_lapsed_reacquires_beside_live_rivals(
 }
 
 async fn publish_sequenced_numbers_deliveries_in_one_step(c: &dyn Coord, _: &ManualClock) {
+    let topic = common::unique("s");
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let s = Arc::clone(&seen);
     let off = c.subscribe(
-        "s",
+        &topic,
         Arc::new(move |_, p| s.lock().expect("seen").push(p.to_owned())),
     );
-    assert_eq!(c.publish_sequenced("s", "a", "seq:s").await, 1);
-    assert_eq!(c.publish_sequenced("s", "b", "seq:s").await, 2);
+    assert_eq!(c.publish_sequenced(&topic, "a", "seq:s").await, 1);
+    assert_eq!(c.publish_sequenced(&topic, "b", "seq:s").await, 2);
     sleep_ms(50).await;
     drop(off);
     assert_eq!(*seen.lock().expect("seen"), vec!["1:a", "2:b"]);

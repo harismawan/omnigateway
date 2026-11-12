@@ -15,10 +15,14 @@
 //!   [`CoordError::Unavailable`] (TS `OVERLOADED`), because a session verified
 //!   against a fallback map is one a password change elsewhere cannot end.
 //!
-//! Plumbing (spec "Redis"): one multiplexed command connection (`link`), one
-//! pub/sub connection, scripts loaded once per connect and called by
-//! `EVALSHA` (sent whole on `NOSCRIPT`), a deadline on every command, and
-//! reconnection with backoff for both connections.
+//! Plumbing (spec "Redis"): one pipelined command connection with a single
+//! ordered, bounded submission queue (`link`; its own RESP2 reader, not the
+//! `redis` crate's multiplexer, whose send channel cannot order a detached
+//! release ahead of a later admission), one pub/sub connection (the `redis`
+//! crate's), scripts loaded once per connect and called by `EVALSHA` (resent
+//! whole on `NOSCRIPT` ahead of anything unwritten; detached releases go as
+//! `EVAL`), a deadline on every command, and reconnection with backoff for
+//! both connections. The `redis` crate still encodes every command.
 //!
 //! Key schema (identical to TS; `NS` = `omni:`):
 //!
@@ -34,6 +38,7 @@
 //! | pubsub | channel `omni:pubsub` | JSON `{"topic","payload"}` |
 
 mod link;
+mod resp;
 pub mod scripts;
 
 use std::collections::BTreeMap;
@@ -51,7 +56,8 @@ use crate::{
     BucketRow, Clock, Coord, CoordError, Counts, Handler, LockToken, RECONNECTED_TOPIC,
     Subscribers, Subscription, WindowClaim, WindowCounter, js_number, system_clock,
 };
-use link::Link;
+pub use link::Refused;
+use link::{Link, Request};
 pub use scripts::CoordScript;
 
 /// Every key this coordinator writes starts here.
@@ -92,6 +98,9 @@ pub enum Fault {
     /// The server answered with an error (its code, not its text).
     #[error("server: {0}")]
     Server(String),
+    /// The submission queue is at its admission capacity.
+    #[error("command queue full")]
+    Saturated,
 }
 
 impl Fault {
@@ -103,6 +112,7 @@ impl Fault {
             Self::TimedOut => "command timed out",
             Self::Connection(_) => "connection",
             Self::Server(_) => "server error",
+            Self::Saturated => "queue full",
         }
     }
 }
@@ -125,6 +135,13 @@ pub struct RedisCoordOptions {
     pub lock_poll: Duration,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
+    /// Queued plus in-flight commands on the command connection.
+    pub queue_capacity: usize,
+    /// Of `queue_capacity`, what only releases may use, so a connection
+    /// saturated by admissions still takes the releases that free them.
+    pub release_reserve: usize,
+    /// How long `close` keeps writing queued releases.
+    pub drain_timeout: Duration,
     /// How often the idle command connection and the pub/sub connection are
     /// PINGed, so a dead one is replaced before a call has to fail on it and
     /// a deaf subscriber is resubscribed.
@@ -147,6 +164,9 @@ impl Default for RedisCoordOptions {
             reconnect_min: link::RECONNECT_MIN,
             reconnect_max: link::RECONNECT_MAX,
             heartbeat: Duration::from_millis(1_000),
+            queue_capacity: 4_096,
+            release_reserve: 1_024,
+            drain_timeout: Duration::from_millis(1_000),
             extra_scripts: Vec::new(),
         }
     }
@@ -264,7 +284,8 @@ impl Remote {
     }
 
     /// `EVALSHA`, or `EVAL` once on `NOSCRIPT` (a server that lost its script
-    /// cache). Keys and args go as given.
+    /// cache), resent ahead of anything not yet written. Keys and args go as
+    /// given.
     pub async fn eval(
         &self,
         script: &CoordScript,
@@ -272,36 +293,103 @@ impl Remote {
         args: &[String],
     ) -> Result<Value, Fault> {
         let (by_sha, whole) = eval_cmds(script, keys, args);
-        self.link
-            .run(|mut conn| async move {
-                match by_sha.query_async::<Value>(&mut conn).await {
-                    Err(e) if link::is_noscript(&e) => whole.query_async(&mut conn).await,
-                    other => other,
-                }
-            })
-            .await
+        let req = Request::Eval {
+            by_sha: by_sha.get_packed_command(),
+            whole: whole.get_packed_command(),
+        };
+        link::one(self.link.call(req).await?)
     }
 
     /// Any one command, under the deadline.
     pub async fn query(&self, cmd: redis::Cmd) -> Result<Value, Fault> {
-        self.link
-            .run(|mut conn| async move { cmd.query_async::<Value>(&mut conn).await })
-            .await
+        link::one(
+            self.link
+                .call(Request::One(cmd.get_packed_command()))
+                .await?,
+        )
     }
 
     /// A pipeline in one round trip, under the deadline — D3's 100 ms load
-    /// publish is one of these.
+    /// publish is one of these. Any command's error fails the call. Not for
+    /// `MULTI` pipelines (`Fault::Server`).
     pub async fn pipeline(&self, pipe: redis::Pipeline) -> Result<Vec<Value>, Fault> {
+        if pipe.is_transaction() {
+            return Err(Fault::Server("transactions unsupported".to_owned()));
+        }
+        if pipe.is_empty() {
+            return Ok(Vec::new());
+        }
+        let req = Request::Many {
+            bytes: pipe.get_packed_pipeline(),
+            replies: pipe.len(),
+        };
         self.link
-            .run(|mut conn| async move { pipe.query_async::<Vec<Value>>(&mut conn).await })
-            .await
+            .call(req)
+            .await?
+            .into_iter()
+            .map(|r| r.map_err(|e| Fault::Server(e.code)))
+            .collect()
     }
 
-    /// `eval`, written onto the connection now and not awaited (TS `void
-    /// evalScript(...)`). Ordered ahead of every later command.
-    pub fn eval_detached(&self, script: &CoordScript, keys: &[String], args: &[String]) {
-        let (by_sha, whole) = eval_cmds(script, keys, args);
-        self.link.send_detached(by_sha, Some(whole));
+    /// Queues a release script — `EVAL`, sent whole so a lost script cache
+    /// cannot reorder it — ahead of every command submitted after this
+    /// returns, and does not wait for it (TS `void evalScript(...)`).
+    ///
+    /// `idempotent` says the script is safe to run twice (a named gauge
+    /// slot; a token compare-and-delete): such a release is kept across a
+    /// reconnect, and queued even while disconnected, to be written first on
+    /// the next connection. A non-idempotent one (unnamed `GAUGE_RELEASE`) is
+    /// refused while disconnected and not replayed.
+    ///
+    /// On refusal (queue full, closing, or down) the release is counted in
+    /// [`Remote::releases_dropped`] and logged, and what it would have
+    /// released is held until its TTL.
+    pub fn eval_detached(
+        &self,
+        script: &CoordScript,
+        keys: &[String],
+        args: &[String],
+        idempotent: bool,
+    ) -> Result<(), Refused> {
+        let (_, whole) = eval_cmds(script, keys, args);
+        self.link.release(whole.get_packed_command(), idempotent)
+    }
+
+    /// Releases not delivered since boot (refused, or lost with a retired
+    /// connection): each one held something until its TTL.
+    pub fn releases_dropped(&self) -> u64 {
+        self.link.releases_dropped()
+    }
+
+    /// Commands queued or awaiting replies on the command connection.
+    pub fn outstanding(&self) -> usize {
+        self.link.outstanding()
+    }
+
+    /// Detached [`GAUGE_RELEASE`](scripts::GAUGE_RELEASE): the concurrency
+    /// release D3 sends at stream end. Named slots are idempotent.
+    pub fn gauge_release_detached(
+        &self,
+        name: &str,
+        now: f64,
+        holder: Option<&str>,
+    ) -> Result<(), Refused> {
+        self.eval_detached(
+            &scripts::GAUGE_RELEASE,
+            &[key("g", name)],
+            &[js_number(now), holder.unwrap_or("").to_owned()],
+            holder.is_some(),
+        )
+    }
+
+    /// Detached token-safe lock release.
+    pub fn lock_release_detached(&self, name: &str, token: &str) -> Result<(), Refused> {
+        self.eval_detached(
+            &scripts::MUTEX_RELEASE,
+            &[key("lock", name)],
+            &[token.to_owned()],
+            true,
+        )
     }
 
     pub async fn window_claim(
@@ -644,21 +732,17 @@ impl Remote {
         self.query(cmd).await.map(drop)
     }
 
-    /// `SCAN` + `UNLINK` of every `omni:kv:<prefix>*`.
+    /// `SCAN` + `UNLINK` of every `omni:kv:<prefix>*`. Each page and each
+    /// `UNLINK` is one bounded call.
     pub async fn kv_del_prefix(&self, prefix: &str) -> Result<(), Fault> {
         let pattern = format!("{}*", glob_escape(&key("kv", prefix)));
-        self.link
-            .run(|mut conn| async move {
-                let found = link::scan(&mut conn, &pattern).await?;
-                for chunk in found.chunks(512) {
-                    let _: i64 = redis::cmd("UNLINK")
-                        .arg(chunk)
-                        .query_async(&mut conn)
-                        .await?;
-                }
-                Ok(())
-            })
-            .await
+        let found = link::scan(&self.link, &pattern).await?;
+        for chunk in found.chunks(512) {
+            let mut unlink = redis::cmd("UNLINK");
+            unlink.arg(chunk);
+            self.query(unlink).await?;
+        }
+        Ok(())
     }
 }
 
@@ -701,7 +785,7 @@ impl RedisCoord {
         let faults_at_start = link.faults();
         let mut connected = link.connected.subscribe();
         link.runtime.spawn(Arc::clone(&link).maintain());
-        link.runtime.spawn(listen(
+        link.runtime.spawn(supervise_listener(
             Arc::clone(&link),
             Arc::clone(&subscribers),
             Arc::clone(&listening),
@@ -758,9 +842,19 @@ impl RedisCoord {
         self.remote.faults()
     }
 
-    /// Stops both connections and their reconnect loops.
+    /// Stops both connections. Admissions are refused at once; releases
+    /// already queued keep being written for up to `drain_timeout` (the
+    /// link task outlives this call by at most that), then anything left is
+    /// counted in `releases_dropped` and logged. Idempotent; dropping the
+    /// coordinator does the same.
     pub fn close(&self) {
         self.remote.link.close();
+    }
+
+    /// [`RedisCoord::close`], then waits until the drain has finished.
+    pub async fn shutdown(&self) {
+        self.close();
+        self.remote.link.stopped().await;
     }
 
     fn now(&self) -> f64 {
@@ -848,8 +942,36 @@ impl Coord for RedisCoord {
         }
     }
 
+    /// Polls `SET NX PX` until taken or `wait` passes.
+    ///
+    /// Token-safe cleanup covers every way an attempt can end without
+    /// handing the token to the caller: a fault (the `SET` may still land
+    /// after its deadline, or on a retired connection a slow server reads
+    /// late) and cancellation of this future mid-attempt. Each queues a
+    /// compare-and-delete for this attempt's token, ordered after the `SET`
+    /// on the connection, so it can never remove another holder's lock. If
+    /// the release itself cannot be queued it is counted and the lock lapses
+    /// at `ttl_ms`.
     async fn lock(&self, key: &str, ttl_ms: u64, wait: Duration) -> Result<LockToken, CoordError> {
-        let token = uuid::Uuid::new_v4().to_string();
+        struct Attempt<'a> {
+            remote: &'a Remote,
+            name: &'a str,
+            token: Option<String>,
+        }
+        impl Drop for Attempt<'_> {
+            fn drop(&mut self) {
+                if let Some(token) = self.token.take() {
+                    // Counted and logged inside on refusal.
+                    let _queued = self.remote.lock_release_detached(self.name, &token).is_ok();
+                }
+            }
+        }
+        let mut attempt = Attempt {
+            remote: &self.remote,
+            name: key,
+            token: Some(uuid::Uuid::new_v4().to_string()),
+        };
+        let token = attempt.token.clone().unwrap_or_default();
         // Real elapsed time: the wait is time spent polling, whatever the
         // injected clock says.
         let deadline = tokio::time::Instant::now() + wait;
@@ -857,42 +979,53 @@ impl Coord for RedisCoord {
         loop {
             match self.remote.lock_try(key, &token, ttl_ms).await {
                 Ok(true) => {
+                    attempt.token = None;
                     return Ok(LockToken {
                         name: key.to_owned(),
                         token,
                     });
                 }
                 Ok(false) => {}
-                Err(_) => {
-                    // The `SET` may still land after its deadline, a lock
-                    // under a token nobody holds. Same connection, so this
-                    // queues behind it and undoes it.
-                    self.remote.eval_detached(
-                        &scripts::MUTEX_RELEASE,
-                        &[self::key("lock", key)],
-                        std::slice::from_ref(&token),
-                    );
-                    return Err(CoordError::LockUnavailable(key.to_owned()));
-                }
+                // `attempt` drops here and queues the cleanup.
+                Err(_) => return Err(CoordError::LockUnavailable(key.to_owned())),
             }
             if tokio::time::Instant::now() >= deadline {
+                // Not taken: nothing to clean up.
+                attempt.token = None;
                 return Err(CoordError::LockUnavailable(key.to_owned()));
             }
             tokio::time::sleep(poll).await;
         }
     }
 
+    /// Queues the token-safe release (so cancelling the caller cannot lose
+    /// it) and waits — bounded by the command deadline — for the server to
+    /// confirm it.
     async fn unlock(&self, token: LockToken) {
-        // A fault leaves the lock to its TTL.
-        let _released = self.remote.lock_release(&token.name, &token.token).await;
+        if self
+            .remote
+            .lock_release_detached(&token.name, &token.token)
+            .is_err()
+        {
+            return;
+        }
+        // The release is ahead of this PING on the connection: when the PING
+        // answers, the release has run.
+        if let Err(fault) = self.remote.query(redis::cmd("PING")).await {
+            tracing::debug!(
+                coord = "redis",
+                reason = fault.reason(),
+                "unlock unconfirmed"
+            );
+        }
     }
 
     fn unlock_detached(&self, token: LockToken) {
-        self.remote.eval_detached(
-            &scripts::MUTEX_RELEASE,
-            &[key("lock", &token.name)],
-            &[token.token],
-        );
+        // Counted and logged inside on refusal.
+        let _queued = self
+            .remote
+            .lock_release_detached(&token.name, &token.token)
+            .is_ok();
     }
 
     async fn buckets_add(&self, key: &str, grain_ms: f64, window_ms: f64, now: f64, delta: Counts) {
@@ -1029,11 +1162,49 @@ struct Envelope {
 /// locally, and on a drop reconnects and resubscribes — on a fresh
 /// connection, so a frame is never delivered twice. Each (re)subscribe
 /// dispatches [`RECONNECTED_TOPIC`] locally (TS `onconnect`).
-async fn listen(
+/// Runs [`listen`] and restarts it if it ever ends abnormally — a panic
+/// escaping a handler in an unwinding build (release builds abort on panic,
+/// per the workspace profile) — so the coordinator never stays deaf with
+/// `listening` reading true.
+async fn supervise_listener(
     link: Arc<Link>,
     subscribers: Arc<Subscribers>,
     listening: Arc<AtomicBool>,
     settled: watch::Sender<bool>,
+) {
+    let settled = Arc::new(settled);
+    loop {
+        let task = link.runtime.spawn(listen(
+            Arc::clone(&link),
+            Arc::clone(&subscribers),
+            Arc::clone(&listening),
+            Arc::clone(&settled),
+        ));
+        let ended = task.await;
+        listening.store(false, Ordering::SeqCst);
+        match ended {
+            Ok(()) => return,
+            Err(e) => {
+                tracing::error!(
+                    coord = "redis",
+                    panicked = e.is_panic(),
+                    "pubsub listener died; restarting"
+                );
+                link.fault(&Fault::Connection("pubsub listener died".to_owned()));
+                if *link.shutdown.borrow() {
+                    return;
+                }
+                tokio::time::sleep(link.opts.reconnect_min).await;
+            }
+        }
+    }
+}
+
+async fn listen(
+    link: Arc<Link>,
+    subscribers: Arc<Subscribers>,
+    listening: Arc<AtomicBool>,
+    settled: Arc<watch::Sender<bool>>,
 ) {
     let mut shutdown = link.shutdown.subscribe();
     let mut delay = link.opts.reconnect_min;

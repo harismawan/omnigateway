@@ -125,3 +125,57 @@ async fn every_memory_call_completes_on_its_first_poll() {
     let gauge = pin!(coord.gauge_acquire("g", 1_000, None));
     assert!(matches!(gauge.poll(&mut cx), Poll::Ready(Ok(0))));
 }
+
+/// I4: the frozen TS `memoryCoord` window, observed (Bun, `packages/coord`):
+/// claims at 1000, 999 (backdated), rollback 999, 1001, 998, rollback 1000,
+/// 1002, 61000, 61002 report `used` 0,1,1,2,3,3,1 and `resetAt`
+/// 1000,61000,61000,61000,61000,61001,121000. A backdated claim is a finite
+/// count, rollback removes that claim, and TS's arrival-order scan makes the
+/// last rollback (behind a later, smaller stamp) a no-op.
+#[tokio::test]
+async fn window_semantics_match_ts_for_backdated_claims_and_rollback() {
+    let coord = MemoryCoord::new(ManualClock::at(0.0).clock());
+    let w = 60_000.0;
+    let mut got = Vec::new();
+    let claim = async |at: f64| {
+        let c = coord.window_claim("k", w, at).await;
+        assert_eq!(c.stamp, at);
+        (c.before.used, c.before.reset_at)
+    };
+    got.push(claim(1_000.0).await);
+    got.push(claim(999.0).await);
+    coord.window_rollback("k", 999.0).await;
+    got.push(claim(1_001.0).await);
+    got.push(claim(998.0).await);
+    coord.window_rollback("k", 1_000.0).await;
+    got.push(claim(1_002.0).await);
+    got.push(claim(61_000.0).await);
+    got.push(claim(61_002.0).await);
+    assert_eq!(
+        got,
+        vec![
+            (0.0, 1_000.0),
+            (1.0, 61_000.0),
+            (1.0, 61_000.0),
+            (2.0, 61_000.0),
+            (3.0, 61_000.0),
+            (3.0, 61_001.0),
+            (1.0, 121_000.0),
+        ]
+    );
+}
+
+/// I4: rollback stays exact however many distinct stamps a window holds
+/// below the per-key cap (the reused ring compacted past 65 536 and then
+/// ignored every rollback).
+#[tokio::test]
+async fn rollback_stays_exact_with_many_distinct_live_stamps() {
+    let coord = MemoryCoord::new(ManualClock::at(0.0).clock());
+    let w = 3_600_000.0;
+    for i in 0..70_000 {
+        coord.window_claim("k", w, f64::from(i)).await;
+    }
+    coord.window_rollback("k", 69_999.0).await;
+    let next = coord.window_claim("k", w, 70_000.0).await;
+    assert_eq!(next.before.used, 69_999.0);
+}

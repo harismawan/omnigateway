@@ -9,9 +9,23 @@
 //!
 //! The one property every implementation holds (TS's contract): a claim is
 //! visible to every concurrent claimant the instant the call is *issued*.
-//! The memory implementation mutates synchronously before its future first
-//! yields; the Redis one writes its command onto one multiplexed connection
-//! in call order, and the server runs each script atomically.
+//!
+//! **Issued means first polled.** A Rust `async fn` does nothing until its
+//! future is polled: creating `coord.window_claim(..)` and dropping it, or
+//! holding it unpolled, records nothing, and two futures are issued in the
+//! order they are first polled, not the order they were created. Within that:
+//! - `MemoryCoord` completes every call on its first poll (no yield);
+//! - `RedisCoord` submits the command to the connection's single ordered
+//!   queue on its first poll, before the first yield; the server executes
+//!   one connection's commands in queue order, each script atomically. So
+//!   among calls on one coordinator, first-polled-first-executed.
+//! - The non-async release paths (`Coord::unlock_detached`,
+//!   `redis::Remote::{gauge_release_detached, lock_release_detached,
+//!   eval_detached}`) are queued when the call returns: a release whose call
+//!   has returned is executed before any command first polled after it.
+//!   This is the guarantee a stream-end concurrency release relies on.
+//! - Cancelling an awaited Redis call after its first poll does not
+//!   withdraw the command; it may still execute.
 //!
 //! **Wire compatibility.** The Redis implementation uses the TS key schema,
 //! value formats and Lua scripts byte-for-byte (see [`redis::scripts`]), so a
@@ -85,7 +99,9 @@ pub enum CoordError {
 }
 
 /// A held mutex, returned by [`Coord::lock`] and given back to
-/// [`Coord::unlock`]. Prefer [`with_lock`], which always gives it back.
+/// [`Coord::unlock`]. Prefer [`with_lock`]. A token that is dropped without
+/// either is held until its TTL (Redis) or forever (memory, whose locks have
+/// no TTL, as in TS).
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a lock token that is never unlocked is held until its TTL"]
 pub struct LockToken {
@@ -139,10 +155,15 @@ pub trait Coord: Send + Sync {
     // --- mutex --------------------------------------------------------------
 
     /// Takes `key`, or [`CoordError::LockUnavailable`] once `wait` has passed.
-    /// `ttl_ms` bounds a holder that never unlocks.
+    /// `ttl_ms` bounds a holder that never unlocks (Redis; memory ignores it,
+    /// as TS's does). Cancelling this future mid-acquire does not strand the
+    /// lock: Redis queues a token-safe release for the attempt.
     async fn lock(&self, key: &str, ttl_ms: u64, wait: Duration) -> Result<LockToken, CoordError>;
     /// Gives a lock back. Only the token's own holding is released: a lock
-    /// that lapsed and was taken by another holder is left alone.
+    /// that lapsed and was taken by another holder is left alone. The
+    /// release is queued on the first poll, so cancelling the returned
+    /// future afterwards still releases; awaiting it waits (bounded by the
+    /// command deadline) for the server to have run it.
     async fn unlock(&self, token: LockToken);
     /// [`Coord::unlock`] from a synchronous context (a drop): the release is
     /// sent without being awaited.
@@ -200,7 +221,10 @@ pub trait Coord: Send + Sync {
 }
 
 /// TS `withLock`: runs `body` while holding `key`, releasing on success, on
-/// error, and — detached — when the body panics or is cancelled.
+/// error, and — detached — when the body panics or is cancelled. Cancelled
+/// while acquiring, nothing is held (see [`Coord::lock`]). On Redis, a
+/// release that cannot be queued (queue full, closed) is counted and logged
+/// and the lock lapses at `ttl_ms`.
 pub async fn with_lock<C, F, Fut, T>(
     coord: &C,
     key: &str,
@@ -291,7 +315,7 @@ impl Subscribers {
             .push((id, pattern.to_owned(), handler));
         Subscription {
             id,
-            owner: Arc::downgrade(self),
+            owner: Some(Arc::downgrade(self)),
         }
     }
 
@@ -314,7 +338,15 @@ impl Subscribers {
             .map(|(_, _, h)| Arc::clone(h))
             .collect();
         for handler in hits {
-            handler(topic, payload);
+            // One handler's panic must not cost the others their delivery or
+            // kill the task dispatching (the pub/sub listener). Only reachable
+            // in unwinding builds; release builds abort on panic.
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handler(topic, payload);
+            }));
+            if ran.is_err() {
+                tracing::error!(topic, "pubsub handler panicked; delivery skipped");
+            }
         }
     }
 }
@@ -331,21 +363,23 @@ fn topic_matches(pattern: &str, topic: &str) -> bool {
 #[must_use = "dropping a Subscription unsubscribes it"]
 pub struct Subscription {
     id: u64,
-    owner: std::sync::Weak<Subscribers>,
+    /// `None` once detached by [`Subscription::forever`].
+    owner: Option<std::sync::Weak<Subscribers>>,
 }
 
 impl Subscription {
     pub fn unsubscribe(self) {}
 
-    /// Keeps the handler for the life of the coordinator.
-    pub fn forever(self) {
-        std::mem::forget(self);
+    /// Keeps the handler for the life of the coordinator. Releases this
+    /// handle's reference (nothing is leaked when the coordinator goes).
+    pub fn forever(mut self) {
+        self.owner = None;
     }
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        if let Some(owner) = self.owner.upgrade() {
+        if let Some(owner) = self.owner.take().and_then(|o| o.upgrade()) {
             owner.remove(self.id);
         }
     }
@@ -407,6 +441,46 @@ mod tests {
         assert_eq!(split_sequenced("1.5:x"), None);
         assert_eq!(split_sequenced("x:y"), None);
         assert_eq!(split_sequenced("plain"), None);
+    }
+
+    #[test]
+    fn forever_keeps_the_handler_without_leaking_the_registry() {
+        let subs = Arc::new(Subscribers::default());
+        let hits = Arc::new(AtomicU64::new(0));
+        let h = Arc::clone(&hits);
+        subs.add(
+            "t",
+            Arc::new(move |_, _| {
+                h.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .forever();
+        subs.dispatch("t", "");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // No handle holds a weak reference any more.
+        assert_eq!(Arc::weak_count(&subs), 0);
+        let dropped = subs.add("u", Arc::new(|_, _| {}));
+        assert_eq!(Arc::weak_count(&subs), 1);
+        drop(dropped);
+        assert_eq!(Arc::weak_count(&subs), 0);
+        assert_eq!(subs.list.read().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn a_panicking_handler_does_not_cost_the_others_their_delivery() {
+        let subs = Arc::new(Subscribers::default());
+        let hits = Arc::new(AtomicU64::new(0));
+        let _bad = subs.add("t", Arc::new(|_, _| panic!("handler bug")));
+        let h = Arc::clone(&hits);
+        let _good = subs.add(
+            "t",
+            Arc::new(move |_, _| {
+                h.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        subs.dispatch("t", "");
+        subs.dispatch("t", "");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[test]

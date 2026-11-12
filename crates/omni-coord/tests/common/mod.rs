@@ -35,8 +35,17 @@ impl ManualClock {
 
 /// `OMNI_TEST_REDIS_URL`, without a trailing `/<db>`. Tests that need a
 /// server return early (and say so) without it, as the TS suite skips.
+///
+/// With `OMNI_TEST_REQUIRE_REDIS=1` a missing server is a failure, not a
+/// skip, so a run that claims Redis coverage cannot pass without it.
 pub fn redis_base() -> Option<String> {
-    let url = std::env::var("OMNI_TEST_REDIS_URL").ok()?;
+    let Ok(url) = std::env::var("OMNI_TEST_REDIS_URL") else {
+        assert!(
+            std::env::var_os("OMNI_TEST_REQUIRE_REDIS").is_none(),
+            "OMNI_TEST_REQUIRE_REDIS is set but OMNI_TEST_REDIS_URL is not"
+        );
+        return None;
+    };
     let trimmed = match url.rsplit_once('/') {
         Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => {
             head.to_owned()
@@ -165,4 +174,116 @@ pub async fn kill_clients_on_db(conn: &mut redis::aio::MultiplexedConnection, db
 
 pub async fn sleep_ms(ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+/// `host:port` of a `redis://host:port` base URL.
+pub fn host_port(base: &str) -> String {
+    base.trim_start_matches("redis://")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A TCP proxy in front of the server whose *established* connections a
+/// test can blackhole — still open, nothing forwarded either way — while new
+/// connections keep working. The failure an RST or a server-wide pause does
+/// not produce: one socket that is silently dead.
+pub struct Proxy {
+    pub port: u16,
+    conns: Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>>,
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl Proxy {
+    pub async fn start(target: &str) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy");
+        let port = listener.local_addr().expect("addr").port();
+        let conns: Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>> = Arc::default();
+        let tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+        let target = target.to_owned();
+        let (c, t) = (Arc::clone(&conns), Arc::clone(&tasks));
+        let accept = tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let Ok(server) = tokio::net::TcpStream::connect(&target).await else {
+                    continue;
+                };
+                let frozen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                c.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(Arc::clone(&frozen));
+                let (cr, cw) = client.into_split();
+                let (sr, sw) = server.into_split();
+                let up = tokio::spawn(pump(cr, sw, Arc::clone(&frozen)));
+                let down = tokio::spawn(pump(sr, cw, frozen));
+                t.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend([up, down]);
+            }
+        });
+        tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(accept);
+        Self { port, conns, tasks }
+    }
+
+    /// Blackholes every connection established so far. Returns how many.
+    pub fn freeze_existing(&self) -> usize {
+        let conns = self.conns.lock().unwrap_or_else(PoisonError::into_inner);
+        for frozen in conns.iter() {
+            frozen.store(true, Ordering::SeqCst);
+        }
+        conns.len()
+    }
+
+    pub fn connections(&self) -> usize {
+        self.conns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        for task in self
+            .tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+        {
+            task.abort();
+        }
+    }
+}
+
+/// Copies one direction until frozen; frozen, it swallows everything and
+/// never closes either half, so the peer sees an open, silent socket.
+async fn pump(
+    mut from: tokio::net::tcp::OwnedReadHalf,
+    mut to: tokio::net::tcp::OwnedWriteHalf,
+    frozen: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = vec![0_u8; 16 * 1024];
+    loop {
+        let n = match from.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if frozen.load(Ordering::SeqCst) {
+            continue;
+        }
+        if to.write_all(&buf[..n]).await.is_err() {
+            break;
+        }
+    }
+    if frozen.load(Ordering::SeqCst) {
+        // Hold the write half open (dropping it would send a FIN).
+        std::future::pending::<()>().await;
+    }
+    drop(to);
 }
