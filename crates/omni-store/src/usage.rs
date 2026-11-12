@@ -157,3 +157,55 @@ pub fn seed_rows(
     tx.commit()?;
     Ok((buckets, stamps))
 }
+
+/// `NODE_GRACE_MS`.
+const NODE_GRACE_MS: i64 = 60_000;
+
+/// `heartbeat` then `sweepPending`'s read (`maintenance.ts`, `usage.ts`):
+/// this node's liveness row, day-old ones forgotten, and every pending row
+/// of this node or of a node with no live heartbeat, as the 499
+/// `interrupted` completions (zero duration) the boot sweep sends through
+/// the writer. The same statements `omni-gateway`'s boot runs today.
+pub fn sweep_pending(
+    conn: &Connection,
+    node_id: &str,
+    now: i64,
+) -> Result<Vec<crate::writer::RequestLog>, StoreError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO nodes (id, seen_at) VALUES (?, ?)",
+        params![node_id, now],
+    )?;
+    conn.execute(
+        "DELETE FROM nodes WHERE seen_at < ?",
+        params![now - 86_400_000],
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, at, api_key_id, requested_model, resolved_provider, resolved_model,
+                credential_id, attempts, input_tokens, output_tokens, cache_read_tokens,
+                cache_write_tokens, ttft_ms, cost_usd, degradations
+           FROM request_logs
+          WHERE state = 'pending'
+            AND (node_id = ? OR node_id NOT IN (SELECT id FROM nodes WHERE seen_at > ?))",
+    )?;
+    let rows = stmt.query_map(params![node_id, now - NODE_GRACE_MS], |r| {
+        let mut log = crate::writer::RequestLog::new(r.get::<_, String>(0)?, r.get(1)?, 499);
+        log.api_key_id = r.get(2)?;
+        log.requested_model = r.get(3)?;
+        log.resolved_provider = r.get(4)?;
+        log.resolved_model = r.get(5)?;
+        log.credential_id = r.get(6)?;
+        log.attempts = r.get(7)?;
+        log.input_tokens = r.get(8)?;
+        log.output_tokens = r.get(9)?;
+        log.cache_read_tokens = r.get(10)?;
+        log.cache_write_tokens = r.get(11)?;
+        log.ttft_ms = r.get(12)?;
+        log.cost_usd = r.get(13)?;
+        let degradations: String = r.get(14)?;
+        log.degradations = serde_json::from_str(&degradations).unwrap_or_default();
+        log.error_code = Some("interrupted".into());
+        log.duration_ms = 0;
+        Ok(log)
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}

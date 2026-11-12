@@ -49,26 +49,43 @@ pub enum KeyEdit<'a> {
     Revoke(i64),
 }
 
-pub fn create(conn: &Connection, key: &ApiKey) -> Result<(), StoreError> {
+/// `JSON.stringify(parseLimitConfig(input.limits))`, as `create` stores it.
+pub(crate) fn limits_column(key: &ApiKey) -> Result<String, StoreError> {
     let limits = key
         .limits
         .as_ref()
         .ok_or_else(|| StoreError::Corrupt("unreadable limits".into()))?
         .to_json();
-    let limits =
-        omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&limits)).expect("limits");
-    conn.execute("INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,body_logging_opt_out,created_at,revoked_at,expires_at,guardrail_policy,smart_routing) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)",rusqlite::params![key.id,key.label,key.prefix,key.hash,key.model_allowlist.as_ref().map(|v|serde_json::to_string(v).expect("models")),limits,i64::from(key.body_logging_opt_out),key.created_at,key.expires_at,key.guardrail_policy,i64::from(key.smart_routing)])?;
+    Ok(omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&limits)).expect("limits"))
+}
+
+/// `setLimits`' guard: the stored text a raw limits edit writes.
+pub(crate) fn edited_limits(raw: &str) -> Result<String, StoreError> {
+    let parsed =
+        parse_limits(raw).ok_or_else(|| StoreError::Corrupt("unreadable limits".into()))?;
+    Ok(
+        omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&parsed.to_json()))
+            .expect("limits"),
+    )
+}
+
+/// `JSON.stringify(modelAllowlist)` for a create.
+pub(crate) fn allowlist_column(key: &ApiKey) -> Option<String> {
+    key.model_allowlist
+        .as_ref()
+        .map(|v| serde_json::to_string(v).expect("models"))
+}
+
+pub fn create(conn: &Connection, key: &ApiKey) -> Result<(), StoreError> {
+    let limits = limits_column(key)?;
+    conn.execute("INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,body_logging_opt_out,created_at,revoked_at,expires_at,guardrail_policy,smart_routing) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)",rusqlite::params![key.id,key.label,key.prefix,key.hash,allowlist_column(key),limits,i64::from(key.body_logging_opt_out),key.created_at,key.expires_at,key.guardrail_policy,i64::from(key.smart_routing)])?;
     Ok(())
 }
 
 pub fn edit(conn: &Connection, id: &str, edit: KeyEdit<'_>) -> Result<(), StoreError> {
     match edit {
         KeyEdit::Limits(v) => {
-            let parsed =
-                parse_limits(v).ok_or_else(|| StoreError::Corrupt("unreadable limits".into()))?;
-            let raw =
-                omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&parsed.to_json()))
-                    .expect("limits");
+            let raw = edited_limits(v)?;
             conn.execute(
                 "UPDATE api_keys SET limits = ? WHERE id = ?",
                 rusqlite::params![raw, id],
@@ -98,43 +115,53 @@ pub fn edit(conn: &Connection, id: &str, edit: KeyEdit<'_>) -> Result<(), StoreE
     Ok(())
 }
 
+/// The stored `model_allowlist` as the gateway reads it.
+///
+/// TS is `JSON.parse(..) as string[]`: invalid JSON throws, and anything
+/// else is used by `includes(model)`. A JSON `null` is unrestricted there
+/// too. A non-string entry can never equal a model name, so dropping it
+/// changes no decision. Any other non-array is a hand-edited row TS would
+/// throw on (or, for a string, substring-match) at the request; it reads
+/// here as deny-all, the closed direction.
+pub(crate) fn parse_allowlist(
+    id: &str,
+    raw: Option<String>,
+) -> Result<Option<Vec<String>>, StoreError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        StoreError::Corrupt(format!("api_keys.model_allowlist of {id}: not JSON ({e})"))
+    })?;
+    Ok(match parsed {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(items) => Some(
+            items
+                .into_iter()
+                .filter_map(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => Some(Vec::new()),
+    })
+}
+
 fn to_key(r: &Row<'_>) -> Result<ApiKey, StoreError> {
     read_key(r, false)
 }
 
 fn read_key(r: &Row<'_>, operator: bool) -> Result<ApiKey, StoreError> {
     let id = row::text(r, T, "id")?;
-    // TS is `JSON.parse(..) as string[]`: invalid JSON throws, and anything
-    // else is used by `includes(model)`. A JSON `null` is unrestricted there
-    // too. A non-string entry can never equal a model name, so dropping it
-    // changes no decision. Any other non-array is a hand-edited row TS would
-    // throw on (or, for a string, substring-match) at the request; it reads
-    // here as deny-all, the closed direction.
-    let model_allowlist = match if operator {
-        None
-    } else {
-        row::opt_text(r, T, "model_allowlist")?
-    } {
-        None => None,
-        Some(raw) => {
-            let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-                StoreError::Corrupt(format!("api_keys.model_allowlist of {id}: not JSON ({e})"))
-            })?;
-            match parsed {
-                serde_json::Value::Null => None,
-                other => Some(match other {
-                    serde_json::Value::Array(items) => items
-                        .into_iter()
-                        .filter_map(|v| match v {
-                            serde_json::Value::String(s) => Some(s),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                }),
-            }
-        }
-    };
+    let model_allowlist = parse_allowlist(
+        &id,
+        if operator {
+            None
+        } else {
+            row::opt_text(r, T, "model_allowlist")?
+        },
+    )?;
     // `parseLimits`: unreadable marks the key rather than failing the read.
     let limits = parse_limits(&row::text(r, T, "limits")?);
     Ok(ApiKey {

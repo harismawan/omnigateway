@@ -18,11 +18,18 @@
 //! are dropped and counted. A batch whose transaction fails is retried when the
 //! failure is transient (`SQLITE_BUSY`/`SQLITE_LOCKED`), and otherwise counted
 //! as failed and reported with `tracing::error!`.
+//!
+//! **Postgres.** [`Writer::spawn_postgres`] runs the same task over a pool;
+//! each batch is one transaction whose `request_logs` and rollup writes are
+//! single `INSERT … SELECT FROM unnest(...)` upserts (`pg_batch.rs`). A row
+//! race with another replica, a serialization failure, a deadlock, or a
+//! statement or pool timeout is the transient class there.
 
 mod batch;
 mod epoch;
 mod events;
 mod num;
+mod pg_batch;
 mod sql;
 mod task;
 

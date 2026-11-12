@@ -536,12 +536,47 @@ impl Writer {
         let (tx, rx) = mpsc::channel(config.capacity.max(1));
         let (shutdown, stop) = oneshot::channel();
         let counters = Arc::new(Counters::new());
-        let task = tokio::spawn(run(conn, rx, stop, config, Arc::clone(&counters)));
+        let task = tokio::spawn(run(
+            Backend::Sqlite(Some(conn)),
+            rx,
+            stop,
+            config,
+            Arc::clone(&counters),
+        ));
         Ok(Self {
             handle: WriterHandle { tx, counters },
             shutdown: Some(shutdown),
             task,
             checkpointer,
+        })
+    }
+
+    /// The same writer over a (migrated) Postgres store: each batch takes a
+    /// pooled connection for its one transaction (`pg_batch.rs`). Batching,
+    /// barriers, seeds, the commit sink and the drop and failure accounting
+    /// are the SQLite writer's, unchanged. `busy_timeout`,
+    /// `checkpoint_every` and `wal_autocheckpoint` are SQLite's and ignored;
+    /// the pool's statement and wait timeouts bound a stalled server instead,
+    /// and a timed-out batch is retried like a busy one.
+    pub fn spawn_postgres(
+        store: crate::pg::PgStore,
+        config: WriterConfig,
+    ) -> Result<Self, StoreError> {
+        let (tx, rx) = mpsc::channel(config.capacity.max(1));
+        let (shutdown, stop) = oneshot::channel();
+        let counters = Arc::new(Counters::new());
+        let task = tokio::spawn(run(
+            Backend::Postgres(store),
+            rx,
+            stop,
+            config,
+            Arc::clone(&counters),
+        ));
+        Ok(Self {
+            handle: WriterHandle { tx, counters },
+            shutdown: Some(shutdown),
+            task,
+            checkpointer: None,
         })
     }
 
@@ -588,18 +623,45 @@ impl Drop for Writer {
 }
 
 /// `SQLITE_BUSY` / `SQLITE_LOCKED`: another connection holds the lock, and
-/// the same batch may well commit a moment later.
+/// the same batch may well commit a moment later. On Postgres the same
+/// class: another writer won a row race ([`StoreError::Conflict`]), a
+/// serialization failure or deadlock, a lock or statement timeout, or no
+/// connection to be had right now (pool wait, a dropped connection).
 fn transient(e: &StoreError) -> bool {
-    matches!(
-        e,
-        StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _))
-            if matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-    )
+    match e {
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _)) => {
+            matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+        }
+        StoreError::Conflict(_) | StoreError::Pool(_) => true,
+        StoreError::Postgres(e) => {
+            use tokio_postgres::error::SqlState;
+            e.is_closed()
+                || e.code().is_none_or(|c| {
+                    [
+                        SqlState::T_R_SERIALIZATION_FAILURE,
+                        SqlState::T_R_DEADLOCK_DETECTED,
+                        SqlState::LOCK_NOT_AVAILABLE,
+                        SqlState::QUERY_CANCELED,
+                        SqlState::ADMIN_SHUTDOWN,
+                        SqlState::CANNOT_CONNECT_NOW,
+                    ]
+                    .contains(c)
+                })
+        }
+        _ => false,
+    }
 }
 
-/// Owns the connection between batches; `None` only while one is in flight.
+/// Where a batch goes: the SQLite connection the writer owns (`None` only
+/// while a batch is in flight on the blocking pool), or a Postgres pool.
+enum Backend {
+    Sqlite(Option<Connection>),
+    Postgres(crate::pg::PgStore),
+}
+
+/// Owns the connection between batches.
 struct Sink {
-    conn: Option<Connection>,
+    backend: Backend,
     node_id: Arc<str>,
     day_offset_minutes: i64,
     counters: Arc<Counters>,
@@ -646,29 +708,47 @@ impl Sink {
 
     /// One seed read, in one read transaction on the writer's connection.
     async fn seed(&mut self, query: SeedQuery) -> Result<(), StoreError> {
-        let conn = self
-            .conn
-            .take()
-            .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
         let q = query.clone();
         let delay = self.seed_delay;
-        let (conn, result) = tokio::task::spawn_blocking(move || {
-            if !delay.is_zero() {
-                std::thread::sleep(delay);
+        let result = match &mut self.backend {
+            Backend::Sqlite(slot) => {
+                let conn = slot
+                    .take()
+                    .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
+                let (conn, result) = tokio::task::spawn_blocking(move || {
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                    let r = crate::usage::seed_rows(
+                        &conn,
+                        &q.api_key_id,
+                        q.since_ms,
+                        q.grain_ms,
+                        q.requested_model.as_deref(),
+                        q.stamp_cap,
+                    );
+                    (conn, r)
+                })
+                .await
+                .map_err(|e| StoreError::Writer(format!("seed read panicked: {e}")))?;
+                *slot = Some(conn);
+                result
             }
-            let r = crate::usage::seed_rows(
-                &conn,
-                &q.api_key_id,
-                q.since_ms,
-                q.grain_ms,
-                q.requested_model.as_deref(),
-                q.stamp_cap,
-            );
-            (conn, r)
-        })
-        .await
-        .map_err(|e| StoreError::Writer(format!("seed read panicked: {e}")))?;
-        self.conn = Some(conn);
+            Backend::Postgres(store) => {
+                if !delay.is_zero() {
+                    sleep(delay).await;
+                }
+                store
+                    .seed_rows(
+                        &q.api_key_id,
+                        q.since_ms,
+                        q.grain_ms,
+                        q.requested_model.as_deref(),
+                        q.stamp_cap,
+                    )
+                    .await
+            }
+        };
         let result = result
             .map(|(buckets, stamps)| SeedRows { buckets, stamps })
             .map_err(|e| e.to_string());
@@ -750,28 +830,48 @@ impl Sink {
         }
         let mut attempt = 1;
         loop {
-            let mut conn = self
-                .conn
-                .take()
-                .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
             let node_id = Arc::clone(&self.node_id);
             let offset = self.day_offset_minutes;
-            let (conn, back, result) = tokio::task::spawn_blocking(move || {
-                let phase = Instant::now();
-                let result = batch::write(&mut conn, &events, &node_id, offset);
-                if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
-                    eprintln!(
-                        "writer_phase sql_us={} events={}",
-                        phase.elapsed().as_micros(),
-                        events.len()
-                    );
+            let result = match &mut self.backend {
+                Backend::Sqlite(slot) => {
+                    let mut conn = slot
+                        .take()
+                        .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
+                    let (conn, back, result) = tokio::task::spawn_blocking(move || {
+                        let phase = Instant::now();
+                        let result = batch::write(&mut conn, &events, &node_id, offset);
+                        if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
+                            eprintln!(
+                                "writer_phase sql_us={} events={}",
+                                phase.elapsed().as_micros(),
+                                events.len()
+                            );
+                        }
+                        (conn, events, result)
+                    })
+                    .await
+                    .map_err(|e| StoreError::Writer(format!("batch write panicked: {e}")))?;
+                    *slot = Some(conn);
+                    events = back;
+                    result
                 }
-                (conn, events, result)
-            })
-            .await
-            .map_err(|e| StoreError::Writer(format!("batch write panicked: {e}")))?;
-            self.conn = Some(conn);
-            events = back;
+                Backend::Postgres(store) => {
+                    let phase = Instant::now();
+                    let result = async {
+                        let mut client = store.client().await?;
+                        super::pg_batch::write(&mut client, &events, &node_id, offset).await
+                    }
+                    .await;
+                    if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
+                        eprintln!(
+                            "writer_phase sql_us={} events={}",
+                            phase.elapsed().as_micros(),
+                            events.len()
+                        );
+                    }
+                    result
+                }
+            };
             let c = Arc::clone(&self.counters);
             match result {
                 Ok(outcome) => {
@@ -926,7 +1026,7 @@ fn stop_arrived(stop: &mut oneshot::Receiver<()>) -> bool {
 }
 
 async fn run(
-    conn: Connection,
+    backend: Backend,
     mut rx: mpsc::Receiver<Queued>,
     mut stop: oneshot::Receiver<()>,
     config: WriterConfig,
@@ -934,7 +1034,7 @@ async fn run(
 ) -> Result<(), StoreError> {
     let max_batch = config.max_batch.max(1);
     let mut sink = Sink {
-        conn: Some(conn),
+        backend,
         node_id: Arc::from(config.node_id.as_str()),
         day_offset_minutes: config.day_offset_minutes,
         counters: Arc::clone(&counters),
