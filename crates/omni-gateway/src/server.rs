@@ -371,6 +371,10 @@ pub struct App {
     pub bench_endpoints: bool,
     /// How long that barrier waits for the writer before a 504.
     pub bench_flush_timeout: Duration,
+    /// `OMNI_METRICS_TOKEN`: registers `/metrics`; absent means no route.
+    pub metrics_token: Option<String>,
+    /// `realpath` of the dashboard directory at boot; `None` when absent.
+    pub static_root: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for App {
@@ -383,7 +387,7 @@ impl std::fmt::Debug for App {
 
 const RESPONSES_KEEPALIVE: Duration = Duration::from_secs(4);
 
-fn full(body: impl Into<Bytes>) -> Body {
+pub(crate) fn full(body: impl Into<Bytes>) -> Body {
     Full::new(body.into())
         .map_err(|never: Infallible| match never {})
         .boxed_unsync()
@@ -423,7 +427,7 @@ fn error_response(
 }
 
 /// Elysia's 404 for an unmatched GET (the `/*` catch-all with no dashboard).
-fn not_found_get(path: &str) -> Response<Body> {
+pub(crate) fn not_found_get(path: &str) -> Response<Body> {
     let mut body = String::from("{\"error\":{\"code\":\"NOT_FOUND\",\"message\":");
     omni_ir::jsjson::write_str(&format!("no route for {path}"), &mut body);
     body.push_str("}}");
@@ -442,8 +446,13 @@ fn not_found_other() -> Response<Body> {
 }
 
 /// Routes one request.
+///
+/// Routes match `new URL(request.url).pathname`, as Elysia's do: dot
+/// segments (and their `%2e` spellings) resolved and the path encode set
+/// applied. Plain paths, which is every `/v1/*` call a client makes, borrow
+/// the request's own path.
 pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
-    let path = req.uri().path().to_owned();
+    let path = crate::static_files::pathname(req.uri().path()).into_owned();
     // Elysia matches a route with one trailing slash as the route itself.
     let route = if path.len() > 1 && path.ends_with('/') && !path.ends_with("//") {
         &path[..path.len() - 1]
@@ -451,6 +460,7 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Bo
         path.as_str()
     };
     let method = req.method().clone();
+    let get = matches!(method, Method::GET | Method::HEAD);
     let res = match (method.clone(), route) {
         (Method::GET | Method::HEAD, "/health") => health(&app),
         (Method::POST, "/__omni/bench/flush") if app.bench_endpoints => bench_flush(&app).await,
@@ -459,10 +469,109 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Bo
         (Method::POST, "/v1/responses") => proxy(app, Surface::Responses, req).await,
         (Method::POST, "/v1/messages/count_tokens") => count_tokens(app, req).await,
         (Method::GET | Method::HEAD, "/v1/models") => models(&app, &req).await,
-        (Method::GET | Method::HEAD, _) => not_found_get(&path),
+        (Method::GET | Method::HEAD, "/metrics") if app.metrics_token.is_some() => {
+            metrics(&app, &req)
+        }
+        (_, r) if is_plugin_api(r) => plugins_unsupported(),
+        (Method::GET | Method::HEAD, r) if is_plugin_asset(&path, r) => plugin_asset_not_found(),
+        _ if get => crate::static_files::serve(app.static_root.as_deref(), &path, &req).await,
         _ => not_found_other(),
     };
+    let mut res = res;
+    if method != Method::HEAD {
+        stamp_date(&mut res);
+    }
     Ok(res)
+}
+
+/// `date: <IMF-fixdate>` as Bun writes it on every response but a HEAD's,
+/// formatted once per second per thread.
+fn stamp_date(res: &mut Response<Body>) {
+    thread_local! {
+        static CACHE: std::cell::RefCell<(u64, Option<HeaderValue>)> =
+            const { std::cell::RefCell::new((0, None)) };
+    }
+    if res.headers().contains_key(hyper::header::DATE) {
+        return;
+    }
+    let now = std::time::SystemTime::now();
+    let secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let value = CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != secs || c.1.is_none() {
+            c.0 = secs;
+            c.1 = HeaderValue::from_str(&httpdate::fmt_http_date(now)).ok();
+        }
+        c.1.clone()
+    });
+    if let Some(v) = value {
+        res.headers_mut().insert(hyper::header::DATE, v);
+    }
+}
+
+/// `/api/plugins` and everything below it: the plugin API, which this
+/// release refuses (spec, non-goals).
+fn is_plugin_api(route: &str) -> bool {
+    route == "/api/plugins" || route.starts_with("/api/plugins/")
+}
+
+/// `/plugin-assets/:id/*` (a non-empty id, then a slash): with no plugin
+/// loaded, TS answers every such path its own 404.
+fn is_plugin_asset(path: &str, _route: &str) -> bool {
+    path.strip_prefix("/plugin-assets/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(id, _)| !id.is_empty())
+}
+
+/// `pluginUiRoutes`' `notFound()` for an id no plugin has.
+fn plugin_asset_not_found() -> Response<Body> {
+    json_response(
+        404,
+        JSON_UTF8,
+        "{\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"no such plugin asset\"}}".to_owned(),
+        &[],
+    )
+}
+
+/// The spec's plugin refusal: 501 with the usual `/api` error body.
+fn plugins_unsupported() -> Response<Body> {
+    json_response(
+        501,
+        JSON_UTF8,
+        "{\"error\":{\"code\":\"UNSUPPORTED\",\"message\":\"plugins are not supported in this release\"}}"
+            .to_owned(),
+        &[],
+    )
+}
+
+/// `GET /metrics`: `authorization` must be exactly `Bearer <token>`,
+/// compared in constant time over equal lengths; anything else is a bare 401.
+fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
+    let Some(token) = &app.metrics_token else {
+        return not_found_get(req.uri().path());
+    };
+    let supplied = header(req, "authorization").unwrap_or_default();
+    let expected = format!("Bearer {token}");
+    let ok = supplied.len() == expected.len()
+        && supplied
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0;
+    if !ok {
+        let mut res = Response::new(full(Bytes::new()));
+        *res.status_mut() = StatusCode::UNAUTHORIZED;
+        return res;
+    }
+    let text = app.deps.telemetry.scrape(&app.deps.load.provider_counts());
+    let mut res = Response::new(full(text));
+    res.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    res
 }
 
 fn health(app: &App) -> Response<Body> {
@@ -713,6 +822,9 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         sname,
         now,
     );
+    if app.deps.telemetry.enabled() {
+        fin = fin.with_telemetry(app.deps.telemetry.clone());
+    }
     let mut headroom = HeadroomByDimension::default();
     let mut admitted = false;
     let limit_headers = |headroom: &HeadroomByDimension, admitted: bool| {
@@ -754,6 +866,10 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             }
             Err(refused) => {
                 headroom = *refused.headroom;
+                app.deps.telemetry.rate_limit(
+                    refused.violation.dimension.as_str(),
+                    refused.violation.window.map(omni_ratelimit::Window::as_str),
+                );
                 let e = refused.to_gateway_error();
                 tracing::warn!(requestId = %request_id, surface = sname, apiKeyId = %key.id,
                     model = %chat.model, code = e.code.as_str(), retryAfterMs = e.retry_after_ms,
@@ -1061,7 +1177,13 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
         #[allow(clippy::cast_precision_loss)]
         app.limiter
             .consume(&key.id, &key.limits, &chat.model, now as f64)
-            .map_err(|r| r.to_gateway_error())?;
+            .map_err(|r| {
+                app.deps.telemetry.rate_limit(
+                    r.violation.dimension.as_str(),
+                    r.violation.window.map(omni_ratelimit::Window::as_str),
+                );
+                r.to_gateway_error()
+            })?;
         // The ponytail ruleset defaults off and is not ported.
         Ok(omni_ir::tokens::estimate_input_tokens(&chat))
     }

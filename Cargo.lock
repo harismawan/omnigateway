@@ -1104,13 +1104,16 @@ dependencies = [
 name = "omni-gateway"
 version = "0.16.0"
 dependencies = [
+ "arc-swap",
  "async-stream",
  "bytes",
  "chrono",
+ "foldhash",
  "futures-core",
  "futures-util",
  "http-body",
  "http-body-util",
+ "httpdate",
  "hyper",
  "hyper-util",
  "mimalloc",

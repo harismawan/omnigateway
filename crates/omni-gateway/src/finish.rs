@@ -29,6 +29,8 @@ enum Phase {
 
 pub struct Finisher {
     writer: WriterHandle,
+    /// `telemetry.record` after the row is handed to the writer.
+    telemetry: Option<Arc<crate::telemetry::Telemetry>>,
     request_id: String,
     started_at: i64,
     surface: &'static str,
@@ -66,6 +68,7 @@ impl Finisher {
     ) -> Self {
         Self {
             writer,
+            telemetry: None,
             request_id,
             started_at,
             surface,
@@ -79,6 +82,14 @@ impl Finisher {
         }
     }
 
+    /// Records each completed request in `telemetry` (`finishLog`'s
+    /// `telemetry?.record`).
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: Arc<crate::telemetry::Telemetry>) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
+
     /// Hands this finisher's duty to the returned one, leaving this one
     /// inert: a stream's body owns the row from here on.
     pub fn take(&mut self) -> Finisher {
@@ -89,6 +100,7 @@ impl Finisher {
             self.surface,
             self.now,
         );
+        moved.telemetry = self.telemetry.clone();
         std::mem::swap(self, &mut moved);
         self.done = true;
         moved
@@ -119,6 +131,11 @@ impl Finisher {
         // A refused row is counted in the writer's `dropped`, which the
         // writer task warns about at most once per interval. No line here:
         // one per request is a flood exactly when the writer is behind.
+        // Telemetry is recorded whether or not the writer took the row, as
+        // TS records after an append that may have failed.
+        if let Some(t) = &self.telemetry {
+            t.record(&log);
+        }
         self.writer.send(LogEvent::Finish(log));
     }
 

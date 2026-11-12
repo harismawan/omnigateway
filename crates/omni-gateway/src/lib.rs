@@ -17,6 +17,8 @@ mod output_budget;
 pub mod overlay;
 pub mod price;
 pub mod server;
+pub mod static_files;
+pub mod telemetry;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -136,6 +138,63 @@ pub fn spawn_preseeder(
     })
 }
 
+/// The default dashboard directory: the first of `<exe dir>/public` and the
+/// checkout's `apps/dashboard/dist` that exists, else the latter.
+fn default_static_dir() -> String {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let mut candidates = Vec::new();
+    if let Some(d) = &exe_dir {
+        candidates.push(d.join("public"));
+        // `target/<profile>/omnigateway` in a checkout.
+        candidates.push(d.join("../../apps/dashboard/dist"));
+    }
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .or(candidates.last())
+        .map(|p| {
+            std::path::absolute(p)
+                .unwrap_or_else(|_| p.clone())
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "public".to_owned())
+}
+
+/// Plugins are not run by this release (spec, non-goals). Where TS would
+/// load `<root>/plugins/<id>` (each directory, in sorted order; `root` is
+/// `OMNI_ROOT`, else the database's directory), one `warn` per entry; then
+/// TS's `plugins resolved` line with the count actually loaded, zero.
+fn warn_plugins(root: Option<&str>, database_path: &str) {
+    let root = root.map_or_else(
+        || {
+            std::path::Path::new(database_path)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+        },
+        std::path::PathBuf::from,
+    );
+    let dir = std::path::absolute(root.join("plugins")).unwrap_or_else(|_| root.join("plugins"));
+    let mut ids: Vec<String> = std::fs::read_dir(&dir)
+        .map(|it| {
+            it.filter_map(Result::ok)
+                // `Dirent.isDirectory()`: a symlink is not followed.
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    for id in &ids {
+        tracing::warn!(plugin = %id, reason = "plugins are not supported in this release",
+            "plugin skipped");
+    }
+    tracing::info!(count = 0, path = %dir.display(), "plugins resolved");
+}
+
 /// A running gateway: the bound address and a way to stop it.
 pub struct Running {
     pub addr: std::net::SocketAddr,
@@ -190,6 +249,10 @@ pub struct Options {
     pub boot_seed_timeout: Duration,
     /// Deterministic seed scheduling delay for embedded/test startup probes.
     pub seed_delay: Duration,
+    /// `VERSION` (`omni_build_info`); see [`telemetry::version`].
+    pub version: String,
+    /// `OMNI_ROOT`, where `plugins/` lives (else the database's directory).
+    pub root: Option<String>,
 }
 
 /// `idleTimeout: 255`.
@@ -206,6 +269,8 @@ impl Default for Options {
             writer_capacity: None,
             boot_seed_timeout: Duration::from_secs(30),
             seed_delay: Duration::ZERO,
+            version: "0.0.0-dev".to_owned(),
+            root: None,
         }
     }
 }
@@ -214,10 +279,14 @@ impl Default for Options {
 /// `idle` is the header read timeout: armed from the moment hyper waits for a
 /// request head, so it bounds both a slow head and the idle wait between
 /// keep-alive requests.
+///
+/// hyper's own `date` header is off: Bun writes one on every response but a
+/// HEAD's, so [`server::handle`] stamps it (see `server::stamp_date`).
 pub fn http1_builder(idle: Duration) -> hyper::server::conn::http1::Builder {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.timer(hyper_util::rt::TokioTimer::new());
     builder.header_read_timeout(idle);
+    builder.auto_date_header(false);
     builder
 }
 
@@ -349,6 +418,19 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         MissConfig::default(),
     );
 
+    // `dashboardDir()`: `OMNI_STATIC_DIR` taken literally when set. Without
+    // it TS tries `./public` and `../../dashboard/dist` beside its bundle;
+    // the Rust binary has no bundle directory, so it tries `public/` beside
+    // the executable and the checkout's `apps/dashboard/dist`.
+    let static_dir = config.static_dir.clone().unwrap_or_else(default_static_dir);
+    let static_root = static_files::resolve_root(&static_dir);
+    if std::path::Path::new(&static_dir).exists() {
+        tracing::info!(path = %static_dir, "dashboard directory resolved");
+    } else {
+        tracing::info!(path = %static_dir, "dashboard directory absent");
+    }
+    warn_plugins(options.root.as_deref(), &config.database_path);
+
     // All fallible startup work precedes task spawning. A failed bind drops
     // the owned writer (which signals stop), with no detached refresher tasks.
     let listener = TcpListener::bind((config.host.as_str(), config.port))
@@ -364,8 +446,23 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let health = Arc::new(dispatch::HealthOverlay::default());
     let overlay_sweeper =
         dispatch::HealthOverlay::spawn_sweeper(health.clone(), overlay::OVERLAY_TTL);
+    let telemetry = Arc::new(telemetry::Telemetry::new(
+        config.metrics_token.is_some(),
+        config.metrics_max_series,
+        &options.version,
+    ));
+    let http = {
+        let t = telemetry.clone();
+        let client = omni_providers::http::Client::new();
+        if t.enabled() {
+            client.with_on_response_head(Arc::new(move |provider, ms| t.http_head(provider, ms)))
+        } else {
+            client
+        }
+    };
     let deps = Arc::new(dispatch::Deps {
-        http: Arc::new(omni_providers::http::Client::new()),
+        http: Arc::new(http),
+        telemetry,
         writer: handle.clone(),
         holder,
         load: load::LoadRegistry::new(),
@@ -385,6 +482,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         idle_timeout: options.idle_timeout,
         bench_endpoints: options.bench_endpoints,
         bench_flush_timeout: options.bench_flush_timeout,
+        metrics_token: config.metrics_token.clone(),
+        static_root,
     });
 
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");

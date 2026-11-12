@@ -69,6 +69,8 @@ async fn run() -> std::process::ExitCode {
     // The bench harness's writer barrier, off unless asked for.
     let options = Options {
         bench_endpoints: env.get("OMNI_BENCH").is_some_and(|v| v == "1"),
+        version: omni_gateway::telemetry::version(&env),
+        root: env.get("OMNI_ROOT").cloned(),
         ..Options::default()
     };
     let running = match start(config, options).await {

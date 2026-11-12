@@ -24,6 +24,9 @@ omni-providers = { path = "../omni-providers" }
 omni-ratelimit = { path = "../omni-ratelimit" }
 omni-router = { path = "../omni-router" }
 omni-store = { path = "../omni-store" }
+arc-swap = "1"
+foldhash = "0.2"
+httpdate = "1"
 serde_json.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "signal", "io-util"] }

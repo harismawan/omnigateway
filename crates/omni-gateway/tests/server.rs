@@ -1459,3 +1459,160 @@ async fn a_barrier_on_a_full_queue_is_503() {
     drop(lock);
     stop(g).await;
 }
+
+/// `/metrics` exists only with a token, takes exactly `Bearer <token>`, and
+/// counts a finished request under TS's series names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_route_is_token_gated_and_records_completions() {
+    let port = upstream().await;
+    let f = fixture(&["c0"]);
+    let c = rusqlite::Connection::open(&f.path).expect("open");
+    c.execute(
+        "UPDATE credentials SET provider_data=? WHERE id='c0'",
+        rusqlite::params![format!(
+            "{{\"endpointId\":\"e0\",\"origin\":\"http://127.0.0.1:{port}\",\"protocol\":\"chat_completions\"}}"
+        )],
+    )
+    .expect("origin");
+    c.execute(
+        "INSERT OR REPLACE INTO virtual_models (id, targets, strategy) VALUES ('m1', ?, 'priority')",
+        rusqlite::params![
+            "[{\"provider\":\"custom\",\"endpointId\":\"e0\",\"model\":\"mock-c1-d0\",\"tier\":1,\"weight\":1,\
+             \"costPerMTok\":{\"input\":1,\"output\":2},\"capabilities\":{\"tools\":true,\"images\":true,\"reasoning\":true}}]"
+        ],
+    )
+    .expect("model");
+    drop(c);
+    add_key(&f.path, "kp", KEY, "", "");
+    let mut env: std::collections::HashMap<String, String> = [
+        ("OMNI_ENCRYPTION_KEY", ENC),
+        ("OMNI_DB_PATH", f.path.to_str().expect("path")),
+        ("OMNI_PORT", "1"),
+        ("OMNI_DAY_OFFSET_MINUTES", "0"),
+        ("OMNI_METRICS_TOKEN", "tok"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .collect();
+    let mut config = load_config(&env, || 0).expect("config");
+    config.port = 0;
+    let running = start(
+        config,
+        Options {
+            version: "1.2.3".into(),
+            ..Options::default()
+        },
+    )
+    .await
+    .expect("start");
+    let base = format!("127.0.0.1:{}", running.addr.port());
+
+    let (s, h, body) = call(&base, "GET", "/metrics", &[], "").await;
+    assert_eq!((s, body.as_str()), (401, ""));
+    assert!(!h.iter().any(|(k, _)| k == "content-type"));
+    let (s, _, _) = call(
+        &base,
+        "GET",
+        "/metrics",
+        &[("authorization", "Bearer tokx")],
+        "",
+    )
+    .await;
+    assert_eq!(s, 401);
+    let (s, h, body) = call(
+        &base,
+        "GET",
+        "/metrics",
+        &[("authorization", "Bearer tok")],
+        "",
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(h.contains(&(
+        "content-type".into(),
+        "text/plain; version=0.0.4; charset=utf-8".into()
+    )));
+    assert!(
+        body.ends_with("omni_build_info{version=\"1.2.3\"} 1\n"),
+        "{body}"
+    );
+    assert!(!body.contains("omni_requests_total"));
+
+    let req = r#"{"model":"m1","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let (s, _, _) = call(
+        &base,
+        "POST",
+        "/v1/chat/completions",
+        &[
+            ("authorization", &format!("Bearer {KEY}")),
+            ("content-type", "application/json"),
+        ],
+        req,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (_, _, body) = call(
+        &base,
+        "GET",
+        "/metrics",
+        &[("authorization", "Bearer tok")],
+        "",
+    )
+    .await;
+    assert!(
+        body.contains(
+            "omni_requests_total{provider=\"custom\",model=\"mock-c1-d0\",status=\"200\",code=\"\",api_key_id=\"kp\"} 1\n"
+        ),
+        "{body}"
+    );
+    assert!(body.contains("omni_upstream_duration_seconds_count{provider=\"custom\"} 1\n"));
+    assert!(body.contains("omni_ttft_seconds_count{provider=\"custom\",model=\"mock-c1-d0\"} 1\n"));
+    // `localCounts()` is empty once the slot is released, and no scrape set
+    // the gauge while it was held: TS registers no `omni_inflight` series.
+    assert!(!body.contains("omni_inflight"), "{body}");
+    running.shutdown();
+    running.wait().await.expect("stop");
+
+    // No token: no route, TS's 404 for an unmatched GET.
+    env.remove("OMNI_METRICS_TOKEN");
+    let mut config = load_config(&env, || 0).expect("config");
+    config.port = 0;
+    let running = start(config, Options::default()).await.expect("start");
+    let base = format!("127.0.0.1:{}", running.addr.port());
+    let (s, _, body) = call(
+        &base,
+        "GET",
+        "/metrics",
+        &[("authorization", "Bearer tok")],
+        "",
+    )
+    .await;
+    assert_eq!(s, 404);
+    assert_eq!(
+        body,
+        r#"{"error":{"code":"NOT_FOUND","message":"no route for /metrics"}}"#
+    );
+    running.shutdown();
+    running.wait().await.expect("stop");
+}
+
+/// `/api/plugins*` answers the spec's 501 for every method.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_routes_are_unsupported() {
+    let g = boot().await;
+    for (m, p) in [
+        ("GET", "/api/plugins"),
+        ("POST", "/api/plugins/x"),
+        ("DELETE", "/api/plugins/x/y"),
+    ] {
+        let (s, _, body) = call(&g.base, m, p, &[], "").await;
+        assert_eq!(s, 501, "{m} {p}");
+        assert_eq!(
+            body,
+            r#"{"error":{"code":"UNSUPPORTED","message":"plugins are not supported in this release"}}"#
+        );
+    }
+    let (s, _, _) = call(&g.base, "GET", "/api/pluginsx", &[], "").await;
+    assert_eq!(s, 404);
+    stop(g).await;
+}

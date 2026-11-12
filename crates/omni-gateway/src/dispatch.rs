@@ -101,6 +101,8 @@ pub struct Deps {
     /// they were made. Held under one lock, which also serializes the
     /// read-modify-write as TS's store transaction does. See [`HealthOverlay`].
     pub health: Arc<HealthOverlay>,
+    /// `/metrics` series (off unless `OMNI_METRICS_TOKEN` is set).
+    pub telemetry: Arc<crate::telemetry::Telemetry>,
     pub now: fn() -> i64,
     pub rand: fn() -> f64,
 }
@@ -269,6 +271,12 @@ impl Deps {
                 .unwrap_or_else(|| blank_health(&c.credential.id, &c.target.model))
         });
         let after = transition(&before);
+        // `deps.telemetry?.breaker(provider, before, after)`, inside apply.
+        self.telemetry.breaker(
+            &c.target.provider,
+            &before.breaker_state,
+            &after.breaker_state,
+        );
         let decided =
             after.breaker_state != before.breaker_state || after.opened_at != before.opened_at;
         // A refused write is counted in the writer's `dropped` and warned
@@ -509,9 +517,11 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
 
     #[allow(clippy::cast_precision_loss)]
     let max_attempts = omni_ir::js::math_min(settings.max_attempts, candidates.len() as f64);
-    let eager = deps
-        .load
-        .acquire(&candidates[0].credential.id, &candidates[0].target.model);
+    let eager = deps.load.acquire(
+        &candidates[0].credential.id,
+        &candidates[0].target.model,
+        &candidates[0].target.provider,
+    );
 
     let events = run(RunState {
         deps,
@@ -582,9 +592,9 @@ fn run(mut s: RunState) -> EventsStream {
                 e.key() == health_key(&c.credential.id, &c.target.model)
             });
             let mut slot = if adopt {
-                s.eager.take().unwrap_or_else(|| deps.load.acquire(&c.credential.id, &c.target.model))
+                s.eager.take().unwrap_or_else(|| deps.load.acquire(&c.credential.id, &c.target.model, &c.target.provider))
             } else {
-                deps.load.acquire(&c.credential.id, &c.target.model)
+                deps.load.acquire(&c.credential.id, &c.target.model, &c.target.provider)
             };
             let success_writes = success_would_change(
                 s.snapshot_health.routing.health_of(&c.credential.id, &c.target.model),

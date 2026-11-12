@@ -144,10 +144,23 @@ pub(crate) struct Target {
     pub path: String,
 }
 
+/// `onResponseHead`: called once per request when the response head or a
+/// transport failure arrives, with the provider and the elapsed whole ms.
+pub type OnResponseHead = Arc<dyn Fn(&str, u64) + Send + Sync>;
+
 /// A keep-alive client over plain TCP and rustls.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     pool: Arc<Pool>,
+    on_head: Option<OnResponseHead>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("pool", &self.pool)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for Client {
@@ -161,6 +174,7 @@ impl Client {
     pub fn new() -> Self {
         Client {
             pool: Arc::new(Pool::new(None, PoolLimits::default())),
+            on_head: None,
         }
     }
 
@@ -168,6 +182,7 @@ impl Client {
     pub fn with_roots(roots: rustls::RootCertStore) -> Self {
         Client {
             pool: Arc::new(Pool::new(Some(roots), PoolLimits::default())),
+            on_head: None,
         }
     }
 
@@ -176,7 +191,15 @@ impl Client {
     pub fn with_config(roots: Option<rustls::RootCertStore>, limits: PoolLimits) -> Self {
         Client {
             pool: Arc::new(Pool::new(roots, limits)),
+            on_head: None,
         }
+    }
+
+    /// Installs `onResponseHead` (the gateway's telemetry hook).
+    #[must_use]
+    pub fn with_on_response_head(mut self, hook: OnResponseHead) -> Self {
+        self.on_head = Some(hook);
+        self
     }
 
     /// Idle pooled connections, across every destination.
@@ -192,8 +215,14 @@ impl Client {
         let target = wire::parse_target(&req.url)?;
         let (bytes, facts) = wire::encode(&req.method, &target, &req.headers, req.body.as_bytes())?;
         let started = Instant::now();
+        let started_ms = epoch_ms();
         let result = self.exchange(&target, &bytes, facts).await;
         let duration_ms = started.elapsed().as_millis();
+        if let Some(hook) = &self.on_head {
+            // `now() - startedAt` over `Date.now()`: whole milliseconds of
+            // wall clock, never negative here.
+            hook(&req.provider, epoch_ms().saturating_sub(started_ms));
+        }
         match &result {
             Ok(res) => tracing::debug!(
                 provider = %req.provider,
@@ -250,6 +279,12 @@ impl HttpClient for Client {
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>> {
         Box::pin(Client::send(self, req))
     }
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The path without its query, which can carry a key and is never logged.

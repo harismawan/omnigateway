@@ -30,6 +30,9 @@ struct State {
     /// When expired history was last swept; sweeps run at most once a
     /// minute, or at once when over the cap.
     swept_at: f64,
+    /// `localCounts()`: in-flight slots per provider, in the insertion order
+    /// of TS's `Map` (an entry leaves at zero and re-enters at the end).
+    providers: Vec<(String, u64)>,
 }
 
 const SWEEP_EVERY_MS: f64 = 60_000.0;
@@ -56,19 +59,29 @@ impl LoadRegistry {
     }
 
     /// Claims a slot; the count moves before this returns.
-    pub fn acquire(self: &Arc<Self>, credential_id: &str, model: &str) -> LoadSlot {
+    pub fn acquire(self: &Arc<Self>, credential_id: &str, model: &str, provider: &str) -> LoadSlot {
         let key = health_key(credential_id, model);
         {
             let mut st = self.lock();
             *Arc::make_mut(&mut st.local)
                 .entry(key.clone())
                 .or_insert(0.0) += 1.0;
+            match st.providers.iter_mut().find(|(p, _)| p == provider) {
+                Some((_, n)) => *n += 1,
+                None => st.providers.push((provider.to_owned(), 1)),
+            }
         }
         LoadSlot {
             registry: Some(self.clone()),
             key,
+            provider: provider.to_owned(),
             ttft_ms: None,
         }
+    }
+
+    /// `localCounts()`: this process's in-flight slots per provider.
+    pub fn provider_counts(&self) -> Vec<(String, u64)> {
+        self.lock().providers.clone()
     }
 
     /// In-flight count per `healthKey`; a missing key is zero.
@@ -81,8 +94,14 @@ impl LoadRegistry {
         self.lock().history.clone()
     }
 
-    fn release(&self, key: &str, ttft_ms: Option<i64>, now: f64) {
+    fn release(&self, key: &str, provider: &str, ttft_ms: Option<i64>, now: f64) {
         let mut st = self.lock();
+        if let Some(i) = st.providers.iter().position(|(p, _)| p == provider) {
+            st.providers[i].1 -= 1;
+            if st.providers[i].1 == 0 {
+                st.providers.remove(i);
+            }
+        }
         let sweep = now - st.swept_at >= SWEEP_EVERY_MS;
         if sweep {
             st.swept_at = now;
@@ -126,7 +145,7 @@ impl LoadRegistry {
 
     /// Test hook: release at an explicit instant.
     pub fn release_at(&self, key: &str, ttft_ms: Option<i64>, now: f64) {
-        self.release(key, ttft_ms, now);
+        self.release(key, "", ttft_ms, now);
     }
 }
 
@@ -138,6 +157,7 @@ impl LoadRegistry {
 pub struct LoadSlot {
     registry: Option<Arc<LoadRegistry>>,
     key: String,
+    provider: String,
     ttft_ms: Option<i64>,
 }
 
@@ -155,7 +175,12 @@ impl LoadSlot {
     pub fn release(&mut self, ttft_ms: Option<i64>) {
         if let Some(r) = self.registry.take() {
             #[allow(clippy::cast_precision_loss)]
-            r.release(&self.key, ttft_ms, crate::clock::now_ms() as f64);
+            r.release(
+                &self.key,
+                &self.provider,
+                ttft_ms,
+                crate::clock::now_ms() as f64,
+            );
         }
     }
 }
@@ -222,8 +247,8 @@ mod tests {
     #[test]
     fn slots_count_release_once_and_fold_ttft() {
         let r = LoadRegistry::new();
-        let mut a = r.acquire("c", "m");
-        let b = r.acquire("c", "m");
+        let mut a = r.acquire("c", "m", "p");
+        let b = r.acquire("c", "m", "p");
         assert_eq!(r.counts().get("c::m"), Some(&2.0));
         a.release(Some(100));
         a.release(Some(999));
@@ -232,16 +257,40 @@ mod tests {
         drop(b);
         assert!(r.counts().is_empty());
         assert_eq!(r.recent()["c::m"].ewma_ttft_ms, Some(100.0));
-        let mut c = r.acquire("c", "m");
+        let mut c = r.acquire("c", "m", "p");
         c.release(Some(200));
         let e = r.recent()["c::m"].ewma_ttft_ms.expect("ewma");
         assert!((e - 130.0).abs() < 1e-9);
     }
 
+    /// `localCounts()`: a `Map` per provider, entries leaving at zero and
+    /// re-entering last, as `omni_inflight` lists them.
+    #[test]
+    fn provider_counts_keep_map_order() {
+        let r = LoadRegistry::new();
+        let a = r.acquire("c", "m", "p");
+        let b = r.acquire("d", "m", "q");
+        let c = r.acquire("e", "m", "p");
+        assert_eq!(
+            r.provider_counts(),
+            vec![("p".to_owned(), 2), ("q".to_owned(), 1)]
+        );
+        drop(a);
+        drop(c);
+        let again = r.acquire("c", "m", "p");
+        assert_eq!(
+            r.provider_counts(),
+            vec![("q".to_owned(), 1), ("p".to_owned(), 1)]
+        );
+        drop(b);
+        drop(again);
+        assert!(r.provider_counts().is_empty());
+    }
+
     #[test]
     fn a_dropped_slot_releases_with_its_observed_ttft() {
         let r = LoadRegistry::new();
-        let mut a = r.acquire("c", "m");
+        let mut a = r.acquire("c", "m", "p");
         a.observed(42);
         drop(a);
         assert_eq!(r.recent()["c::m"].ewma_ttft_ms, Some(42.0));
@@ -268,7 +317,7 @@ mod tests {
     #[test]
     fn readers_share_one_map_until_it_changes() {
         let r = LoadRegistry::new();
-        let _a = r.acquire("c", "m");
+        let _a = r.acquire("c", "m", "p");
         let x = r.counts();
         let y = r.counts();
         assert!(Arc::ptr_eq(&x, &y));

@@ -202,6 +202,7 @@ pub fn harness(f: &Fixture, replies: Vec<Reply>) -> Harness {
         probes: Probes::new(),
         providers: omni_router::Providers::builtin(),
         health: std::sync::Arc::default(),
+        telemetry: Arc::new(omni_gateway::telemetry::Telemetry::disabled()),
         now: omni_gateway::clock::now_ms,
         rand: || 0.0,
     });

@@ -1,0 +1,1033 @@
+{
+  "cases": [
+    { "name": "empty", "maxSeries": 5000, "ops": [], "rendered": "\n" },
+    {
+      "name": "build-info-and-gauges",
+      "maxSeries": 5000,
+      "ops": [
+        {
+          "op": "set",
+          "name": "omni_build_info",
+          "labels": [["version", "0.0.0-dev"]],
+          "value": 1
+        },
+        { "op": "set", "name": "omni_stream_connections", "labels": [], "value": 0 },
+        { "op": "set", "name": "omni_stream_queued", "labels": [], "value": 0 },
+        { "op": "set", "name": "omni_stream_dropped_total", "labels": [], "value": 0 },
+        { "op": "set", "name": "omni_coord_fallback", "labels": [], "value": 0 },
+        { "op": "set", "name": "omni_coord_faults_total", "labels": [], "value": 0 },
+        { "op": "set", "name": "omni_inflight", "labels": [["provider", "custom"]], "value": 2 },
+        { "op": "set", "name": "omni_inflight", "labels": [["provider", "custom"]], "value": 0 }
+      ],
+      "rendered": "# HELP omni_inflight Provider requests in flight in this process.\n# TYPE omni_inflight gauge\nomni_inflight{provider=\"custom\"} 0\n# HELP omni_stream_connections Live stream connections in this process.\n# TYPE omni_stream_connections gauge\nomni_stream_connections 0\n# HELP omni_stream_queued Stream frames queued in this process.\n# TYPE omni_stream_queued gauge\nomni_stream_queued 0\n# HELP omni_stream_dropped_total Stream frames dropped in this process.\n# TYPE omni_stream_dropped_total counter\nomni_stream_dropped_total 0\n# HELP omni_coord_fallback Whether this process is using coordination fallback.\n# TYPE omni_coord_fallback gauge\nomni_coord_fallback 0\n# HELP omni_coord_faults_total Coordinator calls this process answered from memory, timeouts included.\n# TYPE omni_coord_faults_total counter\nomni_coord_faults_total 0\n# HELP omni_build_info Gateway build information.\n# TYPE omni_build_info gauge\nomni_build_info{version=\"0.0.0-dev\"} 1\n"
+    },
+    {
+      "name": "definition-order-not-insertion-order",
+      "maxSeries": 5000,
+      "ops": [
+        { "op": "set", "name": "omni_build_info", "labels": [["version", "1"]], "value": 1 },
+        {
+          "op": "add",
+          "name": "omni_ratelimit_rejected_total",
+          "labels": [["dimension", "requests"], ["window", "1m"]]
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "p"],
+            ["model", "m"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "k"]
+          ]
+        },
+        {
+          "op": "add",
+          "name": "omni_ratelimit_rejected_total",
+          "labels": [["dimension", "concurrency"], ["window", "none"]]
+        },
+        {
+          "op": "add",
+          "name": "omni_ratelimit_rejected_total",
+          "labels": [["dimension", "requests"], ["window", "1m"]]
+        }
+      ],
+      "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{provider=\"p\",model=\"m\",status=\"200\",code=\"\",api_key_id=\"k\"} 1\n# HELP omni_ratelimit_rejected_total API-key rate-limit refusals.\n# TYPE omni_ratelimit_rejected_total counter\nomni_ratelimit_rejected_total{dimension=\"requests\",window=\"1m\"} 2\nomni_ratelimit_rejected_total{dimension=\"concurrency\",window=\"none\"} 1\n# HELP omni_build_info Gateway build information.\n# TYPE omni_build_info gauge\nomni_build_info{version=\"1\"} 1\n"
+    },
+    {
+      "name": "completions",
+      "maxSeries": 5000,
+      "ops": [
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "key_a"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "ok"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_a"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_a"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_a"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_a"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "ok"], ["api_key_id", "key_a"]],
+          "value": 0.000076
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "key_b"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "ok"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_b"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_b"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_b"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_b"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "ok"], ["api_key_id", "key_b"]],
+          "value": 0.000076
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "key_a"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "ok"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_a"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_a"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_a"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "key_a"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "ok"], ["api_key_id", "key_a"]],
+          "value": 0.000076
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", ""],
+            ["status", "401"],
+            ["code", "AUTH"],
+            ["api_key_id", ""]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", ""]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [["provider", "custom"], ["model", ""], ["api_key_id", ""], ["kind", "input"]],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [["provider", "custom"], ["model", ""], ["api_key_id", ""], ["kind", "output"]],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", ""],
+            ["api_key_id", ""],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", ""],
+            ["api_key_id", ""],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", ""], ["api_key_id", ""]],
+          "value": 0.000076
+        }
+      ],
+      "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{provider=\"custom\",model=\"ok\",status=\"200\",code=\"\",api_key_id=\"key_a\"} 2\nomni_requests_total{provider=\"custom\",model=\"ok\",status=\"200\",code=\"\",api_key_id=\"key_b\"} 1\nomni_requests_total{provider=\"custom\",model=\"\",status=\"401\",code=\"AUTH\",api_key_id=\"\"} 1\n# HELP omni_request_duration_seconds Request duration in seconds.\n# TYPE omni_request_duration_seconds histogram\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.005\"} 0\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.01\"} 0\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.025\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.05\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.1\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.25\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.5\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"1\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"2.5\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"5\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"10\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"30\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"60\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"+Inf\"} 3\nomni_request_duration_seconds_sum{provider=\"custom\",model=\"ok\"} 0.036000000000000004\nomni_request_duration_seconds_count{provider=\"custom\",model=\"ok\"} 3\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"0.005\"} 0\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"0.01\"} 0\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"0.025\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"0.05\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"0.1\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"0.25\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"0.5\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"1\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"2.5\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"5\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"10\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"30\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"60\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"\",le=\"+Inf\"} 1\nomni_request_duration_seconds_sum{provider=\"custom\",model=\"\"} 0.012\nomni_request_duration_seconds_count{provider=\"custom\",model=\"\"} 1\n# HELP omni_tokens_total Billable tokens completed by this process.\n# TYPE omni_tokens_total counter\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_a\",kind=\"input\"} 128\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_a\",kind=\"output\"} 12\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_a\",kind=\"cache_read\"} 0\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_a\",kind=\"cache_write\"} 0\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_b\",kind=\"input\"} 64\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_b\",kind=\"output\"} 6\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_b\",kind=\"cache_read\"} 0\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_b\",kind=\"cache_write\"} 0\nomni_tokens_total{provider=\"custom\",model=\"\",api_key_id=\"\",kind=\"input\"} 64\nomni_tokens_total{provider=\"custom\",model=\"\",api_key_id=\"\",kind=\"output\"} 6\nomni_tokens_total{provider=\"custom\",model=\"\",api_key_id=\"\",kind=\"cache_read\"} 0\nomni_tokens_total{provider=\"custom\",model=\"\",api_key_id=\"\",kind=\"cache_write\"} 0\n# HELP omni_cost_usd_total Request cost in US dollars.\n# TYPE omni_cost_usd_total counter\nomni_cost_usd_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_a\"} 0.000152\nomni_cost_usd_total{provider=\"custom\",model=\"ok\",api_key_id=\"key_b\"} 0.000076\nomni_cost_usd_total{provider=\"custom\",model=\"\",api_key_id=\"\"} 0.000076\n"
+    },
+    {
+      "name": "label-order-first-insertion-wins",
+      "maxSeries": 5000,
+      "ops": [
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [["status", "200"], ["provider", "p"]],
+          "value": 2
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [["provider", "p"], ["status", "200"]],
+          "value": 3
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [["provider", "q"], ["status", "200"]]
+        }
+      ],
+      "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{status=\"200\",provider=\"p\"} 5\nomni_requests_total{provider=\"q\",status=\"200\"} 1\n"
+    },
+    {
+      "name": "label-escaping",
+      "maxSeries": 5000,
+      "ops": [
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "quote \" back \\ nl \n tab \t cr \r"],
+            ["model", "日本語 😀"],
+            ["status", "\\n"],
+            ["code", "}{,="],
+            ["api_key_id", ""]
+          ]
+        }
+      ],
+      "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{provider=\"quote \\\" back \\\\ nl \\n tab \t cr \r\",model=\"日本語 😀\",status=\"\\\\n\",code=\"}{,=\",api_key_id=\"\"} 1\n"
+    },
+    {
+      "name": "numbers",
+      "maxSeries": 5000,
+      "ops": [
+        { "op": "add", "name": "omni_cost_usd_total", "labels": [["k", "a"]], "value": 0.1 },
+        { "op": "add", "name": "omni_cost_usd_total", "labels": [["k", "a"]], "value": 0.2 },
+        { "op": "add", "name": "omni_cost_usd_total", "labels": [["k", "b"]], "value": 1e21 },
+        { "op": "add", "name": "omni_cost_usd_total", "labels": [["k", "c"]], "value": 1e-7 },
+        { "op": "add", "name": "omni_cost_usd_total", "labels": [["k", "d"]], "value": "-0" },
+        { "op": "add", "name": "omni_cost_usd_total", "labels": [["k", "e"]], "value": "NaN" },
+        { "op": "add", "name": "omni_cost_usd_total", "labels": [["k", "f"]], "value": "Infinity" },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["k", "g"]],
+          "value": "-Infinity"
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["k", "h"]],
+          "value": 123456789.125
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["k", "i"]],
+          "value": 9007199254740992
+        },
+        { "op": "add", "name": "omni_cost_usd_total", "labels": [["k", "i"]], "value": 1 },
+        { "op": "set", "name": "omni_breaker_open", "labels": [["provider", "x"]], "value": 1.5 },
+        { "op": "set", "name": "omni_breaker_open", "labels": [["provider", "x"]], "value": -3 }
+      ],
+      "rendered": "# HELP omni_cost_usd_total Request cost in US dollars.\n# TYPE omni_cost_usd_total counter\nomni_cost_usd_total{k=\"a\"} 0.30000000000000004\nomni_cost_usd_total{k=\"b\"} 1e+21\nomni_cost_usd_total{k=\"c\"} 1e-7\nomni_cost_usd_total{k=\"d\"} 0\nomni_cost_usd_total{k=\"e\"} NaN\nomni_cost_usd_total{k=\"f\"} +Inf\nomni_cost_usd_total{k=\"g\"} -Inf\nomni_cost_usd_total{k=\"h\"} 123456789.125\nomni_cost_usd_total{k=\"i\"} 9007199254740992\n# HELP omni_breaker_open Credential breakers observed open in this process.\n# TYPE omni_breaker_open gauge\nomni_breaker_open{provider=\"x\"} -3\n"
+    },
+    {
+      "name": "histogram-boundaries",
+      "maxSeries": 5000,
+      "ops": [
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0.005
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0.0051
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0.01
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0.025
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0.05
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0.1
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0.25
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 0.5
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 1
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 2.5
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 5
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 10
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 30
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 60
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 60.001
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": 1000
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": -1
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": "NaN"
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": "Infinity"
+        },
+        {
+          "op": "observe",
+          "name": "omni_upstream_duration_seconds",
+          "labels": [["provider", "custom"]],
+          "value": "-0"
+        },
+        {
+          "op": "observe",
+          "name": "omni_ttft_seconds",
+          "labels": [["provider", "custom"], ["model", "m"]],
+          "value": 0.003
+        },
+        {
+          "op": "observe",
+          "name": "omni_ttft_seconds",
+          "labels": [["provider", "custom"], ["model", "m"]],
+          "value": 0.004
+        }
+      ],
+      "rendered": "# HELP omni_ttft_seconds Streaming time to first token in seconds.\n# TYPE omni_ttft_seconds histogram\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"0.005\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"0.01\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"0.025\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"0.05\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"0.1\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"0.25\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"0.5\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"1\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"2.5\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"5\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"10\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"30\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"60\"} 2\nomni_ttft_seconds_bucket{provider=\"custom\",model=\"m\",le=\"+Inf\"} 2\nomni_ttft_seconds_sum{provider=\"custom\",model=\"m\"} 0.007\nomni_ttft_seconds_count{provider=\"custom\",model=\"m\"} 2\n# HELP omni_upstream_duration_seconds Provider response-head duration in seconds.\n# TYPE omni_upstream_duration_seconds histogram\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"0.005\"} 4\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"0.01\"} 6\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"0.025\"} 7\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"0.05\"} 8\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"0.1\"} 9\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"0.25\"} 10\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"0.5\"} 11\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"1\"} 12\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"2.5\"} 13\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"5\"} 14\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"10\"} 15\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"30\"} 16\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"60\"} 17\nomni_upstream_duration_seconds_bucket{provider=\"custom\",le=\"+Inf\"} 21\nomni_upstream_duration_seconds_sum{provider=\"custom\"} NaN\nomni_upstream_duration_seconds_count{provider=\"custom\"} 21\n"
+    },
+    {
+      "name": "histogram-sum-only-nan",
+      "maxSeries": 5000,
+      "ops": [
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "p"], ["model", "m"]],
+          "value": "NaN"
+        }
+      ],
+      "rendered": "# HELP omni_request_duration_seconds Request duration in seconds.\n# TYPE omni_request_duration_seconds histogram\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"0.005\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"0.01\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"0.025\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"0.05\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"0.1\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"0.25\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"0.5\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"1\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"2.5\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"5\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"10\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"30\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"60\"} 0\nomni_request_duration_seconds_bucket{provider=\"p\",model=\"m\",le=\"+Inf\"} 1\nomni_request_duration_seconds_sum{provider=\"p\",model=\"m\"} NaN\nomni_request_duration_seconds_count{provider=\"p\",model=\"m\"} 1\n"
+    },
+    {
+      "name": "mixed-ops-on-one-series",
+      "maxSeries": 5000,
+      "ops": [
+        { "op": "observe", "name": "omni_ttft_seconds", "labels": [["a", "1"]], "value": 0.5 },
+        { "op": "add", "name": "omni_ttft_seconds", "labels": [["a", "1"]], "value": 1 },
+        { "op": "set", "name": "omni_ttft_seconds", "labels": [["a", "1"]], "value": 7 },
+        { "op": "observe", "name": "omni_ttft_seconds", "labels": [["a", "1"]], "value": 0.01 },
+        { "op": "set", "name": "omni_requests_total", "labels": [["a", "1"]], "value": 4 },
+        { "op": "observe", "name": "omni_requests_total", "labels": [["a", "1"]], "value": 0.01 }
+      ],
+      "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{a=\"1\"} 4.01\n# HELP omni_ttft_seconds Streaming time to first token in seconds.\n# TYPE omni_ttft_seconds histogram\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.005\"} 0\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.01\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.025\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.05\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.1\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.25\"} 1\nomni_ttft_seconds_bucket{a=\"1\",le=\"0.5\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"1\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"2.5\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"5\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"10\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"30\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"60\"} 2\nomni_ttft_seconds_bucket{a=\"1\",le=\"+Inf\"} 2\nomni_ttft_seconds_sum{a=\"1\"} 7.01\nomni_ttft_seconds_count{a=\"1\"} 2\n"
+    },
+    {
+      "name": "cap-folds-api-keys",
+      "maxSeries": 6,
+      "ops": [
+        { "op": "set", "name": "omni_build_info", "labels": [["version", "v"]], "value": 1 },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "k1"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "ok"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "ok"], ["api_key_id", "k1"]],
+          "value": 0.000076
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "k2"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "ok"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k2"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k2"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k2"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k2"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "ok"], ["api_key_id", "k2"]],
+          "value": 0.000076
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "k1"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "ok"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "ok"], ["api_key_id", "k1"]],
+          "value": 0.000076
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "other-model"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "k3"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "other-model"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "other-model"],
+            ["api_key_id", "k3"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "other-model"],
+            ["api_key_id", "k3"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "other-model"],
+            ["api_key_id", "k3"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "other-model"],
+            ["api_key_id", "k3"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "other-model"], ["api_key_id", "k3"]],
+          "value": 0.000076
+        },
+        {
+          "op": "add",
+          "name": "omni_ratelimit_rejected_total",
+          "labels": [["dimension", "tokens"], ["window", "5h"]]
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "k1"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "ok"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k1"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "ok"], ["api_key_id", "k1"]],
+          "value": 0.000076
+        },
+        {
+          "op": "add",
+          "name": "omni_requests_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["status", "200"],
+            ["code", ""],
+            ["api_key_id", "k4"]
+          ]
+        },
+        {
+          "op": "observe",
+          "name": "omni_request_duration_seconds",
+          "labels": [["provider", "custom"], ["model", "ok"]],
+          "value": 0.012
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k4"],
+            ["kind", "input"]
+          ],
+          "value": 64
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k4"],
+            ["kind", "output"]
+          ],
+          "value": 6
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k4"],
+            ["kind", "cache_read"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_tokens_total",
+          "labels": [
+            ["provider", "custom"],
+            ["model", "ok"],
+            ["api_key_id", "k4"],
+            ["kind", "cache_write"]
+          ],
+          "value": 0
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["provider", "custom"], ["model", "ok"], ["api_key_id", "k4"]],
+          "value": 0.000076
+        }
+      ],
+      "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{provider=\"custom\",model=\"ok\",status=\"200\",code=\"\",api_key_id=\"k1\"} 3\nomni_requests_total{provider=\"custom\",model=\"ok\",status=\"200\",code=\"\",api_key_id=\"other\"} 2\nomni_requests_total{provider=\"custom\",model=\"other-model\",status=\"200\",code=\"\",api_key_id=\"other\"} 1\n# HELP omni_request_duration_seconds Request duration in seconds.\n# TYPE omni_request_duration_seconds histogram\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.005\"} 0\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.01\"} 0\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.025\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.05\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.1\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.25\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"0.5\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"1\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"2.5\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"5\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"10\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"30\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"60\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"ok\",le=\"+Inf\"} 5\nomni_request_duration_seconds_sum{provider=\"custom\",model=\"ok\"} 0.06\nomni_request_duration_seconds_count{provider=\"custom\",model=\"ok\"} 5\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"0.005\"} 0\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"0.01\"} 0\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"0.025\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"0.05\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"0.1\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"0.25\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"0.5\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"1\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"2.5\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"5\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"10\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"30\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"60\"} 1\nomni_request_duration_seconds_bucket{provider=\"custom\",model=\"other-model\",le=\"+Inf\"} 1\nomni_request_duration_seconds_sum{provider=\"custom\",model=\"other-model\"} 0.012\nomni_request_duration_seconds_count{provider=\"custom\",model=\"other-model\"} 1\n# HELP omni_tokens_total Billable tokens completed by this process.\n# TYPE omni_tokens_total counter\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"k1\",kind=\"input\"} 192\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"k1\",kind=\"output\"} 18\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"k1\",kind=\"cache_read\"} 0\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"other\",kind=\"cache_write\"} 0\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"other\",kind=\"input\"} 128\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"other\",kind=\"output\"} 12\nomni_tokens_total{provider=\"custom\",model=\"ok\",api_key_id=\"other\",kind=\"cache_read\"} 0\nomni_tokens_total{provider=\"custom\",model=\"other-model\",api_key_id=\"other\",kind=\"input\"} 64\nomni_tokens_total{provider=\"custom\",model=\"other-model\",api_key_id=\"other\",kind=\"output\"} 6\nomni_tokens_total{provider=\"custom\",model=\"other-model\",api_key_id=\"other\",kind=\"cache_read\"} 0\nomni_tokens_total{provider=\"custom\",model=\"other-model\",api_key_id=\"other\",kind=\"cache_write\"} 0\n# HELP omni_cost_usd_total Request cost in US dollars.\n# TYPE omni_cost_usd_total counter\nomni_cost_usd_total{provider=\"custom\",model=\"ok\",api_key_id=\"other\"} 0.00038\nomni_cost_usd_total{provider=\"custom\",model=\"other-model\",api_key_id=\"other\"} 0.000076\n# HELP omni_ratelimit_rejected_total API-key rate-limit refusals.\n# TYPE omni_ratelimit_rejected_total counter\nomni_ratelimit_rejected_total{dimension=\"tokens\",window=\"5h\"} 1\n# HELP omni_metrics_series_folded_total Metric series folded into api_key_id other.\n# TYPE omni_metrics_series_folded_total counter\nomni_metrics_series_folded_total 20\n# HELP omni_build_info Gateway build information.\n# TYPE omni_build_info gauge\nomni_build_info{version=\"v\"} 1\n"
+    },
+    {
+      "name": "cap-one",
+      "maxSeries": 1,
+      "ops": [
+        { "op": "add", "name": "omni_requests_total", "labels": [["api_key_id", "a"]] },
+        { "op": "add", "name": "omni_requests_total", "labels": [["api_key_id", "b"]] },
+        { "op": "add", "name": "omni_requests_total", "labels": [["api_key_id", "other"]] },
+        { "op": "add", "name": "omni_requests_total", "labels": [["api_key_id", "b"]] },
+        { "op": "add", "name": "omni_requests_total", "labels": [["api_key_id", "a"]], "value": 5 },
+        { "op": "add", "name": "omni_requests_total", "labels": [["api_key_id", "c"], ["x", "y"]] },
+        { "op": "set", "name": "omni_coord_fallback", "labels": [], "value": 1 },
+        { "op": "add", "name": "omni_requests_total", "labels": [["api_key_id", "d"]] }
+      ],
+      "rendered": "# HELP omni_requests_total Requests completed by this process.\n# TYPE omni_requests_total counter\nomni_requests_total{api_key_id=\"a\"} 6\nomni_requests_total{api_key_id=\"other\"} 4\nomni_requests_total{api_key_id=\"other\",x=\"y\"} 1\n# HELP omni_coord_fallback Whether this process is using coordination fallback.\n# TYPE omni_coord_fallback gauge\nomni_coord_fallback 1\n# HELP omni_metrics_series_folded_total Metric series folded into api_key_id other.\n# TYPE omni_metrics_series_folded_total counter\nomni_metrics_series_folded_total 4\n"
+    },
+    {
+      "name": "cap-other-key-collides",
+      "maxSeries": 2,
+      "ops": [
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["model", "m"], ["api_key_id", "a"]],
+          "value": 0.5
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["model", "m"], ["api_key_id", "other"]],
+          "value": 0.25
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["model", "m"], ["api_key_id", "z"]],
+          "value": 0.125
+        },
+        {
+          "op": "add",
+          "name": "omni_cost_usd_total",
+          "labels": [["api_key_id", "y"], ["model", "m"]],
+          "value": 1
+        }
+      ],
+      "rendered": "# HELP omni_cost_usd_total Request cost in US dollars.\n# TYPE omni_cost_usd_total counter\nomni_cost_usd_total{model=\"m\",api_key_id=\"a\"} 0.5\nomni_cost_usd_total{model=\"m\",api_key_id=\"other\"} 1.375\n# HELP omni_metrics_series_folded_total Metric series folded into api_key_id other.\n# TYPE omni_metrics_series_folded_total counter\nomni_metrics_series_folded_total 2\n"
+    }
+  ]
+}
