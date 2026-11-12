@@ -28,8 +28,12 @@ let store: Store = await memoryStore();
 let limiter = new ApiKeyRateLimiter({ store, now, coord });
 const held = new Map<number, Admission>();
 let rows = 0;
-/** Every row this agent appended (it is the store's only writer). */
-let appended: Array<{ key: string; model: string; at: number }> = [];
+/**
+ * Every row this agent appended (it is the store's only writer), each in
+ * its own commit, numbered from 1 — the commit ids the Rust side's debits
+ * carry, and its seed snapshots are taken over.
+ */
+let appended: Array<{ key: string; model: string; at: number; commit: number }> = [];
 
 const write = (line: unknown): void => {
   process.stdout.write(`${JSON.stringify(line)}\n`);
@@ -69,8 +73,8 @@ async function run(op: string, a: Args): Promise<unknown> {
       clock = n(a[0]);
       return null;
     case "row": {
-      // [keyId, at, model, tokens, cost]
-      appended.push({ key: s(a[0]), model: s(a[2]), at: n(a[1]) });
+      // [keyId, at, model, tokens, cost] -> the row's commit id
+      appended.push({ key: s(a[0]), model: s(a[2]), at: n(a[1]), commit: appended.length + 1 });
       await store.usage.append(
         requestLog({
           id: `r${rows++}`,
@@ -84,7 +88,7 @@ async function run(op: string, a: Args): Promise<unknown> {
           costUsd: n(a[4]),
         }),
       );
-      return null;
+      return appended.length;
     }
     case "admit": {
       // [handle, keyId, limits, model]
@@ -116,6 +120,24 @@ async function run(op: string, a: Args): Promise<unknown> {
       await sync();
       return null;
     }
+    case "buckets.sum": {
+      // The frozen TS coordinator's own read: [name, grain, window, at].
+      return await coord.buckets.sum(s(a[0]), n(a[1]), n(a[2]), n(a[3]));
+    }
+    case "buckets.add": {
+      // [name, grain, window, at, requests, tokens, cost]
+      await coord.buckets.add(s(a[0]), n(a[1]), n(a[2]), n(a[3]), {
+        requests: n(a[4]),
+        tokens: n(a[5]),
+        costUsd: n(a[6]),
+      });
+      return null;
+    }
+    case "debitNoSync": {
+      // As `debit`, without the round trip after it (bulk callers `sync`).
+      limiter.debit(s(a[0]), s(a[1]), { tokens: n(a[2]), costUsd: n(a[3]) });
+      return null;
+    }
     case "sync":
       await sync();
       return null;
@@ -128,10 +150,19 @@ async function run(op: string, a: Args): Promise<unknown> {
       );
       return out.map(([start, c]) => [start, c.requests, c.tokens, c.costUsd]);
     }
-    case "usage.rowRanges": {
-      // [keyId, sinceMs, grainMs, model|null]: per grain bucket of the row's
-      // own `at`, the least and greatest `at` of done rows at or after since.
+    case "usage.seedRead": {
+      // [keyId, sinceMs, grainMs, model|null]: one consistent read — TS's
+      // own sumBuckets, the per-bucket row ranges (least and greatest `at`
+      // per grain bucket of each done row's own `at`), and the snapshot of
+      // commits it saw (every append so far: `next:next:`).
       const g = n(a[2]);
+      const snapshot = `${appended.length + 1}:${appended.length + 1}:`;
+      const rows = await store.usage.sumBuckets(
+        s(a[0]),
+        n(a[1]),
+        g,
+        a[3] === null ? undefined : s(a[3]),
+      );
       const by = new Map<number, [number, number]>();
       for (const r of appended) {
         if (r.key !== s(a[0]) || r.at < n(a[1])) continue;
@@ -140,7 +171,11 @@ async function run(op: string, a: Args): Promise<unknown> {
         const was = by.get(b);
         by.set(b, was === undefined ? [r.at, r.at] : [Math.min(was[0], r.at), Math.max(was[1], r.at)]);
       }
-      return [...by].map(([b, [lo, hi]]) => [b, lo, hi]);
+      return {
+        rows: rows.map(([start, c]) => [start, c.requests, c.tokens, c.costUsd]),
+        ranges: [...by].map(([b, [lo, hi]]) => [b, lo, hi]),
+        snapshot,
+      };
     }
     case "usage.oldestSince":
       return await store.usage.oldestSince(s(a[0]), n(a[1]), a[2] === null ? undefined : s(a[2]));

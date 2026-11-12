@@ -229,9 +229,9 @@ async fn an_unseeded_window_admits_and_its_seed_lands() {
         "{}",
         e.retry_after_ms
     );
-    // Only the two seeds read the store (counts + row ranges, per window).
+    // Only the two seeds read the store (one consistent read per window).
     assert_eq!(usage.sums.load(Ordering::SeqCst), 2);
-    assert_eq!(usage.oldest.load(Ordering::SeqCst), 2);
+    assert_eq!(usage.calls(), 2);
 }
 
 /// The seed lock: a contender waits for the holder and finds its picture;
@@ -268,10 +268,29 @@ async fn seed_lock_contention() {
     sleep_ms(200).await;
     // The 1w seed was not contended and is in; the 5h one waits.
     assert_eq!(l.metrics().seeds_installed.load(Ordering::SeqCst), 1);
-    c.remote()
-        .buckets_seed("lim:k:5h", 60_000.0, 5.0 * HOUR, T0, &[])
+    // The holder installs a complete picture under its lock, then releases.
+    let installed = c
+        .remote()
+        .eval(
+            &omni_cluster_limit::scripts::SEED_INSTALL,
+            &[
+                "omni:b:lim:k:5h".into(),
+                "omni:b:lim:k:5h:meta".into(),
+                "omni:lock:seed:lim:k:5h".into(),
+            ],
+            &[
+                "other".into(),
+                "36000000".into(),
+                "1:1:".into(),
+                "60000".into(),
+                "1".into(),
+                "seeded".into(),
+                "1".into(),
+            ],
+        )
         .await
         .expect("other installs");
+    assert_eq!(installed, redis::Value::Int(1));
     let _: () = redis::cmd("DEL")
         .arg("omni:lock:seed:lim:k:5h")
         .query_async(&mut conn)
@@ -391,8 +410,8 @@ async fn a_pending_debit_is_not_double_counted_by_a_seed() {
     usage.delay_ms.store(300, Ordering::SeqCst);
     drop(l.admit("k", &lim, "m", T0).await.expect("admit"));
     // Meanwhile another request completes: row committed, debit pending.
-    usage.row("k", "m", T0, 7.0, 0.0);
-    l.debit("k", "m", 7.0, 0.0, T0);
+    let c1 = usage.row("k", "m", T0, 7.0, 0.0);
+    l.debit("k", "m", 7.0, 0.0, T0, &c1);
     l.seeds_settled().await;
     l.flush_debits().await;
     let sum = c
@@ -428,17 +447,13 @@ async fn debits_during_a_seed_that_does_not_install_are_kept() {
     let lim = limits(r#"{"requests":{"5h":100}}"#);
     drop(l.admit("k", &lim, "m", T0).await.expect("admit"));
     sleep_ms(150).await; // the seed is now inside its (failing) store read
-    // Another replica installs the picture, then a request completes here.
-    for w in [
-        ("lim:k:5h", 60_000.0, 5.0 * HOUR),
-        ("lim:k:1w", HOUR, 168.0 * HOUR),
-    ] {
-        c.remote()
-            .buckets_seed(w.0, w.1, w.2, T0, &[])
-            .await
-            .expect("other seeds");
-    }
-    l.debit("k", "m", 3.0, 0.0, T0);
+    // Another replica installs a complete picture (its read saw no rows),
+    // then a request completes here.
+    let other = MemUsage::new();
+    let b = common::limiter(&c, other, clock.clock());
+    assert_eq!(b.preseed_now("k", &lim, T0).await, 0);
+    let c1 = usage.row("k", "m", T0, 3.0, 0.0);
+    l.debit("k", "m", 3.0, 0.0, T0, &c1);
     l.seeds_settled().await;
     assert_eq!(l.metrics().seed_failures.load(Ordering::SeqCst), 2);
     l.flush_debits().await;
@@ -480,9 +495,13 @@ async fn preseed_covers_every_subject() {
         keys,
         [
             "omni:b:lim:k/m/a%2Fb:1w",
+            "omni:b:lim:k/m/a%2Fb:1w:meta",
             "omni:b:lim:k/m/a%2Fb:5h",
+            "omni:b:lim:k/m/a%2Fb:5h:meta",
             "omni:b:lim:k:1w",
-            "omni:b:lim:k:5h"
+            "omni:b:lim:k:1w:meta",
+            "omni:b:lim:k:5h",
+            "omni:b:lim:k:5h:meta"
         ]
     );
     assert!(

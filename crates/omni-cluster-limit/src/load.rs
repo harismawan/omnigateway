@@ -15,7 +15,11 @@
 //!   ranking reads (TS `createLoadRegistry().counts()`).
 //!
 //! Bounded: at most `max_keys` keys are published per tick (the busiest
-//! first), and the snapshot keeps at most `max_keys` keys.
+//! first); the snapshot script reads at most `max_replicas` pictures and
+//! returns the `max_keys` busiest totals, so its work and reply are bounded
+//! at the server. A local copy older than `ttl` (refreshes failing — the
+//! coordinator is down) is not read: ranking falls back to this process's
+//! own counts rather than a picture that may hold dead replicas.
 //!
 //! These keys are new (TS keeps fleet load in `omni:g:load:*` gauges with a
 //! per-request acquire/release); a mixed TS+Rust fleet does not see each
@@ -24,7 +28,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use omni_coord::Clock;
 use omni_coord::redis::{Remote, key};
@@ -42,6 +46,11 @@ pub fn index_key() -> String {
     key("load", "idx")
 }
 
+/// Where a replica builds its next picture before swapping it in.
+pub fn staging_key(replica: &str) -> String {
+    key("load", &format!("s:{replica}"))
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadOptions {
     /// This replica's identity (unique per process).
@@ -49,8 +58,10 @@ pub struct LoadOptions {
     pub interval: Duration,
     /// How long a published picture outlives its last write.
     pub ttl: Duration,
-    /// Most keys published per tick, and kept per snapshot.
+    /// Most keys published per tick, and returned per snapshot.
     pub max_keys: usize,
+    /// Most replica pictures one snapshot reads.
+    pub max_replicas: usize,
 }
 
 impl Default for LoadOptions {
@@ -60,6 +71,7 @@ impl Default for LoadOptions {
             interval: Duration::from_millis(100),
             ttl: Duration::from_millis(1_000),
             max_keys: 4_096,
+            max_replicas: 256,
         }
     }
 }
@@ -75,12 +87,15 @@ pub struct LoadMetrics {
     pub truncated: AtomicU64,
 }
 
+/// The fleet's picture, when it was taken, and how long it may be read.
+type Fleet = (Arc<HashMap<String, f64>>, Option<(Instant, Duration)>);
+
 /// This process's in-flight counts, updated synchronously by the request
 /// path (no I/O), and the fleet's picture, refreshed in the background.
 #[derive(Debug, Default)]
 pub struct LoadView {
     local: Mutex<HashMap<String, u64>>,
-    remote: RwLock<Arc<HashMap<String, f64>>>,
+    remote: RwLock<Fleet>,
     pub metrics: LoadMetrics,
 }
 
@@ -135,9 +150,15 @@ impl LoadView {
             .clone()
     }
 
-    /// Every other live replica's counts, as last refreshed.
+    /// Every other live replica's counts, as last refreshed — empty once
+    /// that refresh is older than the publication TTL (a replica that died
+    /// meanwhile must not be read as busy).
     pub fn remote(&self) -> Arc<HashMap<String, f64>> {
-        Arc::clone(&self.remote.read().unwrap_or_else(PoisonError::into_inner))
+        let g = self.remote.read().unwrap_or_else(PoisonError::into_inner);
+        match g.1 {
+            Some((at, ttl)) if at.elapsed() < ttl => Arc::clone(&g.0),
+            _ => Arc::default(),
+        }
     }
 
     /// What ranking reads: this process's exact counts plus the fleet's.
@@ -204,7 +225,11 @@ pub async fn publish(remote: &Remote, view: &LoadView, clock: &Clock, opts: &Loa
         args.push(k);
         args.push(n.to_string());
     }
-    let keys = [replica_key(&opts.replica), index_key()];
+    let keys = [
+        replica_key(&opts.replica),
+        index_key(),
+        staging_key(&opts.replica),
+    ];
     match remote.eval(&scripts::LOAD_PUBLISH, &keys, &args).await {
         Ok(_) => view.metrics.publishes.fetch_add(1, Ordering::Relaxed),
         Err(_) => view.metrics.publish_faults.fetch_add(1, Ordering::Relaxed),
@@ -216,13 +241,16 @@ pub async fn refresh(remote: &Remote, view: &LoadView, clock: &Clock, opts: &Loa
         crate::js(((clock)()).floor()),
         opts.replica.clone(),
         replica_key(""),
+        opts.max_keys.to_string(),
+        opts.max_replicas.to_string(),
     ];
+    let taken = Instant::now();
     let out = remote
         .eval(&scripts::LOAD_SNAPSHOT, &[index_key()], &args)
         .await;
     let Ok(Value::Array(flat)) = out else {
-        // A fault keeps the last picture until the next tick (it ages with
-        // the TTL server-side, not here).
+        // A fault keeps the last picture, read only until it is `ttl` old
+        // (see `remote`).
         view.metrics.refresh_faults.fetch_add(1, Ordering::Relaxed);
         return;
     };
@@ -236,6 +264,7 @@ pub async fn refresh(remote: &Remote, view: &LoadView, clock: &Clock, opts: &Loa
         };
         map.insert(k, n);
     }
-    *view.remote.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(map);
+    *view.remote.write().unwrap_or_else(PoisonError::into_inner) =
+        (Arc::new(map), Some((taken, opts.ttl)));
     view.metrics.refreshes.fetch_add(1, Ordering::Relaxed);
 }

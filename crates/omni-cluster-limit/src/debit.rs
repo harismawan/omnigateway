@@ -1,22 +1,42 @@
 //! Batched long-window debits (spec "Writes": one script call per batch).
 //!
-//! Each debit is aggregated into its (bucket hash, bucket start) entry —
-//! the start computed exactly as `BUCKETS_ADD` computes it, from the clock
-//! at the debit — and every `debit_interval` the pending entries go to the
-//! server as one [`crate::scripts::DEBIT_BATCH`] call (split only past
-//! `debit_batch_keys` or the request-size bound). The applied state equals
-//! the per-debit `BUCKETS_ADD` sequence: integer sums for requests and
-//! tokens, and each cost added by its own `HINCRBYFLOAT` in order.
+//! A debit is queued into the entry of its (bucket hash, count-bucket
+//! start) — the start computed exactly as `BUCKETS_ADD` computes it, from the
+//! clock at the debit. An entry is an ordered list of *runs*: consecutive
+//! debits from one commit (one writer batch) share a run. Every
+//! `debit_interval` the pending entries go to the server as
+//! [`crate::scripts::DEBIT_BATCH`] calls, in arrival order (split only past
+//! `debit_batch_keys` or the request-size bound).
 //!
-//! Loss policy (TS `lostDebit`): a batch the server did not confirm, or a
-//! debit refused by a full queue, is counted in
-//! [`crate::Metrics::debit_buckets_lost`] and marks the coordinator's
-//! lost-debit flag, so the next successful call drops every `omni:b:*` hash
-//! and the next admissions reseed from the store (which has the rows).
+//! **TS's float arithmetic (ruling I5).** Every cost is kept and the script
+//! applies them one `HINCRBYFLOAT` each, in debit order, so the stored float
+//! is the one TS's per-debit sequence writes. Requests and tokens are
+//! integer sums (exact). An entry that would outgrow one call starts a new
+//! entry for the same bucket after it, so order is kept across calls.
+//!
+//! **Seed safety (ruling I1/I2).** Each run carries its rows' commit id. The
+//! script applies a run only to a *complete* picture whose seed did not see
+//! that commit, so a row counted by a seed — on any replica — is never
+//! counted again by its debit, and a row committed after the seed's read is
+//! added. While a seed holds the bucket's lock and the picture is
+//! incomplete, the script answers *wait*: the entry is kept, ahead of newer
+//! ones, and retried once the install lands. Otherwise an incomplete
+//! picture ignores the debit, as TS's unseeded buckets do (the next seed
+//! reads the committed row).
+//!
+//! **Bounds and loss (I3).** Pending storage is bounded by `debit_queue`
+//! entries and `debit_bytes` estimated bytes (names, commits, every cost and
+//! range included). A debit that does not fit, a batch the server did not
+//! confirm, and an entry still waiting after `debit_wait_max` are *lost*:
+//! counted in [`crate::Metrics::debit_buckets_lost`], logged, and the
+//! coordinator's lost-debit flag armed, so every `omni:b:*` key is dropped
+//! on the next successful call and reseeded from the store, which has the
+//! rows (TS's `lostDebit` policy).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use omni_coord::Counts;
 use omni_coord::redis::key;
@@ -27,106 +47,205 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::subject::{bucket_key, grain_ms};
 use crate::{Inner, scripts};
 
-/// Costs kept individually per entry; past it the newest are summed into
-/// the last (the stored float may then differ from the per-debit sequence
-/// in its last digits — far below any spend ceiling's resolution).
-const MAX_COSTS_PER_ENTRY: usize = 256;
-
 /// A bound on one call's arguments (bytes, roughly), under D2's 1 MiB
 /// request cap with the script-source fallback beside it.
 const MAX_CALL_BYTES: usize = 256 * 1024;
 
+/// Fixed overheads in the byte estimate.
+const ENTRY_OVERHEAD: usize = 128;
+const RUN_OVERHEAD: usize = 64;
+
+/// (bucket hash, count-bucket start bits).
+type Slot = (String, u64);
+
 #[derive(Debug, Clone, Default)]
-struct Entry {
-    grain_ms: f64,
-    window_ms: f64,
+struct Run {
+    /// The rows' commit id (`""`: unknown).
+    commit: String,
     requests: f64,
     tokens: f64,
+    /// Every cost, in debit order.
     costs: Vec<f64>,
-    /// Per row-range bucket start (bits): least and greatest row `at`.
+    /// Per range-bucket start (bits): least and greatest row `at`.
     ranges: Vec<(u64, f64, f64)>,
 }
 
+impl Run {
+    fn bytes(&self) -> usize {
+        RUN_OVERHEAD + self.commit.len() + self.costs.len() * 24 + self.ranges.len() * 48
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Entry {
+    slot: Slot,
+    grain_ms: f64,
+    window_ms: f64,
+    runs: Vec<Run>,
+    /// When the server first answered *wait* for this entry.
+    waiting_since: Option<Instant>,
+    bytes: usize,
+}
+
 #[derive(Default)]
-struct Seeding {
-    /// Seeds of this hash running in this process.
-    running: usize,
-    /// Whether one of them installed.
-    installed: bool,
-    /// Debits made while they ran: `(subject, window, now, row_at, delta)`.
-    held: Vec<(String, Window, f64, f64, Counts)>,
+struct Pending {
+    /// In arrival order.
+    entries: Vec<Entry>,
+    /// The latest entry of each slot (index into `entries`).
+    last: HashMap<Slot, usize>,
+    bytes: usize,
+}
+
+impl Pending {
+    fn take(&mut self) -> Vec<Entry> {
+        self.last.clear();
+        self.bytes = 0;
+        std::mem::take(&mut self.entries)
+    }
+
+    fn reindex(&mut self) {
+        self.last.clear();
+        self.bytes = 0;
+        for (i, e) in self.entries.iter().enumerate() {
+            self.last.insert(e.slot.clone(), i);
+            self.bytes += e.bytes;
+        }
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct Debits {
-    /// Keyed by (bucket hash name, bucket start).
-    pending: Mutex<HashMap<(String, u64), Entry>>,
+    pending: Mutex<Pending>,
     /// One flush at a time, so batches apply in order.
     flushing: AsyncMutex<()>,
-    /// Bucket hashes a local seed is installing, with the debits made
-    /// meanwhile (see [`seeding`]).
-    seeding: Mutex<HashMap<String, Seeding>>,
     stopped: AtomicBool,
 }
 
-/// Queues one debit of `subject`'s `window` stamped `now`, for a row at
-/// `row_at`.
-pub(crate) fn push(
-    inner: &Inner,
-    subject: &str,
-    window: Window,
-    now: f64,
-    row_at: f64,
-    delta: Counts,
-) {
-    let grain = grain_ms(window);
-    let start = (now / grain).floor() * grain;
-    let name = key("b", &bucket_key(subject, window));
-    if let Some(seeding) = inner
-        .debits
-        .seeding
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get_mut(&name)
-    {
-        seeding
-            .held
-            .push((subject.to_owned(), window, now, row_at, delta));
-        return;
+impl Debits {
+    fn pending(&self) -> std::sync::MutexGuard<'_, Pending> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
-    let mut pending = inner
-        .debits
-        .pending
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let slot = (name, start.to_bits());
-    if !pending.contains_key(&slot) && pending.len() >= inner.opts.debit_queue {
-        drop(pending);
-        lost(inner, 1, "debit queue full");
-        return;
-    }
-    crate::bump(&inner.metrics.debits_queued);
-    let e = pending.entry(slot).or_default();
-    e.grain_ms = grain;
-    e.window_ms = window.ms();
-    e.requests += delta.requests;
-    e.tokens += delta.tokens;
-    if e.costs.len() < MAX_COSTS_PER_ENTRY {
-        e.costs.push(delta.cost_usd);
-    } else if let Some(last) = e.costs.last_mut() {
-        *last += delta.cost_usd;
-    }
-    let range = ((row_at / grain).floor() * grain).to_bits();
-    match e.ranges.iter_mut().find(|r| r.0 == range) {
-        Some(r) => {
-            r.1 = r.1.min(row_at);
-            r.2 = r.2.max(row_at);
-        }
-        None => e.ranges.push((range, row_at, row_at)),
+
+    /// Entries and estimated bytes pending.
+    pub(crate) fn usage(&self) -> (usize, usize) {
+        let p = self.pending();
+        (p.entries.len(), p.bytes)
     }
 }
 
+/// One debit, as queued.
+pub(crate) struct Debit<'a> {
+    pub subject: &'a str,
+    pub window: Window,
+    pub now: f64,
+    pub row_at: f64,
+    pub commit: &'a str,
+    pub delta: Counts,
+}
+
+/// Queues one debit. Past the bounds it is lost (counted, reseed armed).
+pub(crate) fn push(inner: &Inner, d: &Debit<'_>) {
+    let grain = grain_ms(d.window);
+    let start = (d.now / grain).floor() * grain;
+    let range = ((d.row_at / grain).floor() * grain).to_bits();
+    let slot = (key("b", &bucket_key(d.subject, d.window)), start.to_bits());
+    let fits = {
+        let mut p = inner.debits.pending();
+        let opts = &inner.opts;
+        // Into the slot's latest entry when it has room; else a new entry
+        // after it (order across calls is arrival order).
+        let at = p.last.get(&slot).copied().filter(|i| {
+            p.entries[*i].bytes + RUN_OVERHEAD + 96 + d.commit.len() <= MAX_CALL_BYTES / 2
+        });
+        let added;
+        if let Some(i) = at {
+            let e = &mut p.entries[i];
+            let before = e.bytes;
+            match e.runs.last_mut().filter(|r| r.commit == d.commit) {
+                Some(r) => {
+                    r.requests += d.delta.requests;
+                    r.tokens += d.delta.tokens;
+                    r.costs.push(d.delta.cost_usd);
+                    match r.ranges.iter_mut().find(|x| x.0 == range) {
+                        Some(x) => {
+                            x.1 = x.1.min(d.row_at);
+                            x.2 = x.2.max(d.row_at);
+                        }
+                        None => r.ranges.push((range, d.row_at, d.row_at)),
+                    }
+                }
+                None => e.runs.push(run(d, range)),
+            }
+            e.bytes =
+                ENTRY_OVERHEAD + e.slot.0.len() + e.runs.iter().map(Run::bytes).sum::<usize>();
+            added = e.bytes - before;
+            if p.bytes + added > opts.debit_bytes {
+                // Undo: drop what was just added (the last cost, and the
+                // run or range it created).
+                let e = &mut p.entries[i];
+                undo_last(e, d);
+                false
+            } else {
+                p.bytes += added;
+                true
+            }
+        } else {
+            let r = run(d, range);
+            let bytes = ENTRY_OVERHEAD + slot.0.len() + r.bytes();
+            if p.entries.len() >= opts.debit_queue || p.bytes + bytes > opts.debit_bytes {
+                false
+            } else {
+                let i = p.entries.len();
+                p.entries.push(Entry {
+                    slot: slot.clone(),
+                    grain_ms: grain,
+                    window_ms: d.window.ms(),
+                    runs: vec![r],
+                    waiting_since: None,
+                    bytes,
+                });
+                p.last.insert(slot, i);
+                p.bytes += bytes;
+                true
+            }
+        }
+    };
+    if fits {
+        crate::bump(&inner.metrics.debits_queued);
+    } else {
+        lost(inner, 1, "debit queue full");
+    }
+}
+
+fn run(d: &Debit<'_>, range: u64) -> Run {
+    Run {
+        commit: d.commit.to_owned(),
+        requests: d.delta.requests,
+        tokens: d.delta.tokens,
+        costs: vec![d.delta.cost_usd],
+        ranges: vec![(range, d.row_at, d.row_at)],
+    }
+}
+
+/// Reverts the debit just merged into `e` (it did not fit). The range is
+/// left widened: a wider range only makes a reset later (the safe side),
+/// and the debit's loss arms a reseed that replaces it anyway.
+fn undo_last(e: &mut Entry, d: &Debit<'_>) {
+    let Some(r) = e.runs.last_mut() else { return };
+    if r.costs.len() == 1 {
+        e.runs.pop();
+    } else {
+        r.requests -= d.delta.requests;
+        r.tokens -= d.delta.tokens;
+        r.costs.pop();
+    }
+    e.bytes = ENTRY_OVERHEAD + e.slot.0.len() + e.runs.iter().map(Run::bytes).sum::<usize>();
+}
+
 fn lost(inner: &Inner, n: u64, why: &'static str) {
+    if n == 0 {
+        return;
+    }
     inner
         .metrics
         .debit_buckets_lost
@@ -140,160 +259,157 @@ fn lost(inner: &Inner, n: u64, why: &'static str) {
     );
 }
 
-/// Marks `bucket` (a `bucket_key`) as being seeded by this process and
-/// applies every debit already pending first, so none of them can land
-/// after the seed: a pending debit's row is committed, so the seed's store
-/// read counts it, and applied now it meets the unseeded hash and is
-/// ignored — TS's order ("row first, then the debit"; an unseeded key
-/// ignores adds). Without this a debit batched across a seed's read is
-/// counted twice.
-///
-/// Debits made while the seed runs are held. If a seed installs they are
-/// dropped: in TS such a debit either meets the unseeded hash (ignored) or
-/// is erased by `BUCKETS_SEED`'s `DEL`, its row read by the seed or not
-/// (TS's own race, kept). If none installs (the store read failed, or
-/// another replica's picture was already there) they are queued as usual.
-pub(crate) async fn seeding<'a>(inner: &'a Inner, bucket: &str) -> SeedingGuard<'a> {
-    let name = key("b", bucket);
-    inner
-        .debits
-        .seeding
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(name.clone())
-        .or_default()
-        .running += 1;
-    let guard = SeedingGuard { inner, name };
-    flush(inner).await;
-    guard
+/// `omni:lock:seed:<bucket>` for a full `omni:b:<bucket>` hash name — the
+/// lock TS's `seed` takes (`withLock("seed:" + bucketKey)`).
+pub(crate) fn lock_key(hash: &str) -> String {
+    key(
+        "lock",
+        &format!("seed:{}", hash.strip_prefix("omni:b:").unwrap_or(hash)),
+    )
 }
 
-pub(crate) struct SeedingGuard<'a> {
-    inner: &'a Inner,
-    name: String,
-}
-
-impl SeedingGuard<'_> {
-    /// The seed installed its picture.
-    pub(crate) fn installed(&self) {
-        if let Some(s) = self
-            .inner
-            .debits
-            .seeding
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_mut(&self.name)
-        {
-            s.installed = true;
-        }
-    }
-}
-
-impl Drop for SeedingGuard<'_> {
-    fn drop(&mut self) {
-        let done = {
-            let mut seeding = self
-                .inner
-                .debits
-                .seeding
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let Some(s) = seeding.get_mut(&self.name) else {
-                return;
-            };
-            s.running -= 1;
-            if s.running > 0 {
-                return;
-            }
-            seeding.remove(&self.name)
-        };
-        let Some(done) = done else { return };
-        if done.installed {
-            self.inner
-                .metrics
-                .debit_buckets_unseeded
-                .fetch_add(done.held.len() as u64, Ordering::Relaxed);
-            return;
-        }
-        for (subject, window, now, row_at, delta) in done.held {
-            push(self.inner, &subject, window, now, row_at, delta);
-        }
-    }
-}
-
-/// Applies every pending entry now.
+/// Applies every pending entry now. Entries a seed is waiting on are kept
+/// ahead of newer ones (or, past `debit_wait_max`, lost).
 pub(crate) async fn flush(inner: &Inner) {
     let _one = inner.debits.flushing.lock().await;
-    let batch: Vec<((String, u64), Entry)> = {
-        let mut pending = inner
-            .debits
-            .pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if pending.is_empty() {
-            return;
-        }
-        pending.drain().collect()
-    };
+    let batch = inner.debits.pending().take();
+    if batch.is_empty() {
+        return;
+    }
+    let mut waiting: Vec<Entry> = Vec::new();
     let mut keys = Vec::new();
     let mut args = Vec::new();
+    let mut sent: Vec<Entry> = Vec::new();
     let mut bytes = 0;
-    for ((name, start), e) in batch {
-        bytes += name.len() + 64 + e.costs.len() * 24 + e.ranges.len() * 48;
-        keys.push(name);
-        args.push(crate::js(f64::from_bits(start)));
+    for e in batch {
+        bytes += e.bytes;
+        let (name, start) = &e.slot;
+        keys.push(name.clone());
+        keys.push(scripts::meta_key(name));
+        keys.push(lock_key(name));
+        args.push(crate::js(f64::from_bits(*start)));
         args.push(crate::js(e.grain_ms));
         args.push(crate::js(e.window_ms));
-        args.push(crate::js(e.requests));
-        args.push(crate::js(e.tokens));
-        args.push(e.ranges.len().to_string());
-        for (_, lo, hi) in &e.ranges {
-            args.push(crate::js(*lo));
-            args.push(crate::js(*hi));
+        args.push(e.runs.len().to_string());
+        for r in &e.runs {
+            args.push(r.commit.clone());
+            args.push(crate::js(r.requests));
+            args.push(crate::js(r.tokens));
+            args.push(r.ranges.len().to_string());
+            for (_, lo, hi) in &r.ranges {
+                args.push(crate::js(*lo));
+                args.push(crate::js(*hi));
+            }
+            // Every cost in order, zeros included: TS sends one
+            // `HINCRBYFLOAT` per debit, and a zero one still creates the
+            // field.
+            args.push(r.costs.len().to_string());
+            args.extend(r.costs.iter().copied().map(crate::js));
         }
-        // Every cost in order, zeros included: TS sends one `HINCRBYFLOAT`
-        // per debit, and a zero one still creates the field.
-        args.push(e.costs.len().to_string());
-        args.extend(e.costs.iter().copied().map(crate::js));
-        if keys.len() >= inner.opts.debit_batch_keys || bytes >= MAX_CALL_BYTES {
-            send(inner, std::mem::take(&mut keys), std::mem::take(&mut args)).await;
+        sent.push(e);
+        if sent.len() >= inner.opts.debit_batch_keys || bytes >= MAX_CALL_BYTES {
+            send(
+                inner,
+                std::mem::take(&mut keys),
+                std::mem::take(&mut args),
+                std::mem::take(&mut sent),
+                &mut waiting,
+            )
+            .await;
             bytes = 0;
         }
     }
-    if !keys.is_empty() {
-        send(inner, keys, args).await;
+    if !sent.is_empty() {
+        send(inner, keys, args, sent, &mut waiting).await;
+    }
+    if !waiting.is_empty() {
+        requeue(inner, waiting);
     }
 }
 
-async fn send(inner: &Inner, keys: Vec<String>, args: Vec<String>) {
-    let n = keys.len() as u64;
-    crate::bump(&inner.metrics.debit_batches);
-    match inner.remote.eval(&scripts::DEBIT_BATCH, &keys, &args).await {
-        Ok(Value::Array(out)) => {
-            let applied = out.iter().filter(|v| matches!(v, Value::Int(1))).count() as u64;
-            inner
-                .metrics
-                .debit_buckets_applied
-                .fetch_add(applied, Ordering::Relaxed);
-            inner
-                .metrics
-                .debit_buckets_unseeded
-                .fetch_add(n.saturating_sub(applied), Ordering::Relaxed);
+/// Puts entries a seed is waiting on back, ahead of everything queued since
+/// (their debits came first). Past the bounds the oldest waiting are kept
+/// and the rest lost.
+fn requeue(inner: &Inner, waiting: Vec<Entry>) {
+    let mut dropped = 0;
+    {
+        let mut p = inner.debits.pending();
+        let newer = std::mem::take(&mut p.entries);
+        let mut all: Vec<Entry> = Vec::with_capacity(waiting.len() + newer.len());
+        let mut bytes = 0;
+        for e in waiting {
+            if all.len() < inner.opts.debit_queue && bytes + e.bytes <= inner.opts.debit_bytes {
+                bytes += e.bytes;
+                all.push(e);
+            } else {
+                dropped += 1;
+            }
         }
+        for e in newer {
+            if all.len() < inner.opts.debit_queue && bytes + e.bytes <= inner.opts.debit_bytes {
+                bytes += e.bytes;
+                all.push(e);
+            } else {
+                dropped += 1;
+            }
+        }
+        p.entries = all;
+        p.reindex();
+    }
+    lost(inner, dropped, "debit queue full while waiting on a seed");
+}
+
+async fn send(
+    inner: &Inner,
+    keys: Vec<String>,
+    args: Vec<String>,
+    sent: Vec<Entry>,
+    waiting: &mut Vec<Entry>,
+) {
+    let n = sent.len() as u64;
+    crate::bump(&inner.metrics.debit_batches);
+    let out = match inner.remote.eval(&scripts::DEBIT_BATCH, &keys, &args).await {
+        Ok(Value::Array(out)) if out.len() == sent.len() => out,
         // Not confirmed: it may or may not have applied. TS's policy for a
         // debit that did not reach the server: reseed on recovery (an
         // applied-and-unconfirmed batch is then simply re-read).
-        Ok(_) | Err(_) => lost(inner, n, "debit batch not confirmed"),
+        _ => return lost(inner, n, "debit batch not confirmed"),
+    };
+    let m = &inner.metrics;
+    let mut expired = 0;
+    for (mut e, v) in sent.into_iter().zip(out) {
+        match v {
+            Value::Int(2) => {
+                let since = *e.waiting_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= inner.opts.debit_wait_max {
+                    expired += 1;
+                } else {
+                    crate::bump(&m.debit_buckets_waiting);
+                    waiting.push(e);
+                }
+            }
+            Value::Array(counts) => {
+                let at = |i: usize| match counts.get(i) {
+                    Some(Value::Int(x)) => u64::try_from(*x).unwrap_or(0),
+                    _ => 0,
+                };
+                m.debit_runs_applied.fetch_add(at(0), Ordering::Relaxed);
+                m.debit_runs_covered.fetch_add(at(1), Ordering::Relaxed);
+                crate::bump(&m.debit_buckets_applied);
+            }
+            _ => crate::bump(&m.debit_buckets_unseeded),
+        }
     }
+    lost(inner, expired, "debit waited past its bound on a seed");
 }
 
-pub(crate) fn spawn(inner: &Arc<Inner>) {
+pub(crate) fn spawn(inner: &Arc<Inner>) -> tokio::task::JoinHandle<()> {
     let weak = Arc::downgrade(inner);
     let every = inner.opts.debit_interval;
-    tokio::spawn(flusher(weak, every));
+    tokio::spawn(flusher(weak, every))
 }
 
-async fn flusher(weak: Weak<Inner>, every: std::time::Duration) {
+async fn flusher(weak: Weak<Inner>, every: Duration) {
     let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -308,4 +424,22 @@ async fn flusher(weak: Weak<Inner>, every: std::time::Duration) {
 
 pub(crate) fn stop(inner: &Inner) {
     inner.debits.stopped.store(true, Ordering::SeqCst);
+}
+
+/// Shutdown: flushes until nothing is pending, keeping entries a seed is
+/// waiting on until `deadline`; whatever is left then is lost (counted,
+/// reseed armed) — never silently dropped.
+pub(crate) async fn drain(inner: &Inner, deadline: tokio::time::Instant) {
+    loop {
+        flush(inner).await;
+        if inner.debits.usage().0 == 0 {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let n = inner.debits.pending().take().len();
+            lost(inner, n as u64, "debits pending at shutdown");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

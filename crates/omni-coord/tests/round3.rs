@@ -21,25 +21,58 @@ fn opts(command_timeout_ms: u64) -> RedisCoordOptions {
     }
 }
 
-/// The server stalls ~0.5 s on every connection (a spinning script).
-async fn spin(url: &str) -> tokio::task::JoinHandle<()> {
+/// A server stall the test controls: `CLIENT PAUSE … WRITE` from a control
+/// connection holds every write and script (`EVAL`/`EVALSHA`, `SET`) until
+/// [`Stall::end`] sends `CLIENT UNPAUSE` — not a CPU loop whose length
+/// depends on the host. Reads (`PING`, the D2 heartbeat) still answer, so
+/// a stall must end inside `command_timeout` or the watchdog may retire the
+/// silent socket; each test ends it as soon as its condition is observed.
+/// The pause carries a 20 s safety timeout in case a test panics first.
+struct Stall {
+    conn: redis::aio::MultiplexedConnection,
+    ended: bool,
+}
+
+impl Stall {
+    async fn end(mut self) {
+        let _: () = redis::cmd("CLIENT")
+            .arg("UNPAUSE")
+            .query_async(&mut self.conn)
+            .await
+            .expect("unpause");
+        self.ended = true;
+    }
+}
+
+impl Drop for Stall {
+    fn drop(&mut self) {
+        if !self.ended {
+            // A panicking test: unpause on the way out (best effort).
+            let mut conn = self.conn.clone();
+            tokio::spawn(async move {
+                let _done: redis::RedisResult<()> = redis::cmd("CLIENT")
+                    .arg("UNPAUSE")
+                    .query_async(&mut conn)
+                    .await;
+            });
+        }
+    }
+}
+
+async fn stall(url: &str) -> Stall {
     let mut conn = redis::Client::open(url)
         .expect("url")
-        .get_multiplexed_async_connection_with_config(
-            &redis::AsyncConnectionConfig::new().set_response_timeout(None),
-        )
+        .get_multiplexed_async_connection()
         .await
-        .expect("blocker");
-    let task = tokio::spawn(async move {
-        let spun: redis::RedisResult<i64> = redis::cmd("EVAL")
-            .arg("for i=1,200000000 do end return 1")
-            .arg(0)
-            .query_async(&mut conn)
-            .await;
-        assert_eq!(spun, Ok(1));
-    });
-    sleep_ms(30).await;
-    task
+        .expect("control");
+    let _: () = redis::cmd("CLIENT")
+        .arg("PAUSE")
+        .arg(20_000)
+        .arg("WRITE")
+        .query_async(&mut conn)
+        .await
+        .expect("pause");
+    Stall { conn, ended: false }
 }
 
 // --- N1: no-response requests ------------------------------------------------
@@ -70,7 +103,7 @@ async fn no_response_commands_stay_charged_and_cannot_break_release_order() {
         Ok(0)
     );
 
-    let spinning = spin(&db.url).await;
+    let spinning = stall(&db.url).await;
     let mut accepted = 0_usize;
     for _ in 0..200 {
         let mut ping = redis::cmd("PING");
@@ -135,7 +168,12 @@ async fn no_response_commands_stay_charged_and_cannot_break_release_order() {
             }
         })
     };
-    spinning.await.expect("spin");
+    // The release and the acquire are both queued behind the stall; their
+    // order on the wire is what is tested, so the stall ends only now.
+    while remote.outstanding() < accepted.min(48) + 2 {
+        tokio::task::yield_now().await;
+    }
+    spinning.end().await;
     assert_eq!(after.await.expect("task"), Ok(0), "release was overtaken");
     coord.close();
 }
@@ -175,7 +213,7 @@ async fn the_eval_fallback_is_validated_and_charged() {
     assert_eq!(remote.outstanding_bytes(), 0);
 
     // Stall the server; submit BIG calls until the budget refuses one.
-    let spinning = spin(&db.url).await;
+    let spinning = stall(&db.url).await;
     let mut held = Vec::new();
     let refused = loop {
         let r = remote.clone();
@@ -221,7 +259,7 @@ async fn the_eval_fallback_is_validated_and_charged() {
         "{} calls retained 600 KiB each under a 3 MiB budget",
         held.len()
     );
-    spinning.await.expect("spin");
+    spinning.end().await;
     for h in held {
         // Not loaded at connect (not in `extra_scripts`): NOSCRIPT, then EVAL.
         assert_eq!(h.await.expect("task"), Ok(redis::Value::Int(1)));
@@ -271,7 +309,7 @@ async fn release_then_immediate_reacquire_of_the_same_key_under_backpressure() {
             "round {round}"
         );
         // Stall and fill: 90 admissions from other tasks queue behind it.
-        let spinning = spin(&db.url).await;
+        let spinning = stall(&db.url).await;
         let mut noise = Vec::new();
         for t in 0..90 {
             let r = remote.clone();
@@ -291,13 +329,26 @@ async fn release_then_immediate_reacquire_of_the_same_key_under_backpressure() {
             Ok(())
         );
         let next = format!("n{round}");
-        let reacquire = loop {
-            match remote.gauge_acquire(key, 0.0, 60_000, Some(&next)).await {
-                Err(Fault::Saturated) => tokio::task::yield_now().await,
-                other => break other,
-            }
+        let queued = remote.outstanding();
+        let reacquire = {
+            let r = remote.clone();
+            let next = next.clone();
+            tokio::spawn(async move {
+                loop {
+                    match r.gauge_acquire(key, 0.0, 60_000, Some(&next)).await {
+                        Err(Fault::Saturated) => tokio::task::yield_now().await,
+                        other => break other,
+                    }
+                }
+            })
         };
-        spinning.await.expect("spin");
+        // Both queued behind the stall (the release charged when it was
+        // accepted, the reacquire now): only then does the stall end.
+        while remote.outstanding() <= queued {
+            tokio::task::yield_now().await;
+        }
+        spinning.end().await;
+        let reacquire = reacquire.await.expect("reacquire");
         for n in noise {
             let _done = n.await.expect("noise").is_ok();
         }

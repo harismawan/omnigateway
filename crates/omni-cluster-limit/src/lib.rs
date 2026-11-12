@@ -19,16 +19,21 @@
 //!   on D2's ordered queue, so a `concurrency: 1` key's next request on this
 //!   process is judged after it. Slots are named and renewed (TS's 300 s TTL,
 //!   100 s renewal, one-day cap).
-//! - **Debits are batched** ([`ClusterLimiter::debit`]): aggregated per
-//!   bucket and applied as one [`scripts::DEBIT_BATCH`] call per batch.
-//!   A batch that faults is lost, counted, and marks the coordinator's
+//! - **Debits are batched** ([`ClusterLimiter::debit`]): queued per bucket
+//!   with every cost in order and the row's commit id, applied as one
+//!   [`scripts::DEBIT_BATCH`] call per batch with TS's per-debit float
+//!   arithmetic. A row a seed already counted (on any replica) is skipped
+//!   by its commit; see [`debit`](crate) docs. Storage is bounded; a debit
+//!   lost to a bound or a fault is counted and arms the coordinator's
 //!   lost-debit flag (TS's policy: every bucket hash is dropped on recovery
 //!   and reseeded from the store).
 //! - **Unseeded long windows admit** (the spec's one deliberate difference
 //!   from TS): the request is judged against what could be checked, and a
 //!   background seeder takes `omni:lock:seed:<bucket>`, reads
-//!   [`UsageSource::sum_buckets`] and runs `BUCKETS_SEED`. Boot and new-key
-//!   pre-seeding: [`ClusterLimiter::preseed`] / [`ClusterLimiter::preseed_now`].
+//!   [`UsageSource::seed_read`] (counts, row ranges and the read's commit
+//!   snapshot, under a deadline) and installs all of it in one
+//!   [`scripts::SEED_INSTALL`] call. Boot and new-key pre-seeding:
+//!   [`ClusterLimiter::preseed`] / [`ClusterLimiter::preseed_now`].
 //! - **Redis outage fails open** to a per-process limiter (D2's
 //!   `MemoryCoord`, TS's `memoryCoord` semantics) with a rate-limited `warn`
 //!   and [`Metrics::local_admissions`]; long windows are not enforced there.
@@ -73,31 +78,41 @@ pub const SEED_LOCK_MS: u64 = 5_000;
 
 /// Where the store's usage is read from: D1's `PgStore` plugs in here.
 /// Called only by the background seeder — never on the request path,
-/// admitted or refused.
+/// admitted or refused — and always under `usage_timeout`.
 #[async_trait]
 pub trait UsageSource: Send + Sync {
-    /// TS `store.usage.sumBuckets(apiKeyId, sinceMs, grainMs, model)`.
-    async fn sum_buckets(
+    /// One consistent read of everything a seed installs (ruling I1/I2):
+    ///
+    /// - `rows`: TS `store.usage.sumBuckets(apiKeyId, sinceMs, grainMs,
+    ///   model)`;
+    /// - `ranges`: per grain bucket of each done row's own `at`, the least
+    ///   and greatest `at` of the done rows at or after `since_ms`
+    ///   (narrowed to `model` when given);
+    /// - `snapshot`: which commits the read saw, as Postgres
+    ///   `pg_current_snapshot()::text` (`xmin:xmax:xip,…`).
+    ///
+    /// All three must come from one store snapshot — on Postgres one
+    /// `REPEATABLE READ` transaction: `SELECT pg_current_snapshot()::text`,
+    /// then the `sumBuckets` query, then `SELECT (at / $g) * $g, MIN(at),
+    /// MAX(at) FROM request_logs WHERE api_key_id = $1 [AND requested_model
+    /// = $m] AND state = 'done' AND at >= $since GROUP BY 1`. Debits must
+    /// then carry the commit id of the transaction that completed their row
+    /// (`pg_current_xact_id()` in the writer's batch transaction).
+    async fn seed_read(
         &self,
         key_id: &str,
         since_ms: f64,
         grain_ms: f64,
         model: Option<&str>,
-    ) -> Result<Vec<BucketRow>, String>;
-    /// Beyond TS: per `grain`-aligned bucket of the row's own `at`, the
-    /// least and greatest `at` of the done rows at or after `since_ms`
-    /// (narrowed to `model` when given) — `(bucket start, min at, max at)`.
-    /// What lets a refusal's exact reset be read from Redis. On Postgres:
-    /// `SELECT (at / g) * g, MIN(at), MAX(at) FROM request_logs WHERE
-    /// api_key_id = $1 [AND requested_model = $2] AND state = 'done' AND
-    /// at >= $3 GROUP BY 1`.
-    async fn row_ranges(
-        &self,
-        key_id: &str,
-        since_ms: f64,
-        grain_ms: f64,
-        model: Option<&str>,
-    ) -> Result<Vec<RowRange>, String>;
+    ) -> Result<SeedRead, String>;
+}
+
+/// What one seed read returns (see [`UsageSource::seed_read`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SeedRead {
+    pub rows: Vec<BucketRow>,
+    pub ranges: Vec<RowRange>,
+    pub snapshot: String,
 }
 
 /// `(bucket start, least at, greatest at)` of the done rows in one bucket.
@@ -120,9 +135,20 @@ pub struct ClusterLimiterOptions {
     pub seed_queue: usize,
     /// How long a failed (or still running) seed suppresses asking again.
     pub seed_retry: Duration,
-    /// Distinct (bucket, start) entries awaiting a flush; past it a debit
-    /// is dropped, counted, and the lost-debit reseed is armed.
+    /// Pending debit entries (per bucket and start); past it a debit is
+    /// lost: counted, logged, and the lost-debit reseed armed.
     pub debit_queue: usize,
+    /// Pending debit storage, estimated bytes (names, commits, every cost
+    /// and range); past it a debit is lost likewise.
+    pub debit_bytes: usize,
+    /// How long a debit may wait on another seed's install before it is
+    /// lost (the seed lock's TTL bounds a live seed).
+    pub debit_wait_max: Duration,
+    /// Deadline on every [`UsageSource`] call.
+    pub usage_timeout: Duration,
+    /// How long [`ClusterLimiter::shutdown`] keeps flushing debits that wait
+    /// on a seed before counting them lost.
+    pub shutdown_drain: Duration,
     /// How often pending debits are flushed (the writer batch's 200 ms).
     pub debit_interval: Duration,
     /// Buckets per [`scripts::DEBIT_BATCH`] call (bounds one request).
@@ -143,6 +169,10 @@ impl Default for ClusterLimiterOptions {
             seed_queue: 4_096,
             seed_retry: Duration::from_millis(5_000),
             debit_queue: 65_536,
+            debit_bytes: 32 * 1024 * 1024,
+            debit_wait_max: Duration::from_millis(SEED_LOCK_MS * 2),
+            usage_timeout: Duration::from_millis(SEED_LOCK_MS * 4 / 5),
+            shutdown_drain: Duration::from_millis(1_000),
             debit_interval: Duration::from_millis(200),
             debit_batch_keys: 1_024,
             fault_log_interval: Duration::from_millis(30_000),
@@ -178,10 +208,16 @@ pub struct Metrics {
     /// The seed lock could not be taken; seeded anyway (TS).
     pub seed_lock_unavailable: AtomicU64,
     pub debits_queued: AtomicU64,
-    /// Bucket entries applied to a seeded hash.
+    /// Bucket entries that met a complete picture.
     pub debit_buckets_applied: AtomicU64,
-    /// Bucket entries ignored by an unseeded hash (the seed reads the row).
+    /// Runs (one commit's debits) added to a complete picture.
+    pub debit_runs_applied: AtomicU64,
+    /// Runs skipped because the picture's seed already counted their rows.
+    pub debit_runs_covered: AtomicU64,
+    /// Bucket entries ignored by an incomplete picture (the seed reads the row).
     pub debit_buckets_unseeded: AtomicU64,
+    /// Bucket entries kept for another flush: a seed is installing.
+    pub debit_buckets_waiting: AtomicU64,
     /// Bucket entries lost to a fault or a full queue (reseed armed).
     pub debit_buckets_lost: AtomicU64,
     pub debit_batches: AtomicU64,
@@ -196,7 +232,9 @@ fn bump(c: &AtomicU64) {
 }
 
 pub(crate) struct Inner {
-    pub(crate) coord: Arc<RedisCoord>,
+    /// Held so the coordinator (whose drop closes its connections) lives as
+    /// long as the limiter; everything goes through `remote`.
+    _coord: Arc<RedisCoord>,
     pub(crate) remote: Remote,
     pub(crate) local: MemoryCoord,
     pub(crate) usage: Arc<dyn UsageSource>,
@@ -208,6 +246,8 @@ pub(crate) struct Inner {
     pub(crate) seeds: seed::Seeds,
     pub(crate) debits: debit::Debits,
     last_fallback_log: Mutex<Option<Instant>>,
+    /// The seed worker and debit flusher, joined at shutdown.
+    background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -219,6 +259,11 @@ impl std::fmt::Debug for Inner {
 impl Inner {
     pub(crate) fn now(&self) -> f64 {
         (self.opts.clock)()
+    }
+
+    /// How often a contended seed lock is retried (TS `LOCK_POLL_MS`).
+    pub(crate) fn coord_lock_poll(&self) -> Duration {
+        Duration::from_millis(50)
     }
 
     fn fallback(&self, fault: &Fault) {
@@ -467,13 +512,14 @@ pub(crate) fn admit_call(
     ]);
     for ask in asks {
         let id = &ask.subject.id;
-        keys.extend([
-            key("w", id),
-            key("g", id),
-            gauge_index(id),
+        let (h5, w1) = (
             key("b", &bucket_key(id, Window::H5)),
             key("b", &bucket_key(id, Window::W1)),
-        ]);
+        );
+        // Script layout: `k+4`/`k+5` the 5h hash and its companion,
+        // `k+6`/`k+7` the 1w ones.
+        let (m5, m1) = (scripts::meta_key(&h5), scripts::meta_key(&w1));
+        keys.extend([key("w", id), key("g", id), gauge_index(id), h5, m5, w1, m1]);
         let l = &ask.scope;
         let req = l.requests.as_ref();
         let tok = l.tokens.as_ref();
@@ -567,7 +613,7 @@ impl ClusterLimiter {
         let remote = coord.remote().clone();
         let local = MemoryCoord::new(Arc::clone(&opts.clock));
         let inner = Arc::new(Inner {
-            coord,
+            _coord: coord,
             remote,
             local,
             usage,
@@ -577,9 +623,13 @@ impl ClusterLimiter {
             metrics: Metrics::default(),
             limits: Mutex::new(HashMap::new()),
             last_fallback_log: Mutex::new(None),
+            background: Mutex::new(Vec::new()),
         });
-        seed::spawn(&inner);
-        debit::spawn(&inner);
+        let tasks = vec![seed::spawn(&inner), debit::spawn(&inner)];
+        *inner
+            .background
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = tasks;
         Self { inner }
     }
 
@@ -659,33 +709,45 @@ impl ClusterLimiter {
         }
         let gauge_now = inner.now();
         let (keys, args) = admit_call(&asks, mode, now, gauge_now, inner.opts.gauge_ttl_ms);
+        // Armed before the script is submitted: if this future is dropped
+        // (the caller cancelled) or the call faults, every named slot the
+        // script may have taken is given back — a detached release ordered
+        // after the script on the connection, replay-safe. Disarmed only
+        // once the slots belong to an `Admission` (or the script refused,
+        // having rolled them back itself).
+        let mut cleanup = SlotCleanup {
+            inner,
+            slots: asks
+                .iter()
+                .filter_map(|a| a.holder.as_ref().map(|h| (a.subject.id.clone(), h.clone())))
+                .collect(),
+        };
         let reply = inner.remote.eval(&scripts::ADMIT, &keys, &args).await;
         let parsed = reply.and_then(|r| parse_admit(&r, asks.len(), now));
         let (verdict, observed, unseeded) = match parsed {
             Ok(p) => p,
             Err(fault) => {
                 // A script that was written may still land after its
-                // deadline (or have run partly, on a server error): give
-                // back any slot it would have taken (ordered after it on
-                // the connection; named, so replay-safe). A late window
-                // claim stays — an over-count, the direction the limiter
-                // permits. A call refused before sending needs nothing.
+                // deadline (or have run partly, on a server error): the
+                // cleanup gives back its slots. A late window claim stays —
+                // an over-count, the direction the limiter permits. A call
+                // refused before sending took nothing.
                 let sent = matches!(
                     fault,
                     Fault::TimedOut | Fault::Connection(_) | Fault::Server(_)
                 );
-                for a in asks.iter().filter(|_| sent) {
-                    if let Some(h) = &a.holder {
-                        let _queued = inner
-                            .remote
-                            .gauge_release_detached(&a.subject.id, inner.now(), Some(h))
-                            .is_ok();
-                    }
+                if sent {
+                    cleanup.release();
                 }
+                cleanup.slots.clear();
                 inner.fallback(&fault);
                 return local::run(&self.inner, asks, mode, now).await;
             }
         };
+        if !verdict {
+            // Refused: the script rolled its own claims back.
+            cleanup.slots.clear();
+        }
         bump(&inner.metrics.redis_calls);
 
         let scopes: Vec<LimitScope> = asks.iter().map(|a| a.scope.clone()).collect();
@@ -746,6 +808,8 @@ impl ClusterLimiter {
             Vec::new()
         };
         let renewal = spawn_renewal(&self.inner, &slots, false, now);
+        // The slots now belong to the admission (released by it, or on drop).
+        cleanup.slots.clear();
         Ok(Admission {
             headroom: combined.headroom,
             unseeded: missing,
@@ -765,7 +829,11 @@ impl ClusterLimiter {
     /// [`Self::flush_debits`]. Call it once the request's row is committed.
     /// `row_at` is the row's `at` (TS `startedAt`): it places the row in the
     /// row ranges a refusal's reset is read from; the counts are stamped
-    /// with the clock now, as TS's `buckets.add(…, now)`.
+    /// with the clock now, as TS's `buckets.add(…, now)`. `commit` is the
+    /// commit id of the store transaction that completed the row (on
+    /// Postgres the writer batch's `pg_current_xact_id()`): a seed whose
+    /// read saw that commit already counted the row, and the debit is then
+    /// skipped (ruling I1). `""` (unknown) is never skipped.
     pub fn debit(
         &self,
         key_id: &str,
@@ -773,6 +841,7 @@ impl ClusterLimiter {
         tokens: f64,
         cost_usd: f64,
         row_at: f64,
+        commit: &str,
     ) {
         let delta = Counts {
             requests: 1.0,
@@ -802,7 +871,17 @@ impl ClusterLimiter {
         let now = self.inner.now();
         for s in wanted {
             for window in LONG {
-                debit::push(&self.inner, &s, window, now, row_at, delta);
+                debit::push(
+                    &self.inner,
+                    &debit::Debit {
+                        subject: &s,
+                        window,
+                        now,
+                        row_at,
+                        commit,
+                        delta,
+                    },
+                );
             }
         }
     }
@@ -856,11 +935,35 @@ impl ClusterLimiter {
         seed::settled(&self.inner).await;
     }
 
-    /// Stops the background tasks after flushing pending debits.
+    /// Debit entries and estimated bytes pending.
+    pub fn debits_pending(&self) -> (usize, usize) {
+        self.inner.debits.usage()
+    }
+
+    /// Stops cleanly (I3): stops the seeder and cancels running seeds
+    /// (releasing their locks) and waits for them; stops the flusher; then
+    /// flushes every pending debit, keeping those another replica's seed is
+    /// installing for at most `shutdown_drain`. Anything still pending then
+    /// is counted lost (reseed armed) — never silently dropped. Idempotent.
     pub async fn shutdown(&self) {
-        debit::flush(&self.inner).await;
-        seed::stop(&self.inner);
-        debit::stop(&self.inner);
+        let inner = &self.inner;
+        // The worker first (so it cannot start a seed after the running ones
+        // are collected), then the running seeds, then the flusher.
+        seed::stopping(inner);
+        debit::stop(inner);
+        let tasks = std::mem::take(
+            &mut *inner
+                .background
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for t in tasks {
+            t.abort();
+            let _ended = t.await.is_err();
+        }
+        seed::stop(inner).await;
+        let deadline = tokio::time::Instant::now() + inner.opts.shutdown_drain;
+        debit::drain(inner, deadline).await;
     }
 }
 
@@ -880,6 +983,35 @@ fn preseed_subjects(key_id: &str, limits: &LimitConfig) -> Vec<Subject> {
         }
     }
     out
+}
+
+/// Gives back named gauge slots unless disarmed (`slots` cleared): a
+/// cancelled or faulted admission must not hold a `concurrency` slot until
+/// its TTL.
+struct SlotCleanup<'a> {
+    inner: &'a Inner,
+    slots: Vec<(String, String)>,
+}
+
+impl SlotCleanup<'_> {
+    fn release(&mut self) {
+        for (subject, holder) in self.slots.drain(..) {
+            if self
+                .inner
+                .remote
+                .gauge_release_detached(&subject, self.inner.now(), Some(&holder))
+                .is_err()
+            {
+                bump(&self.inner.metrics.releases_refused);
+            }
+        }
+    }
+}
+
+impl Drop for SlotCleanup<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// TS `rollback` for every claim, through the per-step scripts.

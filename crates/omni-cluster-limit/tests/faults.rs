@@ -215,7 +215,8 @@ async fn a_stopped_server_fails_open_and_recovers_with_a_reseed() {
         worst < Duration::from_millis(700),
         "bounded by the deadline: {worst:?}"
     );
-    l.debit("k", "m", 50.0, 0.5, T0);
+    let c1 = usage.row("k", "m", T0, 50.0, 0.5);
+    l.debit("k", "m", 50.0, 0.5, T0, &c1);
     l.flush_debits().await;
     assert_eq!(
         l.metrics().debit_buckets_lost.load(Ordering::SeqCst),

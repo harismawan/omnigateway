@@ -26,7 +26,10 @@
 //! raises the gauge for every subject; the spec acquires it "only if a
 //! concurrency limit is set") and the `omni:gidx:*` snapshot index entries
 //! those leave behind. Both are checked separately: every TS gauge key for
-//! a subject without a ceiling is empty after its releases.
+//! a subject without a ceiling is empty after its releases. The Rust-only
+//! companion hashes (`omni:b:…:meta`: seed snapshot and row ranges) are left
+//! out; every TS-visible bucket hash must match exactly, field order
+//! included.
 
 mod common;
 
@@ -263,9 +266,9 @@ async fn run_case(
                     s["tokens"].as_f64().expect("t"),
                     s["cost"].as_f64().expect("c"),
                 );
-                ts.call("row", json!([key, now, last, t, c])).await;
+                let commit = ts.call("row", json!([key, now, last, t, c])).await;
                 ts.call("debit", json!([key, last, t, c])).await;
-                rust.debit(key, &last, t, c, now);
+                rust.debit(key, &last, t, c, now, &commit.to_string());
                 rust.flush_debits().await;
             }
             op => {
@@ -398,15 +401,13 @@ fn count(v: &Value, counts: &mut (usize, usize)) {
     }
 }
 
-/// The Rust-only `<start>:a` / `<start>:z` row-range fields left out.
+/// The Rust-only companion hashes (`omni:b:…:meta`) left out.
 fn without_row_ranges(
     mut state: std::collections::BTreeMap<String, Value>,
 ) -> std::collections::BTreeMap<String, Value> {
-    for v in state.values_mut() {
-        if let Some(fields) = v["v"].as_object_mut() {
-            fields.retain(|f, _| !(f.ends_with(":a") || f.ends_with(":z")));
-        }
-    }
+    // The Rust-only companions; the TS-visible hashes must match exactly,
+    // field order included.
+    state.retain(|k, _| !(k.starts_with("omni:b:") && k.ends_with(":meta")));
     state
 }
 
@@ -493,7 +494,7 @@ async fn batched_debits_equal_per_debit_calls() {
         let cost = costs[usize::try_from(rng.below(costs.len() as u64)).unwrap_or(0)];
         ts.call("debit", json!([key, model, tokens, cost])).await;
         #[allow(clippy::cast_precision_loss)]
-        rust.debit(key, model, tokens as f64, cost, now);
+        rust.debit(key, model, tokens as f64, cost, now, "");
         if i % 97 == 96 {
             rust.flush_debits().await;
         }
@@ -563,6 +564,88 @@ async fn decisions_and_state_equal_the_frozen_ts_limiter() {
         counts.0 > 150 && counts.1 > 400,
         "corpus too thin: {counts:?}"
     );
+    ts.close().await;
+    rs_coord.shutdown().await;
+}
+
+/// TS compatibility of what the Rust seed and debits leave (ruling I1/I2):
+/// the frozen TS `redisCoord.buckets.sum` reads a Rust-installed picture
+/// (seed, then applied debits, then a debit its seed covered) exactly as it
+/// reads a TS-seeded one with the same rows, and TS's own `buckets.add` on
+/// either lands identically. The Rust-only companion is invisible to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_frozen_ts_reader_sees_rust_pictures_as_its_own() {
+    let Some(base) = redis_base() else { return };
+    let ts_db = fresh_db(&base).await;
+    let rs_db = fresh_db(&base).await;
+    let ts = Ts::spawn(&ts_db.url).await;
+    let clock = ManualClock::at(T0);
+    let rs_coord = coord(&rs_db.url, clock.clock()).await;
+    // The same history on both sides.
+    ts.call("reset", json!(["k"])).await;
+    ts.call("clock", json!([T0])).await;
+    let mut commits = Vec::new();
+    for (i, cost) in [0.1, 0.2, 0.3, 1.0 / 3.0].iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let at = T0 - (i as f64 + 1.0) * 1_234_567.0;
+        commits.push(
+            ts.call("row", json!(["k", at, "m", 10 * (i + 1), cost]))
+                .await,
+        );
+    }
+    let raw = r#"{"spend":{"5h":100,"1w":100},"tokens":{"5h":100000}}"#;
+    let lim = limits(raw);
+    let lim_json: Value = serde_json::from_str(raw).expect("json");
+    // TS seeds by admission; Rust by its atomic install.
+    let t = ts.call("admit", json!([1, "k", lim_json, "m"])).await;
+    ts.call("release", json!([1])).await;
+    let usage: Arc<dyn omni_cluster_limit::UsageSource> = Arc::new(AgentUsage(Arc::clone(&ts)));
+    let rust = common::limiter(&rs_coord, usage, clock.clock());
+    assert_eq!(rust.preseed_now("k", &limits(raw), T0).await, 0);
+    let r = rust.admit("k", &lim, "m", T0).await;
+    same_outcome(
+        &t,
+        &outcome_json(&r, |a: &Admission| headroom_json(&a.headroom)),
+        "seeded admit",
+    );
+    drop(r);
+    // A row committed after the seeds: debited on both. A debit for a row
+    // the Rust seed saw (its commit is in the snapshot) is skipped by Rust;
+    // TS never sends one (its seed is inline).
+    let late = ts.call("row", json!(["k", T0, "m", 7, 0.7])).await;
+    ts.call("debit", json!(["k", "m", 7, 0.7])).await;
+    rust.debit("k", "m", 7.0, 0.7, T0, &late.to_string());
+    rust.debit("k", "m", 10.0, 0.1, T0, &commits[0].to_string());
+    rust.flush_debits().await;
+    // Bring a Bun reader to the Rust database: the frozen TS coordinator.
+    let reader = Ts::spawn(&rs_db.url).await;
+    for (name, g, w) in [
+        ("lim:k:5h", 60_000.0, 5.0 * HOUR),
+        ("lim:k:1w", HOUR, 168.0 * HOUR),
+    ] {
+        let from_ts = ts.call("buckets.sum", json!([name, g, w, T0])).await;
+        let from_rs = reader.call("buckets.sum", json!([name, g, w, T0])).await;
+        assert!(from_ts.is_object(), "{name}: TS reads its own as seeded");
+        assert_eq!(
+            js(&from_ts),
+            js(&from_rs),
+            "{name}: frozen TS reads Rust's picture differently"
+        );
+        // TS's own add, on each side, then read again.
+        for who in [&ts, &reader] {
+            who.call("buckets.add", json!([name, g, w, T0 + 1.0, 1, 3, 0.25]))
+                .await;
+        }
+        let a = ts.call("buckets.sum", json!([name, g, w, T0 + 1.0])).await;
+        let b = reader
+            .call("buckets.sum", json!([name, g, w, T0 + 1.0]))
+            .await;
+        assert_eq!(js(&a), js(&b), "{name}: TS add on a Rust picture");
+    }
+    // And the TS-visible hashes are byte-identical, field order included.
+    compare_state(0, "released", &ts_db, &rs_db, &rs_coord, &ts).await;
+    reader.close().await;
+    rust.shutdown().await;
     ts.close().await;
     rs_coord.shutdown().await;
 }
