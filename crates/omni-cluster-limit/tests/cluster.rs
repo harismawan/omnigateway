@@ -223,13 +223,15 @@ async fn an_unseeded_window_admits_and_its_seed_lands() {
         .admit("k", &lim, "fast", T0 + 1.0)
         .await
         .expect_err("refused once seeded");
-    // The exact reset: the oldest row plus five hours.
+    // The exact reset: the oldest row plus five hours, read from Redis.
     assert!(
         (e.retry_after_ms - (5.0 * HOUR - 3.0 * HOUR - 1.0)).abs() < 1e-6,
         "{}",
         e.retry_after_ms
     );
-    assert_eq!(usage.oldest.load(Ordering::SeqCst), 1);
+    // Only the two seeds read the store (counts + row ranges, per window).
+    assert_eq!(usage.sums.load(Ordering::SeqCst), 2);
+    assert_eq!(usage.oldest.load(Ordering::SeqCst), 2);
 }
 
 /// The seed lock: a contender waits for the holder and finds its picture;
@@ -390,7 +392,7 @@ async fn a_pending_debit_is_not_double_counted_by_a_seed() {
     drop(l.admit("k", &lim, "m", T0).await.expect("admit"));
     // Meanwhile another request completes: row committed, debit pending.
     usage.row("k", "m", T0, 7.0, 0.0);
-    l.debit("k", "m", 7.0, 0.0);
+    l.debit("k", "m", 7.0, 0.0, T0);
     l.seeds_settled().await;
     l.flush_debits().await;
     let sum = c
@@ -436,7 +438,7 @@ async fn debits_during_a_seed_that_does_not_install_are_kept() {
             .await
             .expect("other seeds");
     }
-    l.debit("k", "m", 3.0, 0.0);
+    l.debit("k", "m", 3.0, 0.0, T0);
     l.seeds_settled().await;
     assert_eq!(l.metrics().seed_failures.load(Ordering::SeqCst), 2);
     l.flush_debits().await;
@@ -525,4 +527,40 @@ async fn a_long_request_keeps_its_slot_by_renewal() {
         .await
         .expect("free after release");
     drop(again);
+}
+
+/// The refusal path never reads the store: a 5h/1w refusal's exact reset
+/// comes from Redis-held data inside the one admission call (ruling on D3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refusals_make_zero_store_calls() {
+    let Some(base) = redis_base() else { return };
+    let db = fresh_db(&base).await;
+    let clock = ManualClock::at(T0);
+    let c = coord(&db.url, clock.clock()).await;
+    let usage = MemUsage::new();
+    // Oldest in-window rows: key-wide 3 h ago (fast), the opus override's 2 h ago.
+    usage.row("k", "fast", T0 - 3.0 * HOUR, 10.0, 0.5);
+    usage.row("k", "opus", T0 - 2.0 * HOUR, 10.0, 0.5);
+    usage.row("k", "opus", T0 - HOUR, 10.0, 0.5);
+    let l = limiter(&c, usage.clone(), clock.clock());
+    let lim = limits(r#"{"requests":{"5h":3,"1w":3},"models":{"opus":{"requests":{"1w":2}}}}"#);
+    assert_eq!(l.preseed_now("k", &lim, T0).await, 0);
+    let reads = usage.calls();
+    for _ in 0..20 {
+        let e = l.admit("k", &lim, "opus", T0).await.expect_err("refused");
+        // The override's 1w clears last: its oldest row (2 h ago) + 1 w.
+        assert!(
+            (e.retry_after_ms - (168.0 * HOUR - 2.0 * HOUR)).abs() < 1e-6,
+            "{}",
+            e.retry_after_ms
+        );
+        // Key-wide only: its oldest row (3 h ago) + 1 w.
+        let e = l.consume("k", &lim, "fast", T0).await.expect_err("refused");
+        assert!(
+            (e.retry_after_ms - (168.0 * HOUR - 3.0 * HOUR)).abs() < 1e-6,
+            "{}",
+            e.retry_after_ms
+        );
+    }
+    assert_eq!(usage.calls(), reads, "the refusal path read the store");
 }

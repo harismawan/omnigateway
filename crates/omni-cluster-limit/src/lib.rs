@@ -10,8 +10,10 @@
 //!   back in the same step. The decision, headroom and `Retry-After` are
 //!   computed here with `omni-ratelimit` from the figures the script
 //!   returns, exactly as TS `ApiKeyRateLimiter` computes them from its
-//!   per-step calls. A refusal on a long window asks [`UsageSource`] for
-//!   that window's exact reset (TS `oldestSince`) — the refusal path only.
+//!   per-step calls. A refusal on a long window takes its reset (TS
+//!   `oldestSince` + window) from the row ranges the same script reads out
+//!   of the bucket hash — no store read on the request path, refusals
+//!   included (see [`scripts::ADMIT_SRC`] for exactness).
 //! - **Concurrency release is immediate**, never batched:
 //!   [`Admission::release`] (or drop) queues one detached `GAUGE_RELEASE`
 //!   on D2's ordered queue, so a `concurrency: 1` key's next request on this
@@ -69,10 +71,9 @@ pub const MAX_RENEWED_MS: f64 = 86_400_000.0;
 /// second asker waits for it.
 pub const SEED_LOCK_MS: u64 = 5_000;
 
-/// Where the store's usage is read from: D1's `PgStore` (`sum_buckets`, and
-/// the oldest retained done row) plugs in here. Never called on an
-/// admitted request; `sum_buckets` only by the background seeder,
-/// `oldest_since` only for a refusal on a long window.
+/// Where the store's usage is read from: D1's `PgStore` plugs in here.
+/// Called only by the background seeder — never on the request path,
+/// admitted or refused.
 #[async_trait]
 pub trait UsageSource: Send + Sync {
     /// TS `store.usage.sumBuckets(apiKeyId, sinceMs, grainMs, model)`.
@@ -83,14 +84,24 @@ pub trait UsageSource: Send + Sync {
         grain_ms: f64,
         model: Option<&str>,
     ) -> Result<Vec<BucketRow>, String>;
-    /// TS `store.usage.oldestSince(apiKeyId, sinceMs, model)`.
-    async fn oldest_since(
+    /// Beyond TS: per `grain`-aligned bucket of the row's own `at`, the
+    /// least and greatest `at` of the done rows at or after `since_ms`
+    /// (narrowed to `model` when given) — `(bucket start, min at, max at)`.
+    /// What lets a refusal's exact reset be read from Redis. On Postgres:
+    /// `SELECT (at / g) * g, MIN(at), MAX(at) FROM request_logs WHERE
+    /// api_key_id = $1 [AND requested_model = $2] AND state = 'done' AND
+    /// at >= $3 GROUP BY 1`.
+    async fn row_ranges(
         &self,
         key_id: &str,
         since_ms: f64,
+        grain_ms: f64,
         model: Option<&str>,
-    ) -> Result<Option<f64>, String>;
+    ) -> Result<Vec<RowRange>, String>;
 }
+
+/// `(bucket start, least at, greatest at)` of the done rows in one bucket.
+pub type RowRange = (f64, f64, f64);
 
 /// TS `onRejected`: called once per refusal with its dimension and window.
 pub type OnRejected = Arc<dyn Fn(Dimension, Option<Window>) + Send + Sync>;
@@ -118,8 +129,6 @@ pub struct ClusterLimiterOptions {
     pub debit_batch_keys: usize,
     /// At most one fallback `warn` per interval.
     pub fault_log_interval: Duration,
-    /// Bound on a refusal's exact-reset read (TS has none; beyond TS).
-    pub reset_timeout: Duration,
     pub on_rejected: Option<OnRejected>,
 }
 
@@ -137,7 +146,6 @@ impl Default for ClusterLimiterOptions {
             debit_interval: Duration::from_millis(200),
             debit_batch_keys: 1_024,
             fault_log_interval: Duration::from_millis(30_000),
-            reset_timeout: Duration::from_millis(1_000),
             on_rejected: None,
         }
     }
@@ -516,16 +524,21 @@ pub(crate) fn parse_admit(reply: &Value, n: usize, now: f64) -> Result<Parsed, F
         #[allow(clippy::cast_precision_loss)]
         let concurrency = int_of(at(2)).ok_or_else(bad_reply)?.max(0) as f64;
         let mut long = [None, None];
+        let mut oldest = [None, None];
         let mut missing = [false, false];
-        for (w, slot) in long.iter_mut().enumerate() {
-            let base = 3 + w * 4;
+        for w in 0..2 {
+            let base = 3 + w * 5;
             match int_of(at(base)).ok_or_else(bad_reply)? {
                 1 => {
-                    *slot = Some(Counts {
+                    long[w] = Some(Counts {
                         requests: num_of(at(base + 1)).ok_or_else(bad_reply)?,
                         tokens: num_of(at(base + 2)).ok_or_else(bad_reply)?,
                         cost_usd: num_of(at(base + 3)).ok_or_else(bad_reply)?,
                     });
+                    oldest[w] = match text_of(at(base + 4)) {
+                        Some(t) if t.is_empty() => None,
+                        _ => Some(num_of(at(base + 4)).ok_or_else(bad_reply)?),
+                    };
                 }
                 0 => missing[w] = true,
                 _ => {}
@@ -535,6 +548,7 @@ pub(crate) fn parse_admit(reply: &Value, n: usize, now: f64) -> Result<Parsed, F
             before_1m: WindowCounter { used, reset_at },
             concurrency,
             long,
+            oldest,
         });
         unseeded.push(missing);
     }
@@ -677,7 +691,6 @@ impl ClusterLimiter {
         let scopes: Vec<LimitScope> = asks.iter().map(|a| a.scope.clone()).collect();
         let decisions = judge::decide(&scopes, &observed, now);
         let combined: Decision = combine_all(&decisions);
-        let subjects: Vec<Subject> = asks.iter().map(|a| a.subject.clone()).collect();
 
         // Seeds for every unseeded window this request wanted, admitted or
         // not: the next request should find them.
@@ -700,14 +713,7 @@ impl ClusterLimiter {
                 rollback_remote(inner, &asks, now).await;
             }
             bump(&inner.metrics.refusals);
-            let refusal = judge::refusal(
-                &subjects,
-                &decisions,
-                now,
-                inner.usage.as_ref(),
-                inner.opts.reset_timeout,
-            )
-            .await;
+            let refusal = judge::refusal(&decisions, &observed, now);
             if let Some(r) = refusal {
                 if let Some(hook) = &inner.opts.on_rejected {
                     hook(r.violation.dimension, r.violation.window);
@@ -757,7 +763,17 @@ impl ClusterLimiter {
     /// subject this process admitted (or [`Self::record_override`]d) with a
     /// long window. Batched; applied within `debit_interval`, or by
     /// [`Self::flush_debits`]. Call it once the request's row is committed.
-    pub fn debit(&self, key_id: &str, requested_model: &str, tokens: f64, cost_usd: f64) {
+    /// `row_at` is the row's `at` (TS `startedAt`): it places the row in the
+    /// row ranges a refusal's reset is read from; the counts are stamped
+    /// with the clock now, as TS's `buckets.add(…, now)`.
+    pub fn debit(
+        &self,
+        key_id: &str,
+        requested_model: &str,
+        tokens: f64,
+        cost_usd: f64,
+        row_at: f64,
+    ) {
         let delta = Counts {
             requests: 1.0,
             tokens,
@@ -786,7 +802,7 @@ impl ClusterLimiter {
         let now = self.inner.now();
         for s in wanted {
             for window in LONG {
-                debit::push(&self.inner, &s, window, now, delta);
+                debit::push(&self.inner, &s, window, now, row_at, delta);
             }
         }
     }

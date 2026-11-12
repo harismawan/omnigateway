@@ -11,6 +11,14 @@
 //! with a long window is pre-seeded before the first assertion (TS seeds
 //! inside its first admission, blocking; Rust in the background).
 //!
+//! A refusal's reset on a 5h/1w window is read from Redis (ruling on D3: no
+//! store read on the request path), exact unless the window's cutoff falls
+//! inside the oldest row's bucket. So refusals must match TS exactly in the
+//! decision and every headroom figure except a long-window `resetAt` and the
+//! `retryAfterMs` — those equal TS or are later by at most one bucket width
+//! of that window (60 s for 5h, 1 h for 1w), never earlier
+//! ([`same_outcome`]). How many were exact is counted and reported.
+//!
 //! State comparison normalizes what is random by design (window members and
 //! gauge holder names carry uuids; scores are compared) and leaves out two
 //! structures TS writes that the combined path, per the spec, does not:
@@ -140,7 +148,42 @@ fn fixed() -> Vec<Case> {
         ]))
         .expect("steps"),
     });
+    // The safe-side reset: the 5h cutoff falls inside the oldest row's
+    // minute bucket. `T0` is 20 s into its minute, so the bucket of
+    // `T0 - 5h` is B = T0 - 5h - 20 s. Seeded at T0 (cutoff B + 20 s) the
+    // bucket's range is [B + 25 s, B + 50 s]. At `T0 + 10 s` the cutoff is
+    // B + 30 s: B + 25 s has aged out, B + 40 s and B + 50 s are in. TS's
+    // exact reset uses B + 40 s; Redis knows only the range, so Rust
+    // reports B + 50 s + 5h: 10 s later, inside one bucket, never earlier.
+    // One more in-window row in a later bucket makes three, the ceiling.
+    let five = 5.0 * HOUR;
+    let b = T0 - five - 20_000.0;
+    out.push(Case {
+        limits: r#"{"requests":{"5h":3}}"#.into(),
+        history: serde_json::from_value(json!([
+            {"at": b + 25_000.0, "model":"fast","tokens":1,"cost":0},
+            {"at": b + 40_000.0, "model":"fast","tokens":1,"cost":0},
+            {"at": b + 50_000.0, "model":"fast","tokens":1,"cost":0},
+            {"at": T0 - HOUR, "model":"fast","tokens":1,"cost":0},
+        ]))
+        .expect("history"),
+        steps: serde_json::from_value(json!([
+            {"op":"at","ms":T0 + 10_000.0},
+            {"op":"admit","model":"fast"},
+            {"op":"consume","model":"fast"}
+        ]))
+        .expect("steps"),
+    });
     out
+}
+
+/// The fixed safe-side case must actually be later than TS (it is the
+/// reason [`same_outcome`] allows a bucket of slack).
+fn later_seen() -> usize {
+    RESETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .1
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -185,12 +228,10 @@ async fn run_case(
         handle += 1;
         let t = ts.call("admit", json!([handle, key, limits_json, m])).await;
         let r = rust.admit(key, &limits, m, T0).await;
-        assert_eq!(
-            js(&t),
-            js(&outcome_json(&r, |a: &Admission| headroom_json(
-                &a.headroom
-            ))),
-            "case {i}: pre-seed admission {m}"
+        same_outcome(
+            &t,
+            &outcome_json(&r, |a: &Admission| headroom_json(&a.headroom)),
+            &format!("case {i}: pre-seed admission {m}"),
         );
         assert!(
             r.as_ref().map_or(true, |a| a.unseeded.is_empty()),
@@ -224,7 +265,7 @@ async fn run_case(
                 );
                 ts.call("row", json!([key, now, last, t, c])).await;
                 ts.call("debit", json!([key, last, t, c])).await;
-                rust.debit(key, &last, t, c);
+                rust.debit(key, &last, t, c, now);
                 rust.flush_debits().await;
             }
             op => {
@@ -234,7 +275,7 @@ async fn run_case(
                     let r = rust.consume(key, &limits, &last, now).await;
                     let r = outcome_json(&r, |()| json!({}));
                     count(&r, counts);
-                    assert_eq!(js(&t), js(&r), "{}", what());
+                    same_outcome(&t, &r, &what());
                 } else {
                     handle += 1;
                     let t = ts
@@ -243,7 +284,7 @@ async fn run_case(
                     let r = rust.admit(key, &limits, &last, now).await;
                     let rendered = outcome_json(&r, |a: &Admission| headroom_json(&a.headroom));
                     count(&rendered, counts);
-                    assert_eq!(js(&t), js(&rendered), "{}", what());
+                    same_outcome(&t, &rendered, &what());
                     if let Ok(a) = r {
                         assert!(a.unseeded.is_empty() && !a.local, "{}", what());
                         held.push_back((handle, Some(a)));
@@ -281,12 +322,92 @@ async fn run_case(
     rust.shutdown().await;
 }
 
+/// Refusal resets: `(exact, later)` across the corpus.
+static RESETS: std::sync::Mutex<(usize, usize)> = std::sync::Mutex::new((0, 0));
+
+fn grain_of(window: &str) -> f64 {
+    match window {
+        "5h" => 60_000.0,
+        "1w" => HOUR,
+        _ => 0.0,
+    }
+}
+
+/// Equal to TS, except that on a refusal a long-window `resetAt` (and the
+/// `retryAfterMs`) may be later by at most one bucket width, never earlier.
+/// Every other figure, and admit-vs-refuse, must be identical.
+fn same_outcome(t: &Value, r: &Value, what: &str) {
+    let (Some(tr), Some(rr)) = (t.get("refused"), r.get("refused")) else {
+        assert_eq!(js(t), js(r), "{what}");
+        return;
+    };
+    let mut tn = tr.clone();
+    let mut rn = rr.clone();
+    let mut later = false;
+    // The widest bucket among the long windows this refusal's headers show.
+    let mut slack: f64 = 0.0;
+    for dim in ["requests", "tokens", "spend"] {
+        let (Some(te), Some(re)) = (tr["headroom"].get(dim), rr["headroom"].get(dim)) else {
+            continue;
+        };
+        let window = te["window"].as_str().unwrap_or("");
+        let g = grain_of(window);
+        let (ta, ra) = (
+            te["resetAt"].as_f64().expect("resetAt"),
+            re["resetAt"].as_f64().expect("resetAt"),
+        );
+        assert!(
+            ra >= ta && ra - ta <= g,
+            "{what}: {dim} resetAt {ra} vs TS {ta} (window {window})"
+        );
+        later |= ra > ta;
+        slack = slack.max(g);
+        tn["headroom"][dim]["resetAt"] = Value::Null;
+        rn["headroom"][dim]["resetAt"] = Value::Null;
+    }
+    let (ta, ra) = (
+        tr["retryAfterMs"].as_f64().expect("retry"),
+        rr["retryAfterMs"].as_f64().expect("retry"),
+    );
+    // Retry-After can only move with a long window's reset, and the refused
+    // dimension's header is the refusing window itself, so its grain is
+    // among those shown.
+    assert!(
+        ra >= ta && ra - ta <= slack,
+        "{what}: retryAfterMs {ra} vs TS {ta}"
+    );
+    later |= ra > ta;
+    tn["retryAfterMs"] = Value::Null;
+    rn["retryAfterMs"] = Value::Null;
+    assert_eq!(js(&tn), js(&rn), "{what}");
+    let mut resets = RESETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if later {
+        resets.1 += 1;
+    } else {
+        resets.0 += 1;
+    }
+}
+
 fn count(v: &Value, counts: &mut (usize, usize)) {
     if v.get("refused").is_some() {
         counts.0 += 1;
     } else {
         counts.1 += 1;
     }
+}
+
+/// The Rust-only `<start>:a` / `<start>:z` row-range fields left out.
+fn without_row_ranges(
+    mut state: std::collections::BTreeMap<String, Value>,
+) -> std::collections::BTreeMap<String, Value> {
+    for v in state.values_mut() {
+        if let Some(fields) = v["v"].as_object_mut() {
+            fields.retain(|f, _| !(f.ends_with(":a") || f.ends_with(":z")));
+        }
+    }
+    state
 }
 
 /// Gauge keys of subjects TS raised anonymously (no ceiling): their slot
@@ -305,7 +426,7 @@ async fn compare_state(
     let _pinged = rs_coord.remote().query(redis::cmd("PING")).await.is_ok();
     let skip = |k: &str| k.starts_with("omni:gidx:") || k.starts_with("omni:lock:");
     let t = dump(&ts_db.url, &skip).await;
-    let r = dump(&rs_db.url, &skip).await;
+    let r = without_row_ranges(dump(&rs_db.url, &skip).await);
     for (k, v) in &t {
         if k.starts_with("omni:g:") && !r.contains_key(k) {
             // An anonymous TS slot (no ceiling on this subject): allowed
@@ -372,7 +493,7 @@ async fn batched_debits_equal_per_debit_calls() {
         let cost = costs[usize::try_from(rng.below(costs.len() as u64)).unwrap_or(0)];
         ts.call("debit", json!([key, model, tokens, cost])).await;
         #[allow(clippy::cast_precision_loss)]
-        rust.debit(key, model, tokens as f64, cost);
+        rust.debit(key, model, tokens as f64, cost, now);
         if i % 97 == 96 {
             rust.flush_debits().await;
         }
@@ -421,6 +542,17 @@ async fn decisions_and_state_equal_the_frozen_ts_limiter() {
     for (i, case) in cases.iter().enumerate() {
         run_case(i, case, &ts, &ts_db, &rs_db, &rs_coord, &clock, &mut counts).await;
     }
+    let resets = *RESETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    eprintln!(
+        "refusal resets: {} equal to TS, {} later (within one bucket)",
+        resets.0, resets.1
+    );
+    assert!(
+        later_seen() >= 2,
+        "the safe-side case was never later than TS"
+    );
     eprintln!(
         "differential: {} cases, {} refusals, {} admissions",
         cases.len(),

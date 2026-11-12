@@ -43,6 +43,8 @@ struct Entry {
     requests: f64,
     tokens: f64,
     costs: Vec<f64>,
+    /// Per row-range bucket start (bits): least and greatest row `at`.
+    ranges: Vec<(u64, f64, f64)>,
 }
 
 #[derive(Default)]
@@ -51,8 +53,8 @@ struct Seeding {
     running: usize,
     /// Whether one of them installed.
     installed: bool,
-    /// Debits made while they ran: `(subject, window, now, delta)`.
-    held: Vec<(String, Window, f64, Counts)>,
+    /// Debits made while they ran: `(subject, window, now, row_at, delta)`.
+    held: Vec<(String, Window, f64, f64, Counts)>,
 }
 
 #[derive(Default)]
@@ -67,8 +69,16 @@ pub(crate) struct Debits {
     stopped: AtomicBool,
 }
 
-/// Queues one debit of `subject`'s `window` stamped `now`.
-pub(crate) fn push(inner: &Inner, subject: &str, window: Window, now: f64, delta: Counts) {
+/// Queues one debit of `subject`'s `window` stamped `now`, for a row at
+/// `row_at`.
+pub(crate) fn push(
+    inner: &Inner,
+    subject: &str,
+    window: Window,
+    now: f64,
+    row_at: f64,
+    delta: Counts,
+) {
     let grain = grain_ms(window);
     let start = (now / grain).floor() * grain;
     let name = key("b", &bucket_key(subject, window));
@@ -79,7 +89,9 @@ pub(crate) fn push(inner: &Inner, subject: &str, window: Window, now: f64, delta
         .unwrap_or_else(PoisonError::into_inner)
         .get_mut(&name)
     {
-        seeding.held.push((subject.to_owned(), window, now, delta));
+        seeding
+            .held
+            .push((subject.to_owned(), window, now, row_at, delta));
         return;
     }
     let mut pending = inner
@@ -103,6 +115,14 @@ pub(crate) fn push(inner: &Inner, subject: &str, window: Window, now: f64, delta
         e.costs.push(delta.cost_usd);
     } else if let Some(last) = e.costs.last_mut() {
         *last += delta.cost_usd;
+    }
+    let range = ((row_at / grain).floor() * grain).to_bits();
+    match e.ranges.iter_mut().find(|r| r.0 == range) {
+        Some(r) => {
+            r.1 = r.1.min(row_at);
+            r.2 = r.2.max(row_at);
+        }
+        None => e.ranges.push((range, row_at, row_at)),
     }
 }
 
@@ -195,8 +215,8 @@ impl Drop for SeedingGuard<'_> {
                 .fetch_add(done.held.len() as u64, Ordering::Relaxed);
             return;
         }
-        for (subject, window, now, delta) in done.held {
-            push(self.inner, &subject, window, now, delta);
+        for (subject, window, now, row_at, delta) in done.held {
+            push(self.inner, &subject, window, now, row_at, delta);
         }
     }
 }
@@ -219,13 +239,18 @@ pub(crate) async fn flush(inner: &Inner) {
     let mut args = Vec::new();
     let mut bytes = 0;
     for ((name, start), e) in batch {
-        bytes += name.len() + 64 + e.costs.len() * 24;
+        bytes += name.len() + 64 + e.costs.len() * 24 + e.ranges.len() * 48;
         keys.push(name);
         args.push(crate::js(f64::from_bits(start)));
         args.push(crate::js(e.grain_ms));
         args.push(crate::js(e.window_ms));
         args.push(crate::js(e.requests));
         args.push(crate::js(e.tokens));
+        args.push(e.ranges.len().to_string());
+        for (_, lo, hi) in &e.ranges {
+            args.push(crate::js(*lo));
+            args.push(crate::js(*hi));
+        }
         // Every cost in order, zeros included: TS sends one `HINCRBYFLOAT`
         // per debit, and a zero one still creates the field.
         args.push(e.costs.len().to_string());

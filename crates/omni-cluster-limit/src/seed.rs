@@ -162,12 +162,54 @@ async fn install(
         )
         .await
         .map_err(SeedError::Store)?;
+    let ranges = inner
+        .usage
+        .row_ranges(
+            &subject.key_id,
+            now - length,
+            grain,
+            subject.model.as_deref(),
+        )
+        .await
+        .map_err(SeedError::Store)?;
     remote
         .buckets_seed(&name, grain, length, now, &rows)
         .await
         .map_err(coord_err)?;
+    // The row ranges beside the counts, in a second call after the seed
+    // (BUCKETS_SEED stays TS's script). A debit landing between the two is
+    // only widened by them: `ranges` writes min/max, never replaces.
+    if !ranges.is_empty() {
+        write_ranges(inner, &name, grain, &ranges)
+            .await
+            .map_err(coord_err)?;
+    }
     seeding.installed();
     bump(&inner.metrics.seeds_installed);
+    Ok(())
+}
+
+/// Merges seeded row ranges into the (now seeded) hash, min/max per range
+/// bucket, in chunks that keep one call well under the request cap.
+async fn write_ranges(
+    inner: &Inner,
+    name: &str,
+    grain: f64,
+    ranges: &[crate::RowRange],
+) -> Result<(), omni_coord::Fault> {
+    let key = [omni_coord::redis::key("b", name)];
+    for chunk in ranges.chunks(2_048) {
+        let mut args = Vec::with_capacity(1 + chunk.len() * 2);
+        args.push(crate::js(grain));
+        for (_, lo, hi) in chunk {
+            args.push(crate::js(*lo));
+            args.push(crate::js(*hi));
+        }
+        inner
+            .remote
+            .eval(&crate::scripts::RANGES_MERGE, &key, &args)
+            .await?;
+    }
     Ok(())
 }
 

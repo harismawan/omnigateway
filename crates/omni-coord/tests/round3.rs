@@ -76,18 +76,37 @@ async fn no_response_commands_stay_charged_and_cannot_break_release_order() {
         let mut ping = redis::cmd("PING");
         ping.set_no_response(true);
         let r = remote.clone();
+        let before = remote.outstanding();
         // Not awaited to completion: submission is on the first poll.
-        let call = tokio::spawn(async move { r.query(ping).await });
-        tokio::task::yield_now().await;
-        match tokio::time::timeout(Duration::from_millis(2), call).await {
-            Ok(Ok(Err(Fault::Saturated | Fault::Invalid))) => {}
-            Ok(Ok(other)) => {
-                // Answered while the server is stalled: it never waited for
-                // its reply.
-                panic!("a no-response command completed during the stall: {other:?}");
+        let mut call = tokio::spawn(async move { r.query(ping).await });
+        // Classified by what is observed, never by a timer: either the call
+        // finishes (refused, or — the bug — answered during the stall), or
+        // its charge shows in `outstanding` (accepted, waiting for its
+        // reply). A refused call whose task was merely slow to be scheduled
+        // used to be counted as accepted by a 2 ms timeout.
+        let observe = Instant::now() + Duration::from_secs(2);
+        loop {
+            if call.is_finished() {
+                match (&mut call).await {
+                    Ok(Err(Fault::Saturated | Fault::Invalid)) => {}
+                    Ok(other) => {
+                        // Answered while the server is stalled: it never
+                        // waited for its reply.
+                        panic!("a no-response command completed during the stall: {other:?}");
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+                break;
             }
-            Ok(Err(e)) => panic!("{e}"),
-            Err(_) => accepted += 1,
+            if remote.outstanding() > before {
+                accepted += 1;
+                break;
+            }
+            assert!(
+                Instant::now() < observe,
+                "a call neither finished nor was charged"
+            );
+            tokio::task::yield_now().await;
         }
         assert!(remote.outstanding() <= 64, "{}", remote.outstanding());
     }
@@ -161,11 +180,27 @@ async fn the_eval_fallback_is_validated_and_charged() {
     let refused = loop {
         let r = remote.clone();
         let s = big.clone();
-        let call = tokio::spawn(async move { r.eval(&s, &[], &[]).await });
-        tokio::task::yield_now().await;
-        sleep_ms(2).await;
-        if call.is_finished() {
-            break call.await.expect("task");
+        let before = remote.outstanding_bytes();
+        let mut call = tokio::spawn(async move { r.eval(&s, &[], &[]).await });
+        // Classified by what is observed, never by a timer: finished
+        // (refused) or charged (accepted, waiting out the stall). A 2 ms
+        // sleep used to count a call not yet scheduled as accepted.
+        let observe = Instant::now() + Duration::from_secs(2);
+        let finished = loop {
+            if call.is_finished() {
+                break true;
+            }
+            if remote.outstanding_bytes() > before {
+                break false;
+            }
+            assert!(
+                Instant::now() < observe,
+                "a call neither finished nor was charged"
+            );
+            tokio::task::yield_now().await;
+        };
+        if finished {
+            break (&mut call).await.expect("task");
         }
         held.push(call);
         assert!(

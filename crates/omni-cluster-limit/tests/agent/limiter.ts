@@ -28,6 +28,8 @@ let store: Store = await memoryStore();
 let limiter = new ApiKeyRateLimiter({ store, now, coord });
 const held = new Map<number, Admission>();
 let rows = 0;
+/** Every row this agent appended (it is the store's only writer). */
+let appended: Array<{ key: string; model: string; at: number }> = [];
 
 const write = (line: unknown): void => {
   process.stdout.write(`${JSON.stringify(line)}\n`);
@@ -60,6 +62,7 @@ async function run(op: string, a: Args): Promise<unknown> {
       limiter = new ApiKeyRateLimiter({ store, now, coord });
       held.clear();
       rows = 0;
+      appended = [];
       return null;
     }
     case "clock":
@@ -67,6 +70,7 @@ async function run(op: string, a: Args): Promise<unknown> {
       return null;
     case "row": {
       // [keyId, at, model, tokens, cost]
+      appended.push({ key: s(a[0]), model: s(a[2]), at: n(a[1]) });
       await store.usage.append(
         requestLog({
           id: `r${rows++}`,
@@ -123,6 +127,20 @@ async function run(op: string, a: Args): Promise<unknown> {
         a[3] === null ? undefined : s(a[3]),
       );
       return out.map(([start, c]) => [start, c.requests, c.tokens, c.costUsd]);
+    }
+    case "usage.rowRanges": {
+      // [keyId, sinceMs, grainMs, model|null]: per grain bucket of the row's
+      // own `at`, the least and greatest `at` of done rows at or after since.
+      const g = n(a[2]);
+      const by = new Map<number, [number, number]>();
+      for (const r of appended) {
+        if (r.key !== s(a[0]) || r.at < n(a[1])) continue;
+        if (a[3] !== null && r.model !== s(a[3])) continue;
+        const b = Math.floor(r.at / g) * g;
+        const was = by.get(b);
+        by.set(b, was === undefined ? [r.at, r.at] : [Math.min(was[0], r.at), Math.max(was[1], r.at)]);
+      }
+      return [...by].map(([b, [lo, hi]]) => [b, lo, hi]);
     }
     case "usage.oldestSince":
       return await store.usage.oldestSince(s(a[0]), n(a[1]), a[2] === null ? undefined : s(a[2]));

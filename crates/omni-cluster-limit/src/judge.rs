@@ -2,8 +2,6 @@
 //! `judge` / `counters` / `refuse` / `correct` / `exactReset`, with the
 //! arithmetic in `omni-ratelimit`.
 
-use std::time::Duration;
-
 use omni_coord::Counts;
 use omni_ratelimit::limits::LimitScope;
 use omni_ratelimit::{
@@ -11,8 +9,7 @@ use omni_ratelimit::{
     evaluate, last_to_clear, refused_headroom, retry_after_ms, with_reset,
 };
 
-use crate::UsageSource;
-use crate::subject::{LONG, Subject, any_long_limit};
+use crate::subject::{LONG, any_long_limit};
 
 /// What one subject's counters held the instant before this request joined
 /// them: the `1m` ring, the gauge, and each long window that is seeded.
@@ -22,6 +19,9 @@ pub(crate) struct Observed {
     pub concurrency: f64,
     /// `None`: not asked for, or unseeded (read as nothing used).
     pub long: [Option<Counts>; 2],
+    /// Per long window, the oldest in-window row's `at` the script could
+    /// recover from Redis (TS `oldestSince`), or `None`.
+    pub oldest: [Option<f64>; 2],
 }
 
 /// `counters`: the snapshot `evaluate` judges.
@@ -89,18 +89,18 @@ impl std::error::Error for RateLimitExceeded {}
 
 /// `refuse`: every violated long window's reset corrected first (in every
 /// subject), then the one clearing last chosen. `None` only if no decision
-/// holds a violation (the caller then admits).
-pub(crate) async fn refusal(
-    subjects: &[Subject],
+/// holds a violation (the caller then admits). Reads nothing: the resets
+/// came back with the admission script's reply.
+pub(crate) fn refusal(
     decisions: &[Decision],
+    observed: &[Observed],
     now: f64,
-    usage: &dyn UsageSource,
-    reset_timeout: Duration,
 ) -> Option<RateLimitExceeded> {
-    let mut corrected = Vec::with_capacity(decisions.len());
-    for (subject, scope) in subjects.iter().zip(decisions) {
-        corrected.push(correct(subject, scope, now, usage, reset_timeout).await);
-    }
+    let corrected: Vec<Decision> = decisions
+        .iter()
+        .zip(observed)
+        .map(|(scope, o)| correct(scope, o))
+        .collect();
     let decision = combine_all(&corrected);
     let violation = decision.violation?;
     Some(RateLimitExceeded {
@@ -112,25 +112,17 @@ pub(crate) async fn refusal(
 
 /// `correct`: one subject's decision with each violated long window's true
 /// reset, its headroom moved with it.
-async fn correct(
-    subject: &Subject,
-    scope: &Decision,
-    now: f64,
-    usage: &dyn UsageSource,
-    reset_timeout: Duration,
-) -> Decision {
+fn correct(scope: &Decision, o: &Observed) -> Decision {
     if scope.violations.is_empty() {
         return scope.clone();
     }
     let mut exact: Vec<(Window, f64)> = Vec::new();
-    let mut asked: Vec<Window> = Vec::new();
     for v in &scope.violations {
         let Some(window) = v.window else { continue };
-        if asked.contains(&window) {
+        if exact.iter().any(|(w, _)| *w == window) {
             continue;
         }
-        asked.push(window);
-        if let Some(reset) = exact_reset(subject, window, now, usage, reset_timeout).await {
+        if let Some(reset) = exact_reset(o, window) {
             exact.push((window, reset));
         }
     }
@@ -156,31 +148,16 @@ async fn correct(
     }
 }
 
-/// `exactReset`: the oldest retained done row's `at` plus the window, asked
-/// only of a request being refused. `None` keeps the overstated figure: `1m`
-/// (already exact), no row, or a failed (or, beyond TS, timed-out) read.
-async fn exact_reset(
-    subject: &Subject,
-    window: Window,
-    now: f64,
-    usage: &dyn UsageSource,
-    reset_timeout: Duration,
-) -> Option<f64> {
-    if window == Window::M1 {
-        return None;
-    }
-    let length = window.ms();
-    let read = usage.oldest_since(&subject.key_id, now - length, subject.model.as_deref());
-    let reason = match tokio::time::timeout(reset_timeout, read).await {
-        Ok(Ok(oldest)) => return oldest.map(|at| at + length),
-        Ok(Err(e)) => e,
-        Err(_) => "timed out".to_owned(),
-    };
-    tracing::warn!(
-        api_key_id = subject.key_id.as_str(),
-        model = subject.model.as_deref().unwrap_or(""),
-        reason = reason.as_str(),
-        "rate limit reset unavailable"
-    );
-    None
+/// `exactReset`: the oldest in-window row's `at` plus the window. `None`
+/// keeps the overstated `now + window`: `1m` (already exact), or no row
+/// range known (TS: no row found).
+///
+/// Taken from Redis, not the store (ruling on D3: the request path never
+/// touches Postgres): exact when the oldest row's bucket lies wholly inside
+/// the window; when the window's cutoff falls inside that bucket, the
+/// bucket's newest row — later than TS by less than one bucket width (a
+/// minute of 5h, an hour of 1w), never earlier.
+fn exact_reset(o: &Observed, window: Window) -> Option<f64> {
+    let i = LONG.iter().position(|w| *w == window)?;
+    o.oldest[i].map(|at| at + window.ms())
 }

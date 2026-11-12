@@ -29,7 +29,7 @@ pub const ADMIT_ARGS_PER_SUBJECT: usize = 11;
 /// Leading arguments in [`ADMIT`].
 pub const ADMIT_HEAD_ARGS: usize = 10;
 /// Reply items per subject (after the leading verdict).
-pub const ADMIT_REPLY_PER_SUBJECT: usize = 11;
+pub const ADMIT_REPLY_PER_SUBJECT: usize = 13;
 
 /// The combined admission.
 ///
@@ -44,12 +44,29 @@ pub const ADMIT_REPLY_PER_SUBJECT: usize = 11;
 /// An absent ceiling is `''`.
 ///
 /// Reply: `{ verdict (1 admit, 0 refuse), then per subject: used1m,
-/// oldest1m|'', concurrency before, seeded5h, r5h, t5h, c5h, seeded1w, r1w,
-/// t1w, c1w }`; a long window not asked for, or unseeded, reads `0,'','',''`
-/// with seeded `0` (`2` when it was not asked for).
+/// oldest1m|'', concurrency before, then per long window (5h, 1w): seeded,
+/// r, t, c, oldest-row }`; a long window not asked for, or unseeded, reads
+/// `'','','',''` after its seeded flag (`0` unseeded, `2` not asked for).
 ///
 /// The long sums are compared, and returned, through `tostring` exactly as
 /// TS reads `BUCKETS_SUM`'s reply (`Number(tostring(x))`, Lua's `%.14g`).
+///
+/// **Oldest row** (a refusal's exact reset, TS `oldestSince`, from Redis
+/// instead of the store). Beside the counts, a hash may carry
+/// `<s>:a` / `<s>:z`: the least and greatest `at` of the done rows whose
+/// `at` falls in `[s, s + grain)` — keyed by the row's own instant, not by
+/// when it was debited (written by the seed and by batched debits; ignored
+/// by TS's `BUCKETS_SUM`/`BUCKETS_ADD`; pruned with the counts, which is
+/// safe: a range older than the oldest live bucket holds only rows before
+/// the cutoff). With TS's cutoff `now - length`, a range contributes `a`
+/// when `a >= cutoff` (then it is that bucket's oldest in-window row,
+/// exact), else `z` when `z >= cutoff` (the cutoff falls inside this
+/// bucket: some in-window row exists at or before `z`, and every one is
+/// `>= cutoff > s`, so `z` is later than TS by less than one grain), else
+/// nothing. The reply is the least contribution's stored text, or `''`
+/// (no range known: the caller keeps the overstated `now + window`, as TS
+/// does when `oldestSince` finds nothing). Every contribution is the `at` of
+/// a real in-window row, so the reset is never earlier than TS's.
 pub const ADMIT_SRC: &str = r#"
   local now = tonumber(ARGV[1])
   local gnow = ARGV[2]
@@ -62,8 +79,10 @@ pub const ADMIT_SRC: &str = r#"
   local function sum(key, g, len)
     if redis.call('HEXISTS', key, 'seeded') == 0 then return nil end
     local oldest = math.floor((now - len) / g) * g
+    local cutoff = now - len
     local all = redis.call('HGETALL', key)
     local r, t, c = 0, 0, 0
+    local lo, hi = {}, {}
     for i = 1, #all, 2 do
       local field = all[i]
       local sep = string.find(field, ':')
@@ -75,10 +94,25 @@ pub const ADMIT_SRC: &str = r#"
         elseif kind == 'r' then r = r + tonumber(all[i + 1])
         elseif kind == 't' then t = t + tonumber(all[i + 1])
         elseif kind == 'c' then c = c + tonumber(all[i + 1])
+        elseif kind == 'a' then lo[start] = all[i + 1]
+        elseif kind == 'z' then hi[start] = all[i + 1]
         end
       end
     end
-    return tostring(r), tostring(t), tostring(c)
+    -- `lo`/`hi` share their starts (written together).
+    local best, bestn = '', nil
+    local function offer(text)
+      local n = tonumber(text)
+      if n and n >= cutoff and (bestn == nil or n < bestn) then best, bestn = text, n end
+    end
+    for start, a in pairs(lo) do
+      local an = tonumber(a)
+      if an and an >= cutoff then offer(a) elseif hi[start] then offer(hi[start]) end
+    end
+    for start, z in pairs(hi) do
+      if lo[start] == nil then offer(z) end
+    end
+    return tostring(r), tostring(t), tostring(c), best
   end
   local out = { 1 }
   local refuse = false
@@ -120,10 +154,12 @@ pub const ADMIT_SRC: &str = r#"
         out[#out + 1] = ''
         out[#out + 1] = ''
         out[#out + 1] = ''
+        out[#out + 1] = ''
       else
-        local r, t, c = sum(KEYS[k + 3 + j], grain[j], length[j])
+        local r, t, c, first = sum(KEYS[k + 3 + j], grain[j], length[j])
         if r == nil then
           out[#out + 1] = 0
+          out[#out + 1] = ''
           out[#out + 1] = ''
           out[#out + 1] = ''
           out[#out + 1] = ''
@@ -137,6 +173,7 @@ pub const ADMIT_SRC: &str = r#"
           out[#out + 1] = r
           out[#out + 1] = t
           out[#out + 1] = c
+          out[#out + 1] = first
         end
       end
     end
@@ -162,33 +199,73 @@ pub const ADMIT_SRC: &str = r#"
 ///
 /// `KEYS`: bucket hashes (one per entry; a hash may repeat for another
 /// start). `ARGV` per entry: an instant inside the bucket, grain, window
-/// length, requests, tokens, `n`, then the `n` individual costs. The bucket
-/// start is computed (and spelled, `start .. ':r'`) exactly as `BUCKETS_ADD`
-/// does. Each entry is what that many `BUCKETS_ADD` calls leave: an
-/// unseeded hash ignores it; a seeded one gets `HINCRBY` of the summed
-/// requests and tokens (integers, exact) and one `HINCRBYFLOAT` per cost in
-/// order (so the stored float is the one the per-debit sequence writes), and
-/// `PEXPIRE` 2×window. Reply: per entry, 1 applied or 0 unseeded.
+/// length, requests, tokens, `m`, then `m` row ranges `(least at, greatest
+/// at)` each within one grain-aligned range bucket, then `n`, then the `n`
+/// individual costs. The count bucket's start is computed (and spelled,
+/// `start .. ':r'`) exactly as `BUCKETS_ADD` does. Each entry is what that
+/// many `BUCKETS_ADD` calls leave: an unseeded hash ignores it; a seeded one
+/// gets `HINCRBY` of the summed requests and tokens (integers, exact) and
+/// one `HINCRBYFLOAT` per cost in order (so the stored float is the one the
+/// per-debit sequence writes), and `PEXPIRE` 2×window. Beyond TS it widens
+/// each row range's `<s>:a` / `<s>:z` (see [`ADMIT_SRC`]). Reply: per entry,
+/// 1 applied or 0 unseeded.
 pub const DEBIT_BATCH_SRC: &str = r#"
   local out = {}
   local a = 0
   for i = 1, #KEYS do
-    local n = tonumber(ARGV[a + 6])
+    local g = tonumber(ARGV[a + 2])
+    local m = tonumber(ARGV[a + 6])
+    local n = tonumber(ARGV[a + 7 + 2 * m])
     if redis.call('HEXISTS', KEYS[i], 'seeded') == 0 then
       out[i] = 0
     else
-      local start = math.floor(tonumber(ARGV[a + 1]) / tonumber(ARGV[a + 2])) * tonumber(ARGV[a + 2])
+      local start = math.floor(tonumber(ARGV[a + 1]) / g) * g
       redis.call('HINCRBY', KEYS[i], start .. ':r', ARGV[a + 4])
       redis.call('HINCRBY', KEYS[i], start .. ':t', ARGV[a + 5])
       for j = 1, n do
-        redis.call('HINCRBYFLOAT', KEYS[i], start .. ':c', ARGV[a + 6 + j])
+        redis.call('HINCRBYFLOAT', KEYS[i], start .. ':c', ARGV[a + 7 + 2 * m + j])
+      end
+      for j = 1, m do
+        local lo, hi = ARGV[a + 5 + 2 * j], ARGV[a + 6 + 2 * j]
+        local s = math.floor(tonumber(lo) / g) * g
+        local was = redis.call('HGET', KEYS[i], s .. ':a')
+        if (not was) or tonumber(lo) < tonumber(was) then
+          redis.call('HSET', KEYS[i], s .. ':a', lo)
+        end
+        was = redis.call('HGET', KEYS[i], s .. ':z')
+        if (not was) or tonumber(hi) > tonumber(was) then
+          redis.call('HSET', KEYS[i], s .. ':z', hi)
+        end
       end
       redis.call('PEXPIRE', KEYS[i], tonumber(ARGV[a + 3]) * 2)
       out[i] = 1
     end
-    a = a + 6 + n
+    a = a + 7 + 2 * m + n
   end
   return out
+"#;
+
+/// Row ranges installed by a seed (background only), merged min/max per
+/// range bucket into a seeded hash; nothing else is touched.
+///
+/// `KEYS[1]`: the bucket hash. `ARGV`: grain, then `(least at, greatest
+/// at)` pairs. Reply: 1 merged, 0 unseeded (left alone).
+pub const RANGES_MERGE_SRC: &str = r#"
+  if redis.call('HEXISTS', KEYS[1], 'seeded') == 0 then return 0 end
+  local g = tonumber(ARGV[1])
+  for j = 2, #ARGV, 2 do
+    local lo, hi = ARGV[j], ARGV[j + 1]
+    local s = math.floor(tonumber(lo) / g) * g
+    local was = redis.call('HGET', KEYS[1], s .. ':a')
+    if (not was) or tonumber(lo) < tonumber(was) then
+      redis.call('HSET', KEYS[1], s .. ':a', lo)
+    end
+    was = redis.call('HGET', KEYS[1], s .. ':z')
+    if (not was) or tonumber(hi) > tonumber(was) then
+      redis.call('HSET', KEYS[1], s .. ':z', hi)
+    end
+  end
+  return 1
 "#;
 
 /// One replica's load picture, replaced whole in one step.
@@ -241,6 +318,8 @@ pub static ADMIT: LazyLock<CoordScript> =
     LazyLock::new(|| CoordScript::new("RATE_LIMIT_ADMIT", ADMIT_SRC));
 pub static DEBIT_BATCH: LazyLock<CoordScript> =
     LazyLock::new(|| CoordScript::new("RATE_LIMIT_DEBIT_BATCH", DEBIT_BATCH_SRC));
+pub static RANGES_MERGE: LazyLock<CoordScript> =
+    LazyLock::new(|| CoordScript::new("RATE_LIMIT_RANGES_MERGE", RANGES_MERGE_SRC));
 pub static LOAD_PUBLISH: LazyLock<CoordScript> =
     LazyLock::new(|| CoordScript::new("LOAD_PUBLISH", LOAD_PUBLISH_SRC));
 pub static LOAD_SNAPSHOT: LazyLock<CoordScript> =
@@ -253,6 +332,7 @@ pub fn all() -> Vec<CoordScript> {
     vec![
         ADMIT.clone(),
         DEBIT_BATCH.clone(),
+        RANGES_MERGE.clone(),
         LOAD_PUBLISH.clone(),
         LOAD_SNAPSHOT.clone(),
     ]

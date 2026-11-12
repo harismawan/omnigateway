@@ -10,7 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use omni_cluster_limit::{ClusterLimiter, ClusterLimiterOptions, UsageSource, scripts};
+use omni_cluster_limit::{ClusterLimiter, ClusterLimiterOptions, RowRange, UsageSource, scripts};
 use omni_coord::{BucketRow, Clock, Counts, RedisCoord, RedisCoordOptions};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -162,6 +162,7 @@ pub type Row = (String, String, f64, f64, f64);
 pub struct MemUsage {
     pub rows: Mutex<Vec<Row>>,
     pub sums: AtomicUsize,
+    /// `row_ranges` reads (the seeder's second read).
     pub oldest: AtomicUsize,
     pub fail: std::sync::atomic::AtomicBool,
     pub delay_ms: AtomicU64,
@@ -170,6 +171,10 @@ pub struct MemUsage {
 impl MemUsage {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+    /// Every store read made so far.
+    pub fn calls(&self) -> usize {
+        self.sums.load(Ordering::SeqCst) + self.oldest.load(Ordering::SeqCst)
     }
     pub fn row(&self, key: &str, model: &str, at: f64, tokens: f64, cost: f64) {
         self.rows
@@ -217,26 +222,37 @@ impl UsageSource for MemUsage {
         Ok(by.into_iter().map(|(b, c)| (b as f64, c)).collect())
     }
 
-    async fn oldest_since(
+    async fn row_ranges(
         &self,
         key_id: &str,
         since_ms: f64,
+        grain_ms: f64,
         model: Option<&str>,
-    ) -> Result<Option<f64>, String> {
+    ) -> Result<Vec<RowRange>, String> {
         self.oldest.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             return Err("store down".into());
         }
-        Ok(self
+        let mut by: std::collections::BTreeMap<i64, (f64, f64)> = Default::default();
+        for (k, m, at, _, _) in self
             .rows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|(k, m, at, _, _)| {
-                k == key_id && *at >= since_ms && model.is_none_or(|x| x == m)
-            })
-            .map(|r| r.2)
-            .reduce(f64::min))
+        {
+            if k == key_id && *at >= since_ms && model.is_none_or(|x| x == m) {
+                #[allow(clippy::cast_possible_truncation)]
+                let b = ((at / grain_ms).floor() * grain_ms) as i64;
+                let e = by.entry(b).or_insert((*at, *at));
+                e.0 = e.0.min(*at);
+                e.1 = e.1.max(*at);
+            }
+        }
+        #[allow(clippy::cast_precision_loss)]
+        Ok(by
+            .into_iter()
+            .map(|(b, (lo, hi))| (b as f64, lo, hi))
+            .collect())
     }
 }
 
@@ -276,17 +292,28 @@ impl UsageSource for AgentUsage {
             .collect())
     }
 
-    async fn oldest_since(
+    async fn row_ranges(
         &self,
         key_id: &str,
         since_ms: f64,
+        grain_ms: f64,
         model: Option<&str>,
-    ) -> Result<Option<f64>, String> {
+    ) -> Result<Vec<RowRange>, String> {
         let v = self
             .0
-            .try_call("usage.oldestSince", json!([key_id, since_ms, model]))
+            .try_call(
+                "usage.rowRanges",
+                json!([key_id, since_ms, grain_ms, model]),
+            )
             .await?;
-        Ok(v.as_f64())
+        Ok(v.as_array()
+            .expect("ranges")
+            .iter()
+            .map(|r| {
+                let n = |i: usize| r[i].as_f64().expect("number");
+                (n(0), n(1), n(2))
+            })
+            .collect())
     }
 }
 

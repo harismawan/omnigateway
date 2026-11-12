@@ -123,7 +123,11 @@ async fn hot_path_budget_and_latency() {
         4,
         "only the preseed (2 subjects x 2 windows) read the store"
     );
-    assert_eq!(usage.oldest.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        usage.oldest.load(Ordering::SeqCst),
+        4,
+        "only the preseed read row ranges"
+    );
     lat.sort();
     let pct = |p: f64| {
         lat[(lat.len() - 1) * usize::try_from((p * 1000.0).round() as i64).unwrap_or(0) / 1000]

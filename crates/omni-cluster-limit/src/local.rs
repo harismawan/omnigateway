@@ -43,6 +43,7 @@ pub(crate) async fn run(
             before_1m: claim.before,
             concurrency: concurrency as f64,
             long: [None, None],
+            oldest: [None, None],
         });
     }
     let scopes: Vec<_> = asks.iter().map(|a| a.scope.clone()).collect();
@@ -55,17 +56,8 @@ pub(crate) async fn run(
                 let _released = local.gauge_release(&a.subject.id, Some(h)).await.is_ok();
             }
         }
-        let subjects: Vec<_> = asks.iter().map(|a| a.subject.clone()).collect();
         crate::bump(&inner.metrics.refusals);
-        if let Some(r) = judge::refusal(
-            &subjects,
-            &decisions,
-            now,
-            inner.usage.as_ref(),
-            inner.opts.reset_timeout,
-        )
-        .await
-        {
+        if let Some(r) = judge::refusal(&decisions, &observed, now) {
             if let Some(hook) = &inner.opts.on_rejected {
                 hook(r.violation.dimension, r.violation.window);
             }
