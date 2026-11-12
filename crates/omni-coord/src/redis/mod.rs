@@ -390,6 +390,14 @@ impl Remote {
         self.link.release(whole, idempotent)
     }
 
+    /// Records that a long-window debit did not reach the server (TS
+    /// `lostDebit = true`): the next successful call drops every `omni:b:*`
+    /// hash so the next admission reseeds from the store. For callers that
+    /// debit through [`Remote`] directly (D3's batched debits).
+    pub fn note_lost_debit(&self) {
+        self.link.note_lost_debit();
+    }
+
     /// Releases not delivered since boot (refused, or lost with a retired
     /// connection): each one held something until its TTL.
     pub fn releases_dropped(&self) -> u64 {
