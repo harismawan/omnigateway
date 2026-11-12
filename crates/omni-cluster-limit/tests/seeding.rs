@@ -356,8 +356,9 @@ async fn a_hung_seed_is_bounded_and_shutdown_resolves_it() {
         .expect("shutdown returned");
     assert!(t.elapsed() < Duration::from_secs(3));
     assert_eq!(l.debits_pending().0, 0, "debits left unaccounted");
+    // As above: the cancelled seed's release is queued on `c`'s connection.
+    let _synced = c.remote().query(redis::cmd("PING")).await.is_ok();
     let mut conn = admin(&db.url).await;
-    sleep_ms(100).await;
     let held: bool = redis::cmd("EXISTS")
         .arg("omni:lock:seed:lim:k:5h")
         .query_async(&mut conn)
@@ -415,18 +416,48 @@ async fn shutdown_delivers_or_accounts_for_held_debits() {
             let lim = lim.clone();
             let clock = clock.clone();
             let url = db.url.clone();
+            let waiting = {
+                let l = l.clone();
+                move || l.metrics().debit_buckets_waiting.load(Ordering::SeqCst)
+            };
             tokio::spawn(async move {
-                sleep_ms(300).await;
+                // Once shutdown's drain has met the held lock (observed, not
+                // timed), the other replica installs.
+                while waiting() == 0 {
+                    tokio::task::yield_now().await;
+                }
                 if deliver {
                     let mut conn = admin(&url).await;
+                    // An install whose snapshot predates the row, under the
+                    // lock it holds ("other").
+                    let installed = c
+                        .remote()
+                        .eval(
+                            &omni_cluster_limit::scripts::SEED_INSTALL,
+                            &[
+                                "omni:b:lim:k:5h".into(),
+                                "omni:b:lim:k:5h:meta".into(),
+                                "omni:lock:seed:lim:k:5h".into(),
+                            ],
+                            &[
+                                "other".into(),
+                                "36000000".into(),
+                                "1:1:".into(),
+                                "60000".into(),
+                                "1".into(),
+                                "seeded".into(),
+                                "1".into(),
+                            ],
+                        )
+                        .await
+                        .expect("other installs");
+                    assert_eq!(installed, redis::Value::Int(1));
                     let _: () = redis::cmd("DEL")
                         .arg("omni:lock:seed:lim:k:5h")
                         .query_async(&mut conn)
                         .await
                         .expect("unlock");
-                    // An install whose snapshot predates the row.
-                    let b = common::limiter(&c, Arc::new(Snapshot0(usage)), clock.clock());
-                    b.preseed_now("k", &lim, T0).await;
+                    drop((usage, lim, clock));
                 }
             })
         };
@@ -449,26 +480,6 @@ async fn shutdown_delivers_or_accounts_for_held_debits() {
             .query_async(&mut conn)
             .await
             .expect("unlock");
-    }
-}
-
-/// A store whose seed reads saw nothing: no rows, a snapshot taken before
-/// every commit (so every debit is added after it).
-struct Snapshot0(#[allow(dead_code)] Arc<MemUsage>);
-
-#[async_trait::async_trait]
-impl omni_cluster_limit::UsageSource for Snapshot0 {
-    async fn seed_read(
-        &self,
-        _key_id: &str,
-        _since_ms: f64,
-        _grain_ms: f64,
-        _model: Option<&str>,
-    ) -> Result<omni_cluster_limit::SeedRead, String> {
-        Ok(omni_cluster_limit::SeedRead {
-            snapshot: "1:1:".to_owned(),
-            ..Default::default()
-        })
     }
 }
 
@@ -496,13 +507,16 @@ async fn a_hung_store_read_times_out() {
         .await
         .expect("seeds settled");
     assert_eq!(l.metrics().seed_failures.load(Ordering::SeqCst), 2);
+    // The lock's release is detached (queued on the limiter's connection as
+    // the seed ends); a round trip on that connection is behind it.
+    let _synced = c.remote().query(redis::cmd("PING")).await.is_ok();
     let mut conn = admin(&db.url).await;
     let held: bool = redis::cmd("EXISTS")
         .arg("omni:lock:seed:lim:k:5h")
         .query_async(&mut conn)
         .await
         .expect("exists");
-    assert!(!held);
+    assert!(!held, "the timed-out seed kept its lock");
     l.shutdown().await;
 }
 
