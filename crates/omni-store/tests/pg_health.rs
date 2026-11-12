@@ -364,7 +364,11 @@ async fn a_transition_lands_while_log_batches_fail() {
     }
     let hs = health.close().await.expect("health close");
     assert_eq!((hs.written, hs.failed), (5, 0));
-    // Failed before the close, so counted rather than failing the close.
+    // Every log event resolved (failed) before the close, by a barrier, so
+    // they are counted rather than failing the close. Without the barrier a
+    // loaded host can leave some for the close, which then fails, correctly.
+    let b = logs.handle().flush().await.expect("barrier");
+    assert_eq!((b.watermark, b.committed, b.failed), (5, 0, 5));
     let ls = logs.close().await.expect("close");
     assert_eq!((ls.failed, ls.written), (5, 0), "every log batch failed");
     assert!(logs_failed(&db).await, "no log row landed");
