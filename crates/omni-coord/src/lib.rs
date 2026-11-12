@@ -14,8 +14,9 @@
 //! future is polled: creating `coord.window_claim(..)` and dropping it, or
 //! holding it unpolled, records nothing, and two futures are issued in the
 //! order they are first polled, not the order they were created. Within that:
-//! - `MemoryCoord` applies every call's effect on its first poll; all but a
-//!   contended `lock` also complete there (a contended lock waits).
+//! - `MemoryCoord` applies every call's effect on its first poll and
+//!   completes there, except a contended `lock`, which takes the lock (its
+//!   effect) only on a later poll, once the holder releases.
 //! - `RedisCoord` submits a command to the connection's single ordered queue
 //!   on its first poll, and the queue is written to the server in order;
 //!   the server executes one connection's commands in order, each script
@@ -166,8 +167,10 @@ pub trait Coord: Send + Sync {
 
     /// Takes `key`, or [`CoordError::LockUnavailable`] once `wait` has passed.
     /// `ttl_ms` bounds a holder that never unlocks (Redis; memory ignores it,
-    /// as TS's does). Cancelling this future mid-acquire does not strand the
-    /// lock: Redis queues a token-safe release for the attempt.
+    /// as TS's does). Cancelling this future mid-acquire: Redis queues a
+    /// token-safe release for the attempt, which frees the lock on the same
+    /// connection; across a retirement the attempt's `SET` may land after it
+    /// and hold the lock until `ttl_ms` (see [`with_lock`]).
     async fn lock(&self, key: &str, ttl_ms: u64, wait: Duration) -> Result<LockToken, CoordError>;
     /// Gives a lock back. Only the token's own holding is released: a lock
     /// that lapsed and was taken by another holder is left alone. The
@@ -231,10 +234,16 @@ pub trait Coord: Send + Sync {
 }
 
 /// TS `withLock`: runs `body` while holding `key`, releasing on success, on
-/// error, and — detached — when the body panics or is cancelled. Cancelled
-/// while acquiring, nothing is held (see [`Coord::lock`]). On Redis, a
-/// release that cannot be queued (queue full, closed) is counted and logged
-/// and the lock lapses at `ttl_ms`.
+/// error, and — detached — when the body panics or is cancelled.
+///
+/// Cancelled while acquiring: in memory nothing is held. On Redis a
+/// token-safe release for the attempt is queued (see [`Coord::lock`]); on the
+/// same connection it runs after the attempt's `SET`, so the lock is freed.
+/// It is *not* guaranteed across a connection retirement: a `SET` written to
+/// the retired socket may execute after the release sent on the new one, and
+/// then holds the lock until `ttl_ms`. Likewise a release that cannot be
+/// queued (queue full, closed) is counted and logged, and the lock lapses at
+/// `ttl_ms`.
 pub async fn with_lock<C, F, Fut, T>(
     coord: &C,
     key: &str,

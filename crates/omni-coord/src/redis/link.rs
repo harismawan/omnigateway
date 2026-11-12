@@ -27,12 +27,21 @@
 //! answered `NOSCRIPT` is resubmitted once as `EVAL`, at the back of the
 //! queue; its caller has not returned, so a command the caller orders
 //! against has not been submitted, but *other* callers' later commands may
-//! run before the retry.
+//! run before the retry. The retry is not a new admission: its bytes were
+//! charged when the original call was accepted and are transferred to it,
+//! so it cannot be refused for capacity.
 //!
 //! **Boundedness.** The budget is in commands *and* bytes, charged at
 //! submission and returned when the reply arrives (or the op is settled):
 //! - `queue_capacity` commands (a pipeline costs its length) and
-//!   `queue_bytes` request bytes, queued plus in flight;
+//!   `queue_bytes` request bytes, queued plus in flight — *every* byte an op
+//!   retains, including an `EVALSHA` call's `EVAL` fallback (script source
+//!   and a second copy of the arguments), each form validated against
+//!   `max_request_bytes` before acceptance;
+//! - every accepted op is response-bearing and stays charged until its reply
+//!   settles it: a command flagged no-response is refused (`Fault::Invalid`),
+//!   since the `redis` crate would answer it at once while its request still
+//!   occupied the send channel and the driver's in-flight list;
 //! - awaited calls may use all but `release_reserve` commands and
 //!   `release_reserve_bytes` bytes of it, so a connection saturated by
 //!   admissions still takes the releases that free them;
@@ -45,13 +54,20 @@
 //!
 //! Every awaited call is bounded by `command_timeout`.
 //!
-//! **Retirement.** A watchdog marks the connection suspect when commands
-//! are outstanding and no reply has arrived for `command_timeout`. A suspect
+//! **Retirement** (a heuristic). "Progress" is a *completed* reply (one op
+//! settled), not bytes arriving: a long reply still streaming in, or a
+//! pipeline whose replies are arriving but not yet all in, counts as silent.
+//! A watchdog marks the connection suspect when ops are in flight and none
+//! has completed for `command_timeout`. A suspect
 //! connection is retired — dropped (which ends its driver task and closes
 //! the socket) and replaced — when a fresh probe connection to the same
 //! server is answered within the connect timeout and the old connection
-//! still stays silent through a short grace period: the server is alive and
-//! only this socket is dead (blackholed). When the probe also gets no answer
+//! still owes replies and completes none through a short grace period
+//! (rechecked at its end): the server is alive, so this socket is taken to
+//! be dead (blackholed). That inference can be wrong — a reply too large to
+//! complete within `command_timeout`, or a pipeline completing slowly,
+//! looks the same — and then a healthy connection is retired: conservative
+//! (callers fall back), never a mis-delivered reply. When the probe also gets no answer
 //! (the server itself is stalled — a long script, a pause), the connection
 //! is kept, so the replies it is owed still arrive in order; callers have
 //! been answered by their own deadlines meanwhile. An idle connection is
@@ -98,6 +114,9 @@ pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 struct Op {
     /// Sequence number within the queue's lifetime; reply routing uses it.
     id: u64,
+    /// Of `cost.bytes`, what the retained `EVAL` fallback accounts for
+    /// (`OpKind::Call { retry: Some(..) }`); transferred to the retry op.
+    retry_bytes: usize,
     /// Taken by the writer when handed over, except for releases, which keep
     /// it (one `EVAL`, `max_request_bytes` at most) to be replayed.
     req: Option<Wire>,
@@ -415,6 +434,9 @@ impl Link {
         let outcome = self.call_quiet(req, deadline).await;
         match &outcome {
             Ok(_) => self.succeeded(),
+            // The caller's bug, refused before anything was sent: not a
+            // statement about the server.
+            Err(Fault::Invalid) => {}
             Err(fault) => self.fault(fault),
         }
         outcome
@@ -431,6 +453,11 @@ impl Link {
         req: Request,
         deadline: tokio::time::Instant,
     ) -> Result<Value, Fault> {
+        // A spent budget submits nothing: the remaining-budget contract of
+        // multi-call operations (`kv_del_prefix`) is then exact.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Fault::TimedOut);
+        }
         let (tx, rx) = oneshot::channel();
         let (wire, retry) = match req {
             Request::One(cmd) => (Wire::One(cmd), None),
@@ -453,13 +480,36 @@ impl Link {
     }
 
     /// [`Link::submit`], handing a refused op's kind back to the caller.
+    ///
+    /// Every byte the op retains is validated and charged here: the request
+    /// itself and, for an `EVALSHA` call, the `EVAL` fallback kept for a
+    /// `NOSCRIPT` retry (script source plus a second copy of the arguments).
+    /// A request flagged no-response is refused (`Fault::Invalid`): its reply
+    /// would never settle the charge, and `Handoff`'s free-slot invariant
+    /// counts on every accepted op holding its charge until its reply.
     fn submit_op(&self, req: Wire, kind: OpKind, release: bool) -> Result<(), (Fault, OpKind)> {
-        let cost = wire_cost(&req);
+        if no_response(&req) {
+            return Err((Fault::Invalid, kind));
+        }
+        let mut cost = wire_cost(&req);
+        let retry_bytes = match &kind {
+            OpKind::Call {
+                retry: Some(whole), ..
+            } => {
+                if whole.is_no_response() {
+                    return Err((Fault::Invalid, kind));
+                }
+                packed_len(whole)
+            }
+            _ => 0,
+        };
         if cost.bytes > self.opts.max_request_bytes
+            || retry_bytes > self.opts.max_request_bytes
             || (matches!(req, Wire::Many(_)) && cost.commands > self.opts.max_pipeline_len)
         {
             return Err((Fault::TooLarge, kind));
         }
+        cost.bytes += retry_bytes;
         {
             let mut st = self.state();
             let idempotent = matches!(kind, OpKind::Release { idempotent: true });
@@ -489,6 +539,7 @@ impl Link {
             st.next_id += 1;
             st.pending.push_back(Op {
                 id,
+                retry_bytes,
                 req: Some(req),
                 cost,
                 kind,
@@ -705,6 +756,7 @@ impl Link {
             st.next_id += 1;
             st.pending.push_back(Op {
                 id,
+                retry_bytes: 0,
                 req: Some(req),
                 cost,
                 kind: OpKind::Ping,
@@ -739,9 +791,46 @@ impl Link {
             let Some(at) = st.in_flight.iter().position(|op| op.id == id) else {
                 return;
             };
-            let Some(op) = st.in_flight.remove(at) else {
+            let Some(mut op) = st.in_flight.remove(at) else {
                 return;
             };
+            // A cache miss on an awaited EVALSHA with its fallback in hand:
+            // the fallback goes to the back of the queue as a new op that
+            // *keeps* the bytes already charged for it (a transfer — it was
+            // budgeted at acceptance, so it cannot be refused now). Only the
+            // EVALSHA's own share is refunded.
+            //
+            // Not when closing: the retry would be a new admission, which a
+            // closing link refuses; the caller gets the NOSCRIPT fault.
+            let noscript = matches!(&reply, Err(e) if is_noscript(e));
+            if let (true, Some(whole), OpKind::Call { .. }, Mode::Up) =
+                (noscript, retry.as_ref(), &op.kind, st.mode)
+            {
+                let kept = Cost {
+                    commands: 1,
+                    bytes: op.retry_bytes,
+                };
+                let OpKind::Call { tx, .. } = std::mem::replace(&mut op.kind, OpKind::Ping) else {
+                    unreachable!("matched OpKind::Call above")
+                };
+                st.refund(Cost {
+                    commands: op.cost.commands.saturating_sub(1),
+                    bytes: op.cost.bytes.saturating_sub(op.retry_bytes),
+                });
+                let id = st.next_id;
+                st.next_id += 1;
+                st.pending.push_back(Op {
+                    id,
+                    retry_bytes: 0,
+                    req: Some(Wire::One(whole.clone())),
+                    cost: kept,
+                    kind: OpKind::Call { tx, retry: None },
+                });
+                drop(st);
+                self.progress.notify_waiters();
+                self.wake_writer.notify_one();
+                return;
+            }
             st.refund(op.cost);
             if st.mode == Mode::Closing && st.used.commands == 0 {
                 // `notify_one` stores a permit: the writer cannot miss it.
@@ -751,18 +840,6 @@ impl Link {
         };
         self.progress.notify_waiters();
         match (op.kind, reply) {
-            // A cache miss on an awaited EVALSHA: resubmitted once as EVAL,
-            // at the back of the queue, answering the same caller.
-            (OpKind::Call { tx, .. }, Err(e)) if is_noscript(&e) && retry.is_some() => {
-                let Some(whole) = retry else { return };
-                let kind = OpKind::Call { tx, retry: None };
-                if let Err((fault, OpKind::Call { tx, .. })) =
-                    self.submit_op(Wire::One(whole), kind, false)
-                    && tx.send(Err(fault)).is_err()
-                {
-                    tracing::trace!(coord = "redis", "retry after the deadline");
-                }
-            }
             (OpKind::Call { tx, .. }, reply) => {
                 let out = reply.map_err(|e| server_fault(&e));
                 // The caller may have given up at its deadline.
@@ -814,13 +891,15 @@ impl Link {
                 continue;
             }
             // The server answers a fresh connection while this one, owing
-            // replies, has been silent past the deadline. A server that was
-            // stalled and just resumed answers both at about the same time;
-            // a short grace keeps a connection that is flowing again.
+            // replies, has completed none past the deadline. A server that
+            // was stalled and just resumed answers both at about the same
+            // time; a short grace keeps a connection that is flowing again.
             let before = self.state().last_progress;
             let grace = (self.opts.command_timeout / 4).max(Duration::from_millis(20));
             tokio::time::sleep(grace).await;
-            if self.state().last_progress == before {
+            // Final recheck: still owing replies, and none completed.
+            let st = self.state();
+            if !st.in_flight.is_empty() && st.last_progress == before {
                 return End::Stalled;
             }
         }
@@ -921,7 +1000,7 @@ impl Link {
     }
 
     /// The reply bounds every connection's guard enforces.
-    fn limits(&self) -> super::guard::Limits {
+    pub(crate) fn limits(&self) -> super::guard::Limits {
         super::guard::Limits {
             reply_bytes: self.opts.max_reply_bytes,
             reply_nodes: self.opts.max_reply_elements,
@@ -1052,10 +1131,19 @@ fn request(conn: &MultiplexedConnection, req: &Wire) -> BoxFuture<Result<Value, 
 /// driver may lag in *draining* it, but never has more than that queued).
 /// So the first `Pending` is the reply wait.
 ///
-/// This is an assumption about redis-rs internals, so it is pinned twice:
-/// `Cargo.toml` pins `redis = "=1.4.0"` (an upgrade must re-check it), and
-/// `round2::releases_precede_later_admissions_under_concurrent_load` fails
-/// if a release is ever overtaken under contention.
+/// "At most `queue_capacity` outstanding" holds because every op is
+/// charged from submission until *its reply* settles it: no-response
+/// commands, which the crate answers at once while their request still sits
+/// in the channel, are refused at submission (`Fault::Invalid`); a timed-out
+/// caller's op stays charged until its reply arrives; a `NOSCRIPT` retry
+/// takes over its original's charge only after the original's reply.
+///
+/// This is an assumption about redis-rs internals, so it is pinned: the
+/// exact `redis = "=1.4.0"` in `Cargo.toml` (an upgrade must re-check it),
+/// and the regression tests
+/// `round2::releases_precede_later_admissions_under_concurrent_load`,
+/// `round3::release_then_immediate_reacquire_of_the_same_key_under_backpressure`
+/// and `round3::no_response_commands_stay_charged_and_cannot_break_release_order`.
 struct Handoff<'a> {
     fut: &'a mut BoxFuture<Result<Value, RedisError>>,
 }
@@ -1177,3 +1265,34 @@ pub(crate) async fn scan(
 
 pub(crate) const RECONNECT_MIN: Duration = Duration::from_millis(50);
 pub(crate) const RECONNECT_MAX: Duration = Duration::from_secs(2);
+
+/// Whether `req` contains a command flagged no-response.
+fn no_response(req: &Wire) -> bool {
+    match req {
+        Wire::One(cmd) => cmd.is_no_response(),
+        Wire::Many(pipe) => pipe.cmd_iter().any(Cmd::is_no_response),
+    }
+}
+
+/// The pub/sub connection: plain TCP through the same reply guard as the
+/// command connection, then the `redis` crate's RESP2 `PubSub` (AUTH, SELECT
+/// handshake included).
+pub(crate) async fn connect_pubsub(
+    client: &redis::Client,
+    limits: super::guard::Limits,
+) -> Result<redis::aio::PubSub, RedisError> {
+    let info = client.get_connection_info();
+    let redis::ConnectionAddr::Tcp(host, port) = info.addr() else {
+        return Err(RedisError::from((
+            ErrorKind::InvalidClientConfig,
+            "only plain TCP is supported",
+        )));
+    };
+    let stream = tokio::net::TcpStream::connect((host.as_str(), *port)).await?;
+    stream.set_nodelay(true)?;
+    redis::aio::PubSub::new(
+        info.redis_settings(),
+        super::guard::Guarded::new(stream, limits),
+    )
+    .await
+}

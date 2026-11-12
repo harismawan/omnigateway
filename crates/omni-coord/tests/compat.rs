@@ -56,6 +56,12 @@ impl Ts {
         {
             Ok(child) => child,
             Err(e) => {
+                // A run that claims Redis coverage must not skip the
+                // cross-runtime suite silently.
+                assert!(
+                    std::env::var_os("OMNI_TEST_REQUIRE_REDIS").is_none(),
+                    "OMNI_TEST_REQUIRE_REDIS is set but {bun} cannot run: {e}"
+                );
                 eprintln!("skipped: cannot run {bun}: {e}");
                 return None;
             }

@@ -15,14 +15,15 @@
 //!   [`CoordError::Unavailable`] (TS `OVERLOADED`), because a session verified
 //!   against a fallback map is one a password change elsewhere cannot end.
 //!
-//! Plumbing (spec "Redis"): one pipelined command connection with a single
-//! ordered, bounded submission queue (`link`; its own RESP2 reader, not the
-//! `redis` crate's multiplexer, whose send channel cannot order a detached
-//! release ahead of a later admission), one pub/sub connection (the `redis`
-//! crate's), scripts loaded once per connect and called by `EVALSHA` (resent
-//! whole on `NOSCRIPT` ahead of anything unwritten; detached releases go as
-//! `EVAL`), a deadline on every command, and reconnection with backoff for
-//! both connections. The `redis` crate still encodes every command.
+//! Plumbing (spec "Redis"): one command connection — the `redis` crate's
+//! `MultiplexedConnection` per generation, fed by a single ordered, bounded
+//! submission queue and one writer (`link`) — and one pub/sub connection
+//! (the crate's `PubSub`). Both run over plain TCP, RESP2 only, through the
+//! reply guard (`guard`). Scripts are loaded once per connect and called by
+//! `EVALSHA`; an awaited call answered `NOSCRIPT` is resubmitted once as
+//! `EVAL` at the back of the queue; detached releases are sent as `EVAL`
+//! from the start. Every awaited call has a deadline; both connections
+//! reconnect with backoff.
 //!
 //! Key schema (identical to TS; `NS` = `omni:`):
 //!
@@ -108,6 +109,11 @@ pub enum Fault {
     /// The coordinator is closing; nothing new is accepted.
     #[error("closing")]
     Closing,
+    /// A request this connection cannot carry safely: a `Cmd` flagged
+    /// `set_no_response(true)` (its reply would go unaccounted). Refused
+    /// before submission; not counted as a fault — it is the caller's bug.
+    #[error("invalid request")]
+    Invalid,
 }
 
 impl Fault {
@@ -122,6 +128,7 @@ impl Fault {
             Self::Saturated => "queue full",
             Self::TooLarge => "too large",
             Self::Closing => "closing",
+            Self::Invalid => "invalid request",
         }
     }
 }
@@ -334,8 +341,18 @@ impl Remote {
     /// publish is one of these. It costs its length and its bytes against the
     /// queue; past `max_pipeline_len` or `max_request_bytes` it is
     /// `Fault::TooLarge`. Commands marked `.ignore()` are left out of the
-    /// result, as `Pipeline::query_async` does; any command's error fails the
-    /// call (and counts as a fault). Not for `MULTI` pipelines.
+    /// result, as `Pipeline::query_async` does. Not for `MULTI` pipelines;
+    /// commands flagged no-response are `Fault::Invalid`.
+    ///
+    /// Errors: by default any command's error fails the call with
+    /// `Fault::Server` and counts as a fault. **`.ignore_errors()` is an
+    /// explicit opt-in** the coordinator honours: the call then succeeds
+    /// (not a fault) and each failed command's slot holds a
+    /// `Value::ServerError` the caller must inspect.
+    ///
+    /// Each reply is bounded by `max_reply_bytes` / `max_reply_elements`;
+    /// the whole result is bounded only by those times the pipeline length
+    /// (`max_pipeline_len`), so keep pipelines of large reads short.
     pub async fn pipeline(&self, pipe: redis::Pipeline) -> Result<Vec<Value>, Fault> {
         if pipe.is_transaction() {
             return Err(Fault::Server("transactions unsupported".to_owned()));
@@ -804,6 +821,29 @@ impl RedisCoord {
     /// (TS `ready` / `listened`). Fails only on a malformed URL.
     pub async fn connect(url: &str, opts: RedisCoordOptions) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(url)?;
+        // Both connections speak RESP2 (the reply guard and the pub/sub
+        // frame handling are RESP2); a RESP3 URL is refused here rather than
+        // failing every handshake later.
+        if client
+            .get_connection_info()
+            .redis_settings()
+            .protocol()
+            .supports_resp3()
+        {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::InvalidClientConfig,
+                "RESP3 is not supported by this coordinator; drop `protocol=resp3` (RESP2 is used)",
+            )));
+        }
+        if !matches!(
+            client.get_connection_info().addr(),
+            redis::ConnectionAddr::Tcp(..)
+        ) {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::InvalidClientConfig,
+                "only plain TCP redis:// URLs are supported (no TLS, no Unix sockets)",
+            )));
+        }
         let mut scripts: Vec<CoordScript> =
             scripts::builtin().iter().map(|s| (*s).clone()).collect();
         scripts.extend(opts.extra_scripts.iter().cloned());
@@ -1245,7 +1285,7 @@ async fn listen(
             return;
         }
         let attempt = async {
-            let mut pubsub = link.client.get_async_pubsub().await?;
+            let mut pubsub = link::connect_pubsub(&link.client, link.limits()).await?;
             pubsub.subscribe(CHANNEL).await?;
             Ok::<_, redis::RedisError>(pubsub)
         };

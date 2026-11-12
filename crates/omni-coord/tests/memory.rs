@@ -278,3 +278,24 @@ async fn rollback_of_a_duplicated_stamp_removes_exactly_one() {
         2.0
     );
 }
+
+/// M2 (r2 review precision): a claim made *over* the cap with the same
+/// stamp as a stored one is not stored; rolling it back removes the stored
+/// duplicate — the count drops by one more than the claims stored, the
+/// documented fail-open approximation.
+#[tokio::test]
+async fn rollback_of_a_skipped_over_cap_duplicate_removes_the_stored_one() {
+    use omni_coord::memory::WINDOW_KEY_CAP;
+    let coord = MemoryCoord::new(ManualClock::at(0.0).clock());
+    let w = 1_000_000.0;
+    let cap = WINDOW_KEY_CAP as f64;
+    for i in 0..WINDOW_KEY_CAP {
+        coord.window_claim("k", w, i as f64).await;
+    }
+    let dup = cap - 1.0;
+    // Over the cap, stamped like the last stored claim: answered, not stored.
+    assert_eq!(coord.window_claim("k", w, dup).await.before.used, cap);
+    coord.window_rollback("k", dup).await;
+    // The stored claim at `dup` went in its place.
+    assert_eq!(coord.window_claim("k", w, cap).await.before.used, cap - 1.0);
+}
