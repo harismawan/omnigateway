@@ -199,6 +199,15 @@ impl MemUsage {
             .push(((key.into(), model.into(), at, tokens, cost), c));
         c.to_string()
     }
+    /// Commits several rows in one transaction; returns its commit id.
+    pub fn rows_in_one_commit(&self, rows: &[(&str, &str, f64, f64, f64)]) -> String {
+        let c = self.next_commit.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut all = self.rows.lock().unwrap_or_else(PoisonError::into_inner);
+        for (k, m, at, t, cost) in rows {
+            all.push((((*k).into(), (*m).into(), *at, *t, *cost), c));
+        }
+        c.to_string()
+    }
     /// Arms a gate on the next seed reads; returns (entered, release).
     pub fn gate(&self) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Semaphore>) {
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -575,4 +584,158 @@ pub async fn dump(
         out.insert(k, json!({ "v": v, "ttl": pttl > 0 }));
     }
     out
+}
+
+// --- direct script calls -------------------------------------------------------
+
+/// `SEED_INSTALL` of an empty picture (`seeded 1` only) for `lim:<subject>:5h`,
+/// as another replica holding the lock under `token` would, with
+/// `snapshot` and the selection boundary `since`.
+pub async fn install_5h(
+    c: &RedisCoord,
+    subject: &str,
+    token: &str,
+    snapshot: &str,
+    since: f64,
+) -> redis::Value {
+    c.remote()
+        .eval(
+            &scripts::SEED_INSTALL,
+            &[
+                format!("omni:b:lim:{subject}:5h"),
+                format!("omni:b:lim:{subject}:5h:meta"),
+                format!("omni:lock:seed:lim:{subject}:5h"),
+            ],
+            &[
+                token.to_owned(),
+                "36000000".into(),
+                snapshot.to_owned(),
+                "60000".into(),
+                js_num(since),
+                "1".into(),
+                "seeded".into(),
+                "1".into(),
+            ],
+        )
+        .await
+        .expect("install")
+}
+
+/// Takes `omni:lock:seed:lim:<subject>:5h` under `token`.
+pub async fn hold_lock_5h(url: &str, subject: &str, token: &str) {
+    let mut conn = admin(url).await;
+    let _: () = redis::cmd("SET")
+        .arg(format!("omni:lock:seed:lim:{subject}:5h"))
+        .arg(token)
+        .arg("PX")
+        .arg(60_000)
+        .query_async(&mut conn)
+        .await
+        .expect("lock");
+}
+
+/// JS `String(n)` for the integral values tests send.
+pub fn js_num(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{n:.0}")
+    } else {
+        n.to_string()
+    }
+}
+
+/// `CLIENT PAUSE <ms> WRITE` on `url`, ended by [`Paused::end`] — or, if the
+/// test panics first, on drop (best effort), so a failure cannot leave the
+/// shared server paused for the tests after it.
+///
+/// A pause is server-wide: it holds every client's writes, including the
+/// other tests sharing the server. So pauses are exclusive across *all*
+/// test binaries (an OS file lock, `std::fs::File::lock`), and every test
+/// that is sensitive to write latency takes the shared side of the same
+/// lock ([`quiet`]).
+pub struct Paused {
+    url: String,
+    ended: bool,
+    _exclusive: std::fs::File,
+}
+
+fn pause_lock_file() -> std::fs::File {
+    let path = std::env::temp_dir().join("omni-cluster-limit-pause.lock");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .expect("pause lock file")
+}
+
+/// Holds the shared side of the pause lock: no `CLIENT PAUSE` (from any
+/// test binary) runs while it is held. For tests whose assertions depend
+/// on writes not being held (lock waits, timeouts).
+pub async fn quiet() -> std::fs::File {
+    tokio::task::spawn_blocking(|| {
+        let f = pause_lock_file();
+        f.lock_shared().expect("shared pause lock");
+        f
+    })
+    .await
+    .expect("lock task")
+}
+
+impl Paused {
+    pub async fn start(url: &str, ms: u64) -> Self {
+        let exclusive = tokio::task::spawn_blocking(|| {
+            let f = pause_lock_file();
+            f.lock().expect("exclusive pause lock");
+            f
+        })
+        .await
+        .expect("lock task");
+        let mut conn = admin(url).await;
+        let _: () = redis::cmd("CLIENT")
+            .arg("PAUSE")
+            .arg(ms)
+            .arg("WRITE")
+            .query_async(&mut conn)
+            .await
+            .expect("pause");
+        Self {
+            url: url.to_owned(),
+            ended: false,
+            _exclusive: exclusive,
+        }
+    }
+
+    pub async fn end(mut self) {
+        unpause(&self.url).await;
+        self.ended = true;
+    }
+}
+
+async fn unpause(url: &str) {
+    let mut conn = admin(url).await;
+    let _: () = redis::cmd("CLIENT")
+        .arg("UNPAUSE")
+        .query_async(&mut conn)
+        .await
+        .expect("unpause");
+}
+
+impl Drop for Paused {
+    fn drop(&mut self) {
+        if !self.ended {
+            let url = self.url.clone();
+            // A panicking test: unpause from a fresh thread (the runtime may
+            // be shutting down).
+            let _joined = std::thread::spawn(move || {
+                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    rt.block_on(unpause(&url));
+                }
+            })
+            .join()
+            .is_ok();
+        }
+    }
 }

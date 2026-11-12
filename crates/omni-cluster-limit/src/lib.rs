@@ -210,10 +210,10 @@ pub struct Metrics {
     pub debits_queued: AtomicU64,
     /// Bucket entries that met a complete picture.
     pub debit_buckets_applied: AtomicU64,
-    /// Runs (one commit's debits) added to a complete picture.
-    pub debit_runs_applied: AtomicU64,
-    /// Runs skipped because the picture's seed already counted their rows.
-    pub debit_runs_covered: AtomicU64,
+    /// Debited rows added to a complete picture.
+    pub debit_rows_applied: AtomicU64,
+    /// Debited rows skipped because the picture's seed counted them.
+    pub debit_rows_covered: AtomicU64,
     /// Bucket entries ignored by an incomplete picture (the seed reads the row).
     pub debit_buckets_unseeded: AtomicU64,
     /// Bucket entries kept for another flush: a seed is installing.
@@ -248,6 +248,8 @@ pub(crate) struct Inner {
     last_fallback_log: Mutex<Option<Instant>>,
     /// The seed worker and debit flusher, joined at shutdown.
     background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Wakes the debit flusher to stop (cooperatively, between flushes).
+    pub(crate) debits_stop: Arc<tokio::sync::Notify>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -624,6 +626,7 @@ impl ClusterLimiter {
             limits: Mutex::new(HashMap::new()),
             last_fallback_log: Mutex::new(None),
             background: Mutex::new(Vec::new()),
+            debits_stop: Arc::new(tokio::sync::Notify::new()),
         });
         let tasks = vec![seed::spawn(&inner), debit::spawn(&inner)];
         *inner
@@ -898,7 +901,9 @@ impl ClusterLimiter {
         }
     }
 
-    /// Applies every pending debit now (and waits for it).
+    /// Applies every pending debit now (and waits for it). Cancel-safe:
+    /// dropped mid-way, it puts back what it had not sent and counts what
+    /// was in flight as lost (reseed armed).
     pub async fn flush_debits(&self) {
         debit::flush(&self.inner).await;
     }
@@ -940,11 +945,19 @@ impl ClusterLimiter {
         self.inner.debits.usage()
     }
 
-    /// Stops cleanly (I3): stops the seeder and cancels running seeds
-    /// (releasing their locks) and waits for them; stops the flusher; then
-    /// flushes every pending debit, keeping those another replica's seed is
-    /// installing for at most `shutdown_drain`. Anything still pending then
-    /// is counted lost (reseed armed) — never silently dropped. Idempotent.
+    /// The estimated bytes of every retained pending entry, recomputed from
+    /// scratch (what `debits_pending().1` must equal). For tests.
+    #[doc(hidden)]
+    pub fn debits_audit(&self) -> usize {
+        self.inner.debits.audit()
+    }
+
+    /// Stops cleanly (I3, R2): stops the seeder and cancels running seeds
+    /// (releasing their locks) and waits for them; lets the flusher finish
+    /// the flush it is in and joins it; then flushes every pending debit,
+    /// keeping those another replica's seed is installing for at most
+    /// `shutdown_drain`. Anything still pending then is counted lost
+    /// (reseed armed) — never silently dropped. Idempotent.
     pub async fn shutdown(&self) {
         let inner = &self.inner;
         // The worker first (so it cannot start a seed after the running ones
@@ -957,8 +970,17 @@ impl ClusterLimiter {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
         );
+        // [seed worker, debit flusher]. The worker is cancelled (it holds
+        // no work: reserved jobs carry their own completion guard). The
+        // flusher is joined, not cancelled: it ends after the flush it is in
+        // (R2) — and were it cancelled, its flush would put back what it had
+        // not sent and count what was in flight as lost.
+        let mut tasks = tasks.into_iter();
+        if let Some(worker) = tasks.next() {
+            worker.abort();
+            let _ended = worker.await.is_err();
+        }
         for t in tasks {
-            t.abort();
             let _ended = t.await.is_err();
         }
         seed::stop(inner).await;

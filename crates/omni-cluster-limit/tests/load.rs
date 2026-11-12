@@ -22,6 +22,8 @@ fn opts(replica: &str) -> LoadOptions {
 /// two, plus its own exact local counts; nothing double-counts itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicas_see_each_others_load() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = omni_coord::system_clock();
@@ -63,6 +65,8 @@ async fn replicas_see_each_others_load() {
 /// and the next snapshot prunes it from the index.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dead_replicas_load_vanishes_after_its_ttl() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = omni_coord::system_clock();
@@ -341,6 +345,8 @@ async fn the_snapshot_returns_the_busiest_keys_bounded_at_the_server() {
 /// process's own counts alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_fleet_picture_ages_out_during_an_outage() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = omni_coord::system_clock();
@@ -370,4 +376,36 @@ async fn a_stale_fleet_picture_ages_out_during_an_outage() {
     );
     assert_eq!(now.get("mine::m"), Some(&1.0));
     assert!(va.metrics.refresh_faults.load(Ordering::SeqCst) >= 2);
+}
+
+/// Minor (r1 review): a reader whose `max_keys` is below the publishers'
+/// still gets the fleet's busiest keys — each picture is read whole (up to
+/// the fleet's publisher bound), not its first `max_keys` fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_small_reader_gets_the_busiest_of_large_pictures() {
+    let Some(base) = redis_base() else { return };
+    let db = fresh_db(&base).await;
+    let clock = omni_coord::system_clock();
+    let c = coord(&db.url, clock.clock_clone()).await;
+    let v = LoadView::new();
+    let mut held = Vec::new();
+    for i in 0..300 {
+        held.push(v.acquire(&format!("k{i:03}")));
+    }
+    for _ in 0..4 {
+        held.push(v.acquire("k123"));
+    }
+    load::publish(c.remote(), &v, &clock.clock_clone(), &opts("big")).await;
+    let reader = LoadView::new();
+    for want in [1, 5] {
+        let o = LoadOptions {
+            max_keys: want,
+            ..opts("reader")
+        };
+        load::refresh(c.remote(), &reader, &clock.clock_clone(), &o).await;
+        let got = reader.remote();
+        assert_eq!(got.len(), want);
+        assert_eq!(got.get("k123"), Some(&5.0), "busiest key missing: {got:?}");
+    }
+    drop(held);
 }

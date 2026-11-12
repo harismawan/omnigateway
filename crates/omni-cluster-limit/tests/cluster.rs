@@ -132,6 +132,8 @@ async fn rust_and_ts_admitting_together_share_one_ceiling() {
 /// with other traffic flooding the connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrency_one_back_to_back_is_never_refused() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = ManualClock::at(T0);
@@ -178,6 +180,8 @@ async fn concurrency_one_back_to_back_is_never_refused() {
 /// request is judged against it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unseeded_window_admits_and_its_seed_lands() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = ManualClock::at(T0);
@@ -235,9 +239,12 @@ async fn an_unseeded_window_admits_and_its_seed_lands() {
 }
 
 /// The seed lock: a contender waits for the holder and finds its picture;
-/// a lock that cannot be taken in time seeds anyway (TS).
+/// a lock that cannot be taken in time fails the seed (ruling R1 — no
+/// tokenless install), leaving the window incomplete and asked again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_lock_contention() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = ManualClock::at(T0);
@@ -269,27 +276,7 @@ async fn seed_lock_contention() {
     // The 1w seed was not contended and is in; the 5h one waits.
     assert_eq!(l.metrics().seeds_installed.load(Ordering::SeqCst), 1);
     // The holder installs a complete picture under its lock, then releases.
-    let installed = c
-        .remote()
-        .eval(
-            &omni_cluster_limit::scripts::SEED_INSTALL,
-            &[
-                "omni:b:lim:k:5h".into(),
-                "omni:b:lim:k:5h:meta".into(),
-                "omni:lock:seed:lim:k:5h".into(),
-            ],
-            &[
-                "other".into(),
-                "36000000".into(),
-                "1:1:".into(),
-                "60000".into(),
-                "1".into(),
-                "seeded".into(),
-                "1".into(),
-            ],
-        )
-        .await
-        .expect("other installs");
+    let installed = install_5h(&c, "k", "other", "1:1:", T0 - 5.0 * HOUR).await;
     assert_eq!(installed, redis::Value::Int(1));
     let _: () = redis::cmd("DEL")
         .arg("omni:lock:seed:lim:k:5h")
@@ -308,7 +295,10 @@ async fn seed_lock_contention() {
         "only the 1w window read the store"
     );
 
-    // A lock nobody releases: past the wait, seed anyway.
+    // A lock nobody releases: past the wait the seed fails — it no longer
+    // seeds without its lock (ruling R1: such a seed's snapshot, installed
+    // later, could miss a row whose debit was ignored meanwhile). The
+    // window stays incomplete (admitted, not judged) and is asked again.
     flush(&db.url).await;
     let l2 = ClusterLimiter::new(
         Arc::clone(&c),
@@ -326,10 +316,27 @@ async fn seed_lock_contention() {
         .query_async(&mut conn)
         .await
         .expect("set");
+    let reads = usage.sums.load(Ordering::SeqCst);
     drop(l2.admit("k", &lim, "fast", T0).await.expect("admit"));
     l2.seeds_settled().await;
     assert_eq!(l2.metrics().seed_lock_unavailable.load(Ordering::SeqCst), 1);
-    assert_eq!(l2.metrics().seeds_installed.load(Ordering::SeqCst), 2);
+    assert_eq!(l2.metrics().seed_failures.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        l2.metrics().seeds_installed.load(Ordering::SeqCst),
+        1,
+        "1w only"
+    );
+    assert_eq!(
+        usage.sums.load(Ordering::SeqCst),
+        reads + 1,
+        "the 5h seed read nothing"
+    );
+    let a = l2.admit("k", &lim, "fast", T0).await.expect("admit");
+    assert_eq!(
+        a.unseeded,
+        vec![("k".to_owned(), omni_ratelimit::Window::H5)]
+    );
+    drop(a);
     let holder: String = redis::cmd("GET")
         .arg("omni:lock:seed:lim:k:5h")
         .query_async(&mut conn)
@@ -518,6 +525,8 @@ async fn preseed_covers_every_subject() {
 /// free, and renewal never resurrects a released slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_long_request_keeps_its_slot_by_renewal() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = omni_coord::system_clock();

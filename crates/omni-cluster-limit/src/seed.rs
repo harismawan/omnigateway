@@ -5,20 +5,26 @@
 //! (once: a window queued, running, or failed within `seed_retry` is not
 //! queued again). A worker:
 //!
-//! 1. takes TS's `omni:lock:seed:<bucket>` mutex (`SEED_LOCK_MS` TTL and
-//!    wait) under its own token; a lock that cannot be taken in time seeds
-//!    anyway, as TS does;
+//! 1. takes TS's `omni:lock:seed:<bucket>` mutex (`SEED_LOCK_MS` TTL)
+//!    under its own token, retrying for up to `SEED_LOCK_MS` (ruling R1:
+//!    never a tokenless install — while no seed holds the lock, an
+//!    incomplete picture ignores debits, and a picture read before such a
+//!    debit's commit and installed after it would lose that row; a seed
+//!    that cannot take the lock fails and is asked again);
 //! 2. re-checks inside it — another replica may have installed a complete
 //!    picture;
 //! 3. reads [`crate::UsageSource::seed_read`] — counts, row ranges and the
 //!    read's commit snapshot, from one consistent store snapshot — under
-//!    `usage_timeout`;
-//! 4. installs all of it in one [`crate::scripts::SEED_INSTALL`] call,
-//!    which refuses if the lock is no longer this seed's.
+//!    `usage_timeout`, selecting rows with `at >= since` (`since = now −
+//!    window`);
+//! 4. installs all of it, with `since`, in one
+//!    [`crate::scripts::SEED_INSTALL`] call, which refuses unless the lock
+//!    is still this seed's.
 //!
 //! While the lock is held and the picture incomplete, debits for the bucket
-//! wait (see [`crate::debit`]); once installed, a debit whose commit the
-//! snapshot saw is skipped — on every replica — and any other is added.
+//! wait (see [`crate::debit`]); once installed, a debited row the seed
+//! counted (commit visible to its snapshot **and** `at >= since`) is
+//! skipped — on every replica — and every other row is added.
 //! Everything goes through `Remote`, never the memory fallback: a seed that
 //! cannot reach the server fails and is retried later.
 
@@ -111,6 +117,9 @@ pub(crate) enum SeedError {
     Coord(String),
     /// The lock lapsed before the install (the seed outran its TTL).
     LockLost,
+    /// Another seed held the lock past the wait (it is seeding; this one
+    /// is asked again later).
+    LockBusy,
 }
 
 /// The seed lock under this seed's own token, released (token-safe,
@@ -173,20 +182,20 @@ pub(crate) async fn run(
 ) -> Result<(), SeedError> {
     let bucket = bucket_key(&subject.id, window);
     let held = lock(inner, format!("seed:{bucket}")).await;
-    if held.is_none() {
-        bump(&inner.metrics.seed_lock_unavailable);
-    }
-    let token = held
-        .as_ref()
-        .and_then(|l| l.token.clone())
-        .unwrap_or_default();
-    let out = install(inner, subject, window, now, &token).await;
+    let out = match held.as_ref().and_then(|l| l.token.clone()) {
+        Some(token) => install(inner, subject, window, now, &token).await,
+        None => {
+            bump(&inner.metrics.seed_lock_unavailable);
+            Err(SeedError::LockBusy)
+        }
+    };
     drop(held);
     if let Err(e) = &out {
         bump(&inner.metrics.seed_failures);
         let reason = match e {
             SeedError::Store(r) | SeedError::Coord(r) => r.as_str(),
             SeedError::LockLost => "seed lock lapsed before install",
+            SeedError::LockBusy => "seed lock held elsewhere past the wait",
         };
         tracing::warn!(
             api_key_id = subject.key_id.as_str(),
@@ -235,6 +244,7 @@ async fn install(
         Err(_) => return Err(SeedError::Store("store read timed out".to_owned())),
     };
     let args = install_args(token, length, now, grain, &read)?;
+    debug_assert_eq!(args[4], crate::js(now - length));
     let keys = [
         hash.clone(),
         scripts::meta_key(&hash),
@@ -300,6 +310,8 @@ fn install_args(
         crate::js(length * 2.0),
         read.snapshot.clone(),
         crate::js(grain),
+        // The row selection the read used: `at >= since`.
+        crate::js(now - length),
         (fields.len() / 2).to_string(),
     ];
     args.extend(fields);
@@ -351,22 +363,26 @@ async fn worker(weak: Weak<Inner>, wake: Arc<Notify>) {
                 job
             };
             let Some((subject, window)) = job else { break };
+            // The reservation's completion guard exists from here on: if
+            // the worker is cancelled while waiting for a permit, dropping
+            // it settles `running` (so `seeds_settled` cannot hang).
+            let mut done = Done {
+                inner: Arc::clone(&inner),
+                slot: (subject.id.clone(), window),
+                ok: false,
+            };
+            drop(inner);
             let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
                 return;
             };
-            let me = Arc::clone(&inner);
-            let mut tasks = inner.seeds.tasks();
+            let me = Arc::clone(&done.inner);
+            let mut tasks = me.seeds.tasks();
             // Reap finished tasks so the set stays bounded by `PARALLEL`.
             while tasks.try_join_next().is_some() {}
+            let run_on = Arc::clone(&me);
             tasks.spawn(async move {
-                let done = Done {
-                    inner: Arc::clone(&me),
-                    slot: (subject.id.clone(), window),
-                    ok: false,
-                };
-                let mut done = done;
-                let now = me.now();
-                done.ok = run(&me, &subject, window, now).await.is_ok();
+                let now = run_on.now();
+                done.ok = run(&run_on, &subject, window, now).await.is_ok();
                 drop(done);
                 drop(permit);
             });

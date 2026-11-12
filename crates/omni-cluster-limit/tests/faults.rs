@@ -82,6 +82,8 @@ fn lim(c: &Arc<RedisCoord>, clock: &ManualClock, usage: Arc<MemUsage>) -> Cluste
 /// not enforced and nothing reads the store.
 #[tokio::test(flavor = "current_thread")]
 async fn unreachable_fails_open_locally_and_enforces_minute_and_concurrency() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let (logs, _guard) = capture();
     let clock = ManualClock::at(T0);
     let c = quick_coord("redis://127.0.0.1:1", clock.clock()).await;
@@ -187,6 +189,8 @@ async fn wait_remote(l: &ClusterLimiter, key: &str, what: &str) {
 /// lost-debit policy) so the next admission reseeds from the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_server_fails_open_and_recovers_with_a_reseed() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some((name, url)) = docker_target() else {
         return;
     };
@@ -260,6 +264,8 @@ async fn a_stopped_server_fails_open_and_recovers_with_a_reseed() {
 /// (the release queued behind it), so a `concurrency: 1` key is free again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paused_server_is_bounded_and_late_scripts_leave_no_slot() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some((name, url)) = docker_target() else {
         return;
     };

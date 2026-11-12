@@ -27,3 +27,6 @@ redis = { version = "=1.4.0", default-features = false, features = ["tokio-comp"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "process", "io-util", "net"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 omni-ir = { path = "../omni-ir" }
+# The seed/debit visibility contract against a real PostgreSQL
+# (`tests/postgres.rs`); already in the workspace via omni-store.
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }

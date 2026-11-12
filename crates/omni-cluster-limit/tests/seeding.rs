@@ -69,7 +69,7 @@ async fn a_pending_debit_is_not_counted_again_after_another_replicas_seed() {
     a.flush_debits().await;
     assert_eq!(requests_5h(&ca, "k").await, 1.0, "one row counted twice");
     assert_eq!(
-        a.metrics().debit_runs_covered.load(Ordering::SeqCst),
+        a.metrics().debit_rows_covered.load(Ordering::SeqCst),
         2,
         "5h and 1w skipped"
     );
@@ -319,6 +319,8 @@ async fn a_failed_install_leaves_no_picture_and_the_retry_completes_it() {
 /// accounting for every pending debit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hung_seed_is_bounded_and_shutdown_resolves_it() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = ManualClock::at(T0);
@@ -372,6 +374,8 @@ async fn a_hung_seed_is_bounded_and_shutdown_resolves_it() {
 /// and otherwise counts them lost (reseed armed) — never drops them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_delivers_or_accounts_for_held_debits() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = ManualClock::at(T0);
@@ -423,34 +427,19 @@ async fn shutdown_delivers_or_accounts_for_held_debits() {
             tokio::spawn(async move {
                 // Once shutdown's drain has met the held lock (observed, not
                 // timed), the other replica installs.
+                let t = tokio::time::Instant::now();
                 while waiting() == 0 {
+                    assert!(
+                        t.elapsed() < Duration::from_secs(5),
+                        "the drain never waited"
+                    );
                     tokio::task::yield_now().await;
                 }
                 if deliver {
                     let mut conn = admin(&url).await;
                     // An install whose snapshot predates the row, under the
                     // lock it holds ("other").
-                    let installed = c
-                        .remote()
-                        .eval(
-                            &omni_cluster_limit::scripts::SEED_INSTALL,
-                            &[
-                                "omni:b:lim:k:5h".into(),
-                                "omni:b:lim:k:5h:meta".into(),
-                                "omni:lock:seed:lim:k:5h".into(),
-                            ],
-                            &[
-                                "other".into(),
-                                "36000000".into(),
-                                "1:1:".into(),
-                                "60000".into(),
-                                "1".into(),
-                                "seeded".into(),
-                                "1".into(),
-                            ],
-                        )
-                        .await
-                        .expect("other installs");
+                    let installed = install_5h(&c, "k", "other", "1:1:", T0 - 5.0 * HOUR).await;
                     assert_eq!(installed, redis::Value::Int(1));
                     let _: () = redis::cmd("DEL")
                         .arg("omni:lock:seed:lim:k:5h")
@@ -487,6 +476,8 @@ async fn shutdown_delivers_or_accounts_for_held_debits() {
 /// releases its lock) instead of holding a worker forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hung_store_read_times_out() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = ManualClock::at(T0);
@@ -592,24 +583,16 @@ async fn a_cancelled_admission_after_write_leaves_no_slot() {
     let one = limits(r#"{"concurrency":1}"#);
     // Prime the connection (scripts loaded) before pausing writes.
     drop(l.admit("warm", &one, "m", T0).await.expect("warm"));
-    let mut conn = admin(&db.url).await;
-    let _: () = redis::cmd("CLIENT")
-        .arg("PAUSE")
-        .arg(10_000)
-        .arg("WRITE")
-        .query_async(&mut conn)
-        .await
-        .expect("pause");
+    let paused = Paused::start(&db.url, 10_000).await;
     let cancelled =
         tokio::time::timeout(Duration::from_millis(150), l.admit("p", &one, "m", T0)).await;
     assert!(cancelled.is_err(), "admission finished during the pause");
-    let _: () = redis::cmd("CLIENT")
-        .arg("UNPAUSE")
-        .query_async(&mut conn)
-        .await
-        .expect("unpause");
-    // The script and then its cleanup run, in order.
+    paused.end().await;
+    // The script and then its cleanup run, in order. (PING is a read and
+    // is not held by PAUSE WRITE; it is sent after the unpause, behind the
+    // script and its release on the same connection.)
     let _pinged = c.remote().query(redis::cmd("PING")).await.is_ok();
+    let mut conn = admin(&db.url).await;
     let live: i64 = redis::cmd("ZCARD")
         .arg("omni:g:p")
         .query_async(&mut conn)
@@ -623,76 +606,62 @@ async fn a_cancelled_admission_after_write_leaves_no_slot() {
 /// `pg_visible_in_snapshot` exactly. Expected values recorded from
 /// PostgreSQL 17.11 (`/tmp/opencode/d3-fix1/pg-visible.log`) for the
 /// snapshot `5:9:6,7`: 4 t, 5 t, 6 f, 7 f, 8 t, 9 f, 10 f — plus an unknown
-/// commit (`''`), which is never skipped.
+/// commit (`''`), which is never skipped. And (ruling R1) a visible commit's
+/// row before the seed's selection boundary is not covered either.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_snapshot_test_is_pg_visible_in_snapshot() {
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = ManualClock::at(T0);
     let c = coord(&db.url, clock.clock()).await;
+    let since = T0 - 5.0 * HOUR;
+    hold_lock_5h(&db.url, "k", "t").await;
+    assert_eq!(
+        install_5h(&c, "k", "t", "5:9:6,7", since).await,
+        redis::Value::Int(1)
+    );
     let keys = [
         "omni:b:lim:k:5h".to_owned(),
         "omni:b:lim:k:5h:meta".to_owned(),
         "omni:lock:seed:lim:k:5h".to_owned(),
     ];
-    let installed = c
-        .remote()
-        .eval(
-            &omni_cluster_limit::scripts::SEED_INSTALL,
-            &keys,
-            &[
-                String::new(),
-                "36000000".into(),
-                "5:9:6,7".into(),
-                "60000".into(),
-                "1".into(),
-                "seeded".into(),
-                "1".into(),
-            ],
-        )
-        .await
-        .expect("install");
-    assert_eq!(installed, redis::Value::Int(1));
-    for (commit, visible) in [
-        ("4", true),
-        ("5", true),
-        ("6", false),
-        ("7", false),
-        ("8", true),
-        ("9", false),
-        ("10", false),
-        ("", false),
+    for (commit, at, covered) in [
+        ("4", T0, true),
+        ("5", T0, true),
+        ("6", T0, false),
+        ("7", T0, false),
+        ("8", T0, true),
+        ("9", T0, false),
+        ("10", T0, false),
+        ("", T0, false),
+        ("4", since, true),
+        ("4", since - 1.0, false),
+        ("8", since - HOUR, false),
     ] {
-        let args: Vec<String> = [
-            "1700000000000",
-            "60000",
-            "18000000",
-            "1",
-            commit,
-            "1",
-            "0",
-            "1",
-            "1700000000000",
-            "1700000000000",
-            "1",
-            "0",
-        ]
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect();
+        let args: Vec<String> = vec![
+            js_num(T0),
+            "60000".into(),
+            "18000000".into(),
+            "1".into(),
+            commit.into(),
+            "1".into(),
+            js_num(at),
+            "0".into(),
+            "0".into(),
+        ];
         let out = c
             .remote()
             .eval(&omni_cluster_limit::scripts::DEBIT_BATCH, &keys, &args)
             .await
             .expect("debit");
-        let expected = if visible { [0, 1] } else { [1, 0] };
+        let expected = if covered { [0, 1] } else { [1, 0] };
         assert_eq!(
             out,
             redis::Value::Array(vec![redis::Value::Array(vec![
                 redis::Value::Int(expected[0]),
                 redis::Value::Int(expected[1])
             ])]),
-            "commit {commit:?}"
+            "commit {commit:?} at {at}"
         );
     }
 }

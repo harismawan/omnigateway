@@ -56,6 +56,8 @@ fn cpu_s(info: &str) -> f64 {
 /// cargo runs test binaries one at a time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hot_path_budget_and_latency() {
+    // Timing-sensitive: no other test may pause writes meanwhile.
+    let _quiet = quiet().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
     let clock = ManualClock::at(T0);

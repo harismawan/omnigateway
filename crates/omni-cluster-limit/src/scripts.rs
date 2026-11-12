@@ -24,8 +24,9 @@
 //! TS reader (`BUCKETS_SUM`, `BUCKETS_ADD`) sees the same hash. Everything
 //! Rust needs beyond it lives in a companion hash `<that key>:meta`:
 //!
-//! - `snap` — the commit snapshot of the store read the seed installed (see
-//!   [`DEBIT_BATCH_SRC`]): which committed rows the seed already counted.
+//! - `snap` and `since` — the commit snapshot and the row-selection
+//!   boundary of the store read the seed installed (see
+//!   [`DEBIT_BATCH_SRC`]): together, which committed rows the seed counted.
 //! - `<s>:a` / `<s>:z` — row ranges: the least and greatest `at` of the done
 //!   rows whose own `at` falls in `[s, s + grain)` (a refusal's reset, TS
 //!   `oldestSince`, read from Redis; see [`ADMIT_SRC`]).
@@ -238,10 +239,9 @@ pub const ADMIT_SRC: &str = r#"
 ///
 /// `KEYS` per entry (3): the bucket hash, its companion, its seed lock
 /// (`omni:lock:seed:<bucket>`). `ARGV` per entry: an instant inside the
-/// count bucket, grain, window length, `k`, then `k` runs, each: the rows'
-/// commit id (`''`: unknown), requests, tokens, `m`, then `m` row ranges
-/// `(least at, greatest at)` each inside one grain-aligned range bucket,
-/// then `n`, then the `n` costs in debit order. Runs are in debit order.
+/// count bucket, grain, window length, `k`, then `k` runs, each: the
+/// commit id (`''`: unknown), `n`, then `n` rows `(row at, tokens, cost)`
+/// in debit order.
 ///
 /// Per entry, by the picture's state:
 /// - **incomplete** (see the module docs): `2` *wait* when its seed lock is
@@ -249,20 +249,22 @@ pub const ADMIT_SRC: &str = r#"
 ///   or may not be in it — the caller keeps the entry and retries after the
 ///   install), else `0` *ignored*, TS's "an unseeded key ignores adds": the
 ///   next seed reads the committed rows.
-/// - **complete**: per run, *covered* when the seed's read saw its commit
-///   (`snap`) — the seed already counted those rows; adding them again was
-///   the cross-replica double count — else *applied*: what that many TS
-///   `BUCKETS_ADD` calls leave — `HINCRBY` of the summed requests and
-///   tokens (integers, exact), one `HINCRBYFLOAT` per cost in debit order
-///   (TS's float sequence exactly), `PEXPIRE` 2×window — and the row ranges
-///   widened in the companion, which takes the same TTL. Reply
-///   `{applied runs, covered runs}`.
+/// - **complete**: per row (ruling R1), *covered* exactly when the seed
+///   counted it — its commit is visible to the seed's snapshot (`snap`)
+///   **and** its `at` is inside the seed's row selection (`at >= since`, the
+///   boundary the store read used) — else *applied*: what TS's
+///   `BUCKETS_ADD` leaves for those rows — `HINCRBY` of the applied count
+///   and summed tokens (integers, exact), one `HINCRBYFLOAT` per applied cost
+///   in debit order (TS's float sequence exactly), `PEXPIRE` 2×window — and
+///   the applied rows' ranges widened in the companion (same TTL). A run
+///   whose transaction spans the boundary is split row by row. Reply
+///   `{applied rows, covered rows}`.
 ///
 /// `snap` is `xmin:xmax:xip,…`, Postgres `pg_snapshot` text, with
 /// `pg_visible_in_snapshot` semantics: a commit `c < xmin` was seen,
 /// `c >= xmax` was not, otherwise seen unless listed. Ids are compared as
 /// decimal strings, exactly at any width. A run with no commit id is never
-/// covered (it is applied, the pre-ruling behaviour).
+/// covered.
 pub const DEBIT_BATCH_SRC: &str = r#"
   local function lt(x, y)
     if #x ~= #y then return #x < #y end
@@ -281,49 +283,69 @@ pub const DEBIT_BATCH_SRC: &str = r#"
     local g = tonumber(ARGV[a + 2])
     local window = tonumber(ARGV[a + 3])
     local runs = tonumber(ARGV[a + 4])
+    local start = math.floor(tonumber(ARGV[a + 1]) / g) * g
     a = a + 4
     local complete = redis.call('HEXISTS', meta, 'snap') == 1 and redis.call('HEXISTS', key, 'seeded') == 1
-    local snap = nil
+    local snap, since = nil, nil
     if complete then
       local xmin, xmax, xip = string.match(redis.call('HGET', meta, 'snap'), '^(%d+):(%d+):(.*)$')
       snap = { xmin = xmin, xmax = xmax, xip = {} }
       for x in string.gmatch(xip, '%d+') do snap.xip[x] = true end
+      since = tonumber(redis.call('HGET', meta, 'since')) or -math.huge
     end
-    local start = math.floor(tonumber(ARGV[a - 3]) / g) * g
     local applied, covered = 0, 0
+    local count, tokens = 0, 0
+    local costs = {}
+    local lo, hi, order = {}, {}, {}
     for _ = 1, runs do
       local c = ARGV[a + 1]
-      local m = tonumber(ARGV[a + 4])
-      local n = tonumber(ARGV[a + 5 + 2 * m])
-      if complete then
-        if seen(snap, c) then
-          covered = covered + 1
-        else
-          redis.call('HINCRBY', key, start .. ':r', ARGV[a + 2])
-          redis.call('HINCRBY', key, start .. ':t', ARGV[a + 3])
-          for j = 1, n do
-            redis.call('HINCRBYFLOAT', key, start .. ':c', ARGV[a + 5 + 2 * m + j])
-          end
-          for j = 1, m do
-            local lo, hi = ARGV[a + 3 + 2 * j], ARGV[a + 4 + 2 * j]
-            local s = math.floor(tonumber(lo) / g) * g
-            local was = redis.call('HGET', meta, s .. ':a')
-            if (not was) or tonumber(lo) < tonumber(was) then
-              redis.call('HSET', meta, s .. ':a', lo)
+      local n = tonumber(ARGV[a + 2])
+      local visible = complete and seen(snap, c)
+      for j = 1, n do
+        local b = a + 2 + 3 * (j - 1)
+        local at = tonumber(ARGV[b + 1])
+        if complete then
+          if visible and at >= since then
+            covered = covered + 1
+          else
+            applied = applied + 1
+            count = count + 1
+            tokens = tokens + tonumber(ARGV[b + 2])
+            costs[#costs + 1] = ARGV[b + 3]
+            local s = math.floor(at / g) * g
+            if lo[s] == nil then
+              order[#order + 1] = s
+              lo[s], hi[s] = ARGV[b + 1], ARGV[b + 1]
+            else
+              if at < tonumber(lo[s]) then lo[s] = ARGV[b + 1] end
+              if at > tonumber(hi[s]) then hi[s] = ARGV[b + 1] end
             end
-            was = redis.call('HGET', meta, s .. ':z')
-            if (not was) or tonumber(hi) > tonumber(was) then
-              redis.call('HSET', meta, s .. ':z', hi)
-            end
           end
-          redis.call('PEXPIRE', key, window * 2)
-          redis.call('PEXPIRE', meta, window * 2)
-          applied = applied + 1
         end
       end
-      a = a + 5 + 2 * m + n
+      a = a + 2 + 3 * n
     end
     if complete then
+      if count > 0 then
+        -- TS's field order (`:r`, `:t`, `:c`) and float sequence.
+        redis.call('HINCRBY', key, start .. ':r', count)
+        redis.call('HINCRBY', key, start .. ':t', string.format('%.0f', tokens))
+        for _, cost in ipairs(costs) do
+          redis.call('HINCRBYFLOAT', key, start .. ':c', cost)
+        end
+        for _, s in ipairs(order) do
+          local was = redis.call('HGET', meta, s .. ':a')
+          if (not was) or tonumber(lo[s]) < tonumber(was) then
+            redis.call('HSET', meta, s .. ':a', lo[s])
+          end
+          was = redis.call('HGET', meta, s .. ':z')
+          if (not was) or tonumber(hi[s]) > tonumber(was) then
+            redis.call('HSET', meta, s .. ':z', hi[s])
+          end
+        end
+        redis.call('PEXPIRE', key, window * 2)
+        redis.call('PEXPIRE', meta, window * 2)
+      end
       out[i] = { applied, covered }
     elseif redis.call('EXISTS', lock) == 1 then
       out[i] = 2
@@ -337,33 +359,35 @@ pub const DEBIT_BATCH_SRC: &str = r#"
 /// A seed's picture, installed whole in one step (I1/I2 ruling): exactly
 /// what TS's `BUCKETS_SEED` writes to the counts hash (`DEL`; `seeded` and
 /// the count fields, in its order; `PEXPIRE`), plus the companion with the
-/// read's commit snapshot and the row ranges, under the same TTL. No reader
-/// ever sees counts without their ranges and snapshot. TS's `BUCKETS_SEED`
-/// itself is untouched (D2, byte-identical).
+/// read's row-selection boundary (`since`), commit snapshot (`snap`, last)
+/// and the row ranges, under the same TTL. No reader ever sees counts
+/// without their ranges, boundary and snapshot. TS's `BUCKETS_SEED` itself
+/// is untouched (D2, byte-identical).
 ///
 /// `KEYS`: the bucket hash, its companion, its seed lock. `ARGV`: the lock
-/// token (`''`: seeding without the lock, TS's fallback), `PEXPIRE` ms
-/// (2×window), the snapshot, grain, `n`, then `n` count `field, value`
-/// pairs (TS's spelling: `seeded 1`, then `<start>:r|t|c`), then
-/// `(least at, greatest at)` range pairs.
+/// token (required: a seed installs only under its own lock — ruling R1),
+/// `PEXPIRE` ms (2×window), the snapshot, grain, the selection boundary,
+/// `n`, then `n` count `field, value` pairs (TS's spelling: `seeded 1`,
+/// then `<start>:r|t|c`), then `(least at, greatest at)` range pairs.
 ///
 /// Reply: `1` installed; `0` a complete picture is already there (another
-/// replica's, just as exact; left alone); `-1` the lock is no longer this
-/// seed's (it outran its TTL): nothing written, the seed fails and is asked
-/// again. Arguments are validated before the first write, so a bad call
-/// cannot leave a half-written picture.
+/// replica's, just as exact; left alone); `-1` the lock is not this seed's
+/// (it lapsed): nothing written, the seed fails and is asked again.
+/// Arguments are validated before the first write, so a bad call cannot
+/// leave a half-written picture.
 pub const SEED_INSTALL_SRC: &str = r#"
-  if ARGV[1] ~= '' and redis.call('GET', KEYS[3]) ~= ARGV[1] then return -1 end
+  if ARGV[1] == '' or redis.call('GET', KEYS[3]) ~= ARGV[1] then return -1 end
   if redis.call('HEXISTS', KEYS[2], 'snap') == 1 and redis.call('HEXISTS', KEYS[1], 'seeded') == 1 then
     return 0
   end
   local ttl = tonumber(ARGV[2])
   local g = tonumber(ARGV[4])
-  local n = tonumber(ARGV[5])
-  if not (ttl and g and n) or not string.match(ARGV[3], '^%d+:%d+:[%d,]*$') then
+  local since = tonumber(ARGV[5])
+  local n = tonumber(ARGV[6])
+  if not (ttl and g and since and n) or not string.match(ARGV[3], '^%d+:%d+:[%d,]*$') then
     return redis.error_reply('ERR bad seed install')
   end
-  local first = 6 + 2 * n
+  local first = 7 + 2 * n
   if first - 1 > #ARGV or (#ARGV - first + 1) % 2 ~= 0 then
     return redis.error_reply('ERR bad seed install')
   end
@@ -371,7 +395,7 @@ pub const SEED_INSTALL_SRC: &str = r#"
     if not tonumber(ARGV[j]) then return redis.error_reply('ERR bad seed install') end
   end
   redis.call('DEL', KEYS[1], KEYS[2])
-  local i, last = 6, first - 1
+  local i, last = 7, first - 1
   while i <= last do
     local j = math.min(i + 999, last)
     redis.call('HSET', KEYS[1], unpack(ARGV, i, j))
@@ -382,6 +406,7 @@ pub const SEED_INSTALL_SRC: &str = r#"
     local s = math.floor(tonumber(ARGV[j]) / g) * g
     redis.call('HSET', KEYS[2], s .. ':a', ARGV[j], s .. ':z', ARGV[j + 1])
   end
+  redis.call('HSET', KEYS[2], 'since', ARGV[5])
   redis.call('HSET', KEYS[2], 'snap', ARGV[3])
   redis.call('PEXPIRE', KEYS[2], ttl)
   return 1
@@ -419,14 +444,17 @@ pub const LOAD_PUBLISH_SRC: &str = r#"
 /// Every other live replica's load, summed per field, bounded server-side.
 ///
 /// `KEYS`: the replica index. `ARGV`: now, this replica's id, the hash
-/// prefix, the most keys to return, the most replicas to read. Prunes
-/// expired replicas; reads at most `max replicas` pictures (each holds at
-/// most `max keys` fields — the publisher's bound); returns the `max keys`
+/// prefix, the most keys to return, the most replicas to read, the most
+/// fields one picture may hold (the fleet's publisher bound). Prunes
+/// expired replicas; sums every field of at most `max replicas` pictures
+/// (each read up to the publisher bound — a publisher within the fleet's
+/// bound is read whole, so the totals are exact); returns the `max keys`
 /// busiest totals (ties by name). Reply: flat `field, count` pairs.
 pub const LOAD_SNAPSHOT_SRC: &str = r#"
   redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
   local maxk = tonumber(ARGV[4])
   local maxr = tonumber(ARGV[5])
+  local maxp = tonumber(ARGV[6])
   local totals = {}
   local order = {}
   local read = 0
@@ -434,7 +462,7 @@ pub const LOAD_SNAPSHOT_SRC: &str = r#"
     if replica ~= ARGV[2] and read < maxr then
       read = read + 1
       local all = redis.call('HGETALL', ARGV[3] .. replica)
-      for i = 1, math.min(#all, 2 * maxk), 2 do
+      for i = 1, math.min(#all, 2 * maxp), 2 do
         local field = all[i]
         if totals[field] == nil then
           totals[field] = 0

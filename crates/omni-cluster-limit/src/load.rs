@@ -14,10 +14,13 @@
 //!   is that plus this process's own exact local counts, which is what
 //!   ranking reads (TS `createLoadRegistry().counts()`).
 //!
-//! Bounded: at most `max_keys` keys are published per tick (the busiest
-//! first); the snapshot script reads at most `max_replicas` pictures and
-//! returns the `max_keys` busiest totals, so its work and reply are bounded
-//! at the server. A local copy older than `ttl` (refreshes failing — the
+//! Bounded: at most `min(max_keys, fleet_max_keys)` keys are published per
+//! tick (the busiest first). The snapshot script reads at most
+//! `max_replicas` pictures, each up to `fleet_max_keys` fields — every
+//! publisher's bound, so a picture is read whole and the totals are exact —
+//! and returns this reader's `max_keys` busiest totals: work and reply are
+//! bounded at the server. `fleet_max_keys` must be the same on every
+//! replica (it is the fleet's publisher bound, not a per-reader choice). A local copy older than `ttl` (refreshes failing — the
 //! coordinator is down) is not read: ranking falls back to this process's
 //! own counts rather than a picture that may hold dead replicas.
 //!
@@ -60,6 +63,9 @@ pub struct LoadOptions {
     pub ttl: Duration,
     /// Most keys published per tick, and returned per snapshot.
     pub max_keys: usize,
+    /// The fleet's publisher bound: no replica publishes more, and a
+    /// snapshot reads each picture up to it. Same on every replica.
+    pub fleet_max_keys: usize,
     /// Most replica pictures one snapshot reads.
     pub max_replicas: usize,
 }
@@ -71,6 +77,7 @@ impl Default for LoadOptions {
             interval: Duration::from_millis(100),
             ttl: Duration::from_millis(1_000),
             max_keys: 4_096,
+            fleet_max_keys: 4_096,
             max_replicas: 256,
         }
     }
@@ -208,12 +215,13 @@ pub async fn tick_once(remote: &Remote, view: &LoadView, clock: &Clock, opts: &L
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub async fn publish(remote: &Remote, view: &LoadView, clock: &Clock, opts: &LoadOptions) {
     let mut counts: Vec<(String, u64)> = view.local().into_iter().collect();
-    if counts.len() > opts.max_keys {
+    let cap = opts.max_keys.min(opts.fleet_max_keys);
+    if counts.len() > cap {
         counts.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         view.metrics
             .truncated
-            .fetch_add((counts.len() - opts.max_keys) as u64, Ordering::Relaxed);
-        counts.truncate(opts.max_keys);
+            .fetch_add((counts.len() - cap) as u64, Ordering::Relaxed);
+        counts.truncate(cap);
     }
     let ttl = opts.ttl.as_millis() as u64;
     let expires = (clock)() + opts.ttl.as_secs_f64() * 1_000.0;
@@ -243,6 +251,7 @@ pub async fn refresh(remote: &Remote, view: &LoadView, clock: &Clock, opts: &Loa
         replica_key(""),
         opts.max_keys.to_string(),
         opts.max_replicas.to_string(),
+        opts.fleet_max_keys.to_string(),
     ];
     let taken = Instant::now();
     let out = remote
