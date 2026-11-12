@@ -1902,3 +1902,35 @@ async fn oversized_declared_bodies_are_413_off_v1_only() {
     drop(s);
     drop(stop(g).await);
 }
+
+/// Review A4-minor 1: a store failure during first setup is TS's 400
+/// BAD_REQUEST with SQLite's message, and nothing is configured.
+#[tokio::test]
+async fn a_store_refused_setup_is_bad_request_with_sqlite_s_message() {
+    let g = boot().await;
+    rusqlite::Connection::open(&g.f.path)
+        .expect("open")
+        .execute_batch(
+            "CREATE TRIGGER r BEFORE INSERT ON settings WHEN NEW.key = 'adminPasswordHash' \
+             BEGIN SELECT RAISE(ABORT, 'review write denied'); END",
+        )
+        .expect("trigger");
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/api/setup",
+        &[],
+        r#"{"password":"correct-horse-battery"}"#,
+    )
+    .await;
+    assert_eq!(
+        (s, b.as_str()),
+        (
+            400,
+            r#"{"error":{"code":"BAD_REQUEST","message":"review write denied"}}"#
+        )
+    );
+    let (_, _, b) = call(&g.base, "GET", "/api/status", &[], "").await;
+    assert!(b.starts_with(r#"{"configured":false,"#), "{b}");
+    drop(stop(g).await);
+}

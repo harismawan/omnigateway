@@ -515,12 +515,18 @@ async fn setup(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiE
     let Some(password) = fields.string("password") else {
         return Err(ApiError::new(ErrorCode::BadRequest, "password is required"));
     };
+    // Every failure here, the length rule or the store's, is `BAD_REQUEST`
+    // with its described message (`admin.ts`: `catch (error) { throw new
+    // GatewayError("BAD_REQUEST", describeError(error, "invalid password"))
+    // }`). The message is SQLite's own: it names neither the password nor
+    // the database path. Only an operator's own trigger could put the new
+    // hash in it — the hash of the password this caller just sent, never
+    // stored — and TS echoes that too.
     let created = match app.admin.set_initial_password(password).await {
         Ok(created) => created,
-        Err(AuthError::Password(message)) => {
+        Err(AuthError::Password(message) | AuthError::Internal(message)) => {
             return Err(ApiError::new(ErrorCode::BadRequest, message));
         }
-        Err(e) => return Err(e.into()),
     };
     if !created {
         return Err(conflict());
@@ -632,6 +638,113 @@ mod tests {
             ("x-forwarded-proto", b"https"),
         ]);
         assert!(!session_cookie(&two, false, "t", 1).contains("Secure"));
+    }
+
+    /// `requireAdmin` / `requireReader` / `requireClient` against every
+    /// principal, no cookie, an unknown token, and an expired session.
+    #[tokio::test]
+    async fn guards_admit_exactly_their_principals() {
+        use crate::admin_auth::{AdminAuth, Clock, MemoryKv};
+        use std::sync::atomic::{AtomicI64, Ordering};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("omni.db");
+        let store = omni_store::SqliteStore::open(&path, 0).expect("open");
+        rusqlite::Connection::open(&path)
+            .expect("open")
+            .execute(
+                "INSERT INTO api_keys (id, label, prefix, hash, limits, created_at) VALUES ('k1','l','p',?,'{}',1)",
+                [omni_crypto::apikey::hash("sk-omni-guard")],
+            )
+            .expect("key");
+        let clock = Arc::new(AtomicI64::new(1_000));
+        let now: Clock = {
+            let c = clock.clone();
+            Arc::new(move || c.load(Ordering::SeqCst))
+        };
+        let auth = AdminAuth::new(store, Arc::new(MemoryKv::new(now.clone())), now, 60_000);
+        auth.set_initial_password("correct-horse-battery")
+            .await
+            .expect("set");
+        auth.set_viewer_password(Some("viewer-password-1"))
+            .await
+            .expect("set");
+        let admin = auth
+            .login("correct-horse-battery")
+            .await
+            .expect("login")
+            .expect("token");
+        let viewer = auth
+            .login_viewer("viewer-password-1")
+            .await
+            .expect("login")
+            .expect("token");
+        let client = auth
+            .login_client("sk-omni-guard")
+            .await
+            .expect("login")
+            .expect("token");
+        let expired = auth
+            .login("correct-horse-battery")
+            .await
+            .expect("login")
+            .expect("token");
+
+        let cookie = |t: Option<&str>| match t {
+            None => HeaderMap::new(),
+            Some(t) => headers(&[("cookie", format!("omni_admin={t}").as_bytes())]),
+        };
+        let answer = |r: Result<String, ApiError>| match r {
+            Ok(v) => v,
+            Err(ApiError::Gateway(e)) => format!("{} {}", e.code.as_str(), e.message),
+            Err(ApiError::Response(r)) => format!("response {}", r.status()),
+        };
+        const NO_ADMIN: &str = "AUTH admin session required";
+        const NO_CLIENT: &str = "AUTH client session required";
+        // Every session shares one TTL, so the expired case runs last, after
+        // the clock passes it.
+        let rows: [(&str, Option<&str>, &str, &str, &str); 5] = [
+            ("admin", Some(&admin), "ok", "admin", NO_CLIENT),
+            ("viewer", Some(&viewer), NO_ADMIN, "viewer", NO_CLIENT),
+            ("client", Some(&client), NO_ADMIN, NO_ADMIN, "k1"),
+            ("none", None, NO_ADMIN, NO_ADMIN, NO_CLIENT),
+            (
+                "unknown",
+                Some("not-a-token"),
+                NO_ADMIN,
+                NO_ADMIN,
+                NO_CLIENT,
+            ),
+        ];
+        for (who, token, want_admin, want_reader, want_client) in rows {
+            let h = cookie(token);
+            let a = answer(require_admin(&h, &auth).await.map(|()| "ok".to_owned()));
+            let r = answer(
+                require_reader(&h, &auth)
+                    .await
+                    .map(|p| p.kind().as_str().to_owned()),
+            );
+            let c = answer(require_client(&h, &auth).await);
+            assert_eq!(
+                (a.as_str(), r.as_str(), c.as_str()),
+                (want_admin, want_reader, want_client),
+                "{who}"
+            );
+        }
+        clock.fetch_add(60_000, Ordering::SeqCst);
+        let h = cookie(Some(&expired));
+        assert_eq!(
+            answer(require_admin(&h, &auth).await.map(|()| "ok".into())),
+            NO_ADMIN
+        );
+        assert_eq!(
+            answer(
+                require_reader(&h, &auth)
+                    .await
+                    .map(|p| p.kind().as_str().into())
+            ),
+            NO_ADMIN
+        );
+        assert_eq!(answer(require_client(&h, &auth).await), NO_CLIENT);
     }
 
     #[test]

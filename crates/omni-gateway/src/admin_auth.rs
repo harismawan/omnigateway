@@ -228,14 +228,31 @@ pub enum AuthError {
     /// message the routes report as `BAD_REQUEST`.
     #[error("{0}")]
     Password(String),
-    /// Anything else: the routes report `INTERNAL "internal error"`.
+    /// Anything else: most routes report `INTERNAL "internal error"`;
+    /// `/api/setup` reports the message as `BAD_REQUEST`, as TS's does.
     #[error("{0}")]
     Internal(String),
 }
 
 impl From<StoreError> for AuthError {
     fn from(e: StoreError) -> Self {
-        AuthError::Internal(e.to_string())
+        AuthError::Internal(describe_store_error(&e))
+    }
+}
+
+/// `describeError(error, _)` of what `bun:sqlite` throws for the same
+/// failure: SQLite's own message (`sqlite3_errmsg`), or the error's name,
+/// `SQLiteError`, when that message is empty. Never the SQL, a bound
+/// parameter or the database path: SQLite's messages carry none of them.
+fn describe_store_error(e: &StoreError) -> String {
+    match e {
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(m))) if m.is_empty() => {
+            "SQLiteError".to_owned()
+        }
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, None)) => {
+            rusqlite::ffi::code_to_str(code.extended_code).to_owned()
+        }
+        other => other.to_string(),
     }
 }
 
@@ -260,8 +277,8 @@ pub struct AdminAuth {
     kv: Arc<dyn SessionKv>,
     now: Clock,
     ttl_ms: i64,
-    /// Concurrent Argon2 runs (19 MiB each), one per CPU.
-    hashing: tokio::sync::Semaphore,
+    /// Running Argon2 jobs (19 MiB each), one per CPU; see [`Self::hashing`].
+    hashing: Arc<tokio::sync::Semaphore>,
 }
 
 impl std::fmt::Debug for AdminAuth {
@@ -280,8 +297,20 @@ impl AdminAuth {
             kv,
             now,
             ttl_ms,
-            hashing: tokio::sync::Semaphore::new(cpus),
+            hashing: Arc::new(tokio::sync::Semaphore::new(cpus)),
         }
+    }
+
+    /// Replaces the hashing bound (tests).
+    #[cfg(test)]
+    pub(crate) fn set_hashing_permits(&mut self, permits: usize) {
+        self.hashing = Arc::new(tokio::sync::Semaphore::new(permits));
+    }
+
+    /// Hashing permits not held by a running job (tests).
+    #[cfg(test)]
+    pub(crate) fn idle_hashing_permits(&self) -> usize {
+        self.hashing.available_permits()
     }
 
     /// The session TTL in whole seconds: the cookie's `Max-Age`.
@@ -305,19 +334,27 @@ impl AdminAuth {
         .map_err(|e| AuthError::Internal(e.to_string()))?
     }
 
-    /// CPU-heavy work (Argon2) on the blocking pool, bounded.
+    /// CPU-heavy work (Argon2) on the blocking pool, at most one job per
+    /// permit *running*. The permit is owned by the blocking closure and
+    /// released when it exits: a caller that stops waiting (a client hanging
+    /// up mid-login) cannot free a slot while its job still runs, since
+    /// `spawn_blocking` work is not cancelled with the future awaiting it.
     async fn hashing<T: Send + 'static>(
         &self,
         f: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, AuthError> {
-        let _permit = self
+        let permit = self
             .hashing
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|e| AuthError::Internal(e.to_string()))?;
-        tokio::task::spawn_blocking(f)
-            .await
-            .map_err(|e| AuthError::Internal(e.to_string()))
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            f()
+        })
+        .await
+        .map_err(|e| AuthError::Internal(e.to_string()))
     }
 
     /// `passwordMatches(stored, password)`.
@@ -514,6 +551,7 @@ impl AdminAuth {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI64, Ordering};
+    use std::time::Duration;
 
     struct Fixture {
         auth: AdminAuth,
@@ -683,6 +721,13 @@ mod tests {
             .await
             .expect("login")
             .expect("token");
+        seed_key(&f.path, "k1", "sk-omni-change-test");
+        let c = f
+            .auth
+            .login_client("sk-omni-change-test")
+            .await
+            .expect("login")
+            .expect("token");
         assert!(matches!(
             f.auth.change_password("wrong-password!", "short").await,
             Err(AuthError::Password(_))
@@ -705,6 +750,9 @@ mod tests {
         );
         assert_eq!(f.auth.verify(&a).await.expect("verify"), None);
         assert_eq!(f.auth.verify(&v).await.expect("verify"), None);
+        // The client's key is still usable: only the password change ended it.
+        assert_eq!(f.auth.verify(&c).await.expect("verify"), None);
+        assert!(f.kv.is_empty());
         assert!(
             f.auth
                 .login("new-password-123")
@@ -712,6 +760,121 @@ mod tests {
                 .expect("login")
                 .is_some()
         );
+    }
+
+    fn seed_key(path: &std::path::Path, id: &str, raw: &str) {
+        let c = rusqlite::Connection::open(path).expect("open");
+        c.execute(
+            "INSERT INTO api_keys (id, label, prefix, hash, limits, created_at) VALUES (?,'l',?,?,'{}',1)",
+            rusqlite::params![id, omni_crypto::apikey::prefix(raw), omni_crypto::apikey::hash(raw)],
+        )
+        .expect("seed");
+    }
+
+    /// Setting or clearing the viewer password ends viewer sessions and
+    /// leaves admin and client sessions alone.
+    #[tokio::test]
+    async fn viewer_password_changes_spare_admin_and_client_sessions() {
+        let f = fixture(60_000);
+        f.auth.set_initial_password(PW).await.expect("set");
+        f.auth
+            .set_viewer_password(Some("viewer-password-1"))
+            .await
+            .expect("set");
+        seed_key(&f.path, "k1", "sk-omni-viewer-test");
+        let a = f.auth.login(PW).await.expect("login").expect("token");
+        let v = f
+            .auth
+            .login_viewer("viewer-password-1")
+            .await
+            .expect("login")
+            .expect("token");
+        let c = f
+            .auth
+            .login_client("sk-omni-viewer-test")
+            .await
+            .expect("login")
+            .expect("token");
+        f.auth
+            .set_viewer_password(Some("viewer-password-2"))
+            .await
+            .expect("set");
+        assert_eq!(f.auth.verify(&v).await.expect("verify"), None);
+        assert_eq!(
+            f.auth.verify(&a).await.expect("verify"),
+            Some(Principal::Admin)
+        );
+        assert_eq!(
+            f.auth.verify(&c).await.expect("verify"),
+            Some(Principal::Client {
+                api_key_id: "k1".into()
+            })
+        );
+    }
+
+    /// Concurrent first setups: exactly one wins, no loser overwrites its
+    /// row, and the stored hash is the winner's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_first_setups_have_one_persistent_winner() {
+        let f = fixture(60_000);
+        let auth = Arc::new(f.auth);
+        let passwords: Vec<String> = (0..8).map(|i| format!("race-password-{i}-xyz")).collect();
+        let tasks: Vec<_> = passwords
+            .iter()
+            .map(|p| {
+                let (auth, p) = (auth.clone(), p.clone());
+                tokio::spawn(async move { auth.set_initial_password(&p).await })
+            })
+            .collect();
+        let mut won = Vec::new();
+        for (i, t) in tasks.into_iter().enumerate() {
+            if t.await.expect("join").expect("setup") {
+                won.push(i);
+            }
+        }
+        assert_eq!(won.len(), 1, "{won:?}");
+        // Persistent: a fresh connection to the same file reads the
+        // winner's hash, and only the winner's password logs in.
+        let fresh = SqliteStore::open(&f.path, 0).expect("open");
+        let stored = admin_password::admin_hash(&fresh).expect("read");
+        for (i, p) in passwords.iter().enumerate() {
+            assert_eq!(
+                omni_crypto::password::verify(stored.as_deref(), p),
+                i == won[0],
+                "password {i}"
+            );
+            assert_eq!(auth.login(p).await.expect("login").is_some(), i == won[0]);
+        }
+    }
+
+    /// A store refusal surfaces SQLite's own message (what `bun:sqlite`'s
+    /// `SQLiteError.message` is), `SQLiteError` when it is empty; never the
+    /// password.
+    #[tokio::test]
+    async fn store_failures_carry_sqlite_s_message_only() {
+        for (raise, want) in [
+            (
+                "SELECT RAISE(ABORT, 'review write denied')",
+                "review write denied",
+            ),
+            ("SELECT RAISE(FAIL, '')", "SQLiteError"),
+        ] {
+            let f = fixture(60_000);
+            rusqlite::Connection::open(&f.path)
+                .expect("open")
+                .execute_batch(&format!(
+                    "CREATE TRIGGER r BEFORE INSERT ON settings WHEN NEW.key = 'adminPasswordHash' BEGIN {raise}; END"
+                ))
+                .expect("trigger");
+            match f.auth.set_initial_password(PW).await {
+                Err(AuthError::Internal(m)) => {
+                    assert_eq!(m, want);
+                    assert!(!m.contains(PW));
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(!f.auth.is_configured().await.expect("read"));
+        }
     }
 
     #[tokio::test]
@@ -779,6 +942,83 @@ mod tests {
         assert_eq!(f.auth.verify(&v).await.expect("verify"), None);
         // The password itself is untouched.
         assert!(f.auth.login(PW).await.expect("login").is_some());
+    }
+
+    /// Review A4-I1: the bound is on *running* blocking jobs. Each job
+    /// counts itself in and waits on a gate; the awaiting tasks are aborted
+    /// as soon as their job runs, and a fresh task is started in its place.
+    /// With the permit owned by the awaiting future, every abort released a
+    /// slot while its job still ran.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hashing_bound_survives_cancelled_waiters() {
+        use std::sync::atomic::AtomicUsize;
+        const PERMITS: usize = 2;
+        const WAVES: usize = 4;
+        let mut f = fixture(60_000);
+        f.auth.set_hashing_permits(PERMITS);
+        let auth = Arc::new(f.auth);
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(gate_rx));
+        let job = |auth: Arc<AdminAuth>| {
+            let (active, peak, started, gate) =
+                (active.clone(), peak.clone(), started.clone(), gate.clone());
+            tokio::spawn(async move {
+                auth.hashing(move || {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    started.fetch_add(1, Ordering::SeqCst);
+                    // Held until the test opens the gate.
+                    // A closed gate (the test ending) also releases.
+                    if let Ok(g) = gate.lock() {
+                        g.recv().ok();
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await
+            })
+        };
+        let mut waiting = Vec::new();
+        for wave in 0..WAVES {
+            let target = PERMITS * (wave + 1);
+            let handles: Vec<_> = (0..PERMITS).map(|_| job(auth.clone())).collect();
+            // Let this wave's jobs start, if the bound allows it.
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+            while started.load(Ordering::SeqCst) < target.min(PERMITS * WAVES)
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // A client hanging up mid-verify: the awaiting future goes away.
+            for h in handles {
+                h.abort();
+                waiting.push(h);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let running_peak = peak.load(Ordering::SeqCst);
+        // Release everything still parked, so blocking threads can exit.
+        for _ in 0..PERMITS * WAVES {
+            gate_tx.send(()).ok();
+        }
+        drop(gate_tx);
+        for h in waiting {
+            // Aborted: a `JoinError::Cancelled` is the expected outcome.
+            h.await.err();
+        }
+        assert!(
+            running_peak <= PERMITS,
+            "{running_peak} blocking jobs ran at once with {PERMITS} permits"
+        );
+        // Every admitted job ran to completion: cancellation never strands a
+        // permit either (the semaphore is whole again once they exit).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while auth.idle_hashing_permits() < PERMITS && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(auth.idle_hashing_permits(), PERMITS);
     }
 
     #[test]

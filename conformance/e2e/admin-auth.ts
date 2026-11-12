@@ -109,15 +109,20 @@ writeFileSync(
 await cli(["keys", "create", "--label", "k1"]);
 
 /** A copy of the seed database with these settings rows. */
-function seededDb(name: string, rows: Record<string, string>): string {
+function seededDb(name: string, rows: Record<string, string>, sql: string[] = []): string {
   const file = join(work, `${name}.db`);
   copyFileSync(join(seedRoot, "omni.db"), file);
   const d = new Database(file);
   for (const [k, v] of Object.entries(rows))
     d.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [k, v]);
+  for (const statement of sql) d.run(statement);
   d.close();
   return file;
 }
+
+/** A trigger that refuses the first admin password's row with `raise`. */
+const refuseAdminRow = (name: string, raise: string) =>
+  `CREATE TRIGGER ${name} BEFORE INSERT ON settings WHEN NEW.key = 'adminPasswordHash' BEGIN ${raise}; END`;
 // Hashes written by TS's own code path (`Bun.password.hash(_, ARGON2)`).
 const ARGON2 = { algorithm: "argon2id", memoryCost: 19_456, timeCost: 2 } as const;
 const tsAdminHash = await Bun.password.hash(PASSWORD, ARGON2);
@@ -259,13 +264,19 @@ type Step =
       name: string;
       /** Store the issued token under this name. */
       capture?: string;
-      /** An asserted divergence: TS's status, and Rust's exact answer. */
+      /** An asserted divergence: TS's exact answer, and Rust's. */
       expectDiff?: string;
-      tsStatus?: number;
+      tsExact?: string;
       rustExact?: string;
     } & Req)
   | { kind: "restart"; name: string }
-  | { kind: "faketime"; name: string; offset: string };
+  | { kind: "faketime"; name: string; offset: string }
+  /**
+   * `n` first setups at once, each with its own password; recorded as the
+   * sorted statuses, then which of the passwords log in afterwards (exactly
+   * one must: the winner's, which no loser overwrote).
+   */
+  | { kind: "race"; name: string; n: number };
 
 const json: [string, string] = ["content-type", "application/json"];
 const login = (
@@ -288,7 +299,9 @@ const status = (label: string, headers: [string, string][] = [], target = "/api/
 });
 const cookie = (t: string): [string, string] => ["cookie", `omni_admin={{${t}}}`];
 const pw = JSON.stringify({ password: PASSWORD });
-/** Bun's bare 413 against hyper's. */
+/** Bun's bare 413: a status line and nothing else. */
+const TS_413 = "413\n\n\n";
+/** hyper's: the same, plus `content-length: 0` (the documented exception). */
 const RUST_413 = "413\ncontent-length: 0\n\n";
 
 const deep = (n: number) => `{"x":${"[".repeat(n)}${"]".repeat(n)},"password":"${PASSWORD}"}`;
@@ -499,7 +512,7 @@ function bigSteps(): Step[] {
       target: "/api/login",
       big: { size: LIMIT + 1, headOnly: true },
       expectDiff: "413 framing: Bun sends no headers",
-      tsStatus: 413,
+      tsExact: TS_413,
       rustExact: RUST_413,
     },
     {
@@ -508,7 +521,7 @@ function bigSteps(): Step[] {
       target: "/api/setup",
       big: { size: LIMIT + 1, headOnly: true },
       expectDiff: "413 framing: Bun sends no headers",
-      tsStatus: 413,
+      tsExact: TS_413,
       rustExact: RUST_413,
     },
     {
@@ -517,7 +530,7 @@ function bigSteps(): Step[] {
       target: "/api/logout",
       big: { size: LIMIT + 1, headOnly: true },
       expectDiff: "413 framing: Bun sends no headers",
-      tsStatus: 413,
+      tsExact: TS_413,
       rustExact: RUST_413,
     },
     { name: "login body at limit", method: "POST", target: "/api/login", big: { size: LIMIT } },
@@ -527,7 +540,7 @@ function bigSteps(): Step[] {
       target: "/api/login",
       big: { size: LIMIT + 1, chunked: true },
       expectDiff: "413 framing: Bun sends no headers",
-      tsStatus: 413,
+      tsExact: TS_413,
       rustExact: RUST_413,
     },
     status("status with a big content-length", [["content-length", String(LIMIT + 1)]]),
@@ -606,6 +619,49 @@ const configs: Config[] = [
       status("legacy admin", [cookie("A")]),
     ],
   },
+  // Two first setups racing, eight times over (fresh boot each config):
+  // one 200, the rest 409, and only the winner's password works afterwards.
+  ...[1, 2].map(
+    (round): Config => ({
+      label: `setup-race-${round}`,
+      db: () => seededDb(`race-${round}`, {}),
+      steps: () => [
+        { kind: "race", name: "8 concurrent first setups", n: 8 },
+        status("after the race"),
+      ],
+    }),
+  ),
+  // `setInitialPassword` failing in the store: TS reports any such failure
+  // as 400 BAD_REQUEST with the error's described message (SQLite's own
+  // text, or `SQLiteError` when that is empty), and nothing is configured.
+  ...(
+    [
+      ["setup-store-abort", "SELECT RAISE(ABORT, 'review write denied')"],
+      ["setup-store-fail-empty", "SELECT RAISE(FAIL, '')"],
+      ["setup-store-ignore", "SELECT RAISE(IGNORE)"],
+      ["setup-store-constraint", "INSERT INTO refuse_x VALUES (NULL)"],
+    ] as const
+  ).map(
+    ([label, raise]): Config => ({
+      label,
+      db: () =>
+        seededDb(label, {}, [
+          "CREATE TABLE refuse_x (a NOT NULL)",
+          refuseAdminRow("refuse_admin", raise),
+        ]),
+      steps: () => [
+        {
+          name: "setup refused by the store",
+          method: "POST",
+          target: "/api/setup",
+          headers: [json],
+          body: pw,
+        },
+        status("after the refused setup"),
+        login(pw),
+      ],
+    }),
+  ),
   {
     label: "broken-hash",
     db: () => seededDb("broken", { adminPasswordHash: "not-a-phc-string", viewerPasswordHash: "" }),
@@ -759,6 +815,47 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         await sleep(50);
         continue;
       }
+      if (step.kind === "race") {
+        const passwords = Array.from({ length: step.n }, (_, i) => `race-password-${i}-xyz`);
+        const answers = await Promise.all(
+          passwords.map((p) =>
+            exchange({
+              method: "POST",
+              target: "/api/setup",
+              headers: [json],
+              body: JSON.stringify({ password: p }),
+            }),
+          ),
+        );
+        const statuses = answers.map((x) => x.status).sort();
+        const bodies = [
+          ...new Set(answers.filter((x) => x.status !== 200).map((x) => x.body.toString())),
+        ];
+        for (const x of answers) if (x.status === 200) normalize(x, false); // validates its token
+        const logins: number[] = [];
+        for (const p of passwords) {
+          const x = await exchange({
+            method: "POST",
+            target: "/api/login",
+            headers: [json],
+            body: JSON.stringify({ password: p }),
+          });
+          normalize(x, false);
+          logins.push(x.status);
+        }
+        const winners = logins.filter((st) => st === 200).length;
+        const winnerSetup = passwords.findIndex((_, i) => logins[i] === 200);
+        results.set(
+          step.name,
+          [
+            `statuses ${statuses.join(",")}`,
+            `refusals ${bodies.join(" | ")}`,
+            `passwords that log in: ${winners}`,
+            `the one that logs in won its setup: ${answers[winnerSetup]?.status === 200}`,
+          ].join("\n"),
+        );
+        continue;
+      }
       const headers = (step.headers ?? []).map(([k, v]): [string, string] => [
         k,
         v.replace(/\{\{(\w+)\}\}/g, (_, t: string) => tokens.get(t) ?? `<missing ${t}>`),
@@ -791,10 +888,21 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     } | null
   )?.value;
   d.close();
+  // The stdout file sink can trail the process's exit by a moment: wait for
+  // the shutdown line every boot writes last, then read.
+  const deadline = Date.now() + 5_000;
+  while (
+    Date.now() < deadline &&
+    !logs.every((f) => readFileSync(f, "utf8").includes("shutdown requested"))
+  )
+    await sleep(25);
   const authLines = logs
     .flatMap((f) => readFileSync(f, "utf8").split("\n"))
     .map((l) => l.replace(/^\S+ /, ""))
     .filter((l) => /^\w+ +admin /.test(l));
+  // In a race, which password wins (and so where its success line falls) is
+  // the scheduler's choice: compare the multiset.
+  if (cfg.steps().some((st) => st.kind === "race")) authLines.sort();
   return { results, db, hash, authLines };
 }
 
@@ -830,7 +938,7 @@ for (const cfg of configs) {
   }
   const [ts, rs] = [tsRun.results, rsRun.results];
   for (const step of cfg.steps()) {
-    if (step.kind !== undefined && step.kind !== "http") continue;
+    if (step.kind !== undefined && step.kind !== "http" && step.kind !== "race") continue;
     const a = ts.get(step.name);
     const b = rs.get(step.name);
     if (a === undefined && b === undefined) continue;
@@ -845,12 +953,12 @@ for (const cfg of configs) {
       continue;
     }
     if (step.expectDiff !== undefined) {
-      const tsOk = a.split("\n")[0] === String(step.tsStatus);
+      const tsOk = a === step.tsExact;
       const rsOk = b === step.rustExact;
       if (a === b || !tsOk || !rsOk) {
         failures++;
         report.push(
-          `${a === b ? "UNEXPECTED-EQUAL" : "WRONG-DIVERGENCE"} ${cfg.label}: ${step.name} (${step.expectDiff})\n--- want ts status ${step.tsStatus}, rust\n${step.rustExact}\n--- ts\n${a}\n--- rust\n${b}\n`,
+          `${a === b ? "UNEXPECTED-EQUAL" : "WRONG-DIVERGENCE"} ${cfg.label}: ${step.name} (${step.expectDiff})\n--- want ts\n${step.tsExact}\n--- want rust\n${step.rustExact}\n--- ts\n${a}\n--- rust\n${b}\n`,
         );
       } else {
         expected++;

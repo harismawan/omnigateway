@@ -593,3 +593,88 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         app: test_app,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::io::AsyncWriteExt as _;
+
+    /// Review A4-I1 over HTTP: a client that hangs up while its login's
+    /// Argon2 verification runs does not free that verification's slot. The
+    /// stored hash uses t=40 (19 MiB, a few seconds), so the job outlives
+    /// the connection by a wide margin.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hung_up_login_keeps_its_hashing_slot_until_argon2_finishes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("gateway.db");
+        {
+            let store = omni_store::SqliteStore::open(&path, 0).expect("open");
+            // `Bun.password.hash("correct-horse-battery", {argon2id, m=19456, t=40})`,
+            // with t raised: verification honours the stored parameters.
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO settings (key, value) VALUES ('adminPasswordHash', ?)",
+                    ["$argon2id$v=19$m=19456,t=40,p=1$t+bb0UkoQ0wovwgdTOvnEc7mm1XTbABXL7r8RMlrGCc$KvvTq59OWsxxKPGifAvoPd2OVA5js6CNGZoVpFGKQ1Y"],
+                )
+                .expect("hash");
+        }
+        let env = std::collections::HashMap::from([
+            (
+                "OMNI_ENCRYPTION_KEY".into(),
+                "test-encryption-key-0123456789".into(),
+            ),
+            ("OMNI_DB_PATH".into(), path.to_str().expect("path").into()),
+        ]);
+        let mut config = omni_gateway_core::config::load_config(&env, || 0).expect("config");
+        config.port = 0;
+        let running = crate::start(config, crate::Options::default())
+            .await
+            .expect("start");
+        let permits = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        assert_eq!(running.app.admin.idle_hashing_permits(), permits);
+
+        let mut s = tokio::net::TcpStream::connect(running.addr)
+            .await
+            .expect("connect");
+        let body = r#"{"password":"anything-at-all"}"#;
+        s.write_all(
+            format!(
+                "POST /api/login HTTP/1.1\r\nhost: x\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write");
+        // Wait for verification to take its slot, then hang up.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while running.app.admin.idle_hashing_permits() == permits {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "verify never started"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        drop(s);
+        // Long enough for hyper to drop the cancelled request future.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            running.app.admin.idle_hashing_permits(),
+            permits - 1,
+            "the hung-up login's slot was freed while Argon2 still ran"
+        );
+        // The slot comes back once the job itself ends.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while running.app.admin.idle_hashing_permits() < permits {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "slot never returned"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        running.shutdown();
+        running.wait().await.expect("stop");
+    }
+}
