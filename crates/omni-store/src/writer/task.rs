@@ -635,8 +635,12 @@ fn transient(e: &StoreError) -> bool {
         StoreError::Conflict(_) | StoreError::Pool(_) => true,
         StoreError::Postgres(e) => {
             use tokio_postgres::error::SqlState;
+            // A lost connection or a socket error is transient; a client-side
+            // conversion error (no SQLSTATE, not I/O) is a bug, not retried.
+            let io = std::error::Error::source(e).is_some_and(|s| s.is::<std::io::Error>());
             e.is_closed()
-                || e.code().is_none_or(|c| {
+                || io
+                || e.code().is_some_and(|c| {
                     [
                         SqlState::T_R_SERIALIZATION_FAILURE,
                         SqlState::T_R_DEADLOCK_DETECTED,

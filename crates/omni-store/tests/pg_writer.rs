@@ -682,3 +682,81 @@ async fn a_row_another_writer_inserted_after_the_read_is_added_to_not_overwritte
         "the begin is refused, as TS's plain INSERT is"
     );
 }
+
+/// What Postgres would refuse a value of fails only that event, as TS's
+/// `begin`/`append`/`updateHealth` throws for that request alone and its
+/// callers swallow it: an `INTEGER` status out of range, a non-finite
+/// instant. The rest of the batch commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_value_postgres_refuses_fails_only_its_own_event() {
+    let Some(base) = base_url("a_value_postgres_refuses_fails_only_its_own_event") else {
+        return;
+    };
+    let db = TestDb::create(&base, "refused_values").await;
+    let store = prepare(&db, 0).await;
+    let writer = Writer::spawn_postgres(store, config(0, 512)).expect("spawn");
+    let h = writer.handle();
+    let mut bad = done("bad", T0, Some("key-1"), "m", 1);
+    bad.status = i64::from(i32::MAX) + 1;
+    assert!(h.send(pending("bad", T0, Some("key-1"), "m")));
+    assert!(h.send(LogEvent::Finish(bad)));
+    assert!(h.send(LogEvent::Finish(done("good", T0, Some("key-1"), "m", 1))));
+    assert!(h.send(measure("cred-1", "nan", 1, Some(f64::NAN))));
+    assert!(h.send(measure("cred-1", "ok", 1, Some(1.5))));
+    let stats = writer.close().await.expect("close");
+    assert_eq!((stats.failed, stats.batches), (0, 1));
+    assert_eq!(stats.health_refused, 1, "the NaN instant");
+    let c = db.client().await;
+    let rows: Vec<(String, String)> = c
+        .query("SELECT id, state FROM request_logs ORDER BY id", &[])
+        .await
+        .expect("rows")
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("bad".into(), "pending".into()),
+            ("good".into(), "done".into())
+        ],
+        "the refused finish leaves its row pending, as a thrown COMPLETE does"
+    );
+    let until: Option<i64> = c
+        .query_one(
+            "SELECT rate_limited_until FROM credential_health WHERE model = 'ok'",
+            &[],
+        )
+        .await
+        .expect("health")
+        .get(0);
+    assert_eq!(until, Some(2), "1.5 rounds half to even into BIGINT");
+}
+
+/// The URL's own `options` survive the pool's `statement_timeout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn url_options_are_kept_beside_the_statement_timeout() {
+    let Some(base) = base_url("url_options_are_kept_beside_the_statement_timeout") else {
+        return;
+    };
+    let db = TestDb::create(&base, "url_options").await;
+    let sep = if db.url.contains('?') { '&' } else { '?' };
+    let url = format!(
+        "{}{sep}options=-c%20search_path%3Dpublic%2Cpg_catalog",
+        db.url
+    );
+    let mut cfg = PgConfig::new(&url);
+    cfg.statement_timeout = std::time::Duration::from_millis(1234);
+    let store = PgStore::open(cfg, 0).await.expect("open");
+    let c = store.client().await.expect("client");
+    let row = c
+        .query_one(
+            "SELECT current_setting('statement_timeout'), current_setting('search_path')",
+            &[],
+        )
+        .await
+        .expect("settings");
+    let (timeout, path): (String, String) = (row.get(0), row.get(1));
+    assert_eq!(timeout, "1234ms");
+    assert_eq!(path, "public,pg_catalog");
+}

@@ -134,10 +134,16 @@ impl PgStore {
             walked?;
         }
         let mut pooled = pg;
-        pooled.options(format!(
+        let timeout = format!(
             "-c statement_timeout={}",
             config.statement_timeout.as_millis()
-        ));
+        );
+        // Appended, so `options` the URL already carries are kept.
+        let options = match pooled.get_options() {
+            Some(given) if !given.is_empty() => format!("{given} {timeout}"),
+            _ => timeout,
+        };
+        pooled.options(options);
         let manager = Manager::from_config(
             pooled,
             NoTls,

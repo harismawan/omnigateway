@@ -23,7 +23,8 @@
 //! - **Health.** The touched pairs are locked with the advisory lock
 //!   `updateHealth` takes (`hashtext(credential|model)`), in a fixed order.
 //!   A pair whose credential does not exist is what `updateHealth`'s foreign
-//!   key throws on; it is skipped and counted, without aborting the batch.
+//!   key throws on, as is a value its columns cannot hold; either is skipped
+//!   and counted (`health_refused`), without aborting the batch.
 //!   Every transition is applied in order and the last measurement per pair
 //!   after them, as on SQLite.
 
@@ -214,6 +215,15 @@ impl Logs {
         })
     }
 
+    /// [`Self::apply`], where a log Postgres would refuse a value of (an
+    /// `INTEGER` out of range) changes nothing, as TS's `begin`/`append`
+    /// throws for that request alone and `beginLog`/`finishLog` swallow it.
+    fn apply_logged(&mut self, event: &LogEvent, node_id: &str) {
+        if let Err(e) = self.apply(event, node_id) {
+            tracing::warn!(reason = %e, "request log event refused; the row is left as it was");
+        }
+    }
+
     fn slot(&mut self, id: &str) -> &mut Option<Row> {
         self.rows.entry(id.to_owned()).or_default()
     }
@@ -267,7 +277,7 @@ impl Logs {
     }
 
     async fn write(&self, c: &impl GenericClient) -> Result<(), StoreError> {
-        let rows: Vec<&Row> = self
+        let mut rows: Vec<&Row> = self
             .dirty
             .keys()
             .filter_map(|id| self.rows.get(id).and_then(Option::as_ref))
@@ -275,6 +285,8 @@ impl Logs {
         if rows.is_empty() {
             return Ok(());
         }
+        // Inserted in id order, as they were locked.
+        rows.sort_unstable_by(|a, b| a.id.cmp(&b.id));
         macro_rules! col {
             ($f:ident) => {
                 rows.iter().map(|r| r.$f.clone()).collect::<Vec<_>>()
@@ -861,12 +873,21 @@ const UPSERT_MEASUREMENT: &str = "INSERT INTO credential_health
    consecutive_failures = EXCLUDED.consecutive_failures,
    rate_limited_until = EXCLUDED.rate_limited_until";
 
-fn failures(v: i64) -> Result<i32, StoreError> {
-    i32::try_from(v).map_err(|_| {
-        StoreError::Corrupt(format!(
-            "credential_health.consecutive_failures: {v} is out of INTEGER range"
-        ))
+/// A JS number bound into a `BIGINT` column: refused (as `updateHealth`
+/// throws) when it is not finite or rounds outside `int8`.
+fn instant_ok(v: Option<f64>) -> bool {
+    v.is_none_or(|v| {
+        v.is_finite()
+            && v.round_ties_even() >= -9.223_372_036_854_775e18
+            && v.round_ties_even() < 9.223_372_036_854_775e18
     })
+}
+
+/// The row a health write would bind, or `None` where Postgres would refuse
+/// it (and TS's `updateHealth` throw, changing nothing).
+fn health_ok(failures: i64, opened: Option<f64>, until: Option<f64>) -> Option<i32> {
+    let failures = i32::try_from(failures).ok()?;
+    (instant_ok(opened) && instant_ok(until)).then_some(failures)
 }
 
 async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u64, StoreError> {
@@ -917,17 +938,20 @@ async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u
         match e {
             WriteEvent::BreakerTransition(BreakerTransition(h)) => {
                 measured.shift_remove(&(h.credential_id.as_str(), h.model.as_str()));
-                if !known.contains(&h.credential_id) {
+                let Some(failures) =
+                    health_ok(h.consecutive_failures, h.opened_at, h.rate_limited_until)
+                        .filter(|_| known.contains(&h.credential_id))
+                else {
                     refused += 1;
                     continue;
-                }
+                };
                 c.execute(
                     &transition,
                     &[
                         &h.credential_id,
                         &h.model,
                         &h.breaker_state.as_str(),
-                        &failures(h.consecutive_failures)?,
+                        &failures,
                         &h.opened_at,
                         &h.rate_limited_until,
                     ],
@@ -942,18 +966,15 @@ async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u
     }
     let measurement = c.prepare_cached(UPSERT_MEASUREMENT).await?;
     for m in measured.values() {
-        if !known.contains(&m.credential_id) {
+        let Some(failures) = health_ok(m.consecutive_failures, None, m.rate_limited_until)
+            .filter(|_| known.contains(&m.credential_id))
+        else {
             refused += 1;
             continue;
-        }
+        };
         c.execute(
             &measurement,
-            &[
-                &m.credential_id,
-                &m.model,
-                &failures(m.consecutive_failures)?,
-                &m.rate_limited_until,
-            ],
+            &[&m.credential_id, &m.model, &failures, &m.rate_limited_until],
         )
         .await?;
     }
@@ -971,7 +992,7 @@ pub(crate) async fn write(
     let mut logs = Logs::load(&tx, events).await?;
     for e in events {
         if let WriteEvent::Log(l) = e {
-            logs.apply(l, node_id)?;
+            logs.apply_logged(l, node_id);
         }
     }
     logs.write(&tx).await?;
@@ -987,31 +1008,41 @@ pub(crate) async fn write(
         .iter()
         .filter_map(|(_, _, h)| h.as_ref().map(|(k, _)| k.clone()))
         .collect();
+    // Lock order, the same in every writer (and TS's `append`):
+    // `request_logs`, then `usage_daily` read and written, then
+    // `usage_rollup` read and written, then health. Within a table rows
+    // are locked and written in key order, so two replicas over the same
+    // rows queue rather than deadlock.
     let daily_before = if daily_keys.is_empty() {
         HashMap::new()
     } else {
         load_daily(&tx, &daily_keys).await?
     };
+    let mut daily: Folded<DailyKey, Daily> = Folded::new();
+    for (k, v) in &daily_before {
+        daily.rows.insert(k.clone(), (true, *v));
+    }
+    for (dk, dv, _) in &rolled {
+        daily.fold(dk.clone(), *dv, Daily::plus)?;
+    }
+    daily.rows.sort_unstable_keys();
+    write_daily(&tx, &daily, &daily_before).await?;
+
     let hourly_before = if hourly_keys.is_empty() {
         HashMap::new()
     } else {
         load_hourly(&tx, &hourly_keys).await?
     };
-    let mut daily: Folded<DailyKey, Daily> = Folded::new();
-    let mut hourly: Folded<(String, i64), Hourly> = Folded::new();
-    for (k, v) in &daily_before {
-        daily.rows.insert(k.clone(), (true, *v));
-    }
+    let mut hourly: Folded<HourlyKey, Hourly> = Folded::new();
     for (k, v) in &hourly_before {
         hourly.rows.insert(k.clone(), (true, *v));
     }
-    for (dk, dv, h) in rolled {
-        daily.fold(dk, dv, Daily::plus)?;
+    for (_, _, h) in rolled {
         if let Some((hk, hv)) = h {
             hourly.fold(hk, hv, Hourly::plus)?;
         }
     }
-    write_daily(&tx, &daily, &daily_before).await?;
+    hourly.rows.sort_unstable_keys();
     write_hourly(&tx, &hourly, &hourly_before).await?;
 
     let health_refused = write_health(&tx, events).await?;
