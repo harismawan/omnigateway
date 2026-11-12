@@ -42,8 +42,10 @@ use std::path::{Path, PathBuf};
 /// transaction so the parts agree with each other.
 #[derive(Debug, Clone)]
 pub struct SnapshotData {
-    /// Newest first.
-    pub api_keys: Vec<ApiKey>,
+    /// Newest first. A row that does not read is that key's own error (a
+    /// per-key refusal at auth), so one malformed key never stops boot or a
+    /// refresh, and never freezes the others' revocation.
+    pub api_keys: Vec<Result<ApiKey, keys::KeyRowError>>,
     /// By tier then label, secrets decrypted.
     pub credentials: Vec<Credential>,
     pub health: Vec<CredentialHealth>,
@@ -121,7 +123,7 @@ impl SqliteStore {
     pub fn snapshot_reads(&self, key: &FieldKey) -> Result<SnapshotData, StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         let data = SnapshotData {
-            api_keys: keys::list(&tx)?,
+            api_keys: keys::list_entries(&tx)?,
             credentials: credentials::list(&tx, key)?,
             health: credentials::list_health(&tx)?,
             models: models::list(&tx)?,
@@ -139,6 +141,15 @@ impl SqliteStore {
     /// The one read a snapshot miss (a brand-new key) falls back to.
     pub fn find_api_key_by_hash(&self, hash: &str) -> Result<Option<ApiKey>, StoreError> {
         keys::find_by_hash(&self.conn, hash)
+    }
+
+    /// [`Self::find_api_key_by_hash`], an unreadable row as that key's
+    /// [`keys::KeyRowError`] rather than a failed read.
+    pub fn find_api_key_entry(
+        &self,
+        hash: &str,
+    ) -> Result<Option<Result<ApiKey, keys::KeyRowError>>, StoreError> {
+        keys::find_entry_by_hash(&self.conn, hash)
     }
 
     pub fn list_credentials(&self, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {

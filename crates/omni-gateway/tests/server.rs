@@ -332,10 +332,17 @@ async fn failed_boot_is_bounded_and_same_database_restarts_cleanly() {
         c.port = 0;
         c
     };
+    // What is under test is that the *seed* phase is bounded (10 ms, while
+    // each seed is delayed 100 ms), shown by the error naming that bound.
+    // The outer timeout only catches a hang: it also covers boot work the
+    // test does not time (PBKDF2, migrations, the snapshot read), which a
+    // loaded debug build can stretch past a tight budget (review A5 minor).
+    let config = make_config();
+    let started = std::time::Instant::now();
     let error = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(30),
         start(
-            make_config(),
+            config,
             Options {
                 seed_delay: Duration::from_millis(100),
                 boot_seed_timeout: Duration::from_millis(10),
@@ -344,9 +351,13 @@ async fn failed_boot_is_bounded_and_same_database_restarts_cleanly() {
         ),
     )
     .await
-    .expect("bounded startup")
+    .unwrap_or_else(|_| panic!("startup hung for {:?}", started.elapsed()))
     .expect_err("timeout");
-    assert!(error.contains("seed installation timed out"));
+    assert!(
+        error.contains("seed installation timed out"),
+        "after {:?}: {error}",
+        started.elapsed()
+    );
     let occupied = TcpListener::bind("127.0.0.1:0").await.expect("occupy");
     let mut config = make_config();
     config.port = occupied.local_addr().expect("addr").port();

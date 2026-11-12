@@ -143,6 +143,7 @@ fn rust_reads_a_database_the_ts_cli_wrote() {
     let rust_keys: Vec<Value> = snap
         .api_keys
         .iter()
+        .flatten()
         .map(|k| {
             let mut v = serde_json::to_value(k).expect("key json");
             v.as_object_mut().expect("key").shift_remove("hash");
@@ -158,6 +159,7 @@ fn rust_reads_a_database_the_ts_cli_wrote() {
         let found = snap
             .api_keys
             .iter()
+            .flatten()
             .find(|k| k.id == created["id"].as_str().expect("id"))
             .expect("key present");
         assert_eq!(found.hash, omni_crypto::apikey::hash(raw));
@@ -166,6 +168,7 @@ fn rust_reads_a_database_the_ts_cli_wrote() {
     let limits = snap
         .api_keys
         .iter()
+        .flatten()
         .find(|k| k.label == "bench limited")
         .and_then(|k| k.limits.clone())
         .expect("limits readable");

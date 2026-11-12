@@ -712,7 +712,7 @@ async fn authenticate(
                         }
                         AuthOutcome::Refused(e) => Err(e),
                         AuthOutcome::Miss => {
-                            tracing::debug!(apiKeyId = %key.id, "key found but not in snapshot");
+                            tracing::debug!(apiKeyId = %key.as_ref().map_or_else(|e| e.id.clone(), |k| k.id.clone()), "key found but not in snapshot");
                             Err(GatewaySnapshot::refuse_unknown())
                         }
                     }
@@ -899,8 +899,16 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         let ingested = ingest_body(surface, &body, &headers)?;
         drop(body);
         let chat = ingested.request;
-        omni_dialects::ingress::check_model_allowlist(&chat.model, key.model_allowlist.as_deref())?;
+        let lone = ingested.model_lone.as_deref();
+        omni_dialects::ingress::check_model_allowed(&chat.model, key.allows(&chat.model, lone))?;
         fin.requested_model = chat.model.clone();
+        // A model holding a lone surrogate the key admits: TS throws its
+        // URIError building the model's rate-limit subject (at admission or,
+        // in every case, at the completion's debit). Refused here, before
+        // anything is claimed or sent upstream (see the A5 report).
+        if lone.is_some() {
+            return Err(omni_dialects::ingress::lone_surrogate_model_error());
+        }
         #[allow(clippy::cast_precision_loss)]
         match app
             .limiter
@@ -1219,11 +1227,30 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
         let (key, _snapshot) = authenticate(&app, &req, now).await?;
         let headers = headers_of(&req);
         let body = read_body(req, app.idle_timeout).await?;
-        let chat = ingest_body(Surface::Anthropic, &body, &headers)?.request;
-        omni_dialects::ingress::check_model_allowlist(&chat.model, key.model_allowlist.as_deref())?;
+        let ingested = ingest_body(Surface::Anthropic, &body, &headers)?;
+        let lone = ingested.model_lone;
+        let chat = ingested.request;
+        omni_dialects::ingress::check_model_allowed(
+            &chat.model,
+            key.allows(&chat.model, lone.as_deref()),
+        )?;
+        // `consume` builds the model's subject only where an override names
+        // it, and TS's URIError comes from exactly there; a lone-surrogate
+        // model no override names is judged against the key-wide limits.
+        let key_wide;
+        let limits = match lone.as_deref() {
+            Some(units) if key.limits.has_lone_override(units) => {
+                return Err(omni_dialects::ingress::lone_surrogate_model_error());
+            }
+            Some(_) => {
+                key_wide = key.limits.key_wide();
+                &key_wide
+            }
+            None => &key.limits,
+        };
         #[allow(clippy::cast_precision_loss)]
         app.limiter
-            .consume(&key.id, &key.limits, &chat.model, now as f64)
+            .consume(&key.id, limits, &chat.model, now as f64)
             .map_err(|r| {
                 app.deps.telemetry.rate_limit(
                     r.violation.dimension.as_str(),
@@ -1262,6 +1289,9 @@ async fn models(app: &App, req: &Request<Incoming>) -> Response<Body> {
         Ok((key, snapshot)) => {
             let mut ids: Vec<&String> = snapshot.routing.models.keys().collect();
             ids.sort();
+            // Model ids are well-formed (a stored id is UTF-8), so only the
+            // allowlist's well-formed names can equal one: an entry with a
+            // lone surrogate is never U+FFFD's.
             let allowed: Option<HashSet<&str>> = key
                 .model_allowlist
                 .as_ref()

@@ -17,18 +17,30 @@ use omni_crypto::field::FieldKey;
 use omni_ir::error::{ErrorCode, GatewayError};
 use omni_ir::js::trim;
 use omni_router::Snapshot;
+use omni_store::keys::KeyRowError;
 use omni_store::{ApiKey, CredentialHealth, LimitConfig, SqliteStore, StoreError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// One key in the snapshot: readable, or a row TS's `toKey` throws on,
+/// which is refused at auth with that error and nothing else.
+pub type KeyEntry = Result<Arc<ApiKey>, Arc<KeyRowError>>;
+
 /// One consistent view: keys and routing read in one transaction.
 #[derive(Debug, Clone)]
 pub struct GatewaySnapshot {
     /// Keyed by `api_keys.hash` (sha256 hex of the raw key).
-    pub keys_by_hash: HashMap<String, Arc<ApiKey>>,
+    pub keys_by_hash: HashMap<String, KeyEntry>,
     pub routing: Snapshot,
+}
+
+impl GatewaySnapshot {
+    /// The readable keys.
+    pub fn keys(&self) -> impl Iterator<Item = &Arc<ApiKey>> {
+        self.keys_by_hash.values().filter_map(|e| e.as_ref().ok())
+    }
 }
 
 /// A key that passed authentication: usable, with readable limits.
@@ -96,7 +108,26 @@ fn auth(message: &str) -> GatewayError {
 
 /// Judges a found (or missing) key, as `authenticateApiKey` does after its
 /// store lookup: usable first, then limits readable.
-fn judge(key: Option<&Arc<ApiKey>>, now_ms: i64) -> Result<AuthenticatedKey, GatewayError> {
+fn judge(entry: Option<&KeyEntry>, now_ms: i64) -> Result<AuthenticatedKey, GatewayError> {
+    // `findByHash` throws for a row `toKey` cannot read, before any other
+    // check: the proxy answers it as `INTERNAL` with the thrown message.
+    let key = match entry {
+        Some(Err(unreadable)) => {
+            return Err(
+                GatewayError::new(ErrorCode::Internal, unreadable.message.clone())
+                    .gateway_authored(),
+            );
+        }
+        Some(Ok(key)) => Some(key),
+        None => None,
+    };
+    // `toKey` logs this on every read of the row, usable or not, before
+    // `authenticateApiKey` judges it.
+    if let Some(k) = key
+        && k.limits.is_none()
+    {
+        tracing::error!(apiKeyId = %k.id, "api key limits unreadable");
+    }
     let Some(key) = key.filter(|k| k.usable(now_ms)) else {
         return Err(auth("invalid API key"));
     };
@@ -178,7 +209,14 @@ pub fn read_snapshot(
     let keys_by_hash = data
         .api_keys
         .into_iter()
-        .map(|k| (k.hash.clone(), Arc::new(k)))
+        .map(|k| match k {
+            Ok(k) => (k.hash.clone(), Ok(Arc::new(k))),
+            Err(e) => {
+                tracing::debug!(apiKeyId = %e.id, reason = %e.message,
+                    "api key unreadable; refused at auth until repaired");
+                (e.hash.clone(), Err(Arc::new(e)))
+            }
+        })
         .collect();
     Ok(GatewaySnapshot {
         keys_by_hash,
@@ -259,7 +297,7 @@ impl SnapshotHolder {
         &self,
         store: &SqliteStore,
         hash: &str,
-    ) -> Result<Option<Arc<ApiKey>>, StoreError> {
+    ) -> Result<Option<KeyEntry>, StoreError> {
         self.lookup_miss_after_read(store, hash, || {})
     }
 
@@ -268,15 +306,18 @@ impl SnapshotHolder {
         store: &SqliteStore,
         hash: &str,
         after_read: impl FnOnce(),
-    ) -> Result<Option<Arc<ApiKey>>, StoreError> {
+    ) -> Result<Option<KeyEntry>, StoreError> {
         let observed = self.current.load_full();
-        let Some(found) = store.find_api_key_by_hash(hash)? else {
+        let Some(found) = store.find_api_key_entry(hash)? else {
             return Ok(None);
         };
         after_read();
-        let found = Arc::new(found);
+        let found: KeyEntry = match found {
+            Ok(k) => Ok(Arc::new(k)),
+            Err(e) => Err(Arc::new(e)),
+        };
         let mut next = GatewaySnapshot::clone(&observed);
-        next.keys_by_hash.insert(found.hash.clone(), found.clone());
+        next.keys_by_hash.insert(hash.to_owned(), found.clone());
         // The exact snapshot read before the database lookup must still be
         // current at publication. A separate generation check would race.
         let previous = self.current.compare_and_swap(&observed, Arc::new(next));
@@ -356,13 +397,13 @@ mod publication_tests {
                     holder.rebuild(&store).unwrap();
                 })
                 .unwrap();
-            let expected = store.find_api_key_by_hash("h").unwrap();
+            let expected = store.find_api_key_entry("h").unwrap();
+            let entry = |e: Option<&KeyEntry>| {
+                e.map(|e| e.clone().map(|k| (*k).clone()).map_err(|e| (*e).clone()))
+            };
             // No subsequent database write or refresh may be needed to heal.
-            assert_eq!(format!("{result:?}"), format!("{expected:?}"));
-            assert_eq!(
-                format!("{:?}", holder.load().keys_by_hash.get("h")),
-                format!("{:?}", expected.as_ref())
-            );
+            assert_eq!(entry(result.as_ref()), expected);
+            assert_eq!(entry(holder.load().keys_by_hash.get("h")), expected);
         }
     }
 }

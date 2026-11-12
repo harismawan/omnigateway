@@ -29,13 +29,15 @@ fn opt_f(v: Option<i64>) -> Option<f64> {
 
 fn to_key(r: &Row) -> Result<ApiKey, StoreError> {
     let id: String = r.try_get("id")?;
-    let model_allowlist = keys::parse_allowlist(&id, r.try_get("model_allowlist")?)?;
+    let (model_allowlist, lone_allowlist) =
+        keys::parse_allowlist(&id, r.try_get("model_allowlist")?)?;
     let limits: String = r.try_get("limits")?;
     Ok(ApiKey {
         label: r.try_get("label")?,
         prefix: r.try_get("prefix")?,
         hash: r.try_get("hash")?,
         model_allowlist,
+        lone_allowlist,
         // `parseLimits`: unreadable marks the key rather than failing the read.
         limits: keys::parse_stored_limits(&limits),
         body_logging_opt_out: r.try_get("body_logging_opt_out")?,
@@ -49,10 +51,39 @@ fn to_key(r: &Row) -> Result<ApiKey, StoreError> {
 }
 
 pub(crate) async fn list_keys(c: &impl GenericClient) -> Result<Vec<ApiKey>, StoreError> {
+    list_key_entries(c)
+        .await?
+        .into_iter()
+        .map(|e| e.map_err(|e| StoreError::Corrupt(e.message)))
+        .collect()
+}
+
+/// One row through [`to_key`], or that key's [`keys::KeyRowError`] (an
+/// allowlist `JSON.parse` refuses, the only per-row failure Postgres's typed
+/// columns leave).
+fn to_key_entry(r: &Row) -> Result<Result<ApiKey, keys::KeyRowError>, StoreError> {
+    match to_key(r) {
+        Ok(k) => Ok(Ok(k)),
+        Err(StoreError::Corrupt(e)) => {
+            let raw: Option<String> = r.try_get("model_allowlist")?;
+            Ok(Err(keys::KeyRowError {
+                id: r.try_get("id")?,
+                hash: r.try_get("hash")?,
+                message: keys::allowlist_parse_error(raw.as_deref()).unwrap_or(e),
+            }))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Every key, each read on its own (see `keys::list_entries`).
+pub(crate) async fn list_key_entries(
+    c: &impl GenericClient,
+) -> Result<Vec<Result<ApiKey, keys::KeyRowError>>, StoreError> {
     query_rows(c, "SELECT * FROM api_keys ORDER BY created_at DESC", &[])
         .await?
         .iter()
-        .map(to_key)
+        .map(to_key_entry)
         .collect()
 }
 
@@ -177,6 +208,7 @@ fn to_operator_key(r: &Row) -> Result<OperatorKey, StoreError> {
         prefix: r.try_get("prefix")?,
         hash: r.try_get("hash")?,
         model_allowlist: None,
+        lone_allowlist: Vec::new(),
         limits: keys::parse_stored_limits(&limits),
         body_logging_opt_out: r.try_get("body_logging_opt_out")?,
         created_at: 0,
@@ -190,6 +222,7 @@ fn to_operator_key(r: &Row) -> Result<OperatorKey, StoreError> {
         allowlist_json: r.try_get("model_allowlist")?,
         limits_json: limits,
         created_at: date("created_at")?,
+        revoked_at: date("revoked_at")?,
         expires_at: date("expires_at")?,
     })
 }

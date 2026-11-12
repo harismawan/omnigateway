@@ -218,6 +218,8 @@ class Masker {
   keys: string[] = [];
   /** Every raw key this binary returned, with the step that returned it. */
   sightings: string[] = [];
+  /** The step that minted each key, by raw key. */
+  mintedIn = new Map<string, string>();
 
   /** Records a creation answer (validated) and returns its body masked. */
   mint(body: unknown, step: string, side: string): void {
@@ -229,6 +231,7 @@ class Masker {
     if (this.ids.includes(b.id)) throw new Error(`${side}: id minted twice`);
     if (allRawKeys.has(b.key)) throw new Error(`raw key minted twice (${side}, ${step})`);
     allRawKeys.set(b.key, side);
+    this.mintedIn.set(b.key, step);
     this.ids.push(b.id);
     this.keys.push(b.key);
   }
@@ -263,11 +266,29 @@ function normalize(x: Ex, m: Masker): string {
         const t = Date.parse(v);
         if (!Number.isNaN(t) && Math.abs(t / 1000 - now) < 120) return "date: <date>";
       }
-      if (k === "content-length") return "content-length: <n>";
+      // Validated, then masked: the body's own length (masked ids and
+      // timestamps change it), never merely present.
+      if (k === "content-length") {
+        return Number(v) === x.body.length
+          ? "content-length: <body length>"
+          : `content-length: ${v} (body ${x.body.length})`;
+      }
       return `${k}: ${v}`;
     })
     .sort();
   return `${x.status}\n${head.join("\n")}\n\n${maskTimes(m.text(x.body.toString("latin1")))}`;
+}
+
+/**
+ * A `/v1` answer: [`normalize`], and the instants a refusal reports (a
+ * reset, a `retry-after`) read against the clock rather than compared, since
+ * the two binaries answer at different instants.
+ */
+function normalizeV1(x: Ex, m: Masker): string {
+  return normalize(x, m)
+    .replace(/^(anthropic-ratelimit-[a-z-]+-reset): \S+$/gm, "$1: <instant>")
+    .replace(/^(x-ratelimit-reset-[a-z-]+): \S+$/gm, "$1: <duration>")
+    .replace(/^retry-after: \d+$/gm, "retry-after: <s>");
 }
 
 /** Every table but the ones the gateway writes on its own clock, sorted. */
@@ -334,17 +355,29 @@ type Step =
       /** For an outcome the scheduler picks: a verdict instead of a DB dump. */
       settle?: (file: string) => string;
     }
-  /** Mint over the API, then poll `/v1/models` with the raw key: 200 within 1 s. */
-  | { kind: "admitted"; name: string; keyIndex: number; expect: 200 | 401 }
-  /** Poll `/v1/models` with the seeded key until `id` is (or is not) listed, ≤ 1 s. */
+  /**
+   * Poll `/v1/models` with a raw key until it answers `expect`. Asserted on
+   * each binary on its own: the answer must come from a request that both
+   * started and finished within 1 s of the step's start.
+   */
+  | { kind: "admitted"; name: string; keyIndex: number | string; expect: number }
+  /** Poll `/v1/models` with the seeded key until `id` is (or is not) listed, ≤ 1 s, per binary. */
   | { kind: "listed"; name: string; id: string; present: boolean }
+  /**
+   * One `/v1` request authenticated by a raw key (a minted key's index, or
+   * a literal raw key), compared like any exchange.
+   */
+  | {
+      kind: "v1";
+      name: string;
+      key: number | string;
+      method?: string;
+      target: string;
+      body?: string;
+    }
   /** Log in again (after a session-ending change). */
   | { kind: "relogin"; name: string; who: "admin" | "viewer"; password: string; mode?: string }
-  /**
-   * A hand edit while the gateway runs: the Rust snapshot refuses to *boot*
-   * on some rows TS reads lazily (pre-existing; see the A5 report), so rows
-   * only the admin routes are meant to trip on are written after boot.
-   */
+  /** A hand edit while the gateway runs. */
   | { kind: "sql"; name: string; sql: string[] };
 
 const J: [string, string] = ["content-type", "application/json"];
@@ -870,15 +903,190 @@ function oddRowSteps(): Step[] {
     as("admin", "GET", "/api/catalog"),
     as("admin", "PUT", "/api/keys/odd-limits/smart-routing", '{"enabled":true}'),
     as("admin", "PUT", "/api/keys/odd-allow/expiry", '{"expiresAt":null}'),
+    as("admin", "PUT", "/api/keys/odd-frac/smart-routing", '{"enabled":true}'),
+    as("admin", "PUT", "/api/keys/odd-frac/guardrail", '{"policy":"p"}'),
+    as("admin", "PUT", "/api/keys/odd-null/limits", '{"limits":{}}'),
     as("admin", "PUT", "/api/models/m-new", model("m-new")),
+  ];
+}
+
+/**
+ * Review A5-I1: model identity is exact UTF-16 on both sides. A lone
+ * surrogate is never the U+FFFD SQLite stores it as, nor another lone
+ * surrogate; distinct per-model overrides stay distinct.
+ */
+const IDENTITY_SQL = [
+  `INSERT INTO virtual_models (id,targets,strategy) VALUES ('\ufffd','${JSON.stringify([TARGET])}','score')`,
+  `INSERT INTO virtual_models (id,targets,strategy) VALUES ('plain','${JSON.stringify([TARGET])}','score')`,
+  ...(
+    [
+      ["id-k1", '["\\ud800","plain"]', "{}"],
+      ["id-k2", '["\\ufffd"]', "{}"],
+      [
+        "id-k3",
+        null,
+        '{"models":{"\\ud800":{"concurrency":1},"\\ufffd":{"requests":{"1m":1}},"\\udc00":{"requests":{"1m":5}}}}',
+      ],
+      ["id-k4", null, '{"requests":{"1m":50}}'],
+    ] as const
+  ).map(
+    ([id, allow, limits]) =>
+      `INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,created_at) VALUES ('${id}','${id}','${rawOf(id).slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf(id)).digest("hex")}',${allow === null ? "NULL" : `'${allow}'`},'${limits}',1600000000000)`,
+  ),
+];
+
+/** A fixed raw key for a hand-written row (never minted, never secret). */
+function rawOf(id: string): string {
+  return `sk-omni-${id.padEnd(43, "0")}`;
+}
+
+function identitySteps(): Step[] {
+  const chat = (m: string) => `{"model":"${m}","messages":[{"role":"user","content":"hi"}]}`;
+  const s: Step[] = [];
+  for (const k of ["id-k1", "id-k2", "id-k3"]) {
+    s.push({
+      kind: "v1",
+      name: `${k} GET /v1/models`,
+      key: rawOf(k),
+      method: "GET",
+      target: "/v1/models",
+    });
+  }
+  // The allowlist: refusals (401) where TS refuses, on both routes that parse.
+  for (const [k, models] of [
+    ["id-k1", ["\\ufffd", "\ufffd", "\\ud801", "\\udc00", "plain-not"]],
+    ["id-k2", ["\\ud800", "\\ud801", " \\ud800 ", "\\ud800[1m]", "plain"]],
+  ] as const) {
+    for (const m of models) {
+      s.push({
+        kind: "v1",
+        name: `${k} chat ${m}`,
+        key: rawOf(k),
+        target: "/v1/chat/completions",
+        body: chat(m),
+      });
+      s.push({
+        kind: "v1",
+        name: `${k} count ${m}`,
+        key: rawOf(k),
+        target: "/v1/messages/count_tokens",
+        body: chat(m),
+      });
+    }
+  }
+  // Per-model limits: U+FFFD's own 1/min, `\udc00`'s 5/min and `\ud801`
+  // (no override) never alias each other.
+  for (const m of ["\\ufffd", "\\ufffd", "\\ud801", "\\ud801", "\\udc00x", "\ufffd"]) {
+    s.push({
+      kind: "v1",
+      name: `id-k3 count ${m} #${s.length}`,
+      key: rawOf("id-k3"),
+      target: "/v1/messages/count_tokens",
+      body: chat(m),
+    });
+  }
+  // A lone-surrogate override, named exactly: TS's URIError.
+  s.push({
+    kind: "v1",
+    name: "id-k3 count \\ud800",
+    key: rawOf("id-k3"),
+    target: "/v1/messages/count_tokens",
+    body: chat("\\ud800"),
+  });
+  // A count for a well-formed model under a key-wide limit, then U+FFFD's.
+  s.push({
+    kind: "v1",
+    name: "id-k4 count plain",
+    key: rawOf("id-k4"),
+    target: "/v1/messages/count_tokens",
+    body: chat("plain"),
+  });
+  return s;
+}
+
+/**
+ * Review A5-I2 at boot: rows TS reads lazily and the Rust gateway once
+ * refused to boot on, present before boot. Every other key, the models and
+ * settings are served; the bad key alone is refused with TS's error.
+ */
+const BAD_KEY_SQL = [
+  `INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,created_at) VALUES ('bk-allow','b','${rawOf("bk-allow").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-allow")).digest("hex")}','{bad','{}',1600000000000)`,
+  `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,expires_at) VALUES ('bk-frac','f','${rawOf("bk-frac").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-frac")).digest("hex")}','{}',1700000000000.5,4102444800000.5)`,
+  `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,revoked_at) VALUES ('bk-rev','r','${rawOf("bk-rev").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-rev")).digest("hex")}','{}',1600000000001,1.5)`,
+  `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at) VALUES ('bk-lim','l','${rawOf("bk-lim").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-lim")).digest("hex")}','{"requests":{"9m":1}}',1600000000002)`,
+];
+
+function badKeySteps(): Step[] {
+  return [
+    ...["bk-allow", "bk-frac", "bk-rev", "bk-lim"].map(
+      (k): Step => ({
+        kind: "v1",
+        name: `${k} GET /v1/models`,
+        key: rawOf(k),
+        method: "GET",
+        target: "/v1/models",
+      }),
+    ),
+    {
+      kind: "v1",
+      name: "seed key served beside them",
+      key: SEED_KEY,
+      method: "GET",
+      target: "/v1/models",
+    },
+    // The listing reads every row: TS's `keys.list()` throws on the bad one.
+    as("admin", "GET", "/api/keys"),
+    as("admin", "GET", "/api/models"),
+    as("admin", "GET", "/api/settings"),
+    // An edit of the bad key reads it too; an edit of a good one does not.
+    as("admin", "PUT", "/api/keys/bk-allow/smart-routing", '{"enabled":true}'),
+    as("admin", "PUT", "/api/keys/bk-frac/smart-routing", '{"enabled":true}'),
+    // TS's edit reads the row first (`keys.get`), so it cannot repair it:
+    // refused as the listing is.
+    as("admin", "PUT", "/api/keys/bk-allow/models", '{"modelAllowlist":null}'),
+    as("admin", "GET", "/api/keys"),
+  ];
+}
+
+/**
+ * Review A5-I2 live: a key served from the snapshot, another corrupted
+ * behind the gateway's back, then the first revoked over `/api` and a model
+ * and setting changed: every change lands within 1 s.
+ */
+function livePoisonSteps(): Step[] {
+  return [
+    as("admin", "POST", "/api/keys", '{"label":"live a"}'),
+    as("admin", "POST", "/api/keys", '{"label":"live b"}'),
+    { kind: "admitted", name: "a served", keyIndex: 0, expect: 200 },
+    { kind: "admitted", name: "b served", keyIndex: 1, expect: 200 },
+    {
+      kind: "sql",
+      name: "corrupt b",
+      sql: ["UPDATE api_keys SET model_allowlist = '{bad' WHERE label = 'live b'"],
+    },
+    // TS reads the row per request; the Rust snapshot within a poll.
+    { kind: "admitted", name: "b refused within 1 s of its corruption", keyIndex: 1, expect: 500 },
+    { kind: "v1", name: "b refused once corrupted", key: 1, method: "GET", target: "/v1/models" },
+    as("admin", "DELETE", "/api/keys/{{id:0}}"),
+    { kind: "admitted", name: "a refused within 1 s of its revocation", keyIndex: 0, expect: 401 },
+    as("admin", "PUT", "/api/models/live-m", model("live-m")),
+    {
+      kind: "listed",
+      name: "a model put after the corruption is listed within 1 s",
+      id: "live-m",
+      present: true,
+    },
+    as("admin", "PUT", "/api/settings", settings({ maxAttempts: 7 })),
+    as("admin", "GET", "/api/settings"),
   ];
 }
 const ODD_SQL = [
   `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,model_allowlist) VALUES ('odd-limits','l','p1','h1','{"requests":{"1m":0}}',1600000000000,'["a",5,null,{"x":1}]')`,
   `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,model_allowlist) VALUES ('odd-allow','l','p2','h2','{"models":{"\\ud800":{"concurrency":1}}}',1600000000001,'"str"')`,
-  // Integer dates only: a REAL \`created_at\` stops the Rust gateway at boot
-  // (snapshot reader, pre-existing; recorded in the A5 report).
+  // Every date as INTEGER, fractional REAL and NULL (review A5-I3).
   `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,expires_at,revoked_at) VALUES ('odd-dates','l','p3','h3','{}',1500000000000,2500,3)`,
+  `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,expires_at,revoked_at) VALUES ('odd-frac','l','p4','h4','{}',1500000000000.5,2500.25,1.5)`,
+  `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,expires_at,revoked_at) VALUES ('odd-null','l','p5','h5','{}',1500000000001,NULL,NULL)`,
   `INSERT INTO virtual_models VALUES ('odd-m','[{"provider":"anthropic","model":"\\ud800","x":[1,{"y":1e400}]}]','weird',2)`,
   `INSERT INTO settings(key,value) VALUES('settings','{"maxAttempts":"x","extra":[1,{"a":"\\udc00"}],"guardrailModel":"  g ","smartRouterLocalModel":"odd-m"}')`,
 ];
@@ -901,15 +1109,24 @@ const configs: Config[] = [
   { label: "settings", db: () => db("settings", CREDS_SQL), steps: settingsSteps },
   { label: "passwords", db: () => db("passwords"), steps: passwordSteps },
   { label: "odd-rows", db: () => db("odd-rows", ODD_SQL), steps: oddRowSteps },
+  { label: "key-identity", db: () => db("key-identity", IDENTITY_SQL), steps: identitySteps },
+  { label: "boot-bad-keys", db: () => db("boot-bad-keys", BAD_KEY_SQL), steps: badKeySteps },
+  { label: "live-poison", db: () => db("live-poison", CREDS_SQL), steps: livePoisonSteps },
   {
     label: "broken-rows",
-    db: () => db("broken-rows", [`INSERT INTO virtual_models VALUES ('bad','{bad','score',0)`]),
+    // The bad key row is there at boot (review A5-I2: once a Rust boot
+    // failure). The `null` provider_data is written after boot: a routing
+    // snapshot refuses it in both builds (the credential is read whole).
+    db: () =>
+      db("broken-rows", [
+        `INSERT INTO virtual_models VALUES ('bad','{bad','score',0)`,
+        `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,model_allowlist) VALUES ('bad','l','p','h','{}',1,'{bad')`,
+      ]),
     steps: () => [
       {
         kind: "sql",
         name: "hand-edited rows",
         sql: [
-          `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,model_allowlist) VALUES ('bad','l','p','h','{}',1,'{bad')`,
           `INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES ('nul','qoder','N','oauth','null',1,1)`,
         ],
       },
@@ -982,8 +1199,21 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
   const m = new Masker();
   const results = new Map<string, Result>();
   const notes: string[] = [];
+  const deadlineFailures: string[] = [];
   try {
-    await waitHealthy();
+    // A binary that exits instead of serving (a boot refusal) answers every
+    // step with that, so the config fails step by step rather than the run.
+    const booted = await Promise.race([
+      waitHealthy().then(() => true),
+      proc.exited.then(() => false),
+    ]);
+    if (!booted) {
+      const reason = readFileSync(logFile, "utf8").trim().split("\n").at(-1) ?? "";
+      for (const step of cfg.steps())
+        if (step.kind !== "sql")
+          results.set(step.name, { text: `${TRANSPORT_ERROR} did not boot: ${reason}`, db: "" });
+      return { results, lines: [], secretProblems: [], minted: 0, notes, deadlineFailures };
+    }
     const cookies: Record<Who, string | null> = {
       admin: await login(PASSWORD),
       viewer: await login(VIEWER, "viewer"),
@@ -1017,7 +1247,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         } catch {}
       }
       for (const raw of allRawKeys.keys())
-        if (x.body.includes(raw)) m.sightings.push(`${name}: ${raw.slice(0, 12)}`);
+        if (x.body.includes(raw)) m.sightings.push(`${name}\u0000${raw}`);
     };
     for (const step of cfg.steps()) {
       if (step.kind === "sql") {
@@ -1032,47 +1262,71 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         results.set(step.name, { text: c === null ? "refused" : "logged in", db: dump(file, m) });
         continue;
       }
-      if (step.kind === "listed") {
+      if (step.kind === "listed" || step.kind === "admitted") {
+        const raw =
+          step.kind === "listed"
+            ? SEED_KEY
+            : typeof step.keyIndex === "number"
+              ? m.keys[step.keyIndex]
+              : step.keyIndex;
         const started = Date.now();
-        let ok = false;
-        while (Date.now() - started < 1_000) {
-          const x = await exchange({
-            target: "/v1/models",
-            headers: [["authorization", `Bearer ${SEED_KEY}`]],
-          });
-          const ids =
-            (JSON.parse(x.body.toString("utf8")) as { data?: { id: string }[] }).data?.map(
-              (d) => d.id,
-            ) ?? [];
-          if (ids.includes(step.id) === step.present) {
-            ok = true;
-            break;
-          }
-          await sleep(20);
-        }
-        notes.push(`${step.name}: ${ok ? "ok" : "MISSED"} after ${Date.now() - started} ms`);
-        results.set(step.name, { text: ok ? "ok within 1 s" : "not within 1 s", db: "" });
-        continue;
-      }
-      if (step.kind === "admitted") {
-        const raw = m.keys[step.keyIndex];
-        const started = Date.now();
-        let status = 0;
-        while (Date.now() - started < 1_000) {
+        let last = "";
+        let okAt: number | null = null;
+        for (;;) {
+          const sent = Date.now();
+          if (sent - started >= 1_000) break;
           const x = await exchange({
             target: "/v1/models",
             headers: [["authorization", `Bearer ${raw}`]],
           });
-          status = x.status;
-          if (status === step.expect) break;
+          const done = Date.now();
+          let hit: boolean;
+          if (step.kind === "listed") {
+            const ids =
+              (JSON.parse(x.body.toString("utf8")) as { data?: { id: string }[] }).data?.map(
+                (d) => d.id,
+              ) ?? [];
+            hit = x.status === 200 && ids.includes(step.id) === step.present;
+            last = `${x.status} ${ids.length} ids`;
+          } else {
+            hit = x.status === step.expect;
+            last = String(x.status);
+          }
+          // Counted only for an answer that also *finished* inside the bound.
+          if (hit && done - started <= 1_000) {
+            okAt = done - started;
+            break;
+          }
           await sleep(20);
         }
-        const ms = Date.now() - started;
-        notes.push(`${step.name}: ${status} after ${ms} ms`);
+        const verdict = okAt === null ? `MISSED (last ${last})` : "ok";
+        notes.push(`${step.name}: ${verdict}${okAt === null ? "" : ` after ${okAt} ms`}`);
+        if (okAt === null) deadlineFailures.push(`${step.name}: last answer ${last}`);
         results.set(step.name, {
-          text: status === step.expect ? `ok within 1 s` : `status ${status} after ${ms} ms`,
+          text: okAt === null ? "not within 1 s" : "ok within 1 s",
           db: "",
         });
+        continue;
+      }
+      if (step.kind === "v1") {
+        const raw = typeof step.key === "number" ? m.keys[step.key] : step.key;
+        let x: Ex;
+        try {
+          x = await exchange({
+            method: step.method ?? "POST",
+            target: step.target,
+            headers: [
+              ["authorization", `Bearer ${raw}`],
+              ["content-type", "application/json"],
+            ],
+            ...(step.body === undefined ? {} : { body: step.body }),
+          });
+        } catch (err) {
+          results.set(step.name, { text: `${TRANSPORT_ERROR} ${String(err)}`, db: "" });
+          continue;
+        }
+        record(step.name, x);
+        results.set(step.name, { text: normalizeV1(x, m), db: dump(file, m) });
         continue;
       }
       if (step.kind === "concurrent") {
@@ -1098,6 +1352,9 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       record(step.name, x);
       results.set(step.name, { text: normalize(x, m), db: dump(file, m) });
+      // Keys list newest first, and two mints in one millisecond tie: give
+      // each sequential mint its own instant so both builds order alike.
+      if (step.method === "POST" && fill(step.target) === "/api/keys") await sleep(3);
     }
   } finally {
     proc.kill("SIGTERM");
@@ -1111,7 +1368,24 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     .map((l) => l.replace(/^\S+ /, ""))
     .filter((l) => /^\w+ +(admin password|viewer|provider catalog|api key limits)/.test(l))
     .map((l) => m.text(l));
-  return { results, lines, sightings: m.sightings, minted: m.keys.length, notes };
+  // Each raw key this binary minted is seen exactly once, in the answer of
+  // the step that minted it; no other raw key is ever seen.
+  const secretProblems: string[] = [];
+  for (const raw of m.keys) {
+    const seen = m.sightings
+      .filter((s) => s.endsWith(`\u0000${raw}`))
+      .map((s) => s.split("\u0000")[0]);
+    if (seen.length !== 1 || seen[0] !== m.mintedIn.get(raw))
+      secretProblems.push(
+        `${raw.slice(0, 12)} minted in ${m.mintedIn.get(raw)}, seen in ${JSON.stringify(seen)}`,
+      );
+  }
+  for (const s of m.sightings) {
+    const raw = s.split("\u0000")[1] as string;
+    if (!m.keys.includes(raw))
+      secretProblems.push(`foreign key ${raw.slice(0, 12)} seen in ${s.split("\u0000")[0]}`);
+  }
+  return { results, lines, secretProblems, minted: m.keys.length, notes, deadlineFailures };
 }
 
 let failures = 0;
@@ -1162,12 +1436,15 @@ for (const cfg of configs) {
     ["ts", ts],
     ["rust", rs],
   ] as const) {
-    if (run.sightings.length !== run.minted) {
+    if (run.secretProblems.length > 0) {
       failures++;
-      report.push(
-        `SECRET ${cfg.label} ${side}: ${run.minted} keys minted, raw keys seen ${run.sightings.length} times:\n${run.sightings.join("\n")}`,
-      );
+      report.push(`SECRET ${cfg.label} ${side}:\n${run.secretProblems.join("\n")}`);
     } else equal++;
+    // Deadlines are the spec's, per binary: equal misses are still misses.
+    for (const d of run.deadlineFailures) {
+      failures++;
+      report.push(`DEADLINE ${cfg.label} ${side}: ${d}`);
+    }
   }
   report.push(
     ...ts.notes.map((n) => `note ${cfg.label} ts: ${n}`),

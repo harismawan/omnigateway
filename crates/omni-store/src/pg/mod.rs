@@ -267,7 +267,7 @@ impl PgStore {
             .start()
             .await?;
         let data = SnapshotData {
-            api_keys: rows::list_keys(&tx).await?,
+            api_keys: rows::list_key_entries(&tx).await?,
             credentials: rows::list_credentials(&tx, key).await?,
             health: rows::list_health(&tx).await?,
             models: rows::list_models(&tx).await?,

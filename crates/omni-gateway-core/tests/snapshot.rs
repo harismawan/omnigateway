@@ -203,9 +203,72 @@ fn a_key_miss_falls_back_to_one_read_that_populates_the_snapshot() {
     let found = holder
         .lookup_miss(&store, &omni_crypto::apikey::hash("sk-omni-three"))
         .expect("read");
-    assert_eq!(found.map(|k| k.id.clone()), Some("k3".to_owned()));
+    assert_eq!(
+        found.map(|k| k.expect("readable").id.clone()),
+        Some("k3".to_owned())
+    );
     assert!(matches!(
         holder.load().authenticate(Some("sk-omni-three"), 0),
         AuthOutcome::Ok(_)
     ));
+}
+
+/// Review A5-I2: a key row that does not read neither stops the boot read
+/// nor any later refresh. That key alone is refused, with TS's error; a
+/// revocation, a new model and a settings change after it still land.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_unreadable_key_never_poisons_boot_or_refresh() {
+    let (_dir, path, store) = open();
+    let c = Connection::open(&path).expect("open");
+    key_row(&c, "a", "sk-omni-a", None, "{}");
+    key_row(&c, "b", "sk-omni-b", None, "{}");
+    c.execute(
+        "UPDATE api_keys SET model_allowlist='{bad' WHERE id='b'",
+        [],
+    )
+    .expect("corrupt");
+    let holder = Arc::new(
+        SnapshotHolder::build(&store, omni_crypto::field::derive_key(ENC), 0.0)
+            .expect("a bad key row does not stop boot"),
+    );
+    let refused = |raw: &str| match holder.load().authenticate(Some(raw), 5) {
+        AuthOutcome::Refused(e) => format!("{} {}", e.code.as_str(), e.message),
+        other => format!("{other:?}"),
+    };
+    assert_eq!(
+        refused("sk-omni-b"),
+        "INTERNAL JSON Parse error: Expected '}'"
+    );
+    assert!(matches!(
+        holder.load().authenticate(Some("sk-omni-a"), 5),
+        AuthOutcome::Ok(_)
+    ));
+    let refresher = holder
+        .clone()
+        .spawn_refresher(store, Duration::from_millis(50));
+    c.execute("UPDATE api_keys SET revoked_at=1 WHERE id='a'", [])
+        .expect("revoke");
+    omni_store::models::put(&c, "late", TARGETS, "score", false).expect("model");
+    c.execute(
+        "INSERT INTO settings(key,value) VALUES('settings','{\"maxAttempts\":7}')",
+        [],
+    )
+    .expect("settings");
+    let mut landed = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let s = holder.load();
+        if refused("sk-omni-a") == "AUTH invalid API key"
+            && s.routing.models.contains_key("late")
+            && s.routing.settings.max_attempts == 7.0
+        {
+            landed = true;
+            break;
+        }
+    }
+    assert!(
+        landed,
+        "revocation, model and settings landed despite key b"
+    );
+    refresher.abort();
 }

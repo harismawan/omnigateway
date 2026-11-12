@@ -16,7 +16,7 @@
 //! - Reads run in `spawn_blocking`, never on an async worker thread.
 
 use crate::snapshot::SnapshotHolder;
-use omni_store::{ApiKey, SqliteStore};
+use omni_store::SqliteStore;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -43,8 +43,9 @@ impl Default for MissConfig {
 
 #[derive(Debug, Clone)]
 pub enum MissResult {
-    /// The store has it; it is now in the snapshot too.
-    Found(Arc<ApiKey>),
+    /// The store has it (readable, or a row refused at auth as TS's `toKey`
+    /// throws on it); it is now in the snapshot too.
+    Found(crate::snapshot::KeyEntry),
     /// The store does not have it (read now, or remembered).
     Absent,
     /// Not read: the budget was spent. Answer as an unknown key.

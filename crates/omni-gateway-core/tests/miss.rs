@@ -62,7 +62,7 @@ async fn a_brand_new_key_is_found_by_one_read_and_then_served_from_the_snapshot(
         AuthOutcome::Miss
     ));
     match h.resolver.resolve(&hash("sk-omni-new")).await {
-        MissResult::Found(k) => assert_eq!(k.id, "k-new"),
+        MissResult::Found(k) => assert_eq!(k.as_ref().expect("readable").id, "k-new"),
         other => panic!("{other:?}"),
     }
     assert!(matches!(

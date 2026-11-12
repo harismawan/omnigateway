@@ -101,7 +101,8 @@ struct KeyRow {
     limits: JsValue,
     body_logging_opt_out: bool,
     created_at: serde_json::Value,
-    revoked_at: Option<i64>,
+    /// As stored (INTEGER, REAL or null), like the other two dates.
+    revoked_at: serde_json::Value,
     expires_at: serde_json::Value,
     guardrail_policy: Option<String>,
     smart_routing: bool,
@@ -167,7 +168,7 @@ fn key_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<KeyRow>> {
                 prefix: row.key.prefix,
                 body_logging_opt_out: row.key.body_logging_opt_out,
                 created_at: row.created_at,
-                revoked_at: row.key.revoked_at,
+                revoked_at: row.revoked_at,
                 expires_at: row.expires_at,
                 guardrail_policy: row.key.guardrail_policy,
                 smart_routing: row.key.smart_routing,
@@ -269,11 +270,7 @@ fn summary(store: &SqliteStore, k: KeyRow, now: i64) -> Result<JsValue> {
         ("limitUsage", JsValue::Array(usage)),
         ("bodyLoggingOptOut", JsValue::Bool(k.body_logging_opt_out)),
         ("createdAt", JsValue::from(&k.created_at)),
-        (
-            "revokedAt",
-            k.revoked_at
-                .map_or(JsValue::Null, |v| JsValue::from(&serde_json::json!(v))),
-        ),
+        ("revokedAt", JsValue::from(&k.revoked_at)),
         ("expiresAt", JsValue::from(&k.expires_at)),
         ("guardrailPolicy", opt_text(k.guardrail_policy)),
         ("smartRouting", JsValue::Bool(k.smart_routing)),

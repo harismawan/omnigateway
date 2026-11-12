@@ -180,3 +180,51 @@ fn parse_body_is_none_exactly_where_json_parse_throws() {
     assert!(ingress::parse_body("").is_none());
     assert!(ingress::parse_body(" {\"a\":1} ").is_some());
 }
+
+/// Review A5-I1: the request model's exact UTF-16 where it holds a lone
+/// surrogate (after JS trim and `[1m]` folding), on every surface; `None`
+/// for a well-formed model, a surrogate pair, or a lone surrogate elsewhere.
+#[test]
+fn a_lone_surrogate_model_is_kept_as_exact_utf16() {
+    let h = Headers::default();
+    let lone = |surface: ingress::Surface, body: &str| {
+        let mut ids = counter_ids();
+        let mut opts = IngressOptions {
+            new_tool_use_id: &mut ids,
+        };
+        let got = ingress::ingest(surface, body, &h, &mut opts).expect("ingests");
+        (got.request.model.clone(), got.model_lone)
+    };
+    let chat = |m: &str| {
+        format!(r#"{{"model":"{m}","max_tokens":5,"messages":[{{"role":"user","content":"hi"}}]}}"#)
+    };
+    for surface in [ingress::Surface::OpenAi, ingress::Surface::Anthropic] {
+        assert_eq!(
+            lone(surface, &chat(r"\ud800")),
+            ("\u{fffd}".into(), Some(vec![0xd800]))
+        );
+        assert_eq!(
+            lone(surface, &chat(r" \udc00x[1M] ")),
+            ("\u{fffd}x".into(), Some(vec![0xdc00, 0x78]))
+        );
+        assert_eq!(lone(surface, &chat(r"\ufffd")), ("\u{fffd}".into(), None));
+        assert_eq!(
+            lone(surface, &chat(r"\ud83d\ude00")),
+            ("\u{1f600}".into(), None)
+        );
+        assert_eq!(
+            lone(
+                surface,
+                r#"{"model":"\ud800","model":"m","max_tokens":5,"messages":[{"role":"user","content":"\ud800"}]}"#
+            ),
+            ("m".into(), None)
+        );
+    }
+    assert_eq!(
+        lone(
+            ingress::Surface::Responses,
+            r#"{"model":"\ud801","input":"hi"}"#
+        ),
+        ("\u{fffd}".into(), Some(vec![0xd801]))
+    );
+}

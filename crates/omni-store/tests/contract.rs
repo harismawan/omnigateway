@@ -125,6 +125,7 @@ fn key(id: &str, created_at: i64) -> ApiKey {
         prefix: "sk-omni-cccc".into(),
         hash: format!("hash-{id}"),
         model_allowlist: None,
+        lone_allowlist: Vec::new(),
         limits: parse_limits("{}"),
         body_logging_opt_out: false,
         created_at,

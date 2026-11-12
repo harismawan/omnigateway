@@ -59,6 +59,16 @@ pub struct LimitConfig {
     /// Keyed by the requested model exactly. Every override sets at least one
     /// ceiling; `Some(empty)` is a stored `"models":{}`.
     pub models: Option<IndexMap<String, LimitScope>>,
+    /// Overrides whose model name holds a lone surrogate, by exact UTF-16.
+    ///
+    /// A JS string may hold one and a Rust `String` cannot, so these are kept
+    /// apart rather than folded to U+FFFD, which would make `"\ud800"`,
+    /// `"\udc00"` and a literal U+FFFD one model (`Object.hasOwn` tells them
+    /// apart). [`Self::model_override`] never sees them: a well-formed
+    /// request model cannot equal one. TS throws building such a model's
+    /// subject id (`encodeURIComponent`), so they are matched only to refuse
+    /// as it does; [`Self::to_json`] cannot represent them and omits them.
+    pub lone_models: Vec<(Vec<u16>, LimitScope)>,
 }
 
 fn set<T: Copy>(pair: Pair<T>) -> Option<T> {
@@ -137,9 +147,26 @@ impl LimitConfig {
         self.models.as_ref()?.get(model)
     }
 
+    /// Whether an override is configured for this exact lone-surrogate name.
+    pub fn has_lone_override(&self, model: &[u16]) -> bool {
+        self.lone_models.iter().any(|(k, _)| k == model)
+    }
+
+    /// The key-wide scope alone, with no override: what a request for a
+    /// model no override names is judged against.
+    pub fn key_wide(&self) -> LimitConfig {
+        LimitConfig {
+            base: self.base.clone(),
+            models: None,
+            lone_models: Vec::new(),
+        }
+    }
+
     /// No ceiling anywhere. Overrides always set one, so any override counts.
     pub fn is_unlimited(&self) -> bool {
-        !self.base.sets_any_limit() && self.models.as_ref().is_none_or(IndexMap::is_empty)
+        !self.base.sets_any_limit()
+            && self.models.as_ref().is_none_or(IndexMap::is_empty)
+            && self.lone_models.is_empty()
     }
 
     /// The value zod's parse returns, as `JSON.stringify` would see it: schema
@@ -172,9 +199,48 @@ pub fn parse_limits(raw: &str) -> Option<LimitConfig> {
 
 /// `parseLimitConfig` over an already-parsed value.
 pub fn parse_limit_config(value: &Value) -> Option<LimitConfig> {
-    if names_proto(value) {
+    parse_limit_config_with_lone(value, Vec::new())
+}
+
+/// [`parse_limit_config`] for a stored value whose `models` record also
+/// held keys with lone surrogates, passed apart as exact UTF-16 with their
+/// scopes (`value` carries the rest). Every rule applies to them as to any
+/// override: a name of 1..=256 code points (a lone surrogate is one), a
+/// strict scope that limits something, no `__proto__`, and at most
+/// [`MAX_MODEL_OVERRIDES`] overrides in all.
+pub fn parse_limit_config_with_lone(
+    value: &Value,
+    lone: Vec<(Vec<u16>, Value)>,
+) -> Option<LimitConfig> {
+    if names_proto(value) || lone.iter().any(|(_, v)| names_proto(v)) {
         return None;
     }
+    let mut lone_models = Vec::with_capacity(lone.len());
+    for (name, scope) in lone {
+        let points = char::decode_utf16(name.iter().copied()).count();
+        if !(1..=MAX_MODEL_NAME_LENGTH).contains(&points) {
+            return None;
+        }
+        let scope = parse_scope(scope.as_object()?)?;
+        if !scope.sets_any_limit() {
+            return None;
+        }
+        lone_models.push((name, scope));
+    }
+    if !lone_models.is_empty() && value.get("models").is_none() {
+        // A lone key can only have come from a `models` record.
+        return None;
+    }
+    let mut config = parse_limit_config_inner(value)?;
+    let total = config.models.as_ref().map_or(0, IndexMap::len) + lone_models.len();
+    if total > MAX_MODEL_OVERRIDES {
+        return None;
+    }
+    config.lone_models = lone_models;
+    Some(config)
+}
+
+fn parse_limit_config_inner(value: &Value) -> Option<LimitConfig> {
     let obj = value.as_object()?;
     let mut base_fields = Map::new();
     let mut models = None;
@@ -188,6 +254,7 @@ pub fn parse_limit_config(value: &Value) -> Option<LimitConfig> {
     Some(LimitConfig {
         base: parse_scope(&base_fields)?,
         models,
+        lone_models: Vec::new(),
     })
 }
 

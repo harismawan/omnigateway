@@ -588,6 +588,136 @@ fn write_object(
     out.push('}');
 }
 
+// ------------------------------------------------------------------ parsing
+
+enum Frame {
+    Array(Vec<JsValue>),
+    Object(Vec<(Vec<u16>, JsValue)>, Option<Vec<u16>>),
+}
+
+/// `JSON.parse(text)` as a [`JsValue`]: lossless (lone surrogate escapes
+/// kept as the UTF-16 units they are, numbers as `f64` including
+/// out-of-range `±Infinity`, duplicate keys last-wins in first position),
+/// iterative at any depth. `Err` carries JavaScriptCore's message.
+pub fn parse_js(text: &str) -> Result<JsValue, String> {
+    if text.is_empty() {
+        return Err("JSON Parse error: Unexpected EOF".into());
+    }
+    if let Some(error) = crate::jsc_json::parse_error(text) {
+        return Err(error);
+    }
+    let mut frames = Vec::new();
+    let mut root = JsValue::Null;
+    let mut i = 0;
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        let value = match bytes[i] {
+            b' ' | b'\t' | b'\r' | b'\n' | b',' | b':' => {
+                i += 1;
+                continue;
+            }
+            b'[' => {
+                frames.push(Frame::Array(Vec::new()));
+                i += 1;
+                continue;
+            }
+            b'{' => {
+                frames.push(Frame::Object(Vec::new(), None));
+                i += 1;
+                continue;
+            }
+            b']' | b'}' => {
+                i += 1;
+                match frames.pop().expect("validated container") {
+                    Frame::Array(a) => JsValue::Array(a),
+                    Frame::Object(o, _) => JsValue::Object(o),
+                }
+            }
+            b'"' => {
+                let start = i;
+                i += 1;
+                while bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+                let units = string_units(&text[start + 1..i - 1]);
+                if let Some(Frame::Object(_, key @ None)) = frames.last_mut() {
+                    *key = Some(units);
+                    continue;
+                }
+                JsValue::String(units)
+            }
+            b't' => {
+                i += 4;
+                JsValue::Bool(true)
+            }
+            b'f' => {
+                i += 5;
+                JsValue::Bool(false)
+            }
+            b'n' => {
+                i += 4;
+                JsValue::Null
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    i += 1;
+                }
+                JsValue::Number(text[start..i].parse::<f64>().expect("validated number"))
+            }
+        };
+        match frames.last_mut() {
+            None => root = value,
+            Some(Frame::Array(a)) => a.push(value),
+            Some(Frame::Object(o, key)) => {
+                let key = key.take().expect("validated property");
+                if let Some((_, old)) = o.iter_mut().find(|(k, _)| *k == key) {
+                    *old = value;
+                } else {
+                    o.push((key, value));
+                }
+            }
+        }
+    }
+    Ok(root)
+}
+
+/// JSON string contents after syntax validation. Escaped UTF-16 units are data,
+/// including unpaired surrogates; only literal UTF-8 needs transcoding.
+fn string_units(text: &str) -> Vec<u16> {
+    let mut units = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            units.extend_from_slice(c.encode_utf16(&mut [0; 2]));
+            continue;
+        }
+        let c = chars.next().expect("validated escape");
+        units.push(match c {
+            'u' => {
+                let mut unit = 0;
+                for _ in 0..4 {
+                    unit = unit * 16 + chars.next().expect("hex").to_digit(16).expect("hex") as u16;
+                }
+                unit
+            }
+            'b' => 8,
+            'f' => 12,
+            'n' => 10,
+            'r' => 13,
+            't' => 9,
+            _ => c as u16,
+        });
+    }
+    units
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

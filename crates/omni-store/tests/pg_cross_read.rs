@@ -138,10 +138,16 @@ async fn rust_reads_a_database_the_ts_store_wrote() {
     let rust_keys: Vec<Value> = snap
         .api_keys
         .iter()
+        .flatten()
         .map(|k| serde_json::to_value(k).expect("key"))
         .collect();
     assert_eq!(canon(&Value::Array(rust_keys)), canon(&read["keys"]));
-    let k2 = snap.api_keys.iter().find(|k| k.id == "k2").expect("k2");
+    let k2 = snap
+        .api_keys
+        .iter()
+        .flatten()
+        .find(|k| k.id == "k2")
+        .expect("k2");
     assert!(k2.smart_routing && k2.body_logging_opt_out);
     assert_eq!(
         k2.model_allowlist.as_deref(),
@@ -350,6 +356,7 @@ async fn the_ts_store_reads_a_database_rust_wrote() {
                 prefix: "sk-omni-cccc".into(),
                 hash: hash.into(),
                 model_allowlist: (id == "k2").then(|| vec!["m".into()]),
+                lone_allowlist: Vec::new(),
                 limits: limits.clone(),
                 body_logging_opt_out: id == "k2",
                 created_at: created,
@@ -604,11 +611,21 @@ async fn edge_rows_read_as_ts_reads_them() {
     .expect("edges");
     let key = omni_crypto::field::derive_key(SECRET);
     let snap = store.snapshot_reads(&key).await.expect("snapshot");
-    let a = snap.api_keys.iter().find(|k| k.id == "a").expect("a");
+    let a = snap
+        .api_keys
+        .iter()
+        .flatten()
+        .find(|k| k.id == "a")
+        .expect("a");
     assert_eq!(a.created_at, 9_007_199_254_740_991);
     assert_eq!(a.model_allowlist, None, "JSON null is unrestricted");
     assert_eq!(a.limits, None, "unreadable limits mark the key");
-    let b = snap.api_keys.iter().find(|k| k.id == "b").expect("b");
+    let b = snap
+        .api_keys
+        .iter()
+        .flatten()
+        .find(|k| k.id == "b")
+        .expect("b");
     assert_eq!(b.model_allowlist, Some(vec![]), "a non-array denies all");
     assert!(!b.usable(1), "expires at 0");
     assert!(snap.models[0].is_err(), "bad targets fail only their row");

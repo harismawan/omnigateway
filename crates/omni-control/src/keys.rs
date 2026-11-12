@@ -60,6 +60,7 @@ pub fn create_key(store: &SqliteStore, input: CreateKey, now: i64) -> Result<Val
         prefix: prefix.clone(),
         hash: omni_crypto::apikey::hash(&raw),
         model_allowlist: input.models,
+        lone_allowlist: Vec::new(),
         limits: Some(limits),
         body_logging_opt_out: input.no_bodies,
         created_at: now,
@@ -518,6 +519,7 @@ fn project_keys(
         allowlist_json: raw,
         created_at,
         expires_at,
+        revoked_at,
         ..
     } in rows
     {
@@ -535,7 +537,7 @@ fn project_keys(
                     .map_err(|e| e.to_string())?;
             }
         }
-        keys.push(json!({"id":key.id,"label":key.label,"prefix":key.prefix,"modelAllowlist":allowlist,"limits":limits,"limitUsage":usage,"bodyLoggingOptOut":key.body_logging_opt_out,"createdAt":created_at,"revokedAt":key.revoked_at,"expiresAt":expires_at,"guardrailPolicy":key.guardrail_policy,"smartRouting":key.smart_routing}));
+        keys.push(json!({"id":key.id,"label":key.label,"prefix":key.prefix,"modelAllowlist":allowlist,"limits":limits,"limitUsage":usage,"bodyLoggingOptOut":key.body_logging_opt_out,"createdAt":created_at,"revokedAt":revoked_at,"expiresAt":expires_at,"guardrailPolicy":key.guardrail_policy,"smartRouting":key.smart_routing}));
     }
     Ok(KeyListing {
         data: json!({"keys":keys}),

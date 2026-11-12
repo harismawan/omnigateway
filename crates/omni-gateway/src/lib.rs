@@ -122,7 +122,7 @@ pub fn spawn_preseeder(
             generation = Some(now_gen);
             let snap = holder.load();
             let mut current = std::collections::HashMap::with_capacity(snap.keys_by_hash.len());
-            for k in snap.keys_by_hash.values() {
+            for k in snap.keys() {
                 let limits = k
                     .limits
                     .as_ref()
@@ -367,7 +367,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     // receiving and installing each result rather than merely queueing work.
     // Per-key draining also keeps large boot snapshots within queue budgets.
     tokio::time::timeout(options.boot_seed_timeout, async {
-        for key in holder.load().keys_by_hash.values() {
+        for key in holder.load().keys() {
             let Some(limits) = &key.limits else {
                 continue;
             };

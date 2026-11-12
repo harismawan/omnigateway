@@ -112,7 +112,16 @@ pub struct Ingested {
     pub request: ChatRequest,
     /// `customToolNames(body)`: the Responses egress needs it; empty elsewhere.
     pub custom_tool_names: HashSet<String>,
+    /// The request model as the exact UTF-16 JS holds it, where it holds a
+    /// lone surrogate; `None` otherwise. `request.model` is then its lossy
+    /// form (U+FFFD, what SQLite stores and logs show), which must not be
+    /// used for identity: see [`ModelIdentity`].
+    pub model_lone: Option<Vec<u16>>,
 }
+
+/// A request model's identity for the key allowlist and per-model limits,
+/// which TS compares as exact UTF-16 strings.
+pub type ModelIdentity<'a> = (&'a str, Option<&'a [u16]>);
 
 /// **The ingress entry point 5b calls.** Body bytes in, IR out.
 ///
@@ -152,10 +161,19 @@ pub fn ingest(
             Surface::Responses => custom_tool_names(&value),
             _ => HashSet::new(),
         };
+        // A lone surrogate in the model reads as U+FFFD in its lossy form,
+        // so only a model holding one needs the exact re-read: nothing on
+        // the ordinary path (no extra scan of the body).
+        let model_lone = if request.model.contains('\u{fffd}') {
+            lone_model(body)
+        } else {
+            None
+        };
         // `value` drops here, still inside the scope.
         Ok(Ingested {
             request,
             custom_tool_names,
+            model_lone,
         })
     })
 }
@@ -210,16 +228,89 @@ pub fn check_model_allowlist(
     model: &str,
     allowlist: Option<&[String]>,
 ) -> Result<(), GatewayError> {
-    match allowlist {
-        Some(list) if !list.iter().any(|m| m == model) => Err(GatewayError::new(
-            ErrorCode::Auth,
-            format!(
-                "model \"{}\" is not allowed for this API key",
-                safe_token(model)
-            ),
-        )),
-        _ => Ok(()),
+    check_model_allowed(
+        model,
+        allowlist.is_none_or(|list| list.iter().any(|m| m == model)),
+    )
+}
+
+/// The allowlist refusal for `model`, where `allowed` is the (exact UTF-16)
+/// verdict of `modelAllowlist === null || modelAllowlist.includes(model)`.
+pub fn check_model_allowed(model: &str, allowed: bool) -> Result<(), GatewayError> {
+    if allowed {
+        return Ok(());
     }
+    Err(GatewayError::new(
+        ErrorCode::Auth,
+        format!(
+            "model \"{}\" is not allowed for this API key",
+            safe_token(model)
+        ),
+    ))
+}
+
+/// TS's `URIError` for a model holding a lone surrogate, thrown building
+/// its rate-limit subject id (`encodeURIComponent`): at admission where an
+/// override names it, and in every case at the completion's debit.
+pub fn lone_surrogate_model_error() -> GatewayError {
+    GatewayError::new(
+        ErrorCode::Internal,
+        "String contained an illegal UTF-16 sequence.",
+    )
+    .gateway_authored()
+}
+
+/// The top-level `model` string of a body known to hold a lone surrogate
+/// escape, normalized as [`normalize_client_model`] does, as exact UTF-16;
+/// `None` when it holds no lone surrogate (or is not a string).
+fn lone_model(body: &str) -> Option<Vec<u16>> {
+    use omni_ir::jsjson::JsValue;
+    let parsed = omni_ir::jsjson::parse_js(body).ok()?;
+    let JsValue::Object(fields) = &parsed else {
+        return None;
+    };
+    // `JSON.parse`: the last duplicate wins, in the first one's position.
+    let JsValue::String(raw) = &fields
+        .iter()
+        .find(|(k, _)| k.iter().copied().eq("model".encode_utf16()))?
+        .1
+    else {
+        return None;
+    };
+    let units = normalize_model_units(raw);
+    String::from_utf16(&units).is_err().then_some(units)
+}
+
+/// [`normalize_client_model`] on UTF-16: JS `trim`, then a trailing `[1m]`
+/// (any case) dropped when something non-blank precedes it. Only the model
+/// changes here; the 1M beta it implies is read from the lossy form.
+fn normalize_model_units(raw: &[u16]) -> Vec<u16> {
+    fn trim(mut s: &[u16]) -> &[u16] {
+        let ws = |u: &u16| char::from_u32(u32::from(*u)).is_some_and(omni_ir::js::is_js_whitespace);
+        while s.first().is_some_and(ws) {
+            s = &s[1..];
+        }
+        while s.last().is_some_and(ws) {
+            s = &s[..s.len() - 1];
+        }
+        s
+    }
+    let model = trim(raw);
+    let suffix: Vec<u16> = "[1m]".encode_utf16().collect();
+    if model.len() >= suffix.len() {
+        let (head, tail) = model.split_at(model.len() - suffix.len());
+        let lowered: Vec<u16> = tail
+            .iter()
+            .map(|u| if (65..=90).contains(u) { u + 32 } else { *u })
+            .collect();
+        if lowered == suffix {
+            let stripped = trim(head);
+            if !stripped.is_empty() {
+                return stripped.to_vec();
+            }
+        }
+    }
+    model.to_vec()
 }
 
 /// `normalizeClientModel` (`ingress/model.ts`): the trimmed name with a
