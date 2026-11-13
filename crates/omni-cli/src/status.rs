@@ -82,13 +82,24 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             configured = omni_control::admin_password::admin_hash(&store)
                 .map_err(|e| e.to_string())?
                 .is_some();
-            let mut q=store.connection().prepare("SELECT credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms FROM quota_windows").map_err(|e|e.to_string())?;
-            let quota=q.query_map([],|r|Ok(json!({"credentialId":r.get::<_,String>(0)?,"windowType":r.get::<_,String>(1)?,"startsAt":r.get::<_,f64>(2)?,"used":r.get::<_,f64>(3)?,"limit":r.get::<_,Option<f64>>(4)?,"resetsAt":r.get::<_,Option<f64>>(5)?,"observedAt":r.get::<_,f64>(6)?,"windowMs":r.get::<_,Option<f64>>(7)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-            let mut s = store
-                .connection()
-                .prepare("SELECT id,provider,label,enabled FROM credentials ORDER BY tier, label")
-                .map_err(|e| e.to_string())?;
-            credentials=s.query_map([],|r|{let id=r.get::<_,String>(0)?;Ok(json!({"id":id,"provider":r.get::<_,String>(1)?,"label":r.get::<_,String>(2)?,"enabled":r.get::<_,i64>(3)?==1,"quota":quota.iter().filter(|q|q["credentialId"]==id).collect::<Vec<_>>()}))}).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+            let accounts: Value = serde_json::from_str(
+                &omni_control::credentials::list(&store).map_err(|e| e.message)?,
+            )
+            .map_err(|e| e.to_string())?;
+            let health: Value = serde_json::from_str(
+                &omni_control::credentials::health(&store, chrono::Utc::now().timestamp_millis())
+                    .map_err(|e| e.message)?,
+            )
+            .map_err(|e| e.to_string())?;
+            for c in accounts["credentials"].as_array().into_iter().flatten() {
+                let quota = health["quota"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|q| q["credentialId"] == c["id"])
+                    .collect::<Vec<_>>();
+                credentials.push(json!({"id":c["id"],"provider":c["provider"],"label":c["label"],"enabled":c["enabled"],"quota":quota}));
+            }
         }
     }
     if flags.contains_key("json") {
