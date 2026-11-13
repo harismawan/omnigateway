@@ -58,7 +58,7 @@ impl Serialize for WindowType {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
-    /// JS relational comparison when both stored operands are strings.
+    /// Snapshot-time JS relational comparison over raw SQLite primitives.
     #[serde(skip)]
     pub text_spent: Option<bool>,
     pub credential_id: String,
