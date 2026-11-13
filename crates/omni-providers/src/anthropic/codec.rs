@@ -14,6 +14,22 @@ use serde_json::{Map, Value};
 pub struct AnthropicCodec;
 impl ProviderCodec for AnthropicCodec {
     type State = ToolCloak;
+    fn classify_error(
+        &self,
+        input: &crate::codec::CodecErrorInput<'_, ToolCloak>,
+    ) -> Option<GatewayError> {
+        if input.status != 400 || !super::decode::is_fingerprint_message(&input.fallback.message) {
+            return None;
+        }
+        let mut error = GatewayError::new(
+            ErrorCode::FingerprintRefused,
+            input.fallback.message.clone(),
+        );
+        error.upstream_status = input.fallback.upstream_status;
+        error.retry_after_ms = input.fallback.retry_after_ms;
+        error.degradations = input.degradations.to_vec();
+        Some(error)
+    }
     fn build_request(
         &self,
         input: &CodecInput<'_>,
