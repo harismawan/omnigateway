@@ -62,7 +62,9 @@ for cmd in commands:
     trace.unlink(missing_ok=True)
     p=subprocess.run(cmd+['--root',str(root),'status','--json'],env={**env,'PATH':str(bindir),'TRACE':str(trace),'INHERITED_SENTINEL':'present'},capture_output=True)
     assert p.returncode == 0, p.stderr
-    process=json.loads(p.stdout)['process']
+    data=json.loads(p.stdout)
+    assert data['storeError'] is None, data
+    process=data['process']
     assert process['running'] is True and process['pid'] == 123
     assert trace.read_text().splitlines() == ['--user is-active omnigateway.service|present', '--user show omnigateway.service --property=MainPID --value|present']
 print('PASS systemctl inherited environment and exact user arguments')
