@@ -251,7 +251,7 @@ pub fn check_model_allowed(model: &str, allowed: bool) -> Result<(), GatewayErro
 
 /// TS's `URIError` for a model holding a lone surrogate, thrown building
 /// its rate-limit subject id (`encodeURIComponent`): at admission where an
-/// override names it, and in every case at the completion's debit.
+/// override names it, else whenever a completed row's debit is attempted.
 pub fn lone_surrogate_model_error() -> GatewayError {
     GatewayError::new(
         ErrorCode::Internal,
