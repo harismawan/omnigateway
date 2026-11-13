@@ -68,6 +68,7 @@ pub fn export_page(
     query: &str,
     jsonl: bool,
 ) -> Result<(String, Option<String>), Failure> {
+    let started = std::time::Instant::now();
     let parsed = parse_js(&page_encoding(store, query, !jsonl)?).map_err(Failure::internal)?;
     let next = match field(&parsed, "nextCursor") {
         Some(JsValue::String(s)) => Some(String::from_utf16_lossy(s)),
@@ -90,6 +91,7 @@ pub fn export_page(
             }
         }
     }
+    tracing::debug!(elapsed_us = started.elapsed().as_micros() as u64, "export_page_read");
     Ok((out, next))
 }
 

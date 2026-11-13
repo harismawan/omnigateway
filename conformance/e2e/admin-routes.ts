@@ -1928,6 +1928,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     OMNI_ROOT: root,
     OMNI_STATIC_DIR: join(root, "no-dashboard"),
     OMNI_DAY_OFFSET_MINUTES: cfg.dayOffset ?? "0",
+    ...(cfg.label === "export-volume-1" ? { OMNI_LOG_LEVEL: "debug", RUST_LOG: "debug" } : {}),
   };
   const logFile = join(out, `${cfg.label}-${label}.log`);
   let proc = Bun.spawn([binary], {
@@ -1987,6 +1988,31 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       anon: null,
     };
     if (cookies.admin === null || cookies.viewer === null) throw new Error("seed login failed");
+    if (cfg.label === "export-volume-1") {
+      const pages = () => (readFileSync(logFile, "utf8") + readFileSync(`${logFile}.err`, "utf8")).split("export_page_read").length - 1;
+      let atClose = 0;
+      await new Promise<void>((resolve, reject) => {
+        const socket = connect(PORT, "127.0.0.1");
+        const timeout = setTimeout(() => { socket.destroy(); reject(new Error("disconnect export timeout")); }, 10000);
+        socket.on("error", reject);
+        socket.on("connect", () => socket.write(`GET /api/logs/export?since=0&until=40000&format=jsonl HTTP/1.1\r\nHost: localhost\r\nCookie: omni_admin=${cookies.admin}\r\n\r\n`));
+        let received = Buffer.alloc(0);
+        socket.on("data", chunk => {
+          received = Buffer.concat([received, chunk]);
+          const end = received.indexOf("\r\n\r\n");
+          if (end < 0 || received.length <= end + 4) return;
+          if (!received.subarray(0, end).toString().startsWith("HTTP/1.1 200")) reject(new Error("disconnect export status"));
+          socket.destroy();
+        });
+        socket.on("close", () => { atClose = pages(); clearTimeout(timeout); resolve(); });
+      });
+      await sleep(500);
+      const after = pages();
+      if (label === "rust" && (atClose < 1 || after > atClose + 1)) throw new Error(`export disconnect page reads: close=${atClose} after=${after}`);
+      const followup = await exchange({ method: "GET", target: "/api/logs?limit=1", headers: [["cookie", `omni_admin=${cookies.admin}`]] });
+      if (followup.status !== 200) throw new Error(`post-disconnect admin status ${followup.status}`);
+      writeFileSync(join(out, `disconnect-${label}.json`), JSON.stringify({ atClose, after, status: followup.status }));
+    }
     const fill = (s: string) =>
       s
         .replaceAll("{{seed}}", SEED_ID)
