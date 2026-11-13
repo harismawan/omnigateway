@@ -6,6 +6,7 @@ mod limits;
 mod models;
 mod mutations;
 mod output;
+mod registry;
 mod settings;
 use std::{io::IsTerminal, process::ExitCode};
 
@@ -17,9 +18,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     let help = argv.iter().any(|s| matches!(s.as_str(), "--help" | "-h"));
     let Some((command, rest)) = args::resolve(&argv) else {
         if help || argv.iter().all(|s| s.starts_with('-')) {
-            println!(
-                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set; models list, show, rm, catalog, put (-f FILE | --from-catalog; built-in providers only, plugin providers refused)\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
-            );
+            println!("{}", registry::help());
             return ExitCode::SUCCESS;
         }
         eprintln!(
@@ -34,30 +33,13 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         return ExitCode::from(2);
     };
     if help {
-        println!(
-            "omni {}\n\n{}",
-            mutations::usage(&command),
-            match command.as_str() {
-                "models-list" => "List virtual models and their targets",
-                "models-show" => "Show one virtual model's targets and pricing",
-                "models-rm" => "Delete a virtual model",
-                "models-put" => "Create or replace a virtual model",
-                "models-catalog" => "List the built-in model catalog and its list pricing",
-                "settings-get" => "Show routing and retention settings",
-                "settings-set" =>
-                    "Change one setting, e.g. weights.cost 0.4, rtkEnabled true, or guardrailModel null",
-                "models" => "Show or replace one key's allowed models",
-                "expiry" => "Show or replace one key's expiry",
-                "create" => "Mint a gateway API key, printed once",
-                "limits" => "Show or edit one key's limits, with what has been used against them",
-                "guardrail" => "Show or replace one key's usage policy",
-                "smart-routing" => "Turn confidential-data routing on or off for one key",
-                "revoke" => "Revoke a gateway API key, keeping its usage history",
-                _ => "List gateway API keys",
-            }
-        );
+        println!("{}", registry::command_help(&command));
         return ExitCode::SUCCESS;
     }
+    let Some(command) = registry::implemented(&command) else {
+        eprintln!("{command} is not yet available in the Rust CLI");
+        return ExitCode::FAILURE;
+    };
     if command != "list" {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))

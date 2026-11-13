@@ -9,48 +9,25 @@ pub fn resolve(args: &[String]) -> Option<(String, Vec<String>)> {
             i += 1;
         }
     }
-    if args.get(i).map(String::as_str) == Some("models")
-        && args
-            .get(i + 1)
-            .is_some_and(|s| matches!(s.as_str(), "list" | "show" | "rm" | "put" | "catalog"))
-    {
-        return Some((
-            format!("models-{}", args[i + 1]),
-            args[..i].iter().chain(&args[i + 2..]).cloned().collect(),
-        ));
+    let count = args[i..]
+        .iter()
+        .take_while(|s| !s.starts_with('-'))
+        .take(3)
+        .count();
+    for length in (1..=count).rev() {
+        let name = args[i..i + length].join(" ");
+        if crate::registry::COMMANDS.iter().any(|(n, _, _)| *n == name) {
+            return Some((
+                name,
+                args[..i]
+                    .iter()
+                    .chain(&args[i + length..])
+                    .cloned()
+                    .collect(),
+            ));
+        }
     }
-    if args.get(i).map(String::as_str) == Some("settings")
-        && args
-            .get(i + 1)
-            .is_some_and(|s| matches!(s.as_str(), "get" | "set"))
-    {
-        return Some((
-            format!("settings-{}", args[i + 1]),
-            args[..i].iter().chain(&args[i + 2..]).cloned().collect(),
-        ));
-    }
-    if args.get(i).map(String::as_str) == Some("keys")
-        && args.get(i + 1).is_some_and(|s| {
-            matches!(
-                s.as_str(),
-                "list"
-                    | "models"
-                    | "guardrail"
-                    | "smart-routing"
-                    | "revoke"
-                    | "expiry"
-                    | "limits"
-                    | "create"
-            )
-        })
-    {
-        Some((
-            args[i + 1].clone(),
-            args[..i].iter().chain(&args[i + 2..]).cloned().collect(),
-        ))
-    } else {
-        None
-    }
+    None
 }
 
 pub fn parse(args: &[String]) -> Result<HashMap<String, String>, String> {
