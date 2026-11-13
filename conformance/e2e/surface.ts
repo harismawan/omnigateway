@@ -82,6 +82,17 @@ const PORT = 18432;
 const TOKEN = "metrics-token-xyz";
 mkdirSync("/tmp/opencode", { recursive: true });
 const work = mkdtempSync("/tmp/opencode/omni-surface-");
+// Equal isolated executable layouts: default dashboard discovery must not
+// accidentally resolve apps/dashboard/dist in the developer's checkout.
+const binaries = Object.fromEntries(
+  (["ts", "rust"] as const).map((side) => {
+    const dir = join(work, side, "install", "bin");
+    mkdirSync(dir, { recursive: true });
+    const binary = join(dir, "omnigateway");
+    copyFileSync(resolve(REPO, flags[side] as string), binary);
+    return [side, binary];
+  }),
+);
 const out = flags.out ?? join(work, "out");
 mkdirSync(out, { recursive: true });
 const children: Subprocess[] = [];
@@ -1083,8 +1094,8 @@ let equal = 0;
 let expected = 0;
 const report: string[] = [];
 for (const cfg of configs) {
-  const tsRun = await runOne("ts", resolve(REPO, flags.ts as string), cfg, keys, fixture);
-  const rsRun = await runOne("rust", resolve(REPO, flags.rust as string), cfg, keys, fixture);
+  const tsRun = await runOne("ts", binaries.ts as string, cfg, keys, fixture);
+  const rsRun = await runOne("rust", binaries.rust as string, cfg, keys, fixture);
   const [ts, rs] = [tsRun.results, rsRun.results];
   // Plugins (spec non-goal): TS runs gamma's setup; Rust never does, and
   // warns once per plugin directory with the release wording.

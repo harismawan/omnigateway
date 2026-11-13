@@ -240,11 +240,13 @@ function lengthProblem(method: string, x: Ex): string | null {
   const chunked = x.head.some(([k, v]) => k === "transfer-encoding" && /chunked/i.test(v));
   for (const v of lengths) if (!/^\d+$/.test(v)) return `content-length "${v}" is not a number`;
   if (lengths.length > 1) return `${lengths.length} content-length headers`;
-  if (chunked) return lengths.length > 0 ? "content-length beside chunked encoding" : null;
+  if ((x.status < 200 || x.status === 204) && lengths.length > 0)
+    return `content-length forbidden on ${x.status}`;
   if (method === "HEAD" || x.status === 204 || x.status === 304 || x.status < 200)
     return x.body.length === 0
       ? null
       : `${x.body.length} body bytes on a ${method} ${x.status} answer`;
+  if (chunked) return lengths.length > 0 ? "content-length beside chunked encoding" : null;
   const [declared] = lengths;
   return declared === undefined || Number(declared) === x.body.length
     ? null
@@ -271,6 +273,13 @@ function lengthProblem(method: string, x: Ex): string | null {
     ["GET", ex(304, [cl("12")]), true],
     ["GET", ex(200, [["transfer-encoding", "chunked"]], "1\r\nx\r\n0\r\n\r\n"), true],
     ["GET", ex(200, [["transfer-encoding", "chunked"], cl("1")], "x"), false],
+    ...([200, 101, 204, 304] as const).map((status): [string, Ex, boolean] => [
+      status === 200 ? "HEAD" : "GET",
+      ex(status, [["transfer-encoding", "chunked"]], "x"),
+      false,
+    ]),
+    ["GET", ex(101, [cl("0")]), false],
+    ["GET", ex(204, [cl("0")]), false],
   ];
   for (const [method, x, ok] of cases)
     if ((lengthProblem(method, x) === null) !== ok)
@@ -456,7 +465,7 @@ type Step =
   /** A hand edit while the gateway runs. */
   | { kind: "sql"; name: string; sql: string[] }
   /** Let the gateway's own writes land (a completed row, its debit). */
-  | { kind: "wait"; name: string; ms: number };
+  | { kind: "counter-barrier"; name: string; id: string; status: number };
 
 const J: [string, string] = ["content-type", "application/json"];
 const as = (who: Who, method: string, target: string, body?: string, name?: string): HttpStep => ({
@@ -1007,7 +1016,7 @@ const IDENTITY_SQL = [
       ],
       ["id-k4", null, '{"requests":{"1m":50}}'],
       // Review A5-R2: one U+FFFD request per 5 h.
-      ["id-k5", null, '{"models":{"\\ufffd":{"requests":{"5h":1}}}}'],
+      ["id-k5", null, '{"requests":{"5h":1},"models":{"\\ufffd":{"requests":{"5h":1}}}}'],
       // ...and the key-wide subject, which that failed request does debit.
       ["id-k6", null, '{"requests":{"5h":1}}'],
     ] as const
@@ -1115,15 +1124,29 @@ function identitySteps(): Step[] {
   const k6 = on("id-k6");
   s.push(
     k5("count \\ufffd seeds the window", "/v1/messages/count_tokens", "\\ufffd"),
-    { kind: "wait", name: "seed lands", ms: 700 },
-    k5("chat \\ud800 fails", "/v1/chat/completions", "\\ud800"),
-    { kind: "wait", name: "the failed row and its debit land", ms: 800 },
+    k5("chat \\ud800 fails", "/v1/chat/completions", "\\ud800", {
+      why: "early refusal precedes key-wide admission",
+      ts: refusal([
+        "x-ratelimit-limit-requests: 1",
+        "x-ratelimit-remaining-requests: 0",
+        "x-ratelimit-reset-requests: <duration>",
+      ]),
+      rust: refusal([]),
+    }),
+    { kind: "counter-barrier", name: "k5 committed and delivered", id: "id-k5", status: 429 },
+    {
+      kind: "sql",
+      name: "remove barrier ceiling",
+      sql: [
+        `UPDATE api_keys SET limits='{"models":{"\\ufffd":{"requests":{"5h":1}}}}' WHERE id='id-k5'`,
+      ],
+    },
+    { kind: "counter-barrier", name: "k5 barrier ceiling removed", id: "id-k5", status: 200 },
     k5("count \\ufffd is not debited #1", "/v1/messages/count_tokens", "\\ufffd"),
     k5("count \\ufffd is not debited #2", "/v1/messages/count_tokens", "\\ufffd"),
     // The key-wide subject is debited by that same kind of request: its one
     // request per 5 h is spent by the failed chat.
     k6("count plain seeds the key's window", "/v1/messages/count_tokens", "plain"),
-    { kind: "wait", name: "seed lands", ms: 700 },
     // TS admits the request against the key-wide subject and fails later, so
     // its 500 carries that admission's rate-limit headers; Rust refuses
     // before admitting anything and has none to render.
@@ -1136,7 +1159,7 @@ function identitySteps(): Step[] {
       ]),
       rust: refusal([]),
     }),
-    { kind: "wait", name: "the failed row and its debit land", ms: 800 },
+    { kind: "counter-barrier", name: "k6 committed and delivered", id: "id-k6", status: 429 },
     k6("count plain: the key was debited", "/v1/messages/count_tokens", "plain"),
   );
   // Review A5-R3: a literal U+FFFD model beside a 20,000-key object answers
@@ -1440,8 +1463,34 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         d.close();
         continue;
       }
-      if (step.kind === "wait") {
-        await sleep(step.ms);
+      if (step.kind === "counter-barrier") {
+        const started = Date.now();
+        let done = false;
+        while (Date.now() - started < 5_000) {
+          const x = await exchange({
+            method: "POST",
+            target: "/v1/messages/count_tokens",
+            headers: [
+              ["authorization", `Bearer ${rawOf(step.id)}`],
+              ["content-type", "application/json"],
+            ],
+            body: '{"model":"plain","messages":[{"role":"user","content":"hi"}]}',
+          });
+          const db = new Database(file, { readonly: true });
+          const committed = db
+            .query(
+              "SELECT count(*) AS n FROM request_logs WHERE api_key_id=? AND status IS NOT NULL",
+            )
+            .get(step.id) as { n: number };
+          db.close();
+          if (x.status === step.status && committed.n > 0) {
+            done = true;
+            break;
+          }
+          await sleep(10);
+        }
+        if (!done) deadlineFailures.push(`${step.name}: committed/delivered barrier timed out`);
+        results.set(step.name, { text: done ? "barrier reached" : "barrier timed out", db: "" });
         continue;
       }
       if (step.kind === "relogin") {

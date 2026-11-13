@@ -178,13 +178,15 @@ fn remove(scope: &mut Value, d: &str, w: Option<&str>, entry: &str) -> Result<()
             .get_mut(d)
             .and_then(Value::as_object_mut)
             .ok_or_else(missing)?;
-        if windows.remove(w).is_none() {
+        if windows.shift_remove(w).is_none() {
             return Err(missing());
         }
         if windows.is_empty() {
-            object.remove(d);
+            object.shift_remove(d);
         }
-    } else if object.remove(d).is_none() && !matches!(d, "constructor" | "toString" | "valueOf") {
+    } else if object.shift_remove(d).is_none()
+        && !matches!(d, "constructor" | "toString" | "valueOf")
+    {
         return Err(missing());
     }
     Ok(())
@@ -260,7 +262,10 @@ pub fn edit(existing: &Value, entries: &[String]) -> Result<Value, Error> {
                     model_slot(entry, &flag, "model:dimension:window or model:concurrency")?;
                 remove(&mut out["models"][m], d, w, entry)?;
                 if out["models"][m] == json!({}) {
-                    out["models"].as_object_mut().expect("models").remove(m);
+                    out["models"]
+                        .as_object_mut()
+                        .expect("models")
+                        .shift_remove(m);
                 }
             } else if name == "model-limit" {
                 let shape = "model:dimension:window=value or model:concurrency=value";
@@ -312,7 +317,55 @@ pub fn edit(existing: &Value, entries: &[String]) -> Result<Value, Error> {
         }
     }
     if out["models"] == json!({}) {
-        out.as_object_mut().expect("limits").remove("models");
+        out.as_object_mut().expect("limits").shift_remove("models");
     }
     Ok(out)
+}
+
+/// Run the ordered CLI editor on every scope. Lone names get collision-free
+/// temporary keys solely inside the UTF-8 editor, then regain their exact units.
+/// Neither the shared serializer nor persistence performs this normalization.
+pub fn edit_lossless(
+    existing: &omni_ir::jsjson::JsValue,
+    entries: &[String],
+) -> Result<omni_ir::jsjson::JsValue, Error> {
+    use omni_ir::jsjson::JsValue;
+    let mut value = existing.clone();
+    let mut names = Vec::new();
+    if let JsValue::Object(root) = &mut value
+        && let Some((_, JsValue::Object(models))) = root
+            .iter_mut()
+            .find(|(k, _)| k == &"models".encode_utf16().collect::<Vec<_>>())
+    {
+        for i in 0..models.len() {
+            if String::from_utf16(&models[i].0).is_ok() {
+                continue;
+            }
+            let mut temporary = format!("__omni_lone_{i}");
+            while models
+                .iter()
+                .any(|(k, _)| *k == temporary.encode_utf16().collect::<Vec<_>>())
+                || entries.iter().any(|e| e.contains(&temporary))
+            {
+                temporary.push('_');
+            }
+            let units = temporary.encode_utf16().collect::<Vec<_>>();
+            names.push((units.clone(), std::mem::replace(&mut models[i].0, units)));
+        }
+    }
+    let encoded = omni_ir::jsjson::stringify(&value).expect("limits");
+    let utf8: Value = serde_json::from_str(&encoded).expect("names encoded");
+    let mut edited = JsValue::from(&edit(&utf8, entries)?);
+    if let JsValue::Object(root) = &mut edited
+        && let Some((_, JsValue::Object(models))) = root
+            .iter_mut()
+            .find(|(k, _)| k == &"models".encode_utf16().collect::<Vec<_>>())
+    {
+        for (key, _) in models {
+            if let Some((_, original)) = names.iter().find(|(temporary, _)| temporary == key) {
+                *key = original.clone();
+            }
+        }
+    }
+    Ok(edited)
 }

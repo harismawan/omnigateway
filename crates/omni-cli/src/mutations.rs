@@ -139,20 +139,16 @@ pub fn run(
                     );
                 }
             }
-            let limits = crate::limits::edit(&key["limits"], allow)?;
-            let normalized = omni_store::limits::parse_limits(&limits.to_string())
-                .map(|v| v.to_json_well_formed())
-                .unwrap_or_else(|| limits.clone());
-            // The lone-surrogate overrides no flag can name ride along,
-            // as `toLoose(existing.limits)` carries them in TS.
             let existing = if replaced {
                 omni_ir::jsjson::JsValue::Null
             } else {
                 listing.limits_js[index].clone()
             };
+            let limits = crate::limits::edit_lossless(&existing, allow)?;
+            let normalized = omni_control::api::lossy(&limits);
             listing
                 .capture_mutation(&store, id, now, "limits", normalized, || {
-                    omni_control::keys::set_limits(&store, id, &limits, &existing).map(Some)
+                    omni_control::keys::set_limits(&store, id, &limits).map(Some)
                 })
                 .map_err(fail)?;
         }

@@ -73,83 +73,26 @@ pub fn create_key(store: &SqliteStore, input: CreateKey, now: i64) -> Result<Val
     Ok(json!({"id":id,"label":input.label,"prefix":prefix,"key":raw}))
 }
 
-/// `setKeyLimits` for the CLI: `limits` is the edited matrix as flags can
-/// spell it, `existing` the key's complete stored matrix (`null` when it was
-/// unreadable and is being replaced). Overrides whose names hold a lone
-/// surrogate (only the `/api` surface can store one; no flag can name one)
-/// are carried along, in TS's order: `toLoose(existing.limits)` walks the
-/// existing names in JS own-key order, the edit drops or appends names, and
-/// `toWire` writes them in that order. Returns the matrix written, complete.
+/// Validate and persist the CLI's complete, already edited matrix.
 pub fn set_limits(
     store: &SqliteStore,
     id: &str,
-    limits: &Value,
-    existing: &omni_ir::jsjson::JsValue,
+    limits: &omni_ir::jsjson::JsValue,
 ) -> Result<omni_ir::jsjson::JsValue, String> {
     use omni_ir::jsjson::JsValue;
-    validate_limits(limits, "limits", true)?;
+    let body = JsValue::Object(vec![("limits".encode_utf16().collect(), limits.clone())]);
+    let parsed = crate::body_schema::parse_or_throw(&crate::body_schema::key_limits(), &body)
+        .map_err(|e| format!("BAD_REQUEST: {e}"))?;
+    let limits = crate::settings_value::get(&parsed, "limits").expect("limits");
     require_key(store, id)?;
-    let mut config = omni_store::limits::parse_limits(&limits.to_string())
-        .ok_or("BAD_REQUEST: invalid limits")?;
-    let existing_models = match crate::settings_value::get(existing, "models") {
-        Some(JsValue::Object(m)) => m.as_slice(),
-        _ => &[],
-    };
-    let lone: Vec<&(Vec<u16>, JsValue)> = existing_models
-        .iter()
-        .filter(|(k, _)| String::from_utf16(k).is_err())
-        .collect();
-    if !lone.is_empty() {
-        let edited = config.models.take().unwrap_or_default();
-        let mut order: Vec<Vec<u16>> = Vec::new();
-        for i in crate::api::js_order(existing_models) {
-            let name = &existing_models[i].0;
-            match String::from_utf16(name) {
-                Err(_) => order.push(name.clone()),
-                Ok(n) if edited.contains_key(&n) => order.push(name.clone()),
-                Ok(_) => {}
-            }
-        }
-        for k in edited.keys() {
-            let units: Vec<u16> = k.encode_utf16().collect();
-            if !order.contains(&units) {
-                order.push(units);
-            }
-        }
-        let mut models = omni_store::limits::IndexMap::new();
-        let mut lone_models = Vec::new();
-        for (position, name) in order.into_iter().enumerate() {
-            match String::from_utf16(&name) {
-                Ok(n) => {
-                    models.insert(n.clone(), edited[&n].clone());
-                }
-                Err(_) => {
-                    let (_, scope) = lone.iter().find(|(k, _)| *k == name).expect("lone");
-                    let scope = omni_store::limits::parse_limit_config(&crate::api::lossy(scope))
-                        .ok_or("BAD_REQUEST: invalid limits")?
-                        .base;
-                    lone_models.push(omni_store::limits::LoneModel {
-                        name,
-                        position,
-                        scope,
-                    });
-                }
-            }
-        }
-        if models.len() + lone_models.len() > omni_store::limits::MAX_MODEL_OVERRIDES {
-            return Err("BAD_REQUEST: limits.models: at most 64 model overrides per key".into());
-        }
-        config.models = Some(models);
-        config.lone_models = lone_models;
-    }
-    let raw = config.to_json_text();
+    let raw = omni_ir::jsjson::stringify(limits).expect("limits");
     omni_store::keys::edit(
         store.connection(),
         id,
         omni_store::keys::KeyEdit::Limits(&raw),
     )
     .map_err(|e| e.to_string())?;
-    Ok(config.to_js())
+    Ok(limits.clone())
 }
 
 pub fn validate_limits(v: &Value, path: &str, root: bool) -> Result<(), String> {

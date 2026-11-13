@@ -55,6 +55,21 @@ try {
     for (const [id, limits, at] of [
       ["full", FULL, 1700000000001],
       ["only", ONLY, 1700000000002],
+      [
+        "order-exact",
+        '{"models":{"a":{"concurrency":1},"\\ud800":{"concurrency":1},"b":{"concurrency":1}}}',
+        1700000000005,
+      ],
+      [
+        "nulls",
+        '{"models":{"\\ud800":{"requests":{"1m":null},"tokens":{},"concurrency":1}}}',
+        1700000000003,
+      ],
+      [
+        "order",
+        '{"models":{"a":{"concurrency":1},"\\ud800":{"concurrency":1},"b":{"concurrency":1},"�":{"concurrency":1}}}',
+        1700000000004,
+      ],
     ] as const)
       db.run("INSERT INTO api_keys (id,label,prefix,hash,limits,created_at) VALUES (?,?,?,?,?,?)", [
         id,
@@ -87,6 +102,52 @@ try {
     return { out, err, code, rows };
   };
   for (const args of [
+    [
+      "keys",
+      "limits",
+      "order-exact",
+      "--unset-model-limit",
+      "a:concurrency",
+      "--model-limit",
+      "a:concurrency=2",
+      "--json",
+    ],
+    ["keys", "limits", "nulls", "--set", "concurrency=2", "--json"],
+    [
+      "keys",
+      "limits",
+      "order",
+      "--unset-model-limit",
+      "a:concurrency",
+      "--model-limit",
+      "a:concurrency=2",
+      "--json",
+    ],
+    // OS argv encodes lone JS strings as U+FFFD in both processes. These
+    // attempts must edit the real replacement name, never its lone sibling.
+    ["keys", "limits", "order", "--unset-model-limit", "\ud800:concurrency", "--json"],
+    ["keys", "limits", "order", "--model-limit", "\ud800:concurrency=3", "--json"],
+    [
+      "keys",
+      "limits",
+      "order",
+      "--unset-model-limit",
+      "\ud800:concurrency",
+      "--model-limit",
+      "\ud800:concurrency=4",
+      "--json",
+    ],
+    ["keys", "models", "order", "--allow", "\ud800", "--allow", "b", "--allow", "�", "--json"],
+    [
+      "keys",
+      "limits",
+      "order",
+      "--unset-model-limit",
+      "b:concurrency",
+      "--model-limit",
+      "b:concurrency=5",
+      "--json",
+    ],
     ["keys", "list"],
     ["keys", "list", "--json"],
     ["keys", "limits", "k"],

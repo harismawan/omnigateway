@@ -1,7 +1,9 @@
 # A5 report: admin keys / models / catalog / settings / password routes
 
 Base 61e19950, code commit 5da6af7e. Brief: `a5-brief.md`. Evidence: `/tmp/opencode/a5/evidence/`.
-Implementer opus-pr. Controller review (gpt-6-astra#high) pending.
+Original implementer opus-pr. Latest status: fix round 3 addresses the round-2 review's
+N1 and remaining minors; all requested local gates pass. Re-review pending. See the
+round-3 appendix for current evidence and qualifications.
 
 ## What changed
 
@@ -274,8 +276,9 @@ summaries and CLI listing print it unchanged.
 
 ## Fix round 2
 
-**Bookkeeping status: BLOCKED by the fresh surface gate (2 failures); stopped without a
-source fix or retry.** Retained passing results below do not supersede that failure.
+**Historical bookkeeping status: BLOCKED by the fresh surface gate (2 failures).**
+The later controller rerun below cleared that harness-location failure; round 3 also
+isolates both executables in the surface driver. This paragraph records the earlier stop.
 
 Review: `a5-r1-review.md`. Range: `04c3c5af..2b6f1165`; implementation `2998e305`,
 follow-ups `d4e2d54f`, `d12b397b`, `1727cde2`, `ba0edb26`, `2b6f1165`.
@@ -494,3 +497,81 @@ Re-run at HEAD 2b6f1165 with the same release binary copied to `/tmp/opencode/su
 - `conformance/e2e/run.ts`: **all rows equal** (`run.log`).
 - CLI goldens (`OMNI_CLI_BIN=target/release/omni`): keys-list 135, key-mutations (156+4+3+5+16), settings 347, model-puts 302, model-reads 262, model-removals 47, model-catalog 510 + 12 refusal checks, lone-surrogates 36 — all PASS (`cli-*.log`).
 Follow-up (minor): make `surface.ts` copy both binaries into a scratch directory so the location-relative default cannot see the checkout.
+
+## Fix round 3
+
+Review: `a5-r2-review.md`; base `d9801810`. Evidence: `/tmp/opencode/a5-fix3/`.
+No frozen TS or shared persistence serialization changes. Current status: all requested
+local gates pass; ready for scoped re-review.
+
+### N1 — complete CLI edit normalization and order
+
+- `omni-cli::limits::edit_lossless` gives lone names collision-free temporary UTF-8
+  keys inside the existing ordered flag editor, then restores their exact UTF-16 units
+  before validation/persistence. Every scope now receives the same loose conversion:
+  explicit nulls and empty dimensions disappear. Unsets precede sets on the complete
+  matrix; no old-position reconstruction remains in `omni-control::keys::set_limits`.
+- Differential execution also exposed `serde_json::Map::remove`'s swap-removal ordering.
+  The CLI editor uses `shift_remove` for dimensions, windows and model properties.
+  Validation uses the existing lossless key-limits schema; shared create/write and
+  `LimitConfig` serialization retain their lossless, non-normalizing behavior.
+- `lone-surrogates.ts` now has **44** real-TS comparisons: both exact reviewer repros,
+  an additional mixed replacement/lone matrix, deletion/re-addition through lone JS argv
+  strings, mixed allowlist edits, and the existing API-created/shared-writer coverage.
+  Important boundary: an OS argv cannot represent a lone surrogate; Bun encodes those
+  attempted flags as U+FFFD. Those cases prove that the real replacement entry is edited
+  without touching its lone sibling, not that a CLI flag can directly name a lone string.
+- RED first: `red-cli.log` **33/43 differ** before implementation. The final exact-repro
+  corpus against the retained pre-fix release CLI gives **34/44 differ**
+  (`red-cli-final.log`). Final binary: **44 PASS** (`cli-lone-surrogates.log`), comparing
+  output bytes, status and the whole api_keys table after every invocation. Cascading
+  later DB differences are included in the RED counts.
+
+### Remaining minors
+
+- Framing checks reject HEAD/1xx/204/304 bodies before the chunked early return, with
+  synthetic self-checks for each. 1xx/204 content-length is also explicitly refused.
+- R2 tests and driver use a committed/delivered barrier: the same refused request must
+  exhaust a preseeded key-wide 5h ceiling (observed via count_tokens 429) and have a
+  committed request-log row. The non-aliasing test then removes only that barrier
+  ceiling, waits for snapshot visibility via a plain-model 200, and checks the existing
+  live U+FFFD model counter. Polling has a five-second failure deadline; elapsed time
+  alone can never pass. Restart still separately checks persisted replacement history.
+  Gateway startup already waits for boot seed installation; fixed seed sleeps are gone.
+  The driver's extra key-wide ceiling adds one precisely pinned early-admission-header
+  divergence, so its total is now two expected divergences.
+- `surface.ts` copies both binaries into equivalent isolated scratch install/bin layouts,
+  even when a caller supplies a checkout binary. Opening report statuses are refreshed.
+
+### Verification
+
+All driver binaries were copied outside the checkout into `E/bin`; hashes are recorded
+in `binaries.sha256`. Cargo used `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_TEST_DEBUG=0`. The incremental directory was empty (0 bytes). Free space
+was checked between gates: lowest observed approximately 3.06 GB, final approximately
+13.36 GB after shared-environment cleanup by another process; no 2 GB stop triggered.
+
+| Gate | Result / evidence |
+|---|---|
+| Touched crates: omni-cli, omni-control, omni-gateway | **156/0/0**, `touched-tests.log` |
+| Final workspace | **988 passed / 0 failed / 7 ignored**, 103 summaries, `workspace.log` |
+| Workspace clippy all targets, `-D warnings` | clean, `clippy.log` |
+| cargo fmt --check / Biome | clean, `fmt.log`, `biome-check.log` |
+| CLI keys-list | 135 PASS |
+| CLI key-mutations | 156 mutation + 4 repair + 3 usage/null + 5 PTY + 16 creation PASS |
+| CLI settings | 347 + crossread PASS |
+| CLI lone-surrogates | 44 PASS |
+| CLI model-puts / reads / removals / catalog | 302 / 262 / 47 / 510 + 12 refusal checks PASS |
+| admin-routes | **855 equal / 2 expected / 0 failures**, 38 raw keys |
+| admin-auth | **212 equal / 4 expected / 0 failures** |
+| surface | **606 equal / 61 expected / 0 failures** |
+| run.ts | all rows equal, including four DB comparisons |
+
+CLI logs are `cli-<suite>.log`; HTTP logs are `<driver>.log` with matching output folders
+for the three drivers supporting `--out`. A first combined CLI shell hit its 120-second
+tool timeout during settings; settings and subsequent suites were rerun to completion.
+An initial run.ts invocation rejected unsupported `--out` before execution; the corrected
+invocation passed. Intermediate failures (missing schema error prefix and barrier helper
+scope) were corrected before final gates. No live PostgreSQL run was requested/performed;
+workspace PG early-return passes do not establish PG execution. Earlier PG writer-flake
+history and the narrowly accepted early-refusal divergence remain as documented above.

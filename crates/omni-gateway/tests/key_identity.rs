@@ -456,7 +456,7 @@ async fn an_early_refused_lone_model_never_debits_the_replacement_character_mode
         "kf",
         "sk-omni-kf",
         None,
-        r#"{"models":{"\ufffd":{"requests":{"5h":1}}}}"#,
+        r#"{"requests":{"5h":1},"models":{"\ufffd":{"requests":{"5h":1}}}}"#,
     );
     let g = boot_on(f).await;
     let auth = [("authorization", "Bearer sk-omni-kf")];
@@ -476,7 +476,6 @@ async fn an_early_refused_lone_model_never_debits_the_replacement_character_mode
     };
     // Seeds U+FFFD's 5h window (a count writes no row).
     assert_eq!(count(&g).await, 200);
-    tokio::time::sleep(Duration::from_millis(600)).await;
     let (s, _) = call(
         &g.base,
         "POST",
@@ -486,8 +485,17 @@ async fn an_early_refused_lone_model_never_debits_the_replacement_character_mode
     )
     .await;
     assert_eq!(s, 500);
-    // The refused row commits and is delivered to the limiter (writer batch).
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    delivered(&g, "sk-omni-kf").await;
+    // Remove only the barrier ceiling; the already-seeded model counter stays
+    // live. Wait for the snapshot to observe that edit before testing it.
+    rusqlite::Connection::open(&g.f.path)
+        .expect("barrier database")
+        .execute(
+            "UPDATE api_keys SET limits=? WHERE id='kf'",
+            [r#"{"models":{"\ufffd":{"requests":{"5h":1}}}}"#],
+        )
+        .expect("barrier database");
+    count_status(&g, "sk-omni-kf", "plain", 200).await;
     assert_eq!(count(&g).await, 200, "live: the U+FFFD budget is untouched");
     assert_eq!(count(&g).await, 200);
     let f = {
@@ -498,7 +506,6 @@ async fn an_early_refused_lone_model_never_debits_the_replacement_character_mode
         g.f
     };
     let g = boot_on(f).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         count(&g).await,
         429,
@@ -539,7 +546,6 @@ async fn an_early_refused_lone_model_still_debits_the_key_wide_subject() {
     };
     // Seeds the key's 5h window (a count writes no row).
     assert_eq!(count(&g).await, 200);
-    tokio::time::sleep(Duration::from_millis(600)).await;
     let (s, _) = call(
         &g.base,
         "POST",
@@ -549,11 +555,47 @@ async fn an_early_refused_lone_model_still_debits_the_key_wide_subject() {
     )
     .await;
     assert_eq!(s, 500);
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    delivered(&g, "sk-omni-kw").await;
     assert_eq!(
         count(&g).await,
         429,
         "the key's one request per 5 h is spent"
     );
     stop(g).await;
+}
+
+async fn count_status(g: &Gw, raw: &str, model: &str, expected: u16) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (status, _) = call(
+                &g.base,
+                "POST",
+                "/v1/messages/count_tokens",
+                &[("authorization", &format!("Bearer {raw}"))],
+                &chat(model),
+            )
+            .await;
+            if status == expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("counter/snapshot barrier timed out");
+}
+
+async fn delivered(g: &Gw, raw: &str) {
+    // A 429 on this preseeded key-wide long window proves completion delivery,
+    // not merely the passage of a writer interval. Counts create no rows.
+    count_status(g, raw, "plain", 429).await;
+    let rows: i64 = rusqlite::Connection::open(&g.f.path)
+        .expect("barrier database")
+        .query_row(
+            "SELECT count(*) FROM request_logs WHERE status IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("barrier database");
+    assert!(rows > 0, "completion must also be committed");
 }
