@@ -91,6 +91,7 @@ pub type EventsStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, GatewayErr
 
 /// What every dispatch shares: one per process.
 pub struct Deps {
+    pub refresher: Arc<crate::refresh::Refresher>,
     pub http: Arc<dyn HttpClient>,
     pub writer: WriterHandle,
     pub holder: Arc<SnapshotHolder>,
@@ -296,14 +297,9 @@ impl Deps {
         after
     }
 
-    /// The OAuth refresh hook. No OAuth provider is ported yet, so there is
-    /// nothing to refresh with; the structure around it is kept.
-    fn refresh(&self, c: &Credential) -> Result<omni_store::CredentialSecrets, GatewayError> {
-        Err(GatewayError::new(
-            ErrorCode::Internal,
-            format!("no OAuth provider for {}", safe_token(&c.provider)),
-        )
-        .gateway_authored())
+    /// Shared OAuth refresh service for preemptive and reactive retries.
+    async fn refresh(&self, c: &Credential) -> Result<omni_store::CredentialSecrets, GatewayError> {
+        self.refresher.refresh(c).await
     }
 }
 
@@ -696,7 +692,7 @@ fn run(mut s: RunState) -> EventsStream {
                                 "credential expired with no refresh token",
                             ).with_provider(c.credential.provider.clone()));
                         }
-                        match deps.refresh(&c.credential) {
+                        match deps.refresh(&c.credential).await {
                             Ok(sec) => retry_secrets = Some(sec),
                             Err(e) => break 'attempt Err(e),
                         }
@@ -883,7 +879,7 @@ fn run(mut s: RunState) -> EventsStream {
                         model = %c.target.model, credentialId = %c.credential.id,
                         attempt = i + 1, code = failure.code.as_str(),
                         "attempt authentication failed; refreshing credential");
-                    match deps.refresh(&c.credential) {
+                    match deps.refresh(&c.credential).await {
                         Ok(sec) => {
                             retry_secrets = Some(sec);
                             continue;

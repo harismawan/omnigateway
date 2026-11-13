@@ -485,8 +485,22 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             client
         }
     };
+    let http = Arc::new(http);
+    let refresh_store = omni_store::Store::open(
+        omni_store::StoreConfig::Sqlite { path: path.clone() },
+        offset,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let oauth_refresher = Arc::new(refresh::Refresher::new(
+        Arc::new(refresh_store),
+        key.clone(),
+        http.clone(),
+        clock::now_ms,
+    ));
     let deps = Arc::new(dispatch::Deps {
-        http: Arc::new(http),
+        refresher: oauth_refresher,
+        http,
         telemetry,
         writer: handle.clone(),
         holder,

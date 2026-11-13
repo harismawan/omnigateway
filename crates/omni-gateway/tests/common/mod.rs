@@ -195,6 +195,16 @@ pub fn harness(f: &Fixture, replies: Vec<Reply>) -> Harness {
     let writer = Writer::spawn(&f.path, WriterConfig::default()).expect("writer");
     let script = Script::new(replies);
     let deps = Arc::new(Deps {
+        refresher: Arc::new(omni_gateway::refresh::Refresher::new(
+            Arc::new(omni_store::Store::Sqlite {
+                store: Arc::new(std::sync::Mutex::new(store)),
+                path: f.path.clone(),
+                day_offset_minutes: 0,
+            }),
+            key(),
+            script.clone(),
+            omni_gateway::clock::now_ms,
+        )),
         http: script.clone(),
         writer: writer.handle(),
         holder,

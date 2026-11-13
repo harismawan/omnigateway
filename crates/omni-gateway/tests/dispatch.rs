@@ -32,6 +32,49 @@ async fn flush(h: Harness) {
 }
 
 #[tokio::test]
+async fn expired_anthropic_refreshes_before_inference() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',expires_at=1,refresh_token=?", [omni_crypto::field::encrypt(&key(), "refresh")]).expect("oauth");
+    let body = "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}\n\nevent: message_stop\ndata: {}\n\n";
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(
+                200,
+                vec![],
+                vec![r#"{"access_token":"rotated","expires_in":3600}"#.into()],
+            ),
+            Reply::Http(200, vec![], vec![body.into()]),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.last(), Some(StreamEvent::End { .. })));
+    assert_eq!(h.script.seen.lock().expect("seen").len(), 2);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn anthropic_401_refreshes_and_retries_once() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',access_token=?,refresh_token=?", rusqlite::params![omni_crypto::field::encrypt(&key(), "old"), omni_crypto::field::encrypt(&key(), "refresh")]).expect("oauth");
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(401, vec![], vec!["{}".into()]),
+            Reply::Http(200, vec![], vec![r#"{"access_token":"rotated"}"#.into()]),
+            Reply::Http(401, vec![], vec!["{}".into()]),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    while d.events.next().await.is_some() {}
+    assert_eq!(h.script.seen.lock().expect("seen").len(), 3);
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn anthropic_api_key_dispatch_uses_messages_codec() {
     let f = fixture(&["c0"]);
     let conn = rusqlite::Connection::open(&f.path).expect("db");
