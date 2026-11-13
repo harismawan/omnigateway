@@ -22,6 +22,9 @@ fn fs_error(e: &std::io::Error, operation: &str, path: &std::path::Path) -> Stri
         Some(30) => ("EROFS", "read-only file system"),
         _ => return e.to_string(),
     };
+    if operation == "read" && e.raw_os_error() == Some(21) {
+        return format!("{code}: {description}, {operation}");
+    }
     format!("{code}: {description}, {operation} '{}'", path.display())
 }
 fn object() -> V {
@@ -173,7 +176,7 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
         .unwrap_or("<your OmniGateway key>");
     let mut config = object();
     if claude && path.exists() {
-        let raw = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let raw = std::fs::read(&path).map_err(|e| fs_error(&e, "read", &path))?;
         config = operator_json::parse(&String::from_utf8_lossy(&raw))
             .map_err(|e| format!("cannot parse existing settings.json: {e}"))?;
         if !matches!(config, V::Object(_)) {
@@ -243,12 +246,21 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     if !flags.contains_key("dry-run") {
         std::fs::create_dir_all(&dir).map_err(|e| fs_error(&e, "mkdir", &dir))?;
         let temporary = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
-        let result =
-            std::fs::write(&temporary, &contents).and_then(|()| std::fs::rename(&temporary, &path));
+        let result = std::fs::write(&temporary, &contents)
+            .map_err(|e| fs_error(&e, "open", &temporary))
+            .and_then(|()| {
+                std::fs::rename(&temporary, &path).map_err(|e| {
+                    format!(
+                        "{} -> '{}'",
+                        fs_error(&e, "rename", &temporary),
+                        path.display()
+                    )
+                })
+            });
         if result.is_err() {
             drop(std::fs::remove_file(&temporary));
         }
-        result.map_err(|e| e.to_string())?;
+        result?;
     }
     let display = path.to_string_lossy();
     Ok(if flags.contains_key("json") {

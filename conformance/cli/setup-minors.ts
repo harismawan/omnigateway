@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 
@@ -11,7 +11,7 @@ const store = await createStore({
 });
 store.close();
 const db = new Database(join(root, "db"));
-for (const scenario of ["prototype", "io-error"]) {
+for (const scenario of ["prototype", "io-error", "read-error"]) {
   const id = scenario === "prototype" ? "__proto__" : "pool";
   db.run("DELETE FROM virtual_models");
   db.run("INSERT INTO virtual_models VALUES (?, ?, 'weighted', 0)", [
@@ -19,6 +19,7 @@ for (const scenario of ["prototype", "io-error"]) {
     JSON.stringify([{ provider: "openai", model: "gpt-6-astra" }]),
   ]);
   writeFileSync(join(root, "blocked"), "file");
+  if (scenario === "read-error") mkdirSync(join(root, "settings.json"));
   const results = [];
   for (const cmd of [
     ["bun", "--no-env-file", resolve("conformance/cli/setup-seam.ts")],
@@ -35,7 +36,7 @@ for (const scenario of ["prototype", "io-error"]) {
         "--db",
         "db",
         "setup",
-        "opencode",
+        scenario === "read-error" ? "claude" : "opencode",
         "--dir",
         scenario === "io-error" ? join(root, "blocked/sub") : root,
         "--json",
@@ -61,10 +62,12 @@ for (const scenario of ["prototype", "io-error"]) {
     if (scenario === "prototype") {
       const v = JSON.parse(out.slice(out.indexOf("{")));
       assert.deepEqual(JSON.parse(v.files[0].contents).provider.omnigateway.models, {});
-    } else assert(out.includes(`ENOTDIR: not a directory, mkdir '${root}/blocked/sub'`));
+    } else if (scenario === "io-error")
+      assert(out.includes(`ENOTDIR: not a directory, mkdir '${root}/blocked/sub'`));
+    else assert(out.includes(`EISDIR: illegal operation on a directory, read`));
     results.push(r);
   }
   assert.deepEqual(results[1], results[0]);
 }
 db.close();
-console.log(`PASS 2 setup minor regressions (${root})`);
+console.log(`PASS 3 setup minor regressions (${root})`);
