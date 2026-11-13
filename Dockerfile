@@ -1,4 +1,4 @@
-FROM oven/bun:1.4.4-alpine AS base
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4-alpine AS base
 WORKDIR /app
 
 # Manifests first: this layer is cached until a dependency actually changes,
@@ -38,17 +38,33 @@ COPY apps/dashboard apps/dashboard
 # The regular build's `typecheck` step reaches the repository's `scripts/` for two
 # import-boundary tests, which do not ship; CI typechecks, the image compiles.
 RUN bun run --cwd apps/dashboard build:production
-COPY scripts/build-binary.ts scripts/build-binary.ts
-RUN bun run build:binary
+
+# Native musl build on each buildx target (QEMU on single-architecture hosts).
+# Keep the compiler pin aligned with rust-toolchain.toml.
+FROM rust:1.99-alpine AS rust-build
+WORKDIR /app
+RUN apk add --no-cache build-base perl linux-headers
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates crates
+# Rust embeds the same migration SQL as the frozen TS store.
+COPY packages/store/src/sqlite/migrations packages/store/src/sqlite/migrations
+COPY packages/store/src/postgres/migrations packages/store/src/postgres/migrations
+ARG OMNI_VERSION=0.0.0-dev
+ENV OMNI_CLI_VERSION=$OMNI_VERSION
+RUN cargo build --locked --release -p omni-gateway --bin omnigateway
+
+FROM scratch AS binary
+COPY --from=rust-build /app/target/release/omnigateway /omnigateway
 
 # Runtime: only the standalone gateway and built console, no separate Bun or npm tree.
 FROM alpine:3.22 AS runner
 WORKDIR /app
-RUN apk add --no-cache ca-certificates libgcc libstdc++ \
+RUN apk add --no-cache ca-certificates \
  && addgroup -g 1000 bun \
  && adduser -D -u 1000 -G bun bun
-COPY --from=build /app/dist/omnigateway /app/omnigateway
+COPY --from=rust-build /app/target/release/omnigateway /app/omnigateway
 COPY --from=build /app/apps/dashboard/dist /app/public
+RUN ln -s /app/omnigateway /usr/local/bin/omni
 
 # Plugins are read from `$OMNI_ROOT/plugins` at boot. On one node that is the
 # data volume, so `omni plugin install` against it survives a restart; in a
@@ -65,7 +81,8 @@ ENV OMNI_HOST=0.0.0.0 \
     OMNI_PORT=9000 \
     OMNI_ROOT=/data \
     OMNI_DB_PATH=/data/omnigateway.db \
-    OMNI_STATIC_DIR=/app/public
+    OMNI_STATIC_DIR=/app/public \
+    MIMALLOC_PURGE_DELAY=1
 
 # Single-node: credentials outlive the container. Without this, `docker rm`
 # deletes them. Cluster mode (OMNI_DATABASE_URL set) writes nothing here and
