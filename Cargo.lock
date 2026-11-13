@@ -1597,6 +1597,7 @@ dependencies = [
  "memchr",
  "omni-dialects",
  "omni-ir",
+ "rand 0.9.5",
  "rcgen",
  "rustls",
  "rustls-native-certs",
