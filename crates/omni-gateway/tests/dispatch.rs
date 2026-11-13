@@ -32,6 +32,34 @@ async fn flush(h: Harness) {
 }
 
 #[tokio::test]
+async fn anthropic_api_key_dispatch_uses_messages_codec() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='anthropic', provider_data='{}'",
+        [],
+    )
+    .expect("provider");
+    let body = "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":10}}}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\nevent: message_stop\ndata: {}\n\n";
+    let h = harness(&f, vec![Reply::Http(200, vec![], vec![body.into()])]);
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let sent = h.script.seen.lock().expect("seen")[0].clone();
+    assert_eq!(sent.url, "https://api.anthropic.com/v1/messages");
+    assert!(sent.headers.iter().any(|(k, _)| k == "x-api-key"));
+    assert!(sent.body.contains("cch="));
+    assert_eq!(
+        d.log.lock().expect("log").cost_usd,
+        (10.0 * 4.0 + 4.0 * 20.0) / 1e6
+    );
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn a_healthy_stream_is_forwarded_and_begins_one_pending_row() {
     let f = fixture(&["c0"]);
     let h = harness(&f, vec![sse_ok(2)]);

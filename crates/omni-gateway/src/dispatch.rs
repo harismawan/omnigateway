@@ -675,7 +675,7 @@ fn run(mut s: RunState) -> EventsStream {
             let preemptive_refresh_required = c.credential.auth_type == AuthType::OAuth
                 && c.credential.expires_at.is_some_and(|at| at - REFRESH_LEAD_MS <= attempt_now);
 
-            if c.target.provider != omni_providers::custom::ID {
+            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" {
                 let ttft = lock(&log).ttft_ms;
                 slot.release(ttft);
                 yield Err(GatewayError::new(
@@ -712,12 +712,21 @@ fn run(mut s: RunState) -> EventsStream {
                     }
                     let sent = within(
                         s.deadline,
+                        async {
+                        if c.target.provider == "anthropic" {
+                            omni_providers::adapter::send(
+                                &omni_providers::anthropic::codec::AnthropicCodec,
+                                "anthropic", ar, deps.http.as_ref(),
+                            ).await
+                        } else {
                         omni_providers::adapter::send(
                             &omni_providers::custom::CustomCodec,
                             omni_providers::custom::ID,
                             ar,
                             deps.http.as_ref(),
-                        ),
+                        ).await
+                        }
+                        },
                     )
                     .await;
                     let mut result = match sent {
