@@ -142,6 +142,7 @@ const SEED_KEY = seeded.key;
 const seedDb = join(seedRoot, "omni.db");
 {
   const d = new Database(seedDb);
+  d.run("PRAGMA busy_timeout=5000");
   // Fixed timestamps: the seed's own rows must not read as "now".
   d.run("UPDATE api_keys SET created_at = 1700000000000");
   d.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('adminPasswordHash', ?)", [
@@ -164,6 +165,7 @@ function db(name: string, sql: string[] = []): string {
   const file = join(work, `${name}.db`);
   copyFileSync(seedDb, file);
   const d = new Database(file);
+  d.run("PRAGMA busy_timeout=5000");
   for (const s of sql) d.run(s);
   d.close();
   return file;
@@ -452,6 +454,7 @@ function dump(file: string, m: Masker): string {
 // ------------------------------------------------------------ steps
 
 type HttpStep = {
+  expectedStatus?: number;
   kind?: "http";
   name: string;
   who: Who;
@@ -1308,6 +1311,24 @@ type Config = { label: string; db: () => string; steps: () => Step[] };
 let healthSeed: string | undefined;
 const configs: Config[] = [
   {
+    label: "usage",
+    db: () => db("usage", [
+      ...Array.from({length: 20}, (_, i) => `INSERT INTO request_logs(id,at,requested_model,resolved_model,resolved_provider,credential_id,api_key_id,status,duration_ms,input_tokens,output_tokens,cost_usd,rtk_applied,rtk_estimated_tokens_saved) VALUES ('u${i}',${Date.UTC(2026,10,13) + i*3600000},'requested-${i%3}',${i%4 === 0 ? "NULL" : `'m${i%2}'`},'custom','cred-${i%2}','key-${i%3}',${i%3===0?500:200},${i*13},${i},${i*2},0.125,${i%2},${i*3})`),
+      ...Array.from({length: 8}, (_, i) => `INSERT INTO usage_daily(day,provider,credential_id,requested_model,resolved_model,api_key_id,requests,errors,input_tokens,duration_ms_sum) VALUES (${Date.UTC(2026,10,13) + i*86400000},'custom','cred-${i%2}','requested-${i%3}','m${i%2}','key-${i%3}',${i+1},1,${i*17},${i*101})`),
+      "UPDATE request_logs SET resolved_model=x'0102', input_tokens='nonnumeric', duration_ms=1.25 WHERE id='u1'",
+      "UPDATE request_logs SET resolved_model='', input_tokens=1e100 WHERE id='u2'",
+    ]),
+    steps: () => {
+      const queries = ["", "grain=raw", "grain=daily", "grain=bad", "groupBy=bad", "splitBy=bad", "groupBy=day", "grain=daily&groupBy=hour", "credentialId=", "apiKeyId=!", "since=bad", "since=0x10&until=1e20", "since=&until=", "grain=raw&grain=daily"];
+      for (const grain of ["raw", "daily"])
+        for (const groupBy of ["credential", "model", "requestedModel", "apiKey", "provider", grain === "raw" ? "hour" : "day"])
+          for (const splitBy of ["", "model", "provider", "apiKey"])
+            queries.push(`grain=${grain}&groupBy=${groupBy}${splitBy ? `&splitBy=${splitBy}` : ""}`);
+      queries.push("credentialId=cred-1", "apiKeyId=key-1", "credentialId=cred-0&apiKeyId=key-2", "since=1794528000000&until=1794614400000", "grain=daily&since=1794528000001&until=1e20", "until=0");
+      return queries.flatMap((q, i) => everyone("GET", `/api/usage?${q}`).map(s => ({...s, name: `usage ${i} ${s.who}`, expectedStatus: s.who === "anon" ? 401 : i >= 3 && i <= 9 ? 400 : 200 })));
+    },
+  },
+  {
     label: "credential-identity",
     db: () => db("credential-identity", ["UPDATE api_keys SET limits='{}'"]),
     steps: () => {
@@ -2132,6 +2153,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         continue;
       }
       record(step.name, step.method ?? "GET", x);
+      if (step.expectedStatus !== undefined && x.status !== step.expectedStatus)
+        deadlineFailures.push(`${step.name}: expected status ${step.expectedStatus}, got ${x.status}`);
       if (before) {
         const after = readTimes();
         const ok =

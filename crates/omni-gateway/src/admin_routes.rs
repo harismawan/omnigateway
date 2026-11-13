@@ -81,6 +81,7 @@ fn failure(e: Failure) -> ApiError {
 /// The routes this module serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admin {
+    Usage,
     ListCredentials,
     CreateCredential,
     PatchCredential(Option<String>),
@@ -118,6 +119,7 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
     let get = matches!(*method, M::GET | M::HEAD);
     let param = |rest: &str| (!rest.is_empty() && !rest.contains('/')).then(|| decode_param(rest));
     match path {
+        "/api/usage" if get => return Some(Admin::Usage),
         "/api/credentials" if get => return Some(Admin::ListCredentials),
         "/api/credentials" if *method == M::POST => return Some(Admin::CreateCredential),
         "/api/credentials/health" if get => return Some(Admin::CredentialHealth),
@@ -180,6 +182,20 @@ pub async fn serve(
     let control = app.control.clone();
     let now = crate::clock::now_ms();
     match route {
+        Admin::Usage => {
+            require_reader(req.headers(), &app.admin).await?;
+            let query = req.uri().query().unwrap_or("").to_owned();
+            #[allow(clippy::cast_precision_loss)]
+            let now = now as f64;
+            Ok(json_ok(
+                omni_ir::jsjson::stringify(
+                    &control
+                        .run(move |s| omni_control::reports::usage(s, &query, now))
+                        .await?,
+                )
+                .unwrap_or_else(|| "null".into()),
+            ))
+        }
         Admin::ListCredentials => {
             require_reader(req.headers(), &app.admin).await?;
             Ok(json_ok(control.run(omni_control::credentials::list).await?))
