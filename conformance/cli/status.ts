@@ -172,6 +172,16 @@ try {
     }
     assert.deepEqual(results[1], results[0]);
     assert.equal(results[0]?.code, 0);
+    for (const r of results) {
+      assert.equal(r.code, 0);
+      assert.equal(r.err, "");
+      if (json) {
+        const d = JSON.parse(r.out);
+        assert.equal(d.process.running, true);
+        assert.equal(d.process.pid, gateway.pid);
+      } else assert(r.out.includes("running"));
+    }
+    assert.equal(readFileSync(join(state, "gateway.pid"), "utf8"), String(gateway.pid));
   }
 } finally {
   gateway.kill("SIGTERM");

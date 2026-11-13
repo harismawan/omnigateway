@@ -115,6 +115,7 @@ for (const parts of cases) {
 console.log(`PASS ${count} streaming UTF8/UTF16/control/terminal comparisons (${root})`);
 const mismatch = [];
 for (const rust of [false, true]) {
+  copyFileSync(fixture, join(root, `mismatch-${rust}.db`));
   const cmd = rust
     ? [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]
     : ["bun", "--no-env-file", resolve("conformance/cli/password-reader-seam.ts")];
@@ -148,7 +149,15 @@ for (const rust of [false, true]) {
   assert.equal(await p.exited, 0);
   assert.equal(result.code, 1);
   assert(result.restored);
-  mismatch.push({ bytes: result.bytes, code: result.code });
+  const db = new Database(join(root, `mismatch-${rust}.db`));
+  assert.equal(db.query("SELECT value FROM settings WHERE key='adminPasswordHash'").get(), null);
+  const state = (
+    db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {
+      name: string;
+    }[]
+  ).map(({ name }) => [name, db.query(`SELECT * FROM "${name}"`).all()]);
+  db.close();
+  mismatch.push({ bytes: result.bytes, code: result.code, state });
 }
 assert.deepEqual(mismatch[1], mismatch[0]);
 console.log("PASS UTF16 lone-surrogate versus replacement confirmation mismatch");

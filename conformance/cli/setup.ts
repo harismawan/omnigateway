@@ -20,7 +20,7 @@ const store = await createStore({
 store.close();
 const db = new Database(join(root, "db"));
 db.run("INSERT INTO virtual_models VALUES ('pool', ?, 'weighted', 0)", [
-  JSON.stringify([{ provider: "openai", model: "gpt-5", weight: 1 }]),
+  JSON.stringify([{ provider: "openai", model: "gpt-6-astra", weight: 1 }]),
 ]);
 db.close();
 const commands = [
