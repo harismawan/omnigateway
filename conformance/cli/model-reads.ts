@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/models-golden-");
 console.log(root);
@@ -61,7 +62,7 @@ async function compare(args: string[], pty = false, rootEnv = false) {
       "models",
       ...args,
     ];
-    const p = Bun.spawn(
+    const p = goldenSpawn(
       pty ? ["python3", join(repo, "conformance/cli/pty.py"), "", ...command] : command,
       { cwd: dir, env: { ...env, OMNI_ROOT: dir }, stdout: "pipe", stderr: "pipe" },
     );
@@ -288,3 +289,5 @@ await compare(["list"]);
 await compare(["list", "--json"]);
 assert(successfulCommands > 0, "must exercise successful model reads");
 console.log(`PASS models ${count}: ${root}`);
+
+await verifyGoldenExits("model-reads");

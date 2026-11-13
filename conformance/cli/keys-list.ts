@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { requestLog } from "../../packages/testkit/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const binary = resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni");
@@ -20,7 +21,7 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.st
 Object.assign(env, { OMNI_ENCRYPTION_KEY: secret, NO_COLOR: "1", HOME: root });
 const ts = ["bun", "--no-env-file", join(repo, "apps/cli/src/index.ts")];
 async function invoke(cmd: string[], args: string[], cwd = root, extra = {}) {
-  const p = Bun.spawn([...cmd, ...args], {
+  const p = goldenSpawn([...cmd, ...args], {
     cwd,
     env: { ...env, ...extra },
     stdout: "pipe",
@@ -293,3 +294,5 @@ try {
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
+
+await verifyGoldenExits("keys-list");

@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/e1-e5/db-reads-");
 const bin = resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni");
@@ -75,7 +76,7 @@ for (const seeded of [false, true]) {
             rmSync(join(root, `db${suffix}`), { force: true });
           copyFileSync(join(root, "fixture"), join(root, "db"));
           assert.deepEqual(dump(), baseline);
-          const p = Bun.spawn(
+          const p = goldenSpawn(
             [...cmd, "--root", root, "--db", "db", "db", verb, ...(json ? ["--json"] : [])],
             {
               cwd: root,
@@ -149,7 +150,7 @@ for (const size of [1280, 2304, 1310720]) {
   writeFileSync(join(root, "snapshots", id), Buffer.alloc(size));
   const results = [];
   for (const cmd of commands) {
-    const p = Bun.spawn([...cmd, "--root", root, "--db", "db", "db", "snapshots"], {
+    const p = goldenSpawn([...cmd, "--root", root, "--db", "db", "db", "snapshots"], {
       env,
       stdout: "pipe",
       stderr: "pipe",
@@ -167,3 +168,5 @@ for (const size of [1280, 2304, 1310720]) {
   assert.equal(results[0], results[1]);
 }
 console.log("PASS 3 half-way size comparisons");
+
+await verifyGoldenExits("db-reads");

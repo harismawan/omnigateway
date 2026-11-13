@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/date-boundaries-");
 const repo = resolve(import.meta.dir, "../..");
@@ -65,7 +66,7 @@ try {
         const before = db.query("SELECT * FROM api_keys").all();
         const args =
           kind === "create" ? ["create", `--expires=${date}`] : ["expiry", "k", `--at=${date}`];
-        const p = Bun.spawn([...cmd, "keys", ...args, "--json", "--root", dir, "--db", "db"], {
+        const p = goldenSpawn([...cmd, "keys", ...args, "--json", "--root", dir, "--db", "db"], {
           cwd: dir,
           env,
           stdout: "pipe",
@@ -89,3 +90,5 @@ try {
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
+
+await verifyGoldenExits("date-boundaries");

@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, DEFAULT_SETTINGS, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/settings-golden-");
 const repo = resolve(import.meta.dir, "../..");
@@ -35,7 +36,7 @@ async function run(i: number, args: string[], dir = roots[i]) {
   assert(dir && command);
   const db = new Database(join(dir, "db"));
   const before = db.query("SELECT * FROM settings ORDER BY key").all();
-  const p = Bun.spawn([...command, "--root", dir, "--db", "db", "settings", ...args], {
+  const p = goldenSpawn([...command, "--root", dir, "--db", "db", "settings", ...args], {
     cwd: dir,
     env,
     stdout: "pipe",
@@ -216,3 +217,5 @@ assert(successfulCommands > 0, "must exercise successful settings commands");
 console.log(
   `PASS ${count} settings raw-byte/status/whole-row comparisons; crossread; artifacts ${root}`,
 );
+
+await verifyGoldenExits("settings");

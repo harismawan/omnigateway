@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/model-puts-");
 console.log(root);
@@ -56,12 +57,15 @@ async function compare(
     await Bun.write(join(dir, "model.json"), raw);
     const db = new Database(join(dir, "db"));
     const before = snapshot(db);
-    const p = Bun.spawn([...(commands[i] ?? []), "--root", dir, "--db", "db", "models", ...args], {
-      cwd: dir,
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const p = goldenSpawn(
+      [...(commands[i] ?? []), "--root", dir, "--db", "db", "models", ...args],
+      {
+        cwd: dir,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
     const out = Buffer.from(await new Response(p.stdout).arrayBuffer());
     const err = Buffer.from(await new Response(p.stderr).arrayBuffer());
     const code = await p.exited;
@@ -373,3 +377,5 @@ if (!group || group === "M2") {
 }
 assert(successfulCommands > 0, "must exercise successful model puts");
 console.log(`PASS ${count} put comparisons`);
+
+await verifyGoldenExits("model-puts");

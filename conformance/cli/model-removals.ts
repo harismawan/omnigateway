@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/model-removals-");
 console.log(root);
@@ -70,7 +71,7 @@ async function compare(args: string[], pty: string | false = false, rootEnv = fa
       "models",
       ...args,
     ];
-    const p = Bun.spawn(
+    const p = goldenSpawn(
       pty !== false ? ["python3", join(repo, "conformance/cli/pty.py"), pty, ...command] : command,
       { cwd: dir, env: { ...env, OMNI_ROOT: dir }, stdout: "pipe", stderr: "pipe" },
     );
@@ -149,3 +150,5 @@ seed("[]");
 await compare(["rm", "a😀", "-y"], false, true);
 assert(successfulCommands > 0, "must exercise successful model removals");
 console.log(`PASS ${count} removal comparisons`);
+
+await verifyGoldenExits("model-removals");

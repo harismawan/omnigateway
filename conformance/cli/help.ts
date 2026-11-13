@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../apps/cli/src/registry.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/e1-e5/help-");
 const repo = resolve(import.meta.dir, "../..");
@@ -32,7 +33,7 @@ for (const name of Object.keys(COMMANDS)) {
 for (const [i, args] of cases.entries()) {
   const results = [];
   for (const command of commands) {
-    const p = Bun.spawn([...command, ...args], {
+    const p = goldenSpawn([...command, ...args], {
       cwd: root,
       env: { ...process.env, NO_COLOR: "1", OMNI_ROOT: root },
       stdout: "pipe",
@@ -65,7 +66,7 @@ for (const name of Object.keys(COMMANDS)) {
     name.startsWith("plugin ")
   )
     continue;
-  const p = Bun.spawn([bin, "--root", root, ...name.split(" ")], {
+  const p = goldenSpawn([bin, "--root", root, ...name.split(" ")], {
     cwd: root,
     stdout: "pipe",
     stderr: "pipe",
@@ -80,3 +81,5 @@ for (const name of Object.keys(COMMANDS)) {
 }
 console.log(`PASS ${cases.length} help/resolution comparisons (${root})`);
 console.log(`PASS ${unavailable} explicit unavailable handlers`);
+
+await verifyGoldenExits("help");
