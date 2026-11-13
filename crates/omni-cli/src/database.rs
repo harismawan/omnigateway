@@ -144,11 +144,25 @@ fn snapshots(dir: &Path) -> Vec<Value> {
         {
             continue;
         }
-        let Ok(date) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H-%M-%S-%3fZ")
-        else {
+        if !stamp.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 | 13 | 16 | 19 => b == b'-',
+            10 => b == b'T',
+            23 => b == b'Z',
+            _ => b.is_ascii_digit(),
+        }) {
+            continue;
+        }
+        let iso = format!(
+            "{}:{}:{}.{}",
+            &stamp[..13],
+            &stamp[14..16],
+            &stamp[17..19],
+            &stamp[20..]
+        );
+        let Some(at) = crate::date::parse(&iso) else {
             continue;
         };
-        out.push(json!({"id":name,"filename":name,"createdAt":date.and_utc().timestamp_millis(),"sizeBytes":size_of(&f.path()),"reason":reason}));
+        out.push(json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":size_of(&f.path()),"reason":reason}));
     }
     out.sort_by_key(|s| std::cmp::Reverse(s["createdAt"].as_i64()));
     out

@@ -27,6 +27,8 @@ for (const name of [
   "db_2024-01-01T00-00-00-000Z_manual.sqlite",
   "db_2025-02-01T01-02-03-456Z_beforeRestore.sqlite",
   "db_2025-99-01T00-00-00-000Z_manual.sqlite",
+  "db_2025-02-30T00-00-00-000Z_manual.sqlite",
+  "db_2025-01-01T24-00-00-000Z_manual.sqlite",
 ])
   writeFileSync(join(root, "snapshots", name), "fixture");
 const commands = [["bun", "--no-env-file", resolve("apps/cli/src/index.ts")], [bin]];
