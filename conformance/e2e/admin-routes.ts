@@ -1346,6 +1346,59 @@ const configs: Config[] = [
           model: `identity-${i}`,
           enabled: true,
         });
+      steps.push({
+        kind: "sql",
+        name: "replacement pin identity",
+        sql: [
+          "INSERT INTO credentials(id,provider,label,auth_type,provider_data,api_key,created_at,updated_at) SELECT '�',provider,label,auth_type,provider_data,api_key,created_at,updated_at FROM credentials WHERE provider_data LIKE '%endpoint-2%'",
+        ],
+      });
+      for (const [name, pin] of [
+        ["lone-pin", "\ud800"],
+        ["replacement-pin", "�"],
+      ]) {
+        steps.push({
+          kind: "sql",
+          name: `seed ${name}`,
+          sql: [
+            `INSERT INTO virtual_models VALUES('${name}','${JSON.stringify([{ ...TARGET, provider: "custom", endpointId: "�", model: "m", credentialId: pin }])}','score',1)`,
+          ],
+        });
+        steps.push({
+          kind: "credential-routing",
+          name: `${name} identity`,
+          model: name,
+          enabled: pin === "�",
+        });
+      }
+      for (const [name, provider] of [
+        ["lone-provider", "\ud800"],
+        ["replacement-provider", "�"],
+      ])
+        steps.push({
+          kind: "sql",
+          name: `seed ${name}`,
+          sql: [
+            `INSERT INTO virtual_models VALUES('${name}','${JSON.stringify([{ ...TARGET, provider, model: "m" }])}','score',1)`,
+          ],
+        });
+      steps.push(as("admin", "GET", "/api/models"));
+      for (const name of ["lone-provider", "replacement-provider"])
+        steps.push(
+          { kind: "listed", name: `${name} published`, id: name, present: true },
+          {
+            kind: "v1",
+            name: `${name} frozen exclusion`,
+            key: SEED_KEY,
+            target: "/v1/chat/completions",
+            body: JSON.stringify({ model: name, messages: [{ role: "user", content: "hello" }] }),
+          },
+        );
+      steps.push({
+        kind: "sql",
+        name: "remove pin fixture",
+        sql: ["DELETE FROM credentials WHERE id='�'"],
+      });
       for (let i = 0; i < 3; i++) {
         steps.push(as("admin", "PATCH", `/api/credentials/{{id:${i}}}`, '{"enabled":false}'));
         for (let j = 0; j < 3; j++)
@@ -1472,8 +1525,14 @@ const configs: Config[] = [
         steps.push(as("admin", "PATCH", "/api/credentials/cred-custom", body));
       }
       steps.push(as("admin", "PATCH", "/api/credentials/missing", "{}"));
-      for (const [body, timestamps] of [["{}", "unchanged"], ['{"enabled":false}', "disable"], ['{"enabled":false}', "disable"], ['{"enabled":true}', "enable"], ['{"enabled":true}', "enable"]] as const)
-        steps.push({...as("admin", "PATCH", "/api/credentials/cred-custom", body), timestamps});
+      for (const [body, timestamps] of [
+        ["{}", "unchanged"],
+        ['{"enabled":false}', "disable"],
+        ['{"enabled":false}', "disable"],
+        ['{"enabled":true}', "enable"],
+        ['{"enabled":true}', "enable"],
+      ] as const)
+        steps.push({ ...as("admin", "PATCH", "/api/credentials/cred-custom", body), timestamps });
       steps.push({
         kind: "sql",
         name: "refuse credential update",
@@ -1544,7 +1603,13 @@ const configs: Config[] = [
         ),
       );
       steps.push(as("admin", "GET", "/api/credentials"));
-      steps.push({kind: "sql", name: "precreate routing model", sql: [`INSERT INTO virtual_models VALUES('routing-a6','[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}]','score',1)`]});
+      steps.push({
+        kind: "sql",
+        name: "precreate routing model",
+        sql: [
+          `INSERT INTO virtual_models VALUES('routing-a6','[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}]','score',1)`,
+        ],
+      });
       steps.push(
         as(
           "admin",
@@ -1564,18 +1629,28 @@ const configs: Config[] = [
         steps.push({
           kind: "sql",
           name: `seed ${name}`,
-          sql: [`INSERT INTO credential_health SELECT id,'m','${state}',${failures},${opened},${until} FROM credentials WHERE provider_data LIKE '%routing-a6%'`],
+          sql: [
+            `INSERT INTO credential_health SELECT id,'m','${state}',${failures},${opened},${until} FROM credentials WHERE provider_data LIKE '%routing-a6%'`,
+          ],
         });
         steps.push({ kind: "credential-routing", name, enabled: false });
         steps.push({
           kind: "sql",
           name: `clear ${name}`,
-          sql: ["DELETE FROM credential_health WHERE credential_id IN (SELECT id FROM credentials WHERE provider_data LIKE '%routing-a6%')"],
+          sql: [
+            "DELETE FROM credential_health WHERE credential_id IN (SELECT id FROM credentials WHERE provider_data LIKE '%routing-a6%')",
+          ],
         });
         steps.push({ kind: "credential-routing", name: `recovered after ${name}`, enabled: true });
       }
       steps.push(as("admin", "PATCH", "/api/credentials/{{last}}", '{"enabled":false}'));
-      steps.push({kind: "sql", name: "live malformed unrelated quota", sql: ["INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','live',0,'unknown',100,4102444800000,0,NULL)"]});
+      steps.push({
+        kind: "sql",
+        name: "live malformed unrelated quota",
+        sql: [
+          "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','live',0,'unknown',100,4102444800000,0,NULL)",
+        ],
+      });
       steps.push({
         kind: "credential-routing",
         name: "disabled credential stops routing",
@@ -2009,8 +2084,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       let x: Ex;
       const readTimes = () => {
-        const d = new Database(file, {readonly: true});
-        const row = d.query("SELECT updated_at,disabled_at FROM credentials WHERE id='cred-custom'").get() as {updated_at: number; disabled_at: number | null};
+        const d = new Database(file, { readonly: true });
+        const row = d
+          .query("SELECT updated_at,disabled_at FROM credentials WHERE id='cred-custom'")
+          .get() as { updated_at: number; disabled_at: number | null };
         d.close();
         return row;
       };
@@ -2019,7 +2096,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       const sentAt = Date.now();
       try {
         x = await send(step);
-        if (["POST", "PUT", "PATCH", "DELETE"].includes(step.method ?? "GET")) mutationAck = Date.now();
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(step.method ?? "GET"))
+          mutationAck = Date.now();
       } catch (err) {
         results.set(step.name, { text: `${TRANSPORT_ERROR} ${String(err)}`, db: "" });
         continue;
@@ -2031,11 +2109,21 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       record(step.name, step.method ?? "GET", x);
       if (before) {
         const after = readTimes();
-        const ok = step.timestamps === "unchanged"
-          ? after.updated_at === before.updated_at && after.disabled_at === before.disabled_at
-          : after.updated_at > before.updated_at && after.updated_at >= sentAt && after.updated_at <= Date.now()
-            && (step.timestamps === "enable" ? after.disabled_at === null : after.disabled_at !== null && after.disabled_at >= sentAt && after.disabled_at <= Date.now());
-        if (!ok) deadlineFailures.push(`${step.name}: timestamp invariant failed ${JSON.stringify({before, after})}`);
+        const ok =
+          step.timestamps === "unchanged"
+            ? after.updated_at === before.updated_at && after.disabled_at === before.disabled_at
+            : after.updated_at > before.updated_at &&
+              after.updated_at >= sentAt &&
+              after.updated_at <= Date.now() &&
+              (step.timestamps === "enable"
+                ? after.disabled_at === null
+                : after.disabled_at !== null &&
+                  after.disabled_at >= sentAt &&
+                  after.disabled_at <= Date.now());
+        if (!ok)
+          deadlineFailures.push(
+            `${step.name}: timestamp invariant failed ${JSON.stringify({ before, after })}`,
+          );
       }
       results.set(step.name, { text: normalize(x, m), db: dump(file, m) });
       // Keys list newest first, and two mints in one millisecond tie: give

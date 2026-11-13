@@ -105,7 +105,9 @@ pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
         // lookup is unknown (NaN), just like an unknown text name.
         let window_name = match r.get_ref("window_type")? {
             rusqlite::types::ValueRef::Text(s) => String::from_utf8_lossy(s).into_owned(),
-            rusqlite::types::ValueRef::Blob(b) => b.iter().map(u8::to_string).collect::<Vec<_>>().join(","),
+            rusqlite::types::ValueRef::Blob(b) => {
+                b.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+            }
             rusqlite::types::ValueRef::Null => "null".into(),
             v => crate::js::number_to_string(crate::js::coerce_cell(v)),
         };
