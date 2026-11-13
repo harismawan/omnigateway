@@ -701,7 +701,7 @@ fn run(mut s: RunState) -> EventsStream {
                                 "credential expired with no refresh token",
                             ).with_provider(c.credential.provider.clone()));
                         }
-                        match deps.refresh(&c.credential).await {
+                        match within(s.deadline, deps.refresh(&c.credential)).await.and_then(|r| r) {
                             Ok(sec) => retry_secrets = Some(sec),
                             Err(e) => break 'attempt Err(e),
                         }
@@ -888,7 +888,7 @@ fn run(mut s: RunState) -> EventsStream {
                         model = %c.target.model, credentialId = %c.credential.id,
                         attempt = i + 1, code = failure.code.as_str(),
                         "attempt authentication failed; refreshing credential");
-                    match deps.refresh(&c.credential).await {
+                    match within(s.deadline, deps.refresh(&c.credential)).await.and_then(|r| r) {
                         Ok(sec) => {
                             retry_secrets = Some(sec);
                             continue;

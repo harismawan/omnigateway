@@ -99,6 +99,24 @@ async fn sweep_refreshes_due_rows_and_disables_expired_without_token() {
 }
 
 #[tokio::test]
+async fn cancellation_drops_only_the_waiter_not_shared_rotation() {
+    let (_dir, service, http, c) = fixture(200).await;
+    let waiting = {
+        let service = service.clone();
+        let c = c.clone();
+        tokio::spawn(async move { service.refresh(&c).await })
+    };
+    while http.calls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    let result = service.refresh(&c).await.unwrap();
+    assert_eq!(result.access_token.as_deref(), Some("new"));
+    assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn success_coalesces_and_stale_views_deduplicate() {
     let (_dir, service, http, c) = fixture(200).await;
     let (a, b) = tokio::join!(service.refresh(&c), service.refresh(&c));

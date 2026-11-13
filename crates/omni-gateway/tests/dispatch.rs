@@ -427,6 +427,36 @@ async fn a_429_parks_the_credential_with_its_retry_after() {
 }
 
 #[tokio::test]
+async fn refresh_waits_obey_dispatch_deadline() {
+    for preemptive in [true, false] {
+        let f = fixture(&["c0"]);
+        set_setting(&f.path, "requestDeadlineMs", "150");
+        let conn = rusqlite::Connection::open(&f.path).expect("db");
+        conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',access_token=?,refresh_token=?,expires_at=?", rusqlite::params![omni_crypto::field::encrypt(&key(), "old"),omni_crypto::field::encrypt(&key(), "refresh"),if preemptive {1_i64} else {4102444800000}]).expect("oauth");
+        let replies = if preemptive {
+            vec![Reply::Hang]
+        } else {
+            vec![Reply::Http(401, vec![], vec!["{}".into()]), Reply::Hang]
+        };
+        let h = harness(&f, replies);
+        let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+        let events = tokio::time::timeout(Duration::from_secs(2), drain(&mut d))
+            .await
+            .expect("refresh waiter must respect deadline");
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Error {
+                code: ErrorCode::Timeout,
+                ..
+            })
+        ));
+        drop(d);
+        assert!(h.deps.load.counts().is_empty());
+        flush(h).await;
+    }
+}
+
+#[tokio::test]
 async fn the_deadline_turns_a_hanging_upstream_into_a_timeout() {
     let f = fixture(&["c0"]);
     set_setting(&f.path, "requestDeadlineMs", "150");
