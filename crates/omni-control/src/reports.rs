@@ -1,11 +1,8 @@
 //! Validation for reader reports; aggregate SQL belongs to omni-store.
 use crate::api::Failure;
+use omni_ir::js::trim;
 use omni_ir::jsjson::JsValue;
 use omni_store::{SqliteStore, reports::UsageQuery};
-
-fn trim(s: &str) -> &str {
-    s.trim_matches(|c: char| matches!(c, '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'))
-}
 
 fn dimension(grain: &str, value: &str) -> Result<&'static str, Failure> {
     Ok(match value {

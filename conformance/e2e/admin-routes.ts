@@ -251,18 +251,47 @@ function occurrences(hay: Buffer, needle: string): number {
  * sends exactly that many bytes. A chunked answer declares none. An answer
  * with neither is delimited by the close and has nothing to check.
  */
+const bodyless = (method: string, status: number) =>
+  method === "HEAD" || status === 204 || status === 304 || status < 200;
+const isChunked = (x: Ex) =>
+  x.head.some(([k, v]) => k === "transfer-encoding" && /chunked/i.test(v));
+/** The payload of a chunked body, and whether its framing ran to the last chunk. */
+function dechunk(raw: Buffer): { body: Buffer; complete: boolean } {
+  const parts: Buffer[] = [];
+  let at = 0;
+  for (;;) {
+    const end = raw.indexOf("\r\n", at);
+    if (end < 0) return { body: Buffer.concat(parts), complete: false };
+    const text = raw.subarray(at, end).toString("latin1");
+    if (!/^[0-9a-fA-F]+$/.test(text)) return { body: Buffer.concat(parts), complete: false };
+    const n = Number.parseInt(text, 16);
+    at = end + 2;
+    if (n === 0) return { body: Buffer.concat(parts), complete: raw.length === at + 2 };
+    if (raw.length < at + n + 2) {
+      parts.push(raw.subarray(at));
+      return { body: Buffer.concat(parts), complete: false };
+    }
+    parts.push(raw.subarray(at, at + n));
+    at += n + 2;
+  }
+}
 function lengthProblem(method: string, x: Ex): string | null {
   const lengths = x.head.filter(([k]) => k === "content-length").map(([, v]) => v);
-  const chunked = x.head.some(([k, v]) => k === "transfer-encoding" && /chunked/i.test(v));
+  const chunked = isChunked(x);
   for (const v of lengths) if (!/^\d+$/.test(v)) return `content-length "${v}" is not a number`;
   if (lengths.length > 1) return `${lengths.length} content-length headers`;
   if ((x.status < 200 || x.status === 204) && lengths.length > 0)
     return `content-length forbidden on ${x.status}`;
-  if (method === "HEAD" || x.status === 204 || x.status === 304 || x.status < 200)
+  if (bodyless(method, x.status))
     return x.body.length === 0
       ? null
       : `${x.body.length} body bytes on a ${method} ${x.status} answer`;
-  if (chunked) return lengths.length > 0 ? "content-length beside chunked encoding" : null;
+  if (chunked)
+    return lengths.length > 0
+      ? "content-length beside chunked encoding"
+      : dechunk(x.body).complete
+        ? null
+        : "incomplete chunked framing";
   const [declared] = lengths;
   return declared === undefined || Number(declared) === x.body.length
     ? null
@@ -296,11 +325,22 @@ function lengthProblem(method: string, x: Ex): string | null {
     ]),
     ["GET", ex(101, [cl("0")]), false],
     ["GET", ex(204, [cl("0")]), false],
+    // A streamed HEAD declares chunked framing and sends nothing.
+    ["HEAD", ex(200, [["transfer-encoding", "chunked"]]), true],
+    ["GET", ex(200, [["transfer-encoding", "chunked"]]), false],
+    ["GET", ex(200, [["transfer-encoding", "chunked"]], "2\r\nxy\r\n"), false],
+    ["GET", ex(200, [["transfer-encoding", "chunked"]], "2\r\nx"), false],
+    ["GET", ex(200, [["transfer-encoding", "chunked"]], "zz\r\nx\r\n0\r\n\r\n"), false],
+    ["GET", ex(200, [["transfer-encoding", "chunked"]], "0\r\n\r\n"), true],
   ];
   for (const [method, x, ok] of cases)
     if ((lengthProblem(method, x) === null) !== ok)
       throw new Error(`lengthProblem self-check: ${method} ${JSON.stringify(x.head)}`);
   if (occurrences(Buffer.from("aXaXa"), "aXa") !== 2) throw new Error("occurrences self-check");
+  const two = dechunk(Buffer.from("1\r\na\r\n2\r\nbc\r\n0\r\n\r\n"));
+  if (!two.complete || two.body.toString() !== "abc") throw new Error("dechunk self-check");
+  const cut = dechunk(Buffer.from("1\r\na\r\n2\r\nb"));
+  if (cut.complete || cut.body.toString() !== "ab") throw new Error("dechunk truncation self-check");
 }
 
 /** Per-binary state: the ids, keys, prefixes and hashes it minted. */
@@ -358,7 +398,7 @@ function maskTimes(json: string): string {
   );
 }
 
-function normalize(x: Ex, m: Masker): string {
+function normalize(method: string, x: Ex, m: Masker): string {
   const now = Date.now() / 1000;
   const head = x.head
     .filter(([k, v]) => !(k === "connection" && v === "close"))
@@ -379,13 +419,18 @@ function normalize(x: Ex, m: Masker): string {
       return `${k}: ${v}`;
     })
     .sort();
-  let body=x.body;
-  if(x.head.some(([k,v])=>k==="transfer-encoding"&&v==="chunked")) {
-    const parts:Buffer[]=[];let at=0;
-    for(;;){const end=body.indexOf("\r\n",at);if(end<0)throw new Error("invalid chunk header");const n=Number.parseInt(body.subarray(at,end).toString(),16);if(!Number.isFinite(n))throw new Error("invalid chunk size");at=end+2;if(n===0)break;parts.push(body.subarray(at,at+n));at+=n+2;}
-    body=Buffer.concat(parts);
+  // A HEAD answer (and a 1xx/204/304) carries no body whatever framing it
+  // declares: there is nothing to de-chunk. Elsewhere incomplete framing is
+  // marked, and is that binary's own failure in `lengthProblem`.
+  let body = x.body;
+  let truncated = "";
+  if (bodyless(method, x.status)) body = x.body;
+  else if (isChunked(x)) {
+    const decoded = dechunk(x.body);
+    body = decoded.body;
+    if (!decoded.complete) truncated = "<TRUNCATED>";
   }
-  return `${x.status}\n${head.join("\n")}\n\n${maskTimes(m.text(body.toString("latin1")))}`;
+  return `${x.status}\n${head.join("\n")}\n\n${maskTimes(m.text(body.toString("latin1")))}${truncated}`;
 }
 
 /**
@@ -394,8 +439,8 @@ function normalize(x: Ex, m: Masker): string {
  * instants. Masked only: nothing here reads them against the clock, so this
  * driver shows the headers' presence and shape, not that a reset is right.
  */
-function normalizeV1(x: Ex, m: Masker): string {
-  return normalize(x, m)
+function normalizeV1(method: string, x: Ex, m: Masker): string {
+  return normalize(method, x, m)
     .replace(/^(anthropic-ratelimit-[a-z-]+-reset): \S+$/gm, "$1: <instant>")
     .replace(/^(x-ratelimit-reset-[a-z-]+): \S+$/gm, "$1: <duration>")
     .replace(/^retry-after: \d+$/gm, "retry-after: <s>");
@@ -466,6 +511,8 @@ function dump(file: string, m: Masker): string {
 
 type HttpStep = {
   expectedStatus?: number;
+  /** As a `v1` step's: both answers exactly as pinned, and different. */
+  expectDiff?: ExpectDiff;
   kind?: "http";
   name: string;
   who: Who;
@@ -1327,6 +1374,23 @@ const nodesNow = Date.now();
 const configs: Config[] = [
   {label:"export-nonfinite",db:()=>db("export-nonfinite",["INSERT INTO request_logs(id,at,requested_model,status,duration_ms,cost_usd) VALUES('positive',100,'m',200,1,1e999),('negative',101,'m',200,1,-1e999)"]),steps:()=>["csv","jsonl"].flatMap(format=>everyone("GET",`/api/logs/export?since=0&until=200&format=${format}`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200})))},
   ...["fractional","long","blob"].map(kind=>({label:`export-cursor-${kind}`,db:()=>db(`export-cursor-${kind}`,[`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<501) INSERT INTO request_logs(id,at,requested_model,status,duration_ms) SELECT ${kind==="blob"?"CAST(printf('x%04d',i) AS BLOB)":kind==="long"?"printf('%0300d',i)||'é'":"printf('x%04d',i)"},100.5,'m',200,1 FROM n`]),steps:()=>["csv","jsonl"].flatMap(format=>everyone("GET",`/api/logs/export?since=0&until=200&format=${format}`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200})))})),
+  // HEAD reaches every GET route: the same guard, status and headers, no body.
+  // One pinned divergence (review M2): Bun declares `transfer-encoding:
+  // chunked` on the HEAD of a streamed answer; hyper's HTTP/1 encoder drops
+  // that header from every answer to a HEAD (`Server::can_chunked`), and no
+  // configuration changes it. Both are valid HTTP (RFC 9112 6.1: a server MAY
+  // send it), neither sends a body, and nothing else in the head differs.
+  {label:"head-reports",db:()=>db("head-reports",["INSERT INTO request_logs(id,at,requested_model,resolved_model,api_key_id,status,duration_ms,input_tokens) VALUES('head-1',100,'m','r','k',200,1,2),('head-2',101,'m','r','k',500,1,2)"]),steps:()=>[
+    {kind:"sql" as const,name:"head nodes seed",sql:["DELETE FROM nodes",`INSERT INTO nodes VALUES('peer',${nodesNow+600000})`]},
+    ...([["/api/usage",200],["/api/usage?until=1e20&groupBy=apiKey&splitBy=model",200],["/api/usage?grain=bad",400],["/api/logs",200],["/api/logs?limit=1",200],["/api/logs?state=bad",400],["/api/logs/export?since=0&until=200",200],["/api/logs/export?since=0&until=200&format=jsonl",200],["/api/logs/export?since=300&until=400&format=jsonl",200],["/api/logs/export?since=300&until=400",200],["/api/logs/export",400],["/api/nodes",200],["/api/nodes?ignored=1",200]] as const).flatMap(([target,status])=>everyone("HEAD",target).map((s):HttpStep=>{
+      const streamed=status===200&&target.startsWith("/api/logs/export")&&s.who!=="anon";
+      const format=target.includes("format=jsonl")?"jsonl":"csv";
+      const head=`200\ncache-control: no-store\ncontent-disposition: attachment; filename="omnigateway-logs-<now>.${format}"\ncontent-type: ${format==="jsonl"?"application/x-ndjson":"text/csv; charset=utf-8"}\n`;
+      return {...s,name:`head ${target} ${s.who}`,expectedStatus:s.who==="anon"?401:status,...(streamed?{expectDiff:{why:"hyper never declares transfer-encoding on a HEAD answer (M2)",ts:`${head}transfer-encoding: chunked\n\n`,rust:`${head}\n`}}:{})};
+    })),
+    // Eight HEAD exports each took an export slot; none may have kept it.
+    ...everyone("GET","/api/logs/export?since=0&until=200&format=jsonl").map(s=>({...s,name:`export after head ${s.who}`,expectedStatus:s.who==="anon"?401:200})),
+  ]},
   {label:"nodes",db:()=>db("nodes",[]),steps:()=>["empty","one","several","unusual"].flatMap((name,i)=>[
     {kind:"sql" as const,name:`nodes seed ${name}`,sql:["DELETE FROM nodes",...(i===0?[]:[`INSERT INTO nodes VALUES('peer',${nodesNow+600000})`]),...(i<2?[]:[`INSERT INTO nodes VALUES('older',${nodesNow+500000}),('stale',1)`]),...(i<3?[]:["INSERT INTO nodes VALUES(CAST(x'ff' AS TEXT),'text-time'),(x'0102',1e999),(NULL,'zzz')"])]},
     ...everyone("GET","/api/nodes").map(s=>({...s,name:`nodes ${name} ${s.who}`,expectedStatus:s.who==="anon"?401:200}))
@@ -1359,7 +1423,9 @@ const configs: Config[] = [
   {
     label: "logs",
     db: () => db("logs", ["WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<503) INSERT INTO request_logs(id,at,requested_model,resolved_model,resolved_provider,credential_id,api_key_id,status,error_code,duration_ms) SELECT printf('log-%04d',i),1794000000000+i/3,'requested_model','resolved','custom','cred','key',CASE WHEN i%2=0 THEN 500 ELSE 200 END,'ERROR_CODE',10 FROM n"]),
-    steps: () => ["", "limit=1", "limit=500", "limit=9999", "limit=0", "limit=bad", "since=1794000000001", "until=1794000000001", "state=done", "state=pending", "failed=true", "failed=false", "provider=custom", "requestedModel=MODEL", "resolvedModel=sol", "model=requested", "credentialId=cred", "apiKeyId=key", "errorCode=ERROR_", "cursor=bad", "state=bad", "failed=bad", "since=bad", "since=2&until=1", "wat=x"].flatMap((q,i) => everyone("GET", `/api/logs?${q}`).map(s => ({...s, name:`logs ${i} ${s.who}`, expectedStatus:s.who === "anon" ? 401 : i>=19 ? 400 : 200}))),
+    steps: () => ["", "limit=1", "limit=500", "limit=9999", "limit=0", "limit=bad", "since=1794000000001", "until=1794000000001", "state=done", "state=pending", "failed=true", "failed=false", "provider=custom", "requestedModel=MODEL", "resolvedModel=sol", "model=requested", "credentialId=cred", "apiKeyId=key", "errorCode=ERROR_", "cursor=bad", "state=bad", "failed=bad", "since=bad", "since=2&until=1", "wat=x"].flatMap((q,i) => everyone("GET", `/api/logs?${q}`).map(s => ({...s, name:`logs ${i} ${s.who}`, expectedStatus:s.who === "anon" ? 401 : i>=19 ? 400 : 200}))).concat(
+      // `optionalNumber`: a limit that is blank to `String.prototype.trim` is absent (the default 100), not `Number("")`.
+      ["%EF%BB%BF", "%20", "%09%0A", "%C2%A0", "%E2%80%A8", "%E3%80%80", "+", "%C2%85", "%E2%80%8B", "%EF%BB%BF7%EF%BB%BF"].flatMap((v,i) => everyone("GET", `/api/logs?limit=${v}`).map(s => ({...s, name:`blank limit ${i} ${s.who}`, expectedStatus:s.who === "anon" ? 401 : 200})))),
   },
   {
     label: "usage-large",
@@ -1996,21 +2062,54 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     };
     if (cookies.admin === null || cookies.viewer === null) throw new Error("seed login failed");
     if (cfg.label === "usage-large") {
-      const latencies = [];
-      for (const target of ["/api/usage?since=0&until=9999999999999&groupBy=apiKey&splitBy=model", "/api/logs?limit=500"]) {
-        const headers: [string,string][] = [["cookie",`omni_admin=${cookies.admin}`]];
-        const started = performance.now();
-        const heavy = exchange({method:"GET",target,headers});
-        await sleep(10);
+      // A small read while a large one runs. One large usage read (so the
+      // process's memory high-water mark stays that of three such answers:
+      // this one and the two the steps make) with five small reads inside
+      // it; five large log pages with one small read inside each. The bound
+      // is on the median: one sample is the scheduler's as often as the
+      // gateway's, and a read queued behind the large one misses it every time.
+      const headers: [string,string][] = [["cookie",`omni_admin=${cookies.admin}`]];
+      const light = async () => {
         const start = performance.now();
-        const light = await exchange({method:"GET",target:"/api/logs?limit=1",headers});
-        const latency = performance.now()-start;
+        const x = await exchange({method:"GET",target:"/api/logs?limit=1",headers});
+        if (x.status !== 200) throw new Error(`report concurrency light status ${x.status}`);
+        return performance.now()-start;
+      };
+      const median = (v: number[]) => [...v].sort((a,b)=>a-b)[Math.floor(v.length/2)] as number;
+      const boundMs = 10;
+      const latencies = [];
+      {
+        const target = "/api/usage?since=0&until=9999999999999&groupBy=apiKey&splitBy=model";
+        const started = performance.now();
+        let done = false;
+        const heavy = exchange({method:"GET",target,headers}).then(x => { done = true; return x; });
+        await sleep(10);
+        const samples: number[] = [];
+        for (let i = 0; i < 5 && !done; i++) { samples.push(await light()); await sleep(20); }
         const result = await heavy;
-        if (result.status !== 200 || light.status !== 200) throw new Error(`report concurrency status ${result.status}/${light.status}`);
-        latencies.push({target,latency,totalMs:performance.now()-started});
+        if (result.status !== 200) throw new Error(`report concurrency status ${result.status}`);
+        // TS answers on one thread: its first small read waits out the large
+        // one, so it has one sample, recorded and not bounded.
+        if (label === "rust" && samples.length < 3) throw new Error(`report concurrency: only ${samples.length} reads inside the large one`);
+        latencies.push({target,latency:median(samples),samples,totalMs:performance.now()-started});
       }
-      writeFileSync(join(out, `report-contention-${label}.json`), JSON.stringify(latencies));
-      if (label === "rust" && latencies.some(x=>x.latency>10)) throw new Error(`report contention ${JSON.stringify(latencies)}`);
+      {
+        const target = "/api/logs?limit=500";
+        const samples: number[] = [];
+        const totals: number[] = [];
+        for (let i = 0; i < 5; i++) {
+          const started = performance.now();
+          const heavy = exchange({method:"GET",target,headers});
+          await sleep(10);
+          samples.push(await light());
+          const result = await heavy;
+          if (result.status !== 200) throw new Error(`report concurrency status ${result.status}`);
+          totals.push(performance.now()-started);
+        }
+        latencies.push({target,latency:median(samples),samples,totalMs:median(totals)});
+      }
+      writeFileSync(join(out, `report-contention-${label}.json`), JSON.stringify({boundMs,latencies}));
+      if (label === "rust" && latencies.some(x=>x.latency>boundMs)) throw new Error(`report contention ${JSON.stringify(latencies)}`);
     }
     if (cfg.label === "export-volume-1") {
       const pages = () => (readFileSync(logFile, "utf8") + readFileSync(`${logFile}.err`, "utf8")).split("export_page_read").length - 1;
@@ -2344,7 +2443,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           continue;
         }
         record(step.name, step.method ?? "POST", x);
-        results.set(step.name, { text: normalizeV1(x, m), db: dump(file, m) });
+        results.set(step.name, { text: normalizeV1(step.method ?? "POST", x, m), db: dump(file, m) });
         continue;
       }
       if (step.kind === "concurrent") {
@@ -2404,7 +2503,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
             `${step.name}: timestamp invariant failed ${JSON.stringify({ before, after })}`,
           );
       }
-      results.set(step.name, { text: normalize(x, m), db: dump(file, m) });
+      results.set(step.name, { text: normalize(step.method ?? "GET", x, m), db: dump(file, m) });
       // Keys list newest first, and two mints in one millisecond tie: give
       // each sequential mint its own instant so both builds order alike.
       if (step.method === "POST" && fill(step.target) === "/api/keys") await sleep(3);
@@ -2485,7 +2584,11 @@ for (const cfg of configs) {
   const names = new Set([...ts.results.keys(), ...rs.results.keys()]);
   const pinned = new Map<string, ExpectDiff>();
   for (const step of cfg.steps())
-    if (step.kind === "v1" && step.expectDiff !== undefined) pinned.set(step.name, step.expectDiff);
+    if (
+      (step.kind === "v1" || step.kind === "http" || step.kind === undefined) &&
+      step.expectDiff !== undefined
+    )
+      pinned.set(step.name, step.expectDiff);
   for (const name of names) {
     const a = ts.results.get(name);
     const b = rs.results.get(name);

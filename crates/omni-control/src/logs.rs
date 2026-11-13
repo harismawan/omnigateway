@@ -264,7 +264,9 @@ pub fn parse_query(raw: &str) -> Result<Query, Failure> {
         return Err(Failure::bad("since: must not be after until"));
     }
     let n = get("limit")
-        .filter(|s| !s.trim().is_empty())
+        // `optionalNumber`: blank to `String.prototype.trim` (U+FEFF included,
+        // U+0085 not) is absent, not `Number("")`.
+        .filter(|s| !omni_ir::js::trim(s).is_empty())
         .map(omni_ir::js::string_to_number)
         .filter(|n| n.is_finite())
         .unwrap_or(100.0);
