@@ -546,7 +546,22 @@ pub fn try_collect(
                         citations: Vec::new(),
                     },
                 };
-                blocks.insert(*index, acc);
+                if let Some(old) = blocks.insert(*index, acc) {
+                    match old {
+                        Accum::Text { citations, .. } => {
+                            for v in citations {
+                                crate::deep::drop(v);
+                            }
+                        }
+                        Accum::ProviderNative { data, merges, .. } => {
+                            crate::deep::drop_map(data);
+                            for v in merges {
+                                crate::deep::drop_map(v);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             StreamEvent::BlockDelta { index, delta } => {
                 let Some(acc) = blocks.get_mut(index) else {
@@ -604,6 +619,9 @@ pub fn try_collect(
             } => {
                 stop_reason = *s;
                 usage = *u;
+                if let Some(old) = vendor.take() {
+                    crate::deep::drop_map(old);
+                }
                 vendor = v.take();
             }
             StreamEvent::BlockEnd { .. } | StreamEvent::Error { .. } => {}

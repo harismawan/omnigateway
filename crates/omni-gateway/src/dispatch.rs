@@ -64,7 +64,13 @@ fn event_size(e: &StreamEvent) -> usize {
                 block_type, data, ..
             } => {
                 block_type.len()
-                    + omni_ir::jsjson::to_string(&serde_json::Value::Object(data.clone())).len()
+                    + omni_ir::jsjson::to_string(
+                        &omni_ir::deep::Owned(serde_json::Value::Object(omni_ir::deep::clone_map(
+                            data,
+                        )))
+                        .0,
+                    )
+                    .len()
             }
             _ => 0,
         },
@@ -72,10 +78,17 @@ fn event_size(e: &StreamEvent) -> usize {
             Delta::Text { text } | Delta::Thinking { text } => text.len(),
             Delta::ThinkingSignature { signature } => signature.len(),
             Delta::ToolJson { partial } => partial.len(),
-            other => format!("{other:?}").len(),
+            Delta::ProviderNativeJson { partial, .. } => partial.len(),
+            Delta::ProviderNative { data, .. } => omni_ir::jsjson::to_string(
+                &omni_ir::deep::Owned(serde_json::Value::Object(omni_ir::deep::clone_map(data))).0,
+            )
+            .len(),
         },
         StreamEvent::End { vendor, .. } => vendor.as_ref().map_or(0, |v| {
-            omni_ir::jsjson::to_string(&serde_json::Value::Object(v.clone())).len()
+            omni_ir::jsjson::to_string(
+                &omni_ir::deep::Owned(serde_json::Value::Object(omni_ir::deep::clone_map(v))).0,
+            )
+            .len()
         }),
         StreamEvent::Error { message, .. } => message.len(),
         StreamEvent::BlockEnd { .. } => 0,

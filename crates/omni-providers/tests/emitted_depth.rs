@@ -63,7 +63,9 @@ fn emitted_depth() {
                             for mut encoder in [
                                 StreamEncoder::Anthropic(AnthropicStream::new("req")),
                                 StreamEncoder::OpenAi(OpenAiStream::new("req", 123)),
-                                StreamEncoder::Responses(Box::new(ResponsesStream::new(config))),
+                                StreamEncoder::Responses(Box::new(ResponsesStream::new(
+                                    config.clone(),
+                                ))),
                             ] {
                                 eprintln!(
                                     "encoder {}",
@@ -75,13 +77,23 @@ fn emitted_depth() {
                                 );
                                 let mut wire = String::new();
                                 for event in &out {
-                                    encoder.push(event, &mut wire);
+                                    encoder.push_owned(event.clone(), &mut wire);
                                 }
                                 encoder.finish(&mut wire);
                                 eprintln!("rendered");
                             }
                             eprintln!("collect terminal={terminal}");
-                            drop(omni_ir::stream::collect(out.clone()));
+                            let collected = omni_ir::stream::collect(out.clone());
+                            let mut repeated = out.clone();
+                            repeated.extend(out.clone());
+                            drop(omni_ir::stream::collect(repeated));
+                            for value in [
+                                omni_dialects::egress::anthropic::response(&collected, "req"),
+                                omni_dialects::egress::openai::response(&collected, "req", 123),
+                                omni_dialects::egress::responses::response(&collected, &config),
+                            ] {
+                                assert!(!omni_ir::jsjson::to_string(&value.0).is_empty());
+                            }
                         }
                         drop(out);
                     }
