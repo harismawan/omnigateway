@@ -337,22 +337,39 @@ fn email_text(
     }
 }
 fn js_text(value: &omni_ir::jsjson::JsValue) -> String {
-    match value {
-        omni_ir::jsjson::JsValue::String(s) => String::from_utf16_lossy(s),
-        omni_ir::jsjson::JsValue::Null => "null".into(),
-        omni_ir::jsjson::JsValue::Undefined => "undefined".into(),
-        omni_ir::jsjson::JsValue::Object(_) => "[object Object]".into(),
-        omni_ir::jsjson::JsValue::Array(values) => values
-            .iter()
-            .map(|v| match v {
-                omni_ir::jsjson::JsValue::Null | omni_ir::jsjson::JsValue::Undefined => {
-                    String::new()
+    use omni_ir::jsjson::JsValue;
+    let mut out = String::new();
+    let mut parents: Vec<std::slice::Iter<'_, JsValue>> = Vec::new();
+    let mut current = Some(value);
+    loop {
+        if let Some(v) = current.take() {
+            match v {
+                JsValue::Array(values) => {
+                    parents.push(values.iter());
+                    current = parents.last_mut().and_then(Iterator::next);
+                    if current.is_some() {
+                        continue;
+                    }
                 }
-                v => js_text(v),
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        _ => omni_ir::jsjson::stringify(value).unwrap_or_default(),
+                JsValue::String(s) => out.push_str(&String::from_utf16_lossy(s)),
+                JsValue::Null if parents.is_empty() => out.push_str("null"),
+                JsValue::Undefined if parents.is_empty() => out.push_str("undefined"),
+                JsValue::Null | JsValue::Undefined => {}
+                JsValue::Object(_) => out.push_str("[object Object]"),
+                _ => out.push_str(&omni_ir::jsjson::stringify(v).unwrap_or_default()),
+            }
+        }
+        loop {
+            let Some(parent) = parents.last_mut() else {
+                return out;
+            };
+            if let Some(next) = parent.next() {
+                out.push(',');
+                current = Some(next);
+                break;
+            }
+            parents.pop();
+        }
     }
 }
 

@@ -11,6 +11,61 @@ struct Fake {
     status: u16,
     calls: AtomicUsize,
 }
+struct DeepToken;
+impl HttpClient for DeepToken {
+    fn send(
+        &self,
+        _: HttpRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<HttpResponse, HttpError>> + Send + '_>,
+    > {
+        Box::pin(async {
+            let body = format!(
+                "{{\"access_token\":\"a\",\"refresh_token\":{}\"r\"{}}}",
+                "[".repeat(40000),
+                "]".repeat(40000)
+            );
+            Ok(HttpResponse {
+                status: 200,
+                headers: Headers::new(),
+                body: ResponseBody::from_bytes(body),
+            })
+        })
+    }
+}
+#[test]
+fn deep_token_host_subprocess() {
+    if std::env::var_os("OMNI_DEEP_TOKEN_CHILD").is_some() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let (_dir, mut service, _, c) = fixture(200).await;
+                        Arc::get_mut(&mut service).unwrap().http = Arc::new(DeepToken);
+                        let secrets = service.refresh(&c).await.unwrap();
+                        assert_eq!(secrets.refresh_token.as_deref(), Some("r"));
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "deep_token_host_subprocess"])
+        .env("OMNI_DEEP_TOKEN_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 struct Unavailable;
 impl omni_gateway::refresh::RefreshLock for Unavailable {
     fn acquire(
