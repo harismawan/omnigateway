@@ -86,6 +86,21 @@ impl std::fmt::Debug for SqliteStore {
 }
 
 impl SqliteStore {
+    /// Independent read-only report handle. No migration or persistent transaction.
+    pub fn open_reader(
+        path: impl AsRef<Path>,
+        day_offset_minutes: i64,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref().to_path_buf();
+        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Self {
+            conn,
+            path,
+            day_offset_minutes,
+        })
+    }
+
     /// `openDb`: open or create, set the pragmas, apply what the ledger lacks.
     /// `day_offset_minutes` is the fixed offset every daily bucket uses.
     pub fn open(path: impl AsRef<Path>, day_offset_minutes: i64) -> Result<Self, StoreError> {

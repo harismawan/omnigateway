@@ -114,13 +114,15 @@ pub fn page_encoding(
     } else {
         format!("WHERE {}", clauses.join(" AND "))
     };
+    let start = std::time::Instant::now();
     let mut stmt = store.connection().prepare(&format!(
         "SELECT * FROM request_logs {filter} ORDER BY at DESC,id DESC LIMIT ?"
     ))?;
     bindings.push(Value::Integer(
         i64::try_from(q.limit.saturating_add(1)).unwrap_or(i64::MAX),
     ));
-    Ok(stmt
+    let prepared = start.elapsed().as_micros();
+    let result = stmt
         .query_map(rusqlite::params_from_iter(&bindings), |r| {
             let mut fields = Vec::new();
             for (name, col) in [
@@ -185,5 +187,11 @@ pub fn page_encoding(
             }
             Ok(JsValue::Object(fields))
         })?
-        .collect::<Result<Vec<_>, _>>()?)
+        .collect::<Result<Vec<_>, _>>()?;
+    tracing::debug!(
+        "log_page prepare_us={} query_decode_us={}",
+        prepared,
+        start.elapsed().as_micros() - prepared
+    );
+    Ok(result)
 }

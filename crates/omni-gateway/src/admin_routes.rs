@@ -29,7 +29,12 @@ use crate::server::{App, Body};
 /// opened at boot, behind a mutex (admin traffic is light), and only ever
 /// touched on the blocking pool.
 #[derive(Clone)]
-pub struct ControlStore(Arc<Mutex<SqliteStore>>);
+pub struct ControlStore(
+    Arc<Mutex<SqliteStore>>,
+    Arc<tokio::sync::Semaphore>,
+    std::path::PathBuf,
+    i64,
+);
 
 impl std::fmt::Debug for ControlStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -39,7 +44,30 @@ impl std::fmt::Debug for ControlStore {
 
 impl ControlStore {
     pub fn new(store: SqliteStore) -> Self {
-        Self(Arc::new(Mutex::new(store)))
+        let path = store.path().to_owned();
+        let offset = store.day_offset_minutes();
+        Self(
+            Arc::new(Mutex::new(store)),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            path,
+            offset,
+        )
+    }
+
+    async fn export_reader(&self) -> Result<(Self, tokio::sync::OwnedSemaphorePermit), ApiError> {
+        let permit = self
+            .1
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ApiError::internal())?;
+        let path = self.2.clone();
+        let offset = self.3;
+        let store = tokio::task::spawn_blocking(move || SqliteStore::open_reader(path, offset))
+            .await
+            .map_err(|_| ApiError::internal())?
+            .map_err(|_| ApiError::internal())?;
+        Ok((Self::new(store), permit))
     }
 
     /// One operation on the blocking pool. A failure that is not a
@@ -193,11 +221,13 @@ pub async fn serve(
             let (query, jsonl) = omni_control::logs::export_query(req.uri().query().unwrap_or(""))
                 .map_err(failure)?;
             let first_query = query.clone();
+            let (control, permit) = control.export_reader().await?;
             let (first, next) = control
                 .run(move |s| omni_control::logs::export_page(s, &first_query, jsonl))
                 .await?;
             let empty = jsonl && first.is_empty() && next.is_none();
             let stream = async_stream::try_stream! {
+                let _permit = permit;
                 if !jsonl {yield hyper::body::Frame::data(bytes::Bytes::from_static(omni_control::logs::CSV_HEADER.as_bytes()));}
                 yield hyper::body::Frame::data(bytes::Bytes::from(first));
                 let mut next=next;

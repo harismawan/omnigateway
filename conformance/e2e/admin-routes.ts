@@ -65,7 +65,7 @@ if (flags.ts === undefined || flags.rust === undefined) {
 const REPO = resolve(import.meta.dir, "../..");
 const KEY = "conformance-admin-routes-encryption-key-01";
 const FIELD_KEY = pbkdf2Sync(KEY, "omnigateway-field-encryption-v1", 210000, 32, "sha256");
-const PORT = 18443;
+const PORT = Number(process.env.A7_TEST_PORT ?? 18443);
 mkdirSync("/tmp/opencode", { recursive: true });
 const work = mkdtempSync("/tmp/opencode/omni-admin-routes-");
 const out = flags.out ?? join(work, "out");
@@ -73,7 +73,7 @@ mkdirSync(out, { recursive: true });
 const children: Subprocess[] = [];
 const credentialUpstream = Bun.serve({
   hostname: "127.0.0.1",
-  port: 18444,
+  port: PORT + 1,
   fetch: (request) =>
     request.headers.get("authorization") !== "Bearer secret-a6-2"
       ? new Response("wrong credential", { status: 401 })
@@ -2020,10 +2020,18 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       const fixture = new Database(file);
       fixture.run("PRAGMA busy_timeout=5000");
       fixture.run(`INSERT INTO virtual_models VALUES('routing-a6','[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}]','score',1)`);
-      const credential = await exchange({method:"POST",target:"/api/credentials",headers:[["cookie",`omni_admin=${cookies.admin}`],J],body:JSON.stringify({provider:"custom",apiKey:"secret-a6-2",endpointId:"routing-a6",endpointLabel:"Routing",origin:"http://127.0.0.1:18444",protocol:"chat_completions"})});
+      const credential = await exchange({method:"POST",target:"/api/credentials",headers:[["cookie",`omni_admin=${cookies.admin}`],J],body:JSON.stringify({provider:"custom",apiKey:"secret-a6-2",endpointId:"routing-a6",endpointLabel:"Routing",origin:`http://127.0.0.1:${PORT+1}`,protocol:"chat_completions"})});
       if (credential.status !== 200) throw new Error(`slow-reader credential status ${credential.status}`);
       await sleep(1100);
       let ended = false;
+      const idle: number[] = [];
+      for (let i=0;i<5;i++) {
+        const start = performance.now();
+        const response = await exchange({method:"GET",target:"/api/logs?limit=1",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
+        if (response.status !== 200) throw new Error("idle admin status");
+        idle.push(performance.now()-start);
+      }
+      const boundMs = 10;
       const socket = connect(PORT, "127.0.0.1");
       socket.on("error", () => { ended = true; });
       socket.on("end", () => { ended = true; });
@@ -2047,7 +2055,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           const admin = await exchange({method:"GET",target:"/api/logs?limit=1",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
           const elapsed = performance.now() - started;
           latencies.push(elapsed);
-          if (admin.status !== 200 || elapsed > 2000) throw new Error(`slow-reader admin status=${admin.status} latency=${elapsed}`);
+          if (admin.status !== 200 || elapsed > boundMs) throw new Error(`slow-reader admin status=${admin.status} latency=${elapsed} bound=${boundMs} idle=${idle}`);
         }
         const deadline = Date.now() + 5000;
         let rows = 0;
@@ -2057,7 +2065,9 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           await sleep(50);
         }
         if (ended || rows < 3) throw new Error(`slow-reader progress: ended=${ended} rows=${rows}`);
-        writeFileSync(join(out, `slow-reader-${label}.json`), JSON.stringify({latencies, rows, exportOpen:!ended, boundMs:2000}));
+        const checkpoint = fixture.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as {busy:number};
+        if (checkpoint.busy !== 0) throw new Error("slow export pins WAL checkpoint");
+        writeFileSync(join(out, `slow-reader-${label}.json`), JSON.stringify({latencies, idle, rows, exportOpen:!ended, boundMs}));
       } finally {
         clearInterval(timer);
         socket.destroy();

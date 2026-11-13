@@ -69,7 +69,9 @@ pub fn export_page(
     jsonl: bool,
 ) -> Result<(String, Option<String>), Failure> {
     let started = std::time::Instant::now();
-    let parsed = parse_js(&page_encoding(store, query, !jsonl)?).map_err(Failure::internal)?;
+    let parsed = page_value(store, query, !jsonl)?;
+    let read_done = started.elapsed().as_micros();
+    let parse_done = started.elapsed().as_micros();
     let next = match field(&parsed, "nextCursor") {
         Some(JsValue::String(s)) => Some(String::from_utf16_lossy(s)),
         _ => None,
@@ -92,8 +94,11 @@ pub fn export_page(
         }
     }
     tracing::debug!(
-        "export_page_read elapsed_us={}",
-        started.elapsed().as_micros()
+        "export_page_read elapsed_us={} read_us={} parse_us={} encode_us={}",
+        started.elapsed().as_micros(),
+        read_done,
+        parse_done - read_done,
+        started.elapsed().as_micros() - parse_done
     );
     Ok((out, next))
 }
@@ -122,6 +127,10 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
 }
 
 fn page_encoding(store: &SqliteStore, raw: &str, csv: bool) -> Result<String, Failure> {
+    Ok(stringify(&page_value(store, raw, csv)?).unwrap_or_default())
+}
+
+fn page_value(store: &SqliteStore, raw: &str, csv: bool) -> Result<JsValue, Failure> {
     let mut pairs = Vec::<(String, String)>::new();
     for (k, v) in url::form_urlencoded::parse(raw.as_bytes()) {
         if let Some(p) = pairs.iter_mut().find(|p| p.0 == k) {
@@ -322,9 +331,8 @@ fn page_encoding(store: &SqliteStore, raw: &str, csv: bool) -> Result<String, Fa
     } else {
         JsValue::Null
     };
-    Ok(stringify(&obj(vec![
+    Ok(obj(vec![
         ("logs", JsValue::Array(rows)),
         ("nextCursor", next),
     ]))
-    .unwrap_or_default())
 }
