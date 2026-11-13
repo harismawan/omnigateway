@@ -67,6 +67,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
         json!({"supervisor":if p.is_some(){"pidfile"}else{"none"},"running":p.is_some(),"pid":p,"state":null,"unitPath":null,"logFile":log})
     };
     let mut credentials = Vec::new();
+    let mut lossless_credentials = Vec::new();
     let mut poll = 300_000.0;
     let mut configured = false;
     let mut error = None;
@@ -82,30 +83,58 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             configured = omni_control::admin_password::admin_hash(&store)
                 .map_err(|e| e.to_string())?
                 .is_some();
-            let accounts: Value = serde_json::from_str(
+            let accounts = omni_control::operator_json::parse(
                 &omni_control::credentials::list(&store).map_err(|e| e.message)?,
             )
             .map_err(|e| e.to_string())?;
-            let health: Value = serde_json::from_str(
+            let health = omni_control::operator_json::parse(
                 &omni_control::credentials::health(&store, chrono::Utc::now().timestamp_millis())
                     .map_err(|e| e.message)?,
             )
             .map_err(|e| e.to_string())?;
-            for c in accounts["credentials"].as_array().into_iter().flatten() {
-                let quota = health["quota"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|q| q["credentialId"] == c["id"])
-                    .collect::<Vec<_>>();
-                credentials.push(json!({"id":c["id"],"provider":c["provider"],"label":c["label"],"enabled":c["enabled"],"quota":quota}));
+            use omni_control::settings_value::get;
+            use omni_ir::jsjson::JsValue as J;
+            if let Some(J::Array(accounts)) = get(&accounts, "credentials") {
+                for c in accounts {
+                    let quota = match get(&health, "quota") {
+                        Some(J::Array(q)) => q
+                            .iter()
+                            .filter(|q| get(q, "credentialId") == get(c, "id"))
+                            .cloned()
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let mut fields = ["id", "provider", "label", "enabled"]
+                        .into_iter()
+                        .map(|key| {
+                            (
+                                key.encode_utf16().collect(),
+                                get(c, key).cloned().unwrap_or(J::Null),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    fields.push(("quota".encode_utf16().collect(), J::Array(quota)));
+                    let projected = J::Object(fields);
+                    let raw = omni_ir::jsjson::stringify(&projected)
+                        .ok_or("invalid status projection")?;
+                    credentials
+                        .push(omni_ir::js::parse_json(&raw).ok_or("invalid status projection")?);
+                    lossless_credentials.push(projected);
+                }
             }
         }
     }
     if flags.contains_key("json") {
-        return Ok(omni_ir::jsjson::to_string_pretty(
-            &json!({"process":process,"adminConfigured":configured,"credentials":credentials,"storeError":error}),
-        ));
+        let mut result = omni_ir::jsjson::JsValue::from(
+            &json!({"process":process,"adminConfigured":configured,"credentials":[],"storeError":error}),
+        );
+        omni_control::settings_value::set(
+            &mut result,
+            "credentials",
+            omni_ir::jsjson::JsValue::Array(lossless_credentials),
+        );
+        return omni_ir::jsjson::stringify_pretty(&result)
+            .ok_or("invalid status projection".into());
     }
     let color = !flags.contains_key("no-color")
         && std::env::var("NO_COLOR").unwrap_or_default().is_empty()

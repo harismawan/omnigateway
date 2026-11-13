@@ -8,8 +8,9 @@ env={**os.environ,'HOME':str(root),'XDG_STATE_HOME':str(root/'state'),'OMNI_ENCR
 subprocess.run(commands[0]+['--root',str(root),'status','--json'],env=env,capture_output=True,check=True)
 db=sqlite3.connect(root/'omnigateway.db')
 db.execute("INSERT INTO credentials(id,provider,label,auth_type,created_at,updated_at) VALUES ('q','openai','quota','oauth',1,1)")
-for bad in [True,False]:
-    db.execute("UPDATE credentials SET provider_data=?",['{' if bad else '{}'])
+for metadata in ['{','{}','{"x":"\\ud800"}']:
+    bad=metadata=='{'
+    db.execute("UPDATE credentials SET provider_data=?",[metadata])
     db.execute('DELETE FROM quota_windows')
     if not bad: db.execute("INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES ('q','fiveHour',0,'bad',100,1,1)")
     db.commit()
@@ -24,4 +25,4 @@ for bad in [True,False]:
             assert p.returncode==0 and p.stderr==b'',results
             assert json.loads(p.stdout)['credentials'][0]['quota'][0]['used']=='bad'
     assert results[0]==results[1]
-print(f'PASS 2 malformed status row/whole-DB comparisons ({root})')
+print(f'PASS 3 malformed status row/whole-DB comparisons ({root})')
