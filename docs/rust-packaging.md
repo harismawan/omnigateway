@@ -34,6 +34,7 @@ Before tagging the first Rust release, set the repository Actions variable
 `FIRST_RUST_RELEASE=true`. The promotion job opens its normal PR but leaves it
 unmerged. Complete the conformance/performance and production-copy gates first.
 Include the `strategy: {type: Recreate}` deployment change in that promotion PR
+(the separate `feat/rust-first-rollout` branch carries this change)
 (remove `rollingUpdate`), inspect the image tag, then merge **by hand**. Do not
 deploy the strategy change independently in advance. Expect brief downtime:
 all TS pods must stop before Rust starts against the same Postgres/Redis/root.
