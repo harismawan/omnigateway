@@ -291,6 +291,20 @@ impl PgStore {
         rows::list_credentials(&self.client().await?, key).await
     }
 
+    pub async fn update_tokens(
+        &self,
+        key: &FieldKey,
+        id: &str,
+        update: &crate::credentials::TokenUpdate,
+        expected_version: i64,
+    ) -> Result<bool, StoreError> {
+        let sealed = update.sealed(key);
+        Ok(self.client().await?.execute(
+            "UPDATE credentials SET access_token=$1, refresh_token=$2, api_key=$3, id_token=$4, expires_at=$5, updated_at=$6, token_version=token_version+1 WHERE id=$7 AND token_version=$8::bigint",
+            &[&sealed[0], &sealed[1], &sealed[2], &sealed[3], &update.expires_at, &update.updated_at, &id, &expected_version],
+        ).await? > 0)
+    }
+
     pub async fn list_health(&self) -> Result<Vec<CredentialHealth>, StoreError> {
         rows::list_health(&self.client().await?).await
     }

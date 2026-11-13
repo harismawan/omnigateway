@@ -174,6 +174,30 @@ impl Store {
         }
     }
 
+    pub async fn update_tokens(
+        &self,
+        key: &FieldKey,
+        id: &str,
+        update: &crate::credentials::TokenUpdate,
+        expected_version: i64,
+    ) -> Result<bool, StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let key = key.clone();
+                let id = id.to_owned();
+                let update = update.clone();
+                on_sqlite!(store, |s| crate::credentials::update_tokens(
+                    s.connection(),
+                    &key,
+                    &id,
+                    &update,
+                    expected_version
+                ))
+            }
+            Self::Postgres(pg) => pg.update_tokens(key, id, update, expected_version).await,
+        }
+    }
+
     pub async fn list_models(
         &self,
     ) -> Result<Vec<Result<VirtualModel, ModelRowError>>, StoreError> {

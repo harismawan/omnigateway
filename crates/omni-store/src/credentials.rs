@@ -96,6 +96,47 @@ impl Credential {
 
 const T: &str = "credentials";
 
+/// A complete OAuth rotation. All four secret columns are replaced, including
+/// NULLs; the expiry belongs to the same atomic versioned write.
+/// Deliberately has no Debug implementation: contains plaintext secrets.
+#[derive(Clone)]
+pub struct TokenUpdate {
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub api_key: Option<String>,
+    pub id_token: Option<String>,
+    pub expires_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+impl TokenUpdate {
+    pub(crate) fn sealed(&self, key: &FieldKey) -> [Option<String>; 4] {
+        [
+            &self.access_token,
+            &self.refresh_token,
+            &self.api_key,
+            &self.id_token,
+        ]
+        .map(|s| s.as_deref().map(|s| omni_crypto::field::encrypt(key, s)))
+    }
+}
+
+/// Compare-and-swap against the version read before calling the token endpoint.
+/// A missing row or a lost race returns false without changing any column.
+pub fn update_tokens(
+    conn: &Connection,
+    key: &FieldKey,
+    id: &str,
+    update: &TokenUpdate,
+    expected_version: i64,
+) -> Result<bool, StoreError> {
+    let sealed = update.sealed(key);
+    Ok(conn.execute(
+        "UPDATE credentials SET access_token=?, refresh_token=?, api_key=?, id_token=?, expires_at=?, updated_at=?, token_version=token_version+1 WHERE id=? AND token_version=?",
+        rusqlite::params![sealed[0], sealed[1], sealed[2], sealed[3], update.expires_at, update.updated_at, id, expected_version],
+    )? > 0)
+}
+
 fn open(r: &Row<'_>, key: &FieldKey, column: &'static str) -> Result<Secret, StoreError> {
     Ok(match row::opt_text(r, T, column)? {
         None => Secret::Absent,
