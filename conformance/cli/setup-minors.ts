@@ -18,6 +18,7 @@ for (const scenario of [
   "read-denied",
   "write-denied",
   "rename-directory",
+  "write-full",
 ]) {
   const id = scenario === "prototype" ? "__proto__" : "pool";
   db.run("DELETE FROM virtual_models");
@@ -49,6 +50,9 @@ for (const scenario of [
         "python3",
         resolve("conformance/cli/pty.py"),
         "",
+        ...(scenario === "write-full"
+          ? ["python3", resolve("conformance/cli/full-disk.py"), destination]
+          : []),
         ...cmd,
         "--root",
         root,
@@ -59,7 +63,7 @@ for (const scenario of [
         "--dir",
         scenario === "io-error"
           ? join(root, "blocked/sub")
-          : ["write-denied", "rename-directory"].includes(scenario)
+          : ["write-denied", "rename-directory", "write-full"].includes(scenario)
             ? destination
             : root,
         "--json",
@@ -93,6 +97,8 @@ for (const scenario of [
       assert(out.includes(`EACCES: permission denied, open '${root}/settings.json'`));
     else if (scenario === "write-denied")
       assert.match(out, /EACCES: permission denied, open '.*opencode.json\.\d+\.tmp'/);
+    else if (scenario === "write-full")
+      assert(out.includes("ENOSPC: no space left on device, write\r\n"));
     else
       assert.match(
         out,
@@ -107,4 +113,4 @@ for (const scenario of [
   assert.deepEqual(results[1], results[0]);
 }
 db.close();
-console.log(`PASS 6 setup minor regressions (${root})`);
+console.log(`PASS 7 setup minor regressions (${root})`);

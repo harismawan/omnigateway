@@ -22,7 +22,7 @@ fn fs_error(e: &std::io::Error, operation: &str, path: &std::path::Path) -> Stri
         Some(30) => ("EROFS", "read-only file system"),
         _ => return e.to_string(),
     };
-    if operation == "read" && e.raw_os_error() == Some(21) {
+    if operation == "write" || (operation == "read" && e.raw_os_error() == Some(21)) {
         return format!("{code}: {description}, {operation}");
     }
     format!("{code}: {description}, {operation} '{}'", path.display())
