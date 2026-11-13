@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
-import { CONFIG_DIAGNOSTICS } from "./config-diagnostics.ts";
+import { assertCoversFrozenLoader, isConfigDiagnostic } from "./config-diagnostics.ts";
 
 const pending: Promise<void>[] = [];
 const observed: Record<string, number> = {};
@@ -24,7 +24,7 @@ export function goldenSpawn(argv: string[], options: Bun.SpawnOptions.OptionsObj
       observed[key] = (observed[key] ?? 0) + 1;
       for (const line of (stderr + stdout).split(/\r?\n/)) {
         if (
-          CONFIG_DIAGNOSTICS.some((prefix) => line.includes(prefix)) ||
+          isConfigDiagnostic(line) ||
           /ENOENT:|EACCES:|unable to open database|database is locked/.test(line)
         ) {
           const kind = line.match(
@@ -48,6 +48,7 @@ export function goldenSpawn(argv: string[], options: Bun.SpawnOptions.OptionsObj
 export async function verifyGoldenExits(suite: string) {
   await Promise.all(pending);
   console.log(`EXIT HISTOGRAM ${suite} ${JSON.stringify(observed)}`);
+  assertCoversFrozenLoader();
   if (process.env.OMNI_RECORD_HISTOGRAM === "1") return;
   const pinned = JSON.parse(
     readFileSync(new URL("./exit-histograms.json", import.meta.url), "utf8"),
