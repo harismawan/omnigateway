@@ -9,6 +9,78 @@ use serde_json::{Value, json};
 
 pub const OAUTH_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
+/// Opt-in placement over successively larger prefixes. Explicit markers win.
+pub fn add_auto_cache(
+    body: &mut Value,
+    req: &omni_ir::request::ChatRequest,
+    notes: &mut Vec<String>,
+) {
+    use omni_ir::tokens::{estimate_cached_input_tokens, estimate_input_tokens};
+    if estimate_cached_input_tokens(req) != 0.0
+        || req
+            .vendor_bag("anthropic")
+            .is_some_and(|v| v.contains_key("cache_control"))
+    {
+        return;
+    }
+    // Reuse the canonical estimator rather than duplicating its token rules.
+    let mut prefix = omni_ir::request::ChatRequest {
+        model: String::new(),
+        system: None,
+        messages: Vec::new(),
+        tools: req.tools.clone(),
+        tool_choice: None,
+        max_tokens: None,
+        temperature: None,
+        stop_sequences: None,
+        stream: false,
+        reasoning: None,
+        vendor: None,
+        provider_headers: None,
+        betas: None,
+        conversation_id: None,
+    };
+    let tools = estimate_input_tokens(&prefix);
+    prefix.system = req.system.clone();
+    let system = estimate_input_tokens(&prefix);
+    let total = estimate_input_tokens(req);
+    let mut marked = 0.0;
+    let mut stable = false;
+    for (key, prefix) in [("tools", tools), ("system", system)] {
+        if prefix - marked >= 1024.0
+            && let Some(last) = body
+                .get_mut(key)
+                .and_then(Value::as_array_mut)
+                .and_then(|v| v.last_mut())
+        {
+            last["cache_control"] = json!({"type":"ephemeral"});
+            marked = prefix;
+            stable = true;
+        }
+    }
+    if stable
+        && !notes
+            .iter()
+            .any(|n| n == "anthropic:cache-breakpoint-added")
+    {
+        notes.push("anthropic:cache-breakpoint-added".into());
+    }
+    if total - marked >= 1024.0
+        && let Some(last) = body
+            .get_mut("messages")
+            .and_then(Value::as_array_mut)
+            .and_then(|v| last_cacheable(v))
+    {
+        last["cache_control"] = json!({"type":"ephemeral"});
+        if !notes
+            .iter()
+            .any(|n| n == "anthropic:history-cache-breakpoint-added")
+        {
+            notes.push("anthropic:history-cache-breakpoint-added".into());
+        }
+    }
+}
+
 /// Model lookup normalization used by the frozen Anthropic catalog.
 fn model_id(model: &str) -> &str {
     let mut id = omni_ir::js::trim(model);
