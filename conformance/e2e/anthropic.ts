@@ -179,7 +179,7 @@ async function run(binary: string, label: string) {
         body: JSON.stringify(request(c.path, c.stream)),
         signal: AbortSignal.timeout(15000),
       });
-      const body = await res.text();
+      const body = new Uint8Array(await res.arrayBuffer());
       output.push({
         case: c,
         status: res.status,
@@ -199,12 +199,17 @@ async function run(binary: string, label: string) {
         stdout: "ignore",
         stderr: Bun.file(join(root, "stderr")),
       });
+      let restartReady = false;
       for (let i = 0; i < 100; i++) {
         try {
-          if ((await fetch("http://127.0.0.1:18482/health")).ok) break;
+          if ((await fetch("http://127.0.0.1:18482/health")).ok) {
+            restartReady = true;
+            break;
+          }
         } catch {}
         await Bun.sleep(50);
       }
+      if (!restartReady) throw Error("gateway restart did not become ready");
     }
     await Bun.sleep(500);
     const db = new Database(join(root, "omni.db"));
@@ -226,7 +231,9 @@ try {
     for (const run of [ts, rust]) {
       const row = run.output[i]!;
       if (row.upstream.length !== 1 || (row.case.code === 200 && row.status !== 200)) {
-        throw Error(`scenario did not reach the upstream exactly once: ${JSON.stringify(row.case)}`);
+        throw Error(
+          `scenario did not reach the upstream exactly once: ${JSON.stringify(row.case)}`,
+        );
       }
     }
     const norm = (x: any) =>
