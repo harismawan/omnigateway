@@ -3,7 +3,6 @@ use crate::api::Failure;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use omni_ir::jsjson::{JsValue, parse_js, stringify};
 use omni_store::{SqliteStore, logs::Query};
-use rusqlite::types::Value;
 
 fn obj(fields: Vec<(&str, JsValue)>) -> JsValue {
     JsValue::Object(
@@ -138,9 +137,19 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let limit = n.clamp(1.0, 500.0).floor() as usize;
     let mut q = Query {
-        clauses: Vec::new(),
-        bindings: Vec::new(),
         limit,
+        since: get("since").and_then(|v| v.parse().ok()),
+        until: get("until").and_then(|v| v.parse().ok()),
+        failed: get("failed") == Some("true"),
+        state: get("state").map(str::to_owned),
+        provider: get("provider").map(str::to_owned),
+        requested_model: get("requestedModel").map(str::to_owned),
+        resolved_model: get("resolvedModel").map(str::to_owned),
+        model: get("model").map(str::to_owned),
+        error_code: get("errorCode").map(str::to_owned),
+        api_key_id: get("apiKeyId").map(str::to_owned),
+        credential_id: get("credentialId").map(str::to_owned),
+        cursor: None,
     };
     if let Some(s) = get("cursor") {
         let bad = || Failure::bad("cursor: malformed");
@@ -165,63 +174,7 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
         {
             return Err(bad());
         }
-        q.clauses.push("(at < ? OR (at = ? AND id < ?))".into());
-        q.bindings.extend([
-            Value::Real(*at),
-            Value::Real(*at),
-            Value::Text(String::from_utf16_lossy(id)),
-        ]);
-    }
-    for (name, value) in &pairs {
-        let col = match name.as_str() {
-            "apiKeyId" => "api_key_id",
-            "credentialId" => "credential_id",
-            "provider" => "resolved_provider",
-            "state" => "state",
-            "requestedModel" => "requested_model",
-            "resolvedModel" => "resolved_model",
-            "errorCode" => "error_code",
-            "since" | "until" => "at",
-            "model" => "",
-            "failed" => {
-                if value == "true" {
-                    q.clauses.push("state = 'done' AND status >= 400".into());
-                }
-                continue;
-            }
-            _ => continue,
-        };
-        if matches!(
-            name.as_str(),
-            "requestedModel" | "resolvedModel" | "errorCode" | "model"
-        ) {
-            let escaped = format!(
-                "%{}%",
-                value
-                    .replace('\\', "\\\\")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_")
-            );
-            if name == "model" {
-                q.clauses.push(
-                    "(requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')"
-                        .into(),
-                );
-                q.bindings.push(Value::Text(escaped.clone()));
-            } else {
-                q.clauses.push(format!("{col} LIKE ? ESCAPE '\\'"));
-            }
-            q.bindings.push(Value::Text(escaped));
-        } else if matches!(name.as_str(), "since" | "until") {
-            q.clauses.push(format!(
-                "at {} ?",
-                if name == "since" { ">=" } else { "<=" }
-            ));
-            q.bindings.push(Value::Real(value.parse().unwrap_or(0.0)));
-        } else {
-            q.clauses.push(format!("{col} = ?"));
-            q.bindings.push(Value::Text(value.clone()));
-        }
+        q.cursor = Some((*at, id.clone()));
     }
     let mut rows = omni_store::logs::page(store, &q)?;
     let next = if rows.len() > limit {
