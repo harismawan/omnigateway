@@ -321,10 +321,10 @@ impl Deps {
         {
             Ok(Some(row)) => self.holder.patch_credential(row),
             Ok(None) => {
-                tracing::warn!(credential_id = %c.id, "refreshed credential disappeared before snapshot publication")
+                tracing::warn!(credentialId = %c.id, "refreshed credential disappeared before snapshot publication")
             }
             Err(_) => {
-                tracing::warn!(credential_id = %c.id, "credential snapshot publication failed; retaining previous snapshot")
+                tracing::warn!(credentialId = %c.id, "credential snapshot publication failed; retaining previous snapshot")
             }
         }
         result

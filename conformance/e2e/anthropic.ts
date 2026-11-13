@@ -234,7 +234,7 @@ async function run(binary: string, label: string) {
       });
       const responses = await Promise.all(Array.from({length:scenario === 4 ? 4 : 1}, send));
       const res = responses[0]!;
-      const extra = await Promise.all(responses.slice(1).map(async r=>({status:r.status,body:new Uint8Array(await r.arrayBuffer())})));
+      const extra = await Promise.all(responses.slice(1).map(async r=>({status:r.status,headers:[...r.headers.entries()],body:new Uint8Array(await r.arrayBuffer())})));
       const body = new Uint8Array(await res.arrayBuffer());
       output.push({
         case: c,

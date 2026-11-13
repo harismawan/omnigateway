@@ -17,6 +17,8 @@ type Flight = tokio::sync::watch::Sender<Option<Result>>;
 /// An owned guard releases the replica lock on drop. Redis adapter is a later integration.
 pub trait RefreshGuard: Send {}
 impl RefreshGuard for tokio::sync::OwnedMutexGuard<()> {}
+/// Distributed adapters own lease TTL/renewal/expiry; the host only owns the
+/// returned guard. Expiry must not release a subsequent owner's lease.
 pub trait RefreshLock: Send + Sync {
     fn acquire(&self, key: String) -> FutureResult<'_, Option<Box<dyn RefreshGuard>>>;
 }
@@ -24,13 +26,14 @@ pub trait RefreshLock: Send + Sync {
 pub struct MemoryLock(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
 impl RefreshLock for MemoryLock {
     fn acquire(&self, key: String) -> FutureResult<'_, Option<Box<dyn RefreshGuard>>> {
-        let lock = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(key)
-            .or_default()
-            .clone();
+        let lock = {
+            let mut entries = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries.retain(|_, lock| Arc::strong_count(lock) > 1);
+            entries.entry(key).or_default().clone()
+        };
         Box::pin(async move {
             tokio::time::timeout(std::time::Duration::from_secs(30), lock.lock_owned())
                 .await
@@ -99,7 +102,7 @@ impl Refresher {
                 match self.refresh(&c).await {
                     Ok(_) => refreshed += 1,
                     Err(error) => {
-                        tracing::warn!(code = error.code.as_str(), "scheduled token refresh failed")
+                        tracing::warn!(provider = %c.provider, credentialId = %c.id, code = error.code.as_str(), "scheduled token refresh failed")
                     }
                 }
             }
