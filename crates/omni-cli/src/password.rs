@@ -35,7 +35,9 @@ fn secret(question: &str) -> Result<String, String> {
     {
         return Err("could not configure terminal".into());
     }
-    let mut bytes = Vec::new();
+    let mut pending = Vec::new();
+    let mut line: Vec<u16> = Vec::new();
+    let mut first = true;
     eprintln!("{question}");
     let mut input = std::io::stdin().lock();
     let result: Result<(), String> = loop {
@@ -43,19 +45,59 @@ fn secret(question: &str) -> Result<String, String> {
         if input.read(&mut b).map_err(|e| e.to_string())? == 0 {
             break Ok(());
         }
-        match b[0] {
-            b'\r' | b'\n' => break Ok(()),
-            3 => break Err("cancelled".into()),
-            8 | 127 => {
-                bytes.pop();
+        pending.push(b[0]);
+        let mut decoded = String::new();
+        loop {
+            match std::str::from_utf8(&pending) {
+                Ok(s) => {
+                    decoded.push_str(s);
+                    pending.clear();
+                    break;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    decoded.push_str(std::str::from_utf8(&pending[..valid]).expect("valid prefix"));
+                    pending.drain(..valid);
+                    if let Some(len) = e.error_len() {
+                        decoded.push('\u{fffd}');
+                        pending.drain(..len);
+                    } else {
+                        break;
+                    }
+                }
             }
-            x => bytes.push(x),
+        }
+        let mut done = false;
+        for c in decoded.chars() {
+            if first {
+                first = false;
+                if c == '\u{feff}' {
+                    continue;
+                }
+            }
+            match c {
+                '\r' | '\n' => {
+                    done = true;
+                    break;
+                }
+                '\u{3}' => return Err("cancelled".into()),
+                '\u{8}' | '\u{7f}' => {
+                    line.pop();
+                }
+                c => {
+                    let mut buf = [0; 2];
+                    line.extend_from_slice(c.encode_utf16(&mut buf));
+                }
+            }
+        }
+        if done {
+            break Ok(());
         }
     };
     drop(_terminal);
     result?;
     eprintln!();
-    Ok(omni_ir::js::trim(&String::from_utf8_lossy(&bytes)).into())
+    Ok(omni_ir::js::trim(&String::from_utf16_lossy(&line)).into())
 }
 pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
     let store = crate::context::open(flags)?;
