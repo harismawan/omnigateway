@@ -18,6 +18,9 @@ for (const seeded of [false, true]) {
       "INSERT INTO credentials(id,provider,label,auth_type,created_at,updated_at) VALUES ('c','openai','account','oauth',1,1)",
     );
     db.run(
+      "INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,created_at,updated_at) VALUES ('a','anthropic','first','apiKey',2,-1,2,2)",
+    );
+    db.run(
       "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES ('c','fiveHour',0,95,100,1,1)",
     );
     db.run("INSERT INTO settings VALUES ('adminPasswordHash','configured')");

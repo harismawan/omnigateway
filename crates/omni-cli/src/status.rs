@@ -85,9 +85,9 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             let quota=q.query_map([],|r|Ok(json!({"credentialId":r.get::<_,String>(0)?,"windowType":r.get::<_,String>(1)?,"startsAt":r.get::<_,f64>(2)?,"used":r.get::<_,f64>(3)?,"limit":r.get::<_,Option<f64>>(4)?,"resetsAt":r.get::<_,Option<f64>>(5)?,"observedAt":r.get::<_,f64>(6)?,"windowMs":r.get::<_,Option<f64>>(7)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
             let mut s = store
                 .connection()
-                .prepare("SELECT id,provider,label,enabled FROM credentials ORDER BY created_at")
+                .prepare("SELECT id,provider,label,enabled FROM credentials ORDER BY tier, label")
                 .map_err(|e| e.to_string())?;
-            credentials=s.query_map([],|r|{let id=r.get::<_,String>(0)?;Ok(json!({"id":id,"provider":r.get::<_,String>(1)?,"label":r.get::<_,String>(2)?,"enabled":r.get::<_,i64>(3)?!=0,"quota":quota.iter().filter(|q|q["credentialId"]==id).collect::<Vec<_>>()}))}).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+            credentials=s.query_map([],|r|{let id=r.get::<_,String>(0)?;Ok(json!({"id":id,"provider":r.get::<_,String>(1)?,"label":r.get::<_,String>(2)?,"enabled":r.get::<_,i64>(3)?==1,"quota":quota.iter().filter(|q|q["credentialId"]==id).collect::<Vec<_>>()}))}).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
         }
     }
     if flags.contains_key("json") {
