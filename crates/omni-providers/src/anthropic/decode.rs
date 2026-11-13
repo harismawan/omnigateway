@@ -100,7 +100,7 @@ impl StreamDecoder for AnthropicDecoder {
         out: &mut VecDeque<StreamEvent>,
     ) -> Result<Flow, DecodeError> {
         let depth = omni_ir::deep::depth_of(&msg.data);
-        omni_ir::deep::scope_for_bound(depth, |_| self.message_inner(msg, out))
+        omni_ir::deep::scope_for_bound(depth, |bound| self.message_inner(msg, out, bound))
     }
     fn finish(&mut self, out: &mut VecDeque<StreamEvent>) {
         if !self.terminal {
@@ -117,8 +117,9 @@ impl AnthropicDecoder {
         &mut self,
         msg: &SseMessage,
         out: &mut VecDeque<StreamEvent>,
+        bound: usize,
     ) -> Result<Flow, DecodeError> {
-        let d = match omni_ir::deep::parse(&msg.data) {
+        let d = match omni_ir::deep::parse_bounded(&msg.data, bound) {
             Ok(v) => omni_ir::deep::Owned(v),
             Err(omni_ir::deep::ParseError::Syntax) => return Ok(Flow::Continue),
             Err(omni_ir::deep::ParseError::TooDeep) => {

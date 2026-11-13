@@ -5,8 +5,20 @@ static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 /// Call before serving requests. Library consumers initialize on first use.
 pub fn initialize() {
     capture(|| {
-        std::env::vars()
-            .filter(|(k, _)| k.starts_with("OMNI_"))
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+            .filter(|(k, _)| {
+                matches!(
+                    k.as_str(),
+                    "OMNI_ANTHROPIC_CLI_VERSION"
+                        | "OMNI_UA_ANTHROPIC"
+                        | "OMNI_ORDER_ANTHROPIC"
+                        | "OMNI_ANTHROPIC_STAINLESS_PACKAGE_VERSION"
+                        | "OMNI_ANTHROPIC_STAINLESS_OS"
+                        | "OMNI_ANTHROPIC_STAINLESS_ARCH"
+                        | "OMNI_ANTHROPIC_STAINLESS_RUNTIME_VERSION"
+                )
+            })
             .collect()
     });
 }
@@ -68,6 +80,27 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&oracle.stdout).trim(),
             r#"["startup","startup-agent"]"#
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn nonunicode_environment_subprocess() {
+        use std::os::unix::ffi::OsStringExt;
+        let out = std::process::Command::new(std::env::current_exe().expect("exe"))
+            .args([
+                "--exact",
+                "anthropic::profile::tests::startup_profile_subprocess",
+            ])
+            .env("OMNI_PROFILE_CHILD", "1")
+            .env("OMNI_ANTHROPIC_CLI_VERSION", "startup")
+            .env("OMNI_UA_ANTHROPIC", "startup-agent")
+            .env("UNRELATED", std::ffi::OsString::from_vec(vec![255]))
+            .output()
+            .expect("child");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }
