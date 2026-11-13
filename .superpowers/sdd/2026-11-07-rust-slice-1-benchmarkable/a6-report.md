@@ -406,3 +406,94 @@ run passed (`workspace-final.log`), before the credential isolation change.
   removed their disposable DB roots. No shared build caches or other worktrees
   were removed. Only A6 files are staged; progress.md, bun.lock and user specs
   remain outside this commit.
+
+## Fix round 1 — checkpoint, NOT complete for review
+
+This section supersedes the earlier acceptance status and the treatment of I1/I2
+as known differences. Both are defects under the operator ruling. Evidence root:
+`/tmp/opencode/a6-fix1/`. Branch `feat/rust-migration-design`, base `b30a85c4`.
+
+| Finding | Commit/status | Verification |
+|---|---|---|
+| I3: repeated steps overwrite comparisons | **52026a2a** | Reviewer enumeration retained in `duplicates-red.log`; strengthened full driver `unique-final.log`: **1249 equal / 2 expected / 0 failures**, 38 raw keys |
+| I1: unusual health counter discards valid deadline/breaker | OPEN, reproduced | Reviewer `health.ts`, copied review binaries: `health-red.log`: **138 equal / 2 failures** |
+| I2: malformed quota freezes unrelated publication | OPEN, reproduced | Reviewer `quota.ts`, copied review binaries: `quota-red.log`: **135 equal / 4 failures** |
+| Mutation-ack deadline and creation-only bound | OPEN | Existing polling clock still starts too late |
+| Explicit no-op/repeated-toggle timestamp assertions | OPEN | Near-now normalization is still insufficient |
+| Frozen-oracle lone provider/pin versus U+FFFD | OPEN | Endpoint vectors do not cover these fields |
+
+I3 materializes every configuration before replacing any `steps` factory, then
+prefixes names with their occurrence index and asserts uniqueness before running.
+This ordering matters: credential-crossread derives its setup by finding the
+unprefixed creation step in credentials. The first attempt replaced factories
+too early and removed that setup; it was corrected before commit. Both binaries
+and expected-divergence lookup now use identical materialized steps. The green
+run retains 56 more comparisons than the previous 1193; it exposed no additional
+parity failures. `biome.log` records the driver formatting check.
+
+### I1 investigation and precise next step
+
+No I1 implementation change has been made at this checkpoint. The frozen reader
+returns raw cells. Preserve these independent operations rather than replacing
+the whole row or narrowing the counter:
+
+- Deadline: `rateLimitedUntil !== null && rateLimitedUntil > now`.
+- Open breaker: `now - (openedAt ?? now)` compared against the NaN-preserving
+  capped exponential of `consecutiveFailures - threshold`; halfOpen always probes.
+- Score: `1 / (1 + (consecutiveFailures ?? 0))`; text requires concatenation,
+  not just numeric coercion.
+- Hard failure: `consecutiveFailures + 1`; text concatenates in the opposite
+  operand order from scoring. Success resets all four fields and uses strict
+  comparison with the blank row to decide whether to write.
+
+Next: port the reviewer's health insertion into the uniquely keyed permanent
+driver, then extend active-deadline/open-breaker/probe routing vectors for
+fractional, text, nullable, negative and huge cells. Run RED with the copied review
+binaries. Replace the strict health representation with one preserving these
+operations, deriving routing coercions at snapshot construction. Trace it through
+`CredentialHealth`, router filters/score/breaker, dispatch overlay, both SQLite
+health write paths (`update_health` and writer batch), and PG checked count binds.
+Do not fix only the filter: that leaves scoring or completion persistence wrong.
+The current isolation test must assert retained field behavior, not row omission.
+NULL counter fixtures require checking schema constraints: the ordinary SQLite
+column is NOT NULL; nullable deadline/openedAt fields can be tested directly.
+
+After I1 is green and committed, implement I2 with permanent pre-boot/live quota
+vectors and unrelated create/disable/delete pickup. Note that comparing two text
+quota cells uses JS string comparison; coercing both to numbers alone is not full
+`used >= limit` parity. Complete all three minors next, then run the final gates.
+
+### Snapshot-reader audit and final D4 hand-off
+
+SQLite `snapshot_reads` reads keys, credentials, health, models, quota and settings
+in one transaction. Inspection found:
+
+- `keys::read_key_entry` isolates row conversion failures, retaining an error
+  entry for a usable hash or skipping an unaddressable hash.
+- `credentials::list_routing` catches row conversion errors. Health currently
+  does likewise but incorrectly loses valid fields (I1).
+- `quota::list` propagates scalar conversion errors (I2).
+- `models::list` retains target/strategy parse errors per model, but reads `id`
+  strictly outside that boundary: a NULL/BLOB id can still fail the transaction.
+  This additional whole-snapshot path is identified by inspection, not yet
+  reproduced or fixed. Include it in the I2 follow-up.
+- `settings::get` accepts non-text as defaults and normalizes parsed settings;
+  its remaining propagated errors are query failures rather than scalar errors.
+
+**D4 must implement equivalent PG row isolation while preserving usable per-field
+health/quota semantics**, including boot and refresh with malformed unrelated
+rows and credential mutation pickup. PG `rows::list_credentials` currently
+collects conversion errors into a whole-read failure. Integer PG schema widths
+do not remove malformed JSON/metadata isolation requirements. D4 also selects
+PgStore via OMNI_DATABASE_URL throughout boot, auth/control, snapshots, miss reads
+and writers, and runs credential HTTP routes plus same-database application
+restart cross-read in both directions on live PostgreSQL. Prior PG mutation tests
+remain store-level evidence, not PG HTTP evidence.
+
+### Verification state
+
+`build.log`: baseline release build passed with `CARGO_INCREMENTAL=0` and
+`CARGO_PROFILE_RELEASE_DEBUG=0`. No final workspace/clippy/fmt or four-driver gate
+is claimed for this incomplete round; those must run once on the final code.
+Only I3 is implementation-complete. No health/quota fix is claimed by the green
+driver, because its permanent regressions have not yet been added.
