@@ -4,6 +4,7 @@ before = termios.tcgetattr(slave)
 p = subprocess.Popen(sys.argv[2:], stdin=slave, stdout=slave, stderr=slave)
 out = bytearray()
 answered = 0
+raw = None
 parts = json.loads(sys.argv[1])
 while True:
     chunk = os.read(master, 65536)
@@ -11,6 +12,7 @@ while True:
     if answered == 0 and b"New admin password: " in out:
         while termios.tcgetattr(slave)[3] & termios.ICANON:
             time.sleep(0.001)
+        raw = termios.tcgetattr(slave)[:6]
         for part in parts:
             os.write(master, bytes.fromhex(part))
             time.sleep(0.01)
@@ -37,4 +39,4 @@ while True:
 after = termios.tcgetattr(slave)
 os.close(master)
 os.close(slave)
-print(json.dumps({"bytes":out.hex(),"code":p.wait(),"restored":before == after}))
+print(json.dumps({"bytes":out.hex(),"code":p.wait(),"restored":before == after,"raw":raw}))

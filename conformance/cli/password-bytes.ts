@@ -6,18 +6,18 @@ import { join, resolve } from "node:path";
 const root = mkdtempSync("/tmp/opencode/e1-e5/password-bytes-");
 const prefix = Buffer.from("correct-horse-battery").toString("hex");
 const cases = [
-  [prefix + "0a"],
-  [prefix + "c3a97f0a"],
-  [prefix + "e4b8ad7f0a"],
-  [prefix + "f09f98807f0a"],
-  [prefix + "f09f98807f7f0a"],
-  ["7f08" + prefix + "0a"],
-  [prefix + "c3", "a9", "7f0a"],
-  [prefix + "f09f", "9880", "7f0a"],
-  [prefix + "fffe0a"],
-  [prefix + "e080800a"],
-  [prefix + "c3", "280a"],
-  [prefix + "00010409161b0a"],
+  [`${prefix}0a`],
+  [`${prefix}c3a97f0a`],
+  [`${prefix}e4b8ad7f0a`],
+  [`${prefix}f09f98807f0a`],
+  [`${prefix}f09f98807f7f0a`],
+  [`7f08${prefix}0a`],
+  [`${prefix}c3`, "a9", "7f0a"],
+  [`${prefix}f09f`, "9880", "7f0a"],
+  [`${prefix}fffe0a`],
+  [`${prefix}e080800a`],
+  [`${prefix}c3`, "280a"],
+  [`${prefix}00010409161b0a`],
   ["03"],
 ];
 let count = 0;
@@ -47,7 +47,7 @@ for (const parts of cases) {
           ...process.env,
           OMNI_ENCRYPTION_KEY: "password-golden-secret",
           READER_RUST: rust ? "1" : "0",
-          ...(rust && process.env.READER_NO_PATH === "1" ? {PATH:"/nonexistent"} : {}),
+          ...(rust && process.env.READER_NO_PATH === "1" ? { PATH: "/nonexistent" } : {}),
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -77,7 +77,7 @@ for (const parts of cases) {
       if (!rust) tsHash = row.value;
     }
     if (rust) assert(result.restored, "terminal restored");
-    results.push({ bytes: result.bytes, code: result.code });
+    results.push({ bytes: result.bytes, code: result.code, raw: result.raw });
   }
   await Bun.write(join(root, `${count}.json`), JSON.stringify({ parts, results, tsHash }));
   assert.deepEqual(results[1], results[0]);
