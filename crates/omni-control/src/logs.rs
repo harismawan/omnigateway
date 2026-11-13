@@ -87,6 +87,11 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
                     return Err(Failure::bad(format!("{name}: Invalid input")));
                 }
                 let n = v.parse::<f64>().unwrap_or(f64::INFINITY);
+                if n < -9_007_199_254_740_991.0 {
+                    return Err(Failure::bad(format!(
+                        "{name}: Too small: expected int to be >=-9007199254740991"
+                    )));
+                }
                 if n.abs() > 9_007_199_254_740_991.0 {
                     return Err(Failure::bad(format!(
                         "{name}: Too big: expected int to be <=9007199254740991"
@@ -94,9 +99,11 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
                 }
             }
             "provider"
-                if !v
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') =>
+                if v.len() > 32
+                    || !v.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                    || !v
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') =>
             {
                 return Err(Failure::bad("provider: must be a lowercase provider id"));
             }
@@ -121,7 +128,16 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
         ]
         .contains(&k.as_str())
         {
-            return Err(Failure::bad(format!("(root): unrecognized key \"{k}\"")));
+            let safe = if !k.is_empty()
+                && k.len() <= 64
+                && k.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.:/+-".contains(&b))
+            {
+                k.as_str()
+            } else {
+                "(unprintable)"
+            };
+            return Err(Failure::bad(format!("(root): unrecognized key \"{safe}\"")));
         }
     }
     if let (Some(a), Some(b)) = (get("since"), get("until"))
@@ -153,7 +169,27 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
     };
     if let Some(s) = get("cursor") {
         let bad = || Failure::bad("cursor: malformed");
-        let bytes = URL_SAFE_NO_PAD.decode(s).map_err(|_| bad())?;
+        // Buffer.from(base64url) ignores non-alphabet bytes, accepts both
+        // alphabets, stops at padding, and discards incomplete trailing bits.
+        let mut bytes = Vec::new();
+        let mut bits = 0u32;
+        let mut count = 0;
+        for b in s.bytes().take_while(|b| *b != b'=') {
+            let n = match b {
+                b'A'..=b'Z' => b - b'A',
+                b'a'..=b'z' => b - b'a' + 26,
+                b'0'..=b'9' => b - b'0' + 52,
+                b'+' | b'-' => 62,
+                b'/' | b'_' => 63,
+                _ => continue,
+            };
+            bits = (bits << 6) | u32::from(n);
+            count += 6;
+            if count >= 8 {
+                count -= 8;
+                bytes.push(((bits >> count) & 255) as u8);
+            }
+        }
         let v = parse_js(&String::from_utf8_lossy(&bytes)).map_err(|_| bad())?;
         if !matches!(&v,JsValue::Object(f) if f.len()==3) {
             return Err(bad());

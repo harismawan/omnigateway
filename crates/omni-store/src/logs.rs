@@ -156,6 +156,7 @@ pub fn page(store: &SqliteStore, q: &Query) -> Result<Vec<JsValue>, StoreError> 
                     ),
                     "degradations" => parse_js(&match raw {
                         ValueRef::Text(s) => String::from_utf8_lossy(s).into_owned(),
+                        ValueRef::Blob(b) => b.iter().map(u8::to_string).collect::<Vec<_>>().join(","),
                         _ => omni_ir::jsjson::stringify(&cell(raw)).unwrap_or_default(),
                     })
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,

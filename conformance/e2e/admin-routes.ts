@@ -465,6 +465,7 @@ type HttpStep = {
   headers?: [string, string][];
 };
 type Step =
+  | { kind: "logs-walk"; name: string }
   | { kind: "usage-traffic"; name: string }
   | HttpStep
   | { kind: "restart-other"; name: string }
@@ -1313,6 +1314,13 @@ const ODD_SQL = [
 type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?: string };
 let healthSeed: string | undefined;
 const configs: Config[] = [
+  {label:"logs-cells",db:()=>db("logs-cells",["INSERT INTO request_logs(id,at,requested_model,status,duration_ms,input_tokens,resolved_model,degradations,rtk_filters) VALUES('odd',1794000000000,'odd','text',x'1234','words',NULL,x'3132','[\"grep\",\"bad\",3,\"git-diff\"]')"]),steps:()=>everyone("GET","/api/logs").map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))},
+  {label:"logs-empty",db:()=>db("logs-empty",[]),steps:()=>everyone("GET","/api/logs").map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))},
+  {label:"logs-validation",db:()=>db("logs-validation",[]),steps:()=>[
+    "provider=1bad","provider=-bad",`provider=${"a".repeat(33)}`,"since=-9007199254740992","until=9007199254740992","bad%0Akey=x",
+    `cursor=${Buffer.from('{"v":2,"at":0,"id":"x"}').toString("base64url")}!!!`,
+    `cursor=${Buffer.from('{"v":2,"at":0,"id":"x"}').toString("base64url")}=`,
+  ].flatMap((q,i)=>everyone("GET",`/api/logs?${q}`).map(s=>({...s,name:`validation ${i} ${s.who}`,expectedStatus:s.who==="anon"?401:400})))},
   {
     label: "usage-traffic",
     db: () => db("usage-traffic", ["INSERT INTO virtual_models VALUES('routing-a6','[{\"provider\":\"custom\",\"endpointId\":\"routing-a6\",\"model\":\"m\",\"tier\":1,\"weight\":1,\"capabilities\":{\"tools\":false,\"images\":false,\"reasoning\":false},\"costPerMTok\":{\"input\":0,\"output\":0}}]','score',1)"]),
@@ -1834,6 +1842,15 @@ const TRANSPORT_ERROR = "TRANSPORT-ERROR";
 
 // Materialize once: sequence identity is independent of repeated request text,
 // and both implementations plus expected-divergence lookup use the same keys.
+const logsConfig=configs.find(c=>c.label==="logs")!;
+const cellsConfig=configs.find(c=>c.label==="logs-cells")!;
+cellsConfig.steps=()=>[
+  ...everyone("GET","/api/logs").map(s=>({...s,name:`blob invalid ${s.who}`,expectedStatus:s.who==="anon"?401:500})),
+  {kind:"sql",name:"single byte blob parses as number",sql:["UPDATE request_logs SET degradations=x'31'"]},
+  ...everyone("GET","/api/logs").map(s=>({...s,name:`blob valid ${s.who}`,expectedStatus:s.who==="anon"?401:200})),
+];
+const logsSteps=logsConfig.steps;
+logsConfig.steps=()=>[...logsSteps(),{kind:"logs-walk",name:"all pages with insertion"}];
 const materializedSteps = configs.map((cfg) => cfg.steps());
 for (const [configIndex, cfg] of configs.entries()) {
   const steps = (materializedSteps[configIndex] ?? []).map((step, index) => ({
@@ -1989,6 +2006,21 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     };
     let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
+      if(step.kind === "logs-walk") {
+        const ids:string[]=[];
+        const pages:unknown[]=[];
+        let cursor:string|null=null;
+        for(let page=0;page<100;page++) {
+          const x=await exchange({target:`/api/logs?limit=17${cursor?`&cursor=${cursor}`:""}`,headers:[["cookie",`omni_admin=${cookies.admin}`]]});
+          if(x.status!==200){deadlineFailures.push(`${step.name}: status ${x.status}`);break;}
+          const body=JSON.parse(x.body.toString());pages.push(body);
+          ids.push(...body.logs.map((l:{id:string})=>l.id));cursor=body.nextCursor;
+          if(page===0){const d=new Database(file);d.run("PRAGMA busy_timeout=5000");d.run("INSERT INTO request_logs(id,at,requested_model,status,duration_ms) VALUES('newer-between-pages',1795000000000,'new',200,1)");d.close();}
+          if(!cursor)break;
+        }
+        if(ids.length!==503||new Set(ids).size!==503||ids.some(id=>!/^log-\d{4}$/.test(id))||cursor!==null)deadlineFailures.push(`${step.name}: incomplete traversal ${ids.length}`);
+        results.set(step.name,{text:JSON.stringify(pages),db:""});continue;
+      }
       if (step.kind === "usage-traffic") {
         await sleep(650);
         const traffic = await exchange({method:"POST",target:"/v1/chat/completions",headers:[["authorization",`Bearer ${SEED_KEY}`],J],body:JSON.stringify({model:"routing-a6",messages:[{role:"user",content:"hello"}]})});
