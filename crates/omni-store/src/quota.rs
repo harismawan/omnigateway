@@ -95,6 +95,20 @@ pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
+        // A non-string JS Map key cannot match a credential's string id.
+        let Ok(credential_id) = row::text(r, Q, "credential_id") else {
+            tracing::warn!("unaddressable quota credential id omitted from routing snapshot");
+            continue;
+        };
+        // Unknown window names still enforce their ceiling in TS. A BLOB's
+        // Uint8Array string form is used in exclusion messages; its duration
+        // lookup is unknown (NaN), just like an unknown text name.
+        let window_name = match r.get_ref("window_type")? {
+            rusqlite::types::ValueRef::Text(s) => String::from_utf8_lossy(s).into_owned(),
+            rusqlite::types::ValueRef::Blob(b) => b.iter().map(u8::to_string).collect::<Vec<_>>().join(","),
+            rusqlite::types::ValueRef::Null => "null".into(),
+            v => crate::js::number_to_string(crate::js::coerce_cell(v)),
+        };
         out.push(QuotaWindow {
             text_spent: match (r.get_ref("used")?, r.get_ref("limit_value")?) {
                 (rusqlite::types::ValueRef::Text(a), rusqlite::types::ValueRef::Text(b)) => Some(
@@ -105,8 +119,8 @@ pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
                 ),
                 _ => None,
             },
-            credential_id: row::text(r, Q, "credential_id")?,
-            window_type: WindowType::parse(&row::text(r, Q, "window_type")?),
+            credential_id,
+            window_type: WindowType::parse(&window_name),
             starts_at: crate::js::coerce_cell(r.get_ref("starts_at")?),
             used: crate::js::coerce_cell(r.get_ref("used")?),
             limit: opt_number(r, "limit_value")?,

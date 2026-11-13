@@ -102,3 +102,16 @@ fn unaddressable_model_ids_do_not_abort_snapshot_publication() {
         .expect("edit");
     assert_eq!(store.snapshot_reads(&key).expect("refresh").models.len(), 2);
 }
+
+#[test]
+fn quota_identity_cells_do_not_freeze_boot_or_live_publication() {
+    let store = omni_store::SqliteStore::open(":memory:", 0).expect("store");
+    store.connection().execute_batch("PRAGMA foreign_keys=OFF; INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('c','custom','c','apiKey','{}',1,1); INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,observed_at) VALUES(x'63','daily',0,100,100,0)").expect("seed");
+    let key = omni_crypto::field::derive_key("key");
+    assert!(store.snapshot_reads(&key).expect("boot").quota.is_empty());
+    store.connection().execute_batch("INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,observed_at) VALUES('c',x'78',0,100,100,0); UPDATE credentials SET enabled=0 WHERE id='c'").expect("live");
+    let live = store.snapshot_reads(&key).expect("refresh");
+    assert!(!live.credentials[0].enabled);
+    assert_eq!(live.quota.len(), 1);
+    assert!(live.quota[0].spent());
+}
