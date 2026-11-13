@@ -87,17 +87,14 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
                 &omni_control::credentials::list(&store).map_err(|e| e.message)?,
             )
             .map_err(|e| e.to_string())?;
-            let health = omni_control::operator_json::parse(
-                &omni_control::credentials::health(&store, chrono::Utc::now().timestamp_millis())
-                    .map_err(|e| e.message)?,
-            )
-            .map_err(|e| e.to_string())?;
+            let quota_rows =
+                omni_control::credentials::status_quota(&store).map_err(|e| e.message)?;
             use omni_control::settings_value::get;
             use omni_ir::jsjson::JsValue as J;
             if let Some(J::Array(accounts)) = get(&accounts, "credentials") {
                 for c in accounts {
-                    let quota = match get(&health, "quota") {
-                        Some(J::Array(q)) => q
+                    let quota = match &quota_rows {
+                        J::Array(q) => q
                             .iter()
                             .filter(|q| get(q, "credentialId") == get(c, "id"))
                             .cloned()
