@@ -15,7 +15,13 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             if !flags.contains_key("system") {
                 c.arg("--user");
             }
-            c.args(args).output().map_err(|e| e.to_string())
+            c.args(args).output().map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    "Executable not found in $PATH: \"systemctl\"".into()
+                } else {
+                    e.to_string()
+                }
+            })
         };
         let a = run(&["is-active", "omnigateway.service"])?;
         let out = String::from_utf8_lossy(&a.stdout);
@@ -45,16 +51,11 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             .join("omnigateway");
         let file = state.join("gateway.pid");
         let mut p = std::fs::read_to_string(&file).ok().and_then(|s| pid(&s));
-        if let Some(id) = p {
-            let alive = Command::new("kill")
-                .args(["-0", &id.to_string()])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !alive {
-                std::fs::remove_file(&file).map_err(|e| e.to_string())?;
-                p = None;
-            }
+        if let Some(id) = p
+            && !crate::process::alive(id)
+        {
+            std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+            p = None;
         }
         let log = ctx
             .env
@@ -170,10 +171,10 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
     }
     Ok(out)
 }
-fn pid(s: &str) -> Option<u64> {
+fn pid(s: &str) -> Option<f64> {
     let n = omni_ir::js::string_to_number(s);
-    if n.is_finite() && n > 0.0 && n.fract() == 0.0 && n < (u64::MAX as f64) {
-        Some(n as u64)
+    if n.is_finite() && n > 0.0 && n.fract() == 0.0 {
+        Some(n)
     } else {
         None
     }

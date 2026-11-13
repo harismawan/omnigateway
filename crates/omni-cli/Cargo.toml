@@ -14,7 +14,7 @@ name = "omni"
 path = "src/main.rs"
 
 [dependencies]
-rustix = { version = "1.1.6", features = ["termios", "fs"] }
+rustix = { version = "1.1.6", features = ["termios", "fs", "process"] }
 omni-control = { path = "../omni-control" }
 omni-ir = { path = "../omni-ir" }
 omni-store = { path = "../omni-store" }

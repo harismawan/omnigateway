@@ -8,6 +8,7 @@ mod models;
 mod mutations;
 mod output;
 mod password;
+mod process;
 mod registry;
 mod settings;
 mod setup;
