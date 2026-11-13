@@ -25,6 +25,7 @@ for value, running, retained in [(str(os.getpid()),True,True), ('2147483647',Fal
         results.append(result)
         assert p.returncode == 0, result
         data=json.loads(p.stdout)
+        assert data['storeError'] is None, data
         assert data['process']['running'] == running, (value,result)
         assert pidfile.exists() == retained, (value,result)
     assert results[0] == results[1], (value,results)
@@ -43,6 +44,7 @@ for script, expected in [(None, None), ('#!/bin/sh\necho failed >&2\nexit 3\n', 
         results.append((p.returncode,p.stdout,p.stderr))
     assert results[0] == results[1], results
     assert results[0][0] == (1 if script is None else 0)
+    if script is not None: assert json.loads(results[0][1])['storeError'] is None
     if expected is None:
         assert results[0][1] == b''
         assert results[0][2] == b'Executable not found in $PATH: "systemctl"\n'

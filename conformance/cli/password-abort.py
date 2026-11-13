@@ -5,6 +5,8 @@ binary = pathlib.Path(os.environ['OMNI_CLI_BIN']).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='/tmp/opencode/e1-e5/password-abort-'))
 (root/'manifest.json').write_text(json.dumps({'commit':subprocess.check_output(['git','rev-parse','HEAD']).decode().strip(),'binary':str(binary),'sha256':hashlib.sha256(binary.read_bytes()).hexdigest()}))
 master, slave = os.openpty()
+preflight=subprocess.run([str(binary),'--root',str(root),'status','--json'],env={**os.environ,'OMNI_ENCRYPTION_KEY':'password-golden-secret'},capture_output=True,check=True)
+assert json.loads(preflight.stdout)['storeError'] is None, preflight.stdout
 before = termios.tcgetattr(slave)
 read, write = os.pipe()
 os.close(read)
