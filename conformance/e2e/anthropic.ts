@@ -6,12 +6,14 @@ import { mkdirSync, copyFileSync, mkdtempSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { parseArgs } from "node:util";
 import { normalize, normalizedEqual } from "./masks.ts";
+import { deriveKey, encrypt, decrypt } from "../../packages/store/src/encryption.ts";
 const { values: f } = parseArgs({
   options: {
     ts: { type: "string" },
     rust: { type: "string" },
     cert: { type: "string" },
     key: { type: "string" },
+    oauth: { type: "boolean", default: false },
   },
 });
 if (!f.ts || !f.rust || !f.cert || !f.key) throw Error("--ts --rust --cert --key required");
@@ -63,7 +65,18 @@ await Bun.write(
 );
 await cli(["models", "put", "test-model", "-f", modelFile]);
 const key = (await cli(["keys", "create", "--label", "test"])).key;
+const fieldKey = await deriveKey(env.OMNI_ENCRYPTION_KEY);
+async function seedOAuth(db: Database, expired: boolean) {
+  db.run("UPDATE credentials SET auth_type='oauth',access_token=?,refresh_token=?,api_key=NULL,expires_at=?,token_version=0,account_email=NULL", [await encrypt(fieldKey, "old-access"), await encrypt(fieldKey, "old-refresh"), expired ? 1 : 4102444800000]);
+}
+if (f.oauth) {
+  const db = new Database(env.OMNI_DB_PATH);
+  await seedOAuth(db, true);
+  db.close();
+}
 let status = 200;
+let inferenceCalls = 0;
+let reactive = false;
 let recorded: string[] = [];
 const sse =
   'event: message_start\ndata: {"message":{"id":"msg_fixed","model":"claude-opus-5-5","usage":{"input_tokens":10}}}\n\nevent: content_block_start\ndata: {"index":0,"content_block":{"type":"text","text":""}}\n\nevent: content_block_delta\ndata: {"index":0,"delta":{"type":"text_delta","text":"hello"}}\n\nevent: content_block_stop\ndata: {"index":0}\n\nevent: message_delta\ndata: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\n\nevent: message_stop\ndata: {}\n\n';
@@ -82,10 +95,13 @@ const listener = Bun.listen<{ buffer: Buffer }>({
       if (end < 0) return;
       const length = Number(/content-length: (\d+)/i.exec(raw.slice(0, end))?.[1] ?? 0);
       if (s.data.buffer.length < end + 4 + length) return;
-      recorded.push(s.data.buffer.subarray(0, end + 4 + length).toString());
+      // TS's independent boot quota probe is outside refresh/inference evidence.
+      if (!raw.startsWith("GET /api/oauth/usage ")) recorded.push(s.data.buffer.subarray(0, end + 4 + length).toString());
       s.data.buffer = s.data.buffer.subarray(end + 4 + length);
-      const body =
-        status === 200
+      const token = raw.startsWith("POST /v1/oauth/token ");
+      const responseStatus = token ? 200 : reactive && inferenceCalls++ === 0 ? 401 : status;
+      const body = token ? JSON.stringify({ access_token: "new-access", refresh_token: "new-refresh", account: { email_address: "new@example.com" } }) :
+        responseStatus === 200
           ? sse
           : JSON.stringify({
               error: {
@@ -94,7 +110,7 @@ const listener = Bun.listen<{ buffer: Buffer }>({
               },
             });
       s.write(
-        `HTTP/1.1 ${status} Fixture\r\nContent-Type: ${status === 200 ? "text/event-stream" : "application/json"}\r\nContent-Length: ${Buffer.byteLength(body)}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n${body}`,
+        `HTTP/1.1 ${responseStatus} Fixture\r\nContent-Type: ${!token && responseStatus === 200 ? "text/event-stream" : "application/json"}\r\nContent-Length: ${Buffer.byteLength(body)}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n${body}`,
       );
       s.end();
     },
@@ -104,6 +120,7 @@ const cases = [];
 for (const path of ["/v1/messages", "/v1/chat/completions", "/v1/responses"])
   for (const stream of [false, true])
     for (const code of [200, 400, 429, 500, 529]) cases.push({ path, stream, code });
+if (f.oauth) cases.splice(0, cases.length, {path:"/v1/messages",stream:false,code:200}, {path:"/v1/messages",stream:false,code:200});
 function request(path: string, stream: boolean) {
   const common = { model: "test-model", stream, max_tokens: 128 };
   if (path === "/v1/responses")
@@ -135,6 +152,9 @@ function request(path: string, stream: boolean) {
   };
 }
 async function run(binary: string, label: string) {
+  recorded = [];
+  reactive = false;
+  inferenceCalls = 0;
   const root = join(work, label);
   mkdirSync(root);
   copyFileSync(env.OMNI_DB_PATH, join(root, "omni.db"));
@@ -158,7 +178,7 @@ async function run(binary: string, label: string) {
     if (!ready) throw Error("boot failed");
     const output = [];
     // Counting is local even for Anthropic: no upstream request and no request log.
-    recorded = [];
+    if (!f.oauth) recorded = [];
     const count = await fetch("http://127.0.0.1:18482/v1/messages/count_tokens", {
       method: "POST",
       headers: { "x-api-key": key, "content-type": "application/json" },
@@ -168,11 +188,13 @@ async function run(binary: string, label: string) {
       }),
     });
     const counted = await count.text();
-    if (counted !== '{"input_tokens":10}' || recorded.length)
+    if (counted !== '{"input_tokens":10}' || (!f.oauth && recorded.length))
       throw Error(`count mismatch ${counted}`);
     for (const c of cases) {
+      reactive = !!f.oauth && output.length === 1;
+      inferenceCalls = 0;
       status = c.code;
-      recorded = [];
+      if (!f.oauth || output.length > 0) recorded = [];
       const res = await fetch("http://127.0.0.1:18482" + c.path, {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
@@ -191,6 +213,13 @@ async function run(binary: string, label: string) {
       child.kill("SIGTERM");
       await child.exited;
       const db = new Database(join(root, "omni.db"));
+      if (f.oauth) {
+        const row = db.query("SELECT * FROM credentials").get() as any;
+        for (const secret of ["access_token", "refresh_token", "api_key", "id_token"]) if (row[secret] !== null) row[secret] = await decrypt(fieldKey, row[secret]);
+        delete row.updated_at;
+        (output.at(-1) as any).credential = row;
+        await seedOAuth(db, false);
+      }
       db.exec("DELETE FROM credential_health");
       db.close();
       child = Bun.spawn([binary], {
@@ -230,7 +259,7 @@ try {
   for (let i = 0; i < cases.length; i++) {
     for (const run of [ts, rust]) {
       const row = run.output[i]!;
-      if (row.upstream.length !== 1 || (row.case.code === 200 && row.status !== 200)) {
+      if (row.upstream.length !== (f.oauth ? i + 2 : 1) || (row.case.code === 200 && row.status !== 200)) {
         throw Error(
           `scenario did not reach the upstream exactly once: ${JSON.stringify(row.case)}`,
         );
@@ -254,6 +283,10 @@ try {
       JSON.stringify(ts.output[i]!.upstream) === JSON.stringify(rust.output[i]!.upstream);
     if (!normalizedEqual(a, b) || !upstream) {
       console.error("DIFF", cases[i], { client: normalizedEqual(a, b), upstream });
+      failed++;
+    }
+    if (f.oauth && JSON.stringify((ts.output[i] as any).credential) !== JSON.stringify((rust.output[i] as any).credential)) {
+      console.error("DIFF credential", i);
       failed++;
     }
   }
