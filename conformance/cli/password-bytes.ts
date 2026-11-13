@@ -158,6 +158,14 @@ for (const rust of [false, true]) {
     }[]
   ).map(({ name }) => [name, db.query(`SELECT * FROM "${name}"`).all()]);
   db.close();
+  const baseline = new Database(fixture);
+  const before = (
+    baseline.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {
+      name: string;
+    }[]
+  ).map(({ name }) => [name, baseline.query(`SELECT * FROM "${name}"`).all()]);
+  baseline.close();
+  assert.deepEqual(state, before, "mismatch preserves each independent database");
   mismatch.push({ bytes: result.bytes, code: result.code, state });
 }
 assert.deepEqual(mismatch[1], mismatch[0]);
