@@ -1,5 +1,23 @@
 # A7 checkpoint — SQLite usage implemented; increment incomplete
 
+## Current state — export matrix/volume checkpoint (466757c1)
+
+**NEXT STEP:** implement a debug-level export page-read event and a permanent disconnect test that records reads at socket close and asserts at most one subsequent page, then verifies another admin request. Add slow-reader concurrent real `/v1` traffic with DB row visibility and measured admin latency on both binaries. These two proofs are still missing. Then read frozen `/api/nodes` and maintenance.nodes, implement/test empty/single/stale/unusual rows and self-node identity. Do not mark complete until these pass.
+
+Status: **partial checkpoint, not complete for review**. Usage and logs retain previous coverage. Export has additional adversarial/volume proof; nodes remains unimplemented.
+
+Requirement → commit → test:
+- CSV BLOB cell coercion → `466757c1` → `matrix.log` independent RED (TS `"1,2"`, Rust `[object Object]`) → `matrix-final.log` GREEN. Store now preserves CSV-specific BLOB string conversion before JSON round-trip; JSON output remains indexed objects.
+- Empty JSONL HTTP framing → same commit → `matrix-green.log` independent RED (TS Content-Length 0 vs Rust chunked) → final GREEN. Empty response uses an exact-size empty body.
+- All supported log filters, roles, empty results, comma/quote/CR/LF/formula/tab/non-ASCII/invalid UTF-8, NULL, numeric text, BLOB → same commit → matrix **173 equal / 0 failures** (initial **161 equal / 12 failures**, intermediate **167 / 6**). Other cases were coverage, not independent RED.
+- 30,000-row CSV and JSONL, each admin/viewer/anonymous, three fresh process runs → same commit → `volume-{1,2,3}.log`, **17 equal / 0 failures each**; no independent RED. Caller invalid cursor and limits 1/2 plus repeated format fields are ignored/overridden across all 60 pages as TS does. Export strips *all* cursor/limit/format entries before appending server limit, and subsequent cursors are generated base64url, so caller paging cannot override later pages.
+
+RSS evidence `/tmp/opencode/a7-accept/volume-{1,2,3}/export-volume-N-{ts,rust}-rss.txt`: TS VmHWM **86,160–88,044 kB** (86,160 / 88,044 / 87,172), Rust **40,140–40,556 kB** (40,140 / 40,556 / 40,260). Each process serves both formats; these are combined process peaks, not independently attributed format peaks. Payload comparisons are byte-equal after HTTP dechunking and validated dynamic filename masking. Preliminary runs reused previous TS artifact; final gates rebuilt both binaries.
+
+Final gates at `466757c1`, evidence `/tmp/opencode/a7-accept/`: workspace **1046 passed / 0 failed / 7 ignored** (`workspace.log`), workspace all-target clippy clean (`clippy.log`), fmt clean (`fmt.log`). Fresh outside-checkout binaries, commit/SHA256 recorded before drivers in `manifest.json`. Admin-routes **2404 equal / 2 expected / 0 failures**; admin-auth **212 equal / 4 expected / 0 failures**; surface **606 equal / 61 expected / 0 failures**; run.ts **all rows equal** (matching log names). All foreground runs finished and results read. Incremental/debug disabled.
+
+Known differences/concerns: no mismatch in exercised matrix; disconnect page counts, slow-reader writer/admin latency and nodes not done. Control mutex remains per page including encoding (500 rows), never whole stream; TS synchronously reads a page then serializes rows while yielding. Relative worst-page admin blocking has **not** been measured. Nonfinite numeric CSV remains untested. D4: add PG readers for usage, logs/export pages, nodes; wire backend selection into control and gateway, then live-PG HTTP, restart/cross-runtime reads, scalar/identity and streaming concurrency conformance. Historical state below is superseded by this section.
+
 ## Latest: cursor identity closed; initial streamed export
 
 **NEXT STEP:** finish export verification before nodes: permanent three-run tens-of-thousands-row CSV/JSONL byte comparisons with RSS ranges; instrument page reads to count post-disconnect work; concurrent slow export plus real `/v1` log commit and admin-read latency assertions; full filter/escaping/unusual-cell matrix. Export implementation is present but these acceptance requirements are still unverified. Then `/api/nodes`.
