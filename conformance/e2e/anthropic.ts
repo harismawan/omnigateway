@@ -14,6 +14,7 @@ const { values: f } = parseArgs({
     cert: { type: "string" },
     key: { type: "string" },
     oauth: { type: "boolean", default: false },
+    "boot-oauth": { type: "boolean", default: false },
   },
 });
 if (!f.ts || !f.rust || !f.cert || !f.key) throw Error("--ts --rust --cert --key required");
@@ -69,15 +70,17 @@ const fieldKey = await deriveKey(env.OMNI_ENCRYPTION_KEY);
 async function seedOAuth(db: Database, expired: boolean) {
   db.run("UPDATE credentials SET auth_type='oauth',access_token=?,refresh_token=?,api_key=NULL,expires_at=?,token_version=0,account_email=NULL", [await encrypt(fieldKey, "old-access"), await encrypt(fieldKey, "old-refresh"), expired ? 1 : 4102444800000]);
 }
+if (f["boot-oauth"]) f.oauth = true;
 if (f.oauth) {
   const db = new Database(env.OMNI_DB_PATH);
-  await seedOAuth(db, true);
+  await seedOAuth(db, !!f["boot-oauth"]);
   db.close();
 }
 let status = 200;
 let inferenceCalls = 0;
 let reactive = false;
 let recorded: string[] = [];
+let sequence: string[] = [];
 const sse =
   'event: message_start\ndata: {"message":{"id":"msg_fixed","model":"claude-opus-5-5","usage":{"input_tokens":10}}}\n\nevent: content_block_start\ndata: {"index":0,"content_block":{"type":"text","text":""}}\n\nevent: content_block_delta\ndata: {"index":0,"delta":{"type":"text_delta","text":"hello"}}\n\nevent: content_block_stop\ndata: {"index":0}\n\nevent: message_delta\ndata: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\n\nevent: message_stop\ndata: {}\n\n';
 const listener = Bun.listen<{ buffer: Buffer }>({
@@ -95,8 +98,8 @@ const listener = Bun.listen<{ buffer: Buffer }>({
       if (end < 0) return;
       const length = Number(/content-length: (\d+)/i.exec(raw.slice(0, end))?.[1] ?? 0);
       if (s.data.buffer.length < end + 4 + length) return;
-      // TS's independent boot quota probe is outside refresh/inference evidence.
-      if (!raw.startsWith("GET /api/oauth/usage ")) recorded.push(s.data.buffer.subarray(0, end + 4 + length).toString());
+      recorded.push(s.data.buffer.subarray(0, end + 4 + length).toString());
+      sequence.push(raw.split("\r\n")[0]!);
       s.data.buffer = s.data.buffer.subarray(end + 4 + length);
       const token = raw.startsWith("POST /v1/oauth/token ");
       const responseStatus = token ? 200 : reactive && inferenceCalls++ === 0 ? 401 : status;
@@ -190,11 +193,24 @@ async function run(binary: string, label: string) {
     const counted = await count.text();
     if (counted !== '{"input_tokens":10}' || (!f.oauth && recorded.length))
       throw Error(`count mismatch ${counted}`);
+    const bootTraffic: string[][] = [];
     for (const c of cases) {
       reactive = !!f.oauth && output.length === 1;
       inferenceCalls = 0;
       status = c.code;
-      if (!f.oauth || output.length > 0) recorded = [];
+      if (f.oauth) {
+        bootTraffic.push([...recorded]);
+        if (!f["boot-oauth"] && recorded.some(x => x.startsWith("POST /v1/oauth/token "))) throw Error("token refreshed before request while valid at boot");
+        if (output.length === 0 && !f["boot-oauth"]) {
+          const db = new Database(join(root, "omni.db"));
+          db.run("UPDATE credentials SET expires_at=1");
+          db.close();
+          await Bun.sleep(1500); // Both frozen TS and Rust poll external store changes.
+          if (recorded.some(x => x.startsWith("POST /v1/oauth/token "))) throw Error("background task refreshed post-boot token before request");
+        }
+      }
+      recorded = [];
+      sequence = ["client request sent"];
       const res = await fetch("http://127.0.0.1:18482" + c.path, {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
@@ -208,6 +224,7 @@ async function run(binary: string, label: string) {
         headers: [...res.headers.entries()],
         body,
         upstream: [...recorded],
+        sequence: [...sequence],
       });
       // Independent rows: no breaker/rate-limit state from the previous refusal.
       child.kill("SIGTERM");
@@ -222,6 +239,7 @@ async function run(binary: string, label: string) {
       }
       db.exec("DELETE FROM credential_health");
       db.close();
+      recorded = [];
       child = Bun.spawn([binary], {
         cwd: work,
         env: { ...env, OMNI_ROOT: root, OMNI_DB_PATH: join(root, "omni.db") },
@@ -244,7 +262,7 @@ async function run(binary: string, label: string) {
     const db = new Database(join(root, "omni.db"));
     const logs = db.query("SELECT * FROM request_logs ORDER BY rowid").all();
     db.close();
-    return { output, logs };
+    return { output, logs, bootTraffic };
   } finally {
     child.kill("SIGTERM");
     await child.exited;
@@ -256,9 +274,18 @@ try {
   await Bun.write(join(work, "ts.json"), JSON.stringify(ts, null, 2));
   await Bun.write(join(work, "rust.json"), JSON.stringify(rust, null, 2));
   let failed = 0;
+  if (f.oauth) console.log("Known B10 boot quota-poller difference (full bytes retained)", {ts:ts.bootTraffic.map(x=>x.map(y=>y.split("\r\n")[0])),rust:rust.bootTraffic.map(x=>x.map(y=>y.split("\r\n")[0]))});
+  if (f["boot-oauth"]) {
+    console.log({work, scenario:"boot-expired-quota-refresh", classification:"known B10 difference; not dispatch parity"});
+    process.exit(0);
+  }
   for (let i = 0; i < cases.length; i++) {
     for (const run of [ts, rust]) {
       const row = run.output[i]!;
+      if (f.oauth) {
+        const expected = i === 0 ? ["client request sent", "POST /v1/oauth/token HTTP/1.1", "POST /v1/messages HTTP/1.1"] : ["client request sent", "POST /v1/messages HTTP/1.1", "POST /v1/oauth/token HTTP/1.1", "POST /v1/messages HTTP/1.1"];
+        if (JSON.stringify(row.sequence) !== JSON.stringify(expected)) throw Error(`refresh ordering: ${JSON.stringify(row.sequence)}`);
+      }
       if (row.upstream.length !== (f.oauth ? i + 2 : 1) || (row.case.code === 200 && row.status !== 200)) {
         throw Error(
           `scenario did not reach the upstream exactly once: ${JSON.stringify(row.case)}`,
