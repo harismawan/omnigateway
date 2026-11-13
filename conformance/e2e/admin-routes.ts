@@ -443,11 +443,13 @@ type Step =
       target: string;
       body?: string;
       /**
-       * A documented divergence in this answer's headers, named: only the
-       * status, the body and the database after it are compared, and the
-       * report says so (`expected-diff`). Never a way to pass a failure.
+       * A documented divergence, pinned on both sides: each binary's answer
+       * must be exactly its text here, and the two must differ. Anything
+       * else (equal answers, or a different difference) fails. Counted as an
+       * expected divergence, never as equal; the database after the step is
+       * still compared.
        */
-      headersDiffer?: string;
+      expectDiff?: { why: string; ts: string; rust: string };
     }
   /** Log in again (after a session-ending change). */
   | { kind: "relogin"; name: string; who: "admin" | "viewer"; password: string; mode?: string }
@@ -1020,6 +1022,19 @@ function rawOf(id: string): string {
   return `sk-omni-${id.padEnd(43, "0")}`;
 }
 
+type ExpectDiff = { why: string; ts: string; rust: string };
+
+/** The OpenAI-dialect 500 for an unencodable model, with `extra` headers. */
+function refusal(extra: string[]): string {
+  const head = [
+    "content-length: <body length>",
+    "content-type: application/json",
+    "date: <date>",
+    ...extra,
+  ].sort();
+  return `500\n${head.join("\n")}\n\n{"error":{"message":"String contained an illegal UTF-16 sequence.","type":"server_error","code":"server_error"}}`;
+}
+
 function identitySteps(): Step[] {
   const chat = (m: string) => `{"model":"${m}","messages":[{"role":"user","content":"hi"}]}`;
   const s: Step[] = [];
@@ -1088,13 +1103,13 @@ function identitySteps(): Step[] {
   // row stores must not stand in for it.
   const on =
     (k: string) =>
-    (name: string, target: string, m: string, headersDiffer?: string): Step => ({
+    (name: string, target: string, m: string, expectDiff?: ExpectDiff): Step => ({
       kind: "v1",
       name: `${k} ${name}`,
       key: rawOf(k),
       target,
       body: chat(m),
-      ...(headersDiffer === undefined ? {} : { headersDiffer }),
+      ...(expectDiff === undefined ? {} : { expectDiff }),
     });
   const k5 = on("id-k5");
   const k6 = on("id-k6");
@@ -1112,12 +1127,15 @@ function identitySteps(): Step[] {
     // TS admits the request against the key-wide subject and fails later, so
     // its 500 carries that admission's rate-limit headers; Rust refuses
     // before admitting anything and has none to render.
-    k6(
-      "chat \\ud800 fails",
-      "/v1/chat/completions",
-      "\\ud800",
-      "the early refusal precedes admission: no x-ratelimit-* headers",
-    ),
+    k6("chat \\ud800 fails", "/v1/chat/completions", "\\ud800", {
+      why: "the early refusal precedes admission: no x-ratelimit-* headers",
+      ts: refusal([
+        "x-ratelimit-limit-requests: 1",
+        "x-ratelimit-remaining-requests: 0",
+        "x-ratelimit-reset-requests: <duration>",
+      ]),
+      rust: refusal([]),
+    }),
     { kind: "wait", name: "the failed row and its debit land", ms: 800 },
     k6("count plain: the key was debited", "/v1/messages/count_tokens", "plain"),
   );
@@ -1497,16 +1515,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           continue;
         }
         record(step.name, step.method ?? "POST", x);
-        const text = normalizeV1(x, m);
-        if (step.headersDiffer !== undefined)
-          notes.push(`expected-diff ${step.name}: headers not compared (${step.headersDiffer})`);
-        results.set(step.name, {
-          text:
-            step.headersDiffer === undefined
-              ? text
-              : `${x.status}\n<headers: ${step.headersDiffer}>\n\n${text.slice(text.indexOf("\n\n") + 2)}`,
-          db: dump(file, m),
-        });
+        results.set(step.name, { text: normalizeV1(x, m), db: dump(file, m) });
         continue;
       }
       if (step.kind === "concurrent") {
@@ -1587,12 +1596,16 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
 
 let failures = 0;
 let equal = 0;
+let expected = 0;
 const report: string[] = [];
 for (const cfg of configs) {
   if (flags.only !== undefined && cfg.label !== flags.only) continue;
   const ts = await runOne("ts", resolve(REPO, flags.ts as string), cfg);
   const rs = await runOne("rust", resolve(REPO, flags.rust as string), cfg);
   const names = new Set([...ts.results.keys(), ...rs.results.keys()]);
+  const pinned = new Map<string, ExpectDiff>();
+  for (const step of cfg.steps())
+    if (step.kind === "v1" && step.expectDiff !== undefined) pinned.set(step.name, step.expectDiff);
   for (const name of names) {
     const a = ts.results.get(name);
     const b = rs.results.get(name);
@@ -1606,7 +1619,19 @@ for (const cfg of configs) {
       report.push(`TRANSPORT ${cfg.label}: ${name}\n--- ts\n${a?.text}\n--- rust\n${b?.text}\n`);
       continue;
     }
-    if (a.text === b.text) equal++;
+    const pin = pinned.get(name);
+    if (pin !== undefined) {
+      // Both sides exactly as pinned, and different: nothing else passes.
+      if (a.text === b.text || a.text !== pin.ts || b.text !== pin.rust) {
+        failures++;
+        report.push(
+          `${a.text === b.text ? "UNEXPECTED-EQUAL" : "WRONG-DIVERGENCE"} ${cfg.label}: ${name} (${pin.why})\n--- want ts\n${pin.ts}\n--- want rust\n${pin.rust}\n--- ts\n${a.text.slice(0, 3000)}\n--- rust\n${b.text.slice(0, 3000)}\n`,
+        );
+      } else {
+        expected++;
+        report.push(`expected-diff ${cfg.label}: ${name} (${pin.why})`);
+      }
+    } else if (a.text === b.text) equal++;
     else {
       failures++;
       report.push(
@@ -1662,7 +1687,7 @@ for (const cfg of configs) {
     JSON.stringify(Object.fromEntries(rs.results), null, 1),
   );
 }
-const summary = `admin-routes: ${equal} equal, ${failures} failures, ${allRawKeys.size} raw keys minted`;
+const summary = `admin-routes: ${equal} equal, ${expected} expected divergences, ${failures} failures, ${allRawKeys.size} raw keys minted`;
 writeFileSync(join(out, "report.txt"), `${report.join("\n")}\n${summary}\n`);
 console.log(report.join("\n"));
 console.log(summary);

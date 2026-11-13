@@ -3,9 +3,13 @@
 // U+FFFD, through the CLI's list and edit paths. Frozen TS and Rust run on
 // equal roots; stdout, stderr, exit code and the whole `api_keys` table are
 // compared after every command.
+//
+// The last block is the review's own repro: keys created over `/api` by the
+// Rust gateway (`OMNI_GATEWAY_BIN`, default `target/debug/omnigateway`), then
+// listed by both CLIs from copies of that one database.
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 
@@ -16,7 +20,10 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.st
 Object.assign(env, { OMNI_ENCRYPTION_KEY: secret, NO_COLOR: "1", HOME: root });
 const commands = [
   ["bun", "--no-env-file", join(repo, "apps/cli/src/index.ts")],
-  [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")],
+  [
+    resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni"),
+    ...(process.env.OMNI_CLI_SUBCOMMAND === "1" ? ["omni"] : []),
+  ],
 ];
 const LIMITS =
   '{"requests":{"1m":5},"models":{"\\ud800":{"concurrency":1},"\\ufffd":{"requests":{"1m":2}},"7":{"tokens":{"5h":9}},"\\udc00x":{"spend":{"1w":1.5}}}}';
@@ -59,9 +66,9 @@ try {
       ]);
     db.close();
   }
-  const run = async (i: number, args: string[]) => {
+  const run = async (i: number, args: string[], dirs = roots) => {
     const command = commands[i];
-    const dir = roots[i];
+    const dir = dirs[i];
     assert(command && dir);
     const p = Bun.spawn([...command, "--root", dir, "--db", "db", ...args], {
       cwd: dir,
@@ -114,6 +121,95 @@ try {
     } catch (e) {
       failures++;
       console.error(`FAIL ${JSON.stringify(args)}\n${(e as Error).message.slice(0, 1500)}`);
+    }
+  }
+
+  // Keys created over the API, as an operator's client would.
+  const gateway = resolve(process.env.OMNI_GATEWAY_BIN ?? "target/debug/omnigateway");
+  assert(existsSync(gateway), `no gateway binary at ${gateway}: cargo build -p omni-gateway`);
+  const apiRoots = [join(root, "api-ts"), join(root, "api-rs")];
+  for (const dir of apiRoots) mkdirSync(dir);
+  const [tsRoot, rsRoot] = apiRoots as [string, string];
+  const port = 18617;
+  const base = `http://127.0.0.1:${port}`;
+  const proc = Bun.spawn([gateway], {
+    cwd: rsRoot,
+    env: {
+      ...env,
+      OMNI_DB_PATH: join(rsRoot, "db"),
+      OMNI_ROOT: rsRoot,
+      OMNI_HOST: "127.0.0.1",
+      OMNI_PORT: String(port),
+      OMNI_STATIC_DIR: join(rsRoot, "no-dashboard"),
+    },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const ids: string[] = [];
+  try {
+    let healthy = false;
+    for (let i = 0; i < 400 && !healthy; i++) {
+      healthy = await fetch(`${base}/health`).then(
+        (r) => r.ok,
+        () => false,
+      );
+      if (!healthy) await Bun.sleep(25);
+    }
+    assert(healthy, "the gateway did not come up");
+    const setup = await fetch(`${base}/api/setup`, {
+      method: "POST",
+      body: '{"password":"correct-horse-battery"}',
+    });
+    const cookie = setup.headers.get("set-cookie")?.split(";")[0];
+    assert(cookie, `setup: ${setup.status}`);
+    for (const body of [
+      // The review's body, verbatim.
+      '{"limits":{"models":{"\\ud800":{"concurrency":1}}}}',
+      `{"label":"mixed","limits":${LIMITS},"modelAllowlist":${ALLOW}}`,
+    ]) {
+      const made = await fetch(`${base}/api/keys`, { method: "POST", headers: { cookie }, body });
+      assert.equal(made.status, 200, await made.clone().text());
+      ids.push(((await made.json()) as { id: string }).id);
+    }
+  } finally {
+    proc.kill("SIGTERM");
+    await proc.exited;
+  }
+  // One database, two copies: whatever the gateway left in its WAL included.
+  const made = new Database(join(rsRoot, "db"));
+  made.run("PRAGMA wal_checkpoint(TRUNCATE)");
+  const stored = made.query("SELECT limits FROM api_keys ORDER BY created_at, rowid").all();
+  made.close();
+  assert.deepEqual(
+    stored[0],
+    { limits: '{"models":{"\\ud800":{"concurrency":1}}}' },
+    "the API stores the lone override as its escape",
+  );
+  copyFileSync(join(rsRoot, "db"), join(tsRoot, "db"));
+  for (const args of [
+    ["keys", "list", "--json"],
+    ["keys", "list"],
+    ...ids.flatMap((id) => [
+      ["keys", "limits", id, "--json"],
+      ["keys", "limits", id],
+      ["keys", "models", id, "--json"],
+    ]),
+    ["keys", "limits", ids[0] as string, "--set", "requests:5h=7", "--json"],
+    ["keys", "list", "--json"],
+  ]) {
+    const [ts, rs] = [await run(0, args, apiRoots), await run(1, args, apiRoots)];
+    count++;
+    try {
+      assert.deepEqual(rs, ts, JSON.stringify(args));
+      if (args.join(" ") === "keys list --json")
+        assert(
+          ts.out.includes('"\\ud800": {\n            "concurrency": 1') &&
+            ts.out.includes('"model": "\\ud800"'),
+          "the listing shows the lone override and its limitUsage entry",
+        );
+    } catch (e) {
+      failures++;
+      console.error(`FAIL api ${JSON.stringify(args)}\n${(e as Error).message.slice(0, 1500)}`);
     }
   }
   assert.equal(failures, 0, `${failures}/${count} lone-surrogate CLI comparisons differ`);
