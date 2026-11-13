@@ -126,3 +126,39 @@ try {
   await gateway.exited;
 }
 console.log("PASS 2 live gateway status comparisons");
+mkdirSync(join(root, ".config/systemd/user"), { recursive: true });
+writeFileSync(join(root, ".config/systemd/user/omnigateway.service"), "fixture");
+mkdirSync(join(root, "bin"));
+writeFileSync(
+  join(root, "bin/systemctl"),
+  '#!/bin/sh\ncase "$*" in *is-active*) echo "$FIXTURE_STATE";; *show*) echo 123;; esac\n',
+  { mode: 0o755 },
+);
+let systemdCount = 0;
+for (const state of ["active", "inactive", "failed"])
+  for (const json of [false, true]) {
+    const results = [];
+    for (const cmd of commands) {
+      const p = Bun.spawn([...cmd, "--root", root, "status", ...(json ? ["--json"] : [])], {
+        cwd: root,
+        env: {
+          ...process.env,
+          HOME: root,
+          PATH: `${join(root, "bin")}:${process.env.PATH}`,
+          FIXTURE_STATE: state,
+          OMNI_ENCRYPTION_KEY: "status-golden-secret",
+          NO_COLOR: "1",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      results.push({
+        out: await new Response(p.stdout).text(),
+        err: await new Response(p.stderr).text(),
+        code: await p.exited,
+      });
+    }
+    assert.deepEqual(results[1], results[0]);
+    systemdCount++;
+  }
+console.log(`PASS ${systemdCount} systemd supervisor comparisons`);
