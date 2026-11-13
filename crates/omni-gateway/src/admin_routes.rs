@@ -84,6 +84,7 @@ pub enum Admin {
     Usage,
     Logs,
     ExportLogs,
+    Nodes,
     ListCredentials,
     CreateCredential,
     PatchCredential(Option<String>),
@@ -124,6 +125,7 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
         "/api/usage" if get => return Some(Admin::Usage),
         "/api/logs" if get => return Some(Admin::Logs),
         "/api/logs/export" if get => return Some(Admin::ExportLogs),
+        "/api/nodes" if get => return Some(Admin::Nodes),
         "/api/credentials" if get => return Some(Admin::ListCredentials),
         "/api/credentials" if *method == M::POST => return Some(Admin::CreateCredential),
         "/api/credentials/health" if get => return Some(Admin::CredentialHealth),
@@ -234,6 +236,15 @@ pub async fn serve(
                 .header("cache-control", "no-store")
                 .body(body)
                 .map_err(|_| ApiError::internal())?)
+        }
+        Admin::Nodes => {
+            require_reader(req.headers(), &app.admin).await?;
+            let node_id = app.node_id.clone();
+            Ok(json_ok(
+                control
+                    .run(move |s| omni_control::reports::nodes(s, now, &node_id))
+                    .await?,
+            ))
         }
         Admin::Logs => {
             require_reader(req.headers(), &app.admin).await?;

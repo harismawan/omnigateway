@@ -20,7 +20,7 @@ pub struct Query {
     pub limit: usize,
 }
 
-fn cell(v: ValueRef<'_>) -> JsValue {
+pub(crate) fn cell(v: ValueRef<'_>) -> JsValue {
     match v {
         ValueRef::Null => JsValue::Null,
         #[allow(clippy::cast_precision_loss)]

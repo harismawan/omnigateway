@@ -95,3 +95,19 @@ pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<JsValue, Fail
         JsValue::Array(rows),
     )]))
 }
+pub fn nodes(store: &omni_store::SqliteStore, now: i64, node_id: &str) -> Result<String, Failure> {
+    use omni_ir::jsjson::{JsValue, stringify};
+    let mut rows = omni_store::reports::nodes(store, now).map_err(Failure::internal)?;
+    let own = JsValue::String(node_id.encode_utf16().collect());
+    for row in &mut rows {
+        if let JsValue::Object(fields) = row {
+            let is_self = fields.first().is_some_and(|(_, id)| id == &own);
+            fields.push(("self".encode_utf16().collect(), JsValue::Bool(is_self)));
+        }
+    }
+    Ok(stringify(&JsValue::Object(vec![(
+        "nodes".encode_utf16().collect(),
+        JsValue::Array(rows),
+    )]))
+    .unwrap_or_default())
+}

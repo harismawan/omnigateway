@@ -4,6 +4,25 @@ use crate::{SqliteStore, StoreError};
 use omni_ir::jsjson::{JsValue, write_number};
 use rusqlite::types::{Value, ValueRef};
 
+pub fn nodes(store: &SqliteStore, now: i64) -> Result<Vec<JsValue>, StoreError> {
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT id, seen_at FROM nodes WHERE seen_at > ? ORDER BY seen_at DESC")?;
+    let rows = stmt.query_map([now.saturating_sub(60_000)], |row| {
+        Ok(JsValue::Object(vec![
+            (
+                "id".encode_utf16().collect(),
+                crate::logs::cell(row.get_ref(0)?),
+            ),
+            (
+                "seenAt".encode_utf16().collect(),
+                crate::logs::cell(row.get_ref(1)?),
+            ),
+        ]))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub struct UsageQuery<'a> {
     pub daily: bool,
     pub key: &'a str,

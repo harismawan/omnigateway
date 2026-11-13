@@ -1323,7 +1323,12 @@ const ODD_SQL = [
 
 type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?: string };
 let healthSeed: string | undefined;
+const nodesNow = Date.now();
 const configs: Config[] = [
+  {label:"nodes",db:()=>db("nodes",[]),steps:()=>["empty","one","several","unusual"].flatMap((name,i)=>[
+    {kind:"sql" as const,name:`nodes seed ${name}`,sql:["DELETE FROM nodes",...(i===0?[]:[`INSERT INTO nodes VALUES('peer',${nodesNow+600000})`]),...(i<2?[]:[`INSERT INTO nodes VALUES('older',${nodesNow+500000}),('stale',1)`]),...(i<3?[]:["INSERT INTO nodes VALUES(CAST(x'ff' AS TEXT),'text-time'),(x'0102',1e999),(NULL,'zzz')"])]},
+    ...everyone("GET","/api/nodes").map(s=>({...s,name:`nodes ${name} ${s.who}`,expectedStatus:s.who==="anon"?401:200}))
+  ])},
   ...[1,2,3].map(run=>({label:`export-volume-${run}`,db:()=>db(`export-volume-${run}`,["WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<30000) INSERT INTO request_logs(id,at,requested_model,resolved_model,resolved_provider,credential_id,api_key_id,status,error_code,duration_ms,input_tokens) SELECT printf('export-%05d',i),100+i,'requested_'||(i%7),'resolved','custom','cred','key',CASE WHEN i%2=0 THEN 500 ELSE 200 END,'ERROR_CODE',10,3 FROM n"]),steps:()=>["csv","jsonl"].flatMap(format=>everyone("GET",`/api/logs/export?since=0&until=40000&format=${format}&cursor=invalid&limit=1&format=${format}&limit=2`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200})))})),
   {label:"export-matrix",db:()=>db("export-matrix",[
     ...["comma,quote\"","CR\rLF\n","=formula","+plus","-minus","@at","\t=tab","é😀"].map((s,i)=>`INSERT INTO request_logs(id,at,requested_model,resolved_model,resolved_provider,api_key_id,credential_id,error_code,status,duration_ms,degradations) VALUES('matrix-${i}',100,'${s.replace(/'/g,"''")}','resolved','custom','key','cred','ERROR_CODE',500,1,'["grep"]')`),
@@ -2060,6 +2065,20 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         fixture.run("DELETE FROM virtual_models WHERE id='routing-a6'");
         fixture.close();
       }
+    }
+    if (cfg.label === "nodes") {
+      const health = await exchange({method:"GET",target:"/health",headers:[]});
+      const own = JSON.parse(health.body.toString()).nodeId;
+      if (health.status !== 200 || typeof own !== "string") throw new Error("node identity health response");
+      const fixture = new Database(file);
+      fixture.run("PRAGMA busy_timeout=5000");
+      fixture.run("DELETE FROM nodes");
+      fixture.run("INSERT INTO nodes VALUES (?, ?)", [own, nodesNow + 600000]);
+      const response = await exchange({method:"GET",target:"/api/nodes",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
+      const nodes = JSON.parse(response.body.toString()).nodes;
+      if (response.status !== 200 || nodes.length !== 1 || nodes[0].id !== own || nodes[0].self !== true) throw new Error("self-node assertion");
+      fixture.run("DELETE FROM nodes");
+      fixture.close();
     }
     const fill = (s: string) =>
       s
