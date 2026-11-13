@@ -172,6 +172,10 @@ impl GatewaySnapshot {
 /// Owns the current snapshot and the key the secrets are opened with.
 pub struct SnapshotHolder {
     writers: std::sync::Mutex<()>,
+    // Lock order: authoritative W, then short publication P. Health takes P only.
+    publication: std::sync::Mutex<()>,
+    jobs: AtomicU64,
+    jobs_done: tokio::sync::Notify,
     current: ArcSwap<GatewaySnapshot>,
     key: FieldKey,
     /// `data_version` read just before the boot read, on the connection
@@ -180,6 +184,15 @@ pub struct SnapshotHolder {
     /// Bumped by every wholesale replacement (each rebuild), so a negative
     /// key lookup recorded before it is known to be stale.
     generation: AtomicU64,
+}
+
+struct PublicationJob(Arc<SnapshotHolder>);
+impl Drop for PublicationJob {
+    fn drop(&mut self) {
+        if self.0.jobs.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.jobs_done.notify_waiters();
+        }
+    }
 }
 
 impl std::fmt::Debug for SnapshotHolder {
@@ -246,11 +259,33 @@ impl SnapshotHolder {
         let first = read_snapshot(store, &key, now)?;
         Ok(Self {
             writers: std::sync::Mutex::new(()),
+            publication: std::sync::Mutex::new(()),
+            jobs: AtomicU64::new(0),
+            jobs_done: tokio::sync::Notify::new(),
             current: ArcSwap::from_pointee(first),
             key,
             boot_version,
             generation: AtomicU64::new(0),
         })
+    }
+
+    fn publication_job(self: &Arc<Self>) -> PublicationJob {
+        self.jobs.fetch_add(1, Ordering::AcqRel);
+        PublicationJob(self.clone())
+    }
+
+    /// After stopping producers, wait for even cancelled callers' blocking jobs.
+    /// The caller applies its existing shutdown grace deadline.
+    pub async fn drain_publications(&self) {
+        loop {
+            let notified = self.jobs_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.jobs.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// The current snapshot. Lock-free; hold it for the whole request.
@@ -278,6 +313,10 @@ impl SnapshotHolder {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let next = read()?;
+        let _publication = self
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.current.store(Arc::new(next));
         self.generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
@@ -286,14 +325,17 @@ impl SnapshotHolder {
     /// `healthSaved`: this process's own health write, patched into the
     /// held snapshot so routing sees it before the next rebuild.
     pub fn patch_health(&self, row: CredentialHealth) {
-        self.current.rcu(|cur| {
-            let mut next = GatewaySnapshot::clone(cur);
-            next.routing.health.insert(
-                omni_router::health_key(&row.credential_id, &row.model),
-                row.clone(),
-            );
-            next
-        });
+        let _publication = self
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cur = self.current.load_full();
+        let mut next = GatewaySnapshot::clone(&cur);
+        next.routing.health.insert(
+            omni_router::health_key(&row.credential_id, &row.model),
+            row.clone(),
+        );
+        self.current.store(Arc::new(next));
     }
 
     /// Read and publish under the authoritative writer lock. The callback must
@@ -304,22 +346,35 @@ impl SnapshotHolder {
         id: &str,
         read: impl FnOnce() -> Result<Option<omni_store::Credential>, StoreError>,
     ) -> Result<(), StoreError> {
+        self.patch_credential_at_publish(id, read, || {})
+    }
+
+    fn patch_credential_at_publish(
+        &self,
+        id: &str,
+        read: impl FnOnce() -> Result<Option<omni_store::Credential>, StoreError>,
+        mut before_store: impl FnMut(),
+    ) -> Result<(), StoreError> {
         let _writer = self
             .writers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let row = read()?;
-        self.current.rcu(|cur| {
-            let mut next = GatewaySnapshot::clone(cur);
-            if let Some(row) = &row {
-                if let Some(current) = next.routing.credentials.iter_mut().find(|c| c.id == id) {
-                    *current = row.clone();
-                }
-            } else {
-                next.routing.credentials.retain(|c| c.id != id);
+        let _publication = self
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cur = self.current.load_full();
+        let mut next = GatewaySnapshot::clone(&cur);
+        if let Some(row) = &row {
+            if let Some(current) = next.routing.credentials.iter_mut().find(|c| c.id == id) {
+                *current = row.clone();
             }
-            next
-        });
+        } else {
+            next.routing.credentials.retain(|c| c.id != id);
+        }
+        before_store();
+        self.current.store(Arc::new(next));
         Ok(())
     }
 
@@ -332,7 +387,9 @@ impl SnapshotHolder {
     ) -> Result<(), StoreError> {
         let holder = self.clone();
         let runtime = tokio::runtime::Handle::current();
+        let job = self.publication_job();
         tokio::task::spawn_blocking(move || {
+            let _job = job;
             holder.patch_credential(&id, || match store.as_ref() {
                 omni_store::Store::Sqlite { store, .. } => {
                     let db = store
@@ -380,16 +437,20 @@ impl SnapshotHolder {
             Ok(k) => Ok(Arc::new(k)),
             Err(e) => Err(Arc::new(e)),
         };
+        let _publication = self
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self.current.load_full();
+        if !Arc::ptr_eq(&current, &observed) {
+            return Ok(current.keys_by_hash.get(hash).cloned());
+        }
         let mut next = GatewaySnapshot::clone(&observed);
         next.keys_by_hash.insert(hash.to_owned(), found.clone());
         // The exact snapshot read before the database lookup must still be
         // current at publication. A separate generation check would race.
-        let previous = self.current.compare_and_swap(&observed, Arc::new(next));
-        if Arc::ptr_eq(&previous, &observed) {
-            Ok(Some(found))
-        } else {
-            Ok(self.current.load().keys_by_hash.get(hash).cloned())
-        }
+        self.current.store(Arc::new(next));
+        Ok(Some(found))
     }
 
     /// Polls `PRAGMA data_version` every `interval` and rebuilds when it
@@ -413,7 +474,9 @@ impl SnapshotHolder {
                 let holder = self.clone();
                 let store = store.clone();
                 let seen = version;
+                let job = self.publication_job();
                 let polled = tokio::task::spawn_blocking(move || {
+                    let _job = job;
                     let store = store
                         .lock()
                         .map_err(|_| "store mutex poisoned".to_owned())?;
@@ -439,6 +502,139 @@ pub use crate::miss::{MissConfig, MissResolver, MissResult};
 #[cfg(test)]
 mod publication_tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn queued_health_and_rebuild_complete_after_one_credential_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queued.db");
+        let db = SqliteStore::open(&path, 0).unwrap();
+        let holder = SnapshotHolder::build(&db, omni_crypto::field::derive_key("k"), 0.0).unwrap();
+        let (loaded_tx, loaded_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        std::thread::scope(|scope| {
+            let holder = &holder;
+            let patch = scope.spawn(move || {
+                holder
+                    .patch_credential_at_publish(
+                        "c",
+                        || Ok(None),
+                        || {
+                            loaded_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                    )
+                    .unwrap()
+            });
+            loaded_rx.recv().unwrap();
+            assert!(holder.writers.try_lock().is_err());
+            assert!(holder.publication.try_lock().is_err());
+            db.connection().execute("INSERT INTO api_keys (id,label,prefix,hash,created_at,limits) VALUES ('k','k','k','admin',0,'{}')", []).unwrap();
+            let rebuild = scope.spawn(|| {
+                let db = SqliteStore::open(&path, 0).unwrap();
+                holder.rebuild(&db).unwrap();
+            });
+            let health = scope.spawn(|| {
+                holder.patch_health(CredentialHealth {
+                    credential_id: "c".into(),
+                    model: "m".into(),
+                    breaker_state: omni_store::BreakerState::Closed,
+                    consecutive_failures: 7,
+                    opened_at: None,
+                    rate_limited_until: None,
+                })
+            });
+            release_tx.send(()).unwrap();
+            patch.join().unwrap();
+            health.join().unwrap();
+            rebuild.join().unwrap();
+        });
+        assert!(holder.load().keys_by_hash.contains_key("admin"));
+        // Rebuild may overwrite health, by policy; credential patches may not.
+        holder.patch_health(CredentialHealth {
+            credential_id: "c".into(),
+            model: "m".into(),
+            breaker_state: omni_store::BreakerState::Closed,
+            consecutive_failures: 9,
+            opened_at: None,
+            rate_limited_until: None,
+        });
+        holder.patch_credential("c", || Ok(None)).unwrap();
+        assert_eq!(
+            holder.load().routing.health[&omni_router::health_key("c", "m")].consecutive_failures,
+            9
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn cancelled_waiter_publication_remains_in_shutdown_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SqliteStore::open(dir.path().join("drain.db"), 0).unwrap();
+        let holder =
+            Arc::new(SnapshotHolder::build(&db, omni_crypto::field::derive_key("k"), 0.0).unwrap());
+        let job = holder.publication_job();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let task = tokio::task::spawn_blocking(move || {
+            let _job = job;
+            release_rx.recv().unwrap();
+        });
+        drop(task); // Same cancellation semantics as a dropped request waiter.
+        let drain = holder.drain_publications();
+        tokio::pin!(drain);
+        std::future::poll_fn(|cx| {
+            use std::future::Future;
+            assert!(drain.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release_tx.send(()).unwrap();
+        drain.await;
+        assert_eq!(holder.jobs.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn credential_publication_cannot_retry_behind_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SqliteStore::open(dir.path().join("bounded.db"), 0).unwrap();
+        let holder = SnapshotHolder::build(&db, omni_crypto::field::derive_key("k"), 0.0).unwrap();
+        let health = CredentialHealth {
+            credential_id: "c".into(),
+            model: "m".into(),
+            breaker_state: omni_store::BreakerState::Closed,
+            consecutive_failures: 7,
+            opened_at: None,
+            rate_limited_until: None,
+        };
+        let mut attempts = 0;
+        holder
+            .patch_credential_at_publish(
+                "c",
+                || Ok(None),
+                || {
+                    attempts += 1;
+                    assert_eq!(
+                        attempts, 1,
+                        "health forced a second publication attempt while W remained held"
+                    );
+                    // Inject the reviewer's conflict whenever publication is unprotected.
+                    // Under P this interleaving is impossible; health must queue instead.
+                    if holder.publication.try_lock().is_ok() {
+                        holder.patch_health(health.clone());
+                    }
+                },
+            )
+            .unwrap();
+        holder.patch_health(health);
+        holder.patch_credential("c", || Ok(None)).unwrap();
+        assert_eq!(
+            holder.load().routing.health[&omni_router::health_key("c", "m")].consecutive_failures,
+            7
+        );
+        holder.rebuild(&db).unwrap();
+        assert_eq!(holder.generation(), 1);
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]

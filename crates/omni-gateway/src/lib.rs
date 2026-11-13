@@ -593,8 +593,10 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         #[cfg(test)]
         app.deadline_workers.before_writer_close();
         drop(tokio::time::timeout_at(shutdown_until, app.deps.refresher.drain()).await);
-        drop(app);
         refresher.abort();
+        drop(refresher.await);
+        drop(tokio::time::timeout_at(shutdown_until, app.deps.holder.drain_publications()).await);
+        drop(app);
         preseeder.abort();
         overlay_sweeper.abort();
         asker.abort();
