@@ -112,15 +112,10 @@ pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
             v => crate::js::number_to_string(crate::js::coerce_cell(v)),
         };
         out.push(QuotaWindow {
-            text_spent: match (r.get_ref("used")?, r.get_ref("limit_value")?) {
-                (rusqlite::types::ValueRef::Text(a), rusqlite::types::ValueRef::Text(b)) => Some(
-                    String::from_utf8_lossy(a)
-                        .encode_utf16()
-                        .cmp(String::from_utf8_lossy(b).encode_utf16())
-                        .is_ge(),
-                ),
-                _ => None,
-            },
+            text_spent: Some(relational_spent(
+                r.get_ref("used")?,
+                r.get_ref("limit_value")?,
+            )),
             credential_id,
             window_type: WindowType::parse(&window_name),
             starts_at: crate::js::coerce_cell(r.get_ref("starts_at")?),
@@ -132,4 +127,28 @@ pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
         });
     }
     Ok(out)
+}
+
+/// JS ToPrimitive precedes relational comparison: Uint8Array becomes a
+/// comma-separated string. Only two string primitives compare lexically;
+/// every other pair uses ToNumber. The router exempts a NULL ceiling first.
+fn relational_spent(
+    used: rusqlite::types::ValueRef<'_>,
+    limit: rusqlite::types::ValueRef<'_>,
+) -> bool {
+    use rusqlite::types::ValueRef;
+    fn string_primitive(v: ValueRef<'_>) -> Option<String> {
+        match v {
+            ValueRef::Text(s) => Some(String::from_utf8_lossy(s).into_owned()),
+            ValueRef::Blob(b) => Some(b.iter().map(u8::to_string).collect::<Vec<_>>().join(",")),
+            _ => None,
+        }
+    }
+    if matches!(limit, ValueRef::Null) {
+        return false;
+    }
+    match (string_primitive(used), string_primitive(limit)) {
+        (Some(a), Some(b)) => a.encode_utf16().cmp(b.encode_utf16()).is_ge(),
+        _ => crate::js::coerce_cell(used) >= crate::js::coerce_cell(limit),
+    }
 }
