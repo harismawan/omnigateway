@@ -363,6 +363,10 @@ function normalize(x: Ex, m: Masker): string {
   const head = x.head
     .filter(([k, v]) => !(k === "connection" && v === "close"))
     .map(([k, v]) => {
+      if(k==="content-disposition") {
+        const match=/^attachment; filename="omnigateway-logs-(\d{4}-\d\d-\d\dT\d\d)-(\d\d)-(\d\d)-(\d{3})Z\.(csv|jsonl)"$/.exec(v);
+        if(match && Math.abs(Date.parse(`${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`)-Date.now())<120000)return `content-disposition: attachment; filename="omnigateway-logs-<now>.${match[5]}"`;
+      }
       if (k === "date") {
         const t = Date.parse(v);
         if (!Number.isNaN(t) && Math.abs(t / 1000 - now) < 120) return "date: <date>";
@@ -375,7 +379,13 @@ function normalize(x: Ex, m: Masker): string {
       return `${k}: ${v}`;
     })
     .sort();
-  return `${x.status}\n${head.join("\n")}\n\n${maskTimes(m.text(x.body.toString("latin1")))}`;
+  let body=x.body;
+  if(x.head.some(([k,v])=>k==="transfer-encoding"&&v==="chunked")) {
+    const parts:Buffer[]=[];let at=0;
+    for(;;){const end=body.indexOf("\r\n",at);if(end<0)throw new Error("invalid chunk header");const n=Number.parseInt(body.subarray(at,end).toString(),16);if(!Number.isFinite(n))throw new Error("invalid chunk size");at=end+2;if(n===0)break;parts.push(body.subarray(at,at+n));at+=n+2;}
+    body=Buffer.concat(parts);
+  }
+  return `${x.status}\n${head.join("\n")}\n\n${maskTimes(m.text(body.toString("latin1")))}`;
 }
 
 /**
@@ -1314,6 +1324,7 @@ const ODD_SQL = [
 type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?: string };
 let healthSeed: string | undefined;
 const configs: Config[] = [
+  {label:"logs-export",db:()=>db("logs-export",["INSERT INTO request_logs(id,at,requested_model,status,duration_ms,degradations) VALUES('export',100,'=a,\"b',200,1,'[\"x\"]')"]),steps:()=>["","since=0","since=0&until=200","since=0&until=200&format=jsonl","since=0&until=200&format=bad","since=0&until=200&cursor=bad","since=0&until=200&provider=INVALID"].flatMap((q,i)=>everyone("GET",`/api/logs/export?${q}`).map(s=>({...s,name:`export ${i} ${s.who}`,expectedStatus:s.who==="anon"?401:[0,1,4,6].includes(i)?400:200})))},
   {label:"logs-identity",db:()=>db("logs-identity",["INSERT INTO request_logs(id,at,requested_model,status,duration_ms) VALUES ('a',100,'x',200,1),('�',100,'x',200,1),('z',100,'x',200,1),('😀',100,'x',200,1)"]),steps:()=>[
     ...["\ud800","�","z"].flatMap(id=>everyone("GET",`/api/logs?cursor=${Buffer.from(JSON.stringify({v:1,at:100,id})).toString("base64url")}`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))),
     ...[`since=${"9".repeat(310)}`,`since=-${"9".repeat(310)}`,...['{"v":1,"at":0,"id":"x"} ','{"at":0,"v":1,"id":"x"}','{"v":3,"at":0,"id":"x"}'].map(s=>`cursor=${Buffer.from(s).toString("base64url")}!`)].flatMap((q,i)=>everyone("GET",`/api/logs?${q}`).map(s=>({...s,name:`mutation ${i} ${s.who}`,expectedStatus:s.who==="anon"?401:400}))),

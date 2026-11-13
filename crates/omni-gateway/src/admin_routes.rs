@@ -83,6 +83,7 @@ fn failure(e: Failure) -> ApiError {
 pub enum Admin {
     Usage,
     Logs,
+    ExportLogs,
     ListCredentials,
     CreateCredential,
     PatchCredential(Option<String>),
@@ -122,6 +123,7 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
     match path {
         "/api/usage" if get => return Some(Admin::Usage),
         "/api/logs" if get => return Some(Admin::Logs),
+        "/api/logs/export" if get => return Some(Admin::ExportLogs),
         "/api/credentials" if get => return Some(Admin::ListCredentials),
         "/api/credentials" if *method == M::POST => return Some(Admin::CreateCredential),
         "/api/credentials/health" if get => return Some(Admin::CredentialHealth),
@@ -184,6 +186,48 @@ pub async fn serve(
     let control = app.control.clone();
     let now = crate::clock::now_ms();
     match route {
+        Admin::ExportLogs => {
+            require_reader(req.headers(), &app.admin).await?;
+            let (query, jsonl) = omni_control::logs::export_query(req.uri().query().unwrap_or(""))
+                .map_err(failure)?;
+            let first_query = query.clone();
+            let (first, next) = control
+                .run(move |s| omni_control::logs::export_page(s, &first_query, jsonl))
+                .await?;
+            let stream = async_stream::try_stream! {
+                if !jsonl {yield hyper::body::Frame::data(bytes::Bytes::from_static(omni_control::logs::CSV_HEADER.as_bytes()));}
+                yield hyper::body::Frame::data(bytes::Bytes::from(first));
+                let mut next=next;
+                while let Some(cursor)=next {
+                    let q=format!("{query}&cursor={cursor}");
+                    let (chunk,cursor)=control.run(move |s|omni_control::logs::export_page(s,&q,jsonl)).await.map_err(|_|std::io::Error::other("log export read failed"))?;
+                    next=cursor;
+                    yield hyper::body::Frame::data(bytes::Bytes::from(chunk));
+                }
+            };
+            use http_body_util::BodyExt;
+            let body = http_body_util::StreamBody::new(stream).boxed_unsync();
+            let stamp = chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                .replace([':', '.'], "-");
+            let format = if jsonl { "jsonl" } else { "csv" };
+            Ok(Response::builder()
+                .header(
+                    "content-type",
+                    if jsonl {
+                        "application/x-ndjson"
+                    } else {
+                        "text/csv; charset=utf-8"
+                    },
+                )
+                .header(
+                    "content-disposition",
+                    format!("attachment; filename=\"omnigateway-logs-{stamp}.{format}\""),
+                )
+                .header("cache-control", "no-store")
+                .body(body)
+                .map_err(|_| ApiError::internal())?)
+        }
         Admin::Logs => {
             require_reader(req.headers(), &app.admin).await?;
             let query = req.uri().query().unwrap_or("").to_owned();
