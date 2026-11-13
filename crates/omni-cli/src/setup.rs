@@ -11,6 +11,19 @@ use std::{
 fn text(s: &str) -> V {
     V::String(s.encode_utf16().collect())
 }
+fn fs_error(e: &std::io::Error, operation: &str, path: &std::path::Path) -> String {
+    let (code, description) = match e.raw_os_error() {
+        Some(2) => ("ENOENT", "no such file or directory"),
+        Some(13) => ("EACCES", "permission denied"),
+        Some(17) => ("EEXIST", "file already exists"),
+        Some(20) => ("ENOTDIR", "not a directory"),
+        Some(21) => ("EISDIR", "illegal operation on a directory"),
+        Some(28) => ("ENOSPC", "no space left on device"),
+        Some(30) => ("EROFS", "read-only file system"),
+        _ => return e.to_string(),
+    };
+    format!("{code}: {description}, {operation} '{}'", path.display())
+}
 fn object() -> V {
     V::Object(vec![])
 }
@@ -202,7 +215,7 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     } else {
         let mut selected = object();
         for id in &mapping {
-            if id.is_empty() || get(&selected, id).is_some() {
+            if id.is_empty() || id == "__proto__" || get(&selected, id).is_some() {
                 continue;
             }
             let index = ids.iter().position(|s| s == id).expect("validated id");
@@ -228,7 +241,7 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     }
     let contents = format!("{}\n", stringify_pretty(&config).expect("object"));
     if !flags.contains_key("dry-run") {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| fs_error(&e, "mkdir", &dir))?;
         let temporary = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
         let result =
             std::fs::write(&temporary, &contents).and_then(|()| std::fs::rename(&temporary, &path));
