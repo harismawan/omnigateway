@@ -1,5 +1,23 @@
 # A7 checkpoint — SQLite usage implemented; increment incomplete
 
+## Latest continuation: typed reader and log parity fixes
+
+**NEXT STEP:** resolve lone-surrogate cursor comparison against a real SQLite TS oracle before export: the typed cursor now retains UTF-16 but store binding still uses `String::from_utf16_lossy`, so the known identity concern is not closed. Exercise canonical lone-surrogate cursors against actual replacement-character IDs, including equal timestamps and ordering. Add the remaining unsafe-number Infinity and broader cursor mutation vectors. Then read frozen export implementation/handler, establish byte-level CSV/JSONL RED, and iterate this typed reader with first chunk awaited before response construction; verify cancellation, slow-reader writer progress, and three-run RSS ranges. Nodes remains subsequent scope.
+
+| Requirement | Commit | Independent evidence under `/tmp/opencode/a7-parity/` |
+|---|---|---|
+| Typed store filter interface; all values including limit bound | `73c918de` | Existing logs corpus `typed.log` passes; structural refactor, no behavioral RED claimed |
+| Exact provider pattern, negative unsafe integer, safeToken unknown key, permissive cursor decode/version order | `ca1f39f0` | `red.log`: 39 equal / 20 failures → `green.log`: 53 equal / 0 failures |
+| BLOB degradations JS coercion | `ca1f39f0` | `cells-red.log`: TS 500 versus Rust 200 → `cells-green.log`: 17 equal / 0 failures; invalid two-byte and valid single-byte blobs |
+| Full cursor traversal, newer insertion between pages | `ca1f39f0` | `walk.log`: 157 equal / 0 failures; 503 original IDs exactly once across 17-row pages; no independent RED |
+| Empty table, text numeric cell, BLOB duration, NULL resolved model, valid RTK arrays | `ca1f39f0` | final driver; cells fixture; no independent RED except BLOB degradations above |
+
+Store Query fields are explicit time bounds, failed/state, provider, requested/resolved/either model, error code, key/account IDs, UTF-16 cursor and limit. SQL text no longer crosses its API. Frozen logFilterSchema has no RTK filter input, so none was invented; RTK arrays are row output and whitelist-filtered. Multi-byte Uint8Array stringifies to comma-separated decimal bytes before JSON.parse, which correctly fails for the tested blob; a single byte parses as a number.
+
+Final gates on implementation commit `ca1f39f0`, both binaries freshly built outside checkout; manifest commit/SHA256 written before driver runs: `/tmp/opencode/a7-parity/manifest.json`. Workspace **1046 passed / 0 failed / 7 ignored** (`workspace.log`); all-target workspace clippy clean (`clippy.log`); fmt clean (`fmt.log`). Admin-routes **2080 equal / 2 expected / 0 failures**; admin-auth **212 equal / 4 expected / 0 failures**; surface **606 equal / 61 expected / 0 failures**; run.ts **all rows equal** (matching log names). Incremental/debug disabled.
+
+Status: **partial checkpoint, not complete for review**. Known unresolved issue: lone-surrogate cursor binding. Additional coverage caveats: overflow-to-Infinity schema wording, exhaustive malformed cursors, and schema-excluded NULL measures remain unchecked. Export not started; no three-run export RSS/cancellation/writer-progress claims. PostgreSQL report readers/backend routing and live HTTP conformance remain D4. Earlier historical next-step lists below are superseded by this section.
+
 ## Latest checkpoint — initial logs, 598f5aaa
 
 **NEXT STEP:** finish logs traversal and adversarial conformance before export. Add a driver step that follows every returned cursor over all 503 seeded rows, inserts a newer row between pages, and asserts no duplication/omission of original rows. Add empty-table, unusual-cell, valid RTK filter, malformed cursor variant and validation boundary cases. Then export's precise next step is to read frozen `exportLogs`/CSV serialization and admin handler, add independent byte-level HTTP RED for CSV/JSONL, and iterate the bounded store page reader with the first chunk awaited before building the response. Do not collect an export; verify cancellation and writer progress with a slow reader.
