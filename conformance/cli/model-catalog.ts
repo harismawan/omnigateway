@@ -90,6 +90,7 @@ type Options = {
   readOnly?: boolean;
 };
 let count = 0;
+let successfulCommands = 0;
 let red = 0;
 async function compare(args: string[], options: Options = {}) {
   const { pty = false, rootEnv = false, db = true, extraEnv = {}, prefix = [] } = options;
@@ -120,6 +121,7 @@ async function compare(args: string[], options: Options = {}) {
     const out = own(await new Response(p.stdout).arrayBuffer());
     const err = own(await new Response(p.stderr).arrayBuffer());
     const code = await p.exited;
+    if (code === 0 && !args.includes("--help")) successfulCommands++;
     const rows = [snapshot(join(dir, "db")), snapshot(join(dir, "omnigateway.db"))];
     const status = pty ? JSON.parse(out.toString()).code : code;
     assert.deepEqual(readdirSync(dir).sort(), files, "no files created");
@@ -642,4 +644,5 @@ if (red > 0) {
   console.log(`RED ${red} of ${count} catalog comparisons`);
   process.exit(1);
 }
+assert(successfulCommands > 0, "must exercise successful catalog commands");
 console.log(`PASS ${count} catalog comparisons`);

@@ -34,10 +34,12 @@ async function invoke(cmd: string[], args: string[], cwd = root, extra = {}) {
   return { out, err, code };
 }
 let count = 0;
+let successfulCommands = 0;
 let failures = 0;
 async function check(args: string[], cwd = root, extra = {}) {
   const expected = await invoke(ts, args, cwd, extra);
   const actual = await invoke(rust, args, cwd, extra);
+  if (actual.code === 0 && expected.code === 0 && !args.includes("--help")) successfulCommands++;
   try {
     assert.deepEqual(actual, expected, JSON.stringify(args));
   } catch (e) {
@@ -286,6 +288,7 @@ try {
     );
   }
   assert.equal(failures, 0, `${failures}/${count} differential failures`);
+  assert(successfulCommands > 0, "must exercise successful key listings");
   console.log(`PASS ${count} real TS/Rust golden comparisons`);
 } finally {
   rmSync(root, { recursive: true, force: true });

@@ -53,6 +53,7 @@ function snapshot(db: Database) {
   ]);
 }
 let count = 0;
+let successfulCommands = 0;
 async function compare(args: string[], pty: string | false = false, rootEnv = false) {
   const results = [];
   for (let i = 0; i < 2; i++) {
@@ -76,6 +77,13 @@ async function compare(args: string[], pty: string | false = false, rootEnv = fa
     const out = Buffer.from(await new Response(p.stdout).arrayBuffer());
     const err = Buffer.from(await new Response(p.stderr).arrayBuffer());
     const code = await p.exited;
+    if ((pty !== false ? JSON.parse(out.toString()).code : code) === 0 && !args.includes("--help"))
+      successfulCommands++;
+    assert(
+      !err.includes("OMNI_PORT must") &&
+        !out.includes(Buffer.from("OMNI_PORT must").toString("hex")),
+      "unrelated configuration failure is not a model oracle",
+    );
     const rows = snapshot(db);
     const expected = structuredClone(before);
     const removed = pty === false ? code === 0 : JSON.parse(out.toString()).code === 0;
@@ -139,4 +147,5 @@ seed("[]");
 await compare(["rm", "a😀", "-y", "ignored"]);
 seed("[]");
 await compare(["rm", "a😀", "-y"], false, true);
+assert(successfulCommands > 0, "must exercise successful model removals");
 console.log(`PASS ${count} removal comparisons`);

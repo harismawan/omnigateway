@@ -37,6 +37,7 @@ const FULL = `{"models":{${[
 // Only lone-surrogate overrides: an edit that names none of them keeps them.
 const ONLY = '{"models":{"\\udc00":{"requests":{"1m":3}},"\\ud800":{"concurrency":1}}}';
 let count = 0;
+let successfulCommands = 0;
 let failures = 0;
 try {
   const roots = [join(root, "ts"), join(root, "rs")];
@@ -96,6 +97,7 @@ try {
       new Response(p.stderr).text(),
       p.exited,
     ]);
+    if (code === 0) successfulCommands++;
     const db = new Database(join(dir, "db"), { readonly: true });
     const rows = db.query("SELECT * FROM api_keys ORDER BY id").all();
     db.close();
@@ -274,6 +276,7 @@ try {
     }
   }
   assert.equal(failures, 0, `${failures}/${count} lone-surrogate CLI comparisons differ`);
+  assert(successfulCommands > 0, "must exercise successful lossless commands");
   console.log(`PASS ${count} lone-surrogate CLI comparisons (bytes, status, whole api_keys table)`);
 } finally {
   rmSync(root, { recursive: true, force: true });
