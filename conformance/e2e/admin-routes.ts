@@ -26,8 +26,14 @@
  * `{{id:n}}` in a target or body is the n-th minted key's id *for that
  * binary*; `{{seed}}` the seeded key's id.
  *
- * Beyond equality, asserted on both binaries:
- * - a raw key appears in exactly one response, its creation's;
+ * Beyond equality, asserted on each binary by itself:
+ * - a raw key occurs exactly once, textually, in everything the driver
+ *   reads back (every response's head and body, and the process's stdout and
+ *   stderr): in the body of its own creation's answer. Nothing else the
+ *   gateway writes (the database aside, which is dumped and compared) is
+ *   inspected;
+ * - every response's `content-length` is the length of the body it sent
+ *   (a HEAD answer and a 204/304 send none, whatever length they declare);
  * - a key minted over the API authenticates on `/v1/models` within 1 s, and
  *   one revoked over the API is refused within 1 s (the spec's snapshot
  *   invalidation bound);
@@ -212,11 +218,74 @@ const allRawKeys = new Map<string, string>(); // raw key -> binary label
 const nearNow = (n: unknown) =>
   typeof n === "number" && Number.isInteger(n) && Math.abs(n - Date.now()) < 120_000;
 
+/** Occurrences of `needle` in `hay`, overlapping ones included. */
+function occurrences(hay: Buffer, needle: string): number {
+  let n = 0;
+  for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + 1)) n++;
+  return n;
+}
+
+/**
+ * What is wrong with one response's framing, judged by itself (so two
+ * binaries wrong alike still fail), or `null`.
+ *
+ * A HEAD answer and a 1xx/204/304 carry no body: none may arrive, and a
+ * declared length (the representation's, for HEAD) need only be a number.
+ * Any other answer that declares a length declares it once, in digits, and
+ * sends exactly that many bytes. A chunked answer declares none. An answer
+ * with neither is delimited by the close and has nothing to check.
+ */
+function lengthProblem(method: string, x: Ex): string | null {
+  const lengths = x.head.filter(([k]) => k === "content-length").map(([, v]) => v);
+  const chunked = x.head.some(([k, v]) => k === "transfer-encoding" && /chunked/i.test(v));
+  for (const v of lengths) if (!/^\d+$/.test(v)) return `content-length "${v}" is not a number`;
+  if (lengths.length > 1) return `${lengths.length} content-length headers`;
+  if (chunked) return lengths.length > 0 ? "content-length beside chunked encoding" : null;
+  if (method === "HEAD" || x.status === 204 || x.status === 304 || x.status < 200)
+    return x.body.length === 0
+      ? null
+      : `${x.body.length} body bytes on a ${method} ${x.status} answer`;
+  const [declared] = lengths;
+  return declared === undefined || Number(declared) === x.body.length
+    ? null
+    : `content-length ${declared}, body ${x.body.length}`;
+}
+{
+  // The check checks: equal wrong lengths are wrong, no-body answers are not.
+  const ex = (status: number, head: [string, string][], body = ""): Ex => ({
+    status,
+    head,
+    body: Buffer.from(body),
+  });
+  const cl = (v: string): [string, string] => ["content-length", v];
+  const cases: [string, Ex, boolean][] = [
+    ["GET", ex(200, [cl("1")], "x"), true],
+    ["GET", ex(200, [cl("99")], "x"), false],
+    ["GET", ex(200, [cl("1"), cl("1")], "x"), false],
+    ["GET", ex(200, [cl("1x")], "x"), false],
+    ["GET", ex(200, [], "x"), true],
+    ["HEAD", ex(200, [cl("99")]), true],
+    ["HEAD", ex(200, [cl("1")], "x"), false],
+    ["DELETE", ex(204, []), true],
+    ["DELETE", ex(204, [], "x"), false],
+    ["GET", ex(304, [cl("12")]), true],
+    ["GET", ex(200, [["transfer-encoding", "chunked"]], "1\r\nx\r\n0\r\n\r\n"), true],
+    ["GET", ex(200, [["transfer-encoding", "chunked"], cl("1")], "x"), false],
+  ];
+  for (const [method, x, ok] of cases)
+    if ((lengthProblem(method, x) === null) !== ok)
+      throw new Error(`lengthProblem self-check: ${method} ${JSON.stringify(x.head)}`);
+  if (occurrences(Buffer.from("aXaXa"), "aXa") !== 2) throw new Error("occurrences self-check");
+}
+
 /** Per-binary state: the ids, keys, prefixes and hashes it minted. */
 class Masker {
   ids: string[] = [];
   keys: string[] = [];
-  /** Every raw key this binary returned, with the step that returned it. */
+  /**
+   * Every textual occurrence of a raw key in anything this binary sent:
+   * `where\u0000raw`, once per occurrence.
+   */
   sightings: string[] = [];
   /** The step that minted each key, by raw key. */
   mintedIn = new Map<string, string>();
@@ -266,13 +335,11 @@ function normalize(x: Ex, m: Masker): string {
         const t = Date.parse(v);
         if (!Number.isNaN(t) && Math.abs(t / 1000 - now) < 120) return "date: <date>";
       }
-      // Validated, then masked: the body's own length (masked ids and
-      // timestamps change it), never merely present.
-      if (k === "content-length") {
-        return Number(v) === x.body.length
-          ? "content-length: <body length>"
-          : `content-length: ${v} (body ${x.body.length})`;
-      }
+      // Masked where it is this body's length (masked ids and timestamps
+      // change it); otherwise compared raw, as a HEAD answer's is. Whether
+      // it is *right* is `lengthProblem`'s, per binary.
+      if (k === "content-length" && /^\d+$/.test(v) && Number(v) === x.body.length)
+        return "content-length: <body length>";
       return `${k}: ${v}`;
     })
     .sort();
@@ -280,9 +347,10 @@ function normalize(x: Ex, m: Masker): string {
 }
 
 /**
- * A `/v1` answer: [`normalize`], and the instants a refusal reports (a
- * reset, a `retry-after`) read against the clock rather than compared, since
- * the two binaries answer at different instants.
+ * A `/v1` answer: [`normalize`], with the instants a refusal reports (a
+ * reset, a `retry-after`) masked, since the two binaries answer at different
+ * instants. Masked only: nothing here reads them against the clock, so this
+ * driver shows the headers' presence and shape, not that a reset is right.
  */
 function normalizeV1(x: Ex, m: Masker): string {
   return normalize(x, m)
@@ -374,11 +442,19 @@ type Step =
       method?: string;
       target: string;
       body?: string;
+      /**
+       * A documented divergence in this answer's headers, named: only the
+       * status, the body and the database after it are compared, and the
+       * report says so (`expected-diff`). Never a way to pass a failure.
+       */
+      headersDiffer?: string;
     }
   /** Log in again (after a session-ending change). */
   | { kind: "relogin"; name: string; who: "admin" | "viewer"; password: string; mode?: string }
   /** A hand edit while the gateway runs. */
-  | { kind: "sql"; name: string; sql: string[] };
+  | { kind: "sql"; name: string; sql: string[] }
+  /** Let the gateway's own writes land (a completed row, its debit). */
+  | { kind: "wait"; name: string; ms: number };
 
 const J: [string, string] = ["content-type", "application/json"];
 const as = (who: Who, method: string, target: string, body?: string, name?: string): HttpStep => ({
@@ -928,6 +1004,10 @@ const IDENTITY_SQL = [
         '{"models":{"\\ud800":{"concurrency":1},"\\ufffd":{"requests":{"1m":1}},"\\udc00":{"requests":{"1m":5}}}}',
       ],
       ["id-k4", null, '{"requests":{"1m":50}}'],
+      // Review A5-R2: one U+FFFD request per 5 h.
+      ["id-k5", null, '{"models":{"\\ufffd":{"requests":{"5h":1}}}}'],
+      // ...and the key-wide subject, which that failed request does debit.
+      ["id-k6", null, '{"requests":{"5h":1}}'],
     ] as const
   ).map(
     ([id, allow, limits]) =>
@@ -1001,6 +1081,56 @@ function identitySteps(): Step[] {
     target: "/v1/messages/count_tokens",
     body: chat("plain"),
   });
+  // Review A5-R2, live counters: a count seeds U+FFFD's 5 h window (a count
+  // files no row); a chat for `\ud800` then fails; once its row has landed,
+  // U+FFFD's budget is as it was. TS debits the key, then throws building
+  // the lone model's subject, so no model is debited; the lossy name the
+  // row stores must not stand in for it.
+  const on =
+    (k: string) =>
+    (name: string, target: string, m: string, headersDiffer?: string): Step => ({
+      kind: "v1",
+      name: `${k} ${name}`,
+      key: rawOf(k),
+      target,
+      body: chat(m),
+      ...(headersDiffer === undefined ? {} : { headersDiffer }),
+    });
+  const k5 = on("id-k5");
+  const k6 = on("id-k6");
+  s.push(
+    k5("count \\ufffd seeds the window", "/v1/messages/count_tokens", "\\ufffd"),
+    { kind: "wait", name: "seed lands", ms: 700 },
+    k5("chat \\ud800 fails", "/v1/chat/completions", "\\ud800"),
+    { kind: "wait", name: "the failed row and its debit land", ms: 800 },
+    k5("count \\ufffd is not debited #1", "/v1/messages/count_tokens", "\\ufffd"),
+    k5("count \\ufffd is not debited #2", "/v1/messages/count_tokens", "\\ufffd"),
+    // The key-wide subject is debited by that same kind of request: its one
+    // request per 5 h is spent by the failed chat.
+    k6("count plain seeds the key's window", "/v1/messages/count_tokens", "plain"),
+    { kind: "wait", name: "seed lands", ms: 700 },
+    // TS admits the request against the key-wide subject and fails later, so
+    // its 500 carries that admission's rate-limit headers; Rust refuses
+    // before admitting anything and has none to render.
+    k6(
+      "chat \\ud800 fails",
+      "/v1/chat/completions",
+      "\\ud800",
+      "the early refusal precedes admission: no x-ratelimit-* headers",
+    ),
+    { kind: "wait", name: "the failed row and its debit land", ms: 800 },
+    k6("count plain: the key was debited", "/v1/messages/count_tokens", "plain"),
+  );
+  // Review A5-R3: a literal U+FFFD model beside a 20,000-key object answers
+  // as any other body does (the exact-model recovery reads it in one pass).
+  const wide = Array.from({ length: 20_000 }, (_, i) => `"k${i}":${i}`).join(",");
+  s.push({
+    kind: "v1",
+    name: "id-k2 count U+FFFD beside a 20,000-key object",
+    key: rawOf("id-k2"),
+    target: "/v1/messages/count_tokens",
+    body: `{"model":"\ufffd","metadata":{${wide}},"messages":[{"role":"user","content":"hi"}]}`,
+  });
   return s;
 }
 
@@ -1013,12 +1143,14 @@ const BAD_KEY_SQL = [
   `INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,created_at) VALUES ('bk-allow','b','${rawOf("bk-allow").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-allow")).digest("hex")}','{bad','{}',1600000000000)`,
   `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,expires_at) VALUES ('bk-frac','f','${rawOf("bk-frac").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-frac")).digest("hex")}','{}',1700000000000.5,4102444800000.5)`,
   `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at,revoked_at) VALUES ('bk-rev','r','${rawOf("bk-rev").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-rev")).digest("hex")}','{}',1600000000001,1.5)`,
+  // An empty column: `JSON.parse("")`'s message, not an empty body's.
+  `INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,created_at) VALUES ('bk-empty','e','${rawOf("bk-empty").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-empty")).digest("hex")}','','{}',1600000000003)`,
   `INSERT INTO api_keys (id,label,prefix,hash,limits,created_at) VALUES ('bk-lim','l','${rawOf("bk-lim").slice(0, 12)}','${new Bun.CryptoHasher("sha256").update(rawOf("bk-lim")).digest("hex")}','{"requests":{"9m":1}}',1600000000002)`,
 ];
 
 function badKeySteps(): Step[] {
   return [
-    ...["bk-allow", "bk-frac", "bk-rev", "bk-lim"].map(
+    ...["bk-allow", "bk-empty", "bk-frac", "bk-rev", "bk-lim"].map(
       (k): Step => ({
         kind: "v1",
         name: `${k} GET /v1/models`,
@@ -1165,13 +1297,18 @@ function cookieOf(x: Ex): string | null {
   return m?.[1] ?? null;
 }
 
-async function login(password: string, mode?: string): Promise<string | null> {
+async function login(
+  password: string,
+  mode: string | undefined,
+  seen: (name: string, method: string, x: Ex) => void,
+): Promise<string | null> {
   const x = await exchange({
     method: "POST",
     target: "/api/login",
     headers: [J],
     body: JSON.stringify(mode === undefined ? { password } : { password, mode }),
   });
+  seen(`login ${mode ?? "admin"}`, "POST", x);
   return x.status === 200 ? cookieOf(x) : null;
 }
 
@@ -1200,6 +1337,20 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
   const results = new Map<string, Result>();
   const notes: string[] = [];
   const deadlineFailures: string[] = [];
+  const lengthFailures: string[] = [];
+  const secretProblems: string[] = [];
+  /** Every answer this binary gave: its framing, and any raw key in it. */
+  const seen = (name: string, method: string, x: Ex) => {
+    if (x.status === 0) return;
+    const problem = lengthProblem(method, x);
+    if (problem !== null) lengthFailures.push(`${name}: ${problem}`);
+    const head = Buffer.from(x.head.map(([k, v]) => `${k}: ${v}`).join("\n"), "latin1");
+    for (const raw of allRawKeys.keys()) {
+      for (let n = occurrences(head, raw); n > 0; n--)
+        m.sightings.push(`${name} (head)\u0000${raw}`);
+      for (let n = occurrences(x.body, raw); n > 0; n--) m.sightings.push(`${name}\u0000${raw}`);
+    }
+  };
   try {
     // A binary that exits instead of serving (a boot refusal) answers every
     // step with that, so the config fails step by step rather than the run.
@@ -1210,13 +1361,21 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     if (!booted) {
       const reason = readFileSync(logFile, "utf8").trim().split("\n").at(-1) ?? "";
       for (const step of cfg.steps())
-        if (step.kind !== "sql")
+        if (step.kind !== "sql" && step.kind !== "wait")
           results.set(step.name, { text: `${TRANSPORT_ERROR} did not boot: ${reason}`, db: "" });
-      return { results, lines: [], secretProblems: [], minted: 0, notes, deadlineFailures };
+      return {
+        results,
+        lines: [],
+        secretProblems,
+        minted: 0,
+        notes,
+        deadlineFailures,
+        lengthFailures,
+      };
     }
     const cookies: Record<Who, string | null> = {
-      admin: await login(PASSWORD),
-      viewer: await login(VIEWER, "viewer"),
+      admin: await login(PASSWORD, undefined, seen),
+      viewer: await login(VIEWER, "viewer", seen),
       anon: null,
     };
     if (cookies.admin === null || cookies.viewer === null) throw new Error("seed login failed");
@@ -1237,17 +1396,24 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         ...(step.body === undefined ? {} : { body: fill(step.body) }),
       });
     };
-    const record = (name: string, x: Ex) => {
+    const record = (name: string, method: string, x: Ex) => {
       if (
         x.status === 200 &&
         (x.head.find(([k]) => k === "content-type")?.[1] ?? "").startsWith("application/json")
       ) {
+        // A body that is not JSON mints nothing; a mint the masker refuses
+        // (an id or a raw key issued twice) is this binary's failure.
+        let body: unknown;
         try {
-          m.mint(JSON.parse(x.body.toString("utf8")), name, label);
+          body = JSON.parse(x.body.toString("utf8"));
         } catch {}
+        try {
+          m.mint(body, name, label);
+        } catch (err) {
+          secretProblems.push(`${name}: ${(err as Error).message}`);
+        }
       }
-      for (const raw of allRawKeys.keys())
-        if (x.body.includes(raw)) m.sightings.push(`${name}\u0000${raw}`);
+      seen(name, method, x);
     };
     for (const step of cfg.steps()) {
       if (step.kind === "sql") {
@@ -1256,8 +1422,12 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         d.close();
         continue;
       }
+      if (step.kind === "wait") {
+        await sleep(step.ms);
+        continue;
+      }
       if (step.kind === "relogin") {
-        const c = await login(step.password, step.mode);
+        const c = await login(step.password, step.mode, seen);
         if (c !== null) cookies[step.who] = c;
         results.set(step.name, { text: c === null ? "refused" : "logged in", db: dump(file, m) });
         continue;
@@ -1280,6 +1450,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
             headers: [["authorization", `Bearer ${raw}`]],
           });
           const done = Date.now();
+          seen(step.name, "GET", x);
           let hit: boolean;
           if (step.kind === "listed") {
             const ids =
@@ -1325,13 +1496,23 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           results.set(step.name, { text: `${TRANSPORT_ERROR} ${String(err)}`, db: "" });
           continue;
         }
-        record(step.name, x);
-        results.set(step.name, { text: normalizeV1(x, m), db: dump(file, m) });
+        record(step.name, step.method ?? "POST", x);
+        const text = normalizeV1(x, m);
+        if (step.headersDiffer !== undefined)
+          notes.push(`expected-diff ${step.name}: headers not compared (${step.headersDiffer})`);
+        results.set(step.name, {
+          text:
+            step.headersDiffer === undefined
+              ? text
+              : `${x.status}\n<headers: ${step.headersDiffer}>\n\n${text.slice(text.indexOf("\n\n") + 2)}`,
+          db: dump(file, m),
+        });
         continue;
       }
       if (step.kind === "concurrent") {
         const answers = await Promise.all(step.steps.map((st) => send(st)));
-        for (const [i, x] of answers.entries()) record(`${step.name} #${i}`, x);
+        for (const [i, x] of answers.entries())
+          record(`${step.name} #${i}`, step.steps[i]?.method ?? "GET", x);
         const statuses = answers.map((x) => x.status).sort();
         results.set(step.name, {
           text: `statuses ${statuses.join(",")}`,
@@ -1350,7 +1531,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         results.set(step.name, { text: `${TRANSPORT_ERROR} no response`, db: "" });
         continue;
       }
-      record(step.name, x);
+      record(step.name, step.method ?? "GET", x);
       results.set(step.name, { text: normalize(x, m), db: dump(file, m) });
       // Keys list newest first, and two mints in one millisecond tie: give
       // each sequential mint its own instant so both builds order alike.
@@ -1368,9 +1549,17 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     .map((l) => l.replace(/^\S+ /, ""))
     .filter((l) => /^\w+ +(admin password|viewer|provider catalog|api key limits)/.test(l))
     .map((l) => m.text(l));
-  // Each raw key this binary minted is seen exactly once, in the answer of
-  // the step that minted it; no other raw key is ever seen.
-  const secretProblems: string[] = [];
+  // What the process wrote to stdout and stderr counts as sent too.
+  for (const [stream, f] of [
+    ["stdout", logFile],
+    ["stderr", `${logFile}.err`],
+  ] as const) {
+    const text = readFileSync(f);
+    for (const raw of allRawKeys.keys())
+      for (let n = occurrences(text, raw); n > 0; n--) m.sightings.push(`${stream}\u0000${raw}`);
+  }
+  // Each raw key this binary minted occurs exactly once in all of that: in
+  // the body of the answer that minted it. No other raw key occurs at all.
   for (const raw of m.keys) {
     const seen = m.sightings
       .filter((s) => s.endsWith(`\u0000${raw}`))
@@ -1385,7 +1574,15 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     if (!m.keys.includes(raw))
       secretProblems.push(`foreign key ${raw.slice(0, 12)} seen in ${s.split("\u0000")[0]}`);
   }
-  return { results, lines, secretProblems, minted: m.keys.length, notes, deadlineFailures };
+  return {
+    results,
+    lines,
+    secretProblems,
+    minted: m.keys.length,
+    notes,
+    deadlineFailures,
+    lengthFailures,
+  };
 }
 
 let failures = 0;
@@ -1431,7 +1628,8 @@ for (const cfg of configs) {
       `LOGS ${cfg.label}:\n--- ts\n${ts.lines.join("\n")}\n--- rust\n${rs.lines.join("\n")}\n`,
     );
   }
-  // A raw key leaves the gateway once: in its own creation's answer.
+  // A raw key occurs once in what the driver reads back: in its own
+  // creation's answer.
   for (const [side, run] of [
     ["ts", ts],
     ["rust", rs],
@@ -1445,6 +1643,11 @@ for (const cfg of configs) {
       failures++;
       report.push(`DEADLINE ${cfg.label} ${side}: ${d}`);
     }
+    // Framing is each binary's own: equal wrong lengths are still wrong.
+    if (run.lengthFailures.length > 0) {
+      failures++;
+      report.push(`LENGTH ${cfg.label} ${side}:\n${run.lengthFailures.join("\n")}`);
+    } else equal++;
   }
   report.push(
     ...ts.notes.map((n) => `note ${cfg.label} ts: ${n}`),

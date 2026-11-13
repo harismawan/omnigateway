@@ -441,3 +441,119 @@ async fn summaries_carry_fractional_dates_as_numbers() {
     );
     stop(g).await;
 }
+
+/// Review A5-R2 (the reviewer's repro, answers from the frozen binary): a
+/// chat for `"\ud800"`, refused early, must not debit the genuine U+FFFD
+/// override's live long window. TS debits the key-wide subject, then
+/// `encodeURIComponent` throws before any model subject. After a restart
+/// the U+FFFD seed reads the stored replacement-character row, in both
+/// builds alike (TS: 200 live, 429 after restart).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_early_refused_lone_model_never_debits_the_replacement_character_model() {
+    let f = fixture(&["c0"]);
+    key(
+        &f.path,
+        "kf",
+        "sk-omni-kf",
+        None,
+        r#"{"models":{"\ufffd":{"requests":{"5h":1}}}}"#,
+    );
+    let g = boot_on(f).await;
+    let auth = [("authorization", "Bearer sk-omni-kf")];
+    let count = |g: &Gw| {
+        let base = g.base.clone();
+        async move {
+            call(
+                &base,
+                "POST",
+                "/v1/messages/count_tokens",
+                &auth,
+                &chat(r"\ufffd"),
+            )
+            .await
+            .0
+        }
+    };
+    // Seeds U+FFFD's 5h window (a count writes no row).
+    assert_eq!(count(&g).await, 200);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (s, _) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &auth,
+        &chat(r"\ud800"),
+    )
+    .await;
+    assert_eq!(s, 500);
+    // The refused row commits and is delivered to the limiter (writer batch).
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(count(&g).await, 200, "live: the U+FFFD budget is untouched");
+    assert_eq!(count(&g).await, 200);
+    let f = {
+        let mut g = g;
+        let r = g.running.take().expect("running");
+        r.shutdown();
+        r.wait().await.expect("stop");
+        g.f
+    };
+    let g = boot_on(f).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        count(&g).await,
+        429,
+        "after restart the seed reads the stored U+FFFD row, as TS's does"
+    );
+    stop(g).await;
+}
+
+/// The other half of review A5-R2: the same refused request *is* a completed
+/// request against the key-wide subject, as in TS, whose `debit` adds to the
+/// key's buckets before `modelSubjectId` throws (frozen binary: 200, 500,
+/// then 429).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_early_refused_lone_model_still_debits_the_key_wide_subject() {
+    let f = fixture(&["c0"]);
+    key(
+        &f.path,
+        "kw",
+        "sk-omni-kw",
+        None,
+        r#"{"requests":{"5h":1}}"#,
+    );
+    let g = boot_on(f).await;
+    let auth = [("authorization", "Bearer sk-omni-kw")];
+    let count = |g: &Gw| {
+        let base = g.base.clone();
+        async move {
+            call(
+                &base,
+                "POST",
+                "/v1/messages/count_tokens",
+                &auth,
+                &chat("plain"),
+            )
+            .await
+            .0
+        }
+    };
+    // Seeds the key's 5h window (a count writes no row).
+    assert_eq!(count(&g).await, 200);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (s, _) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &auth,
+        &chat(r"\ud800"),
+    )
+    .await;
+    assert_eq!(s, 500);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        count(&g).await,
+        429,
+        "the key's one request per 5 h is spent"
+    );
+    stop(g).await;
+}

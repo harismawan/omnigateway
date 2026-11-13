@@ -1,5 +1,5 @@
 //! Operator key summaries.
-use omni_store::{SqliteStore, StoreError};
+use omni_store::SqliteStore;
 use serde_json::{Value, json};
 
 pub struct CreateKey {
@@ -73,19 +73,83 @@ pub fn create_key(store: &SqliteStore, input: CreateKey, now: i64) -> Result<Val
     Ok(json!({"id":id,"label":input.label,"prefix":prefix,"key":raw}))
 }
 
-pub fn set_limits(store: &SqliteStore, id: &str, limits: &Value) -> Result<(), String> {
+/// `setKeyLimits` for the CLI: `limits` is the edited matrix as flags can
+/// spell it, `existing` the key's complete stored matrix (`null` when it was
+/// unreadable and is being replaced). Overrides whose names hold a lone
+/// surrogate (only the `/api` surface can store one; no flag can name one)
+/// are carried along, in TS's order: `toLoose(existing.limits)` walks the
+/// existing names in JS own-key order, the edit drops or appends names, and
+/// `toWire` writes them in that order. Returns the matrix written, complete.
+pub fn set_limits(
+    store: &SqliteStore,
+    id: &str,
+    limits: &Value,
+    existing: &omni_ir::jsjson::JsValue,
+) -> Result<omni_ir::jsjson::JsValue, String> {
+    use omni_ir::jsjson::JsValue;
     validate_limits(limits, "limits", true)?;
     require_key(store, id)?;
-    let config = omni_store::limits::parse_limits(&limits.to_string())
+    let mut config = omni_store::limits::parse_limits(&limits.to_string())
         .ok_or("BAD_REQUEST: invalid limits")?;
-    let raw = omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&config.to_json()))
-        .expect("limits JSON");
+    let existing_models = match crate::settings_value::get(existing, "models") {
+        Some(JsValue::Object(m)) => m.as_slice(),
+        _ => &[],
+    };
+    let lone: Vec<&(Vec<u16>, JsValue)> = existing_models
+        .iter()
+        .filter(|(k, _)| String::from_utf16(k).is_err())
+        .collect();
+    if !lone.is_empty() {
+        let edited = config.models.take().unwrap_or_default();
+        let mut order: Vec<Vec<u16>> = Vec::new();
+        for i in crate::api::js_order(existing_models) {
+            let name = &existing_models[i].0;
+            match String::from_utf16(name) {
+                Err(_) => order.push(name.clone()),
+                Ok(n) if edited.contains_key(&n) => order.push(name.clone()),
+                Ok(_) => {}
+            }
+        }
+        for k in edited.keys() {
+            let units: Vec<u16> = k.encode_utf16().collect();
+            if !order.contains(&units) {
+                order.push(units);
+            }
+        }
+        let mut models = omni_store::limits::IndexMap::new();
+        let mut lone_models = Vec::new();
+        for (position, name) in order.into_iter().enumerate() {
+            match String::from_utf16(&name) {
+                Ok(n) => {
+                    models.insert(n.clone(), edited[&n].clone());
+                }
+                Err(_) => {
+                    let (_, scope) = lone.iter().find(|(k, _)| *k == name).expect("lone");
+                    let scope = omni_store::limits::parse_limit_config(&crate::api::lossy(scope))
+                        .ok_or("BAD_REQUEST: invalid limits")?
+                        .base;
+                    lone_models.push(omni_store::limits::LoneModel {
+                        name,
+                        position,
+                        scope,
+                    });
+                }
+            }
+        }
+        if models.len() + lone_models.len() > omni_store::limits::MAX_MODEL_OVERRIDES {
+            return Err("BAD_REQUEST: limits.models: at most 64 model overrides per key".into());
+        }
+        config.models = Some(models);
+        config.lone_models = lone_models;
+    }
+    let raw = config.to_json_text();
     omni_store::keys::edit(
         store.connection(),
         id,
         omni_store::keys::KeyEdit::Limits(&raw),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok(config.to_js())
 }
 
 pub fn validate_limits(v: &Value, path: &str, root: bool) -> Result<(), String> {
@@ -258,7 +322,7 @@ mod mutation_tests {
                         [],
                     )
                     .expect("rival");
-                Ok(())
+                Ok(None)
             })
             .expect("mutation");
         assert_eq!(listing.data["keys"][0]["label"], "before");
@@ -381,46 +445,17 @@ pub fn revoke(store: &SqliteStore, id: &str, now: i64) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-fn scope_usage(
-    store: &SqliteStore,
-    id: &str,
-    scope: &Value,
-    model: Option<&str>,
-    now: i64,
-    out: &mut Vec<Value>,
-) -> Result<(), StoreError> {
-    let mut sums = std::collections::HashMap::new();
-    for dimension in ["requests", "tokens", "spend"] {
-        for (window, ms) in [("1m", 60_000), ("5h", 18_000_000), ("1w", 604_800_000)] {
-            let limit = &scope[dimension][window];
-            if limit.is_null() {
-                continue;
-            }
-            if !sums.contains_key(window) {
-                sums.insert(
-                    window,
-                    omni_store::usage::sum_since(store.connection(), id, now - ms, model)?,
-                );
-            }
-            let sum = &sums[window];
-            let used = match dimension {
-                "requests" => sum.requests,
-                "tokens" => sum.tokens,
-                _ => sum.cost_usd,
-            };
-            out.push(json!({"dimension":dimension,"window":window,"limit":limit,"used":used,"model":model}));
-        }
-    }
-    if !scope["concurrency"].is_null() {
-        out.push(json!({"dimension":"concurrency","window":null,"limit":scope["concurrency"],"used":null,"model":model}));
-    }
-    Ok(())
-}
-
 /// Explicit public projection: never serialize the stored hash.
 pub struct KeyListing {
+    /// The listing for display and editing: well-formed limits only, and
+    /// the complete `limitUsage` with model names as they print (a lone
+    /// surrogate as U+FFFD, the bytes stdout carries in both builds).
     pub data: Value,
     pub allowlists: Vec<omni_ir::jsjson::JsValue>,
+    /// Each key's complete matrix (lone-surrogate overrides included) and
+    /// its readings, exact: what `--json` prints.
+    pub limits_js: Vec<omni_ir::jsjson::JsValue>,
+    pub usage_js: Vec<omni_ir::jsjson::JsValue>,
 }
 
 impl KeyListing {
@@ -436,7 +471,7 @@ impl KeyListing {
         write: F,
     ) -> Result<(), String>
     where
-        F: FnOnce() -> Result<(), String>,
+        F: FnOnce() -> Result<Option<omni_ir::jsjson::JsValue>, String>,
     {
         let mut captured = project_keys(
             store,
@@ -450,53 +485,54 @@ impl KeyListing {
             .iter()
             .position(|k| k["id"] == id)
             .ok_or("BAD_REQUEST: no such api key")?;
-        write()?;
+        let written = write()?;
         captured.data["keys"][index][field] = value.clone();
         if field == "modelAllowlist" {
             captured.allowlists[index] = omni_ir::jsjson::JsValue::from(&value);
         }
-        let key = &mut captured.data["keys"][index];
-        let mut usage = Vec::new();
-        scope_usage(store, id, &key["limits"], None, now, &mut usage).map_err(|e| e.to_string())?;
-        if let Some(models) = key["limits"]["models"].as_object() {
-            for (m, s) in omni_ir::jsjson::own_entries(models) {
-                scope_usage(store, id, s, Some(m), now, &mut usage).map_err(|e| e.to_string())?;
-            }
+        if field == "limits" {
+            captured.limits_js[index] =
+                written.unwrap_or_else(|| omni_ir::jsjson::JsValue::from(&value));
         }
-        key["limitUsage"] = Value::Array(usage);
+        let usage = crate::api::limit_usage(store, id, &captured.limits_js[index], now)
+            .map_err(|e| e.message)?;
+        let key = &mut captured.data["keys"][index];
+        key["limitUsage"] = Value::Array(usage.iter().map(crate::api::lossy).collect());
         self.data["keys"] = Value::Array(vec![key.clone()]);
         self.allowlists = vec![captured.allowlists[index].clone()];
+        self.limits_js = vec![captured.limits_js[index].clone()];
+        self.usage_js = vec![omni_ir::jsjson::JsValue::Array(usage)];
         Ok(())
     }
-    pub fn one_json(&self, index: usize) -> String {
-        use omni_ir::jsjson::{JsValue, stringify_pretty};
-        let mut data = JsValue::from(&self.data["keys"][index]);
-        if let JsValue::Object(fields) = &mut data {
+    /// One key as JS sees it: the serde summary with its exact fields
+    /// (allowlist, limits, readings) put back.
+    fn exact(&self, index: usize) -> omni_ir::jsjson::JsValue {
+        use omni_ir::jsjson::JsValue;
+        let mut key = JsValue::from(&self.data["keys"][index]);
+        if let JsValue::Object(fields) = &mut key {
             for (name, value) in fields {
-                if name.iter().copied().eq("modelAllowlist".encode_utf16()) {
-                    *value = self.allowlists[index].clone();
+                let name = String::from_utf16_lossy(name);
+                match name.as_str() {
+                    "modelAllowlist" => *value = self.allowlists[index].clone(),
+                    "limits" => *value = self.limits_js[index].clone(),
+                    "limitUsage" => *value = self.usage_js[index].clone(),
+                    _ => {}
                 }
             }
         }
-        stringify_pretty(&data).unwrap_or_default()
+        key
+    }
+    pub fn one_json(&self, index: usize) -> String {
+        omni_ir::jsjson::stringify_pretty(&self.exact(index)).unwrap_or_default()
     }
     pub fn json(&self) -> String {
         use omni_ir::jsjson::{JsValue, stringify_pretty};
-        let mut data = JsValue::from(&self.data);
-        if let JsValue::Object(root) = &mut data
-            && let JsValue::Array(keys) = &mut root[0].1
-        {
-            for (key, allowlist) in keys.iter_mut().zip(&self.allowlists) {
-                if let JsValue::Object(fields) = key
-                    && let Some((_, v)) = fields
-                        .iter_mut()
-                        .find(|(k, _)| k.iter().copied().eq("modelAllowlist".encode_utf16()))
-                {
-                    *v = allowlist.clone();
-                }
-            }
-        }
-        stringify_pretty(&data).unwrap_or_default()
+        let keys = (0..self.allowlists.len()).map(|i| self.exact(i)).collect();
+        stringify_pretty(&JsValue::Object(vec![(
+            "keys".encode_utf16().collect(),
+            JsValue::Array(keys),
+        )]))
+        .unwrap_or_default()
     }
 }
 
@@ -514,6 +550,8 @@ fn project_keys(
 ) -> Result<KeyListing, String> {
     let mut keys = Vec::new();
     let mut allowlists = Vec::new();
+    let mut limits_js = Vec::new();
+    let mut usage_js = Vec::new();
     for omni_store::keys::OperatorKey {
         key,
         allowlist_json: raw,
@@ -528,19 +566,25 @@ fn project_keys(
             Some(raw) => crate::operator_json::parse(&raw)?,
         });
         let allowlist = Value::Null;
-        let limits = key.limits.as_ref().map_or(Value::Null, |l| l.to_json());
-        let mut usage = Vec::new();
-        scope_usage(store, &key.id, &limits, None, now, &mut usage).map_err(|e| e.to_string())?;
-        if let Some(models) = limits["models"].as_object() {
-            for (model, scope) in omni_ir::jsjson::own_entries(models) {
-                scope_usage(store, &key.id, scope, Some(model), now, &mut usage)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
+        let limits = key
+            .limits
+            .as_ref()
+            .map_or(Value::Null, omni_store::LimitConfig::to_json_well_formed);
+        let exact = key.limits.as_ref().map_or(
+            omni_ir::jsjson::JsValue::Null,
+            omni_store::LimitConfig::to_js,
+        );
+        let readings =
+            crate::api::limit_usage(store, &key.id, &exact, now).map_err(|e| e.message)?;
+        let usage: Vec<Value> = readings.iter().map(crate::api::lossy).collect();
+        limits_js.push(exact);
+        usage_js.push(omni_ir::jsjson::JsValue::Array(readings));
         keys.push(json!({"id":key.id,"label":key.label,"prefix":key.prefix,"modelAllowlist":allowlist,"limits":limits,"limitUsage":usage,"bodyLoggingOptOut":key.body_logging_opt_out,"createdAt":created_at,"revokedAt":revoked_at,"expiresAt":expires_at,"guardrailPolicy":key.guardrail_policy,"smartRouting":key.smart_routing}));
     }
     Ok(KeyListing {
         data: json!({"keys":keys}),
         allowlists,
+        limits_js,
+        usage_js,
     })
 }

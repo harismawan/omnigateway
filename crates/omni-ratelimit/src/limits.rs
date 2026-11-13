@@ -11,7 +11,7 @@
 //! (`Some(None)`, also unlimited), or a ceiling (`Some(Some(n))`). The two
 //! unlimited spellings are kept apart only so the value re-serializes exactly.
 
-use indexmap::IndexMap;
+pub use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
 /// `MAX_MODEL_OVERRIDES`.
@@ -67,8 +67,20 @@ pub struct LimitConfig {
     /// apart). [`Self::model_override`] never sees them: a well-formed
     /// request model cannot equal one. TS throws building such a model's
     /// subject id (`encodeURIComponent`), so they are matched only to refuse
-    /// as it does; [`Self::to_json`] cannot represent them and omits them.
-    pub lone_models: Vec<(Vec<u16>, LimitScope)>,
+    /// as it does. [`Self::to_js`] writes them back where they stood;
+    /// [`Self::to_json_well_formed`] cannot represent them and omits them.
+    pub lone_models: Vec<LoneModel>,
+}
+
+/// One override whose model name holds a lone surrogate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoneModel {
+    /// The name, exact.
+    pub name: Vec<u16>,
+    /// Its position among all of the `models` record's members, in
+    /// insertion order: where [`LimitConfig::to_js`] puts it back.
+    pub position: usize,
+    pub scope: LimitScope,
 }
 
 fn set<T: Copy>(pair: Pair<T>) -> Option<T> {
@@ -149,7 +161,7 @@ impl LimitConfig {
 
     /// Whether an override is configured for this exact lone-surrogate name.
     pub fn has_lone_override(&self, model: &[u16]) -> bool {
-        self.lone_models.iter().any(|(k, _)| k == model)
+        self.lone_models.iter().any(|m| m.name == model)
     }
 
     /// The key-wide scope alone, with no override: what a request for a
@@ -169,9 +181,54 @@ impl LimitConfig {
             && self.lone_models.is_empty()
     }
 
-    /// The value zod's parse returns, as `JSON.stringify` would see it: schema
-    /// key order, absent pairs omitted, explicit nulls kept.
-    pub fn to_json(&self) -> Value {
+    /// The value zod's parse returns, as `JSON.stringify` would see it:
+    /// schema key order, absent pairs omitted, explicit nulls kept, and
+    /// every override, lone-surrogate names included, in insertion order.
+    /// The complete form: what operator projections show and writers store.
+    pub fn to_js(&self) -> omni_ir::jsjson::JsValue {
+        use omni_ir::jsjson::JsValue;
+        let mut out: Vec<(Vec<u16>, JsValue)> = self
+            .base
+            .to_json()
+            .iter()
+            .map(|(k, v)| (k.encode_utf16().collect(), JsValue::from(v)))
+            .collect();
+        if self.models.is_some() || !self.lone_models.is_empty() {
+            let mut wf = self.models.iter().flat_map(IndexMap::iter);
+            let mut lone = self.lone_models.iter().peekable();
+            let total = self.models.as_ref().map_or(0, IndexMap::len) + self.lone_models.len();
+            let mut models = Vec::with_capacity(total);
+            for position in 0..total {
+                let (name, scope) = match lone.peek() {
+                    Some(m) if m.position == position => {
+                        let m = lone.next().expect("peeked");
+                        (m.name.clone(), &m.scope)
+                    }
+                    _ => match wf.next() {
+                        Some((k, scope)) => (k.encode_utf16().collect(), scope),
+                        None => {
+                            let m = lone.next().expect("counted");
+                            (m.name.clone(), &m.scope)
+                        }
+                    },
+                };
+                models.push((name, JsValue::from(&Value::Object(scope.to_json()))));
+            }
+            out.push(("models".encode_utf16().collect(), JsValue::Object(models)));
+        }
+        JsValue::Object(out)
+    }
+
+    /// `JSON.stringify` of [`Self::to_js`]: the column text a writer stores.
+    pub fn to_json_text(&self) -> String {
+        omni_ir::jsjson::stringify(&self.to_js()).expect("a limit matrix is JSON")
+    }
+
+    /// [`Self::to_js`] as a serde value, **without** the lone-surrogate
+    /// overrides (serde holds UTF-8 only). For comparisons between configs
+    /// and for callers that only read well-formed names; never what a writer
+    /// stores or an operator is shown.
+    pub fn to_json_well_formed(&self) -> Value {
         let mut out = self.base.to_json();
         if let Some(models) = &self.models {
             let m: Map<String, Value> = models
@@ -184,9 +241,11 @@ impl LimitConfig {
     }
 }
 
+/// The well-formed view ([`LimitConfig::to_json_well_formed`]): serde
+/// cannot hold a lone surrogate. Diagnostic and test output only.
 impl serde::Serialize for LimitConfig {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        self.to_json().serialize(s)
+        self.to_json_well_formed().serialize(s)
     }
 }
 
@@ -207,16 +266,17 @@ pub fn parse_limit_config(value: &Value) -> Option<LimitConfig> {
 /// scopes (`value` carries the rest). Every rule applies to them as to any
 /// override: a name of 1..=256 code points (a lone surrogate is one), a
 /// strict scope that limits something, no `__proto__`, and at most
-/// [`MAX_MODEL_OVERRIDES`] overrides in all.
+/// [`MAX_MODEL_OVERRIDES`] overrides in all. Each lone key carries its
+/// position among the record's members (insertion order), ascending.
 pub fn parse_limit_config_with_lone(
     value: &Value,
-    lone: Vec<(Vec<u16>, Value)>,
+    lone: Vec<(Vec<u16>, usize, Value)>,
 ) -> Option<LimitConfig> {
-    if names_proto(value) || lone.iter().any(|(_, v)| names_proto(v)) {
+    if names_proto(value) || lone.iter().any(|(_, _, v)| names_proto(v)) {
         return None;
     }
     let mut lone_models = Vec::with_capacity(lone.len());
-    for (name, scope) in lone {
+    for (name, position, scope) in lone {
         let points = char::decode_utf16(name.iter().copied()).count();
         if !(1..=MAX_MODEL_NAME_LENGTH).contains(&points) {
             return None;
@@ -225,7 +285,11 @@ pub fn parse_limit_config_with_lone(
         if !scope.sets_any_limit() {
             return None;
         }
-        lone_models.push((name, scope));
+        lone_models.push(LoneModel {
+            name,
+            position,
+            scope,
+        });
     }
     if !lone_models.is_empty() && value.get("models").is_none() {
         // A lone key can only have come from a `models` record.

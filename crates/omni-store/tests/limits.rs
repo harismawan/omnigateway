@@ -121,7 +121,7 @@ console.log(JSON.stringify(out));
         serde_json::from_str(&bun_script(dir.path(), &script, &stdin)).expect("json");
     assert_eq!(expected.len(), cases.len());
     for (raw, want) in cases.iter().zip(expected) {
-        let got = parse_limits(raw).map(|l| omni_ir::jsjson::to_string(&l.to_json()));
+        let got = parse_limits(raw).map(|l| l.to_json_text());
         assert_eq!(got, want, "limits {raw:?}");
     }
 }

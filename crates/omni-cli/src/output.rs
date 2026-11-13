@@ -111,16 +111,26 @@ pub fn human(
         .map(str::to_owned)
         .to_vec(),
     ];
-    for (k, allowlist) in keys.iter().zip(&listing.allowlists) {
+    for ((k, allowlist), exact) in keys.iter().zip(&listing.allowlists).zip(&listing.limits_js) {
         let models = omni_control::operator_json::models(allowlist)?;
         let limits = if k["limits"].is_null() {
             paint(color, false, "unreadable")
         } else {
             let mut parts = Vec::new();
             scope(&k["limits"], "", &mut parts);
-            if let Some(models) = k["limits"]["models"].as_object() {
-                for (model, v) in jsjson::own_entries(models) {
-                    scope(v, &format!("{model}:"), &mut parts);
+            // Every override, a lone-surrogate name included (it prints as
+            // U+FFFD, as it does from TS), in JS own-key order.
+            if let Some(jsjson::JsValue::Object(models)) =
+                omni_control::settings_value::get(exact, "models")
+            {
+                for i in omni_control::api::js_order(models) {
+                    let (model, v) = &models[i];
+                    let model = String::from_utf16_lossy(model);
+                    scope(
+                        &omni_control::api::lossy(v),
+                        &format!("{model}:"),
+                        &mut parts,
+                    );
                 }
             }
             if parts.is_empty() {

@@ -264,20 +264,9 @@ pub fn lone_surrogate_model_error() -> GatewayError {
 /// escape, normalized as [`normalize_client_model`] does, as exact UTF-16;
 /// `None` when it holds no lone surrogate (or is not a string).
 fn lone_model(body: &str) -> Option<Vec<u16>> {
-    use omni_ir::jsjson::JsValue;
-    let parsed = omni_ir::jsjson::parse_js(body).ok()?;
-    let JsValue::Object(fields) = &parsed else {
-        return None;
-    };
-    // `JSON.parse`: the last duplicate wins, in the first one's position.
-    let JsValue::String(raw) = &fields
-        .iter()
-        .find(|(k, _)| k.iter().copied().eq("model".encode_utf16()))?
-        .1
-    else {
-        return None;
-    };
-    let units = normalize_model_units(raw);
+    // One linear pass over the body (no value is built), whatever its width.
+    let raw = omni_ir::jsjson::top_level_string(body, "model")?;
+    let units = normalize_model_units(&raw);
     String::from_utf16(&units).is_err().then_some(units)
 }
 

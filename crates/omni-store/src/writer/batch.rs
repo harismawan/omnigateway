@@ -48,7 +48,7 @@ pub(crate) struct Outcome {
 }
 
 /// The stored completed row's figures as a [`Completion`].
-fn completion(row: &[SqlValue]) -> Result<Completion, StoreError> {
+fn completion(row: &[SqlValue], debit_model: bool) -> Result<Completion, StoreError> {
     let get = |name: &str| column(row, name);
     let n = |name: &str| -> Result<f64, StoreError> {
         Ok(js::number(ValueRef::from(&get(name)?)).unwrap_or(0.0))
@@ -69,6 +69,7 @@ fn completion(row: &[SqlValue]) -> Result<Completion, StoreError> {
             + n("cache_write_tokens")?,
         cost_usd: n("cost_usd")?,
         at: n("at")?,
+        debit_model,
     })
 }
 
@@ -160,6 +161,9 @@ struct Logs {
     dirty: IndexMap<String, ()>,
     /// Ids completed by this batch, in completion order.
     completed: Vec<String>,
+    /// Completed ids whose request named an unencodable model (transient:
+    /// from the completing event, not the row).
+    model_unencodable: std::collections::HashSet<String>,
 }
 
 impl Logs {
@@ -187,6 +191,7 @@ impl Logs {
             rows,
             dirty: IndexMap::new(),
             completed: Vec::new(),
+            model_unencodable: std::collections::HashSet::new(),
         })
     }
 
@@ -236,6 +241,9 @@ impl Logs {
                 *slot = Some(next);
                 self.dirty.insert(log.id.clone(), ());
                 self.completed.push(log.id.clone());
+                if log.model_unencodable {
+                    self.model_unencodable.insert(log.id.clone());
+                }
             }
         }
     }
@@ -258,10 +266,10 @@ impl Logs {
     /// `cost_usd` bound as an INTEGER reads back as the equal REAL, and
     /// `log_values` never binds a `-0`). The TS comparison test holds the two
     /// to the same rows.
-    fn completed_rows(&self) -> impl Iterator<Item = &LogRow> {
+    fn completed_rows_by_id(&self) -> impl Iterator<Item = (&String, &LogRow)> {
         self.completed
             .iter()
-            .filter_map(|id| self.rows.get(id).and_then(Option::as_ref))
+            .filter_map(|id| self.rows.get(id).and_then(Option::as_ref).map(|r| (id, r)))
     }
 }
 
@@ -578,9 +586,9 @@ pub(crate) fn write(
     let mut daily = Rollup::new("usage_daily", &DAILY_KEY, &DAILY_COUNTERS);
     let mut hourly = Rollup::new("usage_rollup", &HOURLY_KEY, &HOURLY_COUNTERS);
     let mut completions = Vec::new();
-    for row in logs.completed_rows() {
+    for (id, row) in logs.completed_rows_by_id() {
         roll_up(&tx, &mut daily, &mut hourly, row, day_offset_minutes)?;
-        completions.push(completion(row)?);
+        completions.push(completion(row, !logs.model_unencodable.contains(id))?);
     }
     daily.write(&tx)?;
     hourly.write(&tx)?;

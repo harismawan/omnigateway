@@ -182,6 +182,9 @@ struct Logs {
     existed: HashSet<String>,
     dirty: IndexMap<String, ()>,
     completed: Vec<String>,
+    /// Completed ids whose request named an unencodable model (transient:
+    /// from the completing event, not the row).
+    model_unencodable: HashSet<String>,
 }
 
 impl Logs {
@@ -216,6 +219,7 @@ impl Logs {
             existed,
             dirty: IndexMap::new(),
             completed: Vec::new(),
+            model_unencodable: HashSet::new(),
         })
     }
 
@@ -283,6 +287,9 @@ impl Logs {
                 *slot = Some(next);
                 self.dirty.insert(log.id.clone(), ());
                 self.completed.push(log.id.clone());
+                if log.model_unencodable {
+                    self.model_unencodable.insert(log.id.clone());
+                }
             }
         }
         Ok(())
@@ -847,7 +854,7 @@ fn roll_up(row: &Row, day_offset_minutes: i64) -> Result<Rolled, StoreError> {
     Ok((key, daily, hourly))
 }
 
-fn completion(row: &Row) -> Completion {
+fn completion(row: &Row, debit_model: bool) -> Completion {
     #[allow(clippy::cast_precision_loss)]
     let n = |v: i64| v as f64;
     Completion {
@@ -860,6 +867,7 @@ fn completion(row: &Row) -> Completion {
             + n(row.cache_write_tokens),
         cost_usd: row.cost_usd,
         at: n(row.at),
+        debit_model,
     }
 }
 
@@ -1023,7 +1031,7 @@ pub(crate) async fn write(
     let mut completions = Vec::new();
     for row in logs.completed_rows() {
         rolled.push(roll_up(row, day_offset_minutes)?);
-        completions.push(completion(row));
+        completions.push(completion(row, !logs.model_unencodable.contains(&row.id)));
     }
     let daily_keys: Vec<DailyKey> = rolled.iter().map(|(k, _, _)| k.clone()).collect();
     let hourly_keys: Vec<(String, i64)> = rolled

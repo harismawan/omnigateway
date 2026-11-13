@@ -1434,3 +1434,45 @@ fn send_does_not_wait_while_a_barrier_is_pending() {
         writer.close().await.expect("close");
     });
 }
+
+/// Review A5-R2: a completion carries whether its model subject is debited
+/// from the request's own event. Two rows store the same U+FFFD name; only
+/// the one whose request named an unencodable model is flagged.
+#[test]
+fn a_completion_carries_the_requests_model_identity_not_the_stored_name() {
+    current_thread().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let writer = Writer::spawn(
+            &db,
+            WriterConfig {
+                commit_sink: Some(tx),
+                ..config(0, 512)
+            },
+        )
+        .expect("spawn");
+        let mut lone = done("lone", T0, Some("k"), "\u{fffd}", 1);
+        lone.model_unencodable = true;
+        let real = done("real", T0, Some("k"), "\u{fffd}", 1);
+        assert!(writer.handle().send(LogEvent::Finish(lone)));
+        assert!(writer.handle().send(LogEvent::Finish(real)));
+        writer.close().await.expect("close");
+        let mut seen = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            if let omni_store::writer::Committed::Completions(c) = m {
+                seen.extend(
+                    c.into_iter()
+                        .map(|c| (c.id, c.requested_model, c.debit_model)),
+                );
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                ("lone".to_owned(), "\u{fffd}".to_owned(), false),
+                ("real".to_owned(), "\u{fffd}".to_owned(), true)
+            ]
+        );
+    });
+}

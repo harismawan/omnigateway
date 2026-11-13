@@ -28,12 +28,12 @@ pub(crate) fn parse_stored_limits(raw: &str) -> Option<LimitConfig> {
             && let JsValue::Object(models) = value
         {
             let mut wf = serde_json::Map::new();
-            for (model, scope) in models {
+            for (position, (model, scope)) in models.iter().enumerate() {
                 match String::from_utf16(model) {
                     Ok(model) => {
                         wf.insert(model, js_to_value(scope));
                     }
-                    Err(_) => lone.push((model.clone(), js_to_value(scope))),
+                    Err(_) => lone.push((model.clone(), position, js_to_value(scope))),
                 }
             }
             root.insert(name, serde_json::Value::Object(wf));
@@ -89,10 +89,12 @@ pub struct ApiKey {
     /// a lone surrogate is in [`Self::lone_allowlist`] instead, by exact
     /// UTF-16: `includes` tells it apart from U+FFFD, and so must we.
     pub model_allowlist: Option<Vec<String>>,
-    /// Allowlist entries holding a lone surrogate, as exact UTF-16. Only a
-    /// request model with a lone surrogate can equal one.
+    /// Allowlist entries holding a lone surrogate, as exact UTF-16, each with
+    /// its position among the allowlist's names (so a writer puts it back
+    /// where it stood). Only a request model with a lone surrogate can equal
+    /// one.
     #[serde(skip)]
-    pub lone_allowlist: Vec<Vec<u16>>,
+    pub lone_allowlist: Vec<(usize, Vec<u16>)>,
     /// `None` when the stored column could not be parsed: refused at auth,
     /// never read as unlimited. `Some` of an empty config is unlimited.
     pub limits: Option<LimitConfig>,
@@ -119,7 +121,7 @@ impl ApiKey {
     pub fn allows(&self, model: &str, lone: Option<&[u16]>) -> bool {
         match (&self.model_allowlist, lone) {
             (None, _) => true,
-            (Some(_), Some(units)) => self.lone_allowlist.iter().any(|e| e == units),
+            (Some(_), Some(units)) => self.lone_allowlist.iter().any(|(_, e)| e == units),
             (Some(list), None) => list.iter().any(|m| m == model),
         }
     }
@@ -147,31 +149,42 @@ pub enum KeyEdit<'a> {
     Revoke(i64),
 }
 
-/// `JSON.stringify(parseLimitConfig(input.limits))`, as `create` stores it.
+/// `JSON.stringify(parseLimitConfig(input.limits))`, as `create` stores it:
+/// the complete matrix, lone-surrogate overrides included.
 pub(crate) fn limits_column(key: &ApiKey) -> Result<String, StoreError> {
-    let limits = key
+    Ok(key
         .limits
         .as_ref()
         .ok_or_else(|| StoreError::Corrupt("unreadable limits".into()))?
-        .to_json();
-    Ok(omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&limits)).expect("limits"))
+        .to_json_text())
 }
 
-/// `setLimits`' guard: the stored text a raw limits edit writes.
+/// `setLimits`' guard: the stored text a raw limits edit writes, read with
+/// `JSON.parse` semantics (a lone surrogate in an override name kept).
 pub(crate) fn edited_limits(raw: &str) -> Result<String, StoreError> {
-    let parsed =
-        parse_limits(raw).ok_or_else(|| StoreError::Corrupt("unreadable limits".into()))?;
-    Ok(
-        omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::from(&parsed.to_json()))
-            .expect("limits"),
-    )
+    Ok(parse_stored_limits(raw)
+        .ok_or_else(|| StoreError::Corrupt("unreadable limits".into()))?
+        .to_json_text())
 }
 
-/// `JSON.stringify(modelAllowlist)` for a create.
+/// `JSON.stringify(modelAllowlist)` for a create: every name, a lone
+/// surrogate escaped where it stood.
 pub(crate) fn allowlist_column(key: &ApiKey) -> Option<String> {
-    key.model_allowlist
-        .as_ref()
-        .map(|v| serde_json::to_string(v).expect("models"))
+    let wf = key.model_allowlist.as_ref()?;
+    let mut lone = key.lone_allowlist.iter().peekable();
+    let mut wf_iter = wf.iter();
+    let mut items = Vec::with_capacity(wf.len() + key.lone_allowlist.len());
+    for position in 0..wf.len() + key.lone_allowlist.len() {
+        let units = match lone.peek() {
+            Some((p, _)) if *p == position => lone.next().expect("peeked").1.clone(),
+            _ => match wf_iter.next() {
+                Some(s) => s.encode_utf16().collect(),
+                None => lone.next().expect("counted").1.clone(),
+            },
+        };
+        items.push(JsValue::String(units));
+    }
+    omni_ir::jsjson::stringify(&JsValue::Array(items))
 }
 
 pub fn create(conn: &Connection, key: &ApiKey) -> Result<(), StoreError> {
@@ -224,7 +237,7 @@ pub fn edit(conn: &Connection, id: &str, edit: KeyEdit<'_>) -> Result<(), StoreE
 /// Any other non-array is a hand-edited row TS would throw on (or, for a
 /// string, substring-match) at the request; it reads here as deny-all, the
 /// closed direction.
-pub(crate) type Allowlist = (Option<Vec<String>>, Vec<Vec<u16>>);
+pub(crate) type Allowlist = (Option<Vec<String>>, Vec<(usize, Vec<u16>)>);
 
 pub(crate) fn parse_allowlist(id: &str, raw: Option<String>) -> Result<Allowlist, StoreError> {
     let Some(raw) = raw else {
@@ -261,7 +274,7 @@ pub(crate) fn parse_allowlist(id: &str, raw: Option<String>) -> Result<Allowlist
                 if let JsValue::String(units) = item {
                     match String::from_utf16(units) {
                         Ok(s) => wf.push(s),
-                        Err(_) => lone.push(units.clone()),
+                        Err(_) => lone.push((wf.len() + lone.len(), units.clone())),
                     }
                 }
             }
@@ -272,9 +285,11 @@ pub(crate) fn parse_allowlist(id: &str, raw: Option<String>) -> Result<Allowlist
 }
 
 /// What TS's `toKey` throws on for this row's allowlist, or `None`:
-/// `JSON.parse`'s message, verbatim (the refusal's message at auth).
+/// `JSON.parse(stored)`'s message, verbatim (the refusal's message at auth),
+/// an empty column included (`JSON Parse error: Unexpected EOF`, not the
+/// request-body wording `Request.json()` gives an empty body).
 pub(crate) fn allowlist_parse_error(raw: Option<&str>) -> Option<String> {
-    omni_ir::jsc_json::parse_error(raw?)
+    omni_ir::jsjson::parse_js(raw?).err()
 }
 
 /// A JS number read from a date cell as `bun:sqlite` returns it: INTEGER and

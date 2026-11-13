@@ -126,3 +126,63 @@ fn integer_like_keys_hoist_ahead_of_string_keys_like_v8() {
         Some(r#"{"2":4,"10":2,"b":1,"a":3,"01":5}"#)
     );
 }
+
+/// The linear top-level extractor agrees with the full parse (`JSON.parse`
+/// semantics) on what the top-level `model` is: the last duplicate, an
+/// escaped spelling of the key, never a nested or quoted look-alike.
+#[test]
+fn top_level_string_agrees_with_the_full_parse() {
+    use omni_ir::jsjson::{parse_js, top_level_string};
+    let cases = [
+        r#"{"model":"a"}"#,
+        r#"  {  "model"  :  "a"  ,  "x"  :  1  }  "#,
+        "{\n\t\"model\"\r:\n\"a\"\n}",
+        r#"{"model":"a","model":"b"}"#,
+        r#"{"model":"a","model":1}"#,
+        r#"{"model":1,"model":"b"}"#,
+        r#"{"model":"a","model":null,"model":"\ud800"}"#,
+        r#"{"mod\u0065l":"escaped key"}"#,
+        r#"{"model\u0000":"not it","Model":"nor this"}"#,
+        r#"{"x":{"model":"nested"},"y":[{"model":"deeper"}]}"#,
+        r#"{"x":{"model":"nested"},"model":"top","y":[{"model":"deeper"}]}"#,
+        r#"{"x":"\"model\":\"quoted\"","model":"real"}"#,
+        r#"{"x":"}]{[,\"","model":"after brackets in a string"}"#,
+        r#"{"x":"ends with a backslash \\","model":"after"}"#,
+        r#"{"x\"":"\\\"","model":"after escapes"}"#,
+        r#"{"x":[1,[2,{"a":"]"}],"}"],"model":"after arrays"}"#,
+        r#"{"x":-1.5e-3,"y":true,"z":null,"model":"after scalars"}"#,
+        r#"{"model":"\ud800"}"#,
+        r#"{"model":"\ud83d\ude00"}"#,
+        r#"{"model":"\ud83d x \ude00"}"#,
+        r#"{"model":"\ufffd"}"#,
+        "{\"model\":\"\u{fffd}\"}",
+        "{\"model\":\"\u{1f600} é\"}",
+        r#"{"model":"\"\\\/\b\f\n\r\t"}"#,
+        r#"{"model":""}"#,
+        r#"{"model":{"model":"object"}}"#,
+        r#"{"model":["array"]}"#,
+        r#"{}"#,
+        r#"{ }"#,
+        r#"["model","a"]"#,
+        r#""model""#,
+        r#"1"#,
+        r#"null"#,
+        r#"{"a":{},"b":[],"model":"after empties"}"#,
+        r#"{"a":{"b":{"c":{"d":[[[{"model":"x"}]]]}}},"model":"deep before"}"#,
+    ];
+    for text in cases {
+        let parsed = parse_js(text).expect(text);
+        let JsValue::Object(fields) = &parsed else {
+            assert_eq!(top_level_string(text, "model"), None, "{text}");
+            continue;
+        };
+        let want = fields
+            .iter()
+            .find(|(k, _)| k.iter().copied().eq("model".encode_utf16()))
+            .and_then(|(_, v)| match v {
+                JsValue::String(units) => Some(units.clone()),
+                _ => None,
+            });
+        assert_eq!(top_level_string(text, "model"), want, "{text}");
+    }
+}

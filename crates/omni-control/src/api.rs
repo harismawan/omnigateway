@@ -248,18 +248,48 @@ fn read_scope(
     Ok(())
 }
 
-/// `toSummary`.
-fn summary(store: &SqliteStore, k: KeyRow, now: i64) -> Result<JsValue> {
+/// `readLimitUsage`: the key-wide readings, then each override's in JS
+/// own-key order, for a complete (lossless) matrix; none for `null`.
+pub fn limit_usage(
+    store: &SqliteStore,
+    id: &str,
+    limits: &JsValue,
+    now: i64,
+) -> Result<Vec<JsValue>> {
     let mut usage = Vec::new();
-    if !matches!(k.limits, JsValue::Null) {
-        read_scope(store, &k.id, &k.limits, None, now, &mut usage)?;
-        if let Some(JsValue::Object(models)) = get(&k.limits, "models") {
+    if !matches!(limits, JsValue::Null) {
+        read_scope(store, id, limits, None, now, &mut usage)?;
+        if let Some(JsValue::Object(models)) = get(limits, "models") {
             for i in js_order(models) {
                 let (name, scope) = &models[i];
-                read_scope(store, &k.id, scope, Some(name), now, &mut usage)?;
+                read_scope(store, id, scope, Some(name), now, &mut usage)?;
             }
         }
     }
+    Ok(usage)
+}
+
+/// A JS value as serde holds it, for display: strings and keys lossy (a
+/// lone surrogate as U+FFFD, the bytes it prints as), numbers as numbers.
+/// Never for identity, and never for an object whose keys may then collide
+/// (a limit matrix's `models`): read those from the [`JsValue`].
+pub fn lossy(v: &JsValue) -> serde_json::Value {
+    use serde_json::Value;
+    omni_ir::deep::grow(|| match v {
+        JsValue::Undefined | JsValue::Function | JsValue::Null => Value::Null,
+        JsValue::Bool(b) => Value::Bool(*b),
+        JsValue::Number(n) => serde_json::Number::from_f64(*n).map_or(Value::Null, Value::Number),
+        JsValue::String(s) => Value::String(utf8(s)),
+        JsValue::Array(items) => Value::Array(items.iter().map(lossy).collect()),
+        JsValue::Object(fields) => {
+            Value::Object(fields.iter().map(|(k, v)| (utf8(k), lossy(v))).collect())
+        }
+    })
+}
+
+/// `toSummary`.
+fn summary(store: &SqliteStore, k: KeyRow, now: i64) -> Result<JsValue> {
+    let usage = limit_usage(store, &k.id, &k.limits, now)?;
     let opt_text = |v: Option<String>| v.map_or(JsValue::Null, |s| text(&s));
     Ok(object(vec![
         ("id", text(&k.id)),
@@ -278,7 +308,7 @@ fn summary(store: &SqliteStore, k: KeyRow, now: i64) -> Result<JsValue> {
 }
 
 /// JS own-key order: canonical array indices ascending, then insertion.
-fn js_order(fields: &[(Vec<u16>, JsValue)]) -> Vec<usize> {
+pub fn js_order(fields: &[(Vec<u16>, JsValue)]) -> Vec<usize> {
     let mut indexed: Vec<(u32, usize)> = Vec::new();
     let mut named = Vec::new();
     for (i, (k, _)) in fields.iter().enumerate() {

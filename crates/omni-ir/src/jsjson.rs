@@ -592,7 +592,32 @@ fn write_object(
 
 enum Frame {
     Array(Vec<JsValue>),
-    Object(Vec<(Vec<u16>, JsValue)>, Option<Vec<u16>>),
+    /// The members so far, the key awaiting its value, and (once the object
+    /// is wide enough to need one) an index from key to position, so a
+    /// duplicate is found in amortized constant time rather than by a scan
+    /// of every earlier key.
+    Object(
+        Vec<(Vec<u16>, JsValue)>,
+        Option<Vec<u16>>,
+        Option<std::collections::HashMap<Vec<u16>, usize>>,
+    ),
+}
+
+/// Objects up to this many members find a duplicate key by scanning them.
+const INDEX_FROM: usize = 8;
+
+thread_local! {
+    static SCAN_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Work counted by this module's parsers on this thread: one step per byte
+/// scanned and per key compared. For complexity tests.
+pub fn scan_steps() -> u64 {
+    SCAN_STEPS.with(std::cell::Cell::get)
+}
+
+fn count_steps(n: usize) {
+    SCAN_STEPS.with(|c| c.set(c.get() + n as u64));
 }
 
 /// `JSON.parse(text)` as a [`JsValue`]: lossless (lone surrogate escapes
@@ -622,7 +647,7 @@ pub fn parse_js(text: &str) -> Result<JsValue, String> {
                 continue;
             }
             b'{' => {
-                frames.push(Frame::Object(Vec::new(), None));
+                frames.push(Frame::Object(Vec::new(), None, None));
                 i += 1;
                 continue;
             }
@@ -630,7 +655,7 @@ pub fn parse_js(text: &str) -> Result<JsValue, String> {
                 i += 1;
                 match frames.pop().expect("validated container") {
                     Frame::Array(a) => JsValue::Array(a),
-                    Frame::Object(o, _) => JsValue::Object(o),
+                    Frame::Object(o, _, _) => JsValue::Object(o),
                 }
             }
             b'"' => {
@@ -644,7 +669,7 @@ pub fn parse_js(text: &str) -> Result<JsValue, String> {
                 }
                 i += 1;
                 let units = string_units(&text[start + 1..i - 1]);
-                if let Some(Frame::Object(_, key @ None)) = frames.last_mut() {
+                if let Some(Frame::Object(_, key @ None, _)) = frames.last_mut() {
                     *key = Some(units);
                     continue;
                 }
@@ -675,17 +700,125 @@ pub fn parse_js(text: &str) -> Result<JsValue, String> {
         match frames.last_mut() {
             None => root = value,
             Some(Frame::Array(a)) => a.push(value),
-            Some(Frame::Object(o, key)) => {
+            Some(Frame::Object(o, key, index)) => {
                 let key = key.take().expect("validated property");
-                if let Some((_, old)) = o.iter_mut().find(|(k, _)| *k == key) {
-                    *old = value;
-                } else {
-                    o.push((key, value));
+                // `JSON.parse`: a duplicate's value replaces the first one's,
+                // which keeps its position.
+                let at = match index {
+                    Some(index) => {
+                        count_steps(1);
+                        index.get(&key).copied()
+                    }
+                    None => {
+                        count_steps(o.len());
+                        o.iter().position(|(k, _)| *k == key)
+                    }
+                };
+                match at {
+                    Some(at) => o[at].1 = value,
+                    None => {
+                        if let Some(index) = index {
+                            index.insert(key.clone(), o.len());
+                        }
+                        o.push((key, value));
+                        if index.is_none() && o.len() > INDEX_FROM {
+                            *index = Some(
+                                o.iter()
+                                    .enumerate()
+                                    .map(|(i, (k, _))| (k.clone(), i))
+                                    .collect(),
+                            );
+                        }
+                    }
                 }
             }
         }
     }
+    count_steps(bytes.len());
     Ok(root)
+}
+
+/// The last `key` member of the top-level object of `text` (valid JSON, as
+/// `JSON.parse` reads it: the last duplicate wins), as exact UTF-16 when it
+/// is a string. `None` when `text` is not an object, has no such member, or
+/// the member is not a string. One linear pass: other values are skipped by
+/// bracket depth without being built.
+pub fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>> {
+    let b = text.as_bytes();
+    let ws = |i: &mut usize| {
+        while matches!(b.get(*i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            *i += 1;
+        }
+    };
+    // The end of the string opening at `i` (its quote), after the closing one.
+    let end_of_string = |mut i: usize| {
+        i += 1;
+        while let Some(&c) = b.get(i) {
+            match c {
+                b'\\' => i += 2,
+                b'"' => return i + 1,
+                _ => i += 1,
+            }
+        }
+        i
+    };
+    let mut i = 0;
+    ws(&mut i);
+    if b.get(i) != Some(&b'{') {
+        count_steps(i);
+        return None;
+    }
+    i += 1;
+    let mut found: Option<Option<Vec<u16>>> = None;
+    loop {
+        ws(&mut i);
+        if b.get(i) != Some(&b'"') {
+            break;
+        }
+        let key_end = end_of_string(i);
+        let wanted = string_units(&text[i + 1..key_end - 1])
+            .iter()
+            .copied()
+            .eq(key.encode_utf16());
+        i = key_end;
+        ws(&mut i);
+        i += 1; // ':'
+        ws(&mut i);
+        if b.get(i) == Some(&b'"') {
+            let end = end_of_string(i);
+            if wanted {
+                found = Some(Some(string_units(&text[i + 1..end - 1])));
+            }
+            i = end;
+        } else {
+            if wanted {
+                found = Some(None);
+            }
+            // A container, a number or a literal: to the `,` or `}` at depth 0.
+            let mut depth = 0usize;
+            while let Some(&c) = b.get(i) {
+                match c {
+                    b'"' => {
+                        i = end_of_string(i);
+                        continue;
+                    }
+                    b'[' | b'{' => depth += 1,
+                    b']' | b'}' if depth > 0 => depth -= 1,
+                    b',' | b'}' if depth == 0 => break,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        ws(&mut i);
+        if b.get(i) == Some(&b',') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    count_steps(i);
+    found.flatten()
 }
 
 /// JSON string contents after syntax validation. Escaped UTF-16 units are data,

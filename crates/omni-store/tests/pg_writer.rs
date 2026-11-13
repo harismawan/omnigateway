@@ -984,3 +984,42 @@ async fn wait_for_blocked(db: &TestDb, holder_pid: i32, prefix: &str) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+/// Review A5-R2 on Postgres: the completion's `debit_model` comes from the
+/// request's event, not from the stored (replacement-character) name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_completion_carries_the_requests_model_identity_not_the_stored_name() {
+    let Some(base) = base_url("a_completion_carries_the_requests_model_identity") else {
+        return;
+    };
+    let db = TestDb::create(&base, "model_identity").await;
+    let store = prepare(&db, 0).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let writer = Writer::spawn_postgres(
+        store,
+        WriterConfig {
+            commit_sink: Some(tx),
+            ..config(0, 512)
+        },
+    )
+    .expect("spawn");
+    let mut lone = done("lone", T0, Some("k"), "\u{fffd}", 1);
+    lone.model_unencodable = true;
+    assert!(writer.handle().send(LogEvent::Finish(lone)));
+    assert!(
+        writer
+            .handle()
+            .send(LogEvent::Finish(done("real", T0, Some("k"), "\u{fffd}", 1)))
+    );
+    writer.close().await.expect("close");
+    let mut seen = Vec::new();
+    while let Ok(m) = rx.try_recv() {
+        if let Committed::Completions(c) = m {
+            seen.extend(c.into_iter().map(|c| (c.id, c.debit_model)));
+        }
+    }
+    assert_eq!(
+        seen,
+        [("lone".to_owned(), false), ("real".to_owned(), true)]
+    );
+}

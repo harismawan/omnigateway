@@ -99,7 +99,13 @@ impl RateLimiter {
                     let Some(key) = c.api_key_id.as_deref() else {
                         continue;
                     };
-                    self.debit(key, &c.requested_model, c.tokens, c.cost_usd, c.at, now);
+                    if c.debit_model {
+                        self.debit(key, &c.requested_model, c.tokens, c.cost_usd, c.at, now);
+                    } else {
+                        // The stored name is the lossy form of a model TS
+                        // could not encode: key-wide only, as TS debits.
+                        self.debit_key_only(key, c.tokens, c.cost_usd, c.at, now);
+                    }
                 }
             }
             Committed::Seed { query, result } => self.install(&query, result),

@@ -70,6 +70,12 @@ pub struct RequestLog {
     pub rtk_compressed_code_units: i64,
     pub rtk_estimated_tokens_saved: i64,
     pub rtk_filters: Vec<String>,
+    /// Transient, never stored: the requested model held a lone surrogate,
+    /// so `requested_model` is its lossy (U+FFFD) form and names a
+    /// *different* model. The completion debits the key-wide subject only:
+    /// TS's `modelSubjectId` throws before any model subject is debited.
+    #[serde(skip)]
+    pub model_unencodable: bool,
 }
 
 impl RequestLog {
@@ -100,6 +106,7 @@ impl RequestLog {
             rtk_compressed_code_units: 0,
             rtk_estimated_tokens_saved: 0,
             rtk_filters: Vec::new(),
+            model_unencodable: false,
         }
     }
 }
@@ -201,6 +208,10 @@ pub struct Completion {
     pub cost_usd: f64,
     /// `request_logs.at`.
     pub at: f64,
+    /// Whether the model subject is debited: `false` where the request's
+    /// model was unencodable (see `RequestLog::model_unencodable`), carried
+    /// from the request's own event, never inferred from the stored name.
+    pub debit_model: bool,
 }
 
 /// A long-window seed the writer reads on its own connection, between

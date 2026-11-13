@@ -220,6 +220,7 @@ fn run_rust(limits_json: &str, history: &[Value], steps: &[Value]) -> Vec<Value>
                             tokens: t,
                             cost_usd: c,
                             at: row_at,
+                            debit_model: true,
                         },
                     ]),
                     clock,

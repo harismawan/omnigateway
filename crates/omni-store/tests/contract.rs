@@ -594,3 +594,63 @@ async fn the_change_probe_moves_on_a_configuration_write() {
         assert!(p.store.database_path().starts_with("postgres://"));
     }
 }
+
+/// Review A5-R1: a key whose limits and allowlist hold lone surrogates
+/// beside a real U+FFFD survives read → write through the shared create and
+/// edit writers, on both backends, as the exact JSON TS would store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lone_surrogate_limits_and_allowlists_round_trip_through_shared_writers() {
+    const LIMITS: &str = r#"{"requests":{"1m":5},"models":{"\ud800":{"concurrency":1},"\ufffd":{"requests":{"1m":2}},"7":{"tokens":{"5h":9}},"\udc00x":{"spend":{"1w":1.5}}}}"#;
+    const ALLOW: &str = r#"["\ud800","\ufffd","x","\udc00"]"#;
+    // What `JSON.stringify(parseLimitConfig(JSON.parse(LIMITS)))` writes:
+    // the array index first, the rest in insertion order.
+    const LIMITS_TS: &str = "{\"requests\":{\"1m\":5},\"models\":{\"7\":{\"tokens\":{\"5h\":9}},\"\\ud800\":{\"concurrency\":1},\"\u{fffd}\":{\"requests\":{\"1m\":2}},\"\\udc00x\":{\"spend\":{\"1w\":1.5}}}}";
+    // `JSON.stringify(JSON.parse(ALLOW))`: a well-formed U+FFFD is literal.
+    const ALLOW_TS: &str = "[\"\\ud800\",\"\u{fffd}\",\"x\",\"\\udc00\"]";
+    each("contract_lone_round_trip", 0, |s| async move {
+        s.create_key(&key("src", 1)).await.expect("create");
+        s.edit_key("src", OwnedKeyEdit::Limits(LIMITS.into()))
+            .await
+            .expect("a lone-surrogate override is a valid matrix");
+        s.edit_key("src", OwnedKeyEdit::Models(Some(ALLOW.into())))
+            .await
+            .expect("models");
+        let stored = |id: &'static str| {
+            let s = s.clone();
+            async move {
+                let op = s.operator_keys(Some(id)).await.expect("op");
+                (op[0].limits_json.clone(), op[0].allowlist_json.clone())
+            }
+        };
+        assert_eq!(
+            stored("src").await,
+            (LIMITS_TS.to_owned(), Some(ALLOW.to_owned()))
+        );
+
+        // Read through the gateway reader, write back through `create`.
+        let mut copy = s
+            .find_api_key_by_hash("hash-src")
+            .await
+            .expect("find")
+            .expect("src");
+        copy.id = "dst".into();
+        copy.hash = "hash-dst".into();
+        s.create_key(&copy).await.expect("create copy");
+        assert_eq!(
+            stored("dst").await,
+            (LIMITS_TS.to_owned(), Some(ALLOW_TS.to_owned())),
+            "nothing dropped, nothing folded into U+FFFD"
+        );
+        let back = s
+            .find_api_key_by_hash("hash-dst")
+            .await
+            .expect("find")
+            .expect("dst");
+        assert_eq!(back, {
+            let mut c = copy.clone();
+            c.created_at = back.created_at;
+            c
+        });
+    })
+    .await;
+}

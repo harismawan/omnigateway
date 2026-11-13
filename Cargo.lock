@@ -1616,6 +1616,7 @@ name = "omni-ratelimit"
 version = "0.16.0"
 dependencies = [
  "indexmap",
+ "omni-ir",
  "serde",
  "serde_json",
 ]

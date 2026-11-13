@@ -37,6 +37,9 @@ pub struct Finisher {
     now: fn() -> i64,
     pub key_id: Option<String>,
     pub requested_model: String,
+    /// The requested model held a lone surrogate: `requested_model` is its
+    /// lossy form, so the completion must not debit that name's subject.
+    pub model_unencodable: bool,
     /// Dispatch's own log, once the request got that far.
     pub outcome: Option<Arc<Mutex<RequestLog>>>,
     /// The concurrency slot; freed just before the row is written.
@@ -75,6 +78,7 @@ impl Finisher {
             now,
             key_id: None,
             requested_model: String::new(),
+            model_unencodable: false,
             outcome: None,
             admission: None,
             phase: Phase::Handler,
@@ -128,6 +132,7 @@ impl Finisher {
             a.release();
         }
         log.api_key_id = self.key_id.clone();
+        log.model_unencodable = self.model_unencodable;
         // A refused row is counted in the writer's `dropped`, which the
         // writer task warns about at most once per interval. No line here:
         // one per request is a flood exactly when the writer is behind.

@@ -141,11 +141,18 @@ pub fn run(
             }
             let limits = crate::limits::edit(&key["limits"], allow)?;
             let normalized = omni_store::limits::parse_limits(&limits.to_string())
-                .map(|v| v.to_json())
+                .map(|v| v.to_json_well_formed())
                 .unwrap_or_else(|| limits.clone());
+            // The lone-surrogate overrides no flag can name ride along,
+            // as `toLoose(existing.limits)` carries them in TS.
+            let existing = if replaced {
+                omni_ir::jsjson::JsValue::Null
+            } else {
+                listing.limits_js[index].clone()
+            };
             listing
                 .capture_mutation(&store, id, now, "limits", normalized, || {
-                    omni_control::keys::set_limits(&store, id, &limits)
+                    omni_control::keys::set_limits(&store, id, &limits, &existing).map(Some)
                 })
                 .map_err(fail)?;
         }
@@ -165,14 +172,14 @@ pub fn run(
             };
             listing
                 .capture_mutation(&store, id, now, "expiresAt", serde_json::json!(at), || {
-                    omni_control::keys::set_expiry(&store, id, at)
+                    omni_control::keys::set_expiry(&store, id, at).map(|()| None)
                 })
                 .map_err(fail)?;
         }
         "smart-routing" => {
             listing
                 .capture_mutation(&store, id, now, "smartRouting", has("on").into(), || {
-                    omni_control::keys::set_smart_routing(&store, id, has("on"))
+                    omni_control::keys::set_smart_routing(&store, id, has("on")).map(|()| None)
                 })
                 .map_err(fail)?;
         }
@@ -201,6 +208,7 @@ pub fn run(
                             Some(if has("none") { &[] } else { allow })
                         },
                     )
+                    .map(|()| None)
                 })
                 .map_err(fail)?;
         }
@@ -225,6 +233,7 @@ pub fn run(
                         id,
                         if has("clear") { None } else { Some(&policy) },
                     )
+                    .map(|()| None)
                 })
                 .map_err(fail)?;
         }

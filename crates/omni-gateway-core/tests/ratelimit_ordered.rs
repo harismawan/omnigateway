@@ -61,6 +61,7 @@ async fn commit_crossing_minute_uses_application_time_not_row_time() {
             tokens: 0.0,
             cost_usd: 0.0,
             at: minute + 59_999.0,
+            debit_model: true,
         }]),
         minute + 60_001.0,
     );

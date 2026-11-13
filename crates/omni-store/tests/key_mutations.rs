@@ -90,7 +90,7 @@ fn minted_secret_roundtrips_only_as_hash() {
             .expect("key")
             .limits
             .expect("limits")
-            .to_json()["concurrency"],
+            .to_json_well_formed()["concurrency"],
         2
     );
 }
@@ -133,7 +133,7 @@ fn lone_surrogate_escapes_in_stored_json_read_as_js_does() {
     assert!(!limits.has_lone_override(&[0xfffd]));
     assert!(limits.model_override("\u{fffd}").is_none());
     assert_eq!(key.model_allowlist.as_deref(), Some(&["b".to_owned()][..]));
-    assert_eq!(key.lone_allowlist, vec![vec![0xd800]]);
+    assert_eq!(key.lone_allowlist, vec![(0, vec![0xd800])]);
     assert!(key.allows("b", None));
     assert!(!key.allows("\u{fffd}", None), "U+FFFD is not \\ud800");
     assert!(key.allows("\u{fffd}", Some(&[0xd800])));
@@ -258,6 +258,13 @@ fn an_unreadable_row_is_isolated_in_the_snapshot_read() {
         keys::list(c).is_err(),
         "the admin listing still fails, as `keys.list()` throws"
     );
+    // An empty column is `JSON.parse("")`'s error, not `Request.json()`'s
+    // empty-body wording (review A5 r1 minor 2).
+    c.execute("UPDATE api_keys SET model_allowlist='' WHERE id='bad'", [])
+        .expect("empty");
+    let entries = keys::list_entries(c).expect("read");
+    let bad = entries.iter().find_map(|e| e.as_ref().err()).expect("bad");
+    assert_eq!(bad.message, "JSON Parse error: Unexpected EOF");
     assert!(matches!(
         keys::find_entry_by_hash(c, "hb").expect("read"),
         Some(Err(_))

@@ -546,21 +546,45 @@ impl RateLimiter {
         row_at: f64,
         now: f64,
     ) {
+        self.debit_subjects(
+            &[key_id.to_owned(), model_subject_id(key_id, requested_model)],
+            tokens,
+            cost_usd,
+            row_at,
+            now,
+        );
+    }
+
+    /// [`Self::debit`] of the key-wide subject alone: a completion whose
+    /// requested model TS could not encode. TS's `debit` adds to the key's
+    /// subject, then `modelSubjectId` throws before any model's.
+    pub fn debit_key_only(&self, key_id: &str, tokens: f64, cost_usd: f64, row_at: f64, now: f64) {
+        self.debit_subjects(&[key_id.to_owned()], tokens, cost_usd, row_at, now);
+    }
+
+    fn debit_subjects(
+        &self,
+        subjects: &[String],
+        tokens: f64,
+        cost_usd: f64,
+        row_at: f64,
+        now: f64,
+    ) {
         let delta = Counts {
             requests: 1.0,
             tokens,
             cost_usd,
         };
         let mut st = self.lock();
-        for subject in [key_id.to_owned(), model_subject_id(key_id, requested_model)] {
-            let Some(limits) = st.limits.get(&subject) else {
+        for subject in subjects {
+            let Some(limits) = st.limits.get(subject) else {
                 continue;
             };
             if !any_long_limit(limits) {
                 continue;
             }
             for window in LONG {
-                let state = &mut st.long_of(&subject)[long_index(window)];
+                let state = &mut st.long_of(subject)[long_index(window)];
                 if state.buckets.is_seeded() {
                     state.buckets.add(now, delta);
                     state.push_stamp(row_at);

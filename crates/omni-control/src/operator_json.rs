@@ -209,6 +209,8 @@ mod tests {
             let listing = crate::keys::KeyListing {
                 data: serde_json::json!({"keys":[{"modelAllowlist":null},{"modelAllowlist":null}]}),
                 allowlists: vec![earlier, later],
+                limits_js: vec![JsValue::Null, JsValue::Null],
+                usage_js: vec![JsValue::Array(vec![]), JsValue::Array(vec![])],
             };
             assert_eq!(models(&listing.allowlists[0]).expect("earlier"), "0");
             assert_eq!(models(&listing.allowlists[1]), Err("No default value".into()));

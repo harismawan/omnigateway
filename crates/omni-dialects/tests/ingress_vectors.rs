@@ -228,3 +228,76 @@ fn a_lone_surrogate_model_is_kept_as_exact_utf16() {
         ("\u{fffd}".into(), Some(vec![0xd801]))
     );
 }
+
+/// Review A5-R3: recovering the exact model of a body whose model reads as
+/// U+FFFD is linear in the body, however wide an unrelated object in it is.
+/// 20,000 distinct keys cost at most a small constant per byte (the old
+/// duplicate-key search alone took ~2·10⁸ key comparisons); a literal U+FFFD
+/// model is not a lone surrogate.
+#[test]
+fn recovering_a_lone_model_is_linear_in_a_wide_body() {
+    let h = Headers::default();
+    let wide: Vec<String> = (0..20_000).map(|i| format!(r#""k{i}":{i}"#)).collect();
+    let body = |m: &str| {
+        format!(
+            r#"{{"model":"{m}","x":{{{}}},"messages":[{{"role":"user","content":"hi"}}]}}"#,
+            wide.join(",")
+        )
+    };
+    for (m, want) in [
+        (r"\ufffd", None),
+        ("\u{fffd}", None),
+        (r"\ud800", Some(vec![0xd800])),
+    ] {
+        let text = body(m);
+        let mut ids = counter_ids();
+        let mut opts = IngressOptions {
+            new_tool_use_id: &mut ids,
+        };
+        let before = omni_ir::jsjson::scan_steps();
+        let got = ingress::ingest(ingress::Surface::OpenAi, &text, &h, &mut opts).expect("ingests");
+        let steps = omni_ir::jsjson::scan_steps() - before;
+        assert_eq!(got.model_lone, want, "{m}");
+        assert!(
+            steps <= 4 * text.len() as u64,
+            "{steps} scan steps for a {}-byte body",
+            text.len()
+        );
+    }
+}
+
+/// The lossless parser's duplicate-key handling is linear too (a stored row
+/// or an operator file can be as wide), and keeps `JSON.parse`'s semantics:
+/// the last value in the first one's position, UTF-16 keys distinct.
+#[test]
+fn the_lossless_parser_handles_wide_objects_and_duplicates_linearly() {
+    let wide: Vec<String> = (0..20_000).map(|i| format!(r#""k{i}":{i}"#)).collect();
+    let text = format!(
+        r#"{{{},"k5":"last","\ud800":1,"\ufffd":2,"\ud800":3}}"#,
+        wide.join(",")
+    );
+    let before = omni_ir::jsjson::scan_steps();
+    let v = omni_ir::jsjson::parse_js(&text).expect("parses");
+    let steps = omni_ir::jsjson::scan_steps() - before;
+    assert!(
+        steps <= 4 * text.len() as u64,
+        "{steps} steps for {} bytes",
+        text.len()
+    );
+    let omni_ir::jsjson::JsValue::Object(fields) = &v else {
+        panic!("object")
+    };
+    assert_eq!(fields.len(), 20_002);
+    assert_eq!(
+        fields[5].1,
+        omni_ir::jsjson::JsValue::String("last".encode_utf16().collect())
+    );
+    assert_eq!(
+        fields[20_000],
+        (vec![0xd800], omni_ir::jsjson::JsValue::Number(3.0))
+    );
+    assert_eq!(
+        fields[20_001],
+        (vec![0xfffd], omni_ir::jsjson::JsValue::Number(2.0))
+    );
+}

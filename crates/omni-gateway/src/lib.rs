@@ -126,7 +126,12 @@ pub fn spawn_preseeder(
                 let limits = k
                     .limits
                     .as_ref()
-                    .map_or(serde_json::Value::Null, omni_store::LimitConfig::to_json);
+                    // Well-formed view on purpose: a lone-surrogate override
+                    // is never seeded (TS never builds its subject).
+                    .map_or(
+                        serde_json::Value::Null,
+                        omni_store::LimitConfig::to_json_well_formed,
+                    );
                 if seen.get(&k.id) != Some(&limits)
                     && let Some(l) = &k.limits
                     && !l.is_unlimited()

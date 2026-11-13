@@ -903,10 +903,13 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         omni_dialects::ingress::check_model_allowed(&chat.model, key.allows(&chat.model, lone))?;
         fin.requested_model = chat.model.clone();
         // A model holding a lone surrogate the key admits: TS throws its
-        // URIError building the model's rate-limit subject (at admission or,
-        // in every case, at the completion's debit). Refused here, before
-        // anything is claimed or sent upstream (see the A5 report).
+        // URIError building the model's rate-limit subject, at admission
+        // where an override names it, else at the completion's debit after
+        // dispatch. Refused here instead, before anything is claimed or sent
+        // upstream (a documented divergence; see the A5 report). The row's
+        // completion debits the key-wide subject only, as TS's does.
         if lone.is_some() {
+            fin.model_unencodable = true;
             return Err(omni_dialects::ingress::lone_surrogate_model_error());
         }
         #[allow(clippy::cast_precision_loss)]
