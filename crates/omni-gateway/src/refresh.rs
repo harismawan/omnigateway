@@ -192,6 +192,9 @@ impl Refresher {
         self.run(current).await
     }
     async fn run(&self, c: &Credential) -> Result {
+        if let omni_store::Secret::Unreadable(error) = &c.secrets.refresh_token {
+            return Err(GatewayError::new(ErrorCode::Internal, error.to_string()));
+        }
         let token = c.secrets.refresh_token.as_deref().ok_or_else(|| {
             GatewayError::new(
                 ErrorCode::Auth,

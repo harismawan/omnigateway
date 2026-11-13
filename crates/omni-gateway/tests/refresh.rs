@@ -99,6 +99,32 @@ async fn sweep_refreshes_due_rows_and_disables_expired_without_token() {
 }
 
 #[tokio::test]
+async fn unreadable_refresh_is_internal_not_auth_and_keeps_enabled() {
+    let (_dir, service, http, c) = fixture(200).await;
+    if let Store::Sqlite { store, .. } = service.store.as_ref() {
+        store
+            .lock()
+            .unwrap()
+            .connection()
+            .execute("UPDATE credentials SET refresh_token='broken'", [])
+            .unwrap();
+    }
+    let error = service.refresh(&c).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Internal);
+    assert_eq!(error.message, "malformed ciphertext");
+    assert_eq!(http.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        service
+            .store
+            .credential(&service.key, "c")
+            .await
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+}
+
+#[tokio::test]
 async fn unrelated_corrupt_row_cannot_break_refresh() {
     let (_dir, service, _, c) = fixture(200).await;
     if let Store::Sqlite { store, .. } = service.store.as_ref() {
