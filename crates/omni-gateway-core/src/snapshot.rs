@@ -256,10 +256,15 @@ impl SnapshotHolder {
         self.current.load_full()
     }
 
-    /// Replaces the snapshot wholesale.
-    pub fn store(&self, next: GatewaySnapshot) {
-        self.current.store(Arc::new(next));
-        self.generation.fetch_add(1, Ordering::AcqRel);
+    /// Publish only if no writer has published since the database read began.
+    /// On conflict the caller must re-read, including deletions.
+    pub fn publish_snapshot(&self, observed: &Arc<GatewaySnapshot>, next: GatewaySnapshot) -> bool {
+        let previous = self.current.compare_and_swap(observed, Arc::new(next));
+        let published = Arc::ptr_eq(&previous, observed);
+        if published {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        published
     }
 
     /// How many wholesale replacements have happened since boot.
@@ -270,9 +275,13 @@ impl SnapshotHolder {
     /// Re-reads the store and swaps the result in. Blocking: call it from
     /// the refresher or `spawn_blocking`, never on a request task.
     pub fn rebuild(&self, store: &SqliteStore) -> Result<(), StoreError> {
-        let next = read_snapshot(store, &self.key, now_ms())?;
-        self.store(next);
-        Ok(())
+        loop {
+            let observed = self.current.load_full();
+            let next = read_snapshot(store, &self.key, now_ms())?;
+            if self.publish_snapshot(&observed, next) {
+                return Ok(());
+            }
+        }
     }
 
     /// `healthSaved`: this process's own health write, patched into the
@@ -289,13 +298,17 @@ impl SnapshotHolder {
     }
 
     /// Publish a completed credential mutation before another request ranks it.
-    /// Do not let an older refresh overwrite a newer snapshot rotation.
+    /// Versions order rotations; disable dominates enabled at the same version.
+    /// Re-enablement belongs to an authoritative database rebuild. Patches never
+    /// insert missing rows, so deletion cannot resurrect a credential.
     pub fn patch_credential(&self, row: omni_store::Credential) {
         self.current.rcu(|cur| {
             let mut next = GatewaySnapshot::clone(cur);
             if let Some(current) = next.routing.credentials.iter_mut().find(|c| c.id == row.id)
-                && (current.token_version, current.updated_at)
-                    <= (row.token_version, row.updated_at)
+                && (current.token_version < row.token_version
+                    || (current.token_version == row.token_version
+                        && current.enabled
+                        && !row.enabled))
             {
                 *current = row.clone();
             }

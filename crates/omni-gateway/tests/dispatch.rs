@@ -427,6 +427,30 @@ async fn a_429_parks_the_credential_with_its_retry_after() {
 }
 
 #[tokio::test]
+async fn delayed_rebuild_and_equal_stamp_patch_cannot_restore_old_credential() {
+    let f = fixture(&["c0"]);
+    let h = harness(&f, vec![]);
+    let observed = h.deps.holder.load();
+    let store = omni_store::SqliteStore::open(&f.path, 0).expect("store");
+    let stale = omni_gateway_core::snapshot::read_snapshot(&store, &key(), 0.0).expect("read");
+    let old = observed.routing.credentials[0].clone();
+    let mut disabled = old.clone();
+    disabled.enabled = false;
+    h.deps.holder.patch_credential(disabled);
+    h.deps.holder.patch_credential(old.clone());
+    assert!(!h.deps.holder.load().routing.credentials[0].enabled);
+    assert!(!h.deps.holder.publish_snapshot(&observed, stale));
+    store
+        .connection()
+        .execute("DELETE FROM credentials", [])
+        .expect("delete");
+    h.deps.holder.rebuild(&store).expect("rebuild");
+    h.deps.holder.patch_credential(old);
+    assert!(h.deps.holder.load().routing.credentials.is_empty());
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn null_expiry_does_not_trigger_refresh() {
     let f = fixture(&["c0"]);
     let conn = rusqlite::Connection::open(&f.path).expect("db");
