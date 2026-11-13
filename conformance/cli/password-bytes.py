@@ -20,7 +20,7 @@ while True:
     elif answered == 1 and b"Repeat it: " in out:
         # The TS seam answers itself; Rust consumes the identical byte sequence.
         if os.environ.get("READER_RUST") == "1":
-            for part in parts:
+            for part in json.loads(os.environ.get("READER_SECOND", sys.argv[1])):
                 os.write(master, bytes.fromhex(part))
                 time.sleep(0.01)
         answered = 2

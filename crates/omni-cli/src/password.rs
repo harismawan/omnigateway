@@ -10,7 +10,7 @@ impl Drop for Terminal {
         let _restored = tcsetattr(std::io::stdin(), OptionalActions::Now, &self.0);
     }
 }
-fn secret(question: &str) -> Result<String, String> {
+fn secret(question: &str) -> Result<Vec<u16>, String> {
     let saved = tcgetattr(std::io::stdin()).map_err(|e| e.to_string())?;
     let mut raw = saved.clone();
     raw.make_raw();
@@ -80,7 +80,21 @@ fn secret(question: &str) -> Result<String, String> {
     drop(_terminal);
     result?;
     eprintln!();
-    Ok(omni_ir::js::trim(&String::from_utf16_lossy(&line)).into())
+    let whitespace = |u: &u16| {
+        char::from_u32(u32::from(*u)).is_some_and(|c| {
+            let mut buf = [0; 4];
+            omni_ir::js::trim(c.encode_utf8(&mut buf)).is_empty()
+        })
+    };
+    let start = line
+        .iter()
+        .position(|u| !whitespace(u))
+        .unwrap_or(line.len());
+    let end = line
+        .iter()
+        .rposition(|u| !whitespace(u))
+        .map_or(start, |i| i + 1);
+    Ok(line[start..end].to_vec())
 }
 pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
     let store = crate::context::open(flags)?;
@@ -90,7 +104,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
         if again != password {
             return Err("the two passwords do not match".into());
         }
-        password
+        String::from_utf16_lossy(&password)
     } else {
         let mut bytes = Vec::new();
         std::io::stdin()
