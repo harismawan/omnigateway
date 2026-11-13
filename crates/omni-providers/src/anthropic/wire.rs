@@ -112,8 +112,8 @@ fn last_cacheable(messages: &mut [Value]) -> Option<&mut Value> {
     None
 }
 
-/// Base request assembly. Vendor/structured-output and automatic caching are
-/// layered separately; this entry point preserves explicit client markers.
+/// Request assembly including vendor/structured-output merge. The option-bearing
+/// entry point controls automatic caching and system preservation.
 pub fn to_wire(
     req: &omni_ir::request::ChatRequest,
     model: &str,

@@ -1,8 +1,23 @@
-//! Claude CLI identity. Overrides are read when constructing a profile.
+//! Claude CLI identity captured once by gateway startup, as TS captures on import.
+use std::{collections::HashMap, sync::OnceLock};
+static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Call before serving requests. Library consumers initialize on first use.
+pub fn initialize() {
+    ENV.get_or_init(|| {
+        std::env::vars()
+            .filter(|(k, _)| k.starts_with("OMNI_"))
+            .collect()
+    });
+}
+fn raw_env(name: &str) -> Option<&'static String> {
+    initialize();
+    ENV.get().and_then(|env| env.get(name))
+}
 pub fn env(name: &str, fallback: &str) -> String {
-    std::env::var(name)
-        .ok()
+    raw_env(name)
         .filter(|s| safe(s))
+        .cloned()
         .unwrap_or_else(|| fallback.into())
 }
 fn safe(s: &str) -> bool {
@@ -65,7 +80,7 @@ pub fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
         }
     }
     let default = "Accept,Authorization,Content-Type,User-Agent,X-Stainless-Arch,X-Stainless-Lang,X-Stainless-OS,X-Stainless-Package-Version,X-Stainless-Retry-Count,X-Stainless-Runtime,X-Stainless-Runtime-Version,X-Stainless-Timeout,anthropic-beta,anthropic-dangerous-direct-browser-access,anthropic-version,x-api-key,x-app,Connection,Host,Accept-Encoding,Content-Length";
-    let raw = std::env::var("OMNI_ORDER_ANTHROPIC").unwrap_or_default();
+    let raw = raw_env("OMNI_ORDER_ANTHROPIC").map_or("", String::as_str);
     let parts: Vec<_> = raw
         .split(',')
         .map(omni_ir::js::trim)
