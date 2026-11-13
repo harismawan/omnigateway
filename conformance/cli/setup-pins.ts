@@ -30,10 +30,21 @@ db.run("INSERT INTO virtual_models VALUES ('pool', ?, 'weighted', 0)", [
     { provider: "openai", model: "gpt-6-astra", credentialId: "api", endpointId: "" },
   ]),
 ]);
-for (const [data, expected] of [
-  [{}, 922000],
-  [{ endpointId: "" }, 272000],
+for (const [data, expected, enabled, pin, endpoint] of [
+  [{}, 922000, 1, "api", ""],
+  [{ endpointId: "" }, 272000, 1, "api", ""],
+  [{}, 272000, 0, "api", ""],
+  [{}, 272000, 1, "missing", ""],
+  [{ endpointId: "custom" }, 922000, 1, "api", "custom"],
+  [{ endpointId: "other" }, 272000, 1, "api", "custom"],
+  [{ endpointId: 42 }, 272000, 1, "api", ""],
 ] as const) {
+  db.run("UPDATE credentials SET enabled=? WHERE id='api'", [enabled]);
+  db.run("UPDATE virtual_models SET targets=?", [
+    JSON.stringify([
+      { provider: "openai", model: "gpt-6-astra", credentialId: pin, endpointId: endpoint },
+    ]),
+  ]);
   db.run("UPDATE credentials SET provider_data=? WHERE id='api'", [JSON.stringify(data)]);
   const results = [];
   for (const cmd of [
@@ -83,4 +94,4 @@ for (const [data, expected] of [
   assert.deepEqual(results[1], results[0]);
 }
 db.close();
-console.log(`PASS 2 independent setup pin limit regressions (${root})`);
+console.log(`PASS 7 setup pin limit regressions (${root})`);

@@ -1,10 +1,21 @@
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { mkdtempSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { PROVIDER_DESCRIPTORS } from "../../packages/providers/src/descriptors.ts";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 
 const root = mkdtempSync("/tmp/opencode/e1-e5/setup-limits-");
+const binary = resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni");
+await Bun.write(
+  join(root, "manifest.json"),
+  JSON.stringify({
+    commit: Bun.spawnSync(["git", "rev-parse", "HEAD"]).stdout.toString().trim(),
+    binary,
+    sha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
+  }),
+);
 const env = {
   ...process.env,
   OMNI_ENCRYPTION_KEY: "setup-golden-secret",
@@ -26,14 +37,23 @@ let count = 0;
 for (const credentials of [[], ["oauth"], ["apiKey"], ["oauth", "apiKey"]])
   for (const credentialId of [undefined, "c0", "c1", "missing"])
     for (const targets of [
-      [{ provider: "openai", model: "gpt-5" }],
-      [{ provider: "openai", model: "gpt-5", contextWindow: 999, maxOutputTokens: 111 }],
+      [{ provider: "openai", model: "gpt-6-astra" }],
+      [{ provider: "openai", model: "gpt-6-astra", contextWindow: 999, maxOutputTokens: 111 }],
       [
-        { provider: "openai", model: "gpt-5" },
-        { provider: "anthropic", model: "claude-sonnet-4-5" },
+        { provider: "openai", model: "gpt-6-astra" },
+        { provider: "anthropic", model: "claude-sonnet-5" },
       ],
       [{ provider: "unknown", model: "unknown" }],
     ]) {
+      for (const target of targets) {
+        if (target.provider !== "unknown")
+          assert(
+            PROVIDER_DESCRIPTORS[target.provider]?.catalog.models.some(
+              (m) => m.id === target.model,
+            ),
+            `missing catalog fixture ${target.model}`,
+          );
+      }
       db.run("DELETE FROM virtual_models");
       db.run("DELETE FROM credentials");
       db.run("INSERT INTO virtual_models VALUES ('pool', ?, 'weighted', 0)", [
@@ -69,6 +89,29 @@ for (const credentials of [[], ["oauth"], ["apiKey"], ["oauth", "apiKey"]])
           err: await new Response(p.stderr).text(),
           code: await p.exited,
         });
+        const result = results.at(-1);
+        assert(result);
+        assert.equal(result.code, 0);
+        assert.equal(result.err, "");
+        const nested = JSON.parse(result.out);
+        assert.equal(nested.code, 0);
+        const transcript = Buffer.from(nested.bytes, "hex").toString();
+        const config = JSON.parse(
+          JSON.parse(transcript.slice(transcript.indexOf("{"))).files[0].contents,
+        );
+        const model = config.provider.omnigateway.models.pool;
+        if (targets[0]?.provider === "unknown") assert.equal(model.limit, undefined);
+        else {
+          const pinned =
+            credentialId === undefined ? undefined : credentials[Number(credentialId.slice(1))];
+          const oauth = pinned === undefined ? credentials.includes("oauth") : pinned === "oauth";
+          assert.deepEqual(
+            model.limit,
+            targets[0]?.contextWindow === 999
+              ? { context: 999, output: 111 }
+              : { context: oauth ? 272000 : 922000, output: 128000 },
+          );
+        }
         assert.deepEqual(snapshot(), before, "setup must preserve every database table");
       }
       await Bun.write(
@@ -121,6 +164,10 @@ for (const client of ["claude", "opencode"]) {
       });
     }
     assert.deepEqual(results[1], results[0]);
+    for (const result of results) {
+      assert.equal(result.code, 0);
+      assert.equal(JSON.parse(result.out).code, 0);
+    }
     count++;
   }
 }
@@ -153,6 +200,7 @@ for (const client of ["claude", "opencode"]) {
       });
     }
     assert.deepEqual(results[1], results[0]);
+    for (const result of results) assert.equal(result.code, 2);
     parserCount++;
   }
 }
