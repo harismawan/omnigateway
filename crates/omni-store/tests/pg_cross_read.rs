@@ -656,3 +656,54 @@ async fn edge_rows_read_as_ts_reads_them() {
             .is_none()
     );
 }
+
+/// Review A5 r1 (I2 on a live Postgres, minor 2): a key whose stored
+/// allowlist `JSON.parse` refuses is that key's entry alone, carrying
+/// `JSON.parse(stored)`'s own message: an empty column is `Unexpected EOF`,
+/// not an empty request body's wording. Every other key still reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_allowlist_is_isolated_with_json_parses_message() {
+    let Some(base) = base_url("an_unreadable_allowlist_is_isolated_with_json_parses_message")
+    else {
+        return;
+    };
+    let db = TestDb::create(&base, "bad_allowlist").await;
+    let store = PgStore::open(PgConfig::new(&db.url), 0)
+        .await
+        .expect("open");
+    let c = db.client().await;
+    c.batch_execute(
+        "INSERT INTO api_keys (id, label, prefix, hash, model_allowlist, limits, created_at)
+           VALUES ('empty', 'e', 'p', 'h-empty', '', '{}', 3),
+                  ('bad', 'b', 'p', 'h-bad', '{bad', '{}', 2),
+                  ('good', 'g', 'p', 'h-good', '[\"m\"]', '{}', 1);",
+    )
+    .await
+    .expect("rows");
+    let key = omni_crypto::field::derive_key(SECRET);
+    let snap = store.snapshot_reads(&key).await.expect("snapshot");
+    let errors: Vec<(&str, &str, &str)> = snap
+        .api_keys
+        .iter()
+        .filter_map(|e| e.as_ref().err())
+        .map(|e| (e.id.as_str(), e.hash.as_str(), e.message.as_str()))
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            ("empty", "h-empty", "JSON Parse error: Unexpected EOF"),
+            ("bad", "h-bad", "JSON Parse error: Expected '}'"),
+        ]
+    );
+    let good: Vec<&str> = snap
+        .api_keys
+        .iter()
+        .flatten()
+        .map(|k| k.id.as_str())
+        .collect();
+    assert_eq!(good, ["good"], "the readable key is served beside them");
+    assert!(
+        store.list_api_keys().await.is_err(),
+        "the admin listing still fails, as `keys.list()` throws"
+    );
+}
