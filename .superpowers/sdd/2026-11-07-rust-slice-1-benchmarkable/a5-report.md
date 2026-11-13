@@ -271,3 +271,226 @@ summaries and CLI listing print it unchanged.
   catches a corruption within one poll (≤ 500 ms). TS reads the row on every request.
 - **Repair path:** a bad key cannot be repaired over `/api` in either build, because the edit
   reads the row first.
+
+## Fix round 2
+
+**Bookkeeping status: BLOCKED by the fresh surface gate (2 failures); stopped without a
+source fix or retry.** Retained passing results below do not supersede that failure.
+
+Review: `a5-r1-review.md`. Range: `04c3c5af..2b6f1165`; implementation `2998e305`,
+follow-ups `d4e2d54f`, `d12b397b`, `1727cde2`, `ba0edb26`, `2b6f1165`.
+Evidence root **E = `/tmp/opencode/a5-fix2/`** below; every relative log path in this
+section is relative to E. This bookkeeping pass read the review, commit stats and diffs,
+test-result lines, driver reports, CLI output, RED and mutation output. It adds no source fix.
+The corrections below supersede conflicting claims in the original report and round 1.
+
+### Findings → changes → evidence
+
+**R1 — lossless public limits and shared persistence (`2998e305`).**
+`LimitConfig::to_js` / `to_json_text` restore lone-surrogate overrides at their original
+positions. Shared create/edit writers preserve those limits and interleaved allowlist names
+on SQLite and Postgres. CLI JSON summaries and usage use exact JS values; human output keeps
+all entries, printing lone names as replacement characters as TS does. CLI limit edits retain
+overrides flags cannot spell. `to_json_well_formed` is explicitly partial; serde serialization
+still uses that partial diagnostic view, not the complete persistence/operator form.
+
+- Behavioral RED: `red-r1-cli.txt` shows the missing override/usage beside genuine U+FFFD;
+  `red-store-round-trip.txt` fails `lone_surrogate_limits_and_allowlists_round_trip_through_shared_writers`
+  at the edit with `Corrupt("unreadable limits")` (not a compilation failure).
+- `mutation-r1-create-columns.txt` restores only the lossy create helpers: the same contract
+  test fails its exact column comparison, demonstrating create loss independently of edit.
+- GREEN: that contract test passes in `workspace.log` (SQLite leg), `store-postgres.log`
+  and `pg-legs-ran.txt` (explicit SQLite + Postgres execution). `green-r1-cli.txt` shows the
+  review's API-created lone-only key listed identically, including `limitUsage`.
+- `conformance/cli/lone-surrogates.ts`: `d12b397b` adds the 64-override cap and lone-only
+  edit matrices; `ba0edb26` adds API-created keys and explicit listing assertions.
+  `red-cli-lone.txt` reports **35/36 differing comparisons**, while
+  `cli-lone-surrogates.log` reports **36 PASS** (bytes, status, whole `api_keys` table).
+
+**R2 — completion identity (`2998e305`; driver strengthening `ba0edb26`).**
+The finisher carries `model_unencodable` through both writers into transient
+`Completion::debit_model`. Such a completion debits the key-wide subject only; the persisted
+U+FFFD name is not used to choose its live model subject.
+
+- Behavioral RED `red-r2.txt`: gateway test
+  `an_early_refused_lone_model_never_debits_the_replacement_character_model` gets 429 instead
+  of 200 live. GREEN `workspace.log`: that test passes, including its distinct post-restart
+  expectation of 429 from persisted U+FFFD history.
+- Companion test `an_early_refused_lone_model_still_debits_the_key_wide_subject` passes in
+  `workspace.log`. `mutation-key-wide-debit.txt` disables that debit: companion fails
+  (200 instead of 429), while the non-aliasing test still passes; **1 passed / 1 failed**.
+- `a_completion_carries_the_requests_model_identity_not_the_stored_name` passes in SQLite
+  `writer.rs` and live-PG `pg_writer.rs`; `pg-legs-ran.txt` explicitly records the latter.
+- Driver `key-identity` seeds U+FFFD's long window with `count_tokens`, refuses a lone model,
+  then counts U+FFFD twice without a restart. `red.log` / `red-driver/report.txt` have two
+  200-versus-429 failures; `green.log` / `green-driver/report.txt` have neither.
+  `ba0edb26` pins both complete normalized responses for the one admission-header divergence,
+  requiring a difference rather than masking all headers. `mutation-pinned-divergence.txt`
+  sends TS on both sides and fails **UNEXPECTED-EQUAL** (82 equal / 0 expected / 1 failure).
+
+**R3 — linear extraction and duplicate handling (`2998e305`, robustness `1727cde2`).**
+Ingress extracts the final top-level model string with a linear scanner, skipping unrelated
+values. The full lossless parser indexes objects wider than eight members, preserving
+insertion order, last-duplicate-wins semantics and distinct UTF-16 names.
+
+- `red-r3.txt` is **compilation RED only**: missing `scan_steps`, not a measured behavioral
+  regression. Behavioral mutation evidence is `mutation-r3.txt`: disabling the object index
+  fails `the_lossless_parser_handles_wide_objects_and_duplicates_linearly` at 200,347,829
+  steps for 277,826 bytes; restoring whole-body quadratic ingress also fails
+  `recovering_a_lone_model_is_linear_in_a_wide_body` at 200,267,852 steps for 277,848 bytes.
+- Both tests pass in `workspace.log` and `dialects-after-doc.log`; these are structural
+  work-count checks, not throughput benchmarks. The HTTP driver also exercises a 20,000-key
+  ignored object next to a literal U+FFFD model.
+- `top_level_string_agrees_with_the_full_parse` passes. `red-extractor-total.txt` records
+  `top_level_string_never_panics_on_text_that_is_not_json` panicking on a truncated string;
+  `1727cde2` fixes it and `workspace.log` records GREEN. The extractor is intentionally not
+  a JSON validator; malformed input can return a member-shaped prefix or None.
+
+**Minor 1 — independent content-length assertions (`2998e305`).**
+`lengthProblem` now produces a per-binary failure even when both binaries have the same bad
+length. Twelve startup self-check cases cover bad/duplicate/nonnumeric lengths, HEAD,
+204/304 and chunked framing. HEAD/no-body responses are checked for no transmitted body,
+not equality with representation length. GREEN is the admin-routes run; no separately
+retained pre-fix behavioral RED for this minor. The self-checks are not extra Rust test counts.
+
+**Minor 2 — empty stored allowlist wording (`2998e305`, PG regression `d4e2d54f`).**
+Stored JSON uses `parse_js`'s `JSON Parse error: Unexpected EOF`, not empty request-body
+wording. `red-empty-allowlist.txt` and `red-pg-empty-allowlist.txt` each show **0 passed /
+1 failed** on the message comparison. GREEN tests are
+`an_unreadable_row_is_isolated_in_the_snapshot_read` (SQLite) and
+`an_unreadable_allowlist_is_isolated_with_json_parses_message` (live PG, `pg-legs-ran.txt`).
+The latter checks bad/empty rows alongside a healthy row and continued admin-list refusal.
+Driver `boot-bad-keys: bk-empty GET /v1/models` is the third behavioral failure in `red.log`,
+and passes in `green.log`. This adds real PG store/snapshot-read evidence; the gateway
+refresh/miss integration remains SQLite-only.
+
+**Minor 3 — reset claim (`2998e305`).**
+`normalizeV1` now explicitly says reset/retry values are masked. These runs establish their
+presence/shape where compared, not correctness against a clock. Documentation correction;
+no RED/GREEN correctness test for reset values is claimed.
+
+**Minor 4 — secret assertion scope (`2998e305`).**
+The driver counts textual occurrences in observed response heads/bodies and captured process
+stdout/stderr, and records mint-validation exceptions instead of swallowing them. Its
+overlapping-occurrence self-check runs at startup. GREEN covers **38 minted raw keys**,
+each once in its own mint response within that observed scope. No independent pre-fix
+mutation/behavioral RED is retained for this minor; no claim about arbitrary unobserved
+output is made.
+
+**Minor 5 — report precision (`2998e305`, `2b6f1165`, this report appendix).**
+`2b6f1165` changes only the ingress documentation to say TS throws at admission for an exact
+override, otherwise whenever a completed row's debit is attempted. Timing, streaming,
+accounting, reset masking and CLI counts are corrected below. Round 1's `red-store.txt`
+was a compile failure against absent APIs, distinct from its four behavioral HTTP REDs.
+This round's complete driver pair is **847 equal / 1 expected / 3 failures → 850 equal /
+1 expected / 0 failures**; each log is byte-identical to its corresponding `report.txt`.
+
+### Gate chronology and retained results
+
+Times here are 2026-11-13 UTC+07. The last runtime-code change is `1727cde2` at **12:35:47**;
+`ba0edb26` at **13:11:53** changes test drivers only; HEAD `2b6f1165` at **13:21:50** changes
+one documentation line. `workspace.log` finishes at **13:30:14**, after HEAD; its compile
+duration is 53.80 s and summed suite durations 182.62 s (approximately a 13:26 start).
+It includes the final extractor regression. The file was initially created at 11:32 and
+reused, so its birth time is not this run's start. No later commit changes code. The log
+does not embed a SHA/start timestamp: chronology supports final-HEAD execution, rather
+than providing a cryptographic source/binary attestation.
+
+- `cargo test --workspace --no-fail-fast`, retained `workspace.log`: summed **988 passed /
+  0 failed / 7 ignored**, across 103 result summaries. No workspace rerun needed.
+  PostgreSQL tests that return early without `OMNI_TEST_DATABASE_URL` still count as passes;
+  this is not a claim that the workspace run exercised PG.
+- Retained `clippy.log` ends successfully at **13:23:28** with no diagnostics
+  (`cargo clippy --workspace --all-targets -- -D warnings` gate). `fmt.log` is empty at
+  **13:26:15**, but has no saved exit status; a fresh format check is recorded below.
+- `dialects-after-doc.log`, after HEAD: **52 passed / 0 failed / 0 ignored**.
+- Live-PG store suite `store-postgres.log`: **143 passed / 0 failed / 5 ignored**;
+  runs 7 and 8 also have those totals. `pg-legs-ran.txt` at **13:23:45** explicitly
+  records three focused tests actually running with PG (each **1 passed / 0 failed**):
+  R1 round trip, malformed allowlist isolation, R2 completion identity. It separately
+  demonstrates two PG-only tests silently returning when the URL is unset.
+- Retained drivers: `admin-auth.log` **212 equal / 4 expected / 0 failures**;
+  `surface.log` **606 equal / 61 expected / 0 failures**. `run.log` says **all rows equal**:
+  41 request cases, disconnect check, request-ID check, and four DB comparisons
+  (`request_logs` 37 rows, `usage_daily` 18, `usage_rollup` 6, `credential_health` 4).
+- CLI retained logs: `cli-keys-list.log` **135**; `cli-key-mutations.log` **156 mutation +
+  4 repair + 3 usage/null-pruning + 5 PTY + 16 creation** comparisons; `cli-captured-summary.log`
+  **PASS** (no count printed); `cli-date-boundaries.log` **40**;
+  `cli-settings.log` **347 plus crossread**; `cli-model-puts.log` **302**;
+  `cli-lone-surrogates.log` **36**, all passing. `cli-model-reads.log` **262**,
+  `cli-model-catalog.log` **510 comparisons + 12 Rust-only plugin-refusal checks**,
+  `cli-model-removals.log` **47**, all passing after the last runtime-code change.
+  `cli-provider-catalog.log` only says it wrote a data file: it is a generator result,
+  not a golden-suite PASS. `biome.log`: **2 files checked, no fixes applied**.
+
+### Fresh bookkeeping gates — stopped on failure
+
+The retained admin-auth/surface/run and several CLI logs predate `1727cde2`, and the retained
+release copy `bin/rust-fix2` is timestamped 12:29, also before that parser change. Thus even
+the later admin-routes log alone does not establish which parser binary it exercised.
+The final CLI driver was committed after its retained run. A sequential, fail-fast refresh
+was started at final HEAD; `bookkeeping/manifest.txt` records SHA, exact commands, start/end
+times and exit codes. Rust binaries were built in place at `target/release`; the TS binary
+was `/tmp/opencode/a5/bin/ts-omnigateway`.
+
+| Fresh gate | Result | Log under E |
+|---|---|---|
+| `cargo build --release -p omni-gateway -p omni-cli` | exit 0 | `bookkeeping/build.log` |
+| `cargo fmt --check` | exit 0, no diagnostics | `bookkeeping/fmt.log` |
+| `admin-routes.ts` | **850 equal / 1 expected / 0 failures**, 38 raw keys | `bookkeeping/admin-routes.log`, `bookkeeping/admin-routes/report.txt` |
+| `admin-auth.ts` | **212 equal / 4 expected / 0 failures**, 116 distinct tokens | `bookkeeping/admin-auth.log`, `bookkeeping/admin-auth/report.txt` |
+| `surface.ts` | **604 equal / 61 expected / 2 failures**, exit 1 | `bookkeeping/surface.log`, `bookkeeping/surface/report.txt` |
+
+The two failures are `unset: unset GET /` and `unset: unset GET /nested`: TS returns JSON
+404 (`NOT_FOUND`); Rust returns 200 `text/html`, content-length 1494, containing the dashboard.
+The failing run used the in-checkout release binary; no cause or relationship to A5 is
+established. Per task instruction, execution stopped at this failure; no source/environment
+fix and no retry was attempted. Queued fresh `run.ts` and CLI gates did **not** execute;
+their earlier logs remain retained evidence only. The workspace, clippy and live-PG gates
+were not rerun. Initial free disk was 6.3 GiB, so no incremental-cache deletion was required.
+
+### Remaining concerns and accepted divergence
+
+- **Early refusal is accepted narrowly, per the review.** Rust rejects an admitted lone-surrogate
+  model before rate-limit admission/dispatch with `500 INTERNAL` and TS's illegal-UTF-16
+  message in the dialect JSON envelope. This can differ from TS's plain-text envelope,
+  admission headers, minute-window claims and stored status/error code. It avoids dispatch
+  and upstream cost but **does not mean nothing is spent**: the completed row still charges
+  applicable key-wide long windows. `probe-minute-ring.txt` shows TS's subsequent count at
+  429 versus Rust 200; `probe-override-named.txt` shows both key-wide long budgets spent,
+  with plain-text versus JSON refusal; `probe-spent-key.txt` shows different stored statuses.
+- Do not claim TS universally sends upstream then returns 500: exact overrides throw before
+  dispatch, unknown models can fail routing first, and streaming may have emitted its head
+  or content before completion debit throws. These retained probes principally cover refusal
+  cases, not a successful upstream stream.
+- Persisted names still use U+FFFD in both builds; later seeding can read that history as a
+  genuine U+FFFD model. The repaired live completion path is deliberately distinct from
+  post-restart seeding; it never debits that other model's already-seeded live subject.
+- **500 ms is a poll interval, not a hard bound.** Read/build/publication/scheduling follow
+  the tick. The driver checks one second from its poll step, after mutation/dump, not from
+  commit. Retained GREEN live-poison observations are 424 ms refusal, 476 ms revocation,
+  **513 ms model visibility**, directly contradicting the earlier hard-500-ms wording.
+- PG suite history is not uniformly green. `store-postgres-run1-flake.log` is **141/1/5**
+  (SQLite `a_pinned_reader_lets_the_wal_grow_past_the_trigger`); runs 2–6 each **142/1/5**:
+  `a_value_postgres_refuses_fails_only_its_own_event` (2,4),
+  `a_refused_log_event_is_counted_failed_and_refused_not_written` (3,5), and
+  `a_transition_lands_while_log_batches_fail` (6). PG failures report
+  `Writer("1 queued events failed to persist on close")`. Later green runs do not erase them.
+  `pg-writer-flake-at-head.txt` reports 7/30 failing writer runs at `1727cde2` (5 refused-event,
+  4 refused-value failures, overlapping), with 30/30 health runs green. The retained base
+  probe reports related failures at `04c3c5af` (3/30 refused-event, 5/30 refused-value,
+  1/30 blocked-writer transition), but also unrelated TS cross-read failures caused by its
+  archive lacking node_modules. That base probe is qualified evidence of pre-existing
+  instability, not proof that every observed failure has the same cause. No fix attempted.
+- Per-step admin DB dumps still exclude `nodes`, `request_logs`, `usage_rollup`, `usage_daily`
+  and `migrations`; request/usage comparison is provided separately by `run.ts`.
+
+### Fix round 2 — controller re-run of the failed gate (Nov 13)
+
+The bookkeeping run's `surface.ts` failure (2 rows in the `unset` config: `/` and `/nested`, TS 404 vs Rust dashboard HTML 200) is a harness artefact, not a regression. That run pointed `--rust` at `target/release/omnigateway` inside the checkout, so Rust's documented default dashboard candidate `<exe dir>/../../apps/dashboard/dist` resolved to the checkout's real `apps/dashboard/dist`, while the TS bundle (in `/tmp/opencode/a4-fix1/bin`) resolved `/dashboard/dist`, absent. Logs: `unset-ts.log` "dashboard directory absent path=/dashboard/dist" vs `unset-rust.log` "dashboard directory resolved path=…/target/release/../../apps/dashboard/dist". Earlier rounds ran a copy of the binary outside the checkout.
+
+Re-run at HEAD 2b6f1165 with the same release binary copied to `/tmp/opencode/surface-rerun/bin/` (`unset-rust.log`: "dashboard directory absent"):
+- `surface.ts`: **606 equal / 61 expected / 0 failures** (`/tmp/opencode/surface-rerun/surface.log`).
+- `conformance/e2e/run.ts`: **all rows equal** (`run.log`).
+- CLI goldens (`OMNI_CLI_BIN=target/release/omni`): keys-list 135, key-mutations (156+4+3+5+16), settings 347, model-puts 302, model-reads 262, model-removals 47, model-catalog 510 + 12 refusal checks, lone-surrogates 36 — all PASS (`cli-*.log`).
+Follow-up (minor): make `surface.ts` copy both binaries into a scratch directory so the location-relative default cannot see the checkout.
