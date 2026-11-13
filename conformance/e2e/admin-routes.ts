@@ -462,7 +462,7 @@ type HttpStep = {
 type Step =
   | HttpStep
   | { kind: "restart-other"; name: string }
-  | { kind: "credential-routing"; name: string; enabled: boolean }
+  | { kind: "credential-routing"; name: string; enabled: boolean; model?: string }
   /** `n` copies of `step` at once; statuses compared as a multiset, DB after. */
   | {
       kind: "concurrent";
@@ -1307,6 +1307,67 @@ type Config = { label: string; db: () => string; steps: () => Step[] };
 let healthSeed: string | undefined;
 const configs: Config[] = [
   {
+    label: "credential-identity",
+    db: () => db("credential-identity", ["UPDATE api_keys SET limits='{}'"]),
+    steps: () => {
+      const steps: Step[] = [];
+      for (const [i, endpoint] of ["\ud800", "\udc00", "�"].entries()) {
+        steps.push(
+          as(
+            "admin",
+            "POST",
+            "/api/credentials",
+            JSON.stringify({
+              provider: "custom",
+              apiKey: "secret-a6-2",
+              endpointId: endpoint,
+              endpointLabel: `endpoint-${i}`,
+              origin: "http://127.0.0.1:18444",
+              protocol: "chat_completions",
+            }),
+          ),
+        );
+        steps.push(
+          as(
+            "admin",
+            "PUT",
+            `/api/models/identity-${i}`,
+            model(`identity-${i}`, {}, [
+              { ...TARGET, provider: "custom", endpointId: endpoint, model: "m" },
+            ]),
+          ),
+        );
+      }
+      for (let i = 0; i < 3; i++)
+        steps.push({
+          kind: "credential-routing",
+          name: `identity ${i} routes`,
+          model: `identity-${i}`,
+          enabled: true,
+        });
+      for (let i = 0; i < 3; i++) {
+        steps.push(as("admin", "PATCH", `/api/credentials/{{id:${i}}}`, '{"enabled":false}'));
+        for (let j = 0; j < 3; j++)
+          steps.push({
+            kind: "credential-routing",
+            name: `disable ${i} identity ${j}`,
+            model: `identity-${j}`,
+            enabled: i !== j,
+          });
+        steps.push(as("admin", "PATCH", `/api/credentials/{{id:${i}}}`, '{"enabled":true}'));
+      }
+      steps.push({ kind: "restart-other", name: "identity restart" });
+      for (let i = 0; i < 3; i++)
+        steps.push({
+          kind: "credential-routing",
+          name: `restarted identity ${i}`,
+          model: `identity-${i}`,
+          enabled: true,
+        });
+      return steps;
+    },
+  },
+  {
     label: "credential-health",
     db: () => {
       if (healthSeed) return healthSeed;
@@ -1356,6 +1417,17 @@ const configs: Config[] = [
         ],
       },
       { ...as("admin", "GET", "/api/credentials/health"), name: "quota preserves text scalars" },
+      {
+        kind: "sql",
+        name: "quota text timestamps",
+        sql: [
+          "UPDATE quota_windows SET used=25,limit_value=100,observed_at='unknown',resets_at='future' WHERE window_type='w0'",
+        ],
+      },
+      {
+        ...as("admin", "GET", "/api/credentials/health"),
+        name: "quota timestamp JS concatenation",
+      },
     ],
   },
   {
@@ -1761,7 +1833,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
             method: "POST",
             target: "/v1/chat/completions",
             headers: [["authorization", `Bearer ${SEED_KEY}`], J],
-            body: '{"model":"routing-a6","messages":[{"role":"user","content":"hello"}]}',
+            body: JSON.stringify({
+              model: step.model ?? "routing-a6",
+              messages: [{ role: "user", content: "hello" }],
+            }),
           });
           seen(step.name, "POST", x);
           if (
@@ -1935,7 +2010,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
   for (const [stream, f] of [
     ["stdout", logFile],
     ["stderr", `${logFile}.err`],
-    ...(cfg.label === "credential-crossread"
+    ...(["credential-crossread", "credential-identity"].includes(cfg.label)
       ? ([
           ["restart stdout", join(out, `${cfg.label}-${label}-restart.log`)],
           ["restart stderr", join(out, `${cfg.label}-${label}-restart.log.err`)],

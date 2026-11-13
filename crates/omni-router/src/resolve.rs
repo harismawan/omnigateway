@@ -12,6 +12,7 @@ use std::borrow::Cow;
 fn synthesize(provider: &str, model: &str, d: &Descriptor) -> VirtualModel {
     let listed = d.catalog.iter().find(|c| c.id == model);
     let target = Target {
+        lone_identity: Default::default(),
         provider: provider.to_owned(),
         endpoint_id: None,
         model: model.to_owned(),

@@ -74,14 +74,3 @@ pub(crate) fn opt_integer(
 pub(crate) fn flag(row: &Row<'_>, column: &str) -> Result<bool, StoreError> {
     Ok(js::is_one(row.get_ref(column)?))
 }
-
-/// `JSON.parse(row.<column>)`, which throws in TS on the same inputs.
-pub(crate) fn json(
-    row: &Row<'_>,
-    table: &str,
-    column: &str,
-) -> Result<serde_json::Value, StoreError> {
-    let raw = text(row, table, column)?;
-    serde_json::from_str(&raw)
-        .map_err(|e| StoreError::Corrupt(format!("{table}.{column}: not JSON ({e})")))
-}

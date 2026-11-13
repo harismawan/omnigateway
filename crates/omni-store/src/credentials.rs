@@ -58,6 +58,8 @@ pub struct CredentialSecrets {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credential {
+    #[serde(skip)]
+    pub lone_endpoint: Option<Vec<u16>>,
     pub id: String,
     /// `ProviderId`: a validated string, open because plugins add providers.
     pub provider: String,
@@ -95,6 +97,25 @@ impl Credential {
 }
 
 const T: &str = "credentials";
+
+pub(crate) fn lone_fields(
+    value: &omni_ir::jsjson::JsValue,
+    names: &[&str],
+) -> std::collections::HashMap<String, Vec<u16>> {
+    let mut out = std::collections::HashMap::new();
+    if let omni_ir::jsjson::JsValue::Object(fields) = value {
+        for name in names {
+            if let Some((_, omni_ir::jsjson::JsValue::String(units))) = fields
+                .iter()
+                .find(|(k, _)| k.iter().copied().eq(name.encode_utf16()))
+                && String::from_utf16(units).is_err()
+            {
+                out.insert((*name).to_owned(), units.clone());
+            }
+        }
+    }
+    out
+}
 
 /// API-key creation values. Secret fields deliberately have no Debug implementation.
 pub struct ApiKeyCredential<'a> {
@@ -163,7 +184,10 @@ fn open(r: &Row<'_>, key: &FieldKey, column: &'static str) -> Result<Secret, Sto
 }
 
 fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> {
+    let raw = row::text(r, T, "provider_data")?;
+    let lossless = omni_ir::jsjson::parse_js(&raw).map_err(StoreError::Corrupt)?;
     Ok(Credential {
+        lone_endpoint: lone_fields(&lossless, &["endpointId"]).remove("endpointId"),
         id: row::text(r, T, "id")?,
         provider: row::text(r, T, "provider")?,
         label: row::text(r, T, "label")?,
@@ -173,7 +197,8 @@ fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> 
         weight: row::number(r, T, "weight")?,
         expires_at: row::opt_integer(r, T, "expires_at")?,
         account_email: row::opt_text(r, T, "account_email")?,
-        provider_data: row::json(r, T, "provider_data")?,
+        provider_data: omni_ir::js::parse_json(&raw)
+            .ok_or_else(|| StoreError::Corrupt("invalid provider data".into()))?,
         disabled_reason: row::opt_text(r, T, "disabled_reason")?.map(|s| DisabledReason::parse(&s)),
         disabled_at: row::opt_integer(r, T, "disabled_at")?,
         has_refresh_token: r.get_ref("refresh_token")?.data_type() != rusqlite::types::Type::Null,

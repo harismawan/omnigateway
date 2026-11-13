@@ -179,7 +179,8 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
     }
     let burn = quota
         .iter()
-        .map(|q| {
+        .zip(&quota_json)
+        .map(|(q, raw)| {
             let stale = q.observed_at <= 0.0
                 || now as f64 - q.observed_at > settings.quota_poll_interval_ms.max(60_000.0) * 3.0;
             let rolled = q.resets_at.is_some_and(|r| r <= now as f64);
@@ -189,7 +190,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                 q.resets_at.map(|r| {
                     r - q
                         .window_ms
-                        .filter(|n| n.is_finite() && *n > 0.0)
+                        .filter(|n| *n > 0.0)
                         .unwrap_or_else(|| q.window_type.nominal_ms())
                 })
             };
@@ -221,6 +222,44 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                     )
                 }
             });
+            let exhaust_value = match (exhausts, get(raw, "observedAt")) {
+                (Some(_), Some(JsValue::String(units))) => {
+                    let remaining = q.limit.unwrap_or(f64::NAN) - q.used;
+                    let delta = (if remaining.is_nan() {
+                        f64::NAN
+                    } else {
+                        remaining.max(0.0)
+                    } / rate.unwrap_or(f64::NAN))
+                        * 3_600_000.0;
+                    let suffix = if delta.is_nan() {
+                        "NaN".to_owned()
+                    } else if delta == f64::INFINITY {
+                        "Infinity".into()
+                    } else if delta == f64::NEG_INFINITY {
+                        "-Infinity".into()
+                    } else {
+                        let mut s = String::new();
+                        omni_ir::jsjson::write_number(delta, &mut s);
+                        s
+                    };
+                    let mut value = units.clone();
+                    value.extend(suffix.encode_utf16());
+                    JsValue::String(value)
+                }
+                _ => exhausts.map_or(JsValue::Null, JsValue::Number),
+            };
+            let survives = if exhausts.is_none() || q.resets_at.is_none() {
+                true
+            } else {
+                match (&exhaust_value, get(raw, "resetsAt")) {
+                    (JsValue::String(a), Some(JsValue::String(b))) => a >= b,
+                    (JsValue::String(a), _) => {
+                        omni_ir::js::string_to_number(&String::from_utf16_lossy(a))
+                            >= q.resets_at.unwrap_or(f64::NAN)
+                    }
+                    _ => exhausts.unwrap_or(f64::NAN) >= q.resets_at.unwrap_or(f64::NAN),
+                }
+            };
             obj(vec![
                 ("credentialId", text(&q.credential_id)),
                 ("windowType", text(q.window_type.as_str())),
@@ -229,16 +268,13 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                     start.map_or(JsValue::Null, JsValue::Number),
                 ),
                 ("ratePerHour", rate.map_or(JsValue::Null, JsValue::Number)),
-                (
-                    "exhaustsAt",
-                    exhausts.map_or(JsValue::Null, JsValue::Number),
-                ),
+                ("exhaustsAt", exhaust_value),
                 (
                     "survives",
                     if stale || rolled {
                         JsValue::Null
                     } else {
-                        JsValue::Bool(exhausts.zip(q.resets_at).is_none_or(|(a, b)| a >= b))
+                        JsValue::Bool(survives)
                     },
                 ),
                 ("stale", JsValue::Bool(stale || rolled)),

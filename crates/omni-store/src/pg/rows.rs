@@ -270,7 +270,10 @@ fn open(r: &Row, key: &FieldKey, column: &str) -> Result<Secret, StoreError> {
 fn to_credential(r: &Row, key: &FieldKey) -> Result<Credential, StoreError> {
     let provider_data: String = r.try_get("provider_data")?;
     let refresh: Option<String> = r.try_get("refresh_token")?;
+    let lossless = omni_ir::jsjson::parse_js(&provider_data).map_err(StoreError::Corrupt)?;
     Ok(Credential {
+        lone_endpoint: crate::credentials::lone_fields(&lossless, &["endpointId"])
+            .remove("endpointId"),
         id: r.try_get("id")?,
         provider: r.try_get("provider")?,
         label: r.try_get("label")?,
@@ -280,9 +283,8 @@ fn to_credential(r: &Row, key: &FieldKey) -> Result<Credential, StoreError> {
         weight: r.try_get("weight")?,
         expires_at: r.try_get("expires_at")?,
         account_email: r.try_get("account_email")?,
-        provider_data: serde_json::from_str(&provider_data).map_err(|e| {
-            StoreError::Corrupt(format!("credentials.provider_data: not JSON ({e})"))
-        })?,
+        provider_data: omni_ir::js::parse_json(&provider_data)
+            .ok_or_else(|| StoreError::Corrupt("invalid provider data".into()))?,
         disabled_reason: r
             .try_get::<_, Option<&str>>("disabled_reason")?
             .map(DisabledReason::parse),

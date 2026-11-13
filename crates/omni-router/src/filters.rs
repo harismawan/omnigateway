@@ -120,6 +120,11 @@ pub fn required_capabilities(request: &ChatRequest) -> Required {
 /// `""` names no endpoint on the target side only. On the account side a
 /// present value that is not a non-empty string matches nothing at all.
 pub fn serves_target(target: &Target, account: &Credential) -> bool {
+    if target.lone_identity.contains_key("provider")
+        || target.lone_identity.contains_key("credentialId")
+    {
+        return false;
+    }
     if account.provider != target.provider {
         return false;
     }
@@ -144,6 +149,14 @@ pub fn serves_target(target: &Target, account: &Credential) -> bool {
     let same = match (by_target, by_account) {
         (Named::None, Named::None) => true,
         (Named::Id(a), Named::Id(b)) => a == b,
+        _ => false,
+    };
+    let same = match (
+        target.lone_identity.get("endpointId"),
+        account.lone_endpoint.as_ref(),
+    ) {
+        (None, None) => same,
+        (Some(a), Some(b)) => a == b,
         _ => false,
     };
     same && target

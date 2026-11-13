@@ -48,6 +48,7 @@ pub struct Cred(pub Credential);
 
 pub fn credential(id: &str) -> Credential {
     Credential {
+        lone_endpoint: None,
         id: id.to_owned(),
         provider: "anthropic".to_owned(),
         label: id.to_owned(),
@@ -93,6 +94,7 @@ pub fn custom_cred(id: &str, endpoint: Value) -> Credential {
 
 pub fn target() -> Target {
     Target {
+        lone_identity: Default::default(),
         provider: "anthropic".to_owned(),
         endpoint_id: None,
         model: "claude-opus-4".to_owned(),
