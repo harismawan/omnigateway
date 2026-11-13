@@ -1647,7 +1647,6 @@ const configs: Config[] = [
         });
         steps.push({ kind: "credential-routing", name: `recovered after ${name}`, enabled: true });
       }
-      steps.push(as("admin", "PATCH", "/api/credentials/{{last}}", '{"enabled":false}'));
       steps.push({
         kind: "sql",
         name: "live malformed unrelated quota",
@@ -1655,6 +1654,7 @@ const configs: Config[] = [
           "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','live',0,'unknown',100,4102444800000,0,NULL)",
         ],
       });
+      steps.push(as("admin", "PATCH", "/api/credentials/{{last}}", '{"enabled":false}'));
       steps.push({
         kind: "credential-routing",
         name: "disabled credential stops routing",
