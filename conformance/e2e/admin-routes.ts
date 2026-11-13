@@ -1312,6 +1312,7 @@ const configs: Config[] = [
       if (healthSeed) return healthSeed;
       const now = Date.now();
       const sql = [...CREDS_SQL];
+      sql.push("INSERT INTO credential_health VALUES('cred-custom','m','unknown',1.5,2.25,3.5)");
       for (const [i, used, limit, reset, observed, window] of [
         [0, 25, 100, now + 3600000, now, 7200000],
         [1, 100, 100, now + 3600000, now, 7200000],
@@ -1332,7 +1333,7 @@ const configs: Config[] = [
       {
         kind: "sql",
         name: "fractional health after boot",
-        sql: ["INSERT INTO credential_health VALUES('cred-custom','m','unknown',1.5,2.25,3.5)"],
+        sql: ["UPDATE credential_health SET consecutive_failures=1.5"],
       },
       as("admin", "GET", "/api/credentials/health"),
       as("viewer", "GET", "/api/credentials/health"),
@@ -1347,6 +1348,14 @@ const configs: Config[] = [
         ...as("admin", "GET", "/api/credentials/health"),
         name: "health preserves text and null scalars",
       },
+      {
+        kind: "sql",
+        name: "quota text scalar",
+        sql: [
+          "UPDATE quota_windows SET used='unknown',limit_value='unknown' WHERE window_type='w0'",
+        ],
+      },
+      { ...as("admin", "GET", "/api/credentials/health"), name: "quota preserves text scalars" },
     ],
   },
   {

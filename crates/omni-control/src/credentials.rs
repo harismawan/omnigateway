@@ -106,7 +106,59 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         }
         health.push(obj(fields));
     }
-    let quota = omni_store::quota::list(s.connection())?;
+    let mut statement = s
+        .connection()
+        .prepare("SELECT * FROM quota_windows")
+        .map_err(Failure::internal)?;
+    let mut cursor = statement.query([]).map_err(Failure::internal)?;
+    let mut quota_json = Vec::new();
+    let mut quota = Vec::new();
+    while let Some(row) = cursor.next().map_err(Failure::internal)? {
+        let mut fields = Vec::new();
+        for (name, column) in [
+            ("credentialId", "credential_id"),
+            ("windowType", "window_type"),
+            ("startsAt", "starts_at"),
+            ("used", "used"),
+            ("limit", "limit_value"),
+            ("resetsAt", "resets_at"),
+            ("observedAt", "observed_at"),
+            ("windowMs", "window_ms"),
+        ] {
+            fields.push((
+                name,
+                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+            ));
+        }
+        let value = obj(fields);
+        let number = |name| match get(&value, name) {
+            Some(JsValue::Number(n)) => *n,
+            Some(JsValue::Null) => 0.0,
+            Some(JsValue::String(u)) => omni_ir::js::string_to_number(&String::from_utf16_lossy(u)),
+            _ => f64::NAN,
+        };
+        let optional = |name| {
+            if matches!(get(&value, name), Some(JsValue::Null)) {
+                None
+            } else {
+                Some(number(name))
+            }
+        };
+        quota.push(omni_store::QuotaWindow {
+            credential_id: row.get("credential_id").map_err(Failure::internal)?,
+            window_type: omni_store::quota::WindowType::parse(
+                &row.get::<_, String>("window_type")
+                    .map_err(Failure::internal)?,
+            ),
+            starts_at: number("startsAt"),
+            used: number("used"),
+            limit: optional("limit"),
+            resets_at: optional("resetsAt"),
+            observed_at: number("observedAt"),
+            window_ms: optional("windowMs"),
+        });
+        quota_json.push(value);
+    }
     let settings = s.get_settings()?;
     let credentials = rows(s, None)?;
     let mut last_used = Vec::new();
@@ -157,7 +209,16 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                 if limit <= 0.0 || rate <= 0.0 {
                     None
                 } else {
-                    Some(q.observed_at + ((limit - q.used).max(0.0) / rate) * 3_600_000.0)
+                    let remaining = limit - q.used;
+                    Some(
+                        q.observed_at
+                            + (if remaining.is_nan() {
+                                f64::NAN
+                            } else {
+                                remaining.max(0.0)
+                            } / rate)
+                                * 3_600_000.0,
+                    )
                 }
             });
             obj(vec![
@@ -184,13 +245,9 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             ])
         })
         .collect();
-    let parse = |raw: String| crate::operator_json::parse(&raw).map_err(Failure::internal);
     Ok(stringify(&obj(vec![
         ("health", JsValue::Array(health)),
-        (
-            "quota",
-            parse(serde_json::to_string(&quota).map_err(Failure::internal)?)?,
-        ),
+        ("quota", JsValue::Array(quota_json)),
         ("burn", JsValue::Array(burn)),
         ("lastUsed", JsValue::Object(last_used)),
     ])))

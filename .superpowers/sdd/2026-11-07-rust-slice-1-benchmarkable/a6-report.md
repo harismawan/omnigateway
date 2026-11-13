@@ -1,5 +1,38 @@
 # A6 implementation report
 
+## Round 4 checkpoint (base 8ebaf1cc): NOT complete for review
+
+Evidence `/tmp/opencode/a6-round4/`. Exact lone-surrogate routing remains open;
+the three-endpoint RED specified in round 3 is still the next identity task.
+Do not mark A6 complete based on this checkpoint.
+
+| Requirement | Change | Evidence |
+|---|---|---|
+| Unusual health rows do not stop SQLite snapshot publication | Separate routing health read isolates rows that cannot fit the typed routing representation; operator reads remain strict | `red-health.log`: 5 equal / 3 failures against frozen TS due to Rust boot refusal; `credential_isolation::unusual_health_never_blocks_other_snapshot_changes` verifies boot and refresh alongside a healthy row and credential disable |
+| Health endpoint preserves quota SQL values | Raw quota JSON projection; numeric coercion for burn calculations, NaN-preserving remaining-budget arithmetic | `red-quota.log`: isolation-only binary 12 equal / 1 failure for text used/limit columns; final GREEN below |
+
+Known limits: omitted health rows lose their breaker contribution rather than
+reproducing arbitrary JS arithmetic during routing. This is per-row isolation,
+not complete routing equivalence for corrupt rows. Quota numeric coercion covers
+number/null/text inputs, but text observed_at still requires JS `+` concatenation
+semantics in exhaustsAt; unusual quota rows can still poison snapshot reads.
+The new regression uses text used/limit and ordinary numeric timestamps. PG
+health snapshot isolation is not changed; D4 must apply the equivalent read path
+when it wires the gateway. These are not hidden by the green cases.
+
+D4 hand-off remains unchanged: select PgStore for boot/auth/control/snapshot/miss
+and writer paths, then run credential HTTP routes and same-database application
+restart cross-read in both directions. Prior actual live-PG mutation proof is
+retained; no PG HTTP verification is claimed here.
+
+Focused GREEN: `green-health.log` **13 equal / 0 failures**, including unusual
+health rows present at boot, text/null health edits and text quota used/limit.
+`store.log` **2 passed**, including live disable pickup despite an unreadable
+health row. Clippy/fmt/Biome are clean (`clippy.log`, `fmt.log`,
+`biome-final.log`). Final workspace and existing-driver gates follow after the
+code checkpoint commit. Precise next task remains the distinct-surrogate routing
+RED, followed by completing JS quota arithmetic for text timestamps.
+
 ## Round 3 checkpoint (base d02bae94): NOT complete-for-review
 
 Evidence `/tmp/opencode/a6-round3/`. PostgreSQL gateway wiring is explicitly

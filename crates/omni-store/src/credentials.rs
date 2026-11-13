@@ -242,18 +242,36 @@ const H: &str = "credential_health";
 
 /// `CredentialRepo.listHealth`.
 pub fn list_health(conn: &Connection) -> Result<Vec<CredentialHealth>, StoreError> {
+    read_health_rows(conn, false)
+}
+
+/// Snapshot reads isolate an unrepresentable row; operator reads stay strict.
+pub fn list_routing_health(conn: &Connection) -> Result<Vec<CredentialHealth>, StoreError> {
+    read_health_rows(conn, true)
+}
+
+fn read_health_rows(conn: &Connection, isolate: bool) -> Result<Vec<CredentialHealth>, StoreError> {
     let mut stmt = conn.prepare_cached("SELECT * FROM credential_health")?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
-        out.push(CredentialHealth {
-            credential_id: row::text(r, H, "credential_id")?,
-            model: row::text(r, H, "model")?,
-            breaker_state: BreakerState::parse(&row::text(r, H, "breaker_state")?),
-            consecutive_failures: row::integer(r, H, "consecutive_failures")?,
-            opened_at: row::opt_number(r, H, "opened_at")?,
-            rate_limited_until: row::opt_number(r, H, "rate_limited_until")?,
-        });
+        let health = (|| {
+            Ok::<_, StoreError>(CredentialHealth {
+                credential_id: row::text(r, H, "credential_id")?,
+                model: row::text(r, H, "model")?,
+                breaker_state: BreakerState::parse(&row::text(r, H, "breaker_state")?),
+                consecutive_failures: row::integer(r, H, "consecutive_failures")?,
+                opened_at: row::opt_number(r, H, "opened_at")?,
+                rate_limited_until: row::opt_number(r, H, "rate_limited_until")?,
+            })
+        })();
+        match health {
+            Ok(row) => out.push(row),
+            Err(_) if isolate => {
+                tracing::warn!("credential health unreadable; omitted from routing snapshot")
+            }
+            Err(e) => return Err(e),
+        }
     }
     Ok(out)
 }

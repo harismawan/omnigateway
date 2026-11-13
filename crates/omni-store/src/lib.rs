@@ -125,7 +125,7 @@ impl SqliteStore {
         let data = SnapshotData {
             api_keys: keys::list_entries(&tx)?,
             credentials: credentials::list_routing(&tx, key)?,
-            health: credentials::list_health(&tx)?,
+            health: credentials::list_routing_health(&tx)?,
             models: models::list(&tx)?,
             quota: quota::list(&tx)?,
             settings: settings::get(&tx)?,
