@@ -1,5 +1,23 @@
 # A7 checkpoint — SQLite usage implemented; increment incomplete
 
+## Latest: cursor identity closed; initial streamed export
+
+**NEXT STEP:** finish export verification before nodes: permanent three-run tens-of-thousands-row CSV/JSONL byte comparisons with RSS ranges; instrument page reads to count post-disconnect work; concurrent slow export plus real `/v1` log commit and admin-read latency assertions; full filter/escaping/unusual-cell matrix. Export implementation is present but these acceptance requirements are still unverified. Then `/api/nodes`.
+
+| Requirement | Commit | Evidence (`/tmp/opencode/a7-export/`) |
+|---|---|---|
+| Lone-surrogate cursor at same timestamp as U+FFFD/ASCII/astral neighbors | `dc3bcce7` | Real TS matches existing lossy binding; canonical cursor comparison passes. Comment pins Bun UTF-8 boundary. No identity bug/RED |
+| ±Infinity input errors and cursor mutations | `dc3bcce7` | `identity-red.log` 49 equal / 4 failures → `identity-green.log` 53/0; Infinity was behavioral RED |
+| Guarded CSV/JSONL export and errors | `abfb8cac` | `red.log` 26 equal / 42 failures (missing route) → `green2.log` 47/0 |
+
+Frozen behavior discoveries: absent format defaults CSV; unknown format rejects with 400. Both time bounds required. **Caller cursor is ignored**, even malformed, and caller limit overridden to 500, exactly as frozen `exportLogs` does; the handler's unreadable-cursor comment is inaccurate. Export reads the first page before returning a response. CSV column order/header/CRLF, JSONL LF, formula guard, comma/quote escaping and filename/content headers match the exercised fixture. Filename timestamp is validated near-now before masking. Driver now decodes HTTP chunk framing before payload comparison (chunk boundaries/hex case are transport details).
+
+Streaming implementation: first page fetched before Response; subsequent pages pulled by async body stream, each yielding at most one 500-row encoded chunk. No whole-export collection. Control mutex held **per page** including page serialization, released before yielding/backpressure; no explicit read transaction spans pages. TS reads a page synchronously with SQLite `.all()`, then yields rows; neither holds a reader across stream consumption. Dropping Rust stream stops future loop iterations; an already-running blocking page operation may complete. This is implementation reasoning, **not measured cancellation proof**. Current page encoder serializes/parses the bounded page JSON before formatting; memory is page-sized but less efficient than direct row encoding. No RSS range or slow-client writer-progress result claimed.
+
+Final gates at `abfb8cac`: fresh TS/Rust binaries outside checkout; commit/hashes recorded before drivers in `manifest.json`. Workspace **1046 passed / 0 failed / 7 ignored** (`workspace.log`); workspace all-target clippy clean (`clippy.log`); fmt clean (`fmt.log`). Admin-routes **2180 equal / 2 expected / 0 failures**; admin-auth **212 equal / 4 expected / 0 failures**; surface **606 equal / 61 expected / 0 failures**; run.ts **all rows equal** (matching log names). Builds incremental/debug disabled.
+
+Status: **partial export checkpoint, not complete for review**. Remaining concerns: export adversarial encoding matrix (notably nonfinite numeric CSV values), strict chunk-framing validation in test driver, measured cancellation/page counts, three-run memory and concurrent writer proof. No known mismatch in exercised cases. D4 still owns PG report readers/backend selection/live conformance. Historical next-step sections below are superseded.
+
 ## Latest continuation: typed reader and log parity fixes
 
 **NEXT STEP:** resolve lone-surrogate cursor comparison against a real SQLite TS oracle before export: the typed cursor now retains UTF-16 but store binding still uses `String::from_utf16_lossy`, so the known identity concern is not closed. Exercise canonical lone-surrogate cursors against actual replacement-character IDs, including equal timestamps and ordering. Add the remaining unsafe-number Infinity and broader cursor mutation vectors. Then read frozen export implementation/handler, establish byte-level CSV/JSONL RED, and iterate this typed reader with first chunk awaited before response construction; verify cancellation, slow-reader writer progress, and three-run RSS ranges. Nodes remains subsequent scope.
