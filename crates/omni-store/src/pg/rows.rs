@@ -321,6 +321,7 @@ pub(crate) async fn list_health(
         .iter()
         .map(|r| {
             Ok(CredentialHealth {
+                scalar: None,
                 credential_id: r.try_get("credential_id")?,
                 model: r.try_get("model")?,
                 breaker_state: BreakerState::parse(r.try_get("breaker_state")?),
@@ -354,6 +355,7 @@ pub(crate) async fn list_quota(c: &impl GenericClient) -> Result<Vec<QuotaWindow
         .iter()
         .map(|r| {
             Ok(QuotaWindow {
+                text_spent: None,
                 credential_id: r.try_get("credential_id")?,
                 window_type: WindowType::parse(r.try_get("window_type")?),
                 starts_at: f(r.try_get("starts_at")?),

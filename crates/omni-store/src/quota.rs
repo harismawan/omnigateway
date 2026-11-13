@@ -58,6 +58,9 @@ impl Serialize for WindowType {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
+    /// Snapshot-time JS relational comparison over raw SQLite primitives.
+    #[serde(skip)]
+    pub text_spent: Option<bool>,
     pub credential_id: String,
     pub window_type: WindowType,
     pub starts_at: f64,
@@ -70,12 +73,19 @@ pub struct QuotaWindow {
     pub window_ms: Option<f64>,
 }
 
+impl QuotaWindow {
+    pub fn spent(&self) -> bool {
+        self.text_spent
+            .unwrap_or_else(|| self.limit.is_some_and(|l| self.used >= l))
+    }
+}
+
 const Q: &str = "quota_windows";
 
 fn opt_number(r: &rusqlite::Row<'_>, column: &str) -> Result<Option<f64>, StoreError> {
     match r.get_ref(column)? {
         rusqlite::types::ValueRef::Null => Ok(None),
-        _ => row::number(r, Q, column).map(Some),
+        v => Ok(Some(crate::js::coerce_cell(v))),
     }
 }
 
@@ -85,16 +95,60 @@ pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
+        // A non-string JS Map key cannot match a credential's string id.
+        let Ok(credential_id) = row::text(r, Q, "credential_id") else {
+            tracing::warn!("unaddressable quota credential id omitted from routing snapshot");
+            continue;
+        };
+        // Unknown window names still enforce their ceiling in TS. A BLOB's
+        // Uint8Array string form is used in exclusion messages; its duration
+        // lookup is unknown (NaN), just like an unknown text name.
+        let window_name = match r.get_ref("window_type")? {
+            rusqlite::types::ValueRef::Text(s) => String::from_utf8_lossy(s).into_owned(),
+            rusqlite::types::ValueRef::Blob(b) => {
+                b.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+            }
+            rusqlite::types::ValueRef::Null => "null".into(),
+            v => crate::js::number_to_string(crate::js::coerce_cell(v)),
+        };
         out.push(QuotaWindow {
-            credential_id: row::text(r, Q, "credential_id")?,
-            window_type: WindowType::parse(&row::text(r, Q, "window_type")?),
-            starts_at: row::number(r, Q, "starts_at")?,
-            used: row::number(r, Q, "used")?,
+            text_spent: Some(relational_spent(
+                r.get_ref("used")?,
+                r.get_ref("limit_value")?,
+            )),
+            credential_id,
+            window_type: WindowType::parse(&window_name),
+            starts_at: crate::js::coerce_cell(r.get_ref("starts_at")?),
+            used: crate::js::coerce_cell(r.get_ref("used")?),
             limit: opt_number(r, "limit_value")?,
             resets_at: opt_number(r, "resets_at")?,
-            observed_at: row::number(r, Q, "observed_at")?,
+            observed_at: crate::js::coerce_cell(r.get_ref("observed_at")?),
             window_ms: opt_number(r, "window_ms")?,
         });
     }
     Ok(out)
+}
+
+/// JS ToPrimitive precedes relational comparison: Uint8Array becomes a
+/// comma-separated string. Only two string primitives compare lexically;
+/// every other pair uses ToNumber. The router exempts a NULL ceiling first.
+fn relational_spent(
+    used: rusqlite::types::ValueRef<'_>,
+    limit: rusqlite::types::ValueRef<'_>,
+) -> bool {
+    use rusqlite::types::ValueRef;
+    fn string_primitive(v: ValueRef<'_>) -> Option<String> {
+        match v {
+            ValueRef::Text(s) => Some(String::from_utf8_lossy(s).into_owned()),
+            ValueRef::Blob(b) => Some(b.iter().map(u8::to_string).collect::<Vec<_>>().join(",")),
+            _ => None,
+        }
+    }
+    if matches!(limit, ValueRef::Null) {
+        return false;
+    }
+    match (string_primitive(used), string_primitive(limit)) {
+        (Some(a), Some(b)) => a.encode_utf16().cmp(b.encode_utf16()).is_ge(),
+        _ => crate::js::coerce_cell(used) >= crate::js::coerce_cell(limit),
+    }
 }

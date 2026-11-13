@@ -107,6 +107,7 @@ fn quota_windows_are_read_into_the_snapshot() {
         quota,
         vec![
             QuotaWindow {
+                text_spent: Some(false),
                 credential_id: "c1".into(),
                 window_type: WindowType::FiveHour,
                 starts_at: 10.0,
@@ -117,6 +118,7 @@ fn quota_windows_are_read_into_the_snapshot() {
                 window_ms: Some(10_800_000.0),
             },
             QuotaWindow {
+                text_spent: Some(false),
                 credential_id: "c1".into(),
                 window_type: WindowType::Weekly,
                 starts_at: 20.0,
@@ -152,6 +154,7 @@ async fn a_fractional_health_instant_round_trips_through_rust_and_ts() {
     let writer = Writer::spawn(&path, WriterConfig::default()).expect("writer");
     let h = writer.handle();
     h.send(BreakerTransition(CredentialHealth {
+        scalar: None,
         credential_id: "c1".into(),
         model: "m1".into(),
         breaker_state: BreakerState::Open,

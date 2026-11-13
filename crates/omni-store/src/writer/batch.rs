@@ -535,9 +535,9 @@ fn write_health(tx: &Transaction<'_>, events: &[WriteEvent]) -> Result<u64, Stor
                         h.credential_id,
                         h.model,
                         h.breaker_state.as_str(),
-                        h.consecutive_failures,
-                        h.opened_at.map(js::bind_number),
-                        h.rate_limited_until.map(js::bind_number),
+                        h.failure_cell(),
+                        h.opened_cell(),
+                        h.until_cell(),
                     ],
                     &mut refused,
                 )?;

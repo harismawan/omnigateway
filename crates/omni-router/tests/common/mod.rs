@@ -139,6 +139,7 @@ pub fn pricing(input: f64, output: f64) -> TargetPricing {
 
 pub fn health(credential_id: &str) -> CredentialHealth {
     CredentialHealth {
+        scalar: None,
         credential_id: credential_id.to_owned(),
         model: "claude-opus-4".to_owned(),
         breaker_state: BreakerState::Closed,
@@ -156,6 +157,7 @@ pub fn health_with(credential_id: &str, f: impl FnOnce(&mut CredentialHealth)) -
 
 pub fn quota(credential_id: &str, used: f64, limit: Option<f64>) -> QuotaWindow {
     QuotaWindow {
+        text_spent: None,
         credential_id: credential_id.to_owned(),
         window_type: WindowType::FiveHour,
         starts_at: 0.0,

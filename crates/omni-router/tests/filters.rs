@@ -358,6 +358,93 @@ fn excludes_an_open_breaker_inside_its_cooldown() {
 }
 
 #[test]
+fn replacement_provider_eligibility_matches_frozen_oracle() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = std::process::Command::new("bun")
+        .arg(root.join("conformance/e2e/provider-identity-oracle.ts"))
+        .output()
+        .expect("oracle");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("utf8");
+    let verdicts: Vec<bool> = text
+        .lines()
+        .map(|line| line.ends_with("\"matches\":true}"))
+        .collect();
+    assert_eq!(verdicts, [false, true]);
+    let mut account = credential("replacement");
+    account.provider = "�".into();
+    for (i, expected) in verdicts.into_iter().enumerate() {
+        let mut t = target_with(|t| t.provider = "�".into());
+        if i == 0 {
+            t.lone_identity.insert("provider".into(), vec![0xd800]);
+        }
+        assert_eq!(omni_router::serves_target(&t, &account), expected);
+    }
+}
+
+#[test]
+fn unusual_sqlite_health_preserves_deadlines_breakers_and_probes() {
+    let store = omni_store::SqliteStore::open(":memory:", 0).expect("store");
+    store.connection().execute_batch("INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('a','custom','a','apiKey','{}',1,1)").expect("credential");
+    for (state, failures, opened, until, reason, probe) in [
+        (
+            "closed",
+            "1.5",
+            "NULL",
+            "2000000",
+            Some("rateLimited"),
+            false,
+        ),
+        ("open", "1.5", "999999", "NULL", Some("breaker:open"), false),
+        (
+            "open",
+            "3",
+            "999999",
+            "'unknown'",
+            Some("breaker:open"),
+            false,
+        ),
+        ("open", "'unknown'", "999999", "NULL", None, true),
+        ("halfOpen", "'unknown'", "NULL", "NULL", None, true),
+        ("open", "-2", "999999", "NULL", Some("breaker:open"), false),
+        (
+            "open",
+            "1e100",
+            "999999",
+            "NULL",
+            Some("breaker:open"),
+            false,
+        ),
+        ("open", "3", "NULL", "NULL", Some("breaker:open"), false),
+        ("open", "3", "'unknown'", "NULL", None, true),
+    ] {
+        store.connection().execute_batch(&format!("DELETE FROM credential_health; INSERT INTO credential_health VALUES('a','claude-opus-4','{state}',{failures},{opened},{until})")).expect("health");
+        let r = req();
+        let m = score_model(vec![target()]);
+        let s = snapshot(Snap {
+            credentials: vec![credential("a")],
+            health: omni_store::credentials::list_routing_health(store.connection()).expect("read"),
+            ..Snap::default()
+        });
+        let out = eligible(&input(&r, &m, &s));
+        if let Some(reason) = reason {
+            assert_eq!(
+                reasons(&out),
+                [reason],
+                "{state}/{failures}/{opened}/{until}"
+            );
+        } else {
+            assert_eq!(out.pairs.len(), 1);
+            assert_eq!(out.pairs[0].probe, probe);
+        }
+    }
+}
+
+#[test]
 fn admits_an_open_breaker_whose_cooldown_has_elapsed_as_a_probe() {
     let r = req();
     let m = score_model(vec![target()]);

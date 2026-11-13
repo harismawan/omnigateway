@@ -23,6 +23,7 @@ const T0: i64 = 1_794_007_800_000;
 
 fn blank(cred: &str, model: &str) -> CredentialHealth {
     CredentialHealth {
+        scalar: None,
         credential_id: cred.into(),
         model: model.into(),
         breaker_state: BreakerState::Closed,

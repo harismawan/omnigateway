@@ -662,6 +662,7 @@ mod admission_tests {
 
     fn ghost() -> HealthMutation {
         Arc::new(|_| CredentialHealth {
+            scalar: None,
             credential_id: "ghost".into(),
             model: "m".into(),
             breaker_state: crate::BreakerState::Closed,

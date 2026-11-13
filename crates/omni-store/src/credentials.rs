@@ -255,12 +255,177 @@ fn read_list(
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialHealth {
+    /// Raw unusual cells and precomputed JS arithmetic, populated at read time.
+    #[serde(skip)]
+    pub scalar: Option<std::sync::Arc<HealthScalars>>,
     pub credential_id: String,
     pub model: String,
     pub breaker_state: BreakerState,
     pub consecutive_failures: i64,
     pub opened_at: Option<f64>,
     pub rate_limited_until: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HealthScalars {
+    pub failures: rusqlite::types::Value,
+    pub opened: rusqlite::types::Value,
+    pub until: rusqlite::types::Value,
+    pub count: f64,
+    pub score: f64,
+}
+
+impl CredentialHealth {
+    #[allow(clippy::cast_precision_loss)]
+    pub fn failure_number(&self) -> f64 {
+        self.scalar
+            .as_ref()
+            .map_or(self.consecutive_failures as f64, |s| s.count)
+    }
+
+    pub fn health_score(&self) -> f64 {
+        self.scalar
+            .as_ref()
+            .map_or_else(|| 1.0 / (1.0 + self.failure_number()), |s| s.score)
+    }
+
+    pub fn failure_cell(&self) -> rusqlite::types::Value {
+        self.scalar.as_ref().map_or_else(
+            || crate::js::bind_number(self.failure_number()),
+            |s| s.failures.clone(),
+        )
+    }
+
+    pub fn opened_cell(&self) -> rusqlite::types::Value {
+        self.scalar.as_ref().map_or_else(
+            || {
+                self.opened_at
+                    .map(crate::js::bind_number)
+                    .unwrap_or(rusqlite::types::Value::Null)
+            },
+            |s| s.opened.clone(),
+        )
+    }
+
+    pub fn until_cell(&self) -> rusqlite::types::Value {
+        self.scalar.as_ref().map_or_else(
+            || {
+                self.rate_limited_until
+                    .map(crate::js::bind_number)
+                    .unwrap_or(rusqlite::types::Value::Null)
+            },
+            |s| s.until.clone(),
+        )
+    }
+
+    /// Completion-time transitions update raw cells; routing only reads cached numbers.
+    pub fn refresh_scalar(&mut self, opened: bool, until: bool) {
+        if let Some(s) = &mut self.scalar {
+            let s = std::sync::Arc::make_mut(s);
+            if opened {
+                s.opened = self
+                    .opened_at
+                    .map(crate::js::bind_number)
+                    .unwrap_or(rusqlite::types::Value::Null);
+            }
+            if until {
+                s.until = self
+                    .rate_limited_until
+                    .map(crate::js::bind_number)
+                    .unwrap_or(rusqlite::types::Value::Null);
+            }
+        }
+    }
+
+    pub fn increment_failures(&mut self) {
+        use rusqlite::types::Value;
+        let raw = match self.failure_cell() {
+            Value::Text(s) => Value::Text(format!("{s}1")),
+            Value::Blob(bytes) => Value::Text(format!(
+                "{}1",
+                bytes
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
+            _ => crate::js::bind_number(self.failure_number() + 1.0),
+        };
+        if let Value::Integer(n) = raw {
+            self.consecutive_failures = n;
+            if let Some(s) = &mut self.scalar {
+                let s = std::sync::Arc::make_mut(s);
+                s.failures = raw;
+                s.count = crate::js::coerce_cell((&s.failures).into());
+                s.score = 1.0 / (1.0 + s.count);
+            }
+        } else {
+            let count = crate::js::coerce_cell((&raw).into());
+            let denominator = match &raw {
+                Value::Text(s) => omni_ir::js::string_to_number(&format!("1{s}")),
+                _ => 1.0 + count,
+            };
+            self.scalar = Some(std::sync::Arc::new(HealthScalars {
+                failures: raw,
+                opened: self.opened_cell(),
+                until: self.until_cell(),
+                count,
+                score: 1.0 / denominator,
+            }));
+        }
+    }
+}
+
+fn health_from_row(r: &rusqlite::Row<'_>) -> Result<CredentialHealth, StoreError> {
+    use rusqlite::types::ValueRef;
+    let failures = r.get_ref("consecutive_failures")?;
+    let opened = r.get_ref("opened_at")?;
+    let until = r.get_ref("rate_limited_until")?;
+    let count = crate::js::coerce_cell(failures);
+    let ordinary = matches!(failures, ValueRef::Integer(_))
+        && matches!(
+            opened,
+            ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_)
+        )
+        && matches!(
+            until,
+            ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_)
+        );
+    let scalar = (!ordinary).then(|| {
+        let denominator = match failures {
+            ValueRef::Text(s) => {
+                omni_ir::js::string_to_number(&format!("1{}", String::from_utf8_lossy(s)))
+            }
+            ValueRef::Blob(bytes) => omni_ir::js::string_to_number(&format!(
+                "1{}",
+                bytes
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
+            _ => 1.0 + count,
+        };
+        std::sync::Arc::new(HealthScalars {
+            failures: crate::js::own_cell(failures),
+            opened: crate::js::own_cell(opened),
+            until: crate::js::own_cell(until),
+            count,
+            score: 1.0 / denominator,
+        })
+    });
+    Ok(CredentialHealth {
+        scalar,
+        credential_id: row::text(r, H, "credential_id")?,
+        model: row::text(r, H, "model")?,
+        breaker_state: BreakerState::parse(
+            r.get::<_, String>("breaker_state").as_deref().unwrap_or(""),
+        ),
+        consecutive_failures: r.get("consecutive_failures").unwrap_or(0),
+        opened_at: (!matches!(opened, ValueRef::Null)).then(|| crate::js::coerce_cell(opened)),
+        rate_limited_until: (!matches!(until, ValueRef::Null))
+            .then(|| crate::js::coerce_cell(until)),
+    })
 }
 
 const H: &str = "credential_health";
@@ -270,7 +435,7 @@ pub fn list_health(conn: &Connection) -> Result<Vec<CredentialHealth>, StoreErro
     read_health_rows(conn, false)
 }
 
-/// Snapshot reads isolate an unrepresentable row; operator reads stay strict.
+/// Snapshot reads isolate unaddressable rows and preserve each scalar independently.
 pub fn list_routing_health(conn: &Connection) -> Result<Vec<CredentialHealth>, StoreError> {
     read_health_rows(conn, true)
 }
@@ -280,16 +445,7 @@ fn read_health_rows(conn: &Connection, isolate: bool) -> Result<Vec<CredentialHe
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
-        let health = (|| {
-            Ok::<_, StoreError>(CredentialHealth {
-                credential_id: row::text(r, H, "credential_id")?,
-                model: row::text(r, H, "model")?,
-                breaker_state: BreakerState::parse(&row::text(r, H, "breaker_state")?),
-                consecutive_failures: row::integer(r, H, "consecutive_failures")?,
-                opened_at: row::opt_number(r, H, "opened_at")?,
-                rate_limited_until: row::opt_number(r, H, "rate_limited_until")?,
-            })
-        })();
+        let health = health_from_row(r);
         match health {
             Ok(row) => out.push(row),
             Err(_) if isolate => {
@@ -335,9 +491,9 @@ pub fn update_health(
         next.credential_id,
         next.model,
         next.breaker_state.as_str(),
-        next.consecutive_failures,
-        next.opened_at.map(crate::js::bind_number),
-        next.rate_limited_until.map(crate::js::bind_number),
+        next.failure_cell(),
+        next.opened_cell(),
+        next.until_cell(),
     ]) {
         Ok(_) => {}
         Err(rusqlite::Error::SqliteFailure(e, msg))
@@ -364,18 +520,7 @@ pub fn read_health(
 ) -> Result<Option<CredentialHealth>, StoreError> {
     use rusqlite::OptionalExtension as _;
     conn.prepare_cached("SELECT * FROM credential_health WHERE credential_id = ? AND model = ?")?
-        .query_row([credential_id, model], |r| {
-            Ok((|| {
-                Ok::<_, StoreError>(CredentialHealth {
-                    credential_id: row::text(r, H, "credential_id")?,
-                    model: row::text(r, H, "model")?,
-                    breaker_state: BreakerState::parse(&row::text(r, H, "breaker_state")?),
-                    consecutive_failures: row::integer(r, H, "consecutive_failures")?,
-                    opened_at: row::opt_number(r, H, "opened_at")?,
-                    rate_limited_until: row::opt_number(r, H, "rate_limited_until")?,
-                })
-            })())
-        })
+        .query_row([credential_id, model], |r| Ok(health_from_row(r)))
         .optional()?
         .transpose()
 }

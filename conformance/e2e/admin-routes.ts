@@ -177,6 +177,7 @@ type Req = {
   method?: string;
   target: string;
   headers?: [string, string][];
+  timestamps?: "unchanged" | "disable" | "enable";
   body?: string;
 };
 
@@ -1345,6 +1346,66 @@ const configs: Config[] = [
           model: `identity-${i}`,
           enabled: true,
         });
+      steps.push({
+        kind: "sql",
+        name: "replacement pin identity",
+        sql: [
+          "INSERT INTO credentials(id,provider,label,auth_type,provider_data,api_key,created_at,updated_at) SELECT '�',provider,label,auth_type,provider_data,api_key,created_at,updated_at FROM credentials WHERE provider_data LIKE '%endpoint-2%'",
+        ],
+      });
+      for (const [name, pin] of [
+        ["lone-pin", "\ud800"],
+        ["replacement-pin", "�"],
+      ]) {
+        steps.push({
+          kind: "sql",
+          name: `seed ${name}`,
+          sql: [
+            `INSERT INTO virtual_models VALUES('${name}','${JSON.stringify([{ ...TARGET, provider: "custom", endpointId: "�", model: "m", credentialId: pin }])}','score',1)`,
+          ],
+        });
+        steps.push({
+          kind: "credential-routing",
+          name: `${name} identity`,
+          model: name,
+          enabled: pin === "�",
+        });
+      }
+      steps.push({
+        kind: "sql",
+        name: "matching replacement provider",
+        sql: [
+          "INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('replacement-provider','�','replacement','apiKey','{}',1,1)",
+        ],
+      });
+      for (const [name, provider] of [
+        ["lone-provider", "\ud800"],
+        ["replacement-provider", "�"],
+      ])
+        steps.push({
+          kind: "sql",
+          name: `seed ${name}`,
+          sql: [
+            `INSERT INTO virtual_models VALUES('${name}','${JSON.stringify([{ ...TARGET, provider, model: "m" }])}','score',1)`,
+          ],
+        });
+      steps.push(as("admin", "GET", "/api/models"));
+      for (const name of ["lone-provider", "replacement-provider"])
+        steps.push(
+          { kind: "listed", name: `${name} published`, id: name, present: true },
+          {
+            kind: "v1",
+            name: `${name} frozen exclusion`,
+            key: SEED_KEY,
+            target: "/v1/chat/completions",
+            body: JSON.stringify({ model: name, messages: [{ role: "user", content: "hello" }] }),
+          },
+        );
+      steps.push({
+        kind: "sql",
+        name: "remove pin fixture",
+        sql: ["DELETE FROM credentials WHERE id='�'"],
+      });
       for (let i = 0; i < 3; i++) {
         steps.push(as("admin", "PATCH", `/api/credentials/{{id:${i}}}`, '{"enabled":false}'));
         for (let j = 0; j < 3; j++)
@@ -1438,6 +1499,7 @@ const configs: Config[] = [
         `UPDATE api_keys SET limits='{}'`,
         `INSERT INTO credential_health VALUES('cred-custom','m','open',3,100,200)`,
         `INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','daily',0,25,100,2000000000000,0,NULL)`,
+        `INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','preboot',0,'unknown',100,4102444800000,0,NULL)`,
         `INSERT INTO virtual_models VALUES('pinned','[{"provider":"custom","model":"m","credentialId":"cred-custom","tier":1,"weight":1,"costPerMTok":{"input":0,"output":0}}]','ordered',1)`,
       ]),
     steps: () => {
@@ -1470,6 +1532,14 @@ const configs: Config[] = [
         steps.push(as("admin", "PATCH", "/api/credentials/cred-custom", body));
       }
       steps.push(as("admin", "PATCH", "/api/credentials/missing", "{}"));
+      for (const [body, timestamps] of [
+        ["{}", "unchanged"],
+        ['{"enabled":false}', "disable"],
+        ['{"enabled":false}', "disable"],
+        ['{"enabled":true}', "enable"],
+        ['{"enabled":true}', "enable"],
+      ] as const)
+        steps.push({ ...as("admin", "PATCH", "/api/credentials/cred-custom", body), timestamps });
       steps.push({
         kind: "sql",
         name: "refuse credential update",
@@ -1540,6 +1610,13 @@ const configs: Config[] = [
         ),
       );
       steps.push(as("admin", "GET", "/api/credentials"));
+      steps.push({
+        kind: "sql",
+        name: "precreate routing model",
+        sql: [
+          `INSERT INTO virtual_models VALUES('routing-a6','[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}]','score',1)`,
+        ],
+      });
       steps.push(
         as(
           "admin",
@@ -1548,15 +1625,56 @@ const configs: Config[] = [
           '{"provider":"custom","apiKey":"secret-a6-2","endpointId":"routing-a6","endpointLabel":"Routing","origin":"http://127.0.0.1:18444","protocol":"chat_completions"}',
         ),
       );
-      steps.push(
-        as(
-          "admin",
-          "PUT",
-          "/api/models/routing-a6",
-          '{"id":"routing-a6","isAlias":true,"targets":[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}],"strategy":"score"}',
-        ),
-      );
       steps.push({ kind: "credential-routing", name: "created credential routes", enabled: true });
+      steps.push({
+        kind: "sql",
+        name: "blob quota comparison",
+        sql: [
+          "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) SELECT id,'blob-review',0,x'09',x'0a',4102444800000,0,NULL FROM credentials WHERE provider_data LIKE '%routing-a6%'",
+        ],
+      });
+      steps.push({
+        kind: "credential-routing",
+        name: "blob lexical ceiling blocks",
+        enabled: false,
+      });
+      steps.push({
+        kind: "sql",
+        name: "clear blob ceiling",
+        sql: ["DELETE FROM quota_windows WHERE window_type='blob-review'"],
+      });
+      steps.push({ kind: "credential-routing", name: "blob ceiling removed", enabled: true });
+      for (const [name, state, failures, opened, until] of [
+        ["fractional counter preserves active deadline", "closed", "1.5", "NULL", "4102444800000"],
+        ["fractional counter preserves open breaker", "open", "1.5", "4102444800000", "NULL"],
+        ["text counter preserves active deadline", "closed", "'unknown'", "NULL", "4102444800000"],
+        ["huge counter preserves open breaker", "open", "1e100", "4102444800000", "NULL"],
+        ["text deadline preserves open breaker", "open", "3", "4102444800000", "'unknown'"],
+      ] as const) {
+        steps.push({
+          kind: "sql",
+          name: `seed ${name}`,
+          sql: [
+            `INSERT INTO credential_health SELECT id,'m','${state}',${failures},${opened},${until} FROM credentials WHERE provider_data LIKE '%routing-a6%'`,
+          ],
+        });
+        steps.push({ kind: "credential-routing", name, enabled: false });
+        steps.push({
+          kind: "sql",
+          name: `clear ${name}`,
+          sql: [
+            "DELETE FROM credential_health WHERE credential_id IN (SELECT id FROM credentials WHERE provider_data LIKE '%routing-a6%')",
+          ],
+        });
+        steps.push({ kind: "credential-routing", name: `recovered after ${name}`, enabled: true });
+      }
+      steps.push({
+        kind: "sql",
+        name: "live malformed unrelated quota",
+        sql: [
+          "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','live',0,'unknown',100,4102444800000,0,NULL)",
+        ],
+      });
       steps.push(as("admin", "PATCH", "/api/credentials/{{last}}", '{"enabled":false}'));
       steps.push({
         kind: "credential-routing",
@@ -1661,6 +1779,19 @@ configs.push({
 });
 
 const TRANSPORT_ERROR = "TRANSPORT-ERROR";
+
+// Materialize once: sequence identity is independent of repeated request text,
+// and both implementations plus expected-divergence lookup use the same keys.
+const materializedSteps = configs.map((cfg) => cfg.steps());
+for (const [configIndex, cfg] of configs.entries()) {
+  const steps = (materializedSteps[configIndex] ?? []).map((step, index) => ({
+    ...step,
+    name: `${String(index).padStart(4, "0")}: ${step.name}`,
+  }));
+  if (new Set(steps.map((step) => step.name)).size !== steps.length)
+    throw new Error(`duplicate step identity in ${cfg.label}`);
+  cfg.steps = () => steps;
+}
 
 async function waitHealthy(): Promise<void> {
   const deadline = Date.now() + 30_000;
@@ -1803,6 +1934,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       seen(name, method, x);
     };
+    let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
       if (step.kind === "restart-other") {
         proc.kill("SIGTERM");
@@ -1817,6 +1949,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         });
         children.push(proc);
         await waitHealthy();
+        mutationAck = Date.now();
         cookies.admin = await login(PASSWORD, undefined, seen);
         cookies.viewer = await login(VIEWER, "viewer", seen);
         results.set(step.name, {
@@ -1826,7 +1959,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         continue;
       }
       if (step.kind === "credential-routing") {
-        const started = Date.now();
+        const started = mutationAck ?? Date.now();
         let ok = false;
         while (Date.now() - started < 1000) {
           const x = await exchange({
@@ -1855,6 +1988,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       if (step.kind === "sql") {
         const d = new Database(file);
         for (const q of step.sql) d.run(q);
+        mutationAck = Date.now();
         d.close();
         continue;
       }
@@ -1974,8 +2108,21 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         continue;
       }
       let x: Ex;
+      const readTimes = () => {
+        const d = new Database(file, { readonly: true });
+        const row = d
+          .query("SELECT updated_at,disabled_at FROM credentials WHERE id='cred-custom'")
+          .get() as { updated_at: number; disabled_at: number | null };
+        d.close();
+        return row;
+      };
+      const before = step.timestamps ? readTimes() : undefined;
+      if (before) await sleep(5);
+      const sentAt = Date.now();
       try {
         x = await send(step);
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(step.method ?? "GET"))
+          mutationAck = Date.now();
       } catch (err) {
         results.set(step.name, { text: `${TRANSPORT_ERROR} ${String(err)}`, db: "" });
         continue;
@@ -1985,6 +2132,24 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         continue;
       }
       record(step.name, step.method ?? "GET", x);
+      if (before) {
+        const after = readTimes();
+        const ok =
+          step.timestamps === "unchanged"
+            ? after.updated_at === before.updated_at && after.disabled_at === before.disabled_at
+            : after.updated_at > before.updated_at &&
+              after.updated_at >= sentAt &&
+              after.updated_at <= Date.now() &&
+              (step.timestamps === "enable"
+                ? after.disabled_at === null
+                : after.disabled_at !== null &&
+                  after.disabled_at >= sentAt &&
+                  after.disabled_at <= Date.now());
+        if (!ok)
+          deadlineFailures.push(
+            `${step.name}: timestamp invariant failed ${JSON.stringify({ before, after })}`,
+          );
+      }
       results.set(step.name, { text: normalize(x, m), db: dump(file, m) });
       // Keys list newest first, and two mints in one millisecond tie: give
       // each sequential mint its own instant so both builds order alike.

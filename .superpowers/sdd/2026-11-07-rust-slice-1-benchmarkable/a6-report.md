@@ -406,3 +406,269 @@ run passed (`workspace-final.log`), before the credential isolation change.
   removed their disposable DB roots. No shared build caches or other worktrees
   were removed. Only A6 files are staged; progress.md, bun.lock and user specs
   remain outside this commit.
+
+## Fix round 1 — checkpoint, NOT complete for review
+
+This section supersedes the earlier acceptance status and the treatment of I1/I2
+as known differences. Both are defects under the operator ruling. Evidence root:
+`/tmp/opencode/a6-fix1/`. Branch `feat/rust-migration-design`, base `b30a85c4`.
+
+| Finding | Commit/status | Verification |
+|---|---|---|
+| I3: repeated steps overwrite comparisons | **52026a2a** | Reviewer enumeration retained in `duplicates-red.log`; strengthened full driver `unique-final.log`: **1249 equal / 2 expected / 0 failures**, 38 raw keys |
+| I1: unusual health counter discards valid deadline/breaker | OPEN, reproduced | Reviewer `health.ts`, copied review binaries: `health-red.log`: **138 equal / 2 failures** |
+| I2: malformed quota freezes unrelated publication | OPEN, reproduced | Reviewer `quota.ts`, copied review binaries: `quota-red.log`: **135 equal / 4 failures** |
+| Mutation-ack deadline and creation-only bound | OPEN | Existing polling clock still starts too late |
+| Explicit no-op/repeated-toggle timestamp assertions | OPEN | Near-now normalization is still insufficient |
+| Frozen-oracle lone provider/pin versus U+FFFD | OPEN | Endpoint vectors do not cover these fields |
+
+I3 materializes every configuration before replacing any `steps` factory, then
+prefixes names with their occurrence index and asserts uniqueness before running.
+This ordering matters: credential-crossread derives its setup by finding the
+unprefixed creation step in credentials. The first attempt replaced factories
+too early and removed that setup; it was corrected before commit. Both binaries
+and expected-divergence lookup now use identical materialized steps. The green
+run retains 56 more comparisons than the previous 1193; it exposed no additional
+parity failures. `biome.log` records the driver formatting check.
+
+### I1 investigation and precise next step
+
+No I1 implementation change has been made at this checkpoint. The frozen reader
+returns raw cells. Preserve these independent operations rather than replacing
+the whole row or narrowing the counter:
+
+- Deadline: `rateLimitedUntil !== null && rateLimitedUntil > now`.
+- Open breaker: `now - (openedAt ?? now)` compared against the NaN-preserving
+  capped exponential of `consecutiveFailures - threshold`; halfOpen always probes.
+- Score: `1 / (1 + (consecutiveFailures ?? 0))`; text requires concatenation,
+  not just numeric coercion.
+- Hard failure: `consecutiveFailures + 1`; text concatenates in the opposite
+  operand order from scoring. Success resets all four fields and uses strict
+  comparison with the blank row to decide whether to write.
+
+Next: port the reviewer's health insertion into the uniquely keyed permanent
+driver, then extend active-deadline/open-breaker/probe routing vectors for
+fractional, text, nullable, negative and huge cells. Run RED with the copied review
+binaries. Replace the strict health representation with one preserving these
+operations, deriving routing coercions at snapshot construction. Trace it through
+`CredentialHealth`, router filters/score/breaker, dispatch overlay, both SQLite
+health write paths (`update_health` and writer batch), and PG checked count binds.
+Do not fix only the filter: that leaves scoring or completion persistence wrong.
+The current isolation test must assert retained field behavior, not row omission.
+NULL counter fixtures require checking schema constraints: the ordinary SQLite
+column is NOT NULL; nullable deadline/openedAt fields can be tested directly.
+
+After I1 is green and committed, implement I2 with permanent pre-boot/live quota
+vectors and unrelated create/disable/delete pickup. Note that comparing two text
+quota cells uses JS string comparison; coercing both to numbers alone is not full
+`used >= limit` parity. Complete all three minors next, then run the final gates.
+
+### Snapshot-reader audit and final D4 hand-off
+
+SQLite `snapshot_reads` reads keys, credentials, health, models, quota and settings
+in one transaction. Inspection found:
+
+- `keys::read_key_entry` isolates row conversion failures, retaining an error
+  entry for a usable hash or skipping an unaddressable hash.
+- `credentials::list_routing` catches row conversion errors. Health currently
+  does likewise but incorrectly loses valid fields (I1).
+- `quota::list` propagates scalar conversion errors (I2).
+- `models::list` retains target/strategy parse errors per model, but reads `id`
+  strictly outside that boundary: a NULL/BLOB id can still fail the transaction.
+  This additional whole-snapshot path is identified by inspection, not yet
+  reproduced or fixed. Include it in the I2 follow-up.
+- `settings::get` accepts non-text as defaults and normalizes parsed settings;
+  its remaining propagated errors are query failures rather than scalar errors.
+
+**D4 must implement equivalent PG row isolation while preserving usable per-field
+health/quota semantics**, including boot and refresh with malformed unrelated
+rows and credential mutation pickup. PG `rows::list_credentials` currently
+collects conversion errors into a whole-read failure. Integer PG schema widths
+do not remove malformed JSON/metadata isolation requirements. D4 also selects
+PgStore via OMNI_DATABASE_URL throughout boot, auth/control, snapshots, miss reads
+and writers, and runs credential HTTP routes plus same-database application
+restart cross-read in both directions on live PostgreSQL. Prior PG mutation tests
+remain store-level evidence, not PG HTTP evidence.
+
+### Verification state
+
+`build.log`: baseline release build passed with `CARGO_INCREMENTAL=0` and
+`CARGO_PROFILE_RELEASE_DEBUG=0`. No final workspace/clippy/fmt or four-driver gate
+is claimed for this incomplete round; those must run once on the final code.
+Only I3 is implementation-complete. No health/quota fix is claimed by the green
+driver, because its permanent regressions have not yet been added.
+
+### Fix round 1 continuation — I1 checkpoint
+
+I1 now preserves independent health cells. Unusual scalar rows retain raw cells
+and precomputed numeric/score coercions in an Arc sidecar built during reads;
+filtering/scoring performs no new conversion or allocation. Hard failure keeps
+JS text concatenation, soft failure retains siblings, success clears the sidecar,
+and SQLite direct/batched writes preserve raw cells. Dispatch's persistence
+choice uses a full transition for unusual health (refresh logic untouched).
+PostgreSQL writers refuse SQLite-only scalar sidecars rather than narrowing them.
+
+Finding → commit → tests: I1 → this checkpoint commit → permanent five-case
+credentials driver plus `unusual_sqlite_health_preserves_deadlines_breakers_and_probes`
+and `unusual_health_arithmetic_and_raw_cells_survive_writes`.
+Evidence `/tmp/opencode/a6-fix1/`:
+- `health-permanent-red.log`: **162 equal / 10 failures** on baseline binaries.
+- `health-permanent-green.log`: **167 equal / 0 failures**, fresh release copied
+  to `/tmp/opencode/a6-fix1/rust-health`, frozen TS review binary.
+- `health-tests.log`: **304 passed / 0 failed / 6 ignored** (store/router/core).
+- `health-clippy.log`: scoped store/router/gateway all-target clippy clean before
+  the final additional routing-vector test; not a final workspace gate.
+- `health-build.log`: release build passed, incremental/debuginfo disabled.
+
+Status: **NOT complete for review**. Next: I2 preboot/live quota REDs and raw
+comparison semantics, then NULL/BLOB model-id isolation, then all three minors.
+Run final workspace/clippy/fmt and four freshly built copied-binary drivers only
+after those changes. No final gate claim here. Ordinary schema disallows NULL
+failure counts; NULL opened/deadline and text/negative/huge counters are covered.
+
+### I2 checkpoint
+
+I1 commit: `a6f9f0e9`. I2 → this checkpoint commit →
+`unusual_quota_keeps_publication_and_js_comparisons` and permanent preboot/live
+credentials-driver quota fixtures. Quota numeric coercions happen during reads;
+the string/string relational result is precomputed separately for routing.
+`quota-permanent-red.log`: **4 equal / 82 cascading failures**, Rust fails boot
+on pre-existing text usage. `quota-permanent-green.log`: **167 equal / 0 failures**,
+fresh outside-checkout `rust-quota`. `quota-tests.log`: **257 passed / 0 failed /
+5 ignored** (store/router/control). `quota-build.log`: release build passed.
+Remaining: model-id isolation, three minors, final gates. Quota identity columns
+remain strict; malformed scalar numeric columns no longer abort publication.
+
+### Model-id checkpoint
+
+I2 commit: `d12597e8`. Model-id snapshot isolation → this checkpoint commit →
+`unaddressable_model_ids_do_not_abort_snapshot_publication`. Frozen
+`sqlite/config.ts:65-75` retains raw IDs; null/blob Map identities cannot equal
+request strings. Rust omits those unaddressable rows while retaining normal
+models and subsequent live changes. `model-red.log` is a runtime snapshot error,
+not a compile failure; `model-green.log`: **5 passed / 0 failed**.
+Precise next step: three minors (ack-based deadline/precreated model, timestamp
+invariants, lone provider/pin identity regressions), then final gates once.
+
+## Fix round 1 — complete for review
+
+Final implementation commit: `ccab72f2`; this report-only commit records gates
+against that code. Evidence root: `/tmp/opencode/a6-fix1/`.
+
+| Finding | Commit | Regression / evidence |
+|---|---|---|
+| I1 independent health scalar semantics | `a6f9f0e9` | `health-permanent-red.log` 162 equal/10 failures → `health-permanent-green.log` 167/0; store arithmetic/persistence and router deadline/breaker/probe vectors |
+| I2 quota scalar publication | `d12597e8` | `quota-permanent-red.log` boot failure → `quota-permanent-green.log` 167/0; preboot/live text usage and string comparisons |
+| I3 unique comparison identities | `52026a2a` | `duplicates-red.log`, `unique-final.log` 1249 equal/2 expected/0 failures |
+| NULL/BLOB model identities | `16c269d8` | `model-red.log` runtime failure → `model-green.log` 5 passed |
+| Quota identity isolation | `ed699d03` | `quota-identity-red.log` runtime failure → `quota-identity-green.log` 6 passed; boot BLOB credential ID, live BLOB window name and unrelated disable |
+| Mutation-ack pickup bound | `13d02b40` | `deadline-red.log` structural absence check; `deadline-green-clean.log` passing credentials corpus; final driver records acknowledgment before DB dumps and SQL commit time; routing model precreated through SQL |
+| No-op/repeated-toggle timestamps | `21cc77a1` | explicit raw before/after DB assertions, both repeated disable and repeated enable; `timestamp-negative-final.log` inverted no-op invariant yields 2 intended failures; final full driver green |
+| Lone provider/pin versus U+FFFD | `ccab72f2` | SQL U+FFFD credential identity routes only through real replacement pin; lone pin cannot match. Provider model list and frozen exclusion responses compared separately; `identity-negative-final.log` forced lone-pin match yields 2 failures; final full driver green |
+
+### Final gates
+
+Both binaries freshly built; Rust copied outside checkout to `rust-final`, TS
+compiled outside checkout to `ts-final`. Build logs: `final-build.log` and
+`final-ts-build.log`. Cargo incremental and debug information disabled.
+
+| Gate | Result | Log |
+|---|---|---|
+| cargo test --workspace | **1044 passed, 0 failed, 7 ignored** | `final-workspace.log` |
+| cargo clippy --workspace --all-targets -- -D warnings | clean | `final-clippy.log` |
+| cargo fmt --all --check | clean | `final-fmt.log` |
+| admin-routes | **1299 equal, 2 expected, 0 failures**, 38 raw keys | `final-admin-routes.log` |
+| admin-auth | **212 equal, 4 expected, 0 failures**, 116 tokens | `final-admin-auth.log` |
+| surface | **606 equal, 61 expected, 0 failures** | `final-surface.log` |
+| run.ts | **all rows equal**, including 4 DB comparisons (37 request logs, 18 daily, 6 rollup, 4 health rows) | `final-run.log` |
+
+Verification chronology caveats: the first workspace invocation was terminated
+by the 120-second tool timeout; the complete invocation used a 600-second limit.
+run.ts initially rejected unsupported `--out`, then ran successfully without it.
+Temporary negative drivers initially resolved the CLI relative to /tmp and
+failed before assertions. Corrected negative controls explicitly set REPO and
+demonstrate the intended failures, but were executed after the final green gate;
+do not characterize these two minors as runtime RED-before-implementation.
+The deadline RED is a structural coverage check, not a behavioral baseline test.
+
+### D4 hand-off and remaining differences
+
+D4 must select PgStore via OMNI_DATABASE_URL throughout boot, auth/control,
+snapshot build/refresh, miss reads and writers, and exercise credential HTTP
+routes and same-database application restart cross-read in both directions on
+live PostgreSQL. **Postgres row isolation must preserve usable per-field
+health/quota semantics and isolate malformed unrelated rows at boot/refresh**;
+its integer schema does not eliminate malformed JSON/metadata cases. Ordinary
+cargo passes include early-return PG tests and are not live-PG verification.
+
+SQLite non-string credential/model identities are omitted because they cannot
+match a request's string identity. Non-text quota window names remain enforced,
+with their JS string form used for unknown duration/reason names. Health scalar
+sidecars are rejected by PG writes instead of narrowed. Existing driver expected
+divergences remain explicitly pinned (2 admin-routes, 4 admin-auth, 61 surface).
+No providers or dispatch refresh changes, frozen TS edits, user-file staging,
+stash operations, unsafe, push or merge in this continuation.
+
+## Fix round 2 — complete for review
+
+Evidence root: `/tmp/opencode/a6-fix2/`. Final tested implementation commit
+`cb0cecaa`; this report-only commit follows the gates. Source commit/tree and
+SHA256 of both freshly built outside-checkout binaries are recorded together
+with every driver log name in `manifest.json`. No driver used an unstamped
+earlier-round binary in this round.
+
+| Finding | Commit | Independent RED → GREEN |
+|---|---|---|
+| R1 raw quota relational comparison | `398e5a75` | `matrix-red.log` runtime mismatches against frozen router predicate → `matrix-green.log` 100/100 vectors pass |
+| Disable acknowledgment overwritten by SQL | `2ca80410` | `deadline-red.log` failing fixture-order regression → `deadline-green.log`, `deadline-final.log` 1 pass |
+| Vacuous provider identity fixture | `7d72dfac` | `provider-negative.log`: outside-checkout scratch copy with provider guard removed fails true versus false → `provider-green.log` 1 pass with guard intact |
+| Cached snapshot expectation | `cb0cecaa` | full workspace exposed old None expectation; updated to cached Some(false), full workspace green |
+
+The permanent quota oracle reads the actual frozen router's NULL-guard and
+relational expression and evaluates it on Bun SQLite cells. Its ten operands
+span INTEGER, REAL, numeric-looking/non-numeric/empty TEXT, single-byte/empty/
+multi-byte BLOB and NULL: **100 Cartesian pairs**, including schema-excluded
+NULL used in an affinity-free probe table. NULL limit always exempts the window.
+Both string primitives compare UTF-16 lexically; every other pair uses numeric
+coercion. All SQLite comparison results are precomputed at snapshot construction;
+no candidate-path code changed. The reviewer's x'09'/x'0a' routing case is also
+permanent in admin-routes, with recovery after removal.
+
+The deadline regression is explicitly a structural fixture-order test, not an
+induced runtime timeout. Provider coverage calls frozen `servesTarget` with an
+actual replacement-provider credential and compares Rust eligibility for lone
+and real replacement targets. The HTTP fixture also contains a matching SQL
+replacement-provider credential. Scratch mutation changed only the provider
+guard, outside checkout; it failed before the green run. Initial compile access
+to the private module was corrected to its existing public re-export. Sharing
+the target cache with the scratch copy initially reused its artifact; touching
+the real router source/test forced recompilation and the green run passed.
+
+### Final verification and provenance
+
+| Gate | Result | Log under evidence root |
+|---|---|---|
+| cargo test --workspace | **1046 passed / 0 failed / 7 ignored** | `workspace.log` |
+| workspace all-target clippy -D warnings | clean | `clippy.log` |
+| cargo fmt --all --check | clean | `fmt.log` |
+| admin-routes | **1303 equal / 2 expected / 0 failures**, 38 keys | `admin-routes-retry.log` |
+| admin-auth | **212 equal / 4 expected / 0 failures**, 116 tokens | `admin-auth.log` |
+| surface | **606 equal / 61 expected / 0 failures** | `surface.log` |
+| run.ts | **all rows equal**, four DB comparisons | `run.log` |
+
+`build.log`, `build-ts.log`: fresh release builds; `rust` copied from release
+output, `ts` compiled directly outside checkout. Cargo incremental and debug
+information disabled. `manifest.json` covers both binaries and all driver runs.
+The first admin-routes invocation stopped on SQLite BUSY during fixture SQL
+(`admin-routes.log`); the unchanged driver was rerun in a fresh output directory.
+Workspace was rerun after fixing the cached-field test expectation; subsequent
+final gates ran on cb0cecaa with no implementation edits.
+
+Remaining: controller-owned quiet-host custom-path benchmark (66020396 versus
+A6 head) is still a promotion gate, not claimed here. No live-PG gate was run;
+D4 still owns backend wiring, live HTTP/restart cross-read in both directions,
+and equivalent per-field health/quota plus malformed-row isolation at boot and
+refresh. Previously deleted a6-round3/a6-round4/a6-followup evidence is not
+available and is not evidence for this round. Existing pinned driver differences
+remain unchanged. No providers, dispatch refresh, frozen TS, user files or stash
+were modified by this round.
