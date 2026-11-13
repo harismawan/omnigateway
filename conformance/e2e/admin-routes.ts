@@ -1541,20 +1541,13 @@ const configs: Config[] = [
         ),
       );
       steps.push(as("admin", "GET", "/api/credentials"));
+      steps.push({kind: "sql", name: "precreate routing model", sql: [`INSERT INTO virtual_models VALUES('routing-a6','[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}]','score',1)`]});
       steps.push(
         as(
           "admin",
           "POST",
           "/api/credentials",
           '{"provider":"custom","apiKey":"secret-a6-2","endpointId":"routing-a6","endpointLabel":"Routing","origin":"http://127.0.0.1:18444","protocol":"chat_completions"}',
-        ),
-      );
-      steps.push(
-        as(
-          "admin",
-          "PUT",
-          "/api/models/routing-a6",
-          '{"id":"routing-a6","isAlias":true,"targets":[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}],"strategy":"score"}',
         ),
       );
       steps.push({ kind: "credential-routing", name: "created credential routes", enabled: true });
@@ -1838,6 +1831,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       seen(name, method, x);
     };
+    let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
       if (step.kind === "restart-other") {
         proc.kill("SIGTERM");
@@ -1852,6 +1846,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         });
         children.push(proc);
         await waitHealthy();
+        mutationAck = Date.now();
         cookies.admin = await login(PASSWORD, undefined, seen);
         cookies.viewer = await login(VIEWER, "viewer", seen);
         results.set(step.name, {
@@ -1861,7 +1856,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         continue;
       }
       if (step.kind === "credential-routing") {
-        const started = Date.now();
+        const started = mutationAck ?? Date.now();
         let ok = false;
         while (Date.now() - started < 1000) {
           const x = await exchange({
@@ -1890,6 +1885,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       if (step.kind === "sql") {
         const d = new Database(file);
         for (const q of step.sql) d.run(q);
+        mutationAck = Date.now();
         d.close();
         continue;
       }
@@ -2011,6 +2007,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       let x: Ex;
       try {
         x = await send(step);
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(step.method ?? "GET")) mutationAck = Date.now();
       } catch (err) {
         results.set(step.name, { text: `${TRANSPORT_ERROR} ${String(err)}`, db: "" });
         continue;
