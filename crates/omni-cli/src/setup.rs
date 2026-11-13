@@ -22,6 +22,78 @@ fn remove(v: &mut V, key: &str) {
         fields.retain(|(k, _)| !k.iter().copied().eq(key.encode_utf16()));
     }
 }
+// Adapt only identity fields to the shared router rule; setup does not need
+// secrets, pricing or routing health to decide whether a pin serves a target.
+fn serves_pin(t: &V, id: &str, provider: &str, data: &V) -> bool {
+    use omni_store::{
+        AuthType, Credential, CredentialSecrets, Secret,
+        models::{Capabilities, Target, TargetPricing},
+    };
+    let lone = |v: Option<&V>| match v {
+        Some(V::String(units)) if String::from_utf16(units).is_err() => Some(units.clone()),
+        _ => None,
+    };
+    let mut identity = HashMap::new();
+    for key in ["provider", "credentialId", "endpointId"] {
+        if let Some(units) = lone(get(t, key)) {
+            identity.insert(key.into(), units);
+        }
+    }
+    let target = Target {
+        lone_identity: identity,
+        provider: provider.into(),
+        endpoint_id: get(t, "endpointId").map(omni_control::settings_value::shallow),
+        credential_id: Some(id.into()),
+        model: String::new(),
+        tier: 0.0,
+        weight: 1.0,
+        cost_per_m_tok: TargetPricing {
+            input: 0.0,
+            output: 0.0,
+            cache_read: None,
+            cache_write_5m: None,
+            cache_write_1h: None,
+            extra: Default::default(),
+        },
+        context_window: None,
+        max_output_tokens: None,
+        capabilities: Capabilities {
+            tools: false,
+            images: false,
+            reasoning: false,
+        },
+        extra: Default::default(),
+    };
+    let account = Credential {
+        lone_endpoint: lone(get(data, "endpointId")),
+        id: id.into(),
+        provider: provider.into(),
+        label: String::new(),
+        auth_type: AuthType::ApiKey,
+        enabled: true,
+        tier: 0.0,
+        weight: 1.0,
+        expires_at: None,
+        account_email: None,
+        provider_data: get(data, "endpointId").map_or_else(
+            || serde_json::json!({}),
+            |v| serde_json::json!({"endpointId":omni_control::settings_value::shallow(v)}),
+        ),
+        disabled_reason: None,
+        disabled_at: None,
+        has_refresh_token: false,
+        token_version: 0,
+        created_at: 0,
+        updated_at: 0,
+        secrets: CredentialSecrets {
+            access_token: Secret::Absent,
+            refresh_token: Secret::Absent,
+            api_key: Secret::Absent,
+            id_token: Secret::Absent,
+        },
+    };
+    omni_router::serves_target(&target, &account)
+}
 const SLOTS: [(&str, &str, &str); 5] = [
     ("Default", "defaultModel", "ANTHROPIC_MODEL"),
     ("Fable", "fableModel", "ANTHROPIC_DEFAULT_FABLE_MODEL"),
@@ -217,7 +289,7 @@ fn describe(model: &V, store: &omni_store::SqliteStore) -> Result<V, String> {
             get(t, "credentialId") == Some(&text(id))
                 && operator_json::parse(data)
                     .ok()
-                    .is_some_and(|d| get(t, "endpointId") == get(&d, "endpointId"))
+                    .is_some_and(|d| serves_pin(t, id, &provider, &d))
         });
         let auths = if let Some((_, a, _)) = pin {
             vec![a.as_str()]

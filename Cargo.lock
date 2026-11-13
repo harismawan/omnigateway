@@ -1440,6 +1440,7 @@ dependencies = [
  "chrono",
  "omni-control",
  "omni-ir",
+ "omni-router",
  "omni-store",
  "rusqlite",
  "rustix",
