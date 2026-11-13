@@ -23,6 +23,10 @@ for (const seeded of [false, true]) {
     db.run(
       "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES ('c','fiveHour',0,95,100,1,1)",
     );
+    db.run(
+      "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES ('a','weekly',0,0,100,?,?)",
+      [Date.now() + 86400000, Date.now() + 60000],
+    );
     db.run("INSERT INTO settings VALUES ('adminPasswordHash','')");
     db.close();
   }
