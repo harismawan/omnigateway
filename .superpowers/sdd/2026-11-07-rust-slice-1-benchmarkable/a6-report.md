@@ -538,3 +538,14 @@ fresh outside-checkout `rust-quota`. `quota-tests.log`: **257 passed / 0 failed 
 5 ignored** (store/router/control). `quota-build.log`: release build passed.
 Remaining: model-id isolation, three minors, final gates. Quota identity columns
 remain strict; malformed scalar numeric columns no longer abort publication.
+
+### Model-id checkpoint
+
+I2 commit: `d12597e8`. Model-id snapshot isolation → this checkpoint commit →
+`unaddressable_model_ids_do_not_abort_snapshot_publication`. Frozen
+`sqlite/config.ts:65-75` retains raw IDs; null/blob Map identities cannot equal
+request strings. Rust omits those unaddressable rows while retaining normal
+models and subsequent live changes. `model-red.log` is a runtime snapshot error,
+not a compile failure; `model-green.log`: **5 passed / 0 failed**.
+Precise next step: three minors (ack-based deadline/precreated model, timestamp
+invariants, lone provider/pin identity regressions), then final gates once.

@@ -181,7 +181,12 @@ pub fn list(conn: &Connection) -> Result<Vec<Result<VirtualModel, ModelRowError>
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
-        let id = row::text(r, T, "id")?;
+        // TS retains a null/blob Map key. Neither can equal a request's string
+        // model id, so omit only this unaddressable row, never the transaction.
+        let Ok(id) = row::text(r, T, "id") else {
+            tracing::warn!("unaddressable model id omitted from routing snapshot");
+            continue;
+        };
         out.push(read_model(r, &id).map_err(|reason| ModelRowError { id, reason }));
     }
     Ok(out)

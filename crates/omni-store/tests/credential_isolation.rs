@@ -87,3 +87,18 @@ fn unusual_quota_keeps_publication_and_js_comparisons() {
     assert!(!live.credentials[0].enabled);
     assert!(live.quota.iter().any(|w| w.spent()));
 }
+
+#[test]
+fn unaddressable_model_ids_do_not_abort_snapshot_publication() {
+    let store = omni_store::SqliteStore::open(":memory:", 0).expect("store");
+    store.connection().execute_batch("INSERT INTO virtual_models VALUES(NULL,'[]','score',1),(x'61','[]','score',1),('good','[]','score',1)").expect("seed");
+    let key = omni_crypto::field::derive_key("key");
+    let snapshot = store.snapshot_reads(&key).expect("boot");
+    assert_eq!(snapshot.models.len(), 1);
+    assert_eq!(snapshot.models[0].as_ref().expect("model").id, "good");
+    store
+        .connection()
+        .execute_batch("INSERT INTO virtual_models VALUES('live','[]','score',1)")
+        .expect("edit");
+    assert_eq!(store.snapshot_reads(&key).expect("refresh").models.len(), 2);
+}
