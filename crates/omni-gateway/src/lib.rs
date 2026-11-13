@@ -569,6 +569,9 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             }
         }
         drop(listener);
+        let shutdown_until = tokio::time::Instant::now() + deadline;
+        oauth_scheduler.abort();
+        drop(oauth_scheduler.await);
         tracing::info!(reason = "signal", "shutdown requested");
         if tokio::time::timeout(deadline, graceful.shutdown())
             .await
@@ -589,10 +592,9 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         app.deadline_workers.shutdown().await;
         #[cfg(test)]
         app.deadline_workers.before_writer_close();
+        drop(tokio::time::timeout_at(shutdown_until, app.deps.refresher.drain()).await);
         drop(app);
         refresher.abort();
-        oauth_scheduler.abort();
-        drop(oauth_scheduler.await);
         preseeder.abort();
         overlay_sweeper.abort();
         asker.abort();

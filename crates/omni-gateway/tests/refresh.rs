@@ -99,6 +99,29 @@ async fn sweep_refreshes_due_rows_and_disables_expired_without_token() {
 }
 
 #[tokio::test]
+async fn drain_waits_for_detached_rotation_to_persist() {
+    let (_dir, service, http, c) = fixture(200).await;
+    let caller = {
+        let service = service.clone();
+        tokio::spawn(async move { service.refresh(&c).await })
+    };
+    while http.calls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    service.drain().await;
+    let row = service
+        .store
+        .credential(&service.key, "c")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.token_version, 1);
+    assert_eq!(row.secrets.access_token.as_deref(), Some("new"));
+}
+
+#[tokio::test]
 async fn unreadable_refresh_is_internal_not_auth_and_keeps_enabled() {
     let (_dir, service, http, c) = fixture(200).await;
     if let Store::Sqlite { store, .. } = service.store.as_ref() {

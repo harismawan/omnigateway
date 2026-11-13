@@ -51,6 +51,22 @@ fn storage(_: omni_store::StoreError) -> GatewayError {
     GatewayError::new(ErrorCode::Internal, "credential persistence failed")
 }
 impl Refresher {
+    /// After stopping request/sweep producers, let already shared rotations
+    /// persist. The host bounds this wait by its remaining shutdown grace.
+    pub async fn drain(&self) {
+        let receivers: Vec<_> = self
+            .flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(tokio::sync::watch::Sender::subscribe)
+            .collect();
+        for mut rx in receivers {
+            if rx.borrow().is_none() {
+                drop(rx.changed().await);
+            }
+        }
+    }
     /// Frozen scheduler: enabled OAuth inside a five-minute lead; sequential.
     pub async fn sweep(
         self: &Arc<Self>,
