@@ -1371,6 +1371,13 @@ const configs: Config[] = [
           enabled: pin === "�",
         });
       }
+      steps.push({
+        kind: "sql",
+        name: "matching replacement provider",
+        sql: [
+          "INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('replacement-provider','�','replacement','apiKey','{}',1,1)",
+        ],
+      });
       for (const [name, provider] of [
         ["lone-provider", "\ud800"],
         ["replacement-provider", "�"],
@@ -1619,10 +1626,24 @@ const configs: Config[] = [
         ),
       );
       steps.push({ kind: "credential-routing", name: "created credential routes", enabled: true });
-      steps.push({kind: "sql", name: "blob quota comparison", sql: ["INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) SELECT id,'blob-review',0,x'09',x'0a',4102444800000,0,NULL FROM credentials WHERE provider_data LIKE '%routing-a6%'"]});
-      steps.push({kind: "credential-routing", name: "blob lexical ceiling blocks", enabled: false});
-      steps.push({kind: "sql", name: "clear blob ceiling", sql: ["DELETE FROM quota_windows WHERE window_type='blob-review'"]});
-      steps.push({kind: "credential-routing", name: "blob ceiling removed", enabled: true});
+      steps.push({
+        kind: "sql",
+        name: "blob quota comparison",
+        sql: [
+          "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) SELECT id,'blob-review',0,x'09',x'0a',4102444800000,0,NULL FROM credentials WHERE provider_data LIKE '%routing-a6%'",
+        ],
+      });
+      steps.push({
+        kind: "credential-routing",
+        name: "blob lexical ceiling blocks",
+        enabled: false,
+      });
+      steps.push({
+        kind: "sql",
+        name: "clear blob ceiling",
+        sql: ["DELETE FROM quota_windows WHERE window_type='blob-review'"],
+      });
+      steps.push({ kind: "credential-routing", name: "blob ceiling removed", enabled: true });
       for (const [name, state, failures, opened, until] of [
         ["fractional counter preserves active deadline", "closed", "1.5", "NULL", "4102444800000"],
         ["fractional counter preserves open breaker", "open", "1.5", "4102444800000", "NULL"],
