@@ -83,7 +83,7 @@ impl ProviderCodec for CustomCodec {
 }
 
 // A bounded-depth iterator stack, rather than a pending node per sibling.
-fn needs_scope(value: &Value) -> bool {
+pub(crate) fn needs_scope(value: &Value) -> bool {
     fn children(value: &Value) -> Option<Box<dyn Iterator<Item = &Value> + '_>> {
         match value {
             Value::Array(a) => Some(Box::new(a.iter())),

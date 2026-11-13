@@ -16,9 +16,15 @@ pub(super) fn merge(
             notes.push(s);
         }
     };
-    let mut vendor = req.vendor_bag("anthropic").cloned().unwrap_or_default();
+    let mut vendor = req
+        .vendor_bag("anthropic")
+        .map(omni_ir::deep::clone_map)
+        .unwrap_or_default();
     let original_system = vendor.get("system").cloned();
-    let current_system = body.get("system").cloned();
+    let current_system = body
+        .get("system")
+        .cloned()
+        .or_else(|| req.system.as_ref().map(|_| json!([])));
     let native = vendor.get("output_config").and_then(|v| v.get("format"));
     if !readable_format(native) {
         match read_response_format(req) {
@@ -44,7 +50,7 @@ pub(super) fn merge(
         .get("output_config")
         .and_then(Value::as_object)
         .cloned()
-        && let Some(config) = vendor.get("output_config").cloned()
+        && let Some(config) = vendor.get("output_config").map(omni_ir::deep::clone)
     {
         if let Value::Object(mut config) = config {
             if !readable_format(config.get("format")) {

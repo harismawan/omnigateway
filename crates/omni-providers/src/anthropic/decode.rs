@@ -95,9 +95,36 @@ impl StreamDecoder for AnthropicDecoder {
         msg: &SseMessage,
         out: &mut VecDeque<StreamEvent>,
     ) -> Result<Flow, DecodeError> {
-        let Ok(d) = serde_json::from_str::<Value>(&msg.data) else {
-            return Ok(Flow::Continue);
+        let depth = omni_ir::deep::depth_of(&msg.data);
+        omni_ir::deep::scope_for_bound(depth, |_| self.message_inner(msg, out))
+    }
+    fn finish(&mut self, out: &mut VecDeque<StreamEvent>) {
+        if !self.terminal {
+            out.push_back(StreamEvent::Error {
+                code: ErrorCode::Upstream,
+                message: "upstream stream ended before message_stop".into(),
+                retryable: true,
+            });
+        }
+    }
+}
+impl AnthropicDecoder {
+    fn message_inner(
+        &mut self,
+        msg: &SseMessage,
+        out: &mut VecDeque<StreamEvent>,
+    ) -> Result<Flow, DecodeError> {
+        let d = match omni_ir::deep::parse(&msg.data) {
+            Ok(v) => omni_ir::deep::Owned(v),
+            Err(omni_ir::deep::ParseError::Syntax) => return Ok(Flow::Continue),
+            Err(omni_ir::deep::ParseError::TooDeep) => {
+                return Err(DecodeError::Gateway(omni_ir::error::GatewayError::new(
+                    ErrorCode::Upstream,
+                    "upstream JSON exceeds maximum depth",
+                )));
+            }
         };
+        let d = &d.0;
         if !d.is_object() && !d.is_array() {
             return Ok(Flow::Continue);
         }
@@ -133,7 +160,10 @@ impl StreamDecoder for AnthropicDecoder {
                     }
                     t if NATIVE.contains(&t) => {
                         self.native.insert(index);
-                        let mut data = b.as_object().cloned().unwrap_or_default();
+                        let mut data = b
+                            .as_object()
+                            .map(omni_ir::deep::clone_map)
+                            .unwrap_or_default();
                         data.shift_remove("type");
                         ContentBlockStart::ProviderNative {
                             provider: "anthropic".into(),
@@ -189,7 +219,7 @@ impl StreamDecoder for AnthropicDecoder {
                             &["content", "encrypted_content"][..]
                         } {
                             if let Some(v) = delta.get(*key) {
-                                data.insert((*key).into(), v.clone());
+                                data.insert((*key).into(), omni_ir::deep::clone(v));
                             }
                         }
                         Delta::ProviderNative {
@@ -226,7 +256,7 @@ impl StreamDecoder for AnthropicDecoder {
                 self.safeguards(if d["delta"].get("safeguard_results").is_some() {
                     &d["delta"]
                 } else {
-                    &d
+                    d
                 });
                 if let Some(reason) = d["delta"]["stop_reason"].as_str() {
                     self.reason = match reason {
@@ -252,12 +282,12 @@ impl StreamDecoder for AnthropicDecoder {
                     .unwrap_or(self.usage.output_tokens);
             }
             "message_stop" => {
-                self.safeguards(&d);
+                self.safeguards(d);
                 self.terminal = true;
                 out.push_back(StreamEvent::End {
                     stop_reason: self.reason,
                     usage: self.usage,
-                    vendor: self.vendor.clone(),
+                    vendor: self.vendor.as_ref().map(omni_ir::deep::clone_map),
                 });
             }
             "error" => {
@@ -293,14 +323,5 @@ impl StreamDecoder for AnthropicDecoder {
             }
         }
         Ok(Flow::Continue)
-    }
-    fn finish(&mut self, out: &mut VecDeque<StreamEvent>) {
-        if !self.terminal {
-            out.push_back(StreamEvent::Error {
-                code: ErrorCode::Upstream,
-                message: "upstream stream ended before message_stop".into(),
-                retryable: true,
-            });
-        }
     }
 }

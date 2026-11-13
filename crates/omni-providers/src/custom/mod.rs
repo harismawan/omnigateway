@@ -2,7 +2,7 @@
 //!
 //! Forked per provider, as in TS: no other provider's codec is imported.
 
-mod codec;
+pub(crate) mod codec;
 pub mod decode;
 pub mod wire;
 

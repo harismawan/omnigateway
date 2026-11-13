@@ -240,7 +240,9 @@ pub fn to_wire_with_options(
             }
             Value::Array(blocks)
         };
-        messages.push(json!({"role":m.role,"content":content}));
+        let mut message = json!({"role":m.role});
+        message["content"] = content;
+        messages.push(message);
     }
     let id = model_id(model);
     let ceiling = match id {
@@ -281,7 +283,8 @@ pub fn to_wire_with_options(
             }
         }
     }
-    let mut body = json!({"model":model,"messages":messages,"max_tokens":max,"stream":req.stream});
+    let mut body = json!({"model":model,"messages":null,"max_tokens":max,"stream":req.stream});
+    body["messages"] = Value::Array(messages);
     if !system.is_empty() {
         body["system"] = Value::Array(system);
     }
@@ -300,9 +303,11 @@ pub fn to_wire_with_options(
                     if let Some(d) = &t.description {
                         v["description"] = json!(d);
                     }
-                    v["input_schema"] = t.input_schema.clone();
+                    v["input_schema"] = omni_ir::deep::clone(&t.input_schema);
                     if let Some(o) = &t.options {
-                        v.as_object_mut().expect("object").extend(o.clone());
+                        v.as_object_mut()
+                            .expect("object")
+                            .extend(omni_ir::deep::clone_map(o));
                     }
                     (v, &t.cache_control)
                 }
@@ -320,7 +325,9 @@ pub fn to_wire_with_options(
                     if !t.name.is_empty() {
                         v["name"] = json!(t.name);
                     }
-                    v.as_object_mut().expect("object").extend(t.wire.clone());
+                    v.as_object_mut()
+                        .expect("object")
+                        .extend(omni_ir::deep::clone_map(&t.wire));
                     (v, &t.cache_control)
                 }
             };
@@ -400,7 +407,9 @@ pub fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, Ga
             v
         }
         ContentBlock::ToolUse(b) => {
-            json!({"type":"tool_use","id":b.id,"name":cloak.name(&b.name),"input":b.input})
+            let mut v = json!({"type":"tool_use","id":b.id,"name":cloak.name(&b.name)});
+            v["input"] = omni_ir::deep::clone(&b.input);
+            v
         }
         ContentBlock::ProviderNative(b) => {
             if b.provider != "anthropic" {
@@ -412,7 +421,7 @@ pub fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, Ga
                     ),
                 ));
             }
-            let mut v = Value::Object(b.data.clone());
+            let mut v = Value::Object(omni_ir::deep::clone_map(&b.data));
             v["type"] = json!(b.block_type);
             v
         }

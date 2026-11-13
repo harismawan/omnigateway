@@ -18,4 +18,9 @@ for(const model of ['m','claude-haiku-4-5']) for(const config of [undefined,{eff
  const result=toWire(request,model,{oauth:true,preserveSystem,maxOutputTokens:100000});
  rows.push({request,model,oauth:true,preserveSystem,body:JSON.stringify(result.body),degradations:result.degradations});
 }
+for(const system of [undefined,[],[{type:'image',mediaType:'image/png',data:'aA=='}]]) {
+ const request:any={model:'m',stream:false,...(system===undefined?{}:{system}),messages:[],vendor:{anthropic:{system:[{type:'text',text:'stale'}],safeguards:[{}]}}};
+ const result=toWire(request,'m',{oauth:true,preserveSystem:true,maxOutputTokens:100000});
+ rows.push({request,model:'m',oauth:true,preserveSystem:true,body:JSON.stringify(result.body),degradations:result.degradations});
+}
 console.log(JSON.stringify(rows));

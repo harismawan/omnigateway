@@ -6,6 +6,30 @@ use omni_providers::{
 use std::collections::VecDeque;
 
 #[test]
+fn deep_valid_events_are_not_silently_discarded() {
+    let mut decoder = AnthropicDecoder::default();
+    let mut out = VecDeque::new();
+    let msg = SseMessage {
+        event: "content_block_start".into(),
+        data: format!(
+            r#"{{"content_block":{{"type":"document","data":{}0{}}}}}"#,
+            "[".repeat(140),
+            "]".repeat(140)
+        ),
+    };
+    decoder.message(&msg, &mut out).expect("valid JSON");
+    assert_eq!(out.len(), 1);
+    let msg = SseMessage {
+        event: "ping".into(),
+        data: format!("{}0{}", "[".repeat(40001), "]".repeat(40001)),
+    };
+    assert!(
+        decoder.message(&msg, &mut out).is_err(),
+        "depth policy must be explicit"
+    );
+}
+
+#[test]
 fn frozen_ts_decoder_generated_corpus() {
     let run = std::process::Command::new("bun")
         .arg("tests/anthropic-decode-reference.ts")
