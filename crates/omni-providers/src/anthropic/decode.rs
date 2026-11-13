@@ -76,12 +76,20 @@ const NATIVE: &[&str] = &[
 impl AnthropicDecoder {
     fn safeguards(&mut self, value: &Value) {
         if let Some(v) = value.get("safeguard_results") {
-            self.vendor = Some(
-                serde_json::json!({"anthropic":{"safeguard_results":v}})
-                    .as_object()
-                    .expect("object")
-                    .clone(),
-            );
+            let mut verdict = Map::new();
+            verdict.insert("safeguard_results".into(), omni_ir::deep::clone(v));
+            let mut vendor = Map::new();
+            vendor.insert("anthropic".into(), Value::Object(verdict));
+            if let Some(old) = self.vendor.replace(vendor) {
+                omni_ir::deep::drop_map(old);
+            }
+        }
+    }
+}
+impl Drop for AnthropicDecoder {
+    fn drop(&mut self) {
+        if let Some(vendor) = self.vendor.take() {
+            omni_ir::deep::drop_map(vendor);
         }
     }
 }

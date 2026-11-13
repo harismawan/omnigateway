@@ -6,6 +6,65 @@ use omni_providers::{
 use std::collections::VecDeque;
 
 #[test]
+fn retained_safeguards_depth_subprocess() {
+    if std::env::var_os("OMNI_SAFEGUARDS_CHILD").is_some() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let mut decoder = AnthropicDecoder::default();
+                let mut out = VecDeque::new();
+                let nested = format!("{}0{}", "[".repeat(39995), "]".repeat(39995));
+                for payload in [nested.clone(), nested, "null".into()] {
+                    decoder
+                        .message(
+                            &SseMessage {
+                                event: "message_delta".into(),
+                                data: format!("{{\"safeguard_results\":{payload}}}"),
+                            },
+                            &mut out,
+                        )
+                        .expect("decode");
+                }
+                drop(decoder);
+                // A cancellation before message_stop drops a retained deep verdict.
+                let mut decoder = AnthropicDecoder::default();
+                decoder
+                    .message(
+                        &SseMessage {
+                            event: "message_delta".into(),
+                            data: format!(
+                                "{{\"safeguard_results\":{}0{}}}",
+                                "[".repeat(39995),
+                                "]".repeat(39995)
+                            ),
+                        },
+                        &mut out,
+                    )
+                    .expect("decode");
+                drop(decoder);
+            })
+            .expect("thread")
+            .join()
+            .expect("worker");
+        return;
+    }
+    let run = std::process::Command::new(std::env::current_exe().expect("exe"))
+        .args([
+            "--exact",
+            "retained_safeguards_depth_subprocess",
+            "--nocapture",
+        ])
+        .env("OMNI_SAFEGUARDS_CHILD", "1")
+        .output()
+        .expect("subprocess");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn deep_valid_events_are_not_silently_discarded() {
     let mut decoder = AnthropicDecoder::default();
     let mut out = VecDeque::new();
