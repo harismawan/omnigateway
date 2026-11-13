@@ -251,6 +251,7 @@ async function run(binary: string, label: string) {
       await child.exited;
       const db = new Database(join(root, "omni.db"));
       if (f.oauth) {
+        (output.at(-1) as any).requestLogs = db.query("SELECT status, error_code FROM request_logs ORDER BY rowid DESC LIMIT ?").all(responses.length);
         const rows = db.query("SELECT * FROM credentials ORDER BY id").all() as any[];
         for (const row of rows) {
           for (const secret of ["access_token", "refresh_token", "api_key", "id_token"]) if (row[secret] !== null) row[secret] = await decrypt(fieldKey, row[secret]);
@@ -315,6 +316,16 @@ try {
         const oauth = credentials.find((c:any)=>c.auth_type === "oauth");
         if ([2,3,6].includes(i) && (oauth.enabled !== 0 || oauth.disabled_reason !== "tokenRejected")) throw Error("rejected token not disabled");
         if (i === 2 && (row.status !== 503 || !(run.logs[i] as any).error_code?.includes("ALL_CANDIDATES_FAILED"))) throw Error("expected TS aggregate rejection");
+        if (i === 6) {
+          const clients = [row, ...row.extra];
+          if (clients.length !== 4) throw Error("expected four concurrent rejection responses");
+          for (const client of clients) {
+            if (client.status !== 503) throw Error(`unexpected concurrent rejection: ${client.status}`);
+          }
+          // Anthropic bodies expose api_error; the internal code is in request_logs.
+          const logs = (row as any).requestLogs;
+          if (logs.length !== 4 || logs.some((log: any) => log.status !== 503 || log.error_code !== "ALL_CANDIDATES_FAILED")) throw Error("expected four ALL_CANDIDATES_FAILED rejections");
+        }
         if (i === 5 && (oauth.token_version !== 1 || oauth.access_token !== "winner-access" || oauth.account_email !== null)) throw Error("CAS winner overwritten");
       }
       if (f.oauth && i < 2) {
