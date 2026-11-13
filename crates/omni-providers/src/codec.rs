@@ -20,16 +20,21 @@ use crate::http::{BodyEncoding, Headers};
 use crate::sse::SseMessage;
 
 /// `AdapterCredentials`: decrypted, from the in-memory snapshot.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default)]
 pub struct Credentials {
     pub access_token: Option<String>,
     pub api_key: Option<String>,
     /// Durable provider-specific state (custom: `origin`, `basePath`, `protocol`).
     pub provider_data: Map<String, Value>,
 }
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Credentials(<redacted>)")
+    }
+}
 
 /// What a codec is given to build a request (`CodecInput`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct CodecInput<'a> {
     pub request: &'a ChatRequest,
     /// Concrete upstream model id, already resolved from the virtual model.
@@ -41,9 +46,14 @@ pub struct CodecInput<'a> {
     /// Epoch milliseconds dispatch accepted the request.
     pub request_started_at: Option<f64>,
 }
+impl std::fmt::Debug for CodecInput<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CodecInput(<redacted>)")
+    }
+}
 
 /// `CodecHttpRequest`: everything but who is sending it and when to give up.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct CodecHttpRequest {
     pub url: String,
     pub method: String,
@@ -51,9 +61,13 @@ pub struct CodecHttpRequest {
     pub body: String,
     pub body_encoding: Option<BodyEncoding>,
 }
+impl std::fmt::Debug for CodecHttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CodecHttpRequest(<redacted>)")
+    }
+}
 
 /// `CodecRequest`.
-#[derive(Debug)]
 pub struct CodecRequest<S> {
     pub request: CodecHttpRequest,
     pub decode_state: S,
@@ -62,9 +76,13 @@ pub struct CodecRequest<S> {
     /// How many client tool names were renamed outbound. A count, never names.
     pub cloaked_tools: Option<u32>,
 }
+impl<S> std::fmt::Debug for CodecRequest<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CodecRequest(<redacted>)")
+    }
+}
 
 /// `CodecErrorInput`, for [`ProviderCodec::classify_error`].
-#[derive(Debug)]
 pub struct CodecErrorInput<'a, S> {
     pub status: u16,
     pub body: &'a str,
@@ -73,6 +91,11 @@ pub struct CodecErrorInput<'a, S> {
     pub decode_state: &'a S,
     /// The error the host raises if the hook returns `None`.
     pub fallback: &'a GatewayError,
+}
+impl<S> std::fmt::Debug for CodecErrorInput<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CodecErrorInput(<redacted>)")
+    }
 }
 
 /// Whether a decoder wants more of the stream.

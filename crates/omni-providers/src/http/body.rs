@@ -20,10 +20,15 @@ const MAX_LINE: usize = 8 * 1024;
 /// Response headers with node's `IncomingMessage.headers` merge rules, read
 /// back through a fetch `Headers` (`get` is case-insensitive and joins with
 /// `", "`). Order does not matter on the response side.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Headers {
     /// Lowercase name and value; `set-cookie` may repeat, nothing else does.
     entries: Vec<(String, String)>,
+}
+impl std::fmt::Debug for Headers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Headers(<redacted>)")
+    }
 }
 
 /// Headers whose duplicates node discards, keeping the first.
@@ -109,7 +114,6 @@ enum Framing {
 ///
 /// Holds the connection. Read to its clean end, the connection returns to the
 /// pool; dropped earlier, or after an error, it is closed.
-#[derive(Debug)]
 pub struct ResponseBody {
     conn: Option<Conn>,
     given: std::collections::VecDeque<Bytes>,
@@ -117,6 +121,11 @@ pub struct ResponseBody {
     framing: Framing,
     reusable: bool,
     pool: Option<(Arc<Pool>, Key)>,
+}
+impl std::fmt::Debug for ResponseBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ResponseBody(<redacted>)")
+    }
 }
 
 impl ResponseBody {

@@ -41,13 +41,18 @@ pub struct AuthorizeStart {
     pub pending: PendingFlow,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthRequest {
     pub url: String,
     pub method: String,
     pub headers: Vec<(String, String)>,
     pub body: String,
+}
+impl std::fmt::Debug for AuthRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthRequest(<redacted>)")
+    }
 }
 
 // Deliberately no Debug: these values contain live credentials.
