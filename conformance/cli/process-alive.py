@@ -32,7 +32,7 @@ for value, running, retained in [(str(os.getpid()),True,True), ('2147483647',Fal
 unit=root/'.config/systemd/user/omnigateway.service'
 unit.parent.mkdir(parents=True)
 unit.write_text('fixture')
-for script in [None, '#!/bin/sh\necho failed >&2\nexit 3\n', '#!/bin/sh\nexit 1\n']:
+for script, expected in [(None, None), ('#!/bin/sh\necho failed >&2\nexit 3\n', 'failed'), ('#!/bin/sh\nexit 1\n', 'unknown'), ('#!/bin/sh\necho surprising\nexit 7\n', 'surprising')]:
     bindir=root/'bin'
     bindir.mkdir(exist_ok=True)
     if script is not None:
@@ -43,5 +43,24 @@ for script in [None, '#!/bin/sh\necho failed >&2\nexit 3\n', '#!/bin/sh\nexit 1\
         results.append((p.returncode,p.stdout,p.stderr))
     assert results[0] == results[1], results
     assert results[0][0] == (1 if script is None else 0)
+    if expected is None:
+        assert results[0][1] == b''
+        assert results[0][2] == b'Executable not found in $PATH: "systemctl"\n'
+    else:
+        process=json.loads(results[0][1])['process']
+        assert process['supervisor'] == 'systemd'
+        assert process['state'] == expected
+        assert process['running'] is False
+        assert process['pid'] is None
     count+=1
 print(f'PASS {count} process/PID/EPERM/systemctl comparisons ({root})')
+trace=root/'systemctl-args'
+exe.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$*" "$INHERITED_SENTINEL" >> "$TRACE"\ncase "$*" in *is-active*) echo active;; *show*) echo 123;; esac\n')
+for cmd in commands:
+    trace.unlink(missing_ok=True)
+    p=subprocess.run(cmd+['--root',str(root),'status','--json'],env={**env,'PATH':str(bindir),'TRACE':str(trace),'INHERITED_SENTINEL':'present'},capture_output=True)
+    assert p.returncode == 0, p.stderr
+    process=json.loads(p.stdout)['process']
+    assert process['running'] is True and process['pid'] == 123
+    assert trace.read_text().splitlines() == ['--user is-active omnigateway.service|present', '--user show omnigateway.service --property=MainPID --value|present']
+print('PASS systemctl inherited environment and exact user arguments')
