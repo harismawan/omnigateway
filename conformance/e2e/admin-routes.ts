@@ -394,6 +394,7 @@ function normalizeV1(x: Ex, m: Masker): string {
 /** Every table but the ones the gateway writes on its own clock, sorted. */
 function dump(file: string, m: Masker): string {
   const d = new Database(file, { readonly: true });
+  d.run("PRAGMA busy_timeout=5000");
   const tables = (
     d.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {
       name: string;
@@ -907,6 +908,7 @@ function settingsSteps(): Step[] {
     ),
     settle: (file: string) => {
       const d = new Database(file, { readonly: true });
+      d.run("PRAGMA busy_timeout=5000");
       const row = d.query("SELECT value FROM settings WHERE key='settings'").get() as {
         value: string;
       } | null;
@@ -1307,9 +1309,19 @@ const ODD_SQL = [
   `INSERT INTO settings(key,value) VALUES('settings','{"maxAttempts":"x","extra":[1,{"a":"\\udc00"}],"guardrailModel":"  g ","smartRouterLocalModel":"odd-m"}')`,
 ];
 
-type Config = { label: string; db: () => string; steps: () => Step[] };
+type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?: string };
 let healthSeed: string | undefined;
 const configs: Config[] = [
+  {
+    label: "usage-large",
+    db: () => db("usage-large", ["WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<300000) INSERT INTO request_logs(id,at,requested_model,resolved_model,api_key_id,status,duration_ms,input_tokens) SELECT 'large-'||i,1794000000000+i,'requested','model-'||(i%7),'key-'||(i%10000),200,10,2 FROM n"]),
+    steps: () => everyone("GET", "/api/usage?groupBy=apiKey&splitBy=model&until=1e20").map(s => ({...s, expectedStatus: s.who === "anon" ? 401 : 200})),
+  },
+  ...["330", "-480"].map(dayOffset => ({
+    label: `usage-offset-${dayOffset}`, dayOffset,
+    db: () => db(`usage-offset-${dayOffset}`, [`INSERT INTO usage_daily(day,resolved_model,requests) VALUES (${1794528000000-Number(dayOffset)*60000},'offset',7)`]),
+    steps: () => [0,1,-1,86399999,86400000].flatMap(delta => everyone("GET", `/api/usage?grain=daily&groupBy=day&since=${1794528000000-Number(dayOffset)*60000+delta}&until=1e20`).map(s => ({...s, expectedStatus: s.who === "anon" ? 401 : 200}))),
+  })),
   {
     label: "usage",
     db: () => db("usage", [
@@ -1325,7 +1337,12 @@ const configs: Config[] = [
           for (const splitBy of ["", "model", "provider", "apiKey"])
             queries.push(`grain=${grain}&groupBy=${groupBy}${splitBy ? `&splitBy=${splitBy}` : ""}`);
       queries.push("credentialId=cred-1", "apiKeyId=key-1", "credentialId=cred-0&apiKeyId=key-2", "since=1794528000000&until=1794614400000", "grain=daily&since=1794528000001&until=1e20", "until=0");
-      return queries.flatMap((q, i) => everyone("GET", `/api/usage?${q}`).map(s => ({...s, name: `usage ${i} ${s.who}`, expectedStatus: s.who === "anon" ? 401 : i >= 3 && i <= 9 ? 400 : 200 })));
+      queries.push("since=%FF", "since=%C0%AF", "since=%ED%A0%80", "since=%E2%82", "since=%zz");
+      return [
+        ...queries.flatMap((q, i) => everyone("GET", `/api/usage?${q}`).map(s => ({...s, name: `usage ${i} ${s.who}`, expectedStatus: s.who === "anon" ? 401 : i >= 3 && i <= 9 ? 400 : 200 }))),
+        {kind: "sql", name: "live usage raw cells", sql: ["INSERT INTO request_logs(id,at,requested_model,resolved_model,status,duration_ms,input_tokens,degradations) VALUES ('live-usage',1794000000000,'live',CAST(x'ff' AS TEXT),500,'text-duration',x'1234','not-json')", "UPDATE request_logs SET state='pending' WHERE id='u3'"]},
+        ...everyone("GET", "/api/usage?until=1e20").map(s => ({...s, name: `live malformed ${s.who}`, expectedStatus: s.who === "anon" ? 401 : 200})),
+      ];
     },
   },
   {
@@ -1859,6 +1876,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     OMNI_DB_PATH: file,
     OMNI_ROOT: root,
     OMNI_STATIC_DIR: join(root, "no-dashboard"),
+    OMNI_DAY_OFFSET_MINUTES: cfg.dayOffset ?? "0",
   };
   const logFile = join(out, `${cfg.label}-${label}.log`);
   let proc = Bun.spawn([binary], {
@@ -2008,6 +2026,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       if (step.kind === "sql") {
         const d = new Database(file);
+        d.run("PRAGMA busy_timeout=5000");
         for (const q of step.sql) d.run(q);
         mutationAck = Date.now();
         d.close();
@@ -2027,6 +2046,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
             body: '{"model":"plain","messages":[{"role":"user","content":"hi"}]}',
           });
           const db = new Database(file, { readonly: true });
+          db.run("PRAGMA busy_timeout=5000");
           const committed = db
             .query(
               "SELECT count(*) AS n FROM request_logs WHERE api_key_id=? AND status IS NOT NULL",
@@ -2131,6 +2151,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       let x: Ex;
       const readTimes = () => {
         const d = new Database(file, { readonly: true });
+        d.run("PRAGMA busy_timeout=5000");
         const row = d
           .query("SELECT updated_at,disabled_at FROM credentials WHERE id='cred-custom'")
           .get() as { updated_at: number; disabled_at: number | null };
@@ -2179,6 +2200,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       if (step.method === "POST" && fill(step.target) === "/api/keys") await sleep(3);
     }
   } finally {
+    try {
+      const status = readFileSync(`/proc/${proc.pid}/status`, "utf8");
+      writeFileSync(join(out, `${cfg.label}-${label}-rss.txt`), status.split("\n").filter(l => /^Vm(HWM|RSS):/.test(l)).join("\n")+"\n");
+    } catch {}
     proc.kill("SIGTERM");
     await proc.exited;
   }

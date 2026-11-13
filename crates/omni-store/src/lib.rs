@@ -17,6 +17,7 @@ pub mod migrate;
 pub mod models;
 pub mod pg;
 pub mod quota;
+pub mod reports;
 pub mod rollup;
 mod row;
 pub mod settings;
