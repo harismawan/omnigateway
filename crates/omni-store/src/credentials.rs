@@ -96,6 +96,62 @@ impl Credential {
 
 const T: &str = "credentials";
 
+/// API-key creation values. Secret fields deliberately have no Debug implementation.
+pub struct ApiKeyCredential<'a> {
+    pub id: &'a str,
+    pub provider: &'a str,
+    pub label: &'a str,
+    /// Already encoded with the lossless JavaScript JSON serializer.
+    pub provider_data: &'a str,
+    pub api_key: &'a str,
+    pub now: i64,
+}
+
+#[derive(Default)]
+pub struct CredentialPatch {
+    pub label: Option<String>,
+    pub enabled: Option<bool>,
+    pub tier: Option<f64>,
+    pub weight: Option<f64>,
+}
+
+impl CredentialPatch {
+    pub fn is_empty(&self) -> bool {
+        self.label.is_none()
+            && self.enabled.is_none()
+            && self.tier.is_none()
+            && self.weight.is_none()
+    }
+}
+
+pub fn create_api_key(
+    conn: &Connection,
+    key: &FieldKey,
+    input: &ApiKeyCredential<'_>,
+) -> Result<(), StoreError> {
+    let sealed = omni_crypto::field::encrypt(key, input.api_key);
+    conn.execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,provider_data,api_key,created_at,updated_at) VALUES(?,?,?,'apiKey',1,1,1,?,?,?,?)",rusqlite::params![input.id,input.provider,input.label,input.provider_data,sealed,input.now,input.now])?;
+    Ok(())
+}
+
+pub fn patch_metadata(
+    conn: &Connection,
+    id: Option<&str>,
+    patch: &CredentialPatch,
+    now: i64,
+) -> Result<(), StoreError> {
+    if patch.is_empty() {
+        return Ok(());
+    }
+    conn.execute("UPDATE credentials SET label=COALESCE(?1,label),enabled=COALESCE(?2,enabled),tier=COALESCE(?3,tier),weight=COALESCE(?4,weight),disabled_reason=CASE WHEN ?2 IS NULL THEN disabled_reason WHEN ?2=1 THEN NULL ELSE 'manual' END,disabled_at=CASE WHEN ?2 IS NULL THEN disabled_at WHEN ?2=1 THEN NULL ELSE ?5 END,updated_at=?5 WHERE id=?6",rusqlite::params![patch.label,patch.enabled,patch.tier,patch.weight,now,id])?;
+    Ok(())
+}
+
+pub fn remove(conn: &Connection, id: Option<&str>) -> Result<(), StoreError> {
+    conn.execute("DELETE FROM credentials WHERE id=?", [id])?;
+    Ok(())
+}
+
 fn open(r: &Row<'_>, key: &FieldKey, column: &'static str) -> Result<Secret, StoreError> {
     Ok(match row::opt_text(r, T, column)? {
         None => Secret::Absent,

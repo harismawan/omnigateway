@@ -291,6 +291,50 @@ impl PgStore {
         rows::list_credentials(&self.client().await?, key).await
     }
 
+    pub async fn create_api_key_credential(
+        &self,
+        key: &FieldKey,
+        input: &crate::credentials::ApiKeyCredential<'_>,
+    ) -> Result<(), StoreError> {
+        let sealed = omni_crypto::field::encrypt(key, input.api_key);
+        self.client().await?.execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,provider_data,api_key,created_at,updated_at) VALUES($1,$2,$3,'apiKey',true,1,1,$4,$5,$6,$6)",&[&input.id,&input.provider,&input.label,&input.provider_data,&sealed,&input.now]).await?;
+        Ok(())
+    }
+
+    pub async fn patch_credential(
+        &self,
+        id: Option<&str>,
+        patch: &crate::credentials::CredentialPatch,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        if patch.is_empty() {
+            return Ok(());
+        }
+        let tier = patch
+            .tier
+            .map(|n| {
+                if n.fract() != 0.0 || n < i32::MIN as f64 || n > i32::MAX as f64 || !n.is_finite()
+                {
+                    Err(StoreError::Refused(
+                        "tier out of PostgreSQL integer range".into(),
+                    ))
+                } else {
+                    Ok(n as i32)
+                }
+            })
+            .transpose()?;
+        self.client().await?.execute("UPDATE credentials SET label=COALESCE($1,label),enabled=COALESCE($2,enabled),tier=COALESCE($3,tier),weight=COALESCE($4,weight),disabled_reason=CASE WHEN $2::boolean IS NULL THEN disabled_reason WHEN $2 THEN NULL ELSE 'manual' END,disabled_at=CASE WHEN $2::boolean IS NULL THEN disabled_at WHEN $2 THEN NULL ELSE $5 END,updated_at=$5 WHERE id=$6",&[&patch.label,&patch.enabled,&tier,&patch.weight,&now,&id]).await?;
+        Ok(())
+    }
+
+    pub async fn remove_credential(&self, id: Option<&str>) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute("DELETE FROM credentials WHERE id=$1", &[&id])
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_health(&self) -> Result<Vec<CredentialHealth>, StoreError> {
         rows::list_health(&self.client().await?).await
     }

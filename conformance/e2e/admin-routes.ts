@@ -1342,6 +1342,18 @@ const configs: Config[] = [
         steps.push(as("admin", "PATCH", "/api/credentials/cred-custom", body));
       }
       steps.push(as("admin", "PATCH", "/api/credentials/missing", "{}"));
+      steps.push({
+        kind: "sql",
+        name: "refuse credential update",
+        sql: [
+          "CREATE TRIGGER a6_refuse BEFORE UPDATE ON credentials BEGIN SELECT RAISE(ABORT,'test refusal'); END",
+        ],
+      });
+      steps.push({
+        ...as("admin", "PATCH", "/api/credentials/cred-custom", '{"enabled":false}'),
+        name: "credential update refused by SQL trigger",
+      });
+      steps.push({ kind: "sql", name: "allow credential update", sql: ["DROP TRIGGER a6_refuse"] });
       for (const body of [
         "null",
         "[]",
@@ -1816,7 +1828,11 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
   const lines = readFileSync(logFile, "utf8")
     .split("\n")
     .map((l) => l.replace(/^\S+ /, ""))
-    .filter((l) => /^\w+ +(admin password|viewer|provider catalog|api key limits)/.test(l))
+    .filter((l) =>
+      /^\w+ +(admin password|viewer|provider catalog|api key limits|credential enabled|credential disabled)/.test(
+        l,
+      ),
+    )
     .map((l) => m.text(l));
   // What the process wrote to stdout and stderr counts as sent too.
   for (const [stream, f] of [

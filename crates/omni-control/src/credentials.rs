@@ -177,9 +177,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
     ])))
 }
 pub fn remove(s: &SqliteStore, id: Option<&str>) -> Result<()> {
-    s.connection()
-        .execute("DELETE FROM credentials WHERE id=?", [id])
-        .map_err(Failure::internal)?;
+    omni_store::credentials::remove(s.connection(), id)?;
     Ok(())
 }
 pub fn patch(s: &SqliteStore, id: Option<&str>, body: &JsValue, now: i64) -> Result<()> {
@@ -233,54 +231,36 @@ pub fn patch(s: &SqliteStore, id: Option<&str>, body: &JsValue, now: i64) -> Res
     if fields.is_empty() {
         return Ok(());
     }
-    let mut sets = Vec::new();
-    let mut vals = Vec::<rusqlite::types::Value>::new();
+    let mut mutation = omni_store::credentials::CredentialPatch::default();
     for (k, v) in fields {
         let k = String::from_utf16_lossy(k);
-        sets.push(format!("{k}=?"));
-        let value = match v {
-            JsValue::String(u) => String::from_utf16_lossy(u).into(),
-            JsValue::Number(n) => rusqlite::types::Value::Real(*n),
-            JsValue::Bool(b) => {
-                let b = *b;
-                sets.push("disabled_reason=?".into());
-                sets.push("disabled_at=?".into());
-                vals.push(i64::from(b).into());
-                vals.push(if b {
-                    rusqlite::types::Value::Null
-                } else {
-                    "manual".to_owned().into()
-                });
-                if get(&existing, "enabled") != Some(&JsValue::Bool(b)) {
-                    tracing::info!(
-                        credentialId = id,
-                        "{}",
-                        if b {
-                            "credential enabled"
-                        } else {
-                            "credential disabled"
-                        }
-                    );
-                }
-                if b {
-                    rusqlite::types::Value::Null
-                } else {
-                    now.into()
-                }
-            }
+        match (k.as_str(), v) {
+            ("label", JsValue::String(u)) => mutation.label = Some(String::from_utf16_lossy(u)),
+            ("tier", JsValue::Number(n)) => mutation.tier = Some(*n),
+            ("weight", JsValue::Number(n)) => mutation.weight = Some(*n),
+            ("enabled", JsValue::Bool(b)) => mutation.enabled = Some(*b),
             _ => unreachable!(),
-        };
-        vals.push(value);
+        }
     }
-    sets.push("updated_at=?".into());
-    vals.push(now.into());
-    vals.push(id.unwrap_or_default().to_owned().into());
-    s.connection()
-        .execute(
-            &format!("UPDATE credentials SET {} WHERE id=?", sets.join(",")),
-            rusqlite::params_from_iter(vals),
-        )
-        .map_err(Failure::internal)?;
+    omni_store::credentials::patch_metadata(s.connection(), id, &mutation, now)?;
+    if let Some(enabled) = mutation.enabled
+        && get(&existing, "enabled") != Some(&JsValue::Bool(enabled))
+    {
+        let provider = match get(&existing, "provider") {
+            Some(JsValue::String(u)) => String::from_utf16_lossy(u),
+            _ => String::new(),
+        };
+        tracing::info!(
+            credentialId = id,
+            provider,
+            "{}",
+            if enabled {
+                "credential enabled"
+            } else {
+                "credential disabled"
+            }
+        );
+    }
     Ok(())
 }
 fn required(body: &JsValue, name: &str) -> Result<Vec<u16>> {
@@ -392,8 +372,18 @@ pub fn create(
         }
     }
     let id = omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate());
-    let sealed = omni_crypto::field::encrypt(key, &String::from_utf16_lossy(&secret));
-    s.connection().execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,provider_data,api_key,created_at,updated_at) VALUES(?,?,?,'apiKey',1,1,1,?,?,?,?)",rusqlite::params![id,provider,String::from_utf16_lossy(&label),stringify(&data),sealed,now,now]).map_err(Failure::internal)?;
+    omni_store::credentials::create_api_key(
+        s.connection(),
+        key,
+        &omni_store::credentials::ApiKeyCredential {
+            id: &id,
+            provider: &provider,
+            label: &String::from_utf16_lossy(&label),
+            provider_data: &stringify(&data),
+            api_key: &String::from_utf16_lossy(&secret),
+            now,
+        },
+    )?;
     let mut row = rows(s, Some(&id))?.remove(0);
     if let JsValue::Object(fields) = &mut row {
         for (k, v) in fields {

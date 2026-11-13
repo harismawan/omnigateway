@@ -1,5 +1,66 @@
 # A6 implementation report
 
+## Follow-up: shared mutations and toggle logs (base d2757acb)
+
+Evidence: `/tmp/opencode/a6-followup/`. A6 remains incomplete. This increment
+extracts API-key create, metadata patch and delete into omni-store, with matching
+PgStore methods. Field encryption is done inside both store create APIs; encoded
+provider_data is passed unchanged. Empty patches do not touch updated_at. PG tier
+values outside its INTEGER range are refused rather than truncated. SQLite control
+now uses these APIs. Toggle logs follow successful SQL and include provider.
+
+RED: `red-store.log` is a compile RED for absent shared APIs (not behavioral).
+First live-PG run `pg-store.log` fails binding f64 to INTEGER tier; corrected to
+checked i32. `pg-green.log` executes SQLite and live PostgreSQL create/decrypt,
+patch, no-op, re-enable and delete/repeated-delete assertions, and prints an
+explicit LIVE POSTGRES marker. Container `omni-a6-mutations-20261113` used
+`postgres:17-alpine` on 127.0.0.1:18576; `pg-proof.txt` records image, mapped port,
+stop and removal. These are real store legs, **not PG HTTP route coverage**.
+
+`red-logs-final.log` compares the frozen TS binary against d2757acb: 134 equal /
+1 failure, missing provider on all toggle lines and an extra line for a refused
+SQL UPDATE. The driver now injects a rejecting trigger and compares credential
+toggle lines alongside the existing A5 log categories.
+
+### Precise remaining work
+
+1. Wire Postgres through gateway boot, AdminAuth, ControlStore, snapshot source,
+   miss reads and writer selection. Current `omni-gateway/src/lib.rs` opens SQLite
+   at lines 321, 419, 432, 439; `admin_auth.rs` holds Arc<Mutex<SqliteStore>>;
+   `omni-gateway-core/src/snapshot.rs` build/rebuild/refresher accept SQLite.
+   D1's PgStore exists but no gateway backend selection uses it. The next RED
+   should start the Rust gateway with OMNI_DATABASE_URL and require a credential
+   route to read the same PG database that the TS gateway wrote. Do not count
+   the new store test as fulfilling this route requirement.
+2. Restart cross-read and route in both application directions on SQLite and PG.
+3. Exact lone-surrogate routing identity: the prior omission-only isolation is
+   still present and insufficient for this requirement.
+4. Active/stale/rolled-over burn and unusual SQL scalar oracle matrix.
+
+Final gates for this follow-up:
+- workspace: **1038 passed / 0 failed / 7 ignored** (`workspace.log`). PG is
+  exercised only by the explicitly configured live run above, not this count.
+- clippy all targets `-D warnings`, fmt, Biome: clean (`clippy.log`,
+  `fmt-final.log`, `biome-final.log`). Initial Biome formatting failure corrected.
+- final unique-step log regression: **136 equal / 1 failure RED**
+  (`red-unique.log`) → **137 equal / 0 failures GREEN** (`credential-final.log`).
+- full admin-routes: **990 equal / 2 expected / 0 failures**; admin-auth:
+  **212 equal / 4 expected / 0 failures**; surface: **606 equal / 61 expected /
+  0 failures**; run.ts: **all rows equal**. Logs are named for each driver.
+  Full admin-routes predates only the unique failed-update step name; that exact
+  final step is covered by the credential-only rerun (two additional comparisons).
+- both release binaries copied outside checkout to `bin/`, hashes recorded in
+  `binaries.sha256`. No TS, bun.lock, progress.md, specs or stash changes staged.
+
+Checkpoint for context handoff: shared store APIs and item 5 are green. Item 1's
+PG HTTP integration and items 2–4 remain open. Begin with the PG boot RED described
+above; do not mark A6 complete based on this checkpoint.
+
+The failed-update step was given a unique name after discovering it otherwise
+overwrote an earlier identical request in the driver's result map. Toggle log
+comparison was unaffected, but the unique name additionally retains both HTTP/DB
+comparisons. The final credential-only driver rerun covers that correction.
+
 Status: partial increment; **A6 is not complete**. Base f7c48e57. Evidence:
 `/tmp/opencode/a6/`. Frozen TS and user-owned files were not edited.
 
