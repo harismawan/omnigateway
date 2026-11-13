@@ -42,6 +42,15 @@ fn cell(v: ValueRef<'_>) -> JsValue {
 }
 
 pub fn page(store: &SqliteStore, q: &Query) -> Result<Vec<JsValue>, StoreError> {
+    page_encoding(store, q, false)
+}
+
+/// CSV observes String(Uint8Array), while JSON observes its indexed object.
+pub fn page_encoding(
+    store: &SqliteStore,
+    q: &Query,
+    csv: bool,
+) -> Result<Vec<JsValue>, StoreError> {
     let mut clauses = Vec::new();
     let mut bindings = Vec::new();
     if let Some((at, id)) = &q.cursor {
@@ -167,7 +176,10 @@ pub fn page(store: &SqliteStore, q: &Query) -> Result<Vec<JsValue>, StoreError> 
                     let allowed = ["git-diff","git-status","git-log","grep","path-list","numbered-read","build-output","test-output","deduplicate-log","smart-truncate","lint-output","package-output","tree-output","git-operation","docker-build"];
                     JsValue::Array(match &parsed { Some(JsValue::Array(a)) => a.iter().filter(|v| matches!(v, JsValue::String(s) if allowed.contains(&String::from_utf16_lossy(s).as_str()))).cloned().collect(), _ => Vec::new() })
                 },
-                    _ => cell(raw),
+                    _ => match raw {
+                        ValueRef::Blob(b) if csv => JsValue::String(b.iter().map(u8::to_string).collect::<Vec<_>>().join(",").encode_utf16().collect()),
+                        _ => cell(raw),
+                    },
                 };
                 fields.push((name.encode_utf16().collect(), value));
             }

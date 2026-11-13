@@ -68,7 +68,7 @@ pub fn export_page(
     query: &str,
     jsonl: bool,
 ) -> Result<(String, Option<String>), Failure> {
-    let parsed = parse_js(&page(store, query)?).map_err(Failure::internal)?;
+    let parsed = parse_js(&page_encoding(store, query, !jsonl)?).map_err(Failure::internal)?;
     let next = match field(&parsed, "nextCursor") {
         Some(JsValue::String(s)) => Some(String::from_utf16_lossy(s)),
         _ => None,
@@ -113,6 +113,10 @@ fn csv_cell(v: &JsValue) -> String {
 }
 
 pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
+    page_encoding(store, raw, false)
+}
+
+fn page_encoding(store: &SqliteStore, raw: &str, csv: bool) -> Result<String, Failure> {
     let mut pairs = Vec::<(String, String)>::new();
     for (k, v) in url::form_urlencoded::parse(raw.as_bytes()) {
         if let Some(p) = pairs.iter_mut().find(|p| p.0 == k) {
@@ -298,7 +302,7 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
         }
         q.cursor = Some((*at, id.clone()));
     }
-    let mut rows = omni_store::logs::page(store, &q)?;
+    let mut rows = omni_store::logs::page_encoding(store, &q, csv)?;
     let next = if rows.len() > limit {
         rows.truncate(limit);
         let last = &rows[limit - 1];

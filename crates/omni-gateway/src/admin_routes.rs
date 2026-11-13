@@ -194,6 +194,7 @@ pub async fn serve(
             let (first, next) = control
                 .run(move |s| omni_control::logs::export_page(s, &first_query, jsonl))
                 .await?;
+            let empty = jsonl && first.is_empty() && next.is_none();
             let stream = async_stream::try_stream! {
                 if !jsonl {yield hyper::body::Frame::data(bytes::Bytes::from_static(omni_control::logs::CSV_HEADER.as_bytes()));}
                 yield hyper::body::Frame::data(bytes::Bytes::from(first));
@@ -206,7 +207,13 @@ pub async fn serve(
                 }
             };
             use http_body_util::BodyExt;
-            let body = http_body_util::StreamBody::new(stream).boxed_unsync();
+            let body = if empty {
+                http_body_util::Full::new(bytes::Bytes::new())
+                    .map_err(|never| match never {})
+                    .boxed_unsync()
+            } else {
+                http_body_util::StreamBody::new(stream).boxed_unsync()
+            };
             let stamp = chrono::Utc::now()
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
                 .replace([':', '.'], "-");
