@@ -95,6 +95,12 @@ impl AnthropicStream {
     }
 
     pub fn push(&mut self, event: &StreamEvent, out: &mut String) {
+        if event.has_json_payload() {
+            return omni_ir::deep::scope(|| self.push_inner(event, out));
+        }
+        self.push_inner(event, out);
+    }
+    fn push_inner(&mut self, event: &StreamEvent, out: &mut String) {
         match event {
             StreamEvent::Start { model, .. } => {
                 self.model.clone_from(model);

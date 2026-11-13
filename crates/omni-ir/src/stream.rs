@@ -80,7 +80,7 @@ pub fn prompt_tokens(usage: &Usage) -> f64 {
     usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum ContentBlockStart {
     Text,
     /// `signed: None` is TS's absent field.
@@ -104,7 +104,7 @@ pub enum NativeFold {
     Citation,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Delta {
     Text {
         text: String,
@@ -130,7 +130,7 @@ pub enum Delta {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum StreamEvent {
     Start {
         id: String,
@@ -160,9 +160,25 @@ pub enum StreamEvent {
 }
 
 impl StreamEvent {
+    /// Arbitrary upstream JSON needs protected intermediate rendering ownership.
+    pub fn has_json_payload(&self) -> bool {
+        matches!(
+            self,
+            Self::BlockStart {
+                block: ContentBlockStart::ProviderNative { .. },
+                ..
+            } | Self::BlockDelta {
+                delta: Delta::ProviderNative { .. },
+                ..
+            } | Self::End {
+                vendor: Some(_),
+                ..
+            }
+        )
+    }
     /// The TS object, as `JSON.stringify` would write it.
     pub fn to_json(&self) -> String {
-        jsjson::to_string(&self.to_value())
+        jsjson::to_string(&crate::deep::Owned(self.to_value()).0)
     }
 
     /// The TS object as a JSON value, keys in TS insertion order.
@@ -198,7 +214,7 @@ impl StreamEvent {
                 m.insert("stopReason".into(), s(stop_reason.as_str()));
                 m.insert("usage".into(), usage_value(usage));
                 if let Some(v) = vendor {
-                    m.insert("vendor".into(), Value::Object(v.clone()));
+                    m.insert("vendor".into(), Value::Object(crate::deep::clone_map(v)));
                 }
             }
             StreamEvent::Error {
@@ -213,6 +229,118 @@ impl StreamEvent {
             }
         }
         Value::Object(m)
+    }
+}
+
+impl Drop for ContentBlockStart {
+    fn drop(&mut self) {
+        if let Self::ProviderNative { data, .. } = self {
+            crate::deep::drop_map_in_place(data);
+        }
+    }
+}
+impl Clone for ContentBlockStart {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Text => Self::Text,
+            Self::Thinking { signed } => Self::Thinking { signed: *signed },
+            Self::ToolUse { id, name } => Self::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            Self::ProviderNative {
+                provider,
+                block_type,
+                data,
+            } => Self::ProviderNative {
+                provider: provider.clone(),
+                block_type: block_type.clone(),
+                data: crate::deep::clone_map(data),
+            },
+        }
+    }
+}
+impl Drop for Delta {
+    fn drop(&mut self) {
+        if let Self::ProviderNative { data, .. } = self {
+            crate::deep::drop_map_in_place(data);
+        }
+    }
+}
+impl Clone for Delta {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Text { text } => Self::Text { text: text.clone() },
+            Self::Thinking { text } => Self::Thinking { text: text.clone() },
+            Self::ThinkingSignature { signature } => Self::ThinkingSignature {
+                signature: signature.clone(),
+            },
+            Self::ToolJson { partial } => Self::ToolJson {
+                partial: partial.clone(),
+            },
+            Self::ProviderNativeJson { provider, partial } => Self::ProviderNativeJson {
+                provider: provider.clone(),
+                partial: partial.clone(),
+            },
+            Self::ProviderNative {
+                provider,
+                delta_type,
+                fold,
+                data,
+            } => Self::ProviderNative {
+                provider: provider.clone(),
+                delta_type: delta_type.clone(),
+                fold: *fold,
+                data: crate::deep::clone_map(data),
+            },
+        }
+    }
+}
+impl Drop for StreamEvent {
+    fn drop(&mut self) {
+        if let Self::End {
+            vendor: Some(data), ..
+        } = self
+        {
+            crate::deep::drop_map_in_place(data);
+        }
+    }
+}
+impl Clone for StreamEvent {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Start { id, model } => Self::Start {
+                id: id.clone(),
+                model: model.clone(),
+            },
+            Self::BlockStart { index, block } => Self::BlockStart {
+                index: *index,
+                block: block.clone(),
+            },
+            Self::BlockDelta { index, delta } => Self::BlockDelta {
+                index: *index,
+                delta: delta.clone(),
+            },
+            Self::BlockEnd { index } => Self::BlockEnd { index: *index },
+            Self::End {
+                stop_reason,
+                usage,
+                vendor,
+            } => Self::End {
+                stop_reason: *stop_reason,
+                usage: *usage,
+                vendor: vendor.as_ref().map(crate::deep::clone_map),
+            },
+            Self::Error {
+                code,
+                message,
+                retryable,
+            } => Self::Error {
+                code: *code,
+                message: message.clone(),
+                retryable: *retryable,
+            },
+        }
     }
 }
 
@@ -261,7 +389,7 @@ fn block_start_value(b: &ContentBlockStart) -> Value {
             m.insert("type".into(), "providerNative".into());
             m.insert("provider".into(), provider.as_str().into());
             m.insert("blockType".into(), block_type.as_str().into());
-            m.insert("data".into(), Value::Object(data.clone()));
+            m.insert("data".into(), Value::Object(crate::deep::clone_map(data)));
         }
     }
     Value::Object(m)
@@ -307,14 +435,14 @@ fn delta_value(d: &Delta) -> Value {
                 };
                 m.insert("fold".into(), f.into());
             }
-            m.insert("data".into(), Value::Object(data.clone()));
+            m.insert("data".into(), Value::Object(crate::deep::clone_map(data)));
         }
     }
     Value::Object(m)
 }
 
 /// `CollectedResponse`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct CollectedResponse {
     pub id: String,
     pub model: String,
@@ -322,6 +450,25 @@ pub struct CollectedResponse {
     pub stop_reason: StopReason,
     pub usage: Usage,
     pub vendor: Option<Map<String, Value>>,
+}
+impl Drop for CollectedResponse {
+    fn drop(&mut self) {
+        if let Some(v) = self.vendor.take() {
+            crate::deep::drop_map(v);
+        }
+    }
+}
+impl Clone for CollectedResponse {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            content: self.content.clone(),
+            stop_reason: self.stop_reason,
+            usage: self.usage,
+            vendor: self.vendor.as_ref().map(crate::deep::clone_map),
+        }
+    }
 }
 
 enum Accum {
@@ -366,17 +513,17 @@ pub fn try_collect(
     let mut usage = Usage::default();
     let mut blocks: BTreeMap<u32, Accum> = BTreeMap::new();
 
-    for ev in events {
-        match ev {
+    for mut ev in events {
+        match &mut ev {
             StreamEvent::Start { id: i, model: m } => {
-                id = i;
-                model = m;
+                id = std::mem::take(i);
+                model = std::mem::take(m);
             }
             StreamEvent::BlockStart { index, block } => {
                 let acc = match block {
                     ContentBlockStart::ToolUse { id, name } => Accum::ToolUse {
-                        id,
-                        name,
+                        id: std::mem::take(id),
+                        name: std::mem::take(name),
                         json: String::new(),
                     },
                     ContentBlockStart::Thinking { .. } => Accum::Thinking {
@@ -388,9 +535,9 @@ pub fn try_collect(
                         block_type,
                         data,
                     } => Accum::ProviderNative {
-                        provider,
-                        block_type,
-                        data,
+                        provider: std::mem::take(provider),
+                        block_type: std::mem::take(block_type),
+                        data: std::mem::take(data),
                         json: String::new(),
                         merges: Vec::new(),
                     },
@@ -399,30 +546,30 @@ pub fn try_collect(
                         citations: Vec::new(),
                     },
                 };
-                blocks.insert(index, acc);
+                blocks.insert(*index, acc);
             }
             StreamEvent::BlockDelta { index, delta } => {
-                let Some(acc) = blocks.get_mut(&index) else {
+                let Some(acc) = blocks.get_mut(index) else {
                     continue;
                 };
                 match (delta, acc) {
                     (Delta::Text { text }, Accum::Text { text: t, .. })
                     | (Delta::Thinking { text }, Accum::Thinking { text: t, .. }) => {
-                        t.push_str(&text);
+                        t.push_str(text);
                     }
                     // Concatenated: a signature may arrive in fragments.
                     (
                         Delta::ThinkingSignature { signature },
                         Accum::Thinking { signature: s, .. },
                     ) => {
-                        s.get_or_insert_with(String::new).push_str(&signature);
+                        s.get_or_insert_with(String::new).push_str(signature);
                     }
                     (Delta::ToolJson { partial }, Accum::ToolUse { json, .. })
                     | (
                         Delta::ProviderNativeJson { partial, .. },
                         Accum::ProviderNative { json, .. },
                     ) => {
-                        json.push_str(&partial);
+                        json.push_str(partial);
                     }
                     (
                         Delta::ProviderNative {
@@ -431,7 +578,7 @@ pub fn try_collect(
                             ..
                         },
                         Accum::ProviderNative { merges, .. },
-                    ) => merges.push(data),
+                    ) => merges.push(std::mem::take(data)),
                     (
                         Delta::ProviderNative {
                             fold: Some(NativeFold::Citation),
@@ -441,7 +588,11 @@ pub fn try_collect(
                         Accum::Text { citations, .. },
                     ) => {
                         // `data.citation`, which is `undefined` when absent.
-                        citations.push(data.get("citation").cloned().unwrap_or(Value::Null));
+                        citations.push(
+                            data.get("citation")
+                                .map(crate::deep::clone)
+                                .unwrap_or(Value::Null),
+                        );
                     }
                     _ => {}
                 }
@@ -451,9 +602,9 @@ pub fn try_collect(
                 usage: u,
                 vendor: v,
             } => {
-                stop_reason = s;
-                usage = u;
-                vendor = v;
+                stop_reason = *s;
+                usage = *u;
+                vendor = v.take();
             }
             StreamEvent::BlockEnd { .. } | StreamEvent::Error { .. } => {}
         }
