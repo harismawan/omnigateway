@@ -53,10 +53,10 @@ pub struct AuthRequest {
 // Deliberately no Debug: these values contain live credentials.
 #[derive(Clone)]
 pub struct FlowResult {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
+    pub access_token: Vec<u16>,
+    pub refresh_token: Option<omni_ir::jsjson::JsValue>,
     pub expires_at: Option<f64>,
-    pub account_email: Option<String>,
+    pub account_email: Option<omni_ir::jsjson::JsValue>,
 }
 
 pub fn token_error(status: u16, body: &Value) -> GatewayError {

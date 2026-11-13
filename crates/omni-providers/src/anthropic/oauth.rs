@@ -72,30 +72,57 @@ pub fn token_result(
     fallback: Option<&str>,
     now: f64,
 ) -> Result<FlowResult, GatewayError> {
-    let body: Value = serde_json::from_str(text).unwrap_or(Value::Null);
-    if !(200..300).contains(&status) {
-        return Err(token_error(status, &body));
+    use omni_ir::jsjson::{JsValue, parse_js};
+    fn get<'a>(v: &'a JsValue, key: &str) -> Option<&'a JsValue> {
+        if let JsValue::Object(entries) = v {
+            entries
+                .iter()
+                .find(|(k, _)| k.iter().copied().eq(key.encode_utf16()))
+                .map(|(_, v)| v)
+        } else {
+            None
+        }
     }
-    let access = body
-        .get("access_token")
-        .and_then(Value::as_str)
+    fn present(v: Option<&JsValue>) -> Option<&JsValue> {
+        v.filter(|v| !matches!(v, JsValue::Null | JsValue::Undefined))
+    }
+    let body = parse_js(text).unwrap_or(JsValue::Null);
+    if !(200..300).contains(&status) {
+        let error = get(&body, "error").and_then(|v| {
+            if let JsValue::String(s) = v {
+                String::from_utf16(s).ok()
+            } else {
+                None
+            }
+        });
+        return Err(token_error(status, &serde_json::json!({"error":error})));
+    }
+    let access = get(&body, "access_token")
+        .and_then(|v| {
+            if let JsValue::String(s) = v {
+                Some(s)
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| {
             GatewayError::new(ErrorCode::Auth, "token endpoint returned no access_token")
         })?;
     Ok(FlowResult {
-        access_token: access.into(),
-        refresh_token: body
-            .get("refresh_token")
-            .and_then(Value::as_str)
-            .or(fallback)
-            .map(str::to_owned),
-        expires_at: body
-            .get("expires_in")
-            .and_then(Value::as_f64)
+        access_token: access.clone(),
+        refresh_token: present(get(&body, "refresh_token"))
+            .cloned()
+            .or_else(|| fallback.map(|s| JsValue::String(s.encode_utf16().collect()))),
+        expires_at: get(&body, "expires_in")
+            .and_then(|v| {
+                if let JsValue::Number(n) = v {
+                    Some(*n)
+                } else {
+                    None
+                }
+            })
             .map(|s| now + s * 1000.0),
-        account_email: body
-            .pointer("/account/email_address")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        account_email: present(get(&body, "account").and_then(|a| get(a, "email_address")))
+            .cloned(),
     })
 }

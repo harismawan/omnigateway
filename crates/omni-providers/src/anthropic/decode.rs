@@ -39,11 +39,7 @@ fn text(v: &Value) -> String {
     v.as_str().unwrap_or("").into()
 }
 fn name(v: Option<&Value>) -> String {
-    match v {
-        None => "undefined".into(),
-        Some(Value::String(s)) => s.clone(),
-        Some(v) => omni_ir::jsjson::to_string(v),
-    }
+    omni_ir::js::to_string(v)
 }
 fn protocol(out: &mut VecDeque<StreamEvent>, message: String) -> Flow {
     out.push_back(StreamEvent::Error {
@@ -142,8 +138,14 @@ impl AnthropicDecoder {
                 self.usage.cache_write_1h_tokens =
                     u["cache_creation"]["ephemeral_1h_input_tokens"].as_f64();
                 out.push_back(StreamEvent::Start {
-                    id: text(&m["id"]),
-                    model: text(&m["model"]),
+                    id: m
+                        .get("id")
+                        .filter(|v| !v.is_null())
+                        .map_or_else(String::new, |v| name(Some(v))),
+                    model: m
+                        .get("model")
+                        .filter(|v| !v.is_null())
+                        .map_or_else(String::new, |v| name(Some(v))),
                 });
             }
             "content_block_start" => {
@@ -292,10 +294,10 @@ impl AnthropicDecoder {
             }
             "error" => {
                 self.terminal = true;
-                let message = d["error"]["message"]
-                    .as_str()
-                    .unwrap_or("upstream error")
-                    .to_owned();
+                let message = d["error"]
+                    .get("message")
+                    .filter(|v| !v.is_null())
+                    .map_or_else(|| "upstream error".into(), |v| name(Some(v)));
                 let t = d["error"]["type"].as_str().unwrap_or("");
                 let code = if t == "invalid_request_error" && is_fingerprint_message(&message) {
                     ErrorCode::FingerprintRefused

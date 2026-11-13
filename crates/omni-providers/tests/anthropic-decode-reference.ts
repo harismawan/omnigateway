@@ -11,6 +11,9 @@ for (const type of ['text','thinking','tool_use',...ANTHROPIC_NATIVE_BLOCK_TYPES
 for (const reason of ['end_turn','max_tokens','stop_sequence','tool_use','refusal','pause_turn','constructor']) cases.push([start,m('message_delta',{delta:{stop_reason:reason}}),m('message_stop',{})]);
 for (const type of ['overloaded_error','rate_limit_error','authentication_error','permission_error','invalid_request_error','api_error','constructor']) for (const message of ['bad','Out of extra usage','draw from extra usage']) cases.push([m('error',{error:{type,message}})]);
 cases.push([start], [m('content_block_start',{})], [m('message_stop',{safeguard_results:[]})]);
+for(const value of [123,false,{},[],[1,null,'x']]) {
+ cases.push([m('message_start',{message:{id:value,model:value}}),m('content_block_start',{content_block:{type:'tool_use',id:value,name:value}}),m('error',{error:{message:value}})]);
+}
 const rows = [];
 for (const messages of cases) {
  const events = []; for await (const e of decodeAnthropic((async function*(){yield* messages;})())) events.push(e);

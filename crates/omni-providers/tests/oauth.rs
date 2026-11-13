@@ -100,7 +100,12 @@ fn refresh_rotates_or_preserves_and_errors_do_not_leak() {
         1000.0,
     )
     .expect("tokens");
-    assert_eq!(result.refresh_token.as_deref(), Some("old"));
+    assert_eq!(
+        result.refresh_token,
+        Some(omni_ir::jsjson::JsValue::String(
+            "old".encode_utf16().collect()
+        ))
+    );
     assert_eq!(result.expires_at, Some(61000.0));
     let result = token_result(
         200,
@@ -109,7 +114,12 @@ fn refresh_rotates_or_preserves_and_errors_do_not_leak() {
         0.0,
     )
     .expect("tokens");
-    assert_eq!(result.refresh_token.as_deref(), Some("rotated"));
+    assert_eq!(
+        result.refresh_token,
+        Some(omni_ir::jsjson::JsValue::String(
+            "rotated".encode_utf16().collect()
+        ))
+    );
     for (status, code) in [
         (400, ErrorCode::Auth),
         (429, ErrorCode::RateLimit),
