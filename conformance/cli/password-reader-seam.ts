@@ -16,7 +16,9 @@ process.exitCode = await run(process.argv.slice(2), consoleWriter, {
       }
       consoleWriter.err(question);
       consoleWriter.err("");
-      return first;
+      return process.env.READER_CONFIRM === undefined
+        ? first
+        : JSON.parse(process.env.READER_CONFIRM);
     },
   },
 });

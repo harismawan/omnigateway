@@ -88,3 +88,42 @@ for (const parts of cases) {
   count++;
 }
 console.log(`PASS ${count} streaming UTF8/UTF16/control/terminal comparisons (${root})`);
+const mismatch = [];
+for (const rust of [false, true]) {
+  const cmd = rust
+    ? [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]
+    : ["bun", "--no-env-file", resolve("conformance/cli/password-reader-seam.ts")];
+  const p = Bun.spawn(
+    [
+      Bun.which("python3") ?? "python3",
+      resolve("conformance/cli/password-bytes.py"),
+      JSON.stringify([`${prefix}f09f98807f0a`]),
+      ...cmd,
+      "--root",
+      root,
+      "--db",
+      join(root, "mismatch.db"),
+      "admin",
+      "set-password",
+    ],
+    {
+      env: {
+        ...process.env,
+        OMNI_ENCRYPTION_KEY: "password-golden-secret",
+        READER_RUST: rust ? "1" : "0",
+        READER_SECOND: JSON.stringify([`${prefix}efbfbd0a`]),
+        READER_CONFIRM: JSON.stringify("correct-horse-battery\ufffd"),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const result = JSON.parse(await new Response(p.stdout).text());
+  assert.equal(await new Response(p.stderr).text(), "");
+  assert.equal(await p.exited, 0);
+  assert.equal(result.code, 1);
+  assert(result.restored);
+  mismatch.push({ bytes: result.bytes, code: result.code });
+}
+assert.deepEqual(mismatch[1], mismatch[0]);
+console.log("PASS UTF16 lone-surrogate versus replacement confirmation mismatch");

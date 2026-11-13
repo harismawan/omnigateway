@@ -25,6 +25,9 @@ while True:
                 time.sleep(0.01)
         answered = 2
     if p.poll() is not None:
+        import select
+        while select.select([master], [], [], 0)[0]:
+            out.extend(os.read(master, 65536))
         break
     # Slave stays open for the terminal restoration assertion. A select timeout
     # allows observing process exit without relying on EIO from the master.
