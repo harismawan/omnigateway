@@ -427,25 +427,72 @@ async fn a_429_parks_the_credential_with_its_retry_after() {
 }
 
 #[tokio::test]
+async fn delayed_disable_cannot_undo_admin_reenable() {
+    let f = fixture(&["c0"]);
+    let h = harness(&f, vec![]);
+    let db = omni_store::SqliteStore::open(&f.path, 0).expect("store");
+    db.connection()
+        .execute("UPDATE credentials SET enabled=0", [])
+        .expect("disable");
+    let _delayed = h
+        .deps
+        .refresher
+        .store
+        .credential(&key(), "c0")
+        .await
+        .expect("read")
+        .expect("row");
+    db.connection()
+        .execute(
+            "UPDATE credentials SET enabled=1,label='admin',weight=19",
+            [],
+        )
+        .expect("admin edit");
+    h.deps.holder.rebuild(&db).expect("rebuild");
+    h.deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into())
+        .await
+        .expect("fresh publication");
+    let snapshot = h.deps.holder.load();
+    assert!(snapshot.routing.credentials[0].enabled);
+    assert_eq!(snapshot.routing.credentials[0].label, "admin");
+    assert_eq!(snapshot.routing.credentials[0].weight, 19.0);
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn delayed_rebuild_and_equal_stamp_patch_cannot_restore_old_credential() {
     let f = fixture(&["c0"]);
     let h = harness(&f, vec![]);
-    let observed = h.deps.holder.load();
     let store = omni_store::SqliteStore::open(&f.path, 0).expect("store");
-    let stale = omni_gateway_core::snapshot::read_snapshot(&store, &key(), 0.0).expect("read");
-    let old = observed.routing.credentials[0].clone();
-    let mut disabled = old.clone();
-    disabled.enabled = false;
-    h.deps.holder.patch_credential(disabled);
-    h.deps.holder.patch_credential(old.clone());
+    store
+        .connection()
+        .execute("UPDATE credentials SET enabled=0", [])
+        .expect("same-stamp disable");
+    h.deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into())
+        .await
+        .expect("publish");
     assert!(!h.deps.holder.load().routing.credentials[0].enabled);
-    assert!(!h.deps.holder.publish_snapshot(&observed, stale));
     store
         .connection()
         .execute("DELETE FROM credentials", [])
         .expect("delete");
-    h.deps.holder.rebuild(&store).expect("rebuild");
-    h.deps.holder.patch_credential(old);
+    h.deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into())
+        .await
+        .expect("publish deletion");
+    assert!(h.deps.holder.load().routing.credentials.is_empty());
+    // A targeted refresh never discovers a new row, even if it exists in DB.
+    store.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('c0','anthropic','new','oauth',1,1,1,'{}',0,0)", []).expect("reinsert");
+    h.deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into())
+        .await
+        .expect("missing snapshot row");
     assert!(h.deps.holder.load().routing.credentials.is_empty());
     flush(h).await;
 }
@@ -478,19 +525,20 @@ async fn null_expiry_does_not_trigger_refresh() {
 async fn concurrent_snapshot_publication_never_regresses_rotation() {
     let f = fixture(&["c0"]);
     let h = harness(&f, vec![]);
-    let original = h.deps.holder.load().routing.credentials[0].clone();
-    let mut newer = original.clone();
-    newer.token_version = 2;
-    newer.updated_at = 100;
-    let mut older = original;
-    older.token_version = 1;
-    older.updated_at = 200;
-    std::thread::scope(|scope| {
-        for row in [newer.clone(), older.clone(), newer, older] {
-            let holder = &h.deps.holder;
-            scope.spawn(move || holder.patch_credential(row));
-        }
-    });
+    let db = rusqlite::Connection::open(&f.path).expect("db");
+    db.execute("UPDATE credentials SET token_version=2,updated_at=100", [])
+        .expect("rotate");
+    let a = h
+        .deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into());
+    let b = h
+        .deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into());
+    let (a, b) = tokio::join!(a, b);
+    a.expect("first");
+    b.expect("second");
     assert_eq!(h.deps.holder.load().routing.credentials[0].token_version, 2);
     assert_eq!(h.deps.holder.load().routing.credentials[0].updated_at, 100);
     flush(h).await;

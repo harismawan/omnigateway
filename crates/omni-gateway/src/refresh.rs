@@ -73,7 +73,7 @@ impl Refresher {
     /// Frozen scheduler: enabled OAuth inside a five-minute lead; sequential.
     pub async fn sweep(
         self: &Arc<Self>,
-        holder: Option<&omni_gateway_core::snapshot::SnapshotHolder>,
+        holder: Option<&Arc<omni_gateway_core::snapshot::SnapshotHolder>>,
     ) -> std::result::Result<usize, GatewayError> {
         let credentials = self
             .store
@@ -106,14 +106,11 @@ impl Refresher {
                     }
                 }
             }
-            if let Some(holder) = holder
-                && let Some(row) = self
-                    .store
-                    .credential(&self.key, &c.id)
+            if let Some(holder) = holder {
+                holder
+                    .refresh_credential(self.store.clone(), c.id.clone())
                     .await
-                    .map_err(storage)?
-            {
-                holder.patch_credential(row);
+                    .map_err(storage)?;
             }
         }
         Ok(refreshed)

@@ -296,7 +296,11 @@ impl PgStore {
         key: &FieldKey,
         id: &str,
     ) -> Result<Option<Credential>, StoreError> {
-        rows::credential(&self.client().await?, key, id).await
+        let mut client = self.client().await?;
+        let tx = client.build_transaction().read_only(true).start().await?;
+        let row = rows::credential(&tx, key, id).await?;
+        tx.commit().await?;
+        Ok(row)
     }
 
     pub async fn refresh_metadata(

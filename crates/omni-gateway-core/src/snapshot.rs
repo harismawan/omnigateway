@@ -171,6 +171,7 @@ impl GatewaySnapshot {
 
 /// Owns the current snapshot and the key the secrets are opened with.
 pub struct SnapshotHolder {
+    writers: std::sync::Mutex<()>,
     current: ArcSwap<GatewaySnapshot>,
     key: FieldKey,
     /// `data_version` read just before the boot read, on the connection
@@ -244,6 +245,7 @@ impl SnapshotHolder {
         let boot_version = store.data_version()?;
         let first = read_snapshot(store, &key, now)?;
         Ok(Self {
+            writers: std::sync::Mutex::new(()),
             current: ArcSwap::from_pointee(first),
             key,
             boot_version,
@@ -256,17 +258,6 @@ impl SnapshotHolder {
         self.current.load_full()
     }
 
-    /// Publish only if no writer has published since the database read began.
-    /// On conflict the caller must re-read, including deletions.
-    pub fn publish_snapshot(&self, observed: &Arc<GatewaySnapshot>, next: GatewaySnapshot) -> bool {
-        let previous = self.current.compare_and_swap(observed, Arc::new(next));
-        let published = Arc::ptr_eq(&previous, observed);
-        if published {
-            self.generation.fetch_add(1, Ordering::AcqRel);
-        }
-        published
-    }
-
     /// How many wholesale replacements have happened since boot.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
@@ -275,13 +266,21 @@ impl SnapshotHolder {
     /// Re-reads the store and swaps the result in. Blocking: call it from
     /// the refresher or `spawn_blocking`, never on a request task.
     pub fn rebuild(&self, store: &SqliteStore) -> Result<(), StoreError> {
-        loop {
-            let observed = self.current.load_full();
-            let next = read_snapshot(store, &self.key, now_ms())?;
-            if self.publish_snapshot(&observed, next) {
-                return Ok(());
-            }
-        }
+        self.rebuild_read(|| read_snapshot(store, &self.key, now_ms()))
+    }
+
+    fn rebuild_read(
+        &self,
+        read: impl FnOnce() -> Result<GatewaySnapshot, StoreError>,
+    ) -> Result<(), StoreError> {
+        let _writer = self
+            .writers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = read()?;
+        self.current.store(Arc::new(next));
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
     /// `healthSaved`: this process's own health write, patched into the
@@ -297,23 +296,60 @@ impl SnapshotHolder {
         });
     }
 
-    /// Publish a completed credential mutation before another request ranks it.
-    /// Versions order rotations; disable dominates enabled at the same version.
-    /// Re-enablement belongs to an authoritative database rebuild. Patches never
-    /// insert missing rows, so deletion cannot resurrect a credential.
-    pub fn patch_credential(&self, row: omni_store::Credential) {
+    /// Read and publish under the authoritative writer lock. The callback must
+    /// begin a fresh database read, not return a previously captured row.
+    /// Blocking only: never call on an async worker.
+    fn patch_credential(
+        &self,
+        id: &str,
+        read: impl FnOnce() -> Result<Option<omni_store::Credential>, StoreError>,
+    ) -> Result<(), StoreError> {
+        let _writer = self
+            .writers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let row = read()?;
         self.current.rcu(|cur| {
             let mut next = GatewaySnapshot::clone(cur);
-            if let Some(current) = next.routing.credentials.iter_mut().find(|c| c.id == row.id)
-                && (current.token_version < row.token_version
-                    || (current.token_version == row.token_version
-                        && current.enabled
-                        && !row.enabled))
-            {
-                *current = row.clone();
+            if let Some(row) = &row {
+                if let Some(current) = next.routing.credentials.iter_mut().find(|c| c.id == id) {
+                    *current = row.clone();
+                }
+            } else {
+                next.routing.credentials.retain(|c| c.id != id);
             }
             next
         });
+        Ok(())
+    }
+
+    /// Adapter for the async backend. W is acquired only on the blocking pool;
+    /// the backend read starts after acquisition and completes before publish.
+    pub async fn refresh_credential(
+        self: &Arc<Self>,
+        store: Arc<omni_store::Store>,
+        id: String,
+    ) -> Result<(), StoreError> {
+        let holder = self.clone();
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            holder.patch_credential(&id, || match store.as_ref() {
+                omni_store::Store::Sqlite { store, .. } => {
+                    let db = store
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let tx = db.connection().unchecked_transaction()?;
+                    let row = omni_store::credentials::get(&tx, &holder.key, &id)?;
+                    tx.commit()?;
+                    Ok(row)
+                }
+                omni_store::Store::Postgres(_) => {
+                    runtime.block_on(store.credential(&holder.key, &id))
+                }
+            })
+        })
+        .await
+        .map_err(|e| StoreError::Writer(format!("snapshot task: {e}")))?
     }
 
     /// The one read a snapshot miss (a brand-new key) falls back to. A key
@@ -403,6 +439,120 @@ pub use crate::miss::{MissConfig, MissResolver, MissResult};
 #[cfg(test)]
 mod publication_tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn authoritative_sections_serialize_read_and_publish_in_both_orders() {
+        for patch_first in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ordering.db");
+            let db = SqliteStore::open(&path, 0).unwrap();
+            db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('c','anthropic','old','oauth',0,1,1,'{}',0,0)", []).unwrap();
+            let key = omni_crypto::field::derive_key("k");
+            let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
+            let (read_tx, read_rx) = std::sync::mpsc::sync_channel(0);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+            std::thread::scope(|s| {
+                let holder = &holder;
+                let key = &key;
+                let path = &path;
+                s.spawn(move || {
+                    let db = SqliteStore::open(path, 0).unwrap();
+                    if patch_first {
+                        holder
+                            .patch_credential("c", || {
+                                let row = omni_store::credentials::get(db.connection(), key, "c")?;
+                                read_tx.send(()).unwrap();
+                                release_rx.recv().unwrap();
+                                Ok(row)
+                            })
+                            .unwrap();
+                    } else {
+                        holder
+                            .rebuild_read(|| {
+                                let next = read_snapshot(&db, key, 0.0)?;
+                                read_tx.send(()).unwrap();
+                                release_rx.recv().unwrap();
+                                Ok(next)
+                            })
+                            .unwrap();
+                    }
+                });
+                read_rx.recv().unwrap();
+                // The first section has captured disabled/old; the second
+                // must read the administrative edit only after it publishes.
+                db.connection()
+                    .execute(
+                        "UPDATE credentials SET enabled=1,label='admin',weight=19,token_version=2",
+                        [],
+                    )
+                    .unwrap();
+                assert!(holder.writers.try_lock().is_err());
+                let second = s.spawn(move || {
+                    let db = SqliteStore::open(path, 0).unwrap();
+                    if patch_first {
+                        holder.rebuild(&db).unwrap();
+                    } else {
+                        holder
+                            .patch_credential("c", || {
+                                omni_store::credentials::get(db.connection(), key, "c")
+                            })
+                            .unwrap();
+                    }
+                });
+                release_tx.send(()).unwrap();
+                second.join().unwrap();
+            });
+            let current = holder.load();
+            let row = &current.routing.credentials[0];
+            assert!(row.enabled);
+            assert_eq!(row.label, "admin");
+            assert_eq!(row.weight, 19.0);
+            assert_eq!(row.token_version, 2);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn health_traffic_does_not_repeat_or_block_authoritative_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.db");
+        let store = SqliteStore::open(&path, 0).unwrap();
+        let key = omni_crypto::field::derive_key("k");
+        let holder = SnapshotHolder::build(&store, key.clone(), 0.0).unwrap();
+        store.connection().execute("INSERT INTO api_keys (id,label,prefix,hash,created_at,limits) VALUES ('k','k','k','h',0,'{}')", []).unwrap();
+        let (read_tx, read_rx) = std::sync::mpsc::sync_channel(0);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
+        std::thread::scope(|s| {
+            let holder = &holder;
+            s.spawn(move || {
+                read_rx.recv().unwrap();
+                for n in 0..32 {
+                    holder.patch_health(CredentialHealth {
+                        credential_id: "c".into(),
+                        model: "m".into(),
+                        breaker_state: omni_store::BreakerState::Closed,
+                        consecutive_failures: n,
+                        opened_at: None,
+                        rate_limited_until: None,
+                    });
+                }
+                done_tx.send(()).unwrap();
+            });
+            let mut reads = 0;
+            holder
+                .rebuild_read(|| {
+                    reads += 1;
+                    let next = read_snapshot(&store, &key, 0.0)?;
+                    read_tx.send(()).unwrap();
+                    done_rx.recv().unwrap();
+                    Ok(next)
+                })
+                .unwrap();
+            assert_eq!(reads, 1);
+        });
+        assert!(holder.load().keys_by_hash.contains_key("h"));
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)] // Isolated database fixture setup.

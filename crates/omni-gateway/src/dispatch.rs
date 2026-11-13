@@ -314,15 +314,11 @@ impl Deps {
     async fn refresh(&self, c: &Credential) -> Result<omni_store::CredentialSecrets, GatewayError> {
         let result = self.refresher.refresh(c).await;
         match self
-            .refresher
-            .store
-            .credential(&self.refresher.key, &c.id)
+            .holder
+            .refresh_credential(self.refresher.store.clone(), c.id.clone())
             .await
         {
-            Ok(Some(row)) => self.holder.patch_credential(row),
-            Ok(None) => {
-                tracing::warn!(credentialId = %c.id, "refreshed credential disappeared before snapshot publication")
-            }
+            Ok(()) => {}
             Err(_) => {
                 tracing::warn!(credentialId = %c.id, "credential snapshot publication failed; retaining previous snapshot")
             }
