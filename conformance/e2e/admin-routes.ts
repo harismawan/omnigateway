@@ -1325,6 +1325,7 @@ type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?
 let healthSeed: string | undefined;
 const nodesNow = Date.now();
 const configs: Config[] = [
+  {label:"export-nonfinite",db:()=>db("export-nonfinite",["INSERT INTO request_logs(id,at,requested_model,status,duration_ms,cost_usd) VALUES('positive',100,'m',200,1,1e999),('negative',101,'m',200,1,-1e999)"]),steps:()=>["csv","jsonl"].flatMap(format=>everyone("GET",`/api/logs/export?since=0&until=200&format=${format}`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200})))},
   ...["fractional","long","blob"].map(kind=>({label:`export-cursor-${kind}`,db:()=>db(`export-cursor-${kind}`,[`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<501) INSERT INTO request_logs(id,at,requested_model,status,duration_ms) SELECT ${kind==="blob"?"CAST(printf('x%04d',i) AS BLOB)":kind==="long"?"printf('%0300d',i)||'é'":"printf('x%04d',i)"},100.5,'m',200,1 FROM n`]),steps:()=>["csv","jsonl"].flatMap(format=>everyone("GET",`/api/logs/export?since=0&until=200&format=${format}`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200})))})),
   {label:"nodes",db:()=>db("nodes",[]),steps:()=>["empty","one","several","unusual"].flatMap((name,i)=>[
     {kind:"sql" as const,name:`nodes seed ${name}`,sql:["DELETE FROM nodes",...(i===0?[]:[`INSERT INTO nodes VALUES('peer',${nodesNow+600000})`]),...(i<2?[]:[`INSERT INTO nodes VALUES('older',${nodesNow+500000}),('stale',1)`]),...(i<3?[]:["INSERT INTO nodes VALUES(CAST(x'ff' AS TEXT),'text-time'),(x'0102',1e999),(NULL,'zzz')"])]},

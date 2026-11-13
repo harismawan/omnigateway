@@ -109,6 +109,15 @@ fn csv_cell(v: &JsValue) -> String {
         JsValue::Null | JsValue::Undefined => String::new(),
         JsValue::String(s) => String::from_utf16_lossy(s),
         JsValue::Object(_) => "[object Object]".into(),
+        JsValue::Number(n) if !n.is_finite() => {
+            if n.is_nan() {
+                "NaN".into()
+            } else if n.is_sign_negative() {
+                "-Infinity".into()
+            } else {
+                "Infinity".into()
+            }
+        }
         _ => stringify(v).unwrap_or_default(),
     };
     let first=text.trim_start_matches(|c:char|matches!(c,'\u{9}'..='\u{d}'|' '|'\u{a0}'|'\u{1680}'|'\u{2000}'..='\u{200a}'|'\u{2028}'|'\u{2029}'|'\u{202f}'|'\u{205f}'|'\u{3000}'|'\u{feff}')).chars().next();
