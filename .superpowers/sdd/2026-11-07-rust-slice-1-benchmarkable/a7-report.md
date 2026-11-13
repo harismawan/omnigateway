@@ -1,4 +1,59 @@
-# A7 checkpoint — SQLite usage implemented; increment incomplete
+# A7 — complete for review (SQLite)
+
+## Final hand-off (supersedes all historical NEXT STEP sections below)
+
+Status: **complete for review**. Final implementation commit `e9a89479`; subsequent report-only commit records these results. No frozen TS product files, unrelated working changes, stash, or other worktrees changed.
+
+| Requirement | Commit(s) | Permanent tests / independent RED |
+|---|---|---|
+| Usage schemas, roles, grouping, raw/daily reads | `6d2a7a8e` | usage HTTP missing-route RED; duplicate parameter mismatch RED; final usage matrix |
+| Usage store extraction, volume, offsets, raw cells | `89ecdb01` | coverage passed before refactor; no behavioral RED |
+| Logs guarded reader, paging/filter/cursor and real usage traffic | `598f5aaa` | logs 80 equal/150 failures → 155/0; real traffic coverage had only a test-cookie error |
+| Typed bound store parameters | `73c918de` | existing corpus; structural change, no RED |
+| Provider/cursor/schema and BLOB coercion parity | `ca1f39f0` | 39/20 → 53/0; BLOB degradations independently RED; traversal coverage already passed |
+| Cursor identity and Infinity errors | `dc3bcce7` | Infinity 49/4 → 53/0; surrogate identity already passed |
+| Streamed export and validation | `abfb8cac` | missing route 26/42 → 47/0 |
+| Export matrix, empty framing, 30k rows × three runs | `466757c1` | BLOB CSV and empty JSONL framing RED; volume coverage already passed |
+| Disconnect page-read cancellation proof | `3fb6e78b` | permanent export-volume-1 socket test; missing instrumentation RED (`disconnect-red.log`); GREEN 17/0; no cancellation bug found |
+| Slow-reader real traffic and admin latency | `40e107b3` | permanent export-volume-1 scenario; behavior already passed. First run's six mismatches were fixture credential UUIDs, fixed by fixture cleanup, not product behavior |
+| Nodes store/control/reader-guarded route | `595711d6` | `nodes-red.log` 17 equal/24 failures (missing route); `nodes-self.log` 29/0. Empty/single/several/stale/NULL/BLOB/invalid UTF-8/nonfinite cells, all roles and expected statuses; independent self assertion on each gateway |
+| Visible per-page timing | `e9a89479` | console formatter discarded structured timing field; emitted timing in message, final HTTP gates below |
+
+### Final evidence
+
+All paths below relative to `/tmp/opencode/a7-final/`. Fresh TS built with `bun scripts/build-binary.ts /tmp/opencode/a7-final/ts-final`; Rust with `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --offline -p omni-gateway`, copied from `target/debug/omnigateway` to `/tmp/opencode/a7-final/rust-final`. Both outside checkout. `manifest.json` records `e9a89479` full commit and SHA256 of both artifacts before drivers. Build logs: `build-{ts,rust}.log`. Earlier targeted tests reused the prior TS artifact and are not the final gate evidence.
+
+| Gate | Result | Log |
+|---|---|---|
+| `cargo test --offline --workspace` | 1046 passed, 0 failed, 7 ignored | `workspace.log` |
+| `cargo clippy --offline --workspace --all-targets -- -D warnings` | clean | `clippy.log` |
+| `cargo fmt --all -- --check` | clean | `fmt.log` |
+| admin-routes | 2433 equal, 2 expected, 0 failures | `admin-routes.log` |
+| admin-auth | 212 equal, 4 expected, 0 failures | `admin-auth.log` |
+| surface | 606 equal, 61 expected, 0 failures | `surface.log` |
+| run.ts | all rows equal; DB row counts 37/18/6/4 | `run.log` |
+
+Rust gates used CARGO_INCREMENTAL=0 and profile DEV/TEST DEBUG=0. All runs were foreground and completed; results read. One initial 120-second workspace attempt was terminated and rerun to completion. Driver invocation: `bun conformance/e2e/NAME.ts --ts /tmp/opencode/a7-final/ts-final --rust /tmp/opencode/a7-final/rust-final --out /tmp/opencode/a7-final/NAME` for admin-routes/admin-auth/surface; run.ts uses the same binaries without --out. Before the last driver rerun, process log files were cleared: Bun's file redirection otherwise retained old content, which inflated absolute page counts on a repeated output directory. Final disconnect JSON has fresh counts.
+
+### Cancellation, contention and known differences
+
+`admin-routes/disconnect-rust.json`: **1** page completed at socket close, **2** after a 500ms settling interval (at most one additional), follow-up admin status **200**. The raw socket waits for successful export headers plus body bytes then destroys the connection; the permanent check rejects missing Rust instrumentation. TS is exercised for follow-up health but has no page event, so its zero counter is not a cancellation measurement. Existing stream drop behavior needed no fix.
+
+Slow client resumes once per 200ms, pauses after each socket chunk; 30k-row export remains open while three actual `/v1/chat/completions` calls traverse the authenticated stub and three request_logs rows become visible. Permanent per-admin bound: **2000ms**. Final `admin-routes/slow-reader-{rust,ts}.json`: Rust **54.953 / 131.319 / 143.638ms**, TS **0.720 / 0.612 / 0.478ms**. Both have rows=3/exportOpen=true. These are observations on this host, not worst-case guarantees.
+
+Control connection is held for one bounded 500-row page, including SQL read and JSON/CSV encoding, released before yielding to socket backpressure; no stream-long DB transaction/write lock. Debug timing measures this page operation (excluding mutex acquisition, with negligible closure/event overhead outside the timer). Final Rust process logged 247 completed page operations, **50.508–169.166ms** each across cancellation, slow export and full-format comparisons (`admin-routes/export-volume-1-rust.log`). A single page can therefore delay another admin call by up to the remaining page time (observed page maximum ~169ms); Rust's extra page encoding under its control mutex is materially more contention than TS's synchronous page read then row-at-a-time serialization. Observed maximum admin latency excess in this scenario is **142.917ms** (143.638 minus TS maximum 0.720). TS page-operation duration itself was not instrumented; no precise causal or universal worst-case difference is claimed. Request-log writer still progresses independently.
+
+Nodes binds `now - 60000`, strict `seen_at > cutoff`, descending seen_at; preserves raw-cell JSON semantics. Rust node ID is a fresh UUID v4 from `clock::uuid_v4()` in gateway startup; frozen TS uses `crypto.randomUUID()` at startup. They intentionally differ even for the same installation. Fixture comparisons use stable foreign IDs with self=false; an additional per-binary check obtains `/health` nodeId, inserts exactly that row and asserts id and self=true. Future-dated fixtures are relative to driver start, with stale row at 1, avoiding clock-boundary races; heartbeat writing remains outside this route increment.
+
+No new known response mismatch in exercised cases. Existing expected driver divergences remain as described in their logs. Coverage not added: live Postgres, exhaustive malformed cursors, exact 60-second clock boundary, nonfinite numeric CSV formatting, independent TS page timing, long-duration/multi-export contention stress. Earlier volume RSS evidence below remains applicable; no claim of constant usage-report cardinality.
+
+### Roadmap D4 hand-off
+
+Write PgStore readers for **usage, logs, export pages and nodes** matching SQLite typed filter/query interfaces: aggregate raw/daily usage with JS-compatible cells, descending `(at,id)` cursor pages with bound parameters and limit+1, reuse those pages for bounded streaming export, nodes strict now-minus-60s filter/order. No PG reader was added here. Wire backend selection/config into the control handle and gateway so reader operations use a separate PG reader/pool rather than the log writer; preserve first-page errors, guards and lossless serialization. Test against a live unique postgres:17-alpine container (remove afterward), then run all four HTTP route matrices against real TS PG: roles/statuses, filters/cursors, unusual cells/identity, cross-runtime/restart reads, CSV/JSONL bytes, cancellation page count, slow-reader concurrent writer progress and admin latency. SQLite results do not establish PG equivalence.
+
+---
+
+## Historical checkpoints
 
 ## Current state — export matrix/volume checkpoint (466757c1)
 
