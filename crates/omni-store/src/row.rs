@@ -36,18 +36,6 @@ pub(crate) fn number(row: &Row<'_>, table: &str, column: &str) -> Result<f64, St
     js::number(cell).ok_or_else(|| corrupt(table, column, "a number", cell))
 }
 
-/// A nullable JS number (INTEGER or REAL).
-pub(crate) fn opt_number(
-    row: &Row<'_>,
-    table: &str,
-    column: &str,
-) -> Result<Option<f64>, StoreError> {
-    match row.get_ref(column)? {
-        ValueRef::Null => Ok(None),
-        _ => number(row, table, column).map(Some),
-    }
-}
-
 /// An epoch-ms instant or a count. A REAL holding a whole number is accepted,
 /// since TS would read the same value; a fraction is not an instant.
 pub(crate) fn integer(row: &Row<'_>, table: &str, column: &str) -> Result<i64, StoreError> {

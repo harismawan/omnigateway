@@ -277,8 +277,7 @@ pub fn eligible<'a>(input: &RankInput<'a>) -> Eligible<'a> {
                 }
                 if h.breaker_state == BreakerState::Open {
                     let elapsed = now - h.opened_at.unwrap_or(now);
-                    let cooldown =
-                        cooldown_ms(h.consecutive_failures as f64, threshold, base_cooldown);
+                    let cooldown = cooldown_ms(h.failure_number(), threshold, base_cooldown);
                     if elapsed < cooldown {
                         drop("breaker:open".to_owned(), ExcludedKind::Account);
                         continue;

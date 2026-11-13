@@ -15,6 +15,7 @@ use std::time::Duration;
 
 fn plus_one(current: Option<CredentialHealth>) -> CredentialHealth {
     let mut h = current.unwrap_or(CredentialHealth {
+        scalar: None,
         credential_id: "c1".into(),
         model: "m".into(),
         breaker_state: BreakerState::Closed,
@@ -376,6 +377,7 @@ async fn a_failed_reconciliation_read_is_reported_as_unknown() {
 
 fn seed_row() -> CredentialHealth {
     CredentialHealth {
+        scalar: None,
         credential_id: "c1".into(),
         model: "m".into(),
         breaker_state: BreakerState::Closed,

@@ -281,7 +281,7 @@ impl Deps {
             after.breaker_state != before.breaker_state || after.opened_at != before.opened_at;
         // A refused write is counted in the writer's `dropped` and warned
         // about by the writer task, rate-limited.
-        if decided {
+        if decided || before.scalar.is_some() || after.scalar.is_some() {
             self.writer.send(BreakerTransition(after.clone()));
         } else {
             self.writer.send(HealthMeasurement {

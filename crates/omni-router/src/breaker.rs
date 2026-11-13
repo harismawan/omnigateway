@@ -30,6 +30,7 @@ const MAX_JITTER_MS: f64 = 2_000.0;
 
 pub fn blank_health(credential_id: &str, model: &str) -> CredentialHealth {
     CredentialHealth {
+        scalar: None,
         credential_id: credential_id.to_owned(),
         model: model.to_owned(),
         breaker_state: BreakerState::Closed,
@@ -44,6 +45,7 @@ pub fn blank_health(credential_id: &str, model: &str) -> CredentialHealth {
 pub fn success_would_change(current: Option<&CredentialHealth>) -> bool {
     current.is_some_and(|h| {
         h.breaker_state != BreakerState::Closed
+            || h.scalar.is_some()
             || h.consecutive_failures != 0
             || h.opened_at.is_some()
             || h.rate_limited_until.is_some()
@@ -52,6 +54,7 @@ pub fn success_would_change(current: Option<&CredentialHealth>) -> bool {
 
 pub fn record_success(current: &CredentialHealth) -> CredentialHealth {
     CredentialHealth {
+        scalar: None,
         breaker_state: BreakerState::Closed,
         consecutive_failures: 0,
         opened_at: None,
@@ -84,18 +87,21 @@ pub fn record_failure(current: &CredentialHealth, opts: &Failure<'_>) -> Credent
                 opts.retry_after_ms.unwrap_or(DEFAULT_RATE_LIMIT_MS)
             };
             let until = opts.now + base + math_round(opts.jitter * MAX_JITTER_MS);
-            CredentialHealth {
+            let mut next = CredentialHealth {
                 rate_limited_until: Some(until),
                 ..current.clone()
-            }
+            };
+            next.refresh_scalar(false, true);
+            next
         }
         Penalty::Hard => {
-            let failures = current.consecutive_failures + 1;
+            let mut next = current.clone();
+            next.increment_failures();
+            let failures = next.failure_number();
             let open = opts.code == ErrorCode::Auth
                 || current.breaker_state == BreakerState::HalfOpen
-                || failures as f64 >= opts.settings.breaker_threshold;
-            CredentialHealth {
-                consecutive_failures: failures,
+                || failures >= opts.settings.breaker_threshold;
+            next = CredentialHealth {
                 breaker_state: if open {
                     BreakerState::Open
                 } else {
@@ -106,8 +112,10 @@ pub fn record_failure(current: &CredentialHealth, opts: &Failure<'_>) -> Credent
                 } else {
                     current.opened_at
                 },
-                ..current.clone()
-            }
+                ..next
+            };
+            next.refresh_scalar(open, false);
+            next
         }
     }
 }

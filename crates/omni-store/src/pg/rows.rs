@@ -321,6 +321,7 @@ pub(crate) async fn list_health(
         .iter()
         .map(|r| {
             Ok(CredentialHealth {
+                scalar: None,
                 credential_id: r.try_get("credential_id")?,
                 model: r.try_get("model")?,
                 breaker_state: BreakerState::parse(r.try_get("breaker_state")?),

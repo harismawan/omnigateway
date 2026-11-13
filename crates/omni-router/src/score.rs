@@ -58,7 +58,7 @@ fn request_cost(target: &Target, t: &TokenEstimate) -> f64 {
 /// `healthScore`, shared with the weighted draw.
 #[allow(clippy::cast_precision_loss)]
 pub fn health_score(h: Option<&CredentialHealth>) -> f64 {
-    let base = 1.0 / (1.0 + h.map_or(0.0, |h| h.consecutive_failures as f64));
+    let base = h.map_or(1.0, omni_store::CredentialHealth::health_score);
     match h.map(|h| &h.breaker_state) {
         Some(BreakerState::Open | BreakerState::HalfOpen) => base * 0.5,
         _ => base,

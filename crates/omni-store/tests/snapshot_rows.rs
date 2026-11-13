@@ -152,6 +152,7 @@ async fn a_fractional_health_instant_round_trips_through_rust_and_ts() {
     let writer = Writer::spawn(&path, WriterConfig::default()).expect("writer");
     let h = writer.handle();
     h.send(BreakerTransition(CredentialHealth {
+        scalar: None,
         credential_id: "c1".into(),
         model: "m1".into(),
         breaker_state: BreakerState::Open,

@@ -139,6 +139,7 @@ pub fn pricing(input: f64, output: f64) -> TargetPricing {
 
 pub fn health(credential_id: &str) -> CredentialHealth {
     CredentialHealth {
+        scalar: None,
         credential_id: credential_id.to_owned(),
         model: "claude-opus-4".to_owned(),
         breaker_state: BreakerState::Closed,

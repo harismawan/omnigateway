@@ -71,6 +71,7 @@ fn done(id: &str, at: i64, key: Option<&str>, model: &str, n: i64) -> RequestLog
 #[allow(clippy::cast_precision_loss)]
 fn transition(cred: &str, model: &str, state: BreakerState, failures: i64) -> WriteEvent {
     BreakerTransition(CredentialHealth {
+        scalar: None,
         credential_id: cred.into(),
         model: model.into(),
         breaker_state: state,
@@ -116,6 +117,7 @@ fn health_sequence() -> Vec<WriteEvent> {
         // the transition, whatever the batch boundaries.
         measure("cred-1", "mixed", 2, None),
         BreakerTransition(CredentialHealth {
+            scalar: None,
             credential_id: "cred-1".into(),
             model: "mixed".into(),
             breaker_state: Open,

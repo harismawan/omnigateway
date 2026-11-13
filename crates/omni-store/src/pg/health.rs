@@ -199,6 +199,7 @@ impl PgStore {
         let current = match tx.query_opt(&read, &[&credential_id, &model]).await? {
             None => None,
             Some(r) => Some(CredentialHealth {
+                scalar: None,
                 credential_id: credential_id.to_owned(),
                 model: model.to_owned(),
                 breaker_state: BreakerState::parse(r.try_get(0)?),
@@ -208,6 +209,11 @@ impl PgStore {
             }),
         };
         let next = apply(current);
+        if next.scalar.is_some() {
+            return Err(StoreError::Refused(
+                "SQLite health scalars cannot be bound to PostgreSQL INTEGER health".into(),
+            ));
+        }
         let failures = i32::try_from(next.consecutive_failures).map_err(|_| {
             StoreError::Refused(format!(
                 "credential_health.consecutive_failures: {} is out of INTEGER range",
@@ -254,6 +260,7 @@ impl PgStore {
             return Ok(None);
         };
         Ok(Some(CredentialHealth {
+            scalar: None,
             credential_id: credential_id.to_owned(),
             model: model.to_owned(),
             breaker_state: BreakerState::parse(r.try_get(0)?),

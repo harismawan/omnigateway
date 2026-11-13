@@ -497,3 +497,31 @@ remain store-level evidence, not PG HTTP evidence.
 is claimed for this incomplete round; those must run once on the final code.
 Only I3 is implementation-complete. No health/quota fix is claimed by the green
 driver, because its permanent regressions have not yet been added.
+
+### Fix round 1 continuation — I1 checkpoint
+
+I1 now preserves independent health cells. Unusual scalar rows retain raw cells
+and precomputed numeric/score coercions in an Arc sidecar built during reads;
+filtering/scoring performs no new conversion or allocation. Hard failure keeps
+JS text concatenation, soft failure retains siblings, success clears the sidecar,
+and SQLite direct/batched writes preserve raw cells. Dispatch's persistence
+choice uses a full transition for unusual health (refresh logic untouched).
+PostgreSQL writers refuse SQLite-only scalar sidecars rather than narrowing them.
+
+Finding → commit → tests: I1 → this checkpoint commit → permanent five-case
+credentials driver plus `unusual_sqlite_health_preserves_deadlines_breakers_and_probes`
+and `unusual_health_arithmetic_and_raw_cells_survive_writes`.
+Evidence `/tmp/opencode/a6-fix1/`:
+- `health-permanent-red.log`: **162 equal / 10 failures** on baseline binaries.
+- `health-permanent-green.log`: **167 equal / 0 failures**, fresh release copied
+  to `/tmp/opencode/a6-fix1/rust-health`, frozen TS review binary.
+- `health-tests.log`: **304 passed / 0 failed / 6 ignored** (store/router/core).
+- `health-clippy.log`: scoped store/router/gateway all-target clippy clean before
+  the final additional routing-vector test; not a final workspace gate.
+- `health-build.log`: release build passed, incremental/debuginfo disabled.
+
+Status: **NOT complete for review**. Next: I2 preboot/live quota REDs and raw
+comparison semantics, then NULL/BLOB model-id isolation, then all three minors.
+Run final workspace/clippy/fmt and four freshly built copied-binary drivers only
+after those changes. No final gate claim here. Ordinary schema disallows NULL
+failure counts; NULL opened/deadline and text/negative/huge counters are covered.

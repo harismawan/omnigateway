@@ -135,6 +135,7 @@ fn done(id: &str, at: i64, key: Option<&str>, model: &str, n: i64) -> RequestLog
 /// The row a breaker transition persists.
 fn transition(cred: &str, model: &str, state: BreakerState, failures: i64) -> WriteEvent {
     BreakerTransition(CredentialHealth {
+        scalar: None,
         credential_id: cred.into(),
         model: model.into(),
         breaker_state: state,

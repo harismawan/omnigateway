@@ -1557,6 +1557,26 @@ const configs: Config[] = [
         ),
       );
       steps.push({ kind: "credential-routing", name: "created credential routes", enabled: true });
+      for (const [name, state, failures, opened, until] of [
+        ["fractional counter preserves active deadline", "closed", "1.5", "NULL", "4102444800000"],
+        ["fractional counter preserves open breaker", "open", "1.5", "4102444800000", "NULL"],
+        ["text counter preserves active deadline", "closed", "'unknown'", "NULL", "4102444800000"],
+        ["huge counter preserves open breaker", "open", "1e100", "4102444800000", "NULL"],
+        ["text deadline preserves open breaker", "open", "3", "4102444800000", "'unknown'"],
+      ] as const) {
+        steps.push({
+          kind: "sql",
+          name: `seed ${name}`,
+          sql: [`INSERT INTO credential_health SELECT id,'m','${state}',${failures},${opened},${until} FROM credentials WHERE provider_data LIKE '%routing-a6%'`],
+        });
+        steps.push({ kind: "credential-routing", name, enabled: false });
+        steps.push({
+          kind: "sql",
+          name: `clear ${name}`,
+          sql: ["DELETE FROM credential_health WHERE credential_id IN (SELECT id FROM credentials WHERE provider_data LIKE '%routing-a6%')"],
+        });
+        steps.push({ kind: "credential-routing", name: `recovered after ${name}`, enabled: true });
+      }
       steps.push(as("admin", "PATCH", "/api/credentials/{{last}}", '{"enabled":false}'));
       steps.push({
         kind: "credential-routing",

@@ -962,7 +962,7 @@ async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u
             WriteEvent::BreakerTransition(BreakerTransition(h)) => {
                 let Some(failures) =
                     health_ok(h.consecutive_failures, h.opened_at, h.rate_limited_until)
-                        .filter(|_| known.contains(&h.credential_id))
+                        .filter(|_| h.scalar.is_none() && known.contains(&h.credential_id))
                 else {
                     // Refused: the measurement before it still stands.
                     refused += 1;

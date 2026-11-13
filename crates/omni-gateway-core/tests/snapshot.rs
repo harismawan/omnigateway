@@ -175,6 +175,7 @@ fn a_health_patch_swaps_in_a_new_snapshot_without_a_store_read() {
         SnapshotHolder::build(&store, omni_crypto::field::derive_key(ENC), 0.0).expect("build");
     let before = holder.load();
     holder.patch_health(CredentialHealth {
+        scalar: None,
         credential_id: "c1".into(),
         model: "up".into(),
         breaker_state: BreakerState::Open,

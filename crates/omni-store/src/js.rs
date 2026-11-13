@@ -3,6 +3,33 @@
 
 use rusqlite::types::{Value as SqlValue, ValueRef};
 
+pub(crate) fn own_cell(value: ValueRef<'_>) -> SqlValue {
+    match value {
+        ValueRef::Null => SqlValue::Null,
+        ValueRef::Integer(n) => SqlValue::Integer(n),
+        ValueRef::Real(n) => SqlValue::Real(n),
+        ValueRef::Text(s) => SqlValue::Text(String::from_utf8_lossy(s).into_owned()),
+        ValueRef::Blob(b) => SqlValue::Blob(b.to_vec()),
+    }
+}
+
+pub(crate) fn coerce_cell(value: ValueRef<'_>) -> f64 {
+    match value {
+        ValueRef::Null => 0.0,
+        #[allow(clippy::cast_precision_loss)]
+        ValueRef::Integer(n) => n as f64,
+        ValueRef::Real(n) => n,
+        ValueRef::Text(s) => omni_ir::js::string_to_number(&String::from_utf8_lossy(s)),
+        ValueRef::Blob(bytes) => omni_ir::js::string_to_number(
+            &bytes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    }
+}
+
 /// ECMAScript `WhiteSpace` and `LineTerminator`, which is what
 /// `String.prototype.trim` strips. Not Rust's `char::is_whitespace`: that
 /// includes U+0085 and excludes U+FEFF, and JS does the opposite.
