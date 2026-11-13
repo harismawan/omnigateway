@@ -74,10 +74,35 @@ impl std::fmt::Debug for HttpResponse {
     }
 }
 
+/// Diagnostics retain only a parsed scheme and host, never URL credentials.
+#[derive(Debug)]
+pub struct RejectedUrl(String);
+
+impl From<&str> for RejectedUrl {
+    fn from(raw: &str) -> Self {
+        Self(url::Url::parse(raw).ok().map_or_else(
+            || "[unparseable URL]".into(),
+            |url| {
+                format!(
+                    "{}://{}",
+                    url.scheme(),
+                    url.host_str().unwrap_or("[no host]")
+                )
+            },
+        ))
+    }
+}
+
+impl std::fmt::Display for RejectedUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
     #[error("invalid url: {0}")]
-    InvalidUrl(String),
+    InvalidUrl(RejectedUrl),
     #[error("invalid http method: {0}")]
     InvalidMethod(String),
     /// A header name that is not a token, or a value node would refuse.
