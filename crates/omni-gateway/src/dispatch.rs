@@ -716,7 +716,7 @@ fn run(mut s: RunState) -> EventsStream {
                                 "credential expired with no refresh token",
                             ).with_provider(c.credential.provider.clone()));
                         }
-                        match within(s.deadline, deps.refresh(&c.credential)).await.and_then(|r| r) {
+                        match within(s.deadline, Box::pin(deps.refresh(&c.credential))).await.and_then(|r| r) {
                             Ok(sec) => retry_secrets = Some(sec),
                             Err(e) => break 'attempt Err(e),
                         }
@@ -730,25 +730,19 @@ fn run(mut s: RunState) -> EventsStream {
                     {
                         ar.request_started_at = Some(s.started_at as f64);
                     }
-                    let sent = within(
-                        s.deadline,
-                        async {
-                        if c.target.provider == "anthropic" {
-                            omni_providers::adapter::send(
+                    let sent = if c.target.provider == "anthropic" {
+                            within(s.deadline, Box::pin(omni_providers::adapter::send(
                                 &omni_providers::anthropic::codec::AnthropicCodec,
                                 "anthropic", ar, deps.http.as_ref(),
-                            ).await
+                            ))).await
                         } else {
-                        omni_providers::adapter::send(
+                        within(s.deadline, omni_providers::adapter::send(
                             &omni_providers::custom::CustomCodec,
                             omni_providers::custom::ID,
                             ar,
                             deps.http.as_ref(),
-                        ).await
-                        }
-                        },
-                    )
-                    .await;
+                        )).await
+                        };
                     let mut result = match sent {
                         Err(t) => break 'attempt Err(t),
                         Ok(Err(e)) => break 'attempt Err(classify_send(e)),
@@ -903,7 +897,7 @@ fn run(mut s: RunState) -> EventsStream {
                         model = %c.target.model, credentialId = %c.credential.id,
                         attempt = i + 1, code = failure.code.as_str(),
                         "attempt authentication failed; refreshing credential");
-                    match within(s.deadline, deps.refresh(&c.credential)).await.and_then(|r| r) {
+                    match within(s.deadline, Box::pin(deps.refresh(&c.credential))).await.and_then(|r| r) {
                         Ok(sec) => {
                             retry_secrets = Some(sec);
                             continue;
