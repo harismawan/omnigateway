@@ -58,6 +58,9 @@ impl Serialize for WindowType {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
+    /// JS relational comparison when both stored operands are strings.
+    #[serde(skip)]
+    pub text_spent: Option<bool>,
     pub credential_id: String,
     pub window_type: WindowType,
     pub starts_at: f64,
@@ -70,12 +73,19 @@ pub struct QuotaWindow {
     pub window_ms: Option<f64>,
 }
 
+impl QuotaWindow {
+    pub fn spent(&self) -> bool {
+        self.text_spent
+            .unwrap_or_else(|| self.limit.is_some_and(|l| self.used >= l))
+    }
+}
+
 const Q: &str = "quota_windows";
 
 fn opt_number(r: &rusqlite::Row<'_>, column: &str) -> Result<Option<f64>, StoreError> {
     match r.get_ref(column)? {
         rusqlite::types::ValueRef::Null => Ok(None),
-        _ => row::number(r, Q, column).map(Some),
+        v => Ok(Some(crate::js::coerce_cell(v))),
     }
 }
 
@@ -86,13 +96,22 @@ pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
         out.push(QuotaWindow {
+            text_spent: match (r.get_ref("used")?, r.get_ref("limit_value")?) {
+                (rusqlite::types::ValueRef::Text(a), rusqlite::types::ValueRef::Text(b)) => Some(
+                    String::from_utf8_lossy(a)
+                        .encode_utf16()
+                        .cmp(String::from_utf8_lossy(b).encode_utf16())
+                        .is_ge(),
+                ),
+                _ => None,
+            },
             credential_id: row::text(r, Q, "credential_id")?,
             window_type: WindowType::parse(&row::text(r, Q, "window_type")?),
-            starts_at: row::number(r, Q, "starts_at")?,
-            used: row::number(r, Q, "used")?,
+            starts_at: crate::js::coerce_cell(r.get_ref("starts_at")?),
+            used: crate::js::coerce_cell(r.get_ref("used")?),
             limit: opt_number(r, "limit_value")?,
             resets_at: opt_number(r, "resets_at")?,
-            observed_at: row::number(r, Q, "observed_at")?,
+            observed_at: crate::js::coerce_cell(r.get_ref("observed_at")?),
             window_ms: opt_number(r, "window_ms")?,
         });
     }

@@ -145,6 +145,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             }
         };
         quota.push(omni_store::QuotaWindow {
+            text_spent: None,
             credential_id: row.get("credential_id").map_err(Failure::internal)?,
             window_type: omni_store::quota::WindowType::parse(
                 &row.get::<_, String>("window_type")

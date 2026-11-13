@@ -291,7 +291,7 @@ pub fn eligible<'a>(input: &RankInput<'a>) -> Eligible<'a> {
             let spent = snapshot
                 .quota_of(&credential.id)
                 .iter()
-                .find(|w| w.limit.is_some_and(|l| w.used >= l) && !rolled_over(w, now));
+                .find(|w| w.spent() && !rolled_over(w, now));
             if let Some(w) = spent {
                 drop(
                     format!("quota:{}", w.window_type.as_str()),

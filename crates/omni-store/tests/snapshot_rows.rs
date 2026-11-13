@@ -107,6 +107,7 @@ fn quota_windows_are_read_into_the_snapshot() {
         quota,
         vec![
             QuotaWindow {
+                text_spent: None,
                 credential_id: "c1".into(),
                 window_type: WindowType::FiveHour,
                 starts_at: 10.0,
@@ -117,6 +118,7 @@ fn quota_windows_are_read_into_the_snapshot() {
                 window_ms: Some(10_800_000.0),
             },
             QuotaWindow {
+                text_spent: None,
                 credential_id: "c1".into(),
                 window_type: WindowType::Weekly,
                 starts_at: 20.0,

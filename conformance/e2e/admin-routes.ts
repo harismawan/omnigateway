@@ -1438,6 +1438,7 @@ const configs: Config[] = [
         `UPDATE api_keys SET limits='{}'`,
         `INSERT INTO credential_health VALUES('cred-custom','m','open',3,100,200)`,
         `INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','daily',0,25,100,2000000000000,0,NULL)`,
+        `INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','preboot',0,'unknown',100,4102444800000,0,NULL)`,
         `INSERT INTO virtual_models VALUES('pinned','[{"provider":"custom","model":"m","credentialId":"cred-custom","tier":1,"weight":1,"costPerMTok":{"input":0,"output":0}}]','ordered',1)`,
       ]),
     steps: () => {
@@ -1578,6 +1579,7 @@ const configs: Config[] = [
         steps.push({ kind: "credential-routing", name: `recovered after ${name}`, enabled: true });
       }
       steps.push(as("admin", "PATCH", "/api/credentials/{{last}}", '{"enabled":false}'));
+      steps.push({kind: "sql", name: "live malformed unrelated quota", sql: ["INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','live',0,'unknown',100,4102444800000,0,NULL)"]});
       steps.push({
         kind: "credential-routing",
         name: "disabled credential stops routing",

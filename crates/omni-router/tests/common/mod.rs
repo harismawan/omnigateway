@@ -157,6 +157,7 @@ pub fn health_with(credential_id: &str, f: impl FnOnce(&mut CredentialHealth)) -
 
 pub fn quota(credential_id: &str, used: f64, limit: Option<f64>) -> QuotaWindow {
     QuotaWindow {
+        text_spent: None,
         credential_id: credential_id.to_owned(),
         window_type: WindowType::FiveHour,
         starts_at: 0.0,

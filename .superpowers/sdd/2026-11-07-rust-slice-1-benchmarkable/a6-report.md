@@ -525,3 +525,16 @@ comparison semantics, then NULL/BLOB model-id isolation, then all three minors.
 Run final workspace/clippy/fmt and four freshly built copied-binary drivers only
 after those changes. No final gate claim here. Ordinary schema disallows NULL
 failure counts; NULL opened/deadline and text/negative/huge counters are covered.
+
+### I2 checkpoint
+
+I1 commit: `a6f9f0e9`. I2 → this checkpoint commit →
+`unusual_quota_keeps_publication_and_js_comparisons` and permanent preboot/live
+credentials-driver quota fixtures. Quota numeric coercions happen during reads;
+the string/string relational result is precomputed separately for routing.
+`quota-permanent-red.log`: **4 equal / 82 cascading failures**, Rust fails boot
+on pre-existing text usage. `quota-permanent-green.log`: **167 equal / 0 failures**,
+fresh outside-checkout `rust-quota`. `quota-tests.log`: **257 passed / 0 failed /
+5 ignored** (store/router/control). `quota-build.log`: release build passed.
+Remaining: model-id isolation, three minors, final gates. Quota identity columns
+remain strict; malformed scalar numeric columns no longer abort publication.

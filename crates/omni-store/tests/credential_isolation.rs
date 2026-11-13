@@ -73,3 +73,17 @@ fn unusual_health_never_blocks_other_snapshot_changes() {
     assert_eq!(snapshot.health[0].rate_limited_until, Some(3.5));
     assert!(!snapshot.credentials[0].enabled);
 }
+
+#[test]
+fn unusual_quota_keeps_publication_and_js_comparisons() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("store");
+    store.connection().execute_batch("INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('c','custom','c','apiKey','{}',1,1); INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES('c','preboot',0,'unknown',100,4102444800000,0)").expect("seed");
+    let key = omni_crypto::field::derive_key("key");
+    let boot = store.snapshot_reads(&key).expect("boot");
+    assert!(!boot.quota[0].spent());
+    store.connection().execute_batch("INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES('c','live',0,'z','a',4102444800000,0); UPDATE credentials SET enabled=0 WHERE id='c'").expect("edit");
+    let live = store.snapshot_reads(&key).expect("refresh");
+    assert!(!live.credentials[0].enabled);
+    assert!(live.quota.iter().any(|w| w.spent()));
+}
