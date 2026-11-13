@@ -498,6 +498,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         http.clone(),
         clock::now_ms,
     ));
+    let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone());
     let deps = Arc::new(dispatch::Deps {
         refresher: oauth_refresher,
         http,
@@ -589,6 +590,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         app.deadline_workers.before_writer_close();
         drop(app);
         refresher.abort();
+        oauth_scheduler.abort();
+        drop(oauth_scheduler.await);
         preseeder.abort();
         overlay_sweeper.abort();
         asker.abort();

@@ -51,6 +51,72 @@ fn storage(_: omni_store::StoreError) -> GatewayError {
     GatewayError::new(ErrorCode::Internal, "credential persistence failed")
 }
 impl Refresher {
+    /// Frozen scheduler: enabled OAuth inside a five-minute lead; sequential.
+    pub async fn sweep(
+        self: &Arc<Self>,
+        holder: Option<&omni_gateway_core::snapshot::SnapshotHolder>,
+    ) -> std::result::Result<usize, GatewayError> {
+        let credentials = self
+            .store
+            .list_credentials(&self.key)
+            .await
+            .map_err(storage)?;
+        let mut refreshed = 0;
+        for c in credentials {
+            let now = (self.now)();
+            if !c.enabled
+                || c.auth_type != omni_store::AuthType::OAuth
+                || !c
+                    .expires_at
+                    .is_some_and(|at| at.saturating_sub(300_000) <= now)
+            {
+                continue;
+            }
+            if !c.has_refresh_token {
+                if c.expires_at.is_some_and(|at| at <= now) {
+                    self.store
+                        .disable_credential(&c.id, now, "expiredNoRefresh")
+                        .await
+                        .map_err(storage)?;
+                }
+            } else {
+                match self.refresh(&c).await {
+                    Ok(_) => refreshed += 1,
+                    Err(error) => {
+                        tracing::warn!(code = error.code.as_str(), "scheduled token refresh failed")
+                    }
+                }
+            }
+            if let Some(holder) = holder
+                && let Some(row) = self
+                    .store
+                    .credential(&self.key, &c.id)
+                    .await
+                    .map_err(storage)?
+            {
+                holder.patch_credential(row);
+            }
+        }
+        Ok(refreshed)
+    }
+
+    pub fn start_scheduler(
+        self: &Arc<Self>,
+        holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+    ) -> tokio::task::JoinHandle<()> {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let period = std::time::Duration::from_secs(60);
+            let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticks.tick().await;
+                if let Err(error) = this.sweep(Some(&holder)).await {
+                    tracing::warn!(code = error.code.as_str(), "token refresh sweep failed");
+                }
+            }
+        })
+    }
     pub fn new(
         store: Arc<Backend>,
         key: FieldKey,

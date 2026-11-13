@@ -207,15 +207,25 @@ impl Store {
     }
 
     pub async fn disable_rejected_token(&self, id: &str, now: i64) -> Result<(), StoreError> {
+        self.disable_credential(id, now, "tokenRejected").await
+    }
+
+    pub async fn disable_credential(
+        &self,
+        id: &str,
+        now: i64,
+        reason: &str,
+    ) -> Result<(), StoreError> {
         match self {
             Self::Sqlite { store, .. } => {
                 let id = id.to_owned();
+                let reason = reason.to_owned();
                 on_sqlite!(store, |s| {
-                    s.connection().execute("UPDATE credentials SET enabled=0,disabled_reason='tokenRejected',disabled_at=?,updated_at=? WHERE id=?", rusqlite::params![now,now,id])?;
+                    s.connection().execute("UPDATE credentials SET enabled=0,disabled_reason=?,disabled_at=?,updated_at=? WHERE id=?", rusqlite::params![reason,now,now,id])?;
                     Ok(())
                 })
             }
-            Self::Postgres(pg) => pg.disable_rejected_token(id, now).await,
+            Self::Postgres(pg) => pg.disable_credential(id, now, reason).await,
         }
     }
 

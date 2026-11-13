@@ -76,6 +76,29 @@ async fn fixture(
     (dir, service, http, c)
 }
 #[tokio::test]
+async fn sweep_refreshes_due_rows_and_disables_expired_without_token() {
+    let (_dir, service, http, _) = fixture(200).await;
+    if let Store::Sqlite { store, .. } = service.store.as_ref() {
+        let db = store.lock().unwrap();
+        db.connection()
+            .execute("UPDATE credentials SET expires_at=1001", [])
+            .unwrap();
+        db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,expires_at,created_at,updated_at) VALUES ('empty','anthropic','empty','oauth',1,0,0)", []).unwrap();
+    }
+    assert_eq!(service.sweep(None).await.unwrap(), 1);
+    assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+    let empty = service
+        .store
+        .credential(&service.key, "empty")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!empty.enabled);
+    assert_eq!(empty.disabled_reason.unwrap().as_str(), "expiredNoRefresh");
+    assert_eq!(service.sweep(None).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn success_coalesces_and_stale_views_deduplicate() {
     let (_dir, service, http, c) = fixture(200).await;
     let (a, b) = tokio::join!(service.refresh(&c), service.refresh(&c));
