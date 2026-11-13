@@ -148,6 +148,7 @@ for (const rust of [false, true]) {
   assert.equal(await new Response(p.stderr).text(), "");
   assert.equal(await p.exited, 0);
   assert.equal(result.code, 1);
+  assert(Buffer.from(result.bytes, "hex").toString().includes("the two passwords do not match"));
   assert(result.restored);
   const db = new Database(join(root, `mismatch-${rust}.db`));
   assert.equal(db.query("SELECT value FROM settings WHERE key='adminPasswordHash'").get(), null);

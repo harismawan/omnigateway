@@ -79,6 +79,13 @@ for (const json of [false, true])
             key: string;
             value: string;
           }[];
+          const otherTables = (
+            d
+              .query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name!='settings' ORDER BY name",
+              )
+              .all() as { name: string }[]
+          ).map(({ name }) => [name, d.query(`SELECT * FROM "${name}"`).all()]);
           d.close();
           for (const row of rows)
             if (row.key === "adminPasswordHash") {
@@ -86,7 +93,7 @@ for (const json of [false, true])
               assert(await Bun.password.verify(password.trim(), row.value));
               row.value = "<validated argon2id hash>";
             }
-          results.push({ ...result, rows });
+          results.push({ ...result, rows, otherTables });
         }
         await Bun.write(
           join(root, `${count}.json`),
