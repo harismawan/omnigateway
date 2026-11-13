@@ -115,7 +115,7 @@ for (const json of [false, true]) {
       ],
       {
         cwd: root,
-        env: { ...env, PTY_ANSWERS: JSON.stringify(["\u0003"]) },
+        env: { ...env, PTY_WAIT_RAW: "1", PTY_ANSWERS: JSON.stringify(["\u0003"]) },
         stdout: "pipe",
         stderr: "pipe",
       },
