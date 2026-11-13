@@ -653,11 +653,15 @@ pub fn try_collect(
                 merges,
             } => {
                 if !json.is_empty() {
-                    data.insert("input".into(), parse_tool_json(&json, &mut depth_error));
+                    crate::deep::insert(
+                        &mut data,
+                        "input".into(),
+                        parse_tool_json(&json, &mut depth_error),
+                    );
                 }
                 for merge in merges {
                     for (k, v) in merge {
-                        data.insert(k, v);
+                        crate::deep::insert(&mut data, k, v);
                     }
                 }
                 ContentBlock::ProviderNative(ProviderNativeBlock {

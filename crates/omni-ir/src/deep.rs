@@ -474,6 +474,13 @@ pub fn drop(value: Value) {
     }
 }
 
+/// Insert a JSON field, releasing any displaced value without recursion.
+pub fn insert(map: &mut Map<String, Value>, key: String, value: Value) {
+    if let Some(old) = map.insert(key, value) {
+        drop(old);
+    }
+}
+
 /// [`drop`] for a map.
 pub fn drop_map(map: Map<String, Value>) {
     drop(Value::Object(map));

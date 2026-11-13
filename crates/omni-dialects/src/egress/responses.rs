@@ -488,14 +488,14 @@ impl ResponsesStream {
             match merge {
                 Merge::Moved(moved) => {
                     for (k, v) in moved {
-                        item.native.insert(k, v);
+                        omni_ir::deep::insert(&mut item.native, k, v);
                     }
                 }
                 // A borrowed event has to be copied to be kept; `push_owned`
                 // moves it instead.
                 Merge::Borrowed => {
                     for (k, v) in data {
-                        item.native.insert(k.clone(), omni_ir::deep::clone(v));
+                        omni_ir::deep::insert(&mut item.native, k.clone(), omni_ir::deep::clone(v));
                     }
                 }
             }
