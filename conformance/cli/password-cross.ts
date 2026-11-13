@@ -35,6 +35,7 @@ for (const [i, gateway] of gateways.entries()) {
   assert(cmd);
   await password(cmd, "correct-horse-battery");
   const p = Bun.spawn([resolve(gateway)], { cwd: root, env, stdout: "ignore", stderr: "ignore" });
+  let oldCookie: string | undefined;
   try {
     let ready = false;
     for (let n = 0; n < 400; n++) {
@@ -58,6 +59,7 @@ for (const [i, gateway] of gateways.entries()) {
     count++;
     const cookie = first.headers.get("set-cookie")?.split(";")[0];
     assert(cookie);
+    oldCookie = cookie;
     await password(cmd, "replacement-password");
     assert.equal((await login("correct-horse-battery")).status, 401);
     count++;
@@ -72,6 +74,34 @@ for (const [i, gateway] of gateways.entries()) {
   } finally {
     p.kill("SIGTERM");
     await p.exited;
+  }
+  assert(oldCookie);
+  const restarted = Bun.spawn([resolve(gateway)], {
+    cwd: root,
+    env,
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    let ready = false;
+    for (let n = 0; n < 400; n++) {
+      try {
+        if ((await fetch("http://127.0.0.1:18449/health")).ok) {
+          ready = true;
+          break;
+        }
+      } catch {}
+      await Bun.sleep(25);
+    }
+    assert(ready);
+    assert.equal(
+      (await fetch("http://127.0.0.1:18449/api/keys", { headers: { cookie: oldCookie } })).status,
+      401,
+    );
+    count++;
+  } finally {
+    restarted.kill("SIGTERM");
+    await restarted.exited;
   }
 }
 console.log(`PASS ${count} real gateway cross-login/password-change/session checks (${root})`);
