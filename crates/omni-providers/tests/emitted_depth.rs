@@ -125,6 +125,9 @@ fn replacement_matrix(nested: &str) {
         custom_tool_names: Default::default(),
     };
     for kind in [
+        "text",
+        "thinking",
+        "tool_use",
         "server_tool_use",
         "web_search_tool_result",
         "web_fetch_tool_result",
@@ -148,72 +151,96 @@ fn replacement_matrix(nested: &str) {
         "fallback",
         "redacted_thinking",
     ] {
-        for mode in ["start", "merge", "input", "error"] {
-            let mut decoder = AnthropicDecoder::default();
-            let mut queue = VecDeque::new();
-            let mut send = |event: &str, data: String| {
-                decoder
-                    .message(
-                        &SseMessage {
-                            event: event.into(),
-                            data,
-                        },
-                        &mut queue,
-                    )
-                    .expect("decode replacement fixture");
-            };
-            send(
-                "content_block_start",
-                format!(
-                    r#"{{"index":0,"content_block":{{"type":"{kind}","content":{nested},"input":{nested}}}}}"#
-                ),
-            );
-            if mode == "merge" {
+        for field in ["content", "encrypted_content", "citation"] {
+            for mode in ["start", "merge", "input", "error"] {
+                eprintln!("matrix {kind}/{field}/{mode}");
+                let delta_type = if field == "citation" {
+                    "citations_delta"
+                } else {
+                    "compaction_delta"
+                };
+                let mut decoder = AnthropicDecoder::default();
+                let mut queue = VecDeque::new();
+                let mut send = |event: &str, data: String| {
+                    decoder
+                        .message(
+                            &SseMessage {
+                                event: event.into(),
+                                data,
+                            },
+                            &mut queue,
+                        )
+                        .expect("decode replacement fixture");
+                };
                 send(
-                    "content_block_delta",
+                    "content_block_start",
                     format!(
-                        r#"{{"index":0,"delta":{{"type":"compaction_delta","content":{nested}}}}}"#
+                        r#"{{"index":0,"content_block":{{"type":"{kind}","content":{nested},"encrypted_content":{nested},"citations":[{nested}],"input":{nested}}}}}"#
                     ),
                 );
-            }
-            if mode == "input" || mode == "error" {
-                let json = if mode == "error" {
-                    format!("{}0{}", "[".repeat(40001), "]".repeat(40001))
-                } else {
-                    "{}".into()
-                };
-                send("content_block_delta", serde_json::json!({"index":0,"delta":{"type":"input_json_delta","partial_json":json}}).to_string());
-            } else {
-                send(
-                    "content_block_delta",
-                    r#"{"index":0,"delta":{"type":"compaction_delta","content":"replacement"}}"#
-                        .into(),
-                );
-            }
-            assert!(queue.len() >= 2);
-            for mut encoder in [
-                StreamEncoder::Anthropic(AnthropicStream::new("req")),
-                StreamEncoder::OpenAi(OpenAiStream::new("req", 0)),
-                StreamEncoder::Responses(Box::new(ResponsesStream::new(config.clone()))),
-            ] {
-                let mut wire = String::new();
-                for event in &queue {
-                    encoder.push_owned(event.clone(), &mut wire);
+                if mode == "merge" {
+                    send(
+                        "content_block_delta",
+                        format!(
+                            r#"{{"index":0,"delta":{{"type":"{delta_type}","{field}":{nested}}}}}"#
+                        ),
+                    );
                 }
-                encoder.finish(&mut wire);
-            }
-            let result = omni_ir::stream::try_collect(queue);
-            if mode == "error" {
-                assert!(result.is_err());
-                continue;
-            }
-            let collected = result.expect("collect replacement fixture");
-            for value in [
-                anthropic::response(&collected, "req"),
-                openai::response(&collected, "req", 0),
-                responses::response(&collected, &config),
-            ] {
-                drop(value);
+                if mode == "input" || mode == "error" {
+                    if matches!(kind, "text" | "thinking") {
+                        send(
+                            "content_block_delta",
+                            format!(
+                                r#"{{"index":0,"delta":{{"type":"{delta_type}","{field}":{nested}}}}}"#
+                            ),
+                        );
+                        send(
+                            "content_block_start",
+                            format!(
+                                r#"{{"index":1,"content_block":{{"type":"document","input":{nested}}}}}"#
+                            ),
+                        );
+                    }
+                    let json = if mode == "error" {
+                        format!("{}0{}", "[".repeat(40001), "]".repeat(40001))
+                    } else {
+                        format!("{}0{}", "[".repeat(39990), "]".repeat(39990))
+                    };
+                    let index = u32::from(matches!(kind, "text" | "thinking"));
+                    send("content_block_delta", serde_json::json!({"index":index,"delta":{"type":"input_json_delta","partial_json":json}}).to_string());
+                } else {
+                    send(
+                        "content_block_delta",
+                        format!(
+                            r#"{{"index":0,"delta":{{"type":"{delta_type}","{field}":{nested}}}}}"#
+                        ),
+                    );
+                }
+                assert!(queue.len() >= 2);
+                for mut encoder in [
+                    StreamEncoder::Anthropic(AnthropicStream::new("req")),
+                    StreamEncoder::OpenAi(OpenAiStream::new("req", 0)),
+                    StreamEncoder::Responses(Box::new(ResponsesStream::new(config.clone()))),
+                ] {
+                    let mut wire = String::new();
+                    for event in &queue {
+                        encoder.push_owned(event.clone(), &mut wire);
+                    }
+                    encoder.finish(&mut wire);
+                }
+                let result = omni_ir::stream::try_collect(queue);
+                if mode == "error" {
+                    assert!(result.is_err());
+                    continue;
+                }
+                let collected = result.expect("collect replacement fixture");
+                for value in [
+                    anthropic::response(&collected, "req"),
+                    openai::response(&collected, "req", 0),
+                    responses::response(&collected, &config),
+                ] {
+                    drop(value);
+                }
             }
         }
     }
