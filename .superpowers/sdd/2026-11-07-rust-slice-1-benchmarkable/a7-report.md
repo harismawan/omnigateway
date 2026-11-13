@@ -1,6 +1,30 @@
 # A7 checkpoint — SQLite usage implemented; increment incomplete
 
-**Precise next step:** finish `/api/usage` coverage before starting `/api/logs`: add a PostgreSQL aggregate reader with a live isolated postgres:17-alpine oracle; add usage assertions over real `/v1` traffic, fixed nonzero day offsets, preboot/live pending rows, malformed/raw cells, duplicate filters and invalid UTF-8 URL decoding. Then read `packages/control/src/logs.ts` and `packages/store/src/logPage.ts`, add independent HTTP RED for `/api/logs`, implement it and commit separately. Export and nodes remain unimplemented.
+## Continuation checkpoint (89ecdb01)
+
+**NEXT STEP:** add a usage-specific real `/v1` stub-upstream request, wait for its committed log, then assert `/api/usage` tokens/counts (normalize only validated nondeterministic duration/timestamps). Expand invalid UTF-8 tests to dimension and ID parameters (current vectors only exercise numeric fallback), and add integer-overflow aggregate error coverage. Then start `/api/logs` with independent real-TS HTTP RED, followed by export and nodes. PostgreSQL is deferred for every route to D4 per the revised instructions.
+
+`89ecdb01` extracts SQL/label conversion into additive `omni-store::reports::usage`, with a defensive SQL expression whitelist. Control retains query validation. Driver now covers 300,000 raw rows across 10,000 keys and seven models (70,000 group/split tuples), +330/-480 minute daily-floor boundaries, a live inserted row with invalid UTF-8 TEXT, BLOB input tokens, text duration, invalid degradations, and a pending row. Five malformed query encodings exercise numeric fallback. All remaining legacy Database connections now set a bounded busy timeout.
+
+**Memory:** neither frozen TS nor Rust has a fixed result bound. For a selected grain, output cardinality is the number of distinct selected group/split tuples among qualifying rows; it is at most the qualifying row count and at most the product of the two dimension cardinalities. An unbounded interval does not impose a fixed ceiling. Both aggregate in SQLite and materialize result buckets, not raw rows. TS additionally holds `.all()` aggregate records before mapping them. Rust directly collects mapped buckets. No new cap is imposed. Final 300k-row fixture VmHWM: **TS 152,852 kB; Rust 142,664 kB** (`admin-routes-final/usage-large-{ts,rust}-rss.txt`). Earlier isolated run: TS 151,060 kB / Rust 240,676 kB; process peaks vary with allocator/runtime behavior. These are Linux process high-water marks through all requests in the configuration, not a guarantee on arbitrary bucket cardinality.
+
+Requirement → commit → test: store extraction, large-table memory, offsets, live/raw cells, malformed numeric query encodings, and legacy busy timeouts → `89ecdb01` → `usage-green.log` (449 equal), `large-green.log` (11 equal), `offset-green.log` and `offset-negative-green.log` (35 equal each), plus full final driver. **No independent behavioral RED occurred in this continuation:** the new tests were run against the old committed implementation before refactoring and already passed (`baseline.log`, `large-baseline.log`, `offset-baseline.log`, `live-baseline.log`). This is coverage plus a behavior-preserving extraction, not a newly fixed mismatch. The prior implementation RED evidence remains below.
+
+Final gates run once against implementation commit `89ecdb01`; evidence `/tmp/opencode/a7-next/`:
+
+| Gate | Result | Log |
+|---|---|---|
+| workspace tests | 1046 passed / 0 failed / 7 ignored | `workspace.log` |
+| workspace all-target clippy -D warnings | clean | `clippy.log` |
+| fmt | clean | `fmt.log` |
+| admin-routes | 1833 equal / 2 expected / 0 failures | `admin-routes-final.log` |
+| admin-auth | 212 equal / 4 expected / 0 failures | `admin-auth-final.log` |
+| surface | 606 equal / 61 expected / 0 failures | `surface-final.log` |
+| run.ts | all rows equal | `run-final.log` |
+
+Both final binaries freshly built at the recorded commit and copied/compiled outside checkout. `manifest.json` records commit, SHA256s, and final driver log names before those driver runs. Build logs: `build-ts-final.log`, `build-rust-final.log`. Earlier exploratory runs reused the prior TS artifact and are not final gates. Existing unrelated working-tree lockfile/progress edits were preserved. No new known response mismatch; real-traffic usage assertion remains incomplete. Logs/export/nodes remain unimplemented. **Status: partial checkpoint, not complete for review.** D4 must add PG report readers beside the extracted SQLite reader and wire backend selection through control operations and HTTP, with live-PG conformance.
+
+## Historical first checkpoint (superseded by continuation above)
 
 ## Changes
 
