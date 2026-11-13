@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
+import { CONFIG_DIAGNOSTICS } from "./config-diagnostics.ts";
 
 const pending: Promise<void>[] = [];
 const observed: Record<string, number> = {};
@@ -23,9 +24,8 @@ export function goldenSpawn(argv: string[], options: Bun.SpawnOptions.OptionsObj
       observed[key] = (observed[key] ?? 0) + 1;
       for (const line of (stderr + stdout).split(/\r?\n/)) {
         if (
-          /OMNI_\w+ (?:must|is required)|ENOENT:|EACCES:|unable to open database|database is locked/.test(
-            line,
-          )
+          CONFIG_DIAGNOSTICS.some((prefix) => line.includes(prefix)) ||
+          /ENOENT:|EACCES:|unable to open database|database is locked/.test(line)
         ) {
           const kind = line.match(
             /OMNI_\w+|ENOENT|EACCES|unable to open database|database is locked/,
