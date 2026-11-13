@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 omni-ir = { path = "../omni-ir" }
+omni-crypto = { path = "../omni-crypto" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

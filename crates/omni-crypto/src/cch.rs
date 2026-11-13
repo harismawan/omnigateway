@@ -53,12 +53,15 @@ pub fn sign_anthropic_body(json: &str) -> String {
 pub fn cc_version_suffix(first_user_text: &[u16], cli_version: &str) -> String {
     let mut seed = String::with_capacity(CCV_SALT.len() + 12 + cli_version.len());
     seed.push_str(CCV_SALT);
-    for index in [4usize, 7, 20] {
-        match first_user_text.get(index) {
-            Some(&unit) => seed.push(char::from_u32(u32::from(unit)).unwrap_or('\u{fffd}')),
-            None => seed.push('0'),
-        }
-    }
+    // JS joins the picked code units before UTF-8 encoding. Adjacent picks
+    // can therefore form a surrogate pair even when separated in the source.
+    let picked = [4usize, 7, 20].map(|index| {
+        first_user_text
+            .get(index)
+            .copied()
+            .unwrap_or(u16::from(b'0'))
+    });
+    seed.push_str(&String::from_utf16_lossy(&picked));
     seed.push_str(cli_version);
     let digest = Sha256::digest(seed.as_bytes());
     crate::hex_lower(&digest[..2])[..3].to_owned()

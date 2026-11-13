@@ -1595,6 +1595,7 @@ dependencies = [
  "httparse",
  "httpdate",
  "memchr",
+ "omni-crypto",
  "omni-dialects",
  "omni-ir",
  "rand 0.9.5",
