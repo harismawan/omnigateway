@@ -57,7 +57,7 @@ pub fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest
     }
     Ok(request(&[
         ("grant_type", "authorization_code"),
-        ("code", raw.trim()),
+        ("code", omni_ir::js::trim(raw)),
         ("redirect_uri", &pending.redirect_uri),
         ("code_verifier", &pending.verifier),
         ("state", &pending.state),

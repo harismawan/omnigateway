@@ -66,7 +66,11 @@ pub fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     }
     let default = "Accept,Authorization,Content-Type,User-Agent,X-Stainless-Arch,X-Stainless-Lang,X-Stainless-OS,X-Stainless-Package-Version,X-Stainless-Retry-Count,X-Stainless-Runtime,X-Stainless-Runtime-Version,X-Stainless-Timeout,anthropic-beta,anthropic-dangerous-direct-browser-access,anthropic-version,x-api-key,x-app,Connection,Host,Accept-Encoding,Content-Length";
     let raw = std::env::var("OMNI_ORDER_ANTHROPIC").unwrap_or_default();
-    let parts: Vec<_> = raw.split(',').map(str::trim).filter(|s| safe(s)).collect();
+    let parts: Vec<_> = raw
+        .split(',')
+        .map(omni_ir::js::trim)
+        .filter(|s| safe(s))
+        .collect();
     let order: Vec<_> = if parts.is_empty() {
         default.split(',').collect()
     } else {

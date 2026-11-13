@@ -182,7 +182,7 @@ fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<ToolCloak>, Gate
         let original: Vec<_> = raw
             .unwrap_or("")
             .split(',')
-            .map(str::trim)
+            .map(omni_ir::js::trim)
             .filter(|s| !s.is_empty())
             .collect();
         let value = if raw.is_some() && original.iter().all(|b| betas.iter().any(|v| v == b)) {
