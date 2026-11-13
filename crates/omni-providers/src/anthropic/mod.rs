@@ -4,4 +4,5 @@ pub mod cloak;
 pub mod decode;
 pub mod oauth;
 pub mod profile;
+mod vendor;
 pub mod wire;

@@ -121,6 +121,18 @@ pub fn to_wire(
     cloak: &ToolCloak,
     saved_max: Option<f64>,
 ) -> Result<(Value, Vec<String>), GatewayError> {
+    to_wire_with_options(req, model, oauth, cloak, saved_max, false, false)
+}
+
+pub fn to_wire_with_options(
+    req: &omni_ir::request::ChatRequest,
+    model: &str,
+    oauth: bool,
+    cloak: &ToolCloak,
+    saved_max: Option<f64>,
+    preserve_system: bool,
+    auto_cache: bool,
+) -> Result<(Value, Vec<String>), GatewayError> {
     use omni_ir::request::{ReasoningConfig, Role, ToolChoice, ToolDef};
     let mut notes = Vec::new();
     let mut note = |s: String| {
@@ -131,7 +143,23 @@ pub fn to_wire(
     let mut system = Vec::new();
     for b in req.system.iter().flatten() {
         if let ContentBlock::Text(t) = b {
-            let mut v = json!({"type":"text","text":t.text});
+            let mut v = json!({});
+            if preserve_system
+                && let Some(original) = req
+                    .vendor_bag("anthropic")
+                    .and_then(|v| v.get("system"))
+                    .and_then(Value::as_array)
+                    .and_then(|v| v.get(system.len()))
+                    .and_then(Value::as_object)
+            {
+                for (k, value) in original {
+                    if !["type", "text", "cache_control"].contains(&k.as_str()) {
+                        v[k] = value.clone();
+                    }
+                }
+            }
+            v["type"] = json!("text");
+            v["text"] = json!(t.text);
             if let Some(c) = &t.cache_control {
                 v["cache_control"] = json!(c);
             }
@@ -140,7 +168,10 @@ pub fn to_wire(
             note(format!("anthropic:system-{}-dropped", b.type_name()));
         }
     }
-    if oauth && system.first().and_then(|v| v["text"].as_str()) != Some(OAUTH_IDENTITY) {
+    if oauth
+        && !preserve_system
+        && system.first().and_then(|v| v["text"].as_str()) != Some(OAUTH_IDENTITY)
+    {
         system.insert(0, json!({"type":"text","text":OAUTH_IDENTITY}));
         note("anthropic:oauth-system-prefix".into());
     }
@@ -306,6 +337,14 @@ pub fn to_wire(
             _ => json!(c),
         };
     }
+    if auto_cache {
+        add_auto_cache(&mut body, req, &mut notes);
+    }
+    let mut note = |s: String| {
+        if !notes.contains(&s) {
+            notes.push(s);
+        }
+    };
     if let Some(r) = &req.reasoning {
         body["thinking"] = Value::Null;
         body["thinking"] = match r {
@@ -331,6 +370,13 @@ pub fn to_wire(
             }
         };
     }
+    super::vendor::merge(
+        &mut body,
+        req,
+        id == "claude-haiku-4-5",
+        preserve_system,
+        &mut notes,
+    );
     Ok((body, notes))
 }
 

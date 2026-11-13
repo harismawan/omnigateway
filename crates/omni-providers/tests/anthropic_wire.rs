@@ -19,17 +19,16 @@ fn request_assembly_matches_real_ts() {
         } else {
             Default::default()
         };
-        let (mut body, mut notes) = omni_providers::anthropic::wire::to_wire(
+        let (body, notes) = omni_providers::anthropic::wire::to_wire_with_options(
             &req,
             row["model"].as_str().expect("model"),
             oauth,
             &cloak,
             Some(100000.0),
+            row["preserveSystem"] == true,
+            row["autoCache"] == true,
         )
         .expect("wire");
-        if row["autoCache"] == true {
-            omni_providers::anthropic::wire::add_auto_cache(&mut body, &req, &mut notes);
-        }
         assert_eq!(
             omni_ir::jsjson::to_string(&body),
             row["body"].as_str().expect("body"),

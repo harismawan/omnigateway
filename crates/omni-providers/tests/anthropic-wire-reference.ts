@@ -13,4 +13,9 @@ for(const tools of [false,true]) for(const system of [false,true]) for(const his
  const result=toWire(request,'m',{oauth:false,autoCache:true,maxOutputTokens:100000});
  rows.push({request,model:'m',oauth:false,autoCache:true,body:JSON.stringify(result.body),degradations:result.degradations});
 }
+for(const model of ['m','claude-haiku-4-5']) for(const config of [undefined,{effort:'low'},'bad',{format:{type:'bad'}},{format:{type:'json_schema',schema:{type:'object',properties:{nested:{type:'object'}}}}}]) for(const preserveSystem of [false,true]) {
+ const request:any={model:'m',stream:true,system:[{type:'text',text:'changed'}],messages:[{role:'user',content:[{type:'text',text:'hi'}]}],reasoning:{mode:'off'},vendor:{openai:{response_format:{type:'json_schema',json_schema:{schema:{type:'object',properties:{a:{type:'object'}}}}}},anthropic:{system:[{type:'text',text:'original',opaque:1}],thinking:{display:'omitted',type:'adaptive'},context_management:{edits:[{type:'clear_thinking_20251015'}]},...(config===undefined?{}:{output_config:config})}}};
+ const result=toWire(request,model,{oauth:true,preserveSystem,maxOutputTokens:100000});
+ rows.push({request,model,oauth:true,preserveSystem,body:JSON.stringify(result.body),degradations:result.degradations});
+}
 console.log(JSON.stringify(rows));
