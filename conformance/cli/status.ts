@@ -23,7 +23,7 @@ for (const seeded of [false, true]) {
     db.run(
       "INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES ('c','fiveHour',0,95,100,1,1)",
     );
-    db.run("INSERT INTO settings VALUES ('adminPasswordHash','configured')");
+    db.run("INSERT INTO settings VALUES ('adminPasswordHash','')");
     db.close();
   }
   for (const pid of [undefined, String(process.pid), "999999999", "garbage"])

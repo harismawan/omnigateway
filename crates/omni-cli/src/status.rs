@@ -80,7 +80,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             }
             configured = omni_control::admin_password::admin_hash(&store)
                 .map_err(|e| e.to_string())?
-                .is_some_and(|s| !s.is_empty());
+                .is_some();
             let mut q=store.connection().prepare("SELECT credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms FROM quota_windows").map_err(|e|e.to_string())?;
             let quota=q.query_map([],|r|Ok(json!({"credentialId":r.get::<_,String>(0)?,"windowType":r.get::<_,String>(1)?,"startsAt":r.get::<_,f64>(2)?,"used":r.get::<_,f64>(3)?,"limit":r.get::<_,Option<f64>>(4)?,"resetsAt":r.get::<_,Option<f64>>(5)?,"observedAt":r.get::<_,f64>(6)?,"windowMs":r.get::<_,Option<f64>>(7)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
             let mut s = store
