@@ -291,6 +291,14 @@ impl PgStore {
         rows::list_credentials(&self.client().await?, key).await
     }
 
+    pub async fn credential(
+        &self,
+        key: &FieldKey,
+        id: &str,
+    ) -> Result<Option<Credential>, StoreError> {
+        rows::credential(&self.client().await?, key, id).await
+    }
+
     pub async fn refresh_metadata(
         &self,
         id: &str,

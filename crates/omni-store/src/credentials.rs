@@ -175,6 +175,13 @@ fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> 
 }
 
 /// `CredentialRepo.list`, ordered by tier then label, secrets decrypted.
+pub fn get(conn: &Connection, key: &FieldKey, id: &str) -> Result<Option<Credential>, StoreError> {
+    let mut stmt = conn.prepare_cached("SELECT * FROM credentials WHERE id=?")?;
+    let mut rows = stmt.query([id])?;
+    rows.next()?.map(|r| to_credential(r, key)).transpose()
+}
+
+/// All credentials, in routing order.
 pub fn list(conn: &Connection, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {
     let mut stmt = conn.prepare_cached("SELECT * FROM credentials ORDER BY tier, label")?;
     let mut rows = stmt.query([])?;

@@ -99,6 +99,18 @@ async fn sweep_refreshes_due_rows_and_disables_expired_without_token() {
 }
 
 #[tokio::test]
+async fn unrelated_corrupt_row_cannot_break_refresh() {
+    let (_dir, service, _, c) = fixture(200).await;
+    if let Store::Sqlite { store, .. } = service.store.as_ref() {
+        store.lock().unwrap().connection().execute("INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES ('corrupt','anthropic','bad','oauth','not-json',0,0)",[]).unwrap();
+    }
+    assert_eq!(
+        service.refresh(&c).await.unwrap().access_token.as_deref(),
+        Some("new")
+    );
+}
+
+#[tokio::test]
 async fn cancellation_drops_only_the_waiter_not_shared_rotation() {
     let (_dir, service, http, c) = fixture(200).await;
     let waiting = {

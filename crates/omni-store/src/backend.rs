@@ -180,11 +180,18 @@ impl Store {
         key: &FieldKey,
         id: &str,
     ) -> Result<Option<Credential>, StoreError> {
-        Ok(self
-            .list_credentials(key)
-            .await?
-            .into_iter()
-            .find(|c| c.id == id))
+        match self {
+            Self::Sqlite { store, .. } => {
+                let key = key.clone();
+                let id = id.to_owned();
+                on_sqlite!(store, |s| crate::credentials::get(
+                    s.connection(),
+                    &key,
+                    &id
+                ))
+            }
+            Self::Postgres(pg) => pg.credential(key, id).await,
+        }
     }
 
     /// Refresh metadata never changes token_version. Called only by the CAS winner.

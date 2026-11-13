@@ -311,6 +311,18 @@ pub(crate) async fn list_credentials(
         .collect()
 }
 
+pub(crate) async fn credential(
+    c: &impl GenericClient,
+    key: &FieldKey,
+    id: &str,
+) -> Result<Option<Credential>, StoreError> {
+    query_rows(c, "SELECT * FROM credentials WHERE id=$1", &[&id])
+        .await?
+        .first()
+        .map(|r| to_credential(r, key))
+        .transpose()
+}
+
 pub(crate) async fn list_health(
     c: &impl GenericClient,
 ) -> Result<Vec<CredentialHealth>, StoreError> {
