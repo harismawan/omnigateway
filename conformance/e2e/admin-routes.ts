@@ -1314,6 +1314,10 @@ const ODD_SQL = [
 type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?: string };
 let healthSeed: string | undefined;
 const configs: Config[] = [
+  {label:"logs-identity",db:()=>db("logs-identity",["INSERT INTO request_logs(id,at,requested_model,status,duration_ms) VALUES ('a',100,'x',200,1),('�',100,'x',200,1),('z',100,'x',200,1),('😀',100,'x',200,1)"]),steps:()=>[
+    ...["\ud800","�","z"].flatMap(id=>everyone("GET",`/api/logs?cursor=${Buffer.from(JSON.stringify({v:1,at:100,id})).toString("base64url")}`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))),
+    ...[`since=${"9".repeat(310)}`,`since=-${"9".repeat(310)}`,...['{"v":1,"at":0,"id":"x"} ','{"at":0,"v":1,"id":"x"}','{"v":3,"at":0,"id":"x"}'].map(s=>`cursor=${Buffer.from(s).toString("base64url")}!`)].flatMap((q,i)=>everyone("GET",`/api/logs?${q}`).map(s=>({...s,name:`mutation ${i} ${s.who}`,expectedStatus:s.who==="anon"?401:400}))),
+  ]},
   {label:"logs-cells",db:()=>db("logs-cells",["INSERT INTO request_logs(id,at,requested_model,status,duration_ms,input_tokens,resolved_model,degradations,rtk_filters) VALUES('odd',1794000000000,'odd','text',x'1234','words',NULL,x'3132','[\"grep\",\"bad\",3,\"git-diff\"]')"]),steps:()=>everyone("GET","/api/logs").map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))},
   {label:"logs-empty",db:()=>db("logs-empty",[]),steps:()=>everyone("GET","/api/logs").map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))},
   {label:"logs-validation",db:()=>db("logs-validation",[]),steps:()=>[

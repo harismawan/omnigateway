@@ -87,6 +87,12 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
                     return Err(Failure::bad(format!("{name}: Invalid input")));
                 }
                 let n = v.parse::<f64>().unwrap_or(f64::INFINITY);
+                if !n.is_finite() {
+                    return Err(Failure::bad(format!(
+                        "{name}: Invalid input: expected number, received {}Infinity",
+                        if n.is_sign_negative() { "-" } else { "" }
+                    )));
+                }
                 if n < -9_007_199_254_740_991.0 {
                     return Err(Failure::bad(format!(
                         "{name}: Too small: expected int to be >=-9007199254740991"
