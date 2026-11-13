@@ -85,4 +85,18 @@ async fn postgres_competing_rotations_have_one_winner() {
     assert_eq!(current.secrets.refresh_token.as_deref(), Some("rotated"));
     assert_eq!(current.expires_at, Some(1234));
     assert!(!store.update_tokens(&key, "gone", &first, 0).await.unwrap());
+    store
+        .refresh_metadata("c", Some("rotated@example.com".into()), 88)
+        .await
+        .unwrap();
+    store.disable_rejected_token("c", 99).await.unwrap();
+    let current = store.list_credentials(&key).await.unwrap().remove(0);
+    assert!(!current.enabled);
+    assert_eq!(current.disabled_reason.unwrap().as_str(), "tokenRejected");
+    assert_eq!(current.disabled_at, Some(99));
+    assert_eq!(
+        current.account_email.as_deref(),
+        Some("rotated@example.com")
+    );
+    assert_eq!(current.token_version, 1);
 }

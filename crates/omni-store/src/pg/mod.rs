@@ -302,7 +302,7 @@ impl PgStore {
     }
 
     pub async fn disable_rejected_token(&self, id: &str, now: i64) -> Result<(), StoreError> {
-        self.client().await?.execute("UPDATE credentials SET enabled=0,disabled_reason='tokenRejected',disabled_at=$1,updated_at=$1 WHERE id=$2", &[&now,&id]).await?;
+        self.client().await?.execute("UPDATE credentials SET enabled=false,disabled_reason='tokenRejected',disabled_at=$1,updated_at=$1 WHERE id=$2", &[&now,&id]).await?;
         Ok(())
     }
 

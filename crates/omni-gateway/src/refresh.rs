@@ -179,7 +179,6 @@ impl Refresher {
         // TextEncoder, which TS encryption uses, replaces unpaired UTF-16 units.
         let access = String::from_utf16_lossy(&result.access_token);
         let refresh = result.refresh_token.as_ref().map(js_text);
-        let email = result.account_email.as_ref().map(js_text);
         #[allow(clippy::cast_possible_truncation)]
         let update = omni_store::credentials::TokenUpdate {
             access_token: Some(access),
@@ -195,6 +194,11 @@ impl Refresher {
             .await
             .map_err(storage)?
         {
+            let email = result
+                .account_email
+                .as_ref()
+                .map(|v| email_text(v, self.store.engine()))
+                .transpose()?;
             self.store
                 .refresh_metadata(&c.id, email, (self.now)())
                 .await
@@ -208,6 +212,25 @@ impl Refresher {
             .ok_or_else(|| {
                 GatewayError::new(ErrorCode::Auth, format!("credential {} is gone", c.id))
             })
+    }
+}
+fn email_text(
+    value: &omni_ir::jsjson::JsValue,
+    engine: omni_store::Engine,
+) -> std::result::Result<String, GatewayError> {
+    use omni_ir::jsjson::JsValue;
+    match (engine, value) {
+        (omni_store::Engine::Sqlite, JsValue::Object(_) | JsValue::Array(_)) => {
+            Err(GatewayError::new(
+                ErrorCode::Internal,
+                "Binding expected string, TypedArray, boolean, number, bigint or null",
+            ))
+        }
+        (omni_store::Engine::Sqlite, JsValue::Bool(b)) => Ok(if *b { "1" } else { "0" }.into()),
+        (omni_store::Engine::Postgres, JsValue::Object(_)) => {
+            Ok(omni_ir::jsjson::stringify(value).unwrap_or_default())
+        }
+        _ => Ok(js_text(value)),
     }
 }
 fn js_text(value: &omni_ir::jsjson::JsValue) -> String {
@@ -227,5 +250,28 @@ fn js_text(value: &omni_ir::jsjson::JsValue) -> String {
             .collect::<Vec<_>>()
             .join(","),
         _ => omni_ir::jsjson::stringify(value).unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    #[test]
+    fn sqlite_email_binding_is_not_text_encoder_coercion() {
+        use omni_ir::jsjson::parse_js;
+        assert_eq!(
+            email_text(
+                &parse_js("false").expect("json"),
+                omni_store::Engine::Sqlite
+            )
+            .expect("bind"),
+            "0"
+        );
+        assert!(email_text(&parse_js("{}").expect("json"), omni_store::Engine::Sqlite).is_err());
+        assert_eq!(
+            email_text(&parse_js("{}").expect("json"), omni_store::Engine::Postgres).expect("bind"),
+            "{}"
+        );
+        assert_eq!(js_text(&parse_js("{}").expect("json")), "[object Object]");
     }
 }
