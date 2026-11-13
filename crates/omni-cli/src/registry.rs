@@ -330,6 +330,9 @@ pub fn command_help(name: &str) -> String {
 }
 
 pub fn implemented(name: &str) -> Option<String> {
+    if name == "admin set-password" {
+        return Some("admin-set-password".into());
+    }
     if name.starts_with("setup ") {
         return Some(name.replace(' ', "-"));
     }

@@ -6,6 +6,7 @@ mod limits;
 mod models;
 mod mutations;
 mod output;
+mod password;
 mod registry;
 mod settings;
 mod setup;
@@ -49,7 +50,9 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
-                if command.starts_with("setup-") {
+                if command == "admin-set-password" {
+                    password::run(&flags).map_err(|e| (1, e))
+                } else if command.starts_with("setup-") {
                     setup::run(&command, &flags).map_err(|e| (1, e))
                 } else if command.starts_with("models-") {
                     models::run(&command, &flags, &positional, &allow)

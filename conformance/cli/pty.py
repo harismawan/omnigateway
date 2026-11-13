@@ -37,7 +37,7 @@ while True:
     if not chunk:
         break
     out.extend(chunk)
-    if answer_index < len(answers) and b"]: " in out[prompt_end:]:
+    if answer_index < len(answers) and (b"]: " in out[prompt_end:] or b"password: " in out[prompt_end:] or b"Repeat it: " in out[prompt_end:]):
         os.write(master, answers[answer_index].encode() + b"\n")
         answer_index += 1
         prompt_end = len(out)
