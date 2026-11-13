@@ -136,8 +136,12 @@ async fn the_refresher_picks_up_another_connections_commit_within_a_poll() {
 
     // Another process creates a key and fixes the broken model.
     let c = Connection::open(&path).expect("open");
+    // Publish the fixture atomically: a polling snapshot may legitimately see
+    // either commit if these writes are separate transactions.
+    c.execute_batch("BEGIN").expect("begin operator update");
     key_row(&c, "k2", "sk-omni-two", None, "{}");
     omni_store::models::put(&c, "broken", TARGETS, "score", false).expect("fix");
+    c.execute_batch("COMMIT").expect("commit operator update");
 
     let mut seen = false;
     for _ in 0..40 {
