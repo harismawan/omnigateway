@@ -92,8 +92,8 @@ pub fn export_page(
         }
     }
     tracing::debug!(
-        elapsed_us = started.elapsed().as_micros() as u64,
-        "export_page_read"
+        "export_page_read elapsed_us={}",
+        started.elapsed().as_micros()
     );
     Ok((out, next))
 }
