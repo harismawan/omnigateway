@@ -7,6 +7,261 @@ use omni_ir::{
 };
 use serde_json::{Value, json};
 
+pub const OAUTH_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// Model lookup normalization used by the frozen Anthropic catalog.
+fn model_id(model: &str) -> &str {
+    let mut id = omni_ir::js::trim(model);
+    if id.to_ascii_lowercase().ends_with("[1m]") {
+        id = omni_ir::js::trim(&id[..id.len() - 4]);
+    }
+    if id.len() >= 9
+        && id.as_bytes()[id.len() - 9] == b'-'
+        && id.as_bytes()[id.len() - 8..].iter().all(u8::is_ascii_digit)
+    {
+        id = &id[..id.len() - 9];
+    }
+    id
+}
+
+fn last_cacheable(messages: &mut [Value]) -> Option<&mut Value> {
+    for message in messages.iter_mut().rev() {
+        if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+            for block in blocks.iter_mut().rev() {
+                if matches!(
+                    block["type"].as_str(),
+                    Some("text" | "image" | "tool_use" | "tool_result" | "document")
+                ) {
+                    return Some(block);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Base request assembly. Vendor/structured-output and automatic caching are
+/// layered separately; this entry point preserves explicit client markers.
+pub fn to_wire(
+    req: &omni_ir::request::ChatRequest,
+    model: &str,
+    oauth: bool,
+    cloak: &ToolCloak,
+    saved_max: Option<f64>,
+) -> Result<(Value, Vec<String>), GatewayError> {
+    use omni_ir::request::{ReasoningConfig, Role, ToolChoice, ToolDef};
+    let mut notes = Vec::new();
+    let mut note = |s: String| {
+        if !notes.contains(&s) {
+            notes.push(s);
+        }
+    };
+    let mut system = Vec::new();
+    for b in req.system.iter().flatten() {
+        if let ContentBlock::Text(t) = b {
+            let mut v = json!({"type":"text","text":t.text});
+            if let Some(c) = &t.cache_control {
+                v["cache_control"] = json!(c);
+            }
+            system.push(v);
+        } else {
+            note(format!("anthropic:system-{}-dropped", b.type_name()));
+        }
+    }
+    if oauth && system.first().and_then(|v| v["text"].as_str()) != Some(OAUTH_IDENTITY) {
+        system.insert(0, json!({"type":"text","text":OAUTH_IDENTITY}));
+        note("anthropic:oauth-system-prefix".into());
+    }
+    if !cloak.to_wire.is_empty() {
+        note("anthropic:tool-names-cloaked".into());
+    }
+    let marked = req
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .flat_map(|m| &m.content)
+        .filter(|b| b.cache_control().is_some())
+        .count();
+    let retarget = req
+        .messages
+        .last()
+        .filter(|m| m.role == Role::System)
+        .and_then(|m| m.content.iter().rev().find_map(ContentBlock::cache_control));
+    if marked > usize::from(retarget.is_some()) {
+        note("anthropic:system-turn-cache-control-dropped".into());
+    }
+    for b in req.messages.iter().flat_map(|m| &m.content) {
+        if let ContentBlock::ToolResult(b) = b {
+            let files = split_files(b.files.as_deref().unwrap_or_default(), |t| {
+                t == "application/pdf"
+            });
+            if !files.text.is_empty() {
+                note("anthropic:tool-result-files-inlined".into());
+            }
+            if files.dropped {
+                note("anthropic:files-dropped".into());
+            }
+        }
+    }
+    let mut messages = Vec::new();
+    for m in &req.messages {
+        let content = if m.role == Role::System
+            && m.content.iter().all(|b| matches!(b, ContentBlock::Text(_)))
+        {
+            Value::String(
+                m.content
+                    .iter()
+                    .filter_map(|b| {
+                        if let ContentBlock::Text(t) = b {
+                            Some(t.text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        } else {
+            let mut blocks = Vec::new();
+            for b in &m.content {
+                if m.role != Role::System
+                    && matches!(b,ContentBlock::Thinking(t) if t.signature.as_deref().is_none_or(str::is_empty))
+                {
+                    note("anthropic:unsigned-thinking-dropped".into());
+                    continue;
+                }
+                blocks.push(encode_block(b, cloak)?);
+            }
+            if blocks.is_empty() && m.role != Role::System {
+                continue;
+            }
+            Value::Array(blocks)
+        };
+        messages.push(json!({"role":m.role,"content":content}));
+    }
+    let id = model_id(model);
+    let ceiling = match id {
+        "claude-haiku-4-5" => Some(64000.0),
+        "claude-fable-5-1" | "claude-opus-5-5" | "claude-fable-5" | "claude-opus-5"
+        | "claude-sonnet-5-5" | "claude-sonnet-5" | "claude-haiku-5-5" => Some(128000.0),
+        _ => None,
+    };
+    let max = req.max_tokens.unwrap_or(match (saved_max, ceiling) {
+        (Some(s), Some(c)) => s.min(c),
+        (Some(s), None) => s,
+        (None, Some(c)) => c,
+        _ => 4096.0,
+    });
+    if let Some(cache) = retarget {
+        if let Some(blocks) = messages
+            .last_mut()
+            .and_then(|m| m["content"].as_array_mut())
+        {
+            for b in blocks {
+                if let Some(o) = b.as_object_mut() {
+                    o.shift_remove("cache_control");
+                }
+            }
+        }
+        if !req
+            .vendor_bag("anthropic")
+            .is_some_and(|v| v.contains_key("cache_control"))
+        {
+            let len = messages.len().saturating_sub(1);
+            if let Some(b) = last_cacheable(&mut messages[..len]) {
+                if b.get("cache_control").is_none() {
+                    b["cache_control"] = json!(cache);
+                    note("anthropic:system-turn-cache-control-retargeted".into());
+                }
+            } else {
+                note("anthropic:system-turn-cache-control-dropped".into());
+            }
+        }
+    }
+    let mut body = json!({"model":model,"messages":messages,"max_tokens":max,"stream":req.stream});
+    if !system.is_empty() {
+        body["system"] = Value::Array(system);
+    }
+    if let Some(t) = req.temperature {
+        body["temperature"] = json!(t);
+    }
+    if let Some(s) = &req.stop_sequences {
+        body["stop_sequences"] = json!(s);
+    }
+    if let Some(tools) = &req.tools {
+        let mut out = Vec::new();
+        for t in tools {
+            let (mut v, cache) = match t {
+                ToolDef::Portable(t) => {
+                    let mut v = json!({"name":cloak.name(&t.name)});
+                    if let Some(d) = &t.description {
+                        v["description"] = json!(d);
+                    }
+                    v["input_schema"] = t.input_schema.clone();
+                    if let Some(o) = &t.options {
+                        v.as_object_mut().expect("object").extend(o.clone());
+                    }
+                    (v, &t.cache_control)
+                }
+                ToolDef::Provider(t) => {
+                    if t.provider != "anthropic" {
+                        return Err(GatewayError::new(
+                            ErrorCode::Internal,
+                            format!(
+                                "anthropic adapter received a {} provider-defined tool",
+                                t.provider
+                            ),
+                        ));
+                    }
+                    let mut v = json!({"type":t.tool_type});
+                    if !t.name.is_empty() {
+                        v["name"] = json!(t.name);
+                    }
+                    v.as_object_mut().expect("object").extend(t.wire.clone());
+                    (v, &t.cache_control)
+                }
+            };
+            if let Some(c) = cache {
+                v["cache_control"] = json!(c);
+            }
+            out.push(v);
+        }
+        body["tools"] = Value::Array(out);
+    }
+    if let Some(c) = &req.tool_choice {
+        body["tool_choice"] = match c {
+            ToolChoice::Tool { name } => json!({"type":"tool","name":cloak.name(name)}),
+            _ => json!(c),
+        };
+    }
+    if let Some(r) = &req.reasoning {
+        body["thinking"] = Value::Null;
+        body["thinking"] = match r {
+            ReasoningConfig::BetweenTools => json!({"type":"between_tools"}),
+            ReasoningConfig::Off => json!({"type":"disabled"}),
+            ReasoningConfig::Budget { budget_tokens } => {
+                json!({"type":"enabled","budget_tokens":budget_tokens})
+            }
+            ReasoningConfig::Adaptive { effort, display } => {
+                if id == "claude-haiku-4-5" {
+                    note("anthropic:adaptive-thinking-unsupported".into());
+                    json!({"type":"disabled"})
+                } else {
+                    let mut v = json!({"type":"adaptive"});
+                    if let Some(d) = display {
+                        v["display"] = json!(d);
+                    }
+                    if let Some(e) = effort {
+                        body["output_config"] = json!({"effort":e});
+                    }
+                    v
+                }
+            }
+        };
+    }
+    Ok((body, notes))
+}
+
 pub fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, GatewayError> {
     let mut value = match block {
         ContentBlock::Text(b) => {
