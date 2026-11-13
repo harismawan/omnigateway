@@ -270,7 +270,7 @@ impl Refresher {
             refresh_token: refresh,
             api_key: None,
             id_token: None,
-            expires_at: result.expires_at.map(|n| n as i64),
+            expires_at: persisted_expiry(result.expires_at),
             updated_at: (self.now)(),
         };
         if self
@@ -299,6 +299,13 @@ impl Refresher {
             })
     }
 }
+// X2: the shared integer carrier truncates fractions and saturates infinities.
+// SQLite binds NaN as NULL; preserving that avoids repeated preemptive refresh.
+#[allow(clippy::cast_possible_truncation)]
+fn persisted_expiry(expiry: Option<f64>) -> Option<i64> {
+    expiry.filter(|n| !n.is_nan()).map(|n| n as i64)
+}
+
 fn email_text(
     value: &omni_ir::jsjson::JsValue,
     engine: omni_store::Engine,
@@ -341,6 +348,13 @@ fn js_text(value: &omni_ir::jsjson::JsValue) -> String {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+    #[test]
+    fn expiry_carrier_preserves_nonfinite_routing() {
+        assert_eq!(persisted_expiry(Some(f64::NAN)), None);
+        assert_eq!(persisted_expiry(Some(f64::INFINITY)), Some(i64::MAX));
+        assert_eq!(persisted_expiry(Some(f64::NEG_INFINITY)), Some(i64::MIN));
+        assert_eq!(persisted_expiry(Some(1.5)), Some(1));
+    }
     #[test]
     fn sqlite_email_binding_is_not_text_encoder_coercion() {
         use omni_ir::jsjson::parse_js;

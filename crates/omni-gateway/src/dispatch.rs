@@ -684,7 +684,7 @@ fn run(mut s: RunState) -> EventsStream {
             let mut retry_secrets: Option<omni_store::CredentialSecrets> = None;
             let attempt_now = now();
             let preemptive_refresh_required = c.credential.auth_type == AuthType::OAuth
-                && c.credential.expires_at.is_some_and(|at| at - REFRESH_LEAD_MS <= attempt_now);
+                && c.credential.expires_at.is_some_and(|at| at.saturating_sub(REFRESH_LEAD_MS) <= attempt_now);
 
             if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" {
                 let ttft = lock(&log).ttft_ms;

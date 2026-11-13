@@ -427,6 +427,30 @@ async fn a_429_parks_the_credential_with_its_retry_after() {
 }
 
 #[tokio::test]
+async fn null_expiry_does_not_trigger_refresh() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',access_token=?,refresh_token=?,expires_at=NULL",rusqlite::params![omni_crypto::field::encrypt(&key(),"access"),omni_crypto::field::encrypt(&key(),"refresh")]).expect("oauth");
+    let h = harness(
+        &f,
+        vec![Reply::Http(
+            200,
+            vec![],
+            vec!["event: message_stop\ndata: {}\n\n".into()],
+        )],
+    );
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    drain(&mut d).await;
+    {
+        let seen = h.script.seen.lock().expect("seen");
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].url.ends_with("/v1/messages"));
+    }
+    assert_eq!(h.deps.refresher.sweep(None).await.expect("sweep"), 0);
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn concurrent_snapshot_publication_never_regresses_rotation() {
     let f = fixture(&["c0"]);
     let h = harness(&f, vec![]);
