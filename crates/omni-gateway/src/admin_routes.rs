@@ -34,6 +34,8 @@ pub struct ControlStore(
     Arc<tokio::sync::Semaphore>,
     std::path::PathBuf,
     i64,
+    Arc<tokio::sync::Semaphore>,
+    Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 );
 
 impl std::fmt::Debug for ControlStore {
@@ -51,12 +53,13 @@ impl ControlStore {
             Arc::new(tokio::sync::Semaphore::new(4)),
             path,
             offset,
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            None,
         )
     }
 
-    async fn export_reader(&self) -> Result<(Self, tokio::sync::OwnedSemaphorePermit), ApiError> {
-        let permit = self
-            .1
+    async fn reader(&self, export: bool) -> Result<Self, ApiError> {
+        let permit = if export { &self.1 } else { &self.4 }
             .clone()
             .acquire_owned()
             .await
@@ -67,7 +70,9 @@ impl ControlStore {
             .await
             .map_err(|_| ApiError::internal())?
             .map_err(|_| ApiError::internal())?;
-        Ok((Self::new(store), permit))
+        let mut reader = Self::new(store);
+        reader.5 = Some(Arc::new(permit));
+        Ok(reader)
     }
 
     /// One operation on the blocking pool. A failure that is not a
@@ -78,7 +83,9 @@ impl ControlStore {
         f: impl FnOnce(&SqliteStore) -> Result<T, Failure> + Send + 'static,
     ) -> Result<T, ApiError> {
         let store = self.0.clone();
+        let permit = self.5.clone();
         let joined = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let guard = store
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -221,13 +228,12 @@ pub async fn serve(
             let (query, jsonl) = omni_control::logs::export_query(req.uri().query().unwrap_or(""))
                 .map_err(failure)?;
             let first_query = query.clone();
-            let (control, permit) = control.export_reader().await?;
+            let control = control.reader(true).await?;
             let (first, next) = control
                 .run(move |s| omni_control::logs::export_page(s, &first_query, jsonl))
                 .await?;
             let empty = jsonl && first.is_empty() && next.is_none();
             let stream = async_stream::try_stream! {
-                let _permit = permit;
                 if !jsonl {yield hyper::body::Frame::data(bytes::Bytes::from_static(omni_control::logs::CSV_HEADER.as_bytes()));}
                 yield hyper::body::Frame::data(bytes::Bytes::from(first));
                 let mut next=next;
@@ -278,6 +284,7 @@ pub async fn serve(
         }
         Admin::Logs => {
             require_reader(req.headers(), &app.admin).await?;
+            let control = control.reader(false).await?;
             let query = req.uri().query().unwrap_or("").to_owned();
             Ok(json_ok(
                 control
@@ -287,6 +294,7 @@ pub async fn serve(
         }
         Admin::Usage => {
             require_reader(req.headers(), &app.admin).await?;
+            let control = control.reader(false).await?;
             let query = req.uri().query().unwrap_or("").to_owned();
             #[allow(clippy::cast_precision_loss)]
             let now = now as f64;

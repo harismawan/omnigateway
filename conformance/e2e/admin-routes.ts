@@ -1993,6 +1993,23 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       anon: null,
     };
     if (cookies.admin === null || cookies.viewer === null) throw new Error("seed login failed");
+    if (cfg.label === "usage-large") {
+      const latencies = [];
+      for (const target of ["/api/usage?since=0&until=9999999999999&groupBy=apiKey&splitBy=model", "/api/logs?limit=500"]) {
+        const headers: [string,string][] = [["cookie",`omni_admin=${cookies.admin}`]];
+        const started = performance.now();
+        const heavy = exchange({method:"GET",target,headers});
+        await sleep(10);
+        const start = performance.now();
+        const light = await exchange({method:"GET",target:"/api/logs?limit=1",headers});
+        const latency = performance.now()-start;
+        const result = await heavy;
+        if (result.status !== 200 || light.status !== 200) throw new Error(`report concurrency status ${result.status}/${light.status}`);
+        latencies.push({target,latency,totalMs:performance.now()-started});
+      }
+      writeFileSync(join(out, `report-contention-${label}.json`), JSON.stringify(latencies));
+      if (label === "rust" && latencies.some(x=>x.latency>10)) throw new Error(`report contention ${JSON.stringify(latencies)}`);
+    }
     if (cfg.label === "export-volume-1") {
       const pages = () => (readFileSync(logFile, "utf8") + readFileSync(`${logFile}.err`, "utf8")).split("export_page_read").length - 1;
       let atClose = 0;
