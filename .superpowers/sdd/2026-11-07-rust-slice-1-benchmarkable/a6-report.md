@@ -549,3 +549,62 @@ models and subsequent live changes. `model-red.log` is a runtime snapshot error,
 not a compile failure; `model-green.log`: **5 passed / 0 failed**.
 Precise next step: three minors (ack-based deadline/precreated model, timestamp
 invariants, lone provider/pin identity regressions), then final gates once.
+
+## Fix round 1 — complete for review
+
+Final implementation commit: `ccab72f2`; this report-only commit records gates
+against that code. Evidence root: `/tmp/opencode/a6-fix1/`.
+
+| Finding | Commit | Regression / evidence |
+|---|---|---|
+| I1 independent health scalar semantics | `a6f9f0e9` | `health-permanent-red.log` 162 equal/10 failures → `health-permanent-green.log` 167/0; store arithmetic/persistence and router deadline/breaker/probe vectors |
+| I2 quota scalar publication | `d12597e8` | `quota-permanent-red.log` boot failure → `quota-permanent-green.log` 167/0; preboot/live text usage and string comparisons |
+| I3 unique comparison identities | `52026a2a` | `duplicates-red.log`, `unique-final.log` 1249 equal/2 expected/0 failures |
+| NULL/BLOB model identities | `16c269d8` | `model-red.log` runtime failure → `model-green.log` 5 passed |
+| Quota identity isolation | `ed699d03` | `quota-identity-red.log` runtime failure → `quota-identity-green.log` 6 passed; boot BLOB credential ID, live BLOB window name and unrelated disable |
+| Mutation-ack pickup bound | `13d02b40` | `deadline-red.log` structural absence check; `deadline-green-clean.log` passing credentials corpus; final driver records acknowledgment before DB dumps and SQL commit time; routing model precreated through SQL |
+| No-op/repeated-toggle timestamps | `21cc77a1` | explicit raw before/after DB assertions, both repeated disable and repeated enable; `timestamp-negative-final.log` inverted no-op invariant yields 2 intended failures; final full driver green |
+| Lone provider/pin versus U+FFFD | `ccab72f2` | SQL U+FFFD credential identity routes only through real replacement pin; lone pin cannot match. Provider model list and frozen exclusion responses compared separately; `identity-negative-final.log` forced lone-pin match yields 2 failures; final full driver green |
+
+### Final gates
+
+Both binaries freshly built; Rust copied outside checkout to `rust-final`, TS
+compiled outside checkout to `ts-final`. Build logs: `final-build.log` and
+`final-ts-build.log`. Cargo incremental and debug information disabled.
+
+| Gate | Result | Log |
+|---|---|---|
+| cargo test --workspace | **1044 passed, 0 failed, 7 ignored** | `final-workspace.log` |
+| cargo clippy --workspace --all-targets -- -D warnings | clean | `final-clippy.log` |
+| cargo fmt --all --check | clean | `final-fmt.log` |
+| admin-routes | **1299 equal, 2 expected, 0 failures**, 38 raw keys | `final-admin-routes.log` |
+| admin-auth | **212 equal, 4 expected, 0 failures**, 116 tokens | `final-admin-auth.log` |
+| surface | **606 equal, 61 expected, 0 failures** | `final-surface.log` |
+| run.ts | **all rows equal**, including 4 DB comparisons (37 request logs, 18 daily, 6 rollup, 4 health rows) | `final-run.log` |
+
+Verification chronology caveats: the first workspace invocation was terminated
+by the 120-second tool timeout; the complete invocation used a 600-second limit.
+run.ts initially rejected unsupported `--out`, then ran successfully without it.
+Temporary negative drivers initially resolved the CLI relative to /tmp and
+failed before assertions. Corrected negative controls explicitly set REPO and
+demonstrate the intended failures, but were executed after the final green gate;
+do not characterize these two minors as runtime RED-before-implementation.
+The deadline RED is a structural coverage check, not a behavioral baseline test.
+
+### D4 hand-off and remaining differences
+
+D4 must select PgStore via OMNI_DATABASE_URL throughout boot, auth/control,
+snapshot build/refresh, miss reads and writers, and exercise credential HTTP
+routes and same-database application restart cross-read in both directions on
+live PostgreSQL. **Postgres row isolation must preserve usable per-field
+health/quota semantics and isolate malformed unrelated rows at boot/refresh**;
+its integer schema does not eliminate malformed JSON/metadata cases. Ordinary
+cargo passes include early-return PG tests and are not live-PG verification.
+
+SQLite non-string credential/model identities are omitted because they cannot
+match a request's string identity. Non-text quota window names remain enforced,
+with their JS string form used for unknown duration/reason names. Health scalar
+sidecars are rejected by PG writes instead of narrowed. Existing driver expected
+divergences remain explicitly pinned (2 admin-routes, 4 admin-auth, 61 surface).
+No providers or dispatch refresh changes, frozen TS edits, user-file staging,
+stash operations, unsafe, push or merge in this continuation.
