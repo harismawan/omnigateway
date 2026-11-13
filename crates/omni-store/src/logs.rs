@@ -3,7 +3,7 @@ use crate::{SqliteStore, StoreError};
 use omni_ir::jsjson::{JsValue, parse_js};
 use rusqlite::types::{Value, ValueRef};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Query {
     pub since: Option<f64>,
     pub until: Option<f64>,
@@ -17,6 +17,7 @@ pub struct Query {
     pub api_key_id: Option<String>,
     pub credential_id: Option<String>,
     pub cursor: Option<(f64, Vec<u16>)>,
+    pub internal_cursor: Option<(Value, Value)>,
     pub limit: usize,
 }
 
@@ -51,8 +52,17 @@ pub fn page_encoding(
     q: &Query,
     csv: bool,
 ) -> Result<Vec<JsValue>, StoreError> {
+    Ok(export_page(store, q, csv)?.0)
+}
+
+pub type ExportPage = (Vec<JsValue>, Option<(Value, Value)>);
+pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPage, StoreError> {
     let mut clauses = Vec::new();
     let mut bindings = Vec::new();
+    if let Some((at, id)) = &q.internal_cursor {
+        clauses.push("(at < ? OR (at = ? AND id < ?))".to_owned());
+        bindings.extend([at.clone(), at.clone(), id.clone()]);
+    }
     if let Some((at, id)) = &q.cursor {
         // Bun SQLite binds JS strings as UTF-8, replacing lone surrogates.
         // The wire cursor retains UTF-16; only this SQL boundary narrows it.
@@ -122,8 +132,12 @@ pub fn page_encoding(
         i64::try_from(q.limit.saturating_add(1)).unwrap_or(i64::MAX),
     ));
     let prepared = start.elapsed().as_micros();
+    let mut index = 0;
+    let mut next = None;
     let result = stmt
         .query_map(rusqlite::params_from_iter(&bindings), |r| {
+            index += 1;
+            if index == q.limit { next = Some((r.get::<_,Value>("at")?, r.get::<_,Value>("id")?)); }
             let mut fields = Vec::new();
             for (name, col) in [
                 ("id", "id"),
@@ -193,5 +207,8 @@ pub fn page_encoding(
         prepared,
         start.elapsed().as_micros() - prepared
     );
-    Ok(result)
+    if result.len() <= q.limit {
+        next = None;
+    }
+    Ok((result, next))
 }

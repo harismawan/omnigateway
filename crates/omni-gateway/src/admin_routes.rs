@@ -228,6 +228,7 @@ pub async fn serve(
             let (query, jsonl) = omni_control::logs::export_query(req.uri().query().unwrap_or(""))
                 .map_err(failure)?;
             let first_query = query.clone();
+            let first_query = omni_control::logs::parse_query(&first_query).map_err(failure)?;
             let control = control.reader(true).await?;
             let (first, next) = control
                 .run(move |s| omni_control::logs::export_page(s, &first_query, jsonl))
@@ -238,7 +239,7 @@ pub async fn serve(
                 yield hyper::body::Frame::data(bytes::Bytes::from(first));
                 let mut next=next;
                 while let Some(cursor)=next {
-                    let q=format!("{query}&cursor={cursor}");
+                    let q=cursor;
                     let (chunk,cursor)=control.run(move |s|omni_control::logs::export_page(s,&q,jsonl)).await.map_err(|_|std::io::Error::other("log export read failed"))?;
                     next=cursor;
                     yield hyper::body::Frame::data(bytes::Bytes::from(chunk));

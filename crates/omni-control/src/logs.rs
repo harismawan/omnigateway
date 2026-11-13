@@ -65,32 +65,32 @@ pub fn export_query(raw: &str) -> Result<(String, bool), Failure> {
 
 pub fn export_page(
     store: &SqliteStore,
-    query: &str,
+    query: &Query,
     jsonl: bool,
-) -> Result<(String, Option<String>), Failure> {
+) -> Result<(String, Option<Query>), Failure> {
     let started = std::time::Instant::now();
-    let parsed = page_value(store, query, !jsonl)?;
+    let (mut rows, next) = omni_store::logs::export_page(store, query, !jsonl)?;
+    rows.truncate(query.limit);
     let read_done = started.elapsed().as_micros();
     let parse_done = started.elapsed().as_micros();
-    let next = match field(&parsed, "nextCursor") {
-        Some(JsValue::String(s)) => Some(String::from_utf16_lossy(s)),
-        _ => None,
-    };
+    let next = next.map(|cursor| {
+        let mut q = query.clone();
+        q.internal_cursor = Some(cursor);
+        q
+    });
     let mut out = String::new();
-    if let Some(JsValue::Array(rows)) = field(&parsed, "logs") {
-        for row in rows {
-            if jsonl {
-                out.push_str(&stringify(row).unwrap_or_default());
-                out.push('\n');
-            } else if let JsValue::Object(fields) = row {
-                for (i, (_, v)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    out.push_str(&csv_cell(v));
+    for row in &rows {
+        if jsonl {
+            out.push_str(&stringify(row).unwrap_or_default());
+            out.push('\n');
+        } else if let JsValue::Object(fields) = row {
+            for (i, (_, v)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
                 }
-                out.push_str("\r\n");
+                out.push_str(&csv_cell(v));
             }
+            out.push_str("\r\n");
         }
     }
     tracing::debug!(
@@ -131,6 +131,11 @@ fn page_encoding(store: &SqliteStore, raw: &str, csv: bool) -> Result<String, Fa
 }
 
 fn page_value(store: &SqliteStore, raw: &str, csv: bool) -> Result<JsValue, Failure> {
+    let q = parse_query(raw)?;
+    page_from_query(store, &q, csv)
+}
+
+pub fn parse_query(raw: &str) -> Result<Query, Failure> {
     let mut pairs = Vec::<(String, String)>::new();
     for (k, v) in url::form_urlencoded::parse(raw.as_bytes()) {
         if let Some(p) = pairs.iter_mut().find(|p| p.0 == k) {
@@ -270,6 +275,7 @@ fn page_value(store: &SqliteStore, raw: &str, csv: bool) -> Result<JsValue, Fail
         api_key_id: get("apiKeyId").map(str::to_owned),
         credential_id: get("credentialId").map(str::to_owned),
         cursor: None,
+        internal_cursor: None,
     };
     if let Some(s) = get("cursor") {
         let bad = || Failure::bad("cursor: malformed");
@@ -316,7 +322,12 @@ fn page_value(store: &SqliteStore, raw: &str, csv: bool) -> Result<JsValue, Fail
         }
         q.cursor = Some((*at, id.clone()));
     }
-    let mut rows = omni_store::logs::page_encoding(store, &q, csv)?;
+    Ok(q)
+}
+
+fn page_from_query(store: &SqliteStore, q: &Query, csv: bool) -> Result<JsValue, Failure> {
+    let limit = q.limit;
+    let mut rows = omni_store::logs::page_encoding(store, q, csv)?;
     let next = if rows.len() > limit {
         rows.truncate(limit);
         let last = &rows[limit - 1];
