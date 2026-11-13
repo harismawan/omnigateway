@@ -36,6 +36,10 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         println!("{}", registry::command_help(&command));
         return ExitCode::SUCCESS;
     }
+    if command.starts_with("plugin ") {
+        eprintln!("plugins are not supported in this release");
+        return ExitCode::FAILURE;
+    }
     let Some(command) = registry::implemented(&command) else {
         eprintln!("{command} is not yet available in the Rust CLI");
         return ExitCode::FAILURE;
