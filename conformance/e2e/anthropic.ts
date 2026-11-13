@@ -104,13 +104,13 @@ const listener = Bun.listen<{ buffer: Buffer }>({
       sequence.push(raw.split("\r\n")[0]!);
       s.data.buffer = s.data.buffer.subarray(end + 4 + length);
       const token = raw.startsWith("POST /v1/oauth/token ");
-      if (token && scenario === 4) await Bun.sleep(200);
+      if (token && [4,6].includes(scenario)) await Bun.sleep(200);
       if (token && scenario === 5) {
         const db = new Database(currentDatabase);
         db.run("UPDATE credentials SET access_token=?,refresh_token=?,expires_at=NULL,token_version=token_version+1", [await encrypt(fieldKey,"winner-access"),await encrypt(fieldKey,"winner-refresh")]);
         db.close();
       }
-      const responseStatus = token ? ([2,3].includes(scenario) ? 400 : 200) : reactive && inferenceCalls++ === 0 ? 401 : status;
+      const responseStatus = token ? ([2,3,6].includes(scenario) ? 400 : 200) : reactive && inferenceCalls++ === 0 ? 401 : status;
       const body = token ? (responseStatus === 400 ? '{"error":"invalid_grant"}' : JSON.stringify({ access_token: "new-access", refresh_token: "new-refresh", account: { email_address: "new@example.com" } })) :
         responseStatus === 200
           ? sse
@@ -131,7 +131,7 @@ const cases = [];
 for (const path of ["/v1/messages", "/v1/chat/completions", "/v1/responses"])
   for (const stream of [false, true])
     for (const code of [200, 400, 429, 500, 529]) cases.push({ path, stream, code });
-if (f.oauth) cases.splice(0, cases.length, ...Array.from({length:f["boot-oauth"] ? 2 : 6},()=>({path:"/v1/messages",stream:false,code:200})));
+if (f.oauth) cases.splice(0, cases.length, ...Array.from({length:f["boot-oauth"] ? 2 : 7},()=>({path:"/v1/messages",stream:false,code:200})));
 function request(path: string, stream: boolean) {
   const common = { model: "test-model", stream, max_tokens: 128 };
   if (path === "/v1/responses")
@@ -189,6 +189,7 @@ async function run(binary: string, label: string) {
       await Bun.sleep(50);
     }
     if (!ready) throw Error("boot failed");
+    await Bun.sleep(500); // Let the independent boot quota probe settle before expiry mutation.
     const output = [];
     // Counting is local even for Anthropic: no upstream request and no request log.
     if (!f.oauth) recorded = [];
@@ -232,7 +233,7 @@ async function run(binary: string, label: string) {
         body: JSON.stringify(request(c.path, c.stream)),
         signal: AbortSignal.timeout(15000),
       });
-      const responses = await Promise.all(Array.from({length:scenario === 4 ? 4 : 1}, send));
+      const responses = await Promise.all(Array.from({length:[4,6].includes(scenario) ? 4 : 1}, send));
       const res = responses[0]!;
       const extra = await Promise.all(responses.slice(1).map(async r=>({status:r.status,headers:[...r.headers.entries()],body:new Uint8Array(await r.arrayBuffer())})));
       const body = new Uint8Array(await res.arrayBuffer());
@@ -281,6 +282,7 @@ async function run(binary: string, label: string) {
         await Bun.sleep(50);
       }
       if (!restartReady) throw Error("gateway restart did not become ready");
+      await Bun.sleep(500);
     }
     await Bun.sleep(500);
     const db = new Database(join(root, "omni.db"));
@@ -311,7 +313,7 @@ try {
         if (tokens.length !== 1 || row.sequence[1] !== "POST /v1/oauth/token HTTP/1.1") throw Error("expected one request-triggered refresh");
         const credentials = (row as any).credential;
         const oauth = credentials.find((c:any)=>c.auth_type === "oauth");
-        if ([2,3].includes(i) && (oauth.enabled !== 0 || oauth.disabled_reason !== "tokenRejected")) throw Error("rejected token not disabled");
+        if ([2,3,6].includes(i) && (oauth.enabled !== 0 || oauth.disabled_reason !== "tokenRejected")) throw Error("rejected token not disabled");
         if (i === 2 && (row.status !== 503 || !(run.logs[i] as any).error_code?.includes("ALL_CANDIDATES_FAILED"))) throw Error("expected TS aggregate rejection");
         if (i === 5 && (oauth.token_version !== 1 || oauth.access_token !== "winner-access" || oauth.account_email !== null)) throw Error("CAS winner overwritten");
       }
@@ -319,7 +321,7 @@ try {
         const expected = i === 0 ? ["client request sent", "POST /v1/oauth/token HTTP/1.1", "POST /v1/messages HTTP/1.1"] : ["client request sent", "POST /v1/messages HTTP/1.1", "POST /v1/oauth/token HTTP/1.1", "POST /v1/messages HTTP/1.1"];
         if (JSON.stringify(row.sequence) !== JSON.stringify(expected)) throw Error(`refresh ordering: ${JSON.stringify(row.sequence)}`);
       }
-      if (row.upstream.length !== (f.oauth ? [2,3,1,2,5,2][i] : 1) || (row.case.code === 200 && !(f.oauth && i === 2) && row.status !== 200)) {
+      if (row.upstream.length !== (f.oauth ? [2,3,1,2,5,2,1][i] : 1) || (row.case.code === 200 && !(f.oauth && [2,6].includes(i)) && row.status !== 200)) {
         throw Error(
           `scenario did not reach the upstream exactly once: ${JSON.stringify(row.case)}`,
         );
@@ -364,7 +366,7 @@ try {
       ),
     );
   // Counting must not create a row; each inference must create exactly one.
-   if (ts.logs.length !== cases.length + (f.oauth ? 3 : 0) || rust.logs.length !== cases.length + (f.oauth ? 3 : 0)) {
+   if (ts.logs.length !== cases.length + (f.oauth ? 6 : 0) || rust.logs.length !== cases.length + (f.oauth ? 6 : 0)) {
     throw Error(`request log count: TS=${ts.logs.length}, Rust=${rust.logs.length}`);
   }
   if (JSON.stringify(logMask(ts.logs)) !== JSON.stringify(logMask(rust.logs))) {
