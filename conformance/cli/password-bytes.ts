@@ -31,7 +31,7 @@ for (const parts of cases) {
       : ["bun", "--no-env-file", resolve("conformance/cli/password-reader-seam.ts")];
     const p = Bun.spawn(
       [
-        "python3",
+        Bun.which("python3") ?? "python3",
         resolve("conformance/cli/password-bytes.py"),
         JSON.stringify(parts),
         ...cmd,
@@ -47,6 +47,7 @@ for (const parts of cases) {
           ...process.env,
           OMNI_ENCRYPTION_KEY: "password-golden-secret",
           READER_RUST: rust ? "1" : "0",
+          ...(rust && process.env.READER_NO_PATH === "1" ? {PATH:"/nonexistent"} : {}),
         },
         stdout: "pipe",
         stderr: "pipe",

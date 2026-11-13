@@ -12,7 +12,7 @@ still use the real TS CLI. Plugin code is never imported and pluginFailures is
 always empty.
 
 `admin set-password` accepts piped secrets and hidden terminal confirmation.
-Terminal input requires the platform `stty` utility. Password changes use the
+Terminal input uses safe rustix termios with automatic restoration. Password changes use the
 shared Argon2id implementation; existing gateway sessions remain alive until
 restart, matching TS. Multi-question terminal flow uses the authorized divergence
 above. `status` and database commands remain unavailable.

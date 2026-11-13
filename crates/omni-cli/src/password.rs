@@ -1,40 +1,23 @@
 use std::{
     collections::HashMap,
     io::{IsTerminal, Read},
-    process::{Command, Stdio},
 };
 
-// stty owns the platform termios boundary; no unsafe FFI in the CLI.
-struct Terminal(String);
+use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
+struct Terminal(Termios);
 impl Drop for Terminal {
     fn drop(&mut self) {
-        drop(
-            Command::new("stty")
-                .arg(&self.0)
-                .stdin(Stdio::inherit())
-                .status(),
-        );
+        let _restored = tcsetattr(std::io::stdin(), OptionalActions::Now, &self.0);
     }
 }
 fn secret(question: &str) -> Result<String, String> {
-    let saved = Command::new("stty")
-        .arg("-g")
-        .stdin(Stdio::inherit())
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !saved.status.success() {
-        return Err("could not read terminal settings".into());
-    }
-    let _terminal = Terminal(String::from_utf8_lossy(&saved.stdout).trim().into());
-    if !Command::new("stty")
-        .args(["-icanon", "-echo", "-isig", "min", "1", "time", "0"])
-        .stdin(Stdio::inherit())
-        .status()
-        .map_err(|e| e.to_string())?
-        .success()
-    {
-        return Err("could not configure terminal".into());
-    }
+    let saved = tcgetattr(std::io::stdin()).map_err(|e| e.to_string())?;
+    let mut raw = saved.clone();
+    raw.make_raw();
+    // libuv raw mode preserves output processing (including terminal CRLF).
+    raw.output_modes = saved.output_modes;
+    let _terminal = Terminal(saved);
+    tcsetattr(std::io::stdin(), OptionalActions::Now, &raw).map_err(|e| e.to_string())?;
     let mut pending = Vec::new();
     let mut line: Vec<u16> = Vec::new();
     let mut first = true;
