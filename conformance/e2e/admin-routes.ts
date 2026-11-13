@@ -1662,6 +1662,19 @@ configs.push({
 
 const TRANSPORT_ERROR = "TRANSPORT-ERROR";
 
+// Materialize once: sequence identity is independent of repeated request text,
+// and both implementations plus expected-divergence lookup use the same keys.
+const materializedSteps = configs.map((cfg) => cfg.steps());
+for (const [configIndex, cfg] of configs.entries()) {
+  const steps = (materializedSteps[configIndex] ?? []).map((step, index) => ({
+    ...step,
+    name: `${String(index).padStart(4, "0")}: ${step.name}`,
+  }));
+  if (new Set(steps.map((step) => step.name)).size !== steps.length)
+    throw new Error(`duplicate step identity in ${cfg.label}`);
+  cfg.steps = () => steps;
+}
+
 async function waitHealthy(): Promise<void> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
