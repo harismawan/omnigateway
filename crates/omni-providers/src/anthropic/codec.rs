@@ -122,15 +122,16 @@ fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<ToolCloak>, Gate
                 })
             })
             .unwrap_or("");
-        body["system"] = Value::Array(apply_system(
+        let system = Value::Array(apply_system(
             body["system"]
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or_default(),
             first,
         ));
+        omni_ir::deep::replace(&mut body["system"], system);
     }
-    body["stream"] = Value::Bool(true);
+    omni_ir::deep::replace(&mut body["stream"], Value::Bool(true));
     let client = req
         .provider_headers
         .as_ref()
@@ -220,7 +221,7 @@ fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<ToolCloak>, Gate
         "stream",
     ] {
         if let Some(v) = body.shift_remove(key) {
-            ordered.insert(key.into(), v);
+            omni_ir::deep::insert(&mut ordered, key.into(), v);
         }
     }
     ordered.extend(body);

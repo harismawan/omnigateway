@@ -77,9 +77,13 @@ impl AnthropicDecoder {
     fn safeguards(&mut self, value: &Value) {
         if let Some(v) = value.get("safeguard_results") {
             let mut verdict = Map::new();
-            verdict.insert("safeguard_results".into(), omni_ir::deep::clone(v));
+            omni_ir::deep::insert(
+                &mut verdict,
+                "safeguard_results".into(),
+                omni_ir::deep::clone(v),
+            );
             let mut vendor = Map::new();
-            vendor.insert("anthropic".into(), Value::Object(verdict));
+            omni_ir::deep::insert(&mut vendor, "anthropic".into(), Value::Object(verdict));
             if let Some(old) = self.vendor.replace(vendor) {
                 omni_ir::deep::drop_map(old);
             }
@@ -230,7 +234,11 @@ impl AnthropicDecoder {
                             &["content", "encrypted_content"][..]
                         } {
                             if let Some(v) = delta.get(*key) {
-                                data.insert((*key).into(), omni_ir::deep::clone(v));
+                                omni_ir::deep::insert(
+                                    &mut data,
+                                    (*key).into(),
+                                    omni_ir::deep::clone(v),
+                                );
                             }
                         }
                         Delta::ProviderNative {

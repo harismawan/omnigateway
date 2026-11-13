@@ -481,6 +481,11 @@ pub fn insert(map: &mut Map<String, Value>, key: String, value: Value) {
     }
 }
 
+/// Replace an indexed JSON value, releasing the previous value iteratively.
+pub fn replace(slot: &mut Value, value: Value) {
+    drop(std::mem::replace(slot, value));
+}
+
 /// [`drop`] for a map.
 pub fn drop_map(map: Map<String, Value>) {
     drop(Value::Object(map));

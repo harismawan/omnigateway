@@ -201,19 +201,23 @@ pub fn move_to_responses_text(
         copy
     });
     if malformed_format && let Some(text) = &text {
-        body.insert("text".into(), Value::Object(omni_ir::deep::clone_map(text)));
+        omni_ir::deep::insert(
+            body,
+            "text".into(),
+            Value::Object(omni_ir::deep::clone_map(text)),
+        );
     }
 
     match read {
         ResponseFormatRead::Readable(format) => {
             let mut next = text.unwrap_or_default();
             let mut spec = Map::new();
-            spec.insert("type".into(), json!("json_schema"));
-            spec.insert("name".into(), json!(format.name));
-            spec.insert("schema".into(), Value::Object(format.schema));
-            spec.insert("strict".into(), Value::Bool(true));
-            next.insert("format".into(), Value::Object(spec));
-            body.insert("text".into(), Value::Object(next));
+            omni_ir::deep::insert(&mut spec, "type".into(), json!("json_schema"));
+            omni_ir::deep::insert(&mut spec, "name".into(), json!(format.name));
+            omni_ir::deep::insert(&mut spec, "schema".into(), Value::Object(format.schema));
+            omni_ir::deep::insert(&mut spec, "strict".into(), Value::Bool(true));
+            omni_ir::deep::insert(&mut next, "format".into(), Value::Object(spec));
+            omni_ir::deep::insert(body, "text".into(), Value::Object(next));
             Some(format!("{provider}:response-format-translated"))
         }
         _ if raw
@@ -222,8 +226,8 @@ pub fn move_to_responses_text(
             .is_some_and(|r| r.get("type").and_then(Value::as_str) == Some("json_object")) =>
         {
             let mut next = text.unwrap_or_default();
-            next.insert("format".into(), json!({ "type": "json_object" }));
-            body.insert("text".into(), Value::Object(next));
+            omni_ir::deep::insert(&mut next, "format".into(), json!({ "type": "json_object" }));
+            omni_ir::deep::insert(body, "text".into(), Value::Object(next));
             Some(format!("{provider}:response-format-translated"))
         }
         ResponseFormatRead::TooDeep => Some(format!("{provider}:response-schema-too-deep")),

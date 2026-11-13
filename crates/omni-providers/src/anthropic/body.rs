@@ -67,7 +67,7 @@ pub fn apply_system(system: &[Value], first_user_text: &str) -> Vec<Value> {
         if !omni_ir::js::trim(&rewritten).is_empty() {
             let mut value = json!({"type":"text","text":rewritten});
             if let Some(cache) = block.get("cache_control") {
-                value["cache_control"] = cache.clone();
+                omni_ir::deep::replace(&mut value["cache_control"], cache.clone());
             }
             out.push(value);
         }

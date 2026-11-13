@@ -32,9 +32,13 @@ pub fn start(verifier: &str, challenge: &str, state: &str) -> AuthorizeStart {
 fn request(fields: &[(&str, &str)]) -> AuthRequest {
     let mut body = serde_json::Map::new();
     for (k, v) in fields {
-        body.insert((*k).into(), Value::String((*v).into()));
+        omni_ir::deep::insert(&mut body, (*k).into(), Value::String((*v).into()));
     }
-    body.insert("client_id".into(), Value::String(CLIENT_ID.into()));
+    omni_ir::deep::insert(
+        &mut body,
+        "client_id".into(),
+        Value::String(CLIENT_ID.into()),
+    );
     AuthRequest {
         url: "https://api.anthropic.com/v1/oauth/token".into(),
         method: "POST".into(),

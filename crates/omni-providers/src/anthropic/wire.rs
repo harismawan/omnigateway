@@ -53,7 +53,7 @@ pub fn add_auto_cache(
                 .and_then(Value::as_array_mut)
                 .and_then(|v| v.last_mut())
         {
-            last["cache_control"] = json!({"type":"ephemeral"});
+            omni_ir::deep::replace(&mut last["cache_control"], json!({"type":"ephemeral"}));
             marked = prefix;
             stable = true;
         }
@@ -71,7 +71,7 @@ pub fn add_auto_cache(
             .and_then(Value::as_array_mut)
             .and_then(|v| last_cacheable(v))
     {
-        last["cache_control"] = json!({"type":"ephemeral"});
+        omni_ir::deep::replace(&mut last["cache_control"], json!({"type":"ephemeral"}));
         if !notes
             .iter()
             .any(|n| n == "anthropic:history-cache-breakpoint-added")
@@ -154,14 +154,14 @@ pub fn to_wire_with_options(
             {
                 for (k, value) in original {
                     if !["type", "text", "cache_control"].contains(&k.as_str()) {
-                        v[k] = value.clone();
+                        omni_ir::deep::replace(&mut v[k], value.clone());
                     }
                 }
             }
-            v["type"] = json!("text");
-            v["text"] = json!(t.text);
+            omni_ir::deep::replace(&mut v["type"], json!("text"));
+            omni_ir::deep::replace(&mut v["text"], json!(t.text));
             if let Some(c) = &t.cache_control {
-                v["cache_control"] = json!(c);
+                omni_ir::deep::replace(&mut v["cache_control"], json!(c));
             }
             system.push(v);
         } else {
@@ -241,7 +241,7 @@ pub fn to_wire_with_options(
             Value::Array(blocks)
         };
         let mut message = json!({"role":m.role});
-        message["content"] = content;
+        omni_ir::deep::replace(&mut message["content"], content);
         messages.push(message);
     }
     let id = model_id(model);
@@ -275,7 +275,7 @@ pub fn to_wire_with_options(
             let len = messages.len().saturating_sub(1);
             if let Some(b) = last_cacheable(&mut messages[..len]) {
                 if b.get("cache_control").is_none() {
-                    b["cache_control"] = json!(cache);
+                    omni_ir::deep::replace(&mut b["cache_control"], json!(cache));
                     note("anthropic:system-turn-cache-control-retargeted".into());
                 }
             } else {
@@ -284,15 +284,15 @@ pub fn to_wire_with_options(
         }
     }
     let mut body = json!({"model":model,"messages":null,"max_tokens":max,"stream":req.stream});
-    body["messages"] = Value::Array(messages);
+    omni_ir::deep::replace(&mut body["messages"], Value::Array(messages));
     if !system.is_empty() {
-        body["system"] = Value::Array(system);
+        omni_ir::deep::replace(&mut body["system"], Value::Array(system));
     }
     if let Some(t) = req.temperature {
-        body["temperature"] = json!(t);
+        omni_ir::deep::replace(&mut body["temperature"], json!(t));
     }
     if let Some(s) = &req.stop_sequences {
-        body["stop_sequences"] = json!(s);
+        omni_ir::deep::replace(&mut body["stop_sequences"], json!(s));
     }
     if let Some(tools) = &req.tools {
         let mut out = Vec::new();
@@ -301,9 +301,12 @@ pub fn to_wire_with_options(
                 ToolDef::Portable(t) => {
                     let mut v = json!({"name":cloak.name(&t.name)});
                     if let Some(d) = &t.description {
-                        v["description"] = json!(d);
+                        omni_ir::deep::replace(&mut v["description"], json!(d));
                     }
-                    v["input_schema"] = omni_ir::deep::clone(&t.input_schema);
+                    omni_ir::deep::replace(
+                        &mut v["input_schema"],
+                        omni_ir::deep::clone(&t.input_schema),
+                    );
                     if let Some(o) = &t.options {
                         v.as_object_mut()
                             .expect("object")
@@ -323,7 +326,7 @@ pub fn to_wire_with_options(
                     }
                     let mut v = json!({"type":t.tool_type});
                     if !t.name.is_empty() {
-                        v["name"] = json!(t.name);
+                        omni_ir::deep::replace(&mut v["name"], json!(t.name));
                     }
                     v.as_object_mut()
                         .expect("object")
@@ -332,17 +335,20 @@ pub fn to_wire_with_options(
                 }
             };
             if let Some(c) = cache {
-                v["cache_control"] = json!(c);
+                omni_ir::deep::replace(&mut v["cache_control"], json!(c));
             }
             out.push(v);
         }
-        body["tools"] = Value::Array(out);
+        omni_ir::deep::replace(&mut body["tools"], Value::Array(out));
     }
     if let Some(c) = &req.tool_choice {
-        body["tool_choice"] = match c {
-            ToolChoice::Tool { name } => json!({"type":"tool","name":cloak.name(name)}),
-            _ => json!(c),
-        };
+        omni_ir::deep::replace(
+            &mut body["tool_choice"],
+            match c {
+                ToolChoice::Tool { name } => json!({"type":"tool","name":cloak.name(name)}),
+                _ => json!(c),
+            },
+        );
     }
     if auto_cache {
         add_auto_cache(&mut body, req, &mut notes);
@@ -353,8 +359,8 @@ pub fn to_wire_with_options(
         }
     };
     if let Some(r) = &req.reasoning {
-        body["thinking"] = Value::Null;
-        body["thinking"] = match r {
+        omni_ir::deep::replace(&mut body["thinking"], Value::Null);
+        let thinking = match r {
             ReasoningConfig::BetweenTools => json!({"type":"between_tools"}),
             ReasoningConfig::Off => json!({"type":"disabled"}),
             ReasoningConfig::Budget { budget_tokens } => {
@@ -367,15 +373,16 @@ pub fn to_wire_with_options(
                 } else {
                     let mut v = json!({"type":"adaptive"});
                     if let Some(d) = display {
-                        v["display"] = json!(d);
+                        omni_ir::deep::replace(&mut v["display"], json!(d));
                     }
                     if let Some(e) = effort {
-                        body["output_config"] = json!({"effort":e});
+                        omni_ir::deep::replace(&mut body["output_config"], json!({"effort":e}));
                     }
                     v
                 }
             }
         };
+        omni_ir::deep::replace(&mut body["thinking"], thinking);
     }
     super::vendor::merge(
         &mut body,
@@ -392,7 +399,7 @@ pub fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, Ga
         ContentBlock::Text(b) => {
             let mut v = json!({"type":"text","text":b.text});
             if let Some(c) = &b.citations {
-                v["citations"] = json!(c);
+                omni_ir::deep::replace(&mut v["citations"], json!(c));
             }
             v
         }
@@ -402,13 +409,13 @@ pub fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, Ga
         ContentBlock::Thinking(b) => {
             let mut v = json!({"type":"thinking","thinking":b.text});
             if let Some(s) = &b.signature {
-                v["signature"] = json!(s);
+                omni_ir::deep::replace(&mut v["signature"], json!(s));
             }
             v
         }
         ContentBlock::ToolUse(b) => {
             let mut v = json!({"type":"tool_use","id":b.id,"name":cloak.name(&b.name)});
-            v["input"] = omni_ir::deep::clone(&b.input);
+            omni_ir::deep::replace(&mut v["input"], omni_ir::deep::clone(&b.input));
             v
         }
         ContentBlock::ProviderNative(b) => {
@@ -422,7 +429,7 @@ pub fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, Ga
                 ));
             }
             let mut v = Value::Object(omni_ir::deep::clone_map(&b.data));
-            v["type"] = json!(b.block_type);
+            omni_ir::deep::replace(&mut v["type"], json!(b.block_type));
             v
         }
         ContentBlock::ToolResult(b) => {
@@ -437,7 +444,7 @@ pub fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, Ga
             for file in files.carried {
                 let mut doc = json!({"type":"document","source":{"type":"base64","media_type":file.media_type,"data":file.data}});
                 if let Some(title) = &file.filename {
-                    doc["title"] = json!(title);
+                    omni_ir::deep::replace(&mut doc["title"], json!(title));
                 }
                 parts.push(doc);
             }
@@ -457,13 +464,13 @@ pub fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, Ga
             };
             let mut v = json!({"type":"tool_result","tool_use_id":b.tool_use_id,"content":content});
             if let Some(error) = b.is_error {
-                v["is_error"] = json!(error);
+                omni_ir::deep::replace(&mut v["is_error"], json!(error));
             }
             v
         }
     };
     if let Some(cache) = block.cache_control() {
-        value["cache_control"] = json!(cache);
+        omni_ir::deep::replace(&mut value["cache_control"], json!(cache));
     }
     Ok(value)
 }

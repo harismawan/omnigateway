@@ -135,7 +135,7 @@ fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<Protocol>, Gatew
         Protocol::Responses => to_custom_responses_wire(input.request, input.model),
     };
     // `{ ...encoded.body, stream: true }`: keeps `stream`'s position.
-    encoded.body.insert("stream".into(), Value::Bool(true));
+    omni_ir::deep::insert(&mut encoded.body, "stream".into(), Value::Bool(true));
     let body = jsjson::to_string(&Value::Object(encoded.body));
 
     Ok(CodecRequest {

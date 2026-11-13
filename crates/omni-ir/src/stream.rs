@@ -187,34 +187,38 @@ impl StreamEvent {
         let s = |v: &str| Value::String(v.to_string());
         match self {
             StreamEvent::Start { id, model } => {
-                m.insert("type".into(), s("start"));
-                m.insert("id".into(), s(id));
-                m.insert("model".into(), s(model));
+                crate::deep::insert(&mut m, "type".into(), s("start"));
+                crate::deep::insert(&mut m, "id".into(), s(id));
+                crate::deep::insert(&mut m, "model".into(), s(model));
             }
             StreamEvent::BlockStart { index, block } => {
-                m.insert("type".into(), s("blockStart"));
-                m.insert("index".into(), Value::from(*index));
-                m.insert("block".into(), block_start_value(block));
+                crate::deep::insert(&mut m, "type".into(), s("blockStart"));
+                crate::deep::insert(&mut m, "index".into(), Value::from(*index));
+                crate::deep::insert(&mut m, "block".into(), block_start_value(block));
             }
             StreamEvent::BlockDelta { index, delta } => {
-                m.insert("type".into(), s("blockDelta"));
-                m.insert("index".into(), Value::from(*index));
-                m.insert("delta".into(), delta_value(delta));
+                crate::deep::insert(&mut m, "type".into(), s("blockDelta"));
+                crate::deep::insert(&mut m, "index".into(), Value::from(*index));
+                crate::deep::insert(&mut m, "delta".into(), delta_value(delta));
             }
             StreamEvent::BlockEnd { index } => {
-                m.insert("type".into(), s("blockEnd"));
-                m.insert("index".into(), Value::from(*index));
+                crate::deep::insert(&mut m, "type".into(), s("blockEnd"));
+                crate::deep::insert(&mut m, "index".into(), Value::from(*index));
             }
             StreamEvent::End {
                 stop_reason,
                 usage,
                 vendor,
             } => {
-                m.insert("type".into(), s("end"));
-                m.insert("stopReason".into(), s(stop_reason.as_str()));
-                m.insert("usage".into(), usage_value(usage));
+                crate::deep::insert(&mut m, "type".into(), s("end"));
+                crate::deep::insert(&mut m, "stopReason".into(), s(stop_reason.as_str()));
+                crate::deep::insert(&mut m, "usage".into(), usage_value(usage));
                 if let Some(v) = vendor {
-                    m.insert("vendor".into(), Value::Object(crate::deep::clone_map(v)));
+                    crate::deep::insert(
+                        &mut m,
+                        "vendor".into(),
+                        Value::Object(crate::deep::clone_map(v)),
+                    );
                 }
             }
             StreamEvent::Error {
@@ -222,10 +226,10 @@ impl StreamEvent {
                 message,
                 retryable,
             } => {
-                m.insert("type".into(), s("error"));
-                m.insert("code".into(), s(code.as_str()));
-                m.insert("message".into(), s(message));
-                m.insert("retryable".into(), Value::Bool(*retryable));
+                crate::deep::insert(&mut m, "type".into(), s("error"));
+                crate::deep::insert(&mut m, "code".into(), s(code.as_str()));
+                crate::deep::insert(&mut m, "message".into(), s(message));
+                crate::deep::insert(&mut m, "retryable".into(), Value::Bool(*retryable));
             }
         }
         Value::Object(m)
@@ -351,15 +355,23 @@ pub fn number(v: f64) -> Value {
 
 pub fn usage_value(u: &Usage) -> Value {
     let mut m = Map::new();
-    m.insert("inputTokens".into(), number(u.input_tokens));
-    m.insert("outputTokens".into(), number(u.output_tokens));
-    m.insert("cacheReadTokens".into(), number(u.cache_read_tokens));
-    m.insert("cacheWriteTokens".into(), number(u.cache_write_tokens));
+    crate::deep::insert(&mut m, "inputTokens".into(), number(u.input_tokens));
+    crate::deep::insert(&mut m, "outputTokens".into(), number(u.output_tokens));
+    crate::deep::insert(
+        &mut m,
+        "cacheReadTokens".into(),
+        number(u.cache_read_tokens),
+    );
+    crate::deep::insert(
+        &mut m,
+        "cacheWriteTokens".into(),
+        number(u.cache_write_tokens),
+    );
     if let Some(v) = u.cache_write_5m_tokens {
-        m.insert("cacheWrite5mTokens".into(), number(v));
+        crate::deep::insert(&mut m, "cacheWrite5mTokens".into(), number(v));
     }
     if let Some(v) = u.cache_write_1h_tokens {
-        m.insert("cacheWrite1hTokens".into(), number(v));
+        crate::deep::insert(&mut m, "cacheWrite1hTokens".into(), number(v));
     }
     Value::Object(m)
 }
@@ -368,28 +380,32 @@ fn block_start_value(b: &ContentBlockStart) -> Value {
     let mut m = Map::new();
     match b {
         ContentBlockStart::Text => {
-            m.insert("type".into(), "text".into());
+            crate::deep::insert(&mut m, "type".into(), "text".into());
         }
         ContentBlockStart::Thinking { signed } => {
-            m.insert("type".into(), "thinking".into());
+            crate::deep::insert(&mut m, "type".into(), "thinking".into());
             if let Some(signed) = signed {
-                m.insert("signed".into(), Value::Bool(*signed));
+                crate::deep::insert(&mut m, "signed".into(), Value::Bool(*signed));
             }
         }
         ContentBlockStart::ToolUse { id, name } => {
-            m.insert("type".into(), "toolUse".into());
-            m.insert("id".into(), id.as_str().into());
-            m.insert("name".into(), name.as_str().into());
+            crate::deep::insert(&mut m, "type".into(), "toolUse".into());
+            crate::deep::insert(&mut m, "id".into(), id.as_str().into());
+            crate::deep::insert(&mut m, "name".into(), name.as_str().into());
         }
         ContentBlockStart::ProviderNative {
             provider,
             block_type,
             data,
         } => {
-            m.insert("type".into(), "providerNative".into());
-            m.insert("provider".into(), provider.as_str().into());
-            m.insert("blockType".into(), block_type.as_str().into());
-            m.insert("data".into(), Value::Object(crate::deep::clone_map(data)));
+            crate::deep::insert(&mut m, "type".into(), "providerNative".into());
+            crate::deep::insert(&mut m, "provider".into(), provider.as_str().into());
+            crate::deep::insert(&mut m, "blockType".into(), block_type.as_str().into());
+            crate::deep::insert(
+                &mut m,
+                "data".into(),
+                Value::Object(crate::deep::clone_map(data)),
+            );
         }
     }
     Value::Object(m)
@@ -399,25 +415,25 @@ fn delta_value(d: &Delta) -> Value {
     let mut m = Map::new();
     match d {
         Delta::Text { text } => {
-            m.insert("type".into(), "text".into());
-            m.insert("text".into(), text.as_str().into());
+            crate::deep::insert(&mut m, "type".into(), "text".into());
+            crate::deep::insert(&mut m, "text".into(), text.as_str().into());
         }
         Delta::Thinking { text } => {
-            m.insert("type".into(), "thinking".into());
-            m.insert("text".into(), text.as_str().into());
+            crate::deep::insert(&mut m, "type".into(), "thinking".into());
+            crate::deep::insert(&mut m, "text".into(), text.as_str().into());
         }
         Delta::ThinkingSignature { signature } => {
-            m.insert("type".into(), "thinkingSignature".into());
-            m.insert("signature".into(), signature.as_str().into());
+            crate::deep::insert(&mut m, "type".into(), "thinkingSignature".into());
+            crate::deep::insert(&mut m, "signature".into(), signature.as_str().into());
         }
         Delta::ToolJson { partial } => {
-            m.insert("type".into(), "toolJson".into());
-            m.insert("partial".into(), partial.as_str().into());
+            crate::deep::insert(&mut m, "type".into(), "toolJson".into());
+            crate::deep::insert(&mut m, "partial".into(), partial.as_str().into());
         }
         Delta::ProviderNativeJson { provider, partial } => {
-            m.insert("type".into(), "providerNativeJson".into());
-            m.insert("provider".into(), provider.as_str().into());
-            m.insert("partial".into(), partial.as_str().into());
+            crate::deep::insert(&mut m, "type".into(), "providerNativeJson".into());
+            crate::deep::insert(&mut m, "provider".into(), provider.as_str().into());
+            crate::deep::insert(&mut m, "partial".into(), partial.as_str().into());
         }
         Delta::ProviderNative {
             provider,
@@ -425,17 +441,21 @@ fn delta_value(d: &Delta) -> Value {
             fold,
             data,
         } => {
-            m.insert("type".into(), "providerNative".into());
-            m.insert("provider".into(), provider.as_str().into());
-            m.insert("deltaType".into(), delta_type.as_str().into());
+            crate::deep::insert(&mut m, "type".into(), "providerNative".into());
+            crate::deep::insert(&mut m, "provider".into(), provider.as_str().into());
+            crate::deep::insert(&mut m, "deltaType".into(), delta_type.as_str().into());
             if let Some(fold) = fold {
                 let f = match fold {
                     NativeFold::Merge => "merge",
                     NativeFold::Citation => "citation",
                 };
-                m.insert("fold".into(), f.into());
+                crate::deep::insert(&mut m, "fold".into(), f.into());
             }
-            m.insert("data".into(), Value::Object(crate::deep::clone_map(data)));
+            crate::deep::insert(
+                &mut m,
+                "data".into(),
+                Value::Object(crate::deep::clone_map(data)),
+            );
         }
     }
     Value::Object(m)

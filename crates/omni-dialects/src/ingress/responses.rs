@@ -241,7 +241,7 @@ fn native_block(item: &Value, block_type: &str) -> ContentBlock {
         for key in super::js_keys(map) {
             // Object rest (`{ type, ...data }`) keeps an own `__proto__`.
             if key != "type" {
-                data.insert(key.to_string(), omni_ir::deep::clone(&map[key]));
+                omni_ir::deep::insert(&mut data, key.to_string(), omni_ir::deep::clone(&map[key]));
             }
         }
     }
@@ -401,7 +401,7 @@ fn read_tools(raw: &[Value]) -> Result<Vec<ToolDef>, GatewayError> {
         let mut wire = Map::new();
         for key in super::js_keys(map) {
             if key != "type" && key != "name" {
-                wire.insert(key.to_string(), omni_ir::deep::clone(&map[key]));
+                omni_ir::deep::insert(&mut wire, key.to_string(), omni_ir::deep::clone(&map[key]));
             }
         }
         tools.push(ToolDef::Provider(ProviderToolDef {
@@ -502,7 +502,7 @@ pub fn parse(
         .or_else(|| read_conversation_header(headers));
     if let Some(extras) = extra_fields(raw, KNOWN) {
         let mut vendor = Map::new();
-        vendor.insert("openai".into(), Value::Object(extras));
+        omni_ir::deep::insert(&mut vendor, "openai".into(), Value::Object(extras));
         request.vendor = Some(vendor);
     }
     Ok(validate_request(request, opts.new_tool_use_id))

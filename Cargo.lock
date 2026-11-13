@@ -1577,11 +1577,13 @@ name = "omni-ir"
 version = "0.16.0"
 dependencies = [
  "memchr",
+ "proc-macro2",
  "ryu-js",
  "serde",
  "serde_json",
  "serde_stacker",
  "stacker",
+ "syn 2.0.119",
 ]
 
 [[package]]

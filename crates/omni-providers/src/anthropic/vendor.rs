@@ -30,9 +30,12 @@ pub(super) fn merge(
         match read_response_format(req) {
             ResponseFormatRead::Readable(f) => {
                 if !body["output_config"].is_object() {
-                    body["output_config"] = json!({});
+                    omni_ir::deep::replace(&mut body["output_config"], json!({}));
                 }
-                body["output_config"]["format"] = json!({"type":"json_schema","schema":f.schema});
+                omni_ir::deep::replace(
+                    &mut body["output_config"]["format"],
+                    json!({"type":"json_schema","schema":f.schema}),
+                );
                 note("response-format-translated");
             }
             ResponseFormatRead::TooDeep => note("response-schema-too-deep"),
@@ -43,7 +46,7 @@ pub(super) fn merge(
         && let Some(thinking) = body.get("thinking").and_then(Value::as_object)
     {
         extras.extend(thinking.clone());
-        body["thinking"] = Value::Object(extras);
+        omni_ir::deep::replace(&mut body["thinking"], Value::Object(extras));
     }
     let mut unreadable = false;
     if let Some(encoder) = body
@@ -58,7 +61,7 @@ pub(super) fn merge(
             }
             let mut merged = encoder;
             merged.extend(config);
-            vendor.insert("output_config".into(), Value::Object(merged));
+            omni_ir::deep::insert(&mut vendor, "output_config".into(), Value::Object(merged));
         } else {
             vendor.shift_remove("output_config");
             unreadable = true;
@@ -82,7 +85,7 @@ pub(super) fn merge(
                 s.len() == 1 && s[0]["text"] == original && s[0].get("cache_control").is_none()
             });
         if !unchanged {
-            body["system"] = system;
+            omni_ir::deep::replace(&mut body["system"], system);
         }
     }
     if unreadable {
@@ -177,7 +180,7 @@ fn close(value: &mut Value, depth: usize, changed: &mut bool, truncated: &mut bo
     if schema.get("type").and_then(Value::as_str) == Some("object")
         && schema.get("additionalProperties") != Some(&Value::Bool(false))
     {
-        schema.insert("additionalProperties".into(), Value::Bool(false));
+        omni_ir::deep::insert(schema, "additionalProperties".into(), Value::Bool(false));
         *changed = true;
     }
 }

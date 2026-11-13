@@ -413,7 +413,7 @@ pub fn parse(
                             .map(omni_ir::deep::clone)
                             .unwrap_or_else(|| {
                                 let mut m = Map::new();
-                                m.insert("type".into(), "object".into());
+                                omni_ir::deep::insert(&mut m, "type".into(), "object".into());
                                 Value::Object(m)
                             }),
                         cache_control: outer
@@ -446,7 +446,7 @@ pub fn parse(
     request.conversation_id = read_conversation_header(headers);
     if let Some(extras) = extra_fields(raw, KNOWN) {
         let mut vendor = Map::new();
-        vendor.insert("openai".into(), Value::Object(extras));
+        omni_ir::deep::insert(&mut vendor, "openai".into(), Value::Object(extras));
         request.vendor = Some(vendor);
     }
     Ok(validate_request(request, opts.new_tool_use_id))
