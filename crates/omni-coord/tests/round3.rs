@@ -21,25 +21,73 @@ fn opts(command_timeout_ms: u64) -> RedisCoordOptions {
     }
 }
 
-/// The server stalls ~0.5 s on every connection (a spinning script).
-async fn spin(url: &str) -> tokio::task::JoinHandle<()> {
+/// A server stall the test controls: `CLIENT PAUSE … WRITE` from a control
+/// connection holds every write and script (`EVAL`/`EVALSHA`, `SET`) until
+/// [`Stall::end`] sends `CLIENT UNPAUSE` — not a CPU loop whose length
+/// depends on the host. Reads (`PING`, the D2 heartbeat) still answer at
+/// once — so a stall holds only writes and scripts, and tests that need a
+/// held command use a write. A stall must end inside `command_timeout` or
+/// the watchdog may retire the socket; each test ends it as soon as its
+/// condition is observed (bounded by [`observe_within`]).
+/// The pause carries a 20 s safety timeout in case a test panics first.
+struct Stall {
+    conn: redis::aio::MultiplexedConnection,
+    ended: bool,
+}
+
+impl Stall {
+    async fn end(mut self) {
+        let _: () = redis::cmd("CLIENT")
+            .arg("UNPAUSE")
+            .query_async(&mut self.conn)
+            .await
+            .expect("unpause");
+        self.ended = true;
+    }
+}
+
+impl Drop for Stall {
+    fn drop(&mut self) {
+        if !self.ended {
+            // A panicking test: unpause on the way out (best effort).
+            let mut conn = self.conn.clone();
+            tokio::spawn(async move {
+                let _done: redis::RedisResult<()> = redis::cmd("CLIENT")
+                    .arg("UNPAUSE")
+                    .query_async(&mut conn)
+                    .await;
+            });
+        }
+    }
+}
+
+/// Waits for `cond`, failing the test past `limit` (well inside the
+/// stall's 20 s safety timeout) instead of spinning on a regression.
+async fn observe_within(limit: Duration, what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !cond() {
+        assert!(
+            Instant::now() < deadline,
+            "not observed within {limit:?}: {what}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn stall(url: &str) -> Stall {
     let mut conn = redis::Client::open(url)
         .expect("url")
-        .get_multiplexed_async_connection_with_config(
-            &redis::AsyncConnectionConfig::new().set_response_timeout(None),
-        )
+        .get_multiplexed_async_connection()
         .await
-        .expect("blocker");
-    let task = tokio::spawn(async move {
-        let spun: redis::RedisResult<i64> = redis::cmd("EVAL")
-            .arg("for i=1,200000000 do end return 1")
-            .arg(0)
-            .query_async(&mut conn)
-            .await;
-        assert_eq!(spun, Ok(1));
-    });
-    sleep_ms(30).await;
-    task
+        .expect("control");
+    let _: () = redis::cmd("CLIENT")
+        .arg("PAUSE")
+        .arg(20_000)
+        .arg("WRITE")
+        .query_async(&mut conn)
+        .await
+        .expect("pause");
+    Stall { conn, ended: false }
 }
 
 // --- N1: no-response requests ------------------------------------------------
@@ -49,6 +97,13 @@ async fn spin(url: &str) -> tokio::task::JoinHandle<()> {
 /// of them never drops `outstanding` below what was accepted, never exceeds
 /// capacity, and a release submitted after them still lands before the next
 /// acquire.
+///
+/// The flood is of a *write* (`INCR`): `CLIENT PAUSE WRITE` holds writes and
+/// scripts but answers reads such as `PING` at once, so a `PING` would let a
+/// correct implementation that accepted the command, charged it and awaited
+/// its reply finish during the "stall" and be misread as the bug. With a
+/// held write, either outcome is judged correctly: refused (`Invalid`, what
+/// D2 does), or accepted and still charged until its reply.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_response_commands_stay_charged_and_cannot_break_release_order() {
     let _serial = SERIAL.lock().await;
@@ -70,31 +125,52 @@ async fn no_response_commands_stay_charged_and_cannot_break_release_order() {
         Ok(0)
     );
 
-    let spinning = spin(&db.url).await;
+    let spinning = stall(&db.url).await;
     let mut accepted = 0_usize;
     for _ in 0..200 {
-        let mut ping = redis::cmd("PING");
-        ping.set_no_response(true);
+        let mut write = redis::cmd("INCR");
+        write.arg("held");
+        write.set_no_response(true);
         let r = remote.clone();
+        let before = remote.outstanding();
         // Not awaited to completion: submission is on the first poll.
-        let call = tokio::spawn(async move { r.query(ping).await });
-        tokio::task::yield_now().await;
-        match tokio::time::timeout(Duration::from_millis(2), call).await {
-            Ok(Ok(Err(Fault::Saturated | Fault::Invalid))) => {}
-            Ok(Ok(other)) => {
-                // Answered while the server is stalled: it never waited for
-                // its reply.
-                panic!("a no-response command completed during the stall: {other:?}");
+        let mut call = tokio::spawn(async move { r.query(write).await });
+        // Classified by what is observed, never by a timer: either the call
+        // finishes (refused, or — the bug — answered during the stall), or
+        // its charge shows in `outstanding` (accepted, waiting for its
+        // reply). A refused call whose task was merely slow to be scheduled
+        // used to be counted as accepted by a 2 ms timeout.
+        let observe = Instant::now() + Duration::from_secs(2);
+        loop {
+            if call.is_finished() {
+                match (&mut call).await {
+                    Ok(Err(Fault::Saturated | Fault::Invalid)) => {}
+                    Ok(other) => {
+                        // Answered while the server is stalled: it never
+                        // waited for its reply.
+                        panic!("a no-response command completed during the stall: {other:?}");
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+                break;
             }
-            Ok(Err(e)) => panic!("{e}"),
-            Err(_) => accepted += 1,
+            if remote.outstanding() > before {
+                accepted += 1;
+                break;
+            }
+            assert!(
+                Instant::now() < observe,
+                "a call neither finished nor was charged"
+            );
+            tokio::task::yield_now().await;
         }
         assert!(remote.outstanding() <= 64, "{}", remote.outstanding());
     }
     // A pipeline carrying a no-response command is refused the same way.
     let mut pipe = redis::pipe();
-    pipe.cmd("PING");
-    let mut quiet = redis::cmd("PING");
+    pipe.cmd("INCR").arg("held");
+    let mut quiet = redis::cmd("INCR");
+    quiet.arg("held");
     quiet.set_no_response(true);
     pipe.add_command(quiet);
     assert_eq!(remote.pipeline(pipe).await, Err(Fault::Invalid));
@@ -116,7 +192,13 @@ async fn no_response_commands_stay_charged_and_cannot_break_release_order() {
             }
         })
     };
-    spinning.await.expect("spin");
+    // The release and the acquire are both queued behind the stall; their
+    // order on the wire is what is tested, so the stall ends only now.
+    observe_within(Duration::from_secs(5), "release and acquire queued", || {
+        remote.outstanding() >= accepted.min(48) + 2
+    })
+    .await;
+    spinning.end().await;
     assert_eq!(after.await.expect("task"), Ok(0), "release was overtaken");
     coord.close();
 }
@@ -156,16 +238,32 @@ async fn the_eval_fallback_is_validated_and_charged() {
     assert_eq!(remote.outstanding_bytes(), 0);
 
     // Stall the server; submit BIG calls until the budget refuses one.
-    let spinning = spin(&db.url).await;
+    let spinning = stall(&db.url).await;
     let mut held = Vec::new();
     let refused = loop {
         let r = remote.clone();
         let s = big.clone();
-        let call = tokio::spawn(async move { r.eval(&s, &[], &[]).await });
-        tokio::task::yield_now().await;
-        sleep_ms(2).await;
-        if call.is_finished() {
-            break call.await.expect("task");
+        let before = remote.outstanding_bytes();
+        let mut call = tokio::spawn(async move { r.eval(&s, &[], &[]).await });
+        // Classified by what is observed, never by a timer: finished
+        // (refused) or charged (accepted, waiting out the stall). A 2 ms
+        // sleep used to count a call not yet scheduled as accepted.
+        let observe = Instant::now() + Duration::from_secs(2);
+        let finished = loop {
+            if call.is_finished() {
+                break true;
+            }
+            if remote.outstanding_bytes() > before {
+                break false;
+            }
+            assert!(
+                Instant::now() < observe,
+                "a call neither finished nor was charged"
+            );
+            tokio::task::yield_now().await;
+        };
+        if finished {
+            break (&mut call).await.expect("task");
         }
         held.push(call);
         assert!(
@@ -186,7 +284,7 @@ async fn the_eval_fallback_is_validated_and_charged() {
         "{} calls retained 600 KiB each under a 3 MiB budget",
         held.len()
     );
-    spinning.await.expect("spin");
+    spinning.end().await;
     for h in held {
         // Not loaded at connect (not in `extra_scripts`): NOSCRIPT, then EVAL.
         assert_eq!(h.await.expect("task"), Ok(redis::Value::Int(1)));
@@ -236,7 +334,7 @@ async fn release_then_immediate_reacquire_of_the_same_key_under_backpressure() {
             "round {round}"
         );
         // Stall and fill: 90 admissions from other tasks queue behind it.
-        let spinning = spin(&db.url).await;
+        let spinning = stall(&db.url).await;
         let mut noise = Vec::new();
         for t in 0..90 {
             let r = remote.clone();
@@ -246,9 +344,10 @@ async fn release_then_immediate_reacquire_of_the_same_key_under_backpressure() {
                 r.query(set).await
             }));
         }
-        while remote.outstanding() < 90 {
-            tokio::task::yield_now().await;
-        }
+        observe_within(Duration::from_secs(5), "noise queued", || {
+            remote.outstanding() >= 90
+        })
+        .await;
         assert!(remote.outstanding_bytes() > 8 * 1024 * 1024);
         // Release, then immediately reacquire the same key, same task.
         assert_eq!(
@@ -256,13 +355,27 @@ async fn release_then_immediate_reacquire_of_the_same_key_under_backpressure() {
             Ok(())
         );
         let next = format!("n{round}");
-        let reacquire = loop {
-            match remote.gauge_acquire(key, 0.0, 60_000, Some(&next)).await {
-                Err(Fault::Saturated) => tokio::task::yield_now().await,
-                other => break other,
-            }
+        let queued = remote.outstanding();
+        let reacquire = {
+            let r = remote.clone();
+            let next = next.clone();
+            tokio::spawn(async move {
+                loop {
+                    match r.gauge_acquire(key, 0.0, 60_000, Some(&next)).await {
+                        Err(Fault::Saturated) => tokio::task::yield_now().await,
+                        other => break other,
+                    }
+                }
+            })
         };
-        spinning.await.expect("spin");
+        // Both queued behind the stall (the release charged when it was
+        // accepted, the reacquire now): only then does the stall end.
+        observe_within(Duration::from_secs(5), "reacquire queued", || {
+            remote.outstanding() > queued
+        })
+        .await;
+        spinning.end().await;
+        let reacquire = reacquire.await.expect("reacquire");
         for n in noise {
             let _done = n.await.expect("noise").is_ok();
         }
