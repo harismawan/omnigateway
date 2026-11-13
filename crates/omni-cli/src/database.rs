@@ -191,10 +191,17 @@ fn bytes(n: u64) -> String {
     if n < 1024 {
         format!("{n} B")
     } else if n < 1048576 {
-        format!("{:.1} KB", n as f64 / 1024.0)
+        format!("{} KB", fixed_tenth(n, 1024))
     } else {
-        format!("{:.1} MB", n as f64 / 1048576.0)
+        format!("{} MB", fixed_tenth(n, 1048576))
     }
+}
+fn fixed_tenth(n: u64, divisor: u128) -> String {
+    // JS first converts the byte count to Number. Powers-of-two divisors
+    // are exact, so integer rounding reproduces toFixed's ties upwards.
+    let value = (n as f64) as u128;
+    let tenths = (value * 10 + divisor / 2) / divisor;
+    format!("{}.{:01}", tenths / 10, tenths % 10)
 }
 fn time(at: Option<i64>) -> String {
     at.and_then(chrono::DateTime::from_timestamp_millis)

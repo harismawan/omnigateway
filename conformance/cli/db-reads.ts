@@ -143,3 +143,27 @@ for (const seeded of [false, true]) {
       }
 }
 console.log(`PASS ${count} database read output/status/whole-DB comparisons (${root})`);
+mkdirSync(join(root, "snapshots"), { recursive: true });
+for (const size of [1280, 2304, 1310720]) {
+  const id = "db_2025-02-30T24-00-00-000Z_manual.sqlite";
+  writeFileSync(join(root, "snapshots", id), Buffer.alloc(size));
+  const results = [];
+  for (const cmd of commands) {
+    const p = Bun.spawn([...cmd, "--root", root, "--db", "db", "db", "snapshots"], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(p.stdout).text();
+    assert.equal(await p.exited, 0);
+    assert.equal(await new Response(p.stderr).text(), "");
+    assert(
+      out.includes(
+        size < 1048576 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1048576).toFixed(1)} MB`,
+      ),
+    );
+    results.push(out);
+  }
+  assert.equal(results[0], results[1]);
+}
+console.log("PASS 3 half-way size comparisons");
