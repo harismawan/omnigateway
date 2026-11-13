@@ -288,6 +288,21 @@ impl SnapshotHolder {
         });
     }
 
+    /// Publish a completed credential mutation before another request ranks it.
+    /// Do not let an older refresh overwrite a newer snapshot rotation.
+    pub fn patch_credential(&self, row: omni_store::Credential) {
+        self.current.rcu(|cur| {
+            let mut next = GatewaySnapshot::clone(cur);
+            if let Some(current) = next.routing.credentials.iter_mut().find(|c| c.id == row.id)
+                && (current.token_version, current.updated_at)
+                    <= (row.token_version, row.updated_at)
+            {
+                *current = row.clone();
+            }
+            next
+        });
+    }
+
     /// The one read a snapshot miss (a brand-new key) falls back to. A key
     /// found is added to the snapshot, so the next request does not read.
     /// Blocking, and unguarded: the request path goes through

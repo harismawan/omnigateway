@@ -32,6 +32,54 @@ async fn flush(h: Harness) {
 }
 
 #[tokio::test]
+async fn rejected_refresh_falls_back_and_removes_credential_from_snapshot() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',weight=CASE id WHEN 'c0' THEN 100000 ELSE 1 END,tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END", []).expect("providers");
+    conn.execute(
+        "UPDATE credentials SET auth_type='oauth',expires_at=1,refresh_token=? WHERE id='c0'",
+        [omni_crypto::field::encrypt(&key(), "rejected")],
+    )
+    .expect("oauth");
+    let body = "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}\n\nevent: message_stop\ndata: {}\n\n";
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(400, vec![], vec![r#"{"error":"invalid_grant"}"#.into()]),
+            Reply::Http(200, vec![], vec![body.into()]),
+            Reply::Http(200, vec![], vec![body.into()]),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}; calls={:?}",
+        h.script.seen.lock().expect("seen")
+    );
+    assert_eq!(h.script.seen.lock().expect("seen").len(), 2);
+    assert!(
+        !h.deps
+            .holder
+            .load()
+            .routing
+            .credentials
+            .iter()
+            .find(|c| c.id == "c0")
+            .expect("credential")
+            .enabled
+    );
+    let mut second = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    assert!(matches!(
+        drain(&mut second).await.last(),
+        Some(StreamEvent::End { .. })
+    ));
+    assert_eq!(h.script.seen.lock().expect("seen").len(), 3);
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn expired_anthropic_refreshes_before_inference() {
     let f = fixture(&["c0"]);
     let conn = rusqlite::Connection::open(&f.path).expect("db");

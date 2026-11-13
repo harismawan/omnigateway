@@ -299,7 +299,16 @@ impl Deps {
 
     /// Shared OAuth refresh service for preemptive and reactive retries.
     async fn refresh(&self, c: &Credential) -> Result<omni_store::CredentialSecrets, GatewayError> {
-        self.refresher.refresh(c).await
+        let result = self.refresher.refresh(c).await;
+        if let Ok(Some(row)) = self
+            .refresher
+            .store
+            .credential(&self.refresher.key, &c.id)
+            .await
+        {
+            self.holder.patch_credential(row);
+        }
+        result
     }
 }
 
