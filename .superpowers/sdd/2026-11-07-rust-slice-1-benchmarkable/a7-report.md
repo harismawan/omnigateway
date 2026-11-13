@@ -1,4 +1,40 @@
-# A7 — complete for review (SQLite)
+# A7 — fix round 1 in progress
+
+## Fix round 1
+
+**Status: partial checkpoint, NOT complete for review.** This section supersedes the earlier completion status. HEAD implementation `b2e6f9e9`. **NEXT STEP:** profile/fix usage-large memory and collect five fresh process RSS runs per binary before and after (use pre-fix `/tmp/opencode/a7-final/rust-final` and TS equivalent for baseline); then fix M1 JS whitespace and M2/M3 method-aware HEAD normalization/header parity with independent RED and all four routes × three roles. Finish detailed page breakdown (separate SQLite stepping from carrier decoding), explicit connection-release/bound saturation tests, final export matrix/volume/disconnect/slow-reader reruns, fresh binary manifest and all four drivers/full gates. Current workspace gate stopped at an existing snapshot timing assertion; investigate/rerun before claiming green. No background jobs outstanding.
+
+### Finding → commit → test
+
+| Finding | Commit | Evidence under `/tmp/opencode/a7-fix1/` |
+|---|---|---|
+| Export contention/tight test | `ed3dc1c7` | `profile2.log` independently RED at 172.412ms against 10ms bound on shared-reader instrumented implementation; `isolated2.log`, `optimized.log`, `wal.log` GREEN 17 equal each |
+| Usage/log shared-control exposure | `0fca2fdc` | `reports-red2.log` independently RED; `reports-green.log` 11 equal; concurrent admin reads now 2.746ms during usage and 2.123ms during 500-row logs |
+| I1 typed raw cursor | `b3061657` | `cursor-red.log` broken framing against fractional 501 rows; `cursor-{fractional,long,blob}.log` each 17 equal/0 failures. Long IDs include non-ASCII; BLOB IDs retain SQL storage type |
+| I2 nonfinite CSV | `b2e6f9e9` | `nonfinite-red2.log` 15 equal/2 failures → `nonfinite-green2.log` 17/0; positive and negative Infinity, CSV/JSONL, roles |
+| M1–M3, usage memory | pending | not yet fixed/measured in this round |
+
+Initial `red.log` was contaminated by simultaneous review-driver port use; do not treat it as reliable evidence. Permanent driver now accepts A7_TEST_PORT; targeted runs use 19443/upstream 19444. Only the export-volume fixture's dynamically created upstream origin was adapted so far: other existing fixtures still embed 18444 and need adaptation before a full nondefault-port driver run. `profile2.log` is the uncontaminated RED. The initial nonfinite fixture failed NOT NULL before HTTP; corrected fixture is the independently failing `nonfinite-red2` run. I1 long/BLOB cases were added before implementation but only fractional had an independently executed RED.
+
+### Changes and measurements so far
+
+Four export read-only SQLite connections maximum, controlled by a shared semaphore; excess requests await a permit before opening SQLite. Separate four-permit lane for ordinary usage/log report reads, so slow exports cannot exhaust that lane or the config control connection. TS has no corresponding explicit permit bound. Permits now travel with the private handle and any spawned blocking operation: a cancelled in-flight page retains its slot until completion. Connections use SQLITE_OPEN_READ_ONLY, 5-second busy timeout, no migration. SQLite SELECT's implicit transaction ends when its statement/rows are dropped each page; no explicit transaction spans pages. `wal.log` adds a successful TRUNCATE checkpoint while slow export is open and real request logs have committed. Explicit fd-drop/permit-saturation tests still to add; current socket test proves at most one more completed page, not fd closure directly.
+
+Encoding is on the private report handle rather than the shared control lock. Removed export page JSON stringify → parse round-trip. Filters are parsed once into typed Query; export advances with raw rusqlite Value timestamp/id pairs fetched directly from the last retained row, avoiding public cursor/query-string serialization and validation. `/api/logs` keeps its public cursor validation. CSV directly formats carrier values; +/-Infinity uses JS text and negative formula guard. Preparation still happens per page; it was tiny relative to decoding/serialization and has not been cached.
+
+Profile before optimization (`profile2/export-volume-1-rust.log`, host load differs from original report): first page total **231.382ms**, prepare **0.137ms**, query+carrier decode **72.586ms**, read including page stringify **102.064ms**, JSON reparse **105.478ms**, final encoding **23.841ms**. Second page total **180.062ms**, preparation **0.170ms**, query+decode **86.683ms**, read+stringify **102.213ms**, reparse **62.281ms**, encode **15.568ms**. These quantify the clearly wasteful round-trip; SQL stepping and decoding not yet separated. Debug messages remain `log_page prepare_us/query_decode_us` and `export_page_read elapsed_us/read_us/parse_us/encode_us`; after removal parse_us is near-zero bookkeeping, not a JSON parse.
+
+EXPLAIN QUERY PLAN on a retained 30k-row fixture with `(at < ? OR (at = ? AND id < ?)) AND at >= ? AND at <= ? ORDER BY at DESC,id DESC LIMIT ?`: **SEARCH request_logs USING INDEX idx_request_logs_at (at>? AND at<?)**; no temporary sort reported. Bindings 20000,20000,'export-20000',0,40000,501. This was a Python sqlite3 examination, not yet a saved Bun-vs-rusqlite planner comparison. No index change made.
+
+Slow export baseline original report Rust 55–144ms vs TS 0.48–0.72ms. Tight test isolated RED Rust **172.412ms**, idle 2.66–7.70ms (loaded host). `wal/slow-reader-{rust,ts}.json` after isolation/roundtrip removal: Rust **2.988/2.096/1.276ms**, idle **1.361–2.027ms**; TS **1.158/0.724/1.148ms**, idle **0.974–1.857ms**. Bound is a hard **10ms**, idle samples retained alongside results (not a computed 10× bound). Both confirm three real request rows while export remains open. Latest I1/I2 binaries still require this rerun.
+
+Largest usage fixture (300k rows, 70k buckets): `reports-red2/report-contention-rust.json` concurrent small log read **4256.051ms**, large request total **4805.434ms**; TS **2838.307ms**, total **2864.001ms**. 500-row log request concurrent small read Rust **27.858ms**, TS **0.940ms**. After isolation `reports-green`: Rust usage concurrent **2.746ms**, large response total **6518.593ms**; log concurrent **2.123ms**. TS usage concurrent **2180.134ms**, log **0.935ms**. Totals include transport/serialization and are not mutex hold timers; actual hold-time instrumentation remains pending. TS blocks its event loop during the large aggregation; Rust now leaves other admin work free. No memory improvement claim yet.
+
+### Checkpoint verification (not final gates)
+
+`clippy-checkpoint.log`: workspace/all-targets -D warnings clean. `fmt-checkpoint.log`: clean. `workspace-checkpoint.log`: stopped at `omni-gateway-core --test snapshot`, `the_refresher_picks_up_another_connections_commit_within_a_poll` failed timing assertion; prior completed summaries total 447 passed/1 ignored, failing suite 5 passed/1 failed. Full workspace NOT green. All used offline, CARGO_INCREMENTAL=0, dev/test debug=0. Final rebuilt artifacts/manifest/full-driver verification remain pending; earlier A7 final artifacts are baselines only.
+
+---
 
 ## Final hand-off (supersedes all historical NEXT STEP sections below)
 
