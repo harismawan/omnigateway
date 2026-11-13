@@ -24,6 +24,9 @@ p = subprocess.Popen(sys.argv[2:], stdin=slave, stdout=slave, stderr=slave, env=
 os.close(slave)
 out = bytearray()
 answered = False
+answers = json.loads(env.get("PTY_ANSWERS", "[]"))
+answer_index = 0
+prompt_end = 0
 while True:
     try:
         chunk = os.read(master, 65536)
@@ -34,6 +37,10 @@ while True:
     if not chunk:
         break
     out.extend(chunk)
+    if answer_index < len(answers) and b"]: " in out[prompt_end:]:
+        os.write(master, answers[answer_index].encode() + b"\n")
+        answer_index += 1
+        prompt_end = len(out)
     if b"[y/N]" in out and not answered:
         os.write(master, sys.argv[1].encode() + b"\n")
         answered = True
