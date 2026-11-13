@@ -25,7 +25,7 @@ fn absolute(base: &Path, value: &str) -> PathBuf {
 pub struct Context {
     pub env: HashMap<String, String>,
     pub root: PathBuf,
-    path: PathBuf,
+    pub path: PathBuf,
     config: Result<Config, omni_control::config::ConfigError>,
 }
 

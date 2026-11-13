@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 mod args;
 mod context;
+mod database;
 mod date;
 mod limits;
 mod models;
@@ -51,7 +52,9 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
-                if command == "status" {
+                if command.starts_with("db-") {
+                    database::run(&command, &flags).map_err(|e| (1, e))
+                } else if command == "status" {
                     status::run(&flags).map_err(|e| (1, e))
                 } else if command == "admin-set-password" {
                     password::run(&flags).map_err(|e| (1, e))

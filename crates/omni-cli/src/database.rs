@@ -1,0 +1,222 @@
+use serde_json::{Value, json};
+use std::{collections::HashMap, path::Path};
+pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, String> {
+    let ctx = crate::context::resolve(flags)?;
+    let path = ctx.path.clone();
+    let store = ctx.open()?;
+    let dir = path.parent().ok_or("database has no parent")?;
+    let snaps = snapshots(&dir.join("snapshots"));
+    if command == "db-snapshots" {
+        return Ok(if flags.contains_key("json") {
+            omni_ir::jsjson::to_string_pretty(&json!({"snapshots":snaps}))
+        } else if snaps.is_empty() {
+            format!(
+                "no snapshots in {}; take one with omni db backup",
+                dir.join("snapshots").display()
+            )
+        } else {
+            table(
+                &["ID", "TAKEN", "SIZE", "REASON"],
+                &snaps
+                    .iter()
+                    .map(|s| {
+                        vec![
+                            s["id"].as_str().unwrap_or("").into(),
+                            time(s["createdAt"].as_i64()),
+                            bytes(s["sizeBytes"].as_u64().unwrap_or(0)),
+                            s["reason"].as_str().unwrap_or("").into(),
+                        ]
+                    })
+                    .collect::<Vec<_>>(),
+                &[2],
+            )
+        });
+    }
+    let conn = store.connection();
+    let scalar = |sql: &str| {
+        conn.query_row(sql, [], |r| r.get::<_, i64>(0).map(|n| n as u64))
+            .map_err(|e| e.to_string())
+    };
+    let size = scalar("PRAGMA page_size")?;
+    let pages = scalar("PRAGMA page_count")?;
+    let free = scalar("PRAGMA freelist_count")?;
+    let version = scalar("SELECT COALESCE(MAX(id),0) FROM migrations")?;
+    let mut statement=conn.prepare("SELECT m.tbl_name AS name,SUM(s.pgsize) AS bytes,SUM(CASE WHEN s.pagetype = 'leaf' AND s.name = m.tbl_name THEN s.ncell ELSE 0 END) AS rows FROM dbstat s JOIN sqlite_master m ON m.name = s.name WHERE m.tbl_name NOT LIKE 'sqlite_%' GROUP BY m.tbl_name ORDER BY bytes DESC,name").map_err(|e|e.to_string())?;
+    let tables=statement.query_map([],|r|Ok(json!({"name":r.get::<_,String>(0)?,"bytes":r.get::<_,i64>(1)?,"rows":r.get::<_,i64>(2)?,"deadRows":null}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let settings = omni_control::settings_value::read(&store)?;
+    let setting = |key| {
+        omni_control::settings_value::get(&settings, key)
+            .map(omni_control::settings_value::shallow)
+            .unwrap_or(Value::Null)
+    };
+    let retention = json!({"keepLatest":setting("snapshotKeepLatest"),"maxAgeDays":setting("snapshotMaxAgeDays")});
+    let file = size_of(&path);
+    let wal = size_of(Path::new(&format!("{}-wal", path.display())));
+    let bodies = dir_bytes(&dir.join("request_bodies"));
+    let disk = rustix::fs::statfs(dir)
+        .ok()
+        .map(|s| s.f_bavail * (s.f_bsize as u64));
+    let total = snaps
+        .iter()
+        .filter_map(|s| s["sizeBytes"].as_u64())
+        .sum::<u64>();
+    let latest = snaps.first().and_then(|s| s["createdAt"].as_i64());
+    let data = json!({"engine":"sqlite","location":path,"stats":{"pageSize":size,"pageCount":pages,"freelistCount":free,"schemaVersion":version},"logicalBytes":size*pages,"freePageBytes":size*free,"retention":retention,"tables":tables,"fileBytes":file,"walBytes":wal,"bodiesBytes":bodies,"freeDiskBytes":disk,"snapshots":{"count":snaps.len(),"totalBytes":total,"latestAt":latest}});
+    if flags.contains_key("json") {
+        return Ok(omni_ir::jsjson::to_string_pretty(&data));
+    }
+    let fields = vec![
+        ("database", path.display().to_string()),
+        ("size", bytes(file)),
+        ("write-ahead log", bytes(wal)),
+        (
+            "captured bodies",
+            format!("{} (never snapshotted)", bytes(bodies)),
+        ),
+        (
+            "free pages",
+            format!("{} — reclaimed by omni db vacuum", bytes(size * free)),
+        ),
+        ("schema version", version.to_string()),
+        (
+            "snapshots",
+            format!(
+                "{} ({}), latest {}",
+                snaps.len(),
+                bytes(total),
+                time(latest)
+            ),
+        ),
+        (
+            "retention",
+            format!(
+                "keep {}, up to {} days",
+                omni_ir::jsjson::to_string(&retention["keepLatest"]),
+                omni_ir::jsjson::to_string(&retention["maxAgeDays"])
+            ),
+        ),
+        ("free disk", disk.map(bytes).unwrap_or("unknown".into())),
+    ];
+    let width = fields.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    Ok(format!(
+        "{}\n\n{}",
+        fields
+            .iter()
+            .map(|(k, v)| format!("{k:width$}  {v}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        table(
+            &["TABLE", "SIZE", "ROWS"],
+            &tables
+                .iter()
+                .map(|t| vec![
+                    t["name"].as_str().unwrap_or("").into(),
+                    bytes(t["bytes"].as_u64().unwrap_or(0)),
+                    t["rows"].to_string()
+                ])
+                .collect::<Vec<_>>(),
+            &[1, 2]
+        )
+    ))
+}
+fn snapshots(dir: &Path) -> Vec<Value> {
+    let mut files = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    files.sort_by_key(|e| e.file_name());
+    let mut out = Vec::new();
+    for f in files {
+        let name = f.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name
+            .strip_prefix("db_")
+            .and_then(|s| s.strip_suffix(".sqlite"))
+        else {
+            continue;
+        };
+        let Some((stamp, reason)) = rest.split_once('_') else {
+            continue;
+        };
+        if stamp.len() != 24
+            || reason.is_empty()
+            || !reason.bytes().all(|b| b.is_ascii_alphabetic())
+        {
+            continue;
+        }
+        let Ok(date) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H-%M-%S-%3fZ")
+        else {
+            continue;
+        };
+        out.push(json!({"id":name,"filename":name,"createdAt":date.and_utc().timestamp_millis(),"sizeBytes":size_of(&f.path()),"reason":reason}));
+    }
+    out.sort_by_key(|s| std::cmp::Reverse(s["createdAt"].as_i64()));
+    out
+}
+fn size_of(p: &Path) -> u64 {
+    std::fs::metadata(p).map(|s| s.len()).unwrap_or(0)
+}
+fn dir_bytes(p: &Path) -> u64 {
+    std::fs::read_dir(p)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| {
+            let Ok(t) = e.file_type() else {
+                return 0;
+            };
+            if t.is_dir() {
+                dir_bytes(&e.path())
+            } else {
+                size_of(&e.path())
+            }
+        })
+        .sum()
+}
+fn bytes(n: u64) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1048576 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / 1048576.0)
+    }
+}
+fn time(at: Option<i64>) -> String {
+    at.and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or("—".into())
+}
+fn table(headers: &[&str], rows: &[Vec<String>], right: &[usize]) -> String {
+    let widths = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            rows.iter()
+                .map(|r| r[i].encode_utf16().count())
+                .max()
+                .unwrap_or(0)
+                .max(h.len())
+        })
+        .collect::<Vec<_>>();
+    std::iter::once(headers.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        .chain(rows.iter().cloned())
+        .map(|r| {
+            r.iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let pad = " ".repeat(widths[i] - s.encode_utf16().count());
+                    if right.contains(&i) {
+                        format!("{pad}{s}")
+                    } else {
+                        format!("{s}{pad}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
