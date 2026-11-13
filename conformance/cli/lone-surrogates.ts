@@ -21,6 +21,14 @@ const commands = [
 const LIMITS =
   '{"requests":{"1m":5},"models":{"\\ud800":{"concurrency":1},"\\ufffd":{"requests":{"1m":2}},"7":{"tokens":{"5h":9}},"\\udc00x":{"spend":{"1w":1.5}}}}';
 const ALLOW = '["\\ud800","\\ufffd","x","\\udc00"]';
+// The cap counts every override: 63 well-formed names and one lone surrogate
+// are the 64 a key may hold, so one more is refused and a removal makes room.
+const FULL = `{"models":{${[
+  ...Array.from({ length: 63 }, (_, i) => `"m${i}":{"concurrency":1}`),
+  '"\\ud800":{"concurrency":2}',
+].join(",")}}}`;
+// Only lone-surrogate overrides: an edit that names none of them keeps them.
+const ONLY = '{"models":{"\\udc00":{"requests":{"1m":3}},"\\ud800":{"concurrency":1}}}';
 let count = 0;
 let failures = 0;
 try {
@@ -37,6 +45,18 @@ try {
       "INSERT INTO api_keys (id,label,prefix,hash,limits,model_allowlist,created_at) VALUES (?,?,?,?,?,?,?)",
       ["k", "lone", "sk-omni-test", "h", LIMITS, ALLOW, 1700000000000],
     );
+    for (const [id, limits, at] of [
+      ["full", FULL, 1700000000001],
+      ["only", ONLY, 1700000000002],
+    ] as const)
+      db.run("INSERT INTO api_keys (id,label,prefix,hash,limits,created_at) VALUES (?,?,?,?,?,?)", [
+        id,
+        id,
+        "sk-omni-test",
+        `h-${id}`,
+        limits,
+        at,
+      ]);
     db.close();
   }
   const run = async (i: number, args: string[]) => {
@@ -73,6 +93,18 @@ try {
     ["keys", "guardrail", "k", "--policy", "p", "--json"],
     ["keys", "list", "--json"],
     ["keys", "models", "k", "--allow", "y", "--json"],
+    ["keys", "list"],
+    ["keys", "limits", "full", "--model-limit", "one-more:concurrency=1", "--json"],
+    ["keys", "limits", "full", "--model-limit", "one-more:concurrency=1"],
+    ["keys", "limits", "full", "--model-limit", "m5:concurrency=9", "--json"],
+    ["keys", "limits", "full", "--unset-model-limit", "m0:concurrency", "--json"],
+    ["keys", "limits", "full", "--model-limit", "one-more:concurrency=1", "--json"],
+    ["keys", "limits", "only", "--set", "requests:1m=4", "--json"],
+    ["keys", "limits", "only", "--model-limit", "a:concurrency=1", "--json"],
+    ["keys", "limits", "only", "--unset-model-limit", "a:concurrency", "--json"],
+    ["keys", "limits", "only", "--unset", "requests:1m"],
+    ["keys", "limits", "only"],
+    ["keys", "list", "--json"],
     ["keys", "list"],
   ]) {
     const [ts, rs] = [await run(0, args), await run(1, args)];
