@@ -177,6 +177,7 @@ type Req = {
   method?: string;
   target: string;
   headers?: [string, string][];
+  timestamps?: "unchanged" | "disable" | "enable";
   body?: string;
 };
 
@@ -1471,6 +1472,8 @@ const configs: Config[] = [
         steps.push(as("admin", "PATCH", "/api/credentials/cred-custom", body));
       }
       steps.push(as("admin", "PATCH", "/api/credentials/missing", "{}"));
+      for (const [body, timestamps] of [["{}", "unchanged"], ['{"enabled":false}', "disable"], ['{"enabled":false}', "disable"], ['{"enabled":true}', "enable"], ['{"enabled":true}', "enable"]] as const)
+        steps.push({...as("admin", "PATCH", "/api/credentials/cred-custom", body), timestamps});
       steps.push({
         kind: "sql",
         name: "refuse credential update",
@@ -2005,6 +2008,15 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         continue;
       }
       let x: Ex;
+      const readTimes = () => {
+        const d = new Database(file, {readonly: true});
+        const row = d.query("SELECT updated_at,disabled_at FROM credentials WHERE id='cred-custom'").get() as {updated_at: number; disabled_at: number | null};
+        d.close();
+        return row;
+      };
+      const before = step.timestamps ? readTimes() : undefined;
+      if (before) await sleep(5);
+      const sentAt = Date.now();
       try {
         x = await send(step);
         if (["POST", "PUT", "PATCH", "DELETE"].includes(step.method ?? "GET")) mutationAck = Date.now();
@@ -2017,6 +2029,14 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         continue;
       }
       record(step.name, step.method ?? "GET", x);
+      if (before) {
+        const after = readTimes();
+        const ok = step.timestamps === "unchanged"
+          ? after.updated_at === before.updated_at && after.disabled_at === before.disabled_at
+          : after.updated_at > before.updated_at && after.updated_at >= sentAt && after.updated_at <= Date.now()
+            && (step.timestamps === "enable" ? after.disabled_at === null : after.disabled_at !== null && after.disabled_at >= sentAt && after.disabled_at <= Date.now());
+        if (!ok) deadlineFailures.push(`${step.name}: timestamp invariant failed ${JSON.stringify({before, after})}`);
+      }
       results.set(step.name, { text: normalize(x, m), db: dump(file, m) });
       // Keys list newest first, and two mints in one millisecond tie: give
       // each sequential mint its own instant so both builds order alike.
