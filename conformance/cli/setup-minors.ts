@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 
@@ -11,7 +11,7 @@ const store = await createStore({
 });
 store.close();
 const db = new Database(join(root, "db"));
-for (const scenario of ["prototype", "io-error", "read-error"]) {
+for (const scenario of ["prototype", "io-error", "read-error", "read-denied"]) {
   const id = scenario === "prototype" ? "__proto__" : "pool";
   db.run("DELETE FROM virtual_models");
   db.run("INSERT INTO virtual_models VALUES (?, ?, 'weighted', 0)", [
@@ -20,6 +20,11 @@ for (const scenario of ["prototype", "io-error", "read-error"]) {
   ]);
   writeFileSync(join(root, "blocked"), "file");
   if (scenario === "read-error") mkdirSync(join(root, "settings.json"));
+  if (scenario === "read-denied") {
+    rmSync(join(root, "settings.json"), { recursive: true });
+    writeFileSync(join(root, "settings.json"), "{}");
+    chmodSync(join(root, "settings.json"), 0);
+  }
   const results = [];
   for (const cmd of [
     ["bun", "--no-env-file", resolve("conformance/cli/setup-seam.ts")],
@@ -36,7 +41,7 @@ for (const scenario of ["prototype", "io-error", "read-error"]) {
         "--db",
         "db",
         "setup",
-        scenario === "read-error" ? "claude" : "opencode",
+        scenario.startsWith("read-") ? "claude" : "opencode",
         "--dir",
         scenario === "io-error" ? join(root, "blocked/sub") : root,
         "--json",
@@ -64,10 +69,12 @@ for (const scenario of ["prototype", "io-error", "read-error"]) {
       assert.deepEqual(JSON.parse(v.files[0].contents).provider.omnigateway.models, {});
     } else if (scenario === "io-error")
       assert(out.includes(`ENOTDIR: not a directory, mkdir '${root}/blocked/sub'`));
-    else assert(out.includes(`EISDIR: illegal operation on a directory, read`));
+    else if (scenario === "read-error")
+      assert(out.includes(`EISDIR: illegal operation on a directory, read`));
+    else assert(out.includes(`EACCES: permission denied, open '${root}/settings.json'`));
     results.push(r);
   }
   assert.deepEqual(results[1], results[0]);
 }
 db.close();
-console.log(`PASS 3 setup minor regressions (${root})`);
+console.log(`PASS 4 setup minor regressions (${root})`);

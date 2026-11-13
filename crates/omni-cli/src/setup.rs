@@ -176,7 +176,9 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
         .unwrap_or("<your OmniGateway key>");
     let mut config = object();
     if claude && path.exists() {
-        let raw = std::fs::read(&path).map_err(|e| fs_error(&e, "read", &path))?;
+        let mut file = std::fs::File::open(&path).map_err(|e| fs_error(&e, "open", &path))?;
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut raw).map_err(|e| fs_error(&e, "read", &path))?;
         config = operator_json::parse(&String::from_utf8_lossy(&raw))
             .map_err(|e| format!("cannot parse existing settings.json: {e}"))?;
         if !matches!(config, V::Object(_)) {
@@ -246,8 +248,12 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     if !flags.contains_key("dry-run") {
         std::fs::create_dir_all(&dir).map_err(|e| fs_error(&e, "mkdir", &dir))?;
         let temporary = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
-        let result = std::fs::write(&temporary, &contents)
+        let result = std::fs::File::create(&temporary)
             .map_err(|e| fs_error(&e, "open", &temporary))
+            .and_then(|mut f| {
+                std::io::Write::write_all(&mut f, contents.as_bytes())
+                    .map_err(|e| fs_error(&e, "write", &temporary))
+            })
             .and_then(|()| {
                 std::fs::rename(&temporary, &path).map_err(|e| {
                     format!(
