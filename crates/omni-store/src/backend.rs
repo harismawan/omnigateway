@@ -174,6 +174,51 @@ impl Store {
         }
     }
 
+    /// Fresh credential view for refresh lock deduplication and CAS losers.
+    pub async fn credential(
+        &self,
+        key: &FieldKey,
+        id: &str,
+    ) -> Result<Option<Credential>, StoreError> {
+        Ok(self
+            .list_credentials(key)
+            .await?
+            .into_iter()
+            .find(|c| c.id == id))
+    }
+
+    /// Refresh metadata never changes token_version. Called only by the CAS winner.
+    pub async fn refresh_metadata(
+        &self,
+        id: &str,
+        email: Option<String>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let id = id.to_owned();
+                on_sqlite!(store, |s| {
+                    s.connection().execute("UPDATE credentials SET account_email=COALESCE(?,account_email),updated_at=? WHERE id=?", rusqlite::params![email,now,id])?;
+                    Ok(())
+                })
+            }
+            Self::Postgres(pg) => pg.refresh_metadata(id, email, now).await,
+        }
+    }
+
+    pub async fn disable_rejected_token(&self, id: &str, now: i64) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let id = id.to_owned();
+                on_sqlite!(store, |s| {
+                    s.connection().execute("UPDATE credentials SET enabled=0,disabled_reason='tokenRejected',disabled_at=?,updated_at=? WHERE id=?", rusqlite::params![now,now,id])?;
+                    Ok(())
+                })
+            }
+            Self::Postgres(pg) => pg.disable_rejected_token(id, now).await,
+        }
+    }
+
     pub async fn update_tokens(
         &self,
         key: &FieldKey,

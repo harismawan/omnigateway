@@ -291,6 +291,21 @@ impl PgStore {
         rows::list_credentials(&self.client().await?, key).await
     }
 
+    pub async fn refresh_metadata(
+        &self,
+        id: &str,
+        email: Option<String>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.client().await?.execute("UPDATE credentials SET account_email=COALESCE($1,account_email),updated_at=$2 WHERE id=$3", &[&email,&now,&id]).await?;
+        Ok(())
+    }
+
+    pub async fn disable_rejected_token(&self, id: &str, now: i64) -> Result<(), StoreError> {
+        self.client().await?.execute("UPDATE credentials SET enabled=0,disabled_reason='tokenRejected',disabled_at=$1,updated_at=$1 WHERE id=$2", &[&now,&id]).await?;
+        Ok(())
+    }
+
     pub async fn update_tokens(
         &self,
         key: &FieldKey,
