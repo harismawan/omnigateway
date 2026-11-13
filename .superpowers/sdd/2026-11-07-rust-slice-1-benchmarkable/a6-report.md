@@ -608,3 +608,67 @@ sidecars are rejected by PG writes instead of narrowed. Existing driver expected
 divergences remain explicitly pinned (2 admin-routes, 4 admin-auth, 61 surface).
 No providers or dispatch refresh changes, frozen TS edits, user-file staging,
 stash operations, unsafe, push or merge in this continuation.
+
+## Fix round 2 — complete for review
+
+Evidence root: `/tmp/opencode/a6-fix2/`. Final tested implementation commit
+`cb0cecaa`; this report-only commit follows the gates. Source commit/tree and
+SHA256 of both freshly built outside-checkout binaries are recorded together
+with every driver log name in `manifest.json`. No driver used an unstamped
+earlier-round binary in this round.
+
+| Finding | Commit | Independent RED → GREEN |
+|---|---|---|
+| R1 raw quota relational comparison | `398e5a75` | `matrix-red.log` runtime mismatches against frozen router predicate → `matrix-green.log` 100/100 vectors pass |
+| Disable acknowledgment overwritten by SQL | `2ca80410` | `deadline-red.log` failing fixture-order regression → `deadline-green.log`, `deadline-final.log` 1 pass |
+| Vacuous provider identity fixture | `7d72dfac` | `provider-negative.log`: outside-checkout scratch copy with provider guard removed fails true versus false → `provider-green.log` 1 pass with guard intact |
+| Cached snapshot expectation | `cb0cecaa` | full workspace exposed old None expectation; updated to cached Some(false), full workspace green |
+
+The permanent quota oracle reads the actual frozen router's NULL-guard and
+relational expression and evaluates it on Bun SQLite cells. Its ten operands
+span INTEGER, REAL, numeric-looking/non-numeric/empty TEXT, single-byte/empty/
+multi-byte BLOB and NULL: **100 Cartesian pairs**, including schema-excluded
+NULL used in an affinity-free probe table. NULL limit always exempts the window.
+Both string primitives compare UTF-16 lexically; every other pair uses numeric
+coercion. All SQLite comparison results are precomputed at snapshot construction;
+no candidate-path code changed. The reviewer's x'09'/x'0a' routing case is also
+permanent in admin-routes, with recovery after removal.
+
+The deadline regression is explicitly a structural fixture-order test, not an
+induced runtime timeout. Provider coverage calls frozen `servesTarget` with an
+actual replacement-provider credential and compares Rust eligibility for lone
+and real replacement targets. The HTTP fixture also contains a matching SQL
+replacement-provider credential. Scratch mutation changed only the provider
+guard, outside checkout; it failed before the green run. Initial compile access
+to the private module was corrected to its existing public re-export. Sharing
+the target cache with the scratch copy initially reused its artifact; touching
+the real router source/test forced recompilation and the green run passed.
+
+### Final verification and provenance
+
+| Gate | Result | Log under evidence root |
+|---|---|---|
+| cargo test --workspace | **1046 passed / 0 failed / 7 ignored** | `workspace.log` |
+| workspace all-target clippy -D warnings | clean | `clippy.log` |
+| cargo fmt --all --check | clean | `fmt.log` |
+| admin-routes | **1303 equal / 2 expected / 0 failures**, 38 keys | `admin-routes-retry.log` |
+| admin-auth | **212 equal / 4 expected / 0 failures**, 116 tokens | `admin-auth.log` |
+| surface | **606 equal / 61 expected / 0 failures** | `surface.log` |
+| run.ts | **all rows equal**, four DB comparisons | `run.log` |
+
+`build.log`, `build-ts.log`: fresh release builds; `rust` copied from release
+output, `ts` compiled directly outside checkout. Cargo incremental and debug
+information disabled. `manifest.json` covers both binaries and all driver runs.
+The first admin-routes invocation stopped on SQLite BUSY during fixture SQL
+(`admin-routes.log`); the unchanged driver was rerun in a fresh output directory.
+Workspace was rerun after fixing the cached-field test expectation; subsequent
+final gates ran on cb0cecaa with no implementation edits.
+
+Remaining: controller-owned quiet-host custom-path benchmark (66020396 versus
+A6 head) is still a promotion gate, not claimed here. No live-PG gate was run;
+D4 still owns backend wiring, live HTTP/restart cross-read in both directions,
+and equivalent per-field health/quota plus malformed-row isolation at boot and
+refresh. Previously deleted a6-round3/a6-round4/a6-followup evidence is not
+available and is not evidence for this round. Existing pinned driver differences
+remain unchanged. No providers, dispatch refresh, frozen TS, user files or stash
+were modified by this round.
