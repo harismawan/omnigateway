@@ -2012,6 +2012,54 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       const followup = await exchange({ method: "GET", target: "/api/logs?limit=1", headers: [["cookie", `omni_admin=${cookies.admin}`]] });
       if (followup.status !== 200) throw new Error(`post-disconnect admin status ${followup.status}`);
       writeFileSync(join(out, `disconnect-${label}.json`), JSON.stringify({ atClose, after, status: followup.status }));
+      const fixture = new Database(file);
+      fixture.run("PRAGMA busy_timeout=5000");
+      fixture.run(`INSERT INTO virtual_models VALUES('routing-a6','[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}]','score',1)`);
+      const credential = await exchange({method:"POST",target:"/api/credentials",headers:[["cookie",`omni_admin=${cookies.admin}`],J],body:JSON.stringify({provider:"custom",apiKey:"secret-a6-2",endpointId:"routing-a6",endpointLabel:"Routing",origin:"http://127.0.0.1:18444",protocol:"chat_completions"})});
+      if (credential.status !== 200) throw new Error(`slow-reader credential status ${credential.status}`);
+      await sleep(1100);
+      let ended = false;
+      const socket = connect(PORT, "127.0.0.1");
+      socket.on("error", () => { ended = true; });
+      socket.on("end", () => { ended = true; });
+      await new Promise<void>((resolve, reject) => {
+        socket.once("error", reject);
+        socket.once("connect", () => socket.write(`GET /api/logs/export?since=0&until=40000&format=jsonl HTTP/1.1\r\nHost: localhost\r\nCookie: omni_admin=${cookies.admin}\r\n\r\n`));
+        socket.once("data", chunk => {
+          socket.pause();
+          if (!chunk.toString().startsWith("HTTP/1.1 200")) reject(new Error("slow export status"));
+          else resolve();
+        });
+      });
+      socket.on("data", () => socket.pause());
+      const timer = setInterval(() => socket.resume(), 200);
+      try {
+        const latencies: number[] = [];
+        for (let i = 0; i < 3; i++) {
+          const traffic = await exchange({method:"POST",target:"/v1/chat/completions",headers:[["authorization",`Bearer ${SEED_KEY}`],J],body:JSON.stringify({model:"routing-a6",messages:[{role:"user",content:"hello"}]})});
+          if (traffic.status !== 200) throw new Error(`slow-reader traffic status ${traffic.status}`);
+          const started = performance.now();
+          const admin = await exchange({method:"GET",target:"/api/logs?limit=1",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
+          const elapsed = performance.now() - started;
+          latencies.push(elapsed);
+          if (admin.status !== 200 || elapsed > 2000) throw new Error(`slow-reader admin status=${admin.status} latency=${elapsed}`);
+        }
+        const deadline = Date.now() + 5000;
+        let rows = 0;
+        while (Date.now() < deadline) {
+          rows = (fixture.query("SELECT count(*) AS n FROM request_logs WHERE requested_model='routing-a6'").get() as {n:number}).n;
+          if (rows >= 3) break;
+          await sleep(50);
+        }
+        if (ended || rows < 3) throw new Error(`slow-reader progress: ended=${ended} rows=${rows}`);
+        writeFileSync(join(out, `slow-reader-${label}.json`), JSON.stringify({latencies, rows, exportOpen:!ended, boundMs:2000}));
+      } finally {
+        clearInterval(timer);
+        socket.destroy();
+        fixture.run("DELETE FROM credentials");
+        fixture.run("DELETE FROM virtual_models WHERE id='routing-a6'");
+        fixture.close();
+      }
     }
     const fill = (s: string) =>
       s
