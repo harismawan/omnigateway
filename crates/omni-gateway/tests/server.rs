@@ -1864,15 +1864,15 @@ async fn admin_setup_login_status_logout_end_to_end() {
     assert!(b.contains("\"authenticated\":false"), "{b}");
 
     // Unported `/api` paths keep their fallthrough answers.
-    let (s, _, b) = call(&g.base, "GET", "/api/credentials", &[], "").await;
+    let (s, _, b) = call(&g.base, "GET", "/api/unported", &[], "").await;
     assert_eq!(
         (s, b.as_str()),
         (
             404,
-            r#"{"error":{"code":"NOT_FOUND","message":"no route for /api/credentials"}}"#
+            r#"{"error":{"code":"NOT_FOUND","message":"no route for /api/unported"}}"#
         )
     );
-    let (s, _, b) = call(&g.base, "POST", "/api/credentials", &[], "").await;
+    let (s, _, b) = call(&g.base, "POST", "/api/unported", &[], "").await;
     assert_eq!((s, b.as_str()), (404, "NOT_FOUND"));
     let (s, _, _) = call(&g.base, "POST", "/api/plugins", &[], "").await;
     assert_eq!(s, 501);

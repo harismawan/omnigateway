@@ -5,6 +5,7 @@ pub mod api;
 pub mod body_schema;
 pub mod catalog;
 pub mod config;
+pub mod credentials;
 #[cfg(test)]
 mod http_oracle_tests;
 pub mod keys;

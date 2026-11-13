@@ -517,6 +517,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         admin,
         base_url_https: api::base_url_is_https(&config.base_url),
         control: admin_routes::ControlStore::new(control_store),
+        credential_key: key.clone(),
         body_logging_allowed: config.body_logging_allowed,
         day_offset_minutes: offset,
         reported_catalog_problems: std::sync::Mutex::default(),

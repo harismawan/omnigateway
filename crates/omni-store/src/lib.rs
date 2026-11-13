@@ -124,7 +124,7 @@ impl SqliteStore {
         let tx = self.conn.unchecked_transaction()?;
         let data = SnapshotData {
             api_keys: keys::list_entries(&tx)?,
-            credentials: credentials::list(&tx, key)?,
+            credentials: credentials::list_routing(&tx, key)?,
             health: credentials::list_health(&tx)?,
             models: models::list(&tx)?,
             quota: quota::list(&tx)?,

@@ -41,6 +41,7 @@
  *   password change ends viewer sessions only.
  */
 import { Database } from "bun:sqlite";
+import { createDecipheriv, pbkdf2Sync } from "node:crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { join, resolve } from "node:path";
@@ -63,12 +64,22 @@ if (flags.ts === undefined || flags.rust === undefined) {
 
 const REPO = resolve(import.meta.dir, "../..");
 const KEY = "conformance-admin-routes-encryption-key-01";
+const FIELD_KEY = pbkdf2Sync(KEY, "omnigateway-field-encryption-v1", 210000, 32, "sha256");
 const PORT = 18443;
 mkdirSync("/tmp/opencode", { recursive: true });
 const work = mkdtempSync("/tmp/opencode/omni-admin-routes-");
 const out = flags.out ?? join(work, "out");
 mkdirSync(out, { recursive: true });
 const children: Subprocess[] = [];
+const credentialUpstream = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 18444,
+  fetch: () =>
+    new Response(
+      'data: {"id":"chatcmpl-a6","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"chatcmpl-a6","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    ),
+});
 process.on("exit", () => {
   for (const c of children) if (c.exitCode === null) c.kill("SIGKILL");
 });
@@ -303,6 +314,12 @@ class Masker {
   mint(body: unknown, step: string, side: string): void {
     if (typeof body !== "object" || body === null) return;
     const b = body as Record<string, unknown>;
+    const credential = b.credential as { id?: string } | undefined;
+    if (credential?.id && UUID.test(credential.id)) {
+      if (this.ids.includes(credential.id)) throw new Error("credential id minted twice");
+      this.ids.push(credential.id);
+      return;
+    }
     if (typeof b.id !== "string" || !UUID.test(b.id)) return;
     if (typeof b.key !== "string" || !RAW.test(b.key)) return;
     if (b.prefix !== b.key.slice(0, 12)) return;
@@ -330,8 +347,9 @@ class Masker {
 
 /** Masks timestamps within ±120 s inside JSON text, by key. */
 function maskTimes(json: string): string {
-  return json.replace(/"(createdAt|revokedAt|created_at|revoked_at)":(\d{13})/g, (m, k, v) =>
-    nearNow(Number(v)) ? `"${k}":"<now>"` : m,
+  return json.replace(
+    /"(createdAt|revokedAt|created_at|revoked_at|updatedAt|updated_at|disabledAt|disabled_at)":(\d{13})/g,
+    (m, k, v) => (nearNow(Number(v)) ? `"${k}":"<now>"` : m),
   );
 }
 
@@ -387,6 +405,23 @@ function dump(file: string, m: Masker): string {
       .all()
       .map((r) => {
         const row = r as Record<string, unknown>;
+        if (t === "credentials")
+          for (const col of ["access_token", "refresh_token", "api_key", "id_token"]) {
+            if (row[col] === null) continue;
+            const parts = String(row[col]).split(":");
+            if (parts.length !== 5 || parts[0] !== "enc" || parts[1] !== "v1")
+              throw new Error(`unencrypted ${col}`);
+            const decipher = createDecipheriv(
+              "aes-256-gcm",
+              FIELD_KEY,
+              Buffer.from(parts[2] ?? "", "hex"),
+            );
+            decipher.setAuthTag(Buffer.from(parts[4] ?? "", "hex"));
+            row[col] = Buffer.concat([
+              decipher.update(Buffer.from(parts[3] ?? "", "hex")),
+              decipher.final(),
+            ]).toString("utf8");
+          }
         // Password hashes are salted: equal iff both are the seed's, or
         // both changed (verified by login elsewhere).
         if (t === "settings" && /PasswordHash$/.test(String(row.key))) {
@@ -424,6 +459,7 @@ type HttpStep = {
 };
 type Step =
   | HttpStep
+  | { kind: "credential-routing"; name: string; enabled: boolean }
   /** `n` copies of `step` at once; statuses compared as a multiset, DB after. */
   | {
       kind: "concurrent";
@@ -1266,6 +1302,152 @@ const ODD_SQL = [
 
 type Config = { label: string; db: () => string; steps: () => Step[] };
 const configs: Config[] = [
+  {
+    label: "credentials",
+    db: () =>
+      db("credentials", [
+        ...CREDS_SQL,
+        `UPDATE api_keys SET limits='{}'`,
+        `INSERT INTO credential_health VALUES('cred-custom','m','open',3,100,200)`,
+        `INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','daily',0,25,100,2000000000000,0,NULL)`,
+        `INSERT INTO virtual_models VALUES('pinned','[{"provider":"custom","model":"m","credentialId":"cred-custom","tier":1,"weight":1,"costPerMTok":{"input":0,"output":0}}]','ordered',1)`,
+      ]),
+    steps: () => {
+      const steps: Step[] = [];
+      for (const who of ["anon", "viewer", "admin"] as const) {
+        for (const path of ["/api/credentials", "/api/credentials/health"])
+          steps.push(as(who, "GET", path));
+        steps.push(as(who, "POST", "/api/credentials", "{}"));
+        steps.push(as(who, "PATCH", "/api/credentials/cred-custom", '{"enabled":false}'));
+        steps.push(as(who, "DELETE", "/api/credentials/missing"));
+      }
+      for (const body of [
+        "null",
+        "[]",
+        "{}",
+        '{"label":""}',
+        '{"tier":0}',
+        '{"tier":1.5}',
+        '{"weight":0}',
+        '{"weight":1e400}',
+        '{"enabled":1}',
+        '{"label":"\\ud800","tier":2}',
+        '{"label":" ","weight":0.25}',
+        '{"tier":-1}',
+        '{"tier":9007199254740992}',
+        '{"extra":1}',
+        '{"label":" x ","tier":2,"weight":0.5}',
+        '{"enabled":true}',
+      ]) {
+        steps.push(as("admin", "PATCH", "/api/credentials/cred-custom", body));
+      }
+      steps.push(as("admin", "PATCH", "/api/credentials/missing", "{}"));
+      for (const body of [
+        "null",
+        "[]",
+        '{"provider":1}',
+        '{"provider":"CUSTOM"}',
+        '{"provider":"abcdefghijklmnopqrstuvwxyzabcdefg","apiKey":"secret-a6-1"}',
+        '{"provider":"gemini","apiKey":"secret-a6-1"}',
+        '{"provider":"kimi","apiKey":"secret-a6-1","label":"kimi"}',
+        '{"provider":"missing"}',
+        '{"provider":"openai","apiKey":" "}',
+        '{"provider":"openai","apiKey":"secret-a6-1","label":null}',
+        '{"provider":"openai","apiKey":"secret-a6-1","label":" first "}',
+        '{"provider":"custom","apiKey":"secret-a6-2","endpointId":"ep2","endpointLabel":"Local 2","origin":"https://example.com/api///","protocol":"chat_completions"}',
+        '{"provider":"custom","apiKey":"secret-a6-3","endpointId":"ep2","endpointLabel":"Conflict","origin":"https://example.com/api","protocol":"chat_completions"}',
+      ])
+        steps.push(as("admin", "POST", "/api/credentials", body));
+      for (const origin of [
+        "not a URL",
+        "ftp://example.com",
+        "https://user:pass@example.com",
+        "https://example.com/?q=1",
+        "https://example.com/#fragment",
+        "https://EXAMPLE.com:443/a/../b///",
+        "https://example.com/?#",
+      ]) {
+        steps.push(
+          as(
+            "admin",
+            "POST",
+            "/api/credentials",
+            JSON.stringify({
+              provider: "custom",
+              apiKey: "secret-a6-2",
+              endpointId: origin,
+              endpointLabel: "URL",
+              origin,
+              protocol: "responses",
+            }),
+          ),
+        );
+      }
+      steps.push(
+        as(
+          "admin",
+          "POST",
+          "/api/credentials",
+          '{"provider":"custom","apiKey":"secret-a6-2","label":"\\ud800","endpointId":"\\ud800","endpointLabel":"\\udc00","origin":"http://localhost","protocol":"responses"}',
+        ),
+      );
+      steps.push(
+        as(
+          "admin",
+          "POST",
+          "/api/credentials",
+          '{"provider":"custom","apiKey":"secret-a6-2","endpointId":"�","endpointLabel":"Different","origin":"http://localhost","protocol":"responses"}',
+        ),
+      );
+      steps.push(as("admin", "GET", "/api/credentials"));
+      steps.push(
+        as(
+          "admin",
+          "POST",
+          "/api/credentials",
+          '{"provider":"custom","apiKey":"secret-a6-2","endpointId":"routing-a6","endpointLabel":"Routing","origin":"http://127.0.0.1:18444","protocol":"chat_completions"}',
+        ),
+      );
+      steps.push(
+        as(
+          "admin",
+          "PUT",
+          "/api/models/routing-a6",
+          '{"id":"routing-a6","isAlias":true,"targets":[{"provider":"custom","endpointId":"routing-a6","model":"m","tier":1,"weight":1,"capabilities":{"tools":false,"images":false,"reasoning":false},"costPerMTok":{"input":0,"output":0}}],"strategy":"score"}',
+        ),
+      );
+      steps.push({ kind: "credential-routing", name: "created credential routes", enabled: true });
+      steps.push(as("admin", "PATCH", "/api/credentials/{{last}}", '{"enabled":false}'));
+      steps.push({
+        kind: "credential-routing",
+        name: "disabled credential stops routing",
+        enabled: false,
+      });
+      steps.push(as("admin", "PATCH", "/api/credentials/{{last}}", '{"enabled":true}'));
+      steps.push({ kind: "credential-routing", name: "enabled credential routes", enabled: true });
+      steps.push(as("admin", "DELETE", "/api/credentials/{{last}}"));
+      steps.push({
+        kind: "credential-routing",
+        name: "deleted credential stops routing",
+        enabled: false,
+      });
+      steps.push({
+        kind: "concurrent",
+        name: "concurrent disjoint credential edits",
+        steps: [
+          as("admin", "PATCH", "/api/credentials/cred-custom", '{"label":"concurrent"}'),
+          as("admin", "PATCH", "/api/credentials/cred-custom", '{"weight":3}'),
+          as("admin", "PATCH", "/api/credentials/cred-custom", '{"tier":4}'),
+        ],
+      });
+      steps.push(as("admin", "GET", "/api/credentials/health"));
+      steps.push(as("admin", "DELETE", "/api/credentials/cred-custom"));
+      steps.push(as("admin", "DELETE", "/api/credentials/cred-custom"));
+      steps.push(as("admin", "GET", "/api/credentials"));
+      steps.push(as("admin", "GET", "/api/credentials/health"));
+      return steps;
+    },
+  },
   { label: "reads", db: () => db("reads", CREDS_SQL), steps: readSteps },
   {
     label: "reads-empty",
@@ -1386,6 +1568,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     const problem = lengthProblem(method, x);
     if (problem !== null) lengthFailures.push(`${name}: ${problem}`);
     const head = Buffer.from(x.head.map(([k, v]) => `${k}: ${v}`).join("\n"), "latin1");
+    for (const raw of ["secret-a6-1", "secret-a6-2", "secret-a6-3"]) {
+      if (head.includes(raw) || x.body.includes(raw))
+        secretProblems.push(`${name}: credential secret exposed`);
+    }
     for (const raw of allRawKeys.keys()) {
       for (let n = occurrences(head, raw); n > 0; n--)
         m.sightings.push(`${name} (head)\u0000${raw}`);
@@ -1423,6 +1609,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     const fill = (s: string) =>
       s
         .replaceAll("{{seed}}", SEED_ID)
+        .replaceAll("{{last}}", m.ids.at(-1) ?? "missing")
         .replace(/\{\{id:(\d+)\}\}/g, (_, n: string) => m.ids[Number(n)] ?? `missing-${n}`);
     const send = async (step: HttpStep): Promise<Ex> => {
       const cookie = cookies[step.who];
@@ -1457,6 +1644,30 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       seen(name, method, x);
     };
     for (const step of cfg.steps()) {
+      if (step.kind === "credential-routing") {
+        const started = Date.now();
+        let ok = false;
+        while (Date.now() - started < 1000) {
+          const x = await exchange({
+            method: "POST",
+            target: "/v1/chat/completions",
+            headers: [["authorization", `Bearer ${SEED_KEY}`], J],
+            body: '{"model":"routing-a6","messages":[{"role":"user","content":"hello"}]}',
+          });
+          seen(step.name, "POST", x);
+          if (
+            (step.enabled ? x.status === 200 : x.status === 503) &&
+            Date.now() - started <= 1000
+          ) {
+            ok = true;
+            break;
+          }
+          await sleep(20);
+        }
+        if (!ok) deadlineFailures.push(`${step.name}: routing not visible within 1s`);
+        results.set(step.name, { text: ok ? "within 1s" : "missed", db: "" });
+        continue;
+      }
       if (step.kind === "sql") {
         const d = new Database(file);
         for (const q of step.sql) d.run(q);
@@ -1613,6 +1824,9 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     ["stderr", `${logFile}.err`],
   ] as const) {
     const text = readFileSync(f);
+    for (const raw of ["secret-a6-1", "secret-a6-2", "secret-a6-3"]) {
+      if (text.includes(raw)) secretProblems.push(`${stream}: credential secret exposed`);
+    }
     for (const raw of allRawKeys.keys())
       for (let n = occurrences(text, raw); n > 0; n--) m.sightings.push(`${stream}\u0000${raw}`);
   }
@@ -1740,5 +1954,6 @@ const summary = `admin-routes: ${equal} equal, ${expected} expected divergences,
 writeFileSync(join(out, "report.txt"), `${report.join("\n")}\n${summary}\n`);
 console.log(report.join("\n"));
 console.log(summary);
+credentialUpstream.stop(true);
 rmSync(work, { recursive: true, force: true });
 process.exit(failures === 0 ? 0 : 1);

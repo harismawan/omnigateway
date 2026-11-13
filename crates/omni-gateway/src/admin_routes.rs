@@ -81,6 +81,11 @@ fn failure(e: Failure) -> ApiError {
 /// The routes this module serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admin {
+    ListCredentials,
+    CreateCredential,
+    PatchCredential(Option<String>),
+    RemoveCredential(Option<String>),
+    CredentialHealth,
     ListModels,
     PutModel(Option<String>),
     RemoveModel(Option<String>),
@@ -113,6 +118,9 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
     let get = matches!(*method, M::GET | M::HEAD);
     let param = |rest: &str| (!rest.is_empty() && !rest.contains('/')).then(|| decode_param(rest));
     match path {
+        "/api/credentials" if get => return Some(Admin::ListCredentials),
+        "/api/credentials" if *method == M::POST => return Some(Admin::CreateCredential),
+        "/api/credentials/health" if get => return Some(Admin::CredentialHealth),
         "/api/models" if get => return Some(Admin::ListModels),
         "/api/catalog" if get => return Some(Admin::Catalog),
         "/api/keys" if get => return Some(Admin::ListKeys),
@@ -130,6 +138,14 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
         return match *method {
             M::PUT => Some(Admin::PutModel(id)),
             M::DELETE => Some(Admin::RemoveModel(id)),
+            _ => None,
+        };
+    }
+    if let Some(rest) = path.strip_prefix("/api/credentials/") {
+        let id = param(rest)?;
+        return match *method {
+            M::PATCH => Some(Admin::PatchCredential(id)),
+            M::DELETE => Some(Admin::RemoveCredential(id)),
             _ => None,
         };
     }
@@ -164,6 +180,52 @@ pub async fn serve(
     let control = app.control.clone();
     let now = crate::clock::now_ms();
     match route {
+        Admin::ListCredentials => {
+            require_reader(req.headers(), &app.admin).await?;
+            Ok(json_ok(control.run(omni_control::credentials::list).await?))
+        }
+        Admin::CredentialHealth => {
+            require_reader(req.headers(), &app.admin).await?;
+            Ok(json_ok(
+                control
+                    .run(move |s| omni_control::credentials::health(s, now))
+                    .await?,
+            ))
+        }
+        Admin::CreateCredential => {
+            require_admin(req.headers(), &app.admin).await?;
+            let body = read_json(req, app.idle_timeout).await?;
+            let key = app.credential_key.clone();
+            Ok(json_ok(
+                control
+                    .run(move |s| {
+                        omni_control::credentials::create(s, &key, &body, crate::clock::now_ms())
+                    })
+                    .await?,
+            ))
+        }
+        Admin::PatchCredential(id) => {
+            require_admin(req.headers(), &app.admin).await?;
+            let body = read_json(req, app.idle_timeout).await?;
+            control
+                .run(move |s| {
+                    omni_control::credentials::patch(
+                        s,
+                        id.as_deref(),
+                        &body,
+                        crate::clock::now_ms(),
+                    )
+                })
+                .await?;
+            Ok(json_ok(crate::api::OK.into()))
+        }
+        Admin::RemoveCredential(id) => {
+            require_admin(req.headers(), &app.admin).await?;
+            control
+                .run(move |s| omni_control::credentials::remove(s, id.as_deref()))
+                .await?;
+            Ok(json_ok(crate::api::OK.into()))
+        }
         Admin::ListModels => {
             require_reader(req.headers(), &app.admin).await?;
             Ok(json_ok(control.run(ops::list_models).await?))

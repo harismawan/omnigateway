@@ -135,11 +135,33 @@ fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> 
 
 /// `CredentialRepo.list`, ordered by tier then label, secrets decrypted.
 pub fn list(conn: &Connection, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {
+    read_list(conn, key, false)
+}
+
+/// Routing alone isolates unreadable metadata; operator lists still refuse it.
+pub fn list_routing(conn: &Connection, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {
+    read_list(conn, key, true)
+}
+
+fn read_list(
+    conn: &Connection,
+    key: &FieldKey,
+    isolate: bool,
+) -> Result<Vec<Credential>, StoreError> {
     let mut stmt = conn.prepare_cached("SELECT * FROM credentials ORDER BY tier, label")?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
-        out.push(to_credential(r, key)?);
+        match to_credential(r, key) {
+            Ok(credential) => out.push(credential),
+            Err(_) if isolate => {
+                // A metadata row that cannot be represented must not freeze
+                // unrelated credentials, revocations, or model publication.
+                // Never log the row or parser input (it may contain secrets).
+                tracing::warn!("credential metadata unreadable; omitted from routing snapshot");
+            }
+            Err(e) => return Err(e),
+        }
     }
     Ok(out)
 }

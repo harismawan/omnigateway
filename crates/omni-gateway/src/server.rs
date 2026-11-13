@@ -381,6 +381,7 @@ pub struct App {
     pub base_url_https: bool,
     /// The admin routes' own store connection (keys, models, settings).
     pub control: crate::admin_routes::ControlStore,
+    pub credential_key: omni_crypto::field::FieldKey,
     /// `OMNI_BODY_LOGGING_ALLOWED`, reported on `/api/settings`.
     pub body_logging_allowed: bool,
     /// The daily-bucket offset, reported on `/api/settings`.

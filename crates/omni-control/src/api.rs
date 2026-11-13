@@ -27,13 +27,13 @@ pub struct Failure {
 }
 
 impl Failure {
-    fn bad(message: impl Into<String>) -> Self {
+    pub(crate) fn bad(message: impl Into<String>) -> Self {
         Failure {
             code: Some("BAD_REQUEST"),
             message: message.into(),
         }
     }
-    fn internal(message: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(message: impl std::fmt::Display) -> Self {
         Failure {
             code: None,
             message: message.to_string(),
