@@ -711,5 +711,61 @@ mod tests {
         running.shutdown();
         running.wait().await.expect("stop");
     }
+
+    /// b1-refresh-r2, lifecycle: a credential publication whose request was
+    /// cancelled is still running on the blocking pool. Shutdown waits for it
+    /// (within the grace period) instead of closing underneath it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // The held lock is what keeps the job in flight.
+    async fn shutdown_waits_for_a_cancelled_requests_snapshot_publication() {
+        use std::future::Future as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("gateway.db");
+        let env = std::collections::HashMap::from([
+            (
+                "OMNI_ENCRYPTION_KEY".into(),
+                "test-encryption-key-0123456789".into(),
+            ),
+            ("OMNI_DB_PATH".into(), path.to_str().expect("path").into()),
+        ]);
+        let mut config = omni_gateway_core::config::load_config(&env, || 0).expect("config");
+        config.port = 0;
+        let running = crate::start(
+            config,
+            crate::Options {
+                stop_deadline: Duration::from_secs(60),
+                ..crate::Options::default()
+            },
+        )
+        .await
+        .expect("start");
+        let holder = running.app.deps.holder.clone();
+        let backend = running.app.deps.refresher.store.clone();
+        let omni_store::Store::Sqlite { store, .. } = backend.as_ref() else {
+            panic!("the gateway boots on SQLite");
+        };
+        let held = store.lock().expect("refresh store");
+        let mut publication = Box::pin(holder.refresh_credential(backend.clone(), "c".into()));
+        std::future::poll_fn(|cx| {
+            assert!(publication.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(publication); // The request was cancelled; its job was not.
+        running.shutdown();
+        let started = tokio::time::Instant::now();
+        let stopped = tokio::spawn(running.wait());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !stopped.is_finished(),
+            "shutdown finished while a snapshot publication was still running"
+        );
+        drop(held);
+        stopped.await.expect("join").expect("stop");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "shutdown ran out its grace period instead of seeing the job end"
+        );
+    }
 }
 pub mod refresh;

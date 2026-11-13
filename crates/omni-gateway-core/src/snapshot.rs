@@ -172,7 +172,11 @@ impl GatewaySnapshot {
 /// Owns the current snapshot and the key the secrets are opened with.
 pub struct SnapshotHolder {
     writers: std::sync::Mutex<()>,
-    // Lock order: authoritative W, then short publication P. Health takes P only.
+    // Lock order: authoritative W, then short publication P. Health and the
+    // miss read take P only. Every `current.store` happens under P, after a
+    // `current.load_full` under the same guard where the next value derives
+    // from the current one: no `rcu`, no compare-and-swap, no retry. Request
+    // loads take neither mutex.
     publication: std::sync::Mutex<()>,
     jobs: AtomicU64,
     jobs_done: tokio::sync::Notify,
@@ -186,7 +190,9 @@ pub struct SnapshotHolder {
     generation: AtomicU64,
 }
 
-struct PublicationJob(Arc<SnapshotHolder>);
+/// One blocking job that may publish a snapshot; counted until it ends,
+/// whether or not anything still awaits it.
+pub(crate) struct PublicationJob(Arc<SnapshotHolder>);
 impl Drop for PublicationJob {
     fn drop(&mut self) {
         if self.0.jobs.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -269,7 +275,7 @@ impl SnapshotHolder {
         })
     }
 
-    fn publication_job(self: &Arc<Self>) -> PublicationJob {
+    pub(crate) fn publication_job(self: &Arc<Self>) -> PublicationJob {
         self.jobs.fetch_add(1, Ordering::AcqRel);
         PublicationJob(self.clone())
     }
@@ -564,6 +570,177 @@ mod publication_tests {
             holder.load().routing.health[&omni_router::health_key("c", "m")].consecutive_failures,
             9
         );
+    }
+
+    /// b1-refresh-r2 R3, gated: a per-account update has loaded and cloned
+    /// the snapshot and holds W and P; an administrative commit lands; a
+    /// health update and a rebuild arrive. Neither may run inside the
+    /// update's load-to-store window, the update publishes exactly once,
+    /// the health update is kept, and the rebuild then publishes the
+    /// administrative change after exactly one read.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn gated_credential_update_bounds_health_and_queued_rebuild() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::mpsc::{RecvTimeoutError, channel, sync_channel};
+        const QUEUED: Duration = Duration::from_millis(150);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r3.db");
+        let db = SqliteStore::open(&path, 0).unwrap();
+        db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('c','anthropic','old','oauth',1,1,1,'{}',0,0)", []).unwrap();
+        let key = omni_crypto::field::derive_key("k");
+        let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
+        db.connection()
+            .execute("UPDATE credentials SET label='rotated',token_version=2", [])
+            .unwrap();
+        let health_key = omni_router::health_key("c", "m");
+        let (credential_reads, publications, rebuild_reads) = (
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+        );
+        let (loaded_tx, loaded_rx) = sync_channel(0);
+        let (release_tx, release_rx) = sync_channel(0);
+        let (health_tx, health_rx) = channel();
+        let (rebuild_tx, rebuild_rx) = channel();
+        let (rebuild_release_tx, rebuild_release_rx) = sync_channel(0);
+        std::thread::scope(|scope| {
+            let (holder, key, path) = (&holder, &key, &path);
+            let (credential_reads, publications, rebuild_reads) =
+                (&credential_reads, &publications, &rebuild_reads);
+            let update = scope.spawn(move || {
+                let db = SqliteStore::open(path, 0).unwrap();
+                holder
+                    .patch_credential_at_publish(
+                        "c",
+                        || {
+                            credential_reads.fetch_add(1, Ordering::SeqCst);
+                            omni_store::credentials::get(db.connection(), key, "c")
+                        },
+                        || {
+                            publications.fetch_add(1, Ordering::SeqCst);
+                            loaded_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                        },
+                    )
+                    .unwrap();
+            });
+            // The update is between its load and its store.
+            loaded_rx.recv().unwrap();
+            assert!(holder.writers.try_lock().is_err());
+            assert!(holder.publication.try_lock().is_err());
+            db.connection().execute("INSERT INTO api_keys (id,label,prefix,hash,created_at,limits) VALUES ('k','k','k','admin',0,'{}')", []).unwrap();
+            let health = scope.spawn(move || {
+                holder.patch_health(CredentialHealth {
+                    credential_id: "c".into(),
+                    model: "m".into(),
+                    breaker_state: omni_store::BreakerState::Closed,
+                    consecutive_failures: 7,
+                    opened_at: None,
+                    rate_limited_until: None,
+                });
+                health_tx.send(()).unwrap();
+            });
+            let rebuild = scope.spawn(move || {
+                let db = SqliteStore::open(path, 0).unwrap();
+                holder
+                    .rebuild_read(|| {
+                        rebuild_reads.fetch_add(1, Ordering::SeqCst);
+                        rebuild_tx.send(()).unwrap();
+                        rebuild_release_rx.recv().unwrap();
+                        read_snapshot(&db, key, 0.0)
+                    })
+                    .unwrap();
+            });
+            // Neither enters the window: health waits for P, the rebuild for W.
+            // Observations are asserted after every gate is released, so a
+            // regression fails this test instead of leaving threads parked.
+            let health_early = health_rx.recv_timeout(QUEUED);
+            let rebuild_early = rebuild_rx.recv_timeout(QUEUED);
+            let health_visible_early = holder.load().routing.health.contains_key(&health_key);
+            release_tx.send(()).unwrap();
+            update.join().unwrap();
+            // Health needs only P: it completes while the rebuild holds W.
+            if rebuild_early.is_err() {
+                rebuild_rx.recv().unwrap();
+            }
+            if health_early.is_err() {
+                health_rx.recv().unwrap();
+            }
+            health.join().unwrap();
+            let seen = holder.load();
+            let generation = holder.generation();
+            rebuild_release_tx.send(()).unwrap();
+            rebuild.join().unwrap();
+            assert_eq!(
+                health_early,
+                Err(RecvTimeoutError::Timeout),
+                "a health update was published between the update's load and store"
+            );
+            assert_eq!(
+                rebuild_early,
+                Err(RecvTimeoutError::Timeout),
+                "a rebuild began reading while the update held W"
+            );
+            assert!(!health_visible_early);
+            assert_eq!(seen.routing.credentials[0].label, "rotated");
+            assert_eq!(seen.routing.credentials[0].token_version, 2);
+            assert_eq!(
+                seen.routing.health[&health_key].consecutive_failures, 7,
+                "the concurrent health update was lost"
+            );
+            assert!(!seen.keys_by_hash.contains_key("admin"));
+            assert_eq!(generation, 0);
+        });
+        assert_eq!(credential_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(publications.load(Ordering::SeqCst), 1);
+        assert_eq!(rebuild_reads.load(Ordering::SeqCst), 1);
+        let seen = holder.load();
+        assert!(seen.keys_by_hash.contains_key("admin"));
+        assert_eq!(seen.routing.credentials[0].label, "rotated");
+        assert_eq!(holder.generation(), 1);
+    }
+
+    /// The production adapter, not a synthetic job: the caller is dropped
+    /// while its blocking read waits on the backend; the publication still
+    /// happens and the shutdown drain waits for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::unwrap_used, clippy::await_holding_lock)]
+    async fn cancelled_credential_refresh_still_publishes_and_is_drained() {
+        use std::future::Future;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cancel.db");
+        let db = SqliteStore::open(&path, 0).unwrap();
+        db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('c','anthropic','old','oauth',1,1,1,'{}',0,0)", []).unwrap();
+        let holder =
+            Arc::new(SnapshotHolder::build(&db, omni_crypto::field::derive_key("k"), 0.0).unwrap());
+        db.connection()
+            .execute("UPDATE credentials SET label='rotated'", [])
+            .unwrap();
+        let connection = Arc::new(std::sync::Mutex::new(SqliteStore::open(&path, 0).unwrap()));
+        let backend = Arc::new(omni_store::Store::Sqlite {
+            store: connection.clone(),
+            path: path.clone(),
+            day_offset_minutes: 0,
+        });
+        let held = connection.lock().unwrap();
+        let mut refresh = Box::pin(holder.refresh_credential(backend, "c".into()));
+        std::future::poll_fn(|cx| {
+            assert!(refresh.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(refresh);
+        let mut drain = Box::pin(holder.drain_publications());
+        std::future::poll_fn(|cx| {
+            assert!(drain.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(holder.load().routing.credentials[0].label, "old");
+        drop(held);
+        drain.await;
+        assert_eq!(holder.load().routing.credentials[0].label, "rotated");
     }
 
     #[tokio::test]
