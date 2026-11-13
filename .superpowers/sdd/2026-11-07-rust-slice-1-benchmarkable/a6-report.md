@@ -1,5 +1,113 @@
 # A6 implementation report
 
+## Final A6 acceptance update
+
+Status: **complete for review**, subject to the documented D4 hand-off and known
+differences below. This update supersedes the historical checkpoint statuses.
+Final code commit: **fd40e48d** (following **4f580cd0**). Final gates execute
+against fd40e48d; the subsequent report-only commit changes no runtime/test code.
+The historical round-4 checkpoint below was written before the final identity
+implementation and text-timestamp fix; its OPEN/PARTIAL entries are superseded by
+this acceptance section and retained only to preserve the evidence chronology.
+
+| Final requirement/finding | Commit | Test / evidence |
+|---|---|---|
+| Distinct UTF-16 endpoint identity, no alias to U+FFFD | fd40e48d | `identity-red.log` → `identity-green.log`; credential-identity driver disables each of three rows independently, then restarts with the other binary |
+| Lone JSON provider/pin must not equal UTF-8 SQL replacement name | fd40e48d | exact sidecars recovered for provider/credentialId and refused in serves_target; compilation and existing routing suites; no separate frozen-binary provider/pin vector |
+| Quota raw scalar projection and numeric NaN semantics | 4f580cd0 | `red-quota.log` → `green-health.log` |
+| Text timestamp JS addition/comparison | fd40e48d | `red-timestamp.log` **14 equal / 1 failure** → `timestamp-green.log` **15 equal / 0 failures** |
+| Unusual health cannot poison SQLite snapshot | 4f580cd0 | `red-health.log` boot refusal → credential-health GREEN; credential_isolation verifies independent updates |
+| Restart cross-read, actual decrypted Authorization | 8ebaf1cc, fd40e48d | credential-crossread and credential-identity configurations in final admin-routes driver |
+| Shared PG mutation format and toggle logs | d02bae94 | live-PG marker/container proof under `/tmp/opencode/a6-followup/`; rejecting-update trigger/log comparison |
+| PostgreSQL gateway boot/routes/restart | D4 hand-off | intentionally deferred; store-level tests are not presented as HTTP coverage |
+
+### Closed final findings
+
+- **Exact routing identity:** Credential stores a non-serialized exact UTF-16
+  endpoint sidecar; Target stores exact lone-surrogate endpoint/provider/pin
+  sidecars. Both SQLite and PG readers recover them from lossless JSON before
+  constructing the typed routing view. `serves_target` compares exact endpoint
+  units and refuses a lone provider/pin against UTF-8 SQL provider/id columns.
+  A genuine U+FFFD endpoint never aliases either lone surrogate. No sentinel
+  names enter stored provider_data. Typed diagnostic serialization still renders
+  lone strings as replacement characters; admin projections remain lossless.
+- **Quota coercion:** health preserves raw SQL quota values while coercing the
+  numeric burn operations. NaN stays NaN through Math.max semantics. A textual
+  observedAt uses JS string concatenation for exhaustsAt; survives uses string
+  comparison when both operands are strings, numeric coercion otherwise.
+- **Health snapshot isolation:** 4f580cd0 isolates unrepresentable SQLite health
+  rows without freezing unrelated credential/model updates. Admin health keeps
+  fractional/text/null values exactly as TS's projection returns them.
+
+### Final RED/GREEN
+
+Evidence root `/tmp/opencode/a6-round4/`, both binaries copied outside checkout.
+- `identity-red.log`: **59 equal / 4 failures**, including two independent Rust
+  deadline failures when disabling either surrogate endpoint (replacement row
+  previously served both); `identity-green.log`: **61 equal / 0 failures**.
+  Three endpoint models are routed, each credential disabled with all three
+  outcomes checked, then re-enabled and cross-implementation restarted.
+- `red-timestamp.log` versus `timestamp-green.log`: text timestamp arithmetic
+  regression; GREEN **15 equal / 0 failures**, including health boot isolation,
+  fractional/text/null health rows, active/stale/rolled quota, text used/limit
+  and text observedAt/resetsAt.
+- Earlier health isolation RED/GREEN and shared live-PG tests remain documented
+  below. PG HTTP/restart cross-read is **D4**, not claimed as tested here.
+
+### Known differences / D4 scope
+
+- Unrepresentable health rows are omitted from routing; their breaker contribution
+  is lost rather than emulating arbitrary JS arithmetic. Other rows keep refreshing.
+- SQLite quota rows containing nonnumeric text still may refuse snapshot refresh;
+  the admin endpoint projects/coerces them. The text-quota driver inserts them after
+  boot. This remains a malformed-config routing limitation beyond the requested
+  health-row isolation, not a claim that every SQLite scalar boots successfully.
+- PG uses INTEGER for failure counts, so the SQLite fractional/text-count fixture
+  cannot be inserted there. D4 must wire backend selection in boot, auth/control,
+  snapshot/miss and writer paths, then exercise all credential routes and both
+  application restart directions against live PostgreSQL. A6's shared mutation
+  live-PG proof remains valid and its container was stopped/removed.
+- Existing early-refusal lone **model-name** divergence from A5 is unchanged.
+  This increment fixes credential matching identity, not that accepted divergence.
+- No full gateway PG integration is implied by compilation of PG identity readers.
+- Driver deadlines remain measured from the routing poll step after mutation and
+  DB dump, not from SQL commit. The driver dump retains A5's exclusions; separate
+  run.ts compares completion/usage/health tables. Ciphertexts are compared by
+  decrypting their columns rather than expecting randomized bytes to match.
+- The identity driver uses one expected upstream secret for all three endpoints;
+  isolation is established by disabling each row and checking all three route
+  outcomes, not by secret differences. The independent restarted process must
+  send the correct decrypted Authorization to obtain a successful upstream reply.
+
+Focused touched-crate gate before the final workspace pass: **254 passed /
+0 failed / 5 ignored** (`touched-final.log`). Early implementation clippy found
+the obsolete row::json helper, which was removed after all callers moved to the
+lossless credential read. A proposed extra provider/pin integration unit did not
+compile (private router helper and absent tempfile dependency) and was removed;
+it is not counted as behavioral evidence. The provider/pin limitation in the test
+map above is intentional disclosure.
+
+### Final gates at fd40e48d
+
+Logs relative to `/tmp/opencode/a6-round4/`:
+
+| Gate | Result | Log |
+|---|---|---|
+| Release build, no incremental/debuginfo | pass | build-acceptance.log |
+| cargo test --workspace --no-fail-fast | **1039 passed / 0 failed / 7 ignored** | workspace-acceptance.log |
+| clippy --workspace --all-targets -- -D warnings | clean | clippy-acceptance.log |
+| cargo fmt --check | clean | fmt-acceptance.log |
+| admin-routes | **1193 equal / 2 expected / 0 failures**, 38 raw client keys | acceptance-admin-routes.log |
+| admin-auth | **212 equal / 4 expected / 0 failures** | acceptance-admin-auth.log |
+| surface | **606 equal / 61 expected / 0 failures** | acceptance-surface.log |
+| run.ts | **all rows equal** | acceptance-run.log |
+| Biome driver check | clean | biome-acceptance.log |
+
+All driver binaries are copies in `bin/`, outside checkout; hashes are recorded
+in `binaries.sha256`. The release build began before the code commit, after the
+final source edits; the checks run after the commit. Only the report changes
+after these gates. No TS, bun.lock, progress.md, user specs or stash were staged.
+
 ## Round 4 checkpoint (base 8ebaf1cc): NOT complete for review
 
 Evidence `/tmp/opencode/a6-round4/`. Exact lone-surrogate routing remains open;
@@ -10,6 +118,23 @@ Do not mark A6 complete based on this checkpoint.
 |---|---|---|
 | Unusual health rows do not stop SQLite snapshot publication | Separate routing health read isolates rows that cannot fit the typed routing representation; operator reads remain strict | `red-health.log`: 5 equal / 3 failures against frozen TS due to Rust boot refusal; `credential_isolation::unusual_health_never_blocks_other_snapshot_changes` verifies boot and refresh alongside a healthy row and credential disable |
 | Health endpoint preserves quota SQL values | Raw quota JSON projection; numeric coercion for burn calculations, NaN-preserving remaining-budget arithmetic | `red-quota.log`: isolation-only binary 12 equal / 1 failure for text used/limit columns; final GREEN below |
+
+Both rows above are implemented in **4f580cd0**. This is a verified partial
+checkpoint, not the requested final acceptance commit.
+
+### Cumulative requirement → commit → test map
+
+| Requirement | Commit | Test/evidence |
+|---|---|---|
+| SQLite credential routes, encrypted API-key creation, guards, delete semantics | d2757acb | admin-routes credentials configuration; decrypted DB column comparison; no-secret scan |
+| Shared SQLite/PG credential mutations | d02bae94 | credential_mutations integration test; explicit live-PG marker and container proof under a6-followup |
+| Toggle logging after commit with provider | d02bae94 | rejecting UPDATE trigger plus exact TS/Rust log comparison |
+| SQLite application restart cross-read in both directions | 8ebaf1cc | credential-crossread configuration; exact upstream Authorization assertion |
+| Active/stale/rolled-over burn, fractional and text health projection | 8ebaf1cc | credential-health configuration, round3 RED/GREEN |
+| Health-row snapshot isolation and raw quota text projection | 4f580cd0 | round4 red-health/red-quota/green-health; credential_isolation integration test |
+| Exact lone-surrogate routing | OPEN | next RED detailed below; existing admin identity coverage does not establish routing identity |
+| Full unusual quota JS coercion | PARTIAL | text used/limit covered; text timestamp addition outstanding |
+| PG gateway HTTP/restart cross-read | D4 | live-PG store tests are not a substitute for the deferred gateway leg |
 
 Known limits: omitted health rows lose their breaker contribution rather than
 reproducing arbitrary JS arithmetic during routing. This is per-row isolation,
@@ -32,6 +157,27 @@ health row. Clippy/fmt/Biome are clean (`clippy.log`, `fmt.log`,
 `biome-final.log`). Final workspace and existing-driver gates follow after the
 code checkpoint commit. Precise next task remains the distinct-surrogate routing
 RED, followed by completing JS quota arithmetic for text timestamps.
+
+Concrete identity implementation touchpoints: `omni-store/src/models.rs:Target`
+and `model_from_parts` (currently `omni_ir::js::parse_json` loses lone units),
+`omni-store/src/credentials.rs:Credential/to_credential`, the PG equivalents in
+`pg/rows.rs`, and `omni-router/src/filters.rs:serves_target`. Keep explicit
+lossless sidecar identities instead of a sentinel string hidden in provider_data:
+sentinels collide with real endpoint names and leak into operator views. Target
+provider and credentialId also originate in JSON; credential provider/id columns
+are already SQLite UTF-8 strings. Their comparison must reject a lone JSON name
+rather than matching an actual replacement-character SQL name. Existing literals
+construct these structs in router/store/core tests, so update their default
+sidecar fields when introducing the representation.
+
+Final copied-binary drivers at code commit 4f580cd0:
+- `/tmp/opencode/a6-round4/admin-routes.log`: **1130 equal / 2 expected /
+  0 failures**, 38 raw client keys; includes the two SQLite restart directions.
+- `admin-auth.log`: **212 equal / 4 expected / 0 failures**.
+- `surface.log`: **606 equal / 61 expected / 0 failures**.
+- `run.log`: **all rows equal**.
+- Binaries isolated outside the checkout; hashes in `binaries.sha256`.
+The workspace/clippy/fmt final chain was started after 4f580cd0; results below.
 
 ## Round 3 checkpoint (base d02bae94): NOT complete-for-review
 
