@@ -13,11 +13,15 @@ export const CONFIG_DIAGNOSTICS = [
   'OMNI_TRACE_SAMPLE must be between 0 and 1, got "',
 ];
 
-/** A line carrying one of them, as plain text or inside a JSON string. */
-export function isConfigDiagnostic(line: string): boolean {
-  return CONFIG_DIAGNOSTICS.some(
-    (prefix) => line.includes(prefix) || line.includes(JSON.stringify(prefix).slice(1, -1)),
+/**
+ * The category of the diagnostic a line carries, as plain text or inside a JSON
+ * string: every variable the message names, so each diagnostic has its own.
+ */
+export function configDiagnostic(line: string): string | undefined {
+  const prefix = CONFIG_DIAGNOSTICS.find(
+    (p) => line.includes(p) || line.includes(JSON.stringify(p).slice(1, -1)),
   );
+  return prefix?.match(/OMNI_\w+/g)?.join("+");
 }
 
 /**

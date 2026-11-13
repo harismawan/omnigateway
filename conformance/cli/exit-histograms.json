@@ -9,7 +9,9 @@
     "environment OMNI_PORT": 2,
     "environment OMNI_TRACE_SAMPLE": 1,
     "environment OMNI_ENCRYPTION_KEY": 1,
-    "environment OMNI_METRICS_MAX_SERIES": 1
+    "environment OMNI_METRICS_MAX_SERIES": 1,
+    "environment OMNI_CLUSTER_MODE+OMNI_DATABASE_URL": 1,
+    "environment OMNI_DATABASE_URL+OMNI_REDIS_URL+OMNI_CLUSTER_MODE": 1
   },
   "key-mutations": { "exit 0": 115, "exit 1": 34, "exit 2": 45 },
   "model-catalog": {

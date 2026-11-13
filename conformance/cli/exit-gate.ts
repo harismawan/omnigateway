@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
-import { assertCoversFrozenLoader, isConfigDiagnostic } from "./config-diagnostics.ts";
+import { assertCoversFrozenLoader, configDiagnostic } from "./config-diagnostics.ts";
 
 const pending: Promise<void>[] = [];
 const observed: Record<string, number> = {};
@@ -23,13 +23,10 @@ export function goldenSpawn(argv: string[], options: Bun.SpawnOptions.OptionsObj
       const key = `exit ${code}`;
       observed[key] = (observed[key] ?? 0) + 1;
       for (const line of (stderr + stdout).split(/\r?\n/)) {
-        if (
-          isConfigDiagnostic(line) ||
-          /ENOENT:|EACCES:|unable to open database|database is locked/.test(line)
-        ) {
-          const kind = line.match(
-            /OMNI_\w+|ENOENT|EACCES|unable to open database|database is locked/,
-          )?.[0];
+        const kind =
+          configDiagnostic(line) ??
+          line.match(/ENOENT(?=:)|EACCES(?=:)|unable to open database|database is locked/)?.[0];
+        if (kind !== undefined) {
           const key = `environment ${kind}`;
           observed[key] = (observed[key] ?? 0) + 1;
         }

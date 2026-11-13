@@ -12,7 +12,7 @@ import { loadConfig } from "../../packages/control/src/config.ts";
 import {
   assertCoversFrozenLoader,
   CONFIG_DIAGNOSTICS,
-  isConfigDiagnostic,
+  configDiagnostic,
 } from "./config-diagnostics.ts";
 
 assertCoversFrozenLoader();
@@ -29,6 +29,7 @@ const triggers: Record<string, string>[] = [
   { ...key, OMNI_TRACE_SAMPLE: "bogus" },
 ];
 assert.equal(triggers.length, CONFIG_DIAGNOSTICS.length);
+const categories = new Set<string>();
 for (const [i, env] of triggers.entries()) {
   let message = "";
   try {
@@ -38,11 +39,15 @@ for (const [i, env] of triggers.entries()) {
   }
   const prefix = CONFIG_DIAGNOSTICS[i];
   assert(prefix !== undefined && message.startsWith(prefix), `${i}: ${message}`);
-  assert(isConfigDiagnostic(message), message);
-  assert(isConfigDiagnostic(JSON.stringify({ storeError: message })), message);
+  const category = configDiagnostic(message);
+  assert(category !== undefined, message);
+  assert.equal(configDiagnostic(JSON.stringify({ storeError: message })), category);
+  categories.add(category);
 }
+// One category each: swapping one diagnostic for another changes the histogram.
+assert.equal(categories.size, CONFIG_DIAGNOSTICS.length);
 loadConfig(key);
-assert(!isConfigDiagnostic("OMNI_PORT=9000 OMNI_CLUSTER_MODE=true"));
+assert.equal(configDiagnostic("OMNI_PORT=9000 OMNI_CLUSTER_MODE=true"), undefined);
 
 const root = mkdtempSync("/tmp/opencode/e1-e5/config-gate-");
 let suite = readFileSync("conformance/cli/model-puts.ts", "utf8");
@@ -65,7 +70,10 @@ writeFileSync(join(root, "result.log"), out + err);
 assert.notEqual(await p.exited, 0, "same-exit cluster substitution must fail");
 // Same-exit: every comparison still passed, and the gate alone objected.
 assert.match(out, /^PASS \d+ put comparisons$/m);
-assert.match(out, /^EXIT HISTOGRAM model-puts .*"environment OMNI_CLUSTER_MODE":1/m);
+assert.match(
+  out,
+  /^EXIT HISTOGRAM model-puts .*"environment OMNI_CLUSTER_MODE\+OMNI_DATABASE_URL":1/m,
+);
 assert(err.includes("model-puts: frozen exits/environment failures changed"));
 console.log(
   `PASS ${CONFIG_DIAGNOSTICS.length} frozen config diagnostics and same-exit negative suite (${root})`,
