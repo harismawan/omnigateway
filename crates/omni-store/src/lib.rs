@@ -10,6 +10,7 @@ pub mod credentials;
 mod error;
 mod js;
 pub mod keys;
+pub mod logs;
 /// `api_keys.limits`; lives with the arithmetic in `omni-ratelimit`, as TS's
 /// store imports `@omni/ratelimit/catalog`.
 pub use omni_ratelimit::limits;

@@ -9,6 +9,7 @@ pub mod credentials;
 #[cfg(test)]
 mod http_oracle_tests;
 pub mod keys;
+pub mod logs;
 mod model_schema;
 pub mod models;
 pub mod operator_json;

@@ -82,6 +82,7 @@ fn failure(e: Failure) -> ApiError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admin {
     Usage,
+    Logs,
     ListCredentials,
     CreateCredential,
     PatchCredential(Option<String>),
@@ -120,6 +121,7 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
     let param = |rest: &str| (!rest.is_empty() && !rest.contains('/')).then(|| decode_param(rest));
     match path {
         "/api/usage" if get => return Some(Admin::Usage),
+        "/api/logs" if get => return Some(Admin::Logs),
         "/api/credentials" if get => return Some(Admin::ListCredentials),
         "/api/credentials" if *method == M::POST => return Some(Admin::CreateCredential),
         "/api/credentials/health" if get => return Some(Admin::CredentialHealth),
@@ -182,6 +184,15 @@ pub async fn serve(
     let control = app.control.clone();
     let now = crate::clock::now_ms();
     match route {
+        Admin::Logs => {
+            require_reader(req.headers(), &app.admin).await?;
+            let query = req.uri().query().unwrap_or("").to_owned();
+            Ok(json_ok(
+                control
+                    .run(move |s| omni_control::logs::page(s, &query))
+                    .await?,
+            ))
+        }
         Admin::Usage => {
             require_reader(req.headers(), &app.admin).await?;
             let query = req.uri().query().unwrap_or("").to_owned();

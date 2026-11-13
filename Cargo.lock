@@ -1468,6 +1468,7 @@ dependencies = [
 name = "omni-control"
 version = "0.16.0"
 dependencies = [
+ "base64 0.22.1",
  "icu_collator",
  "omni-crypto",
  "omni-ir",

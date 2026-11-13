@@ -465,6 +465,7 @@ type HttpStep = {
   headers?: [string, string][];
 };
 type Step =
+  | { kind: "usage-traffic"; name: string }
   | HttpStep
   | { kind: "restart-other"; name: string }
   | { kind: "credential-routing"; name: string; enabled: boolean; model?: string }
@@ -1313,6 +1314,19 @@ type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?
 let healthSeed: string | undefined;
 const configs: Config[] = [
   {
+    label: "usage-traffic",
+    db: () => db("usage-traffic", ["INSERT INTO virtual_models VALUES('routing-a6','[{\"provider\":\"custom\",\"endpointId\":\"routing-a6\",\"model\":\"m\",\"tier\":1,\"weight\":1,\"capabilities\":{\"tools\":false,\"images\":false,\"reasoning\":false},\"costPerMTok\":{\"input\":0,\"output\":0}}]','score',1)"]),
+    steps: () => [
+      {...as("admin", "POST", "/api/credentials", '{"provider":"custom","apiKey":"secret-a6-2","endpointId":"routing-a6","endpointLabel":"Routing","origin":"http://127.0.0.1:18444","protocol":"chat_completions"}'), expectedStatus:200},
+      {kind:"usage-traffic",name:"one real request usage"},
+    ],
+  },
+  {
+    label: "logs",
+    db: () => db("logs", ["WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<503) INSERT INTO request_logs(id,at,requested_model,resolved_model,resolved_provider,credential_id,api_key_id,status,error_code,duration_ms) SELECT printf('log-%04d',i),1794000000000+i/3,'requested_model','resolved','custom','cred','key',CASE WHEN i%2=0 THEN 500 ELSE 200 END,'ERROR_CODE',10 FROM n"]),
+    steps: () => ["", "limit=1", "limit=500", "limit=9999", "limit=0", "limit=bad", "since=1794000000001", "until=1794000000001", "state=done", "state=pending", "failed=true", "failed=false", "provider=custom", "requestedModel=MODEL", "resolvedModel=sol", "model=requested", "credentialId=cred", "apiKeyId=key", "errorCode=ERROR_", "cursor=bad", "state=bad", "failed=bad", "since=bad", "since=2&until=1", "wat=x"].flatMap((q,i) => everyone("GET", `/api/logs?${q}`).map(s => ({...s, name:`logs ${i} ${s.who}`, expectedStatus:s.who === "anon" ? 401 : i>=19 ? 400 : 200}))),
+  },
+  {
     label: "usage-large",
     db: () => db("usage-large", ["WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<300000) INSERT INTO request_logs(id,at,requested_model,resolved_model,api_key_id,status,duration_ms,input_tokens) SELECT 'large-'||i,1794000000000+i,'requested','model-'||(i%7),'key-'||(i%10000),200,10,2 FROM n"]),
     steps: () => everyone("GET", "/api/usage?groupBy=apiKey&splitBy=model&until=1e20").map(s => ({...s, expectedStatus: s.who === "anon" ? 401 : 200})),
@@ -1975,6 +1989,28 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     };
     let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
+      if (step.kind === "usage-traffic") {
+        await sleep(650);
+        const traffic = await exchange({method:"POST",target:"/v1/chat/completions",headers:[["authorization",`Bearer ${SEED_KEY}`],J],body:JSON.stringify({model:"routing-a6",messages:[{role:"user",content:"hello"}]})});
+        if (traffic.status !== 200) deadlineFailures.push(`${step.name}: traffic status ${traffic.status}`);
+        let answer: Ex | undefined;
+        for(let attempt=0;attempt<100;attempt++) {
+          answer = await exchange({target:"/api/usage?groupBy=requestedModel",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
+          if(answer.status!==200) break;
+          const rows=JSON.parse(answer.body.toString()).rows;
+          if(rows.length) break;
+          await sleep(20);
+        }
+        if (!answer || answer.status!==200) deadlineFailures.push(`${step.name}: usage status ${answer?.status}`);
+        else {
+          const parsed=JSON.parse(answer.body.toString());
+          const row=parsed.rows[0];
+          if(parsed.rows.length!==1 || row.key!=="routing-a6" || row.requests!==1 || row.inputTokens!==1 || row.outputTokens!==1 || row.errors!==0 || !Number.isFinite(row.durationMsSum) || row.durationMsSum<0 || row.durationMsSum>10000) deadlineFailures.push(`${step.name}: invalid usage ${JSON.stringify(parsed)}`);
+          if(row) row.durationMsSum="<validated-duration>";
+          results.set(step.name,{text:JSON.stringify(parsed),db:""});
+        }
+        continue;
+      }
       if (step.kind === "restart-other") {
         proc.kill("SIGTERM");
         await proc.exited;
