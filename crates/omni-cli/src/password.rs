@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{IsTerminal, Read},
+    io::{IsTerminal, Read, Write},
 };
 
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
@@ -21,14 +21,15 @@ fn secret(question: &str) -> Result<Vec<u16>, String> {
     let mut pending = Vec::new();
     let mut line: Vec<u16> = Vec::new();
     let mut first = true;
-    eprintln!("{question}");
+    writeln!(std::io::stderr().lock(), "{question}").map_err(|e| e.to_string())?;
     let mut input = std::io::stdin().lock();
     let result: Result<(), String> = loop {
         let mut b = [0];
         if input.read(&mut b).map_err(|e| e.to_string())? == 0 {
             break Ok(());
         }
-        pending.push(b[0]);
+        let [byte] = b;
+        pending.push(byte);
         let mut decoded = String::new();
         loop {
             match std::str::from_utf8(&pending) {
@@ -39,11 +40,18 @@ fn secret(question: &str) -> Result<Vec<u16>, String> {
                 }
                 Err(e) => {
                     let valid = e.valid_up_to();
-                    decoded.push_str(std::str::from_utf8(&pending[..valid]).expect("valid prefix"));
-                    pending.drain(..valid);
+                    let prefix = pending.get(..valid).ok_or("invalid UTF8 prefix length")?;
+                    decoded.push_str(std::str::from_utf8(prefix).map_err(|e| e.to_string())?);
+                    pending = pending
+                        .get(valid..)
+                        .ok_or("invalid UTF8 prefix length")?
+                        .to_vec();
                     if let Some(len) = e.error_len() {
                         decoded.push('\u{fffd}');
-                        pending.drain(..len);
+                        pending = pending
+                            .get(len..)
+                            .ok_or("invalid UTF8 error length")?
+                            .to_vec();
                     } else {
                         break;
                     }
@@ -79,7 +87,7 @@ fn secret(question: &str) -> Result<Vec<u16>, String> {
     };
     drop(_terminal);
     result?;
-    eprintln!();
+    writeln!(std::io::stderr().lock()).map_err(|e| e.to_string())?;
     let whitespace = |u: &u16| {
         char::from_u32(u32::from(*u)).is_some_and(|c| {
             let mut buf = [0; 4];

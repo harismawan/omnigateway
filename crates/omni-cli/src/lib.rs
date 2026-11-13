@@ -84,7 +84,11 @@ pub fn run(argv: Vec<String>) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err((code, error)) => {
-                eprintln!("{error}");
+                // Reporting a failed terminal write must not itself abort.
+                let _reported = std::io::Write::write_fmt(
+                    &mut std::io::stderr().lock(),
+                    format_args!("{error}\n"),
+                );
                 if code == 2 {
                     let usage = registry::COMMANDS
                         .iter()
