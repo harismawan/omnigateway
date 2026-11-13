@@ -55,6 +55,7 @@ let unavailable = 0;
 for (const name of Object.keys(COMMANDS)) {
   if (
     name.startsWith("keys ") ||
+    name.startsWith("setup ") ||
     name.startsWith("settings ") ||
     (name.startsWith("models ") && name !== "models dry-run") ||
     name.startsWith("plugin ")

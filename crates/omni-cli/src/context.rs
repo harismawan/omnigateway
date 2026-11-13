@@ -107,6 +107,12 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
 }
 
 impl Context {
+    pub fn base_url(&self) -> Result<String, String> {
+        self.config
+            .as_ref()
+            .map(|c| c.base_url.clone())
+            .map_err(|e| e.to_string())
+    }
     pub fn open(self) -> Result<omni_store::SqliteStore, String> {
         let Config {
             day_offset_minutes, ..

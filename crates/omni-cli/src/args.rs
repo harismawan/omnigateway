@@ -107,6 +107,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             .map_or((&token[2..], None), |(k, v)| (k, Some(v)));
         match name {
             name if matches!(name, "root" | "db")
+                || (command.starts_with("setup-") && matches!(name, "dir" | "key"))
                 || (command == "models-put"
                     && matches!(name, "file" | "from-catalog" | "strategy"))
                 || (command == "models-catalog" && name == "provider")
@@ -156,6 +157,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 flags.insert(name.into(), value);
             }
             name if matches!(name, "json" | "no-color" | "yes" | "help" | "version")
+                || (command.starts_with("setup-") && name == "dry-run")
                 || (command == "models-put" && name == "alias")
                 || (command == "create" && matches!(name, "smart-routing" | "no-bodies"))
                 || (command == "expiry" && name == "never")

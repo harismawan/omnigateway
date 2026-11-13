@@ -8,6 +8,7 @@ mod mutations;
 mod output;
 mod registry;
 mod settings;
+mod setup;
 use std::{io::IsTerminal, process::ExitCode};
 
 pub fn run(argv: Vec<String>) -> ExitCode {
@@ -48,7 +49,9 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
-                if command.starts_with("models-") {
+                if command.starts_with("setup-") {
+                    setup::run(&command, &flags).map_err(|e| (1, e))
+                } else if command.starts_with("models-") {
                     models::run(&command, &flags, &positional, &allow)
                 } else if command.starts_with("settings-") {
                     settings::run(&command, &flags, &positional)
@@ -59,12 +62,28 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         return match result {
             Ok(out) => {
                 println!("{out}");
+                if command.starts_with("setup-")
+                    && let Ok((flags, _, _)) = args::parse_command(&rest, &command)
+                    && !flags.contains_key("json")
+                    && !flags.contains_key("key")
+                {
+                    eprintln!(
+                        "no --key given: the files carry a placeholder, so paste your key over it"
+                    );
+                }
                 ExitCode::SUCCESS
             }
             Err((code, error)) => {
                 eprintln!("{error}");
                 if code == 2 {
-                    eprintln!("usage: omni {}", mutations::usage(&command));
+                    let usage = registry::COMMANDS
+                        .iter()
+                        .find(|(n, _, _)| n.replace(' ', "-") == command)
+                        .map(|(_, u, _)| *u);
+                    eprintln!(
+                        "usage: omni {}",
+                        usage.unwrap_or_else(|| mutations::usage(&command))
+                    );
                 }
                 ExitCode::from(code)
             }

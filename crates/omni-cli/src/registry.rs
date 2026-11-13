@@ -330,6 +330,9 @@ pub fn command_help(name: &str) -> String {
 }
 
 pub fn implemented(name: &str) -> Option<String> {
+    if name.starts_with("setup ") {
+        return Some(name.replace(' ', "-"));
+    }
     if let Some(key) = name.strip_prefix("keys ") {
         return Some(key.into());
     }
