@@ -743,6 +743,10 @@ pub fn parse_js(text: &str) -> Result<JsValue, String> {
 /// is a string. `None` when `text` is not an object, has no such member, or
 /// the member is not a string. One linear pass: other values are skipped by
 /// bracket depth without being built.
+///
+/// Meant for text a parser already accepted. It does not validate: on text
+/// that is not JSON it returns `None` or whatever a member-shaped prefix
+/// held, and never panics.
 pub fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>> {
     let b = text.as_bytes();
     let ws = |i: &mut usize| {
@@ -750,17 +754,18 @@ pub fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>> {
             *i += 1;
         }
     };
-    // The end of the string opening at `i` (its quote), after the closing one.
+    // The end of the string opening at `i` (its quote), after the closing
+    // one; `None` for a string that never closes (text no parser accepted).
     let end_of_string = |mut i: usize| {
         i += 1;
         while let Some(&c) = b.get(i) {
             match c {
                 b'\\' => i += 2,
-                b'"' => return i + 1,
+                b'"' => return Some(i + 1),
                 _ => i += 1,
             }
         }
-        i
+        None
     };
     let mut i = 0;
     ws(&mut i);
@@ -775,19 +780,28 @@ pub fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>> {
         if b.get(i) != Some(&b'"') {
             break;
         }
-        let key_end = end_of_string(i);
-        let wanted = string_units(&text[i + 1..key_end - 1])
-            .iter()
-            .copied()
-            .eq(key.encode_utf16());
+        let Some(key_end) = end_of_string(i) else {
+            i = b.len();
+            break;
+        };
+        let Some(name) = try_string_units(&text[i + 1..key_end - 1]) else {
+            break;
+        };
+        let wanted = name.iter().copied().eq(key.encode_utf16());
         i = key_end;
         ws(&mut i);
         i += 1; // ':'
         ws(&mut i);
         if b.get(i) == Some(&b'"') {
-            let end = end_of_string(i);
+            let Some(end) = end_of_string(i) else {
+                i = b.len();
+                break;
+            };
             if wanted {
-                found = Some(Some(string_units(&text[i + 1..end - 1])));
+                let Some(value) = try_string_units(&text[i + 1..end - 1]) else {
+                    break;
+                };
+                found = Some(Some(value));
             }
             i = end;
         } else {
@@ -799,7 +813,7 @@ pub fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>> {
             while let Some(&c) = b.get(i) {
                 match c {
                     b'"' => {
-                        i = end_of_string(i);
+                        i = end_of_string(i).unwrap_or(b.len());
                         continue;
                     }
                     b'[' | b'{' => depth += 1,
@@ -817,13 +831,19 @@ pub fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>> {
             break;
         }
     }
-    count_steps(i);
+    count_steps(i.min(b.len()));
     found.flatten()
 }
 
 /// JSON string contents after syntax validation. Escaped UTF-16 units are data,
 /// including unpaired surrogates; only literal UTF-8 needs transcoding.
 fn string_units(text: &str) -> Vec<u16> {
+    try_string_units(text).expect("validated string")
+}
+
+/// [`string_units`] for contents nothing validated: `None` on an escape
+/// `JSON.parse` would refuse (cut short, or not hexadecimal).
+fn try_string_units(text: &str) -> Option<Vec<u16>> {
     let mut units = Vec::new();
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
@@ -831,12 +851,12 @@ fn string_units(text: &str) -> Vec<u16> {
             units.extend_from_slice(c.encode_utf16(&mut [0; 2]));
             continue;
         }
-        let c = chars.next().expect("validated escape");
+        let c = chars.next()?;
         units.push(match c {
             'u' => {
                 let mut unit = 0;
                 for _ in 0..4 {
-                    unit = unit * 16 + chars.next().expect("hex").to_digit(16).expect("hex") as u16;
+                    unit = unit * 16 + chars.next()?.to_digit(16)? as u16;
                 }
                 unit
             }
@@ -848,7 +868,7 @@ fn string_units(text: &str) -> Vec<u16> {
             _ => c as u16,
         });
     }
-    units
+    Some(units)
 }
 
 #[cfg(test)]

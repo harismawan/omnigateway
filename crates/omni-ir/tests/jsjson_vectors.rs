@@ -186,3 +186,42 @@ fn top_level_string_agrees_with_the_full_parse() {
         assert_eq!(top_level_string(text, "model"), want, "{text}");
     }
 }
+
+/// The extractor is total. Text no parser accepted (every truncation of a
+/// body, with escapes and multi-byte characters cut anywhere) yields a value
+/// or `None`, never a panic, and a member cut short contributes nothing.
+#[test]
+fn top_level_string_never_panics_on_text_that_is_not_json() {
+    use omni_ir::jsjson::top_level_string;
+    let bodies = [
+        r#"{"model":"\ud800 \"é\" \\","x":{"model":["a",{"b":"]}"}]},"model":"😀\\"}"#,
+        r#"{"modél":"�","model":"café\\\\","mod\u0065l":"\u00e9\ud83d\ude00"}"#,
+        r#"{"model":"\u12"}"#,
+        r#"{"model":"\uzzzz"}"#,
+        r#"{"\uzzzz":"a","model":"b"}"#,
+        r#"{"a":[[[{"#,
+        r#"{"a":]]]}},"model":"x"}"#,
+        r#"{,,,"model":"x"}"#,
+        r#"{"model" "x"}"#,
+        r#"{"model"::::"x"}"#,
+        "{\"model\":\"é",
+        "",
+        "{",
+        "\"",
+        "\\",
+    ];
+    for body in bodies {
+        for end in 0..=body.len() {
+            if body.is_char_boundary(end) {
+                let _ = top_level_string(&body[..end], "model");
+            }
+        }
+    }
+    assert_eq!(top_level_string(r#"{"model":"a\"#, "model"), None);
+    assert_eq!(top_level_string(r#"{"model":"a"#, "model"), None);
+    assert_eq!(top_level_string(r#"{"model":"\u12"}"#, "model"), None);
+    assert_eq!(
+        top_level_string(r#"{"model":"kept","model":"cut\"#, "model"),
+        Some("kept".encode_utf16().collect())
+    );
+}
