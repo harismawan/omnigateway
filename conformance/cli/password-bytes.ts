@@ -18,6 +18,10 @@ const cases = [
   [`${prefix}e080800a`],
   [`${prefix}c3`, "280a"],
   [`${prefix}00010409161b0a`],
+  [`efbbbf${prefix}0a`],
+  [`${prefix}c30a`],
+  [`${prefix}c3`, `e4`, `b8ad0a`],
+  [`${prefix}020506070b0c0e0f1011121314151718191a1c1d1e1f0a`],
   ["03"],
 ];
 let count = 0;
