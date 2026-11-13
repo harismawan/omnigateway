@@ -9,4 +9,5 @@ pub mod jsc_json;
 pub mod jsjson;
 pub mod request;
 pub mod stream;
+pub mod text;
 pub mod tokens;
