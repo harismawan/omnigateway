@@ -12,6 +12,11 @@ pub fn base_url(test: &str) -> Option<String> {
     match std::env::var("OMNI_TEST_DATABASE_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
+            assert_ne!(
+                std::env::var("OMNI_TEST_REQUIRE_PG").as_deref(),
+                Ok("1"),
+                "OMNI_TEST_REQUIRE_PG=1 requires OMNI_TEST_DATABASE_URL"
+            );
             println!("skipping {test}: OMNI_TEST_DATABASE_URL unset, Postgres not run");
             None
         }
@@ -59,6 +64,12 @@ impl TestDb {
             .collect();
         let name = format!("omni_rs_{}_{n}_{hint}", std::process::id()).to_lowercase();
         let admin = connect(base).await;
+        let version: String = admin
+            .query_one("SELECT version()", &[])
+            .await
+            .expect("server version")
+            .get(0);
+        println!("Postgres server: {version}");
         admin
             .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
             .await
