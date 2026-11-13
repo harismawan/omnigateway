@@ -427,6 +427,28 @@ async fn a_429_parks_the_credential_with_its_retry_after() {
 }
 
 #[tokio::test]
+async fn concurrent_snapshot_publication_never_regresses_rotation() {
+    let f = fixture(&["c0"]);
+    let h = harness(&f, vec![]);
+    let original = h.deps.holder.load().routing.credentials[0].clone();
+    let mut newer = original.clone();
+    newer.token_version = 2;
+    newer.updated_at = 100;
+    let mut older = original;
+    older.token_version = 1;
+    older.updated_at = 200;
+    std::thread::scope(|scope| {
+        for row in [newer.clone(), older.clone(), newer, older] {
+            let holder = &h.deps.holder;
+            scope.spawn(move || holder.patch_credential(row));
+        }
+    });
+    assert_eq!(h.deps.holder.load().routing.credentials[0].token_version, 2);
+    assert_eq!(h.deps.holder.load().routing.credentials[0].updated_at, 100);
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn refresh_waits_obey_dispatch_deadline() {
     for preemptive in [true, false] {
         let f = fixture(&["c0"]);

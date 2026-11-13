@@ -300,13 +300,19 @@ impl Deps {
     /// Shared OAuth refresh service for preemptive and reactive retries.
     async fn refresh(&self, c: &Credential) -> Result<omni_store::CredentialSecrets, GatewayError> {
         let result = self.refresher.refresh(c).await;
-        if let Ok(Some(row)) = self
+        match self
             .refresher
             .store
             .credential(&self.refresher.key, &c.id)
             .await
         {
-            self.holder.patch_credential(row);
+            Ok(Some(row)) => self.holder.patch_credential(row),
+            Ok(None) => {
+                tracing::warn!(credential_id = %c.id, "refreshed credential disappeared before snapshot publication")
+            }
+            Err(_) => {
+                tracing::warn!(credential_id = %c.id, "credential snapshot publication failed; retaining previous snapshot")
+            }
         }
         result
     }
