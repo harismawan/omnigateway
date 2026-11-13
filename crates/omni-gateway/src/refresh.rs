@@ -123,13 +123,13 @@ impl Refresher {
         let this = self.clone();
         tokio::spawn(async move {
             let period = std::time::Duration::from_secs(60);
-            let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut next = tokio::time::Instant::now() + period;
             loop {
-                ticks.tick().await;
+                tokio::time::sleep_until(next).await;
                 if let Err(error) = this.sweep(Some(&holder)).await {
                     tracing::warn!(code = error.code.as_str(), "token refresh sweep failed");
                 }
+                next = next_sweep(next, tokio::time::Instant::now());
             }
         })
     }
@@ -300,6 +300,17 @@ impl Refresher {
     }
 }
 // X2: the shared integer carrier truncates fractions and saturates infinities.
+// TS setInterval keeps its phase; callbacks while `running` simply return.
+fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> tokio::time::Instant {
+    let period = std::time::Duration::from_secs(60);
+    let mut next = previous + period;
+    while next <= now {
+        next += period;
+    }
+    next
+}
+
+// X2: the shared integer carrier truncates fractions and saturates infinities.
 // SQLite binds NaN as NULL; preserving that avoids repeated preemptive refresh.
 #[allow(clippy::cast_possible_truncation)]
 fn persisted_expiry(expiry: Option<f64>) -> Option<i64> {
@@ -348,6 +359,21 @@ fn js_text(value: &omni_ir::jsjson::JsValue) -> String {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn long_sweep_skips_elapsed_interval_callbacks() {
+        let start = tokio::time::Instant::now();
+        let first = start + std::time::Duration::from_secs(60);
+        tokio::time::advance(std::time::Duration::from_secs(130)).await;
+        assert_eq!(
+            next_sweep(first, tokio::time::Instant::now()),
+            start + std::time::Duration::from_secs(180)
+        );
+        tokio::time::advance(std::time::Duration::from_secs(50)).await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start + std::time::Duration::from_secs(180)
+        );
+    }
     #[test]
     fn expiry_carrier_preserves_nonfinite_routing() {
         assert_eq!(persisted_expiry(Some(f64::NAN)), None);
