@@ -1,9 +1,16 @@
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { mkdtempSync } from "node:fs";
+import { copyFileSync, mkdtempSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 
 const root = mkdtempSync("/tmp/opencode/e1-e5/password-bytes-");
+const fixture = join(root, "fixture.db");
+const initial = await createStore({
+  path: fixture,
+  encryptionKey: await deriveKey("password-golden-secret"),
+});
+initial.close();
 const prefix = Buffer.from("correct-horse-battery").toString("hex");
 const cases = [
   [`${prefix}0a`],
@@ -29,7 +36,8 @@ for (const parts of cases) {
   const results = [];
   let tsHash = "";
   for (const rust of [false, true]) {
-    const dbpath = join(root, rust ? "rust.db" : "ts.db");
+    const dbpath = join(root, `${count}-${rust ? "rust" : "ts"}.db`);
+    copyFileSync(fixture, dbpath);
     const cmd = rust
       ? [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]
       : ["bun", "--no-env-file", resolve("conformance/cli/password-reader-seam.ts")];
@@ -58,12 +66,29 @@ for (const parts of cases) {
       },
     );
     const result = JSON.parse(await new Response(p.stdout).text());
+    assert.equal(result.code, parts[0] === "03" ? 1 : 0);
     assert.equal(await new Response(p.stderr).text(), "");
     assert.equal(await p.exited, 0);
     const db = new Database(dbpath);
     const row = db.query("SELECT value FROM settings WHERE key='adminPasswordHash'").get() as {
       value: string;
     } | null;
+    const state = (
+      db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {
+        name: string;
+      }[]
+    ).map(({ name }) => [
+      name,
+      db
+        .query(`SELECT * FROM "${name}"`)
+        .all()
+        .map((r) => {
+          const value = r as Record<string, unknown>;
+          return name === "settings" && value.key === "adminPasswordHash"
+            ? { ...value, value: "<verified hash>" }
+            : value;
+        }),
+    ]);
     db.close();
     // Compare hashes by checking both against the independently decoded TS input.
     let line = "";
@@ -79,9 +104,9 @@ for (const parts of cases) {
       assert(row);
       assert(await Bun.password.verify(line.trim(), row.value));
       if (!rust) tsHash = row.value;
-    }
+    } else assert.equal(row, null);
     if (rust) assert(result.restored, "terminal restored");
-    results.push({ bytes: result.bytes, code: result.code, raw: result.raw });
+    results.push({ bytes: result.bytes, code: result.code, raw: result.raw, state });
   }
   await Bun.write(join(root, `${count}.json`), JSON.stringify({ parts, results, tsHash }));
   assert.deepEqual(results[1], results[0]);
@@ -102,7 +127,7 @@ for (const rust of [false, true]) {
       "--root",
       root,
       "--db",
-      join(root, "mismatch.db"),
+      join(root, `mismatch-${rust}.db`),
       "admin",
       "set-password",
     ],

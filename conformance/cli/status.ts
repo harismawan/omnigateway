@@ -1,7 +1,16 @@
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
+import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 
 const root = mkdtempSync("/tmp/opencode/e1-e5/status-");
 const state = join(root, "state", "omnigateway");
@@ -11,6 +20,21 @@ const commands = [
   [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")],
 ];
 let count = 0;
+const initial = await createStore({
+  path: join(root, "omnigateway.db"),
+  encryptionKey: await deriveKey("status-golden-secret"),
+});
+initial.close();
+function dump() {
+  const db = new Database(join(root, "omnigateway.db"));
+  const state = (
+    db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {
+      name: string;
+    }[]
+  ).map(({ name }) => [name, db.query(`SELECT * FROM "${name}"`).all()]);
+  db.close();
+  return state;
+}
 for (const seeded of [false, true]) {
   if (seeded) {
     const db = new Database(join(root, "omnigateway.db"));
@@ -30,12 +54,17 @@ for (const seeded of [false, true]) {
     db.run("INSERT INTO settings VALUES ('adminPasswordHash','')");
     db.close();
   }
+  const before = dump();
+  copyFileSync(join(root, "omnigateway.db"), join(root, "fixture.db"));
   for (const pid of [undefined, String(process.pid), "999999999", "garbage"])
     for (const bad of [false, true])
       for (const json of [false, true])
         for (const tty of [false, true]) {
           const results = [];
           for (const cmd of commands) {
+            for (const suffix of ["", "-wal", "-shm"])
+              rmSync(join(root, `omnigateway.db${suffix}`), { force: true });
+            copyFileSync(join(root, "fixture.db"), join(root, "omnigateway.db"));
             rmSync(join(state, "gateway.pid"), { force: true });
             if (pid !== undefined) writeFileSync(join(state, "gateway.pid"), pid);
             const args = [...cmd, "--root", root, "status", ...(json ? ["--json"] : [])];
@@ -59,6 +88,25 @@ for (const seeded of [false, true]) {
               err: await new Response(p.stderr).text(),
               code: await p.exited,
             });
+            const result = results.at(-1);
+            assert(result);
+            assert.equal(result.code, 0);
+            const nested = tty ? JSON.parse(result.out) : null;
+            if (tty) assert.equal(nested.code, 0);
+            const output = tty ? Buffer.from(nested.bytes, "hex").toString() : result.out;
+            if (json) {
+              const data = JSON.parse(output);
+              assert.equal(data.process.running, pid === String(process.pid));
+              assert.equal(data.adminConfigured, seeded && !bad);
+              assert.equal(data.credentials.length, bad || !seeded ? 0 : 2);
+              assert.equal(data.storeError === null, !bad);
+            } else {
+              assert(output.includes(pid === String(process.pid) ? "running" : "stopped"));
+            }
+            assert.deepEqual(dump(), before);
+            const retained = pid !== undefined && pid !== "999999999";
+            assert.equal(existsSync(join(state, "gateway.pid")), retained);
+            if (retained) assert.equal(readFileSync(join(state, "gateway.pid"), "utf8"), pid);
           }
           await Bun.write(
             join(root, `${count}.json`),
@@ -164,5 +212,15 @@ for (const state of ["active", "inactive", "failed"])
     }
     assert.deepEqual(results[1], results[0]);
     systemdCount++;
+    for (const result of results) {
+      assert.equal(result.code, 0);
+      assert.equal(result.err, "");
+      if (json) {
+        const data = JSON.parse(result.out);
+        assert.equal(data.process.state, state);
+        assert.equal(data.process.running, state === "active");
+        assert.equal(data.process.pid, 123);
+      } else assert(result.out.includes(state === "active" ? "running" : "stopped"));
+    }
   }
 console.log(`PASS ${systemdCount} systemd supervisor comparisons`);
