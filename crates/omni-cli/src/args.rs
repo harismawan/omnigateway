@@ -157,6 +157,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 flags.insert(name.into(), value);
             }
             name if matches!(name, "json" | "no-color" | "yes" | "help" | "version")
+                || (command == "status" && name == "system")
                 || (command.starts_with("setup-") && name == "dry-run")
                 || (command == "models-put" && name == "alias")
                 || (command == "create" && matches!(name, "smart-routing" | "no-bodies"))

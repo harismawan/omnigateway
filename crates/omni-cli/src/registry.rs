@@ -330,6 +330,9 @@ pub fn command_help(name: &str) -> String {
 }
 
 pub fn implemented(name: &str) -> Option<String> {
+    if name == "status" {
+        return Some(name.into());
+    }
     if name == "admin set-password" {
         return Some("admin-set-password".into());
     }

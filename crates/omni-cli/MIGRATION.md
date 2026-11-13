@@ -15,7 +15,8 @@ always empty.
 Terminal input uses safe rustix termios with automatic restoration. Password changes use the
 shared Argon2id implementation; existing gateway sessions remain alive until
 restart, matching TS. Multi-question terminal flow uses the authorized divergence
-above. `status` and database commands remain unavailable.
+above. `status` reports supervisor state, credentials and quota in human/JSON
+form. Database commands remain unavailable.
 
 All five plugin commands exit 1 with `plugins are not supported in this release`
 on stderr, also under `--json` (the TS runner has no JSON error envelope).

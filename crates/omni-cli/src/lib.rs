@@ -10,6 +10,7 @@ mod password;
 mod registry;
 mod settings;
 mod setup;
+mod status;
 use std::{io::IsTerminal, process::ExitCode};
 
 pub fn run(argv: Vec<String>) -> ExitCode {
@@ -50,7 +51,9 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
-                if command == "admin-set-password" {
+                if command == "status" {
+                    status::run(&flags).map_err(|e| (1, e))
+                } else if command == "admin-set-password" {
                     password::run(&flags).map_err(|e| (1, e))
                 } else if command.starts_with("setup-") {
                     setup::run(&command, &flags).map_err(|e| (1, e))

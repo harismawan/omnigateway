@@ -23,6 +23,7 @@ fn absolute(base: &Path, value: &str) -> PathBuf {
 /// Resolving prints the ambient-database warning, as TS does before a command
 /// runs; opening the store is a separate, later step.
 pub struct Context {
+    pub env: HashMap<String, String>,
     pub root: PathBuf,
     path: PathBuf,
     config: Result<Config, omni_control::config::ConfigError>,
@@ -103,7 +104,12 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
             path.display()
         );
     }
-    Ok(Context { root, path, config })
+    Ok(Context {
+        root,
+        path,
+        config,
+        env,
+    })
 }
 
 impl Context {
