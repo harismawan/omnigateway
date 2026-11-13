@@ -4,6 +4,8 @@ node_modules
 *.db-shm
 .env
 .git
+target
+.superpowers
 docs
 graphify-out
 apps/dashboard/dist
