@@ -1,5 +1,69 @@
 # A6 implementation report
 
+## Round 3 checkpoint (base d02bae94): NOT complete-for-review
+
+Evidence `/tmp/opencode/a6-round3/`. PostgreSQL gateway wiring is explicitly
+deferred to **D4**, per the revised instruction. D4 must select PgStore from
+OMNI_DATABASE_URL in boot, AdminAuth/control operations, snapshot build/refresh,
+miss reads and completion writer selection. Then run these credential HTTP
+routes and restart cross-read both directions on the live PG database. A6's
+previous live-PG mutation test remains the actual PG coverage; no new HTTP PG
+coverage is claimed and no D4 boot plumbing was added.
+
+SQLite restart cross-read is now an explicit driver configuration:
+`credential-crossread`. Each original implementation creates encrypted accounts
+and a model, routes, stops cleanly, and launches the OTHER binary on the exact
+same root/database. It authenticates again, reads metadata and routes. The
+recording upstream requires the exact decrypted Bearer secret. Both restarted
+process stdout/stderr streams are included in secret scans. This extends existing
+green behavior; the initial cross-read-only run passed 125 comparisons and is
+not claimed as implementation RED.
+
+Health matrix includes active windows, exhausted/idle windows, negative ceiling,
+unknown reset, rolled-over and stale readings, fractional arithmetic, and health
+rows with fractional, text and null scalar columns. The fixture shares one fixed
+set of observation times between binaries; no computed burn values are masked.
+RED initially found a Rust boot refusal on fractional consecutive_failures;
+`health-red.log`. The admin-focused fixture then inserts that row AFTER boot:
+`health-red-http.log` demonstrates the HTTP mismatch independently. Admin health
+now projects health columns without narrowing scalar types, preserving TS JSON.
+This does not fix boot/refresher handling of unusual health scalar types.
+
+Remaining exact-identity work: credential provider_data endpointId is still
+serde-backed, and snapshot isolation omits a row containing lone surrogates.
+Next RED should create distinct `\\ud800`, `\\udc00` and U+FFFD endpoints, create
+three model targets and assert each selects only its matching credential before
+and after restart. Carry exact UTF-16 on BOTH Target.endpoint_id and credential
+endpoint identity; compare those in omni-router::filters::serves_target. Do not
+map surrogate strings to U+FFFD or merely omit them. JSON-encoded provider/target
+names also need exact comparison wherever SQL binding has not already converted
+them to UTF-8. Broader quota scalar coercion and unusual-health boot isolation
+remain open. Final gates for this checkpoint follow below.
+
+Cross-read scope: the setup retains the same configured encryption key and root;
+neither ciphertext nor metadata is rewritten between stopping the first process
+and starting the second. Session tokens are newly minted after restart. The
+upstream's exact Authorization assertion establishes decrypted secret use, rather
+than inferring decryption merely from a successful metadata GET. This is SQLite
+only. Health scalar fixtures are deliberately written after startup; they are
+not evidence that either boot or routing refresh accepts those values.
+
+Final checkpoint gates (copied binaries and SHA256 in `binaries.sha256`):
+- Final health corpus against pre-fix Rust: **8 equal / 3 failures**, all three
+  HTTP health answers (`health-red-final.log`). Final full admin driver:
+  **1128 equal / 2 expected / 0 failures**, including both restart directions and
+  all health projections (`admin-routes.log`).
+- workspace **1038 passed / 0 failed / 7 ignored** (`workspace.log`).
+- clippy `--workspace --all-targets -- -D warnings`, fmt, Biome all clean.
+- admin-auth **212 equal / 4 expected / 0 failures**; surface **606 equal /
+  61 expected / 0 failures**; run.ts **all rows equal**.
+- No new PostgreSQL container in this round. Prior live-PG mutation proof remains
+  in the follow-up evidence. D4 deferral is intentional, not a skipped PG pass.
+
+Status remains **NOT complete-for-review**, principally because exact surrogate
+routing is still unimplemented. Resume with its three-endpoint RED specified
+above, then quota scalar coercion and snapshot health-row isolation if in scope.
+
 ## Follow-up: shared mutations and toggle logs (base d2757acb)
 
 Evidence: `/tmp/opencode/a6-followup/`. A6 remains incomplete. This increment

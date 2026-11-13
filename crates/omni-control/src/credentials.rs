@@ -83,7 +83,29 @@ pub fn list(s: &SqliteStore) -> Result<String> {
     )])))
 }
 pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
-    let health = s.list_health()?;
+    let mut statement = s
+        .connection()
+        .prepare("SELECT * FROM credential_health")
+        .map_err(Failure::internal)?;
+    let mut cursor = statement.query([]).map_err(Failure::internal)?;
+    let mut health = Vec::new();
+    while let Some(row) = cursor.next().map_err(Failure::internal)? {
+        let mut fields = Vec::new();
+        for (name, column) in [
+            ("credentialId", "credential_id"),
+            ("model", "model"),
+            ("breakerState", "breaker_state"),
+            ("consecutiveFailures", "consecutive_failures"),
+            ("openedAt", "opened_at"),
+            ("rateLimitedUntil", "rate_limited_until"),
+        ] {
+            fields.push((
+                name,
+                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+            ));
+        }
+        health.push(obj(fields));
+    }
     let quota = omni_store::quota::list(s.connection())?;
     let settings = s.get_settings()?;
     let credentials = rows(s, None)?;
@@ -164,10 +186,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         .collect();
     let parse = |raw: String| crate::operator_json::parse(&raw).map_err(Failure::internal);
     Ok(stringify(&obj(vec![
-        (
-            "health",
-            parse(serde_json::to_string(&health).map_err(Failure::internal)?)?,
-        ),
+        ("health", JsValue::Array(health)),
         (
             "quota",
             parse(serde_json::to_string(&quota).map_err(Failure::internal)?)?,

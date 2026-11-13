@@ -74,11 +74,13 @@ const children: Subprocess[] = [];
 const credentialUpstream = Bun.serve({
   hostname: "127.0.0.1",
   port: 18444,
-  fetch: () =>
-    new Response(
-      'data: {"id":"chatcmpl-a6","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"chatcmpl-a6","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n',
-      { headers: { "content-type": "text/event-stream" } },
-    ),
+  fetch: (request) =>
+    request.headers.get("authorization") !== "Bearer secret-a6-2"
+      ? new Response("wrong credential", { status: 401 })
+      : new Response(
+          'data: {"id":"chatcmpl-a6","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"chatcmpl-a6","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
 });
 process.on("exit", () => {
   for (const c of children) if (c.exitCode === null) c.kill("SIGKILL");
@@ -459,6 +461,7 @@ type HttpStep = {
 };
 type Step =
   | HttpStep
+  | { kind: "restart-other"; name: string }
   | { kind: "credential-routing"; name: string; enabled: boolean }
   /** `n` copies of `step` at once; statuses compared as a multiset, DB after. */
   | {
@@ -1301,7 +1304,51 @@ const ODD_SQL = [
 ];
 
 type Config = { label: string; db: () => string; steps: () => Step[] };
+let healthSeed: string | undefined;
 const configs: Config[] = [
+  {
+    label: "credential-health",
+    db: () => {
+      if (healthSeed) return healthSeed;
+      const now = Date.now();
+      const sql = [...CREDS_SQL];
+      for (const [i, used, limit, reset, observed, window] of [
+        [0, 25, 100, now + 3600000, now, 7200000],
+        [1, 100, 100, now + 3600000, now, 7200000],
+        [2, 0, 100, now + 3600000, now, 7200000],
+        [3, 25, -1, now + 3600000, now, 7200000],
+        [4, 25, null, null, now, null],
+        [5, 25, 100, now - 10000, now, 7200000],
+        [6, 25, 100, now + 3600000, now - 3600000, 7200000],
+        [7, 0.25, 1.5, now + 3600000, now + 0.5, 7200000],
+      ])
+        sql.push(
+          `INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES('cred-custom','w${i}',0,${used},${limit ?? "NULL"},${reset ?? "NULL"},${observed},${window ?? "NULL"})`,
+        );
+      healthSeed = db("credential-health", sql);
+      return healthSeed;
+    },
+    steps: () => [
+      {
+        kind: "sql",
+        name: "fractional health after boot",
+        sql: ["INSERT INTO credential_health VALUES('cred-custom','m','unknown',1.5,2.25,3.5)"],
+      },
+      as("admin", "GET", "/api/credentials/health"),
+      as("viewer", "GET", "/api/credentials/health"),
+      {
+        kind: "sql",
+        name: "text health scalar",
+        sql: [
+          "UPDATE credential_health SET consecutive_failures='not-a-number',opened_at='unknown',rate_limited_until=NULL",
+        ],
+      },
+      {
+        ...as("admin", "GET", "/api/credentials/health"),
+        name: "health preserves text and null scalars",
+      },
+    ],
+  },
   {
     label: "credentials",
     db: () =>
@@ -1511,6 +1558,26 @@ const configs: Config[] = [
 ];
 
 // ------------------------------------------------------------ running
+const credentialConfig = configs.find((c) => c.label === "credentials");
+if (!credentialConfig) throw new Error("credential config missing");
+configs.push({
+  label: "credential-crossread",
+  db: credentialConfig.db,
+  steps: () => {
+    const all = credentialConfig.steps();
+    const end = all.findIndex((s) => s.name === "created credential routes");
+    return [
+      ...all.slice(0, end + 1),
+      { kind: "restart-other", name: "restart other implementation" },
+      as("admin", "GET", "/api/credentials"),
+      {
+        kind: "credential-routing",
+        name: "other implementation decrypts and routes",
+        enabled: true,
+      },
+    ];
+  },
+});
 
 const TRANSPORT_ERROR = "TRANSPORT-ERROR";
 
@@ -1561,7 +1628,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     OMNI_STATIC_DIR: join(root, "no-dashboard"),
   };
   const logFile = join(out, `${cfg.label}-${label}.log`);
-  const proc = Bun.spawn([binary], {
+  let proc = Bun.spawn([binary], {
     cwd: root,
     env: e,
     stdout: Bun.file(logFile),
@@ -1656,6 +1723,27 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       seen(name, method, x);
     };
     for (const step of cfg.steps()) {
+      if (step.kind === "restart-other") {
+        proc.kill("SIGTERM");
+        await proc.exited;
+        const other = label === "ts" ? flags.rust : flags.ts;
+        const restartLog = join(out, `${cfg.label}-${label}-restart.log`);
+        proc = Bun.spawn([other as string], {
+          cwd: root,
+          env: e,
+          stdout: Bun.file(restartLog),
+          stderr: Bun.file(`${restartLog}.err`),
+        });
+        children.push(proc);
+        await waitHealthy();
+        cookies.admin = await login(PASSWORD, undefined, seen);
+        cookies.viewer = await login(VIEWER, "viewer", seen);
+        results.set(step.name, {
+          text: cookies.admin ? "restarted and authenticated" : "restart login failed",
+          db: dump(file, m),
+        });
+        continue;
+      }
       if (step.kind === "credential-routing") {
         const started = Date.now();
         let ok = false;
@@ -1838,6 +1926,12 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
   for (const [stream, f] of [
     ["stdout", logFile],
     ["stderr", `${logFile}.err`],
+    ...(cfg.label === "credential-crossread"
+      ? ([
+          ["restart stdout", join(out, `${cfg.label}-${label}-restart.log`)],
+          ["restart stderr", join(out, `${cfg.label}-${label}-restart.log.err`)],
+        ] as const)
+      : []),
   ] as const) {
     const text = readFileSync(f);
     for (const raw of ["secret-a6-1", "secret-a6-2", "secret-a6-3"]) {
