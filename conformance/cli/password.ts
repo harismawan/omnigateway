@@ -70,6 +70,10 @@ for (const json of [false, true])
             err: await new Response(p.stderr).text(),
             code: await p.exited,
           };
+          assert.equal(
+            tty ? JSON.parse(result.out).code : result.code,
+            mismatch || password.trim().length < 12 ? 1 : 0,
+          );
           const d = new Database(join(root, "db"));
           const rows = d.query("SELECT * FROM settings ORDER BY key").all() as {
             key: string;
