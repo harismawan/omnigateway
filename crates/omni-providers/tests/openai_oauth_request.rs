@@ -45,7 +45,6 @@ fn oauth_codec_matches_frozen_ts() {
                     .map(str::to_owned),
                 provider_data: serde_json::from_value(row["credentials"]["providerData"].clone())
                     .unwrap(),
-                ..Default::default()
             }
         } else {
             Credentials {
