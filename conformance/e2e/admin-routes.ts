@@ -539,6 +539,7 @@ type HttpStep = {
 type Step =
   | { kind: "client-summary"; name: string }
   | { kind: "client-logs"; name: string }
+  | { kind: "client-usage"; name: string }
   | { kind: "client-session"; name: string }
   | { kind: "logs-walk"; name: string }
   | { kind: "usage-traffic"; name: string }
@@ -1392,6 +1393,7 @@ const nodesNow = Date.now();
 const configs: Config[] = [
   ...["0", "345", undefined].map(dayOffset => ({label:`client-summary-${dayOffset ?? "host"}`, dayOffset, db:()=>seedDb, steps:():Step[]=>[{kind:"client-summary",name:"three-key summary and isolation"}]})),
   {label:"client-logs",db:()=>seedDb,steps:():Step[]=>[{kind:"client-logs",name:"scoped projected logs"}]},
+  {label:"client-usage",db:()=>seedDb,steps:():Step[]=>[{kind:"client-usage",name:"scoped usage"}]},
   { label: "client-login", db: () => seedDb, steps: () => [
     ...["null", "[]", "1", '"key"', "{}", '{"key":12}', '{"key":null}', '{"key":"unknown"}'].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 401})),
     ...["", "{", "{bad}"].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 400})),
@@ -2460,6 +2462,26 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     };
     let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
+      if (step.kind === "client-usage") {
+        const { fixture, identities, check, attacks, callers } = await clientFixture();
+        const forbidden = [identities[0]!.marker, identities[2]!.marker, identities[0]!.id, identities[2]!.id, "secret-credential-"];
+        const queries = [...attacks, "groupBy=credential", "splitBy=credential", "grain=bad", "groupBy=bad", "grain=daily&groupBy=hour", "grain=daily&groupBy=day", "groupBy=provider", "groupBy=requestedModel", "groupBy=hour", "since=101", "since=bad", "until=bad", "groupBy=apiKey&splitBy=apiKey", "groupBy=credential&groupBy=apiKey", "%67roupBy=apiKey", "GroupBy=credential", "splitBy=model&splitBy=apiKey", "%73plitBy=apiKey"];
+        for (const [who,cookie] of callers) for (const [i,query] of queries.entries()) {
+          const authorized = ["client-A","client-B","client-C"].includes(who);
+          const invalid = ["groupBy=credential","splitBy=credential","grain=bad","groupBy=bad","grain=daily&groupBy=hour"].includes(query);
+          const answer = await exchange({target:`/api/client/usage?${query}&until=1000`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
+          check(`${who} usage ${i}`,answer,authorized?(invalid?400:200):401,who==="client-B"?forbidden:[]);
+          if(who==="client-B" && answer.status===200 && !query.includes("grain=daily")) {
+            const rows=JSON.parse(answer.body.toString());
+            const total=rows.reduce((sum:number,row:{requests:number})=>sum+row.requests,0);
+            if(total!==(query==="since=101"?2:3)) deadlineFailures.push(`B usage ${i}: own total ${total}`);
+          }
+        }
+        fixture.run("UPDATE api_keys SET expires_at=1 WHERE id='client-C'");
+        check("usage expired after login",await exchange({target:"/api/client/usage?grain=bad",headers:[["cookie",`omni_admin=${identities[2]!.cookie}`]]}),401);
+        fixture.close();
+        continue;
+      }
       if (step.kind === "client-logs") {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
         const forbidden = [identities[0]!.marker, identities[2]!.marker, "secret-credential-"];

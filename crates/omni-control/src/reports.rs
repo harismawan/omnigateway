@@ -33,6 +33,35 @@ fn dimension(grain: &str, value: &str) -> Result<&'static str, Failure> {
 
 /// `GET /api/usage`'s body: `{"rows":[…]}`, as `JSON.stringify` writes it.
 pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<String, Failure> {
+    scoped_usage(store, query, now, None)
+}
+
+/// Only the five public filters are forwarded; identity comes from the session.
+pub fn client_usage(
+    store: &SqliteStore,
+    query: &str,
+    now: f64,
+    id: &str,
+) -> Result<String, Failure> {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(
+            url::form_urlencoded::parse(query.as_bytes()).filter(|(k, _)| {
+                matches!(
+                    k.as_ref(),
+                    "grain" | "groupBy" | "splitBy" | "since" | "until"
+                )
+            }),
+        )
+        .finish();
+    scoped_usage(store, &query, now, Some(id))
+}
+
+fn scoped_usage(
+    store: &SqliteStore,
+    query: &str,
+    now: f64,
+    scope: Option<&str>,
+) -> Result<String, Failure> {
     let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
     let get = |name: &str| {
         pairs
@@ -49,6 +78,11 @@ pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<String, Failu
     }
     let key = dimension(grain, get("groupBy").unwrap_or("model"))?;
     let split = get("splitBy").map(|s| dimension(grain, s)).transpose()?;
+    if scope.is_some() && (key == "credential_id" || split == Some("credential_id")) {
+        return Err(Failure::bad(
+            "this dimension is not available on this surface",
+        ));
+    }
     let id = |name: &str, message: &str| -> Result<Option<String>, Failure> {
         get(name)
             .map(|v| {
@@ -67,7 +101,9 @@ pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<String, Failu
             .transpose()
     };
     let credential = id("credentialId", "credentialId must be an account id")?;
-    let api_key = id("apiKeyId", "apiKeyId must be a key id")?;
+    let api_key = scope
+        .map(str::to_owned)
+        .or(id("apiKeyId", "apiKeyId must be a key id")?);
     let number = |name: &str, default: f64| {
         get(name)
             .filter(|s| !trim(s).is_empty())
@@ -75,7 +111,11 @@ pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<String, Failu
             .filter(|n| n.is_finite())
             .unwrap_or(default)
     };
-    let mut out = String::from("{\"rows\":");
+    let mut out = if scope.is_some() {
+        String::new()
+    } else {
+        String::from("{\"rows\":")
+    };
     omni_store::reports::usage_json(
         store,
         UsageQuery {
@@ -89,7 +129,9 @@ pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<String, Failu
         },
         &mut out,
     )?;
-    out.push('}');
+    if scope.is_none() {
+        out.push('}');
+    }
     Ok(out)
 }
 pub fn nodes(store: &omni_store::SqliteStore, now: i64, node_id: &str) -> Result<String, Failure> {
