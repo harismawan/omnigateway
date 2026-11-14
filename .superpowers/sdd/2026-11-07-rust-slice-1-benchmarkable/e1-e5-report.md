@@ -1,5 +1,23 @@
 ## Database write commands
 
+**db5 checkpoint: restore group 1 only; commit `9365d16e`. Canonical detailed report updated at `/home/homebrew/code/omnigateway/.superpowers/sdd/2026-11-07-rust-slice-1-benchmarkable/e1-e5-report.md`.**
+
+| Command | Current status |
+|---|---|
+| backup / vacuum / clear-bodies | implemented; 24 / 4 / 10 cases |
+| restore | group 1 complete: 3 cases; groups 2–5 pending |
+| migrate | unavailable |
+
+- Shared service-status gate; missing ID exit 2 and running gateway messages with/without PID match TS. Registry/help updated. Each differential case verifies live/sidecar/snapshot bytes and directory listing unchanged.
+- Red-first missing-ID case failed on exit, then wording; PID case caught numeric representation bug. Supervisor case not independently run red. Green: 3 comparisons, pinned exit 2=1 / exit 1=2. No TS refusal-state changes observed; nonempty WAL not injected.
+- Candidate-validation failure row remains untested; undo/staging/swap/reopen/metadata rows belong to swap increment. All stopped-gateway inputs currently unavailable, including dry-run; no preview/prompt or Rust-only yes test yet.
+- OMNI_PORT=invalid still passes these early-gate cases; negative disturbance pending group 2 database-open case.
+- Code binary `9365d16eac4c60cf4bd3ee93740b4bd914b6bf8a`: `/tmp/opencode/e1-e5/db5-omni-final`, SHA256 `9d3b7b8ba053677ecd772782cc3e5b4b0ba3a16eafec911cf405c6f19d307c04`.
+- Offline tests 27 passed; clippy -D warnings/fmt passed. Foreground latest matrix plus restore 32/32 exit=0, `/tmp/opencode/e1-e5/db5-verified-summary.txt`. Logs db5-*; fixtures removed.
+- Next: group-2 refusal cases red first (absent/separator/traversal/outside symlink/directory/empty); pass positional ID into database.rs, inspect snapshotPath/store inspection, implement control validation under exclusive guard. Then candidate integrity/schema, preview and confirmation; yes must remain unavailable with Rust-only invariance test. Swap follows only afterward, starting validation recheck/undo/staging failure injections.
+
+### Previous checkpoint (historical)
+
 **Partial checkpoint (db2/A7). A1–A4 and A7 complete; A5 partial; B and A6 open. Next: finish A5 deterministic CLI collision and live-WAL refusal coverage, then B, A6. db restore: not started.**
 
 Review I1: `1bb8836a` removes the ambient recursion marker and asserts/removes exactly one automatic import from the generated child. The reviewer's `OMNI_CONFIG_GATE_CHILD=1` command previously passed 302 without its negative child (`db-i1-before.log`); afterward it passes 302 plus seven diagnostic checks and the expected cluster-category child failure (`db-i1-after.log`, `db-i1-after-child.log`); normal invocation also passes (`db-i1-normal.log`, `db-i1-normal-child.log`). The two round-3 wording qualifications below are corrected.
