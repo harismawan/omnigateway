@@ -2,6 +2,51 @@
 
 ## Fix round 1: measured integrity
 
+### Recording mechanism and window correction
+
+The oha 1.16.0 source prints results before `db::store`. Local 100ms file
+polling at 64 and one client confirmed no SQLite file during the load, and a
+post-load write. Piped stdout JSON is buffered until exit, so its arrival is
+**not** a safe boundary. With `--output report.json`, a complete report file is
+observable before SQLite recording. `scripts/bench-recording-observe.ts OUT`
+reproduces three alternating recording/no-recording pairs per concurrency.
+
+Matrix mode now polls the explicit report file every 2ms and samples the
+gateway/stops its verifier as soon as the complete report is observed, instead
+of waiting for oha to exit. This includes oha's statistics/JSON serialization
+and scheduler/poll latency, not the subsequent SQLite write. Observed interval
+and oha-reported duration are retained; deviation above 250ms fails integrity.
+This is a bounded approximation, not an exact per-request end timestamp.
+
+At that boundary the same SQLite row-count/state wait starts for both gateways,
+independently of oha process exit. `cpuMsPerRequest` ends at the load boundary;
+`cpuMsPerRequestDrained` ends when all measured load-key rows are done. The wait
+polls every 10ms with a 30s deadline; timeout fails the scenario. Both numbers
+include concurrent verifier overhead. This drain count/state check is followed
+by the existing semantic status/usage checks. Default mode retains the original
+sampling, CLI and JSON path.
+
+Matrix provenance captures effective OMNI_*/MIMALLOC_* values from the running
+gateway's `/proc/PID/environ`; key/token/secret/password/credential-like names
+are masked as `<set>`. Rust's production launcher defaults
+`MIMALLOC_PURGE_DELAY=1`; this is not allocator-neutral. Both environments are
+disclosed by the comparison. Strict comparison still refuses path/allocator
+differences; cross-side environment compatibility remains unresolved and final
+two-round comparisons are not yet verified.
+
+By default one gateway serves scenarios in order; later RSS includes prior
+workload history. `--fresh-process` restarts before every matrix scenario and
+checks the effective environment remains unchanged. It retains the seeded DB
+and upstream processes. Final full-matrix/default/fault reruns and item 5
+safeguards remain pending; measurements are not reportable yet.
+
+Recording-on/off reported durations were close to the requested four seconds
+in the sanity runs. Request-count ranges overlapped, but c1 recorded counts
+were somewhat lower in one set. On this busy host that does not prove zero
+perturbation or establish recording cost. Headroom at one client is no longer
+used as an acceptance criterion. Raw evidence retains count/duration and file
+timeline; no gateway performance finding is inferred.
+
 Comparison safeguard update: ratios require matching duration, warmup, CPU sets,
 rate, harness commit, recorded environment, scenario concurrency and request
 body SHA256, both within and between sides. Missing metadata is rejected with

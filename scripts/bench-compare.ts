@@ -6,6 +6,7 @@ type Metrics = {
   rps: number;
   latencyMs: { p50: number; p99: number };
   cpuMsPerRequest: number;
+  cpuMsPerRequestDrained?: number;
   rssPeakMb: number;
 };
 export type Round = {
@@ -29,6 +30,11 @@ const metrics = [
   { name: "p50 ms", higher: false, get: (m: Metrics) => m.latencyMs.p50 },
   { name: "p99 ms", higher: false, get: (m: Metrics) => m.latencyMs.p99 },
   { name: "CPU ms/req", higher: false, get: (m: Metrics) => m.cpuMsPerRequest },
+  {
+    name: "CPU ms/req through row drain",
+    higher: false,
+    get: (m: Metrics) => m.cpuMsPerRequestDrained ?? Number.NaN,
+  },
   { name: "RSS peak MiB", higher: false, get: (m: Metrics) => m.rssPeakMb },
 ];
 function spread(values: number[]) {
@@ -114,6 +120,9 @@ export function compare(base: Round[], head: Round[]): string {
   const header = [
     `Base SHA256: \`${hash(base)}\``,
     `Head SHA256: \`${hash(head)}\``,
+    `Effective base environment: ${JSON.stringify(base[0]?.provenance.environment)}`,
+    `Effective head environment: ${JSON.stringify(head[0]?.provenance.environment)}`,
+    "Rust's production launcher defaults MIMALLOC_PURGE_DELAY=1; this is not an allocator-neutral comparison. Environments must match explicitly; differences are refused.",
     "",
     "Values: successful/total rounds; median [min–max]. Ratios are head/base. Range overlap is descriptive, not a significance test. Directional labels require at least three successful observations per side. RSS is per-scenario peak resident memory.",
     "",

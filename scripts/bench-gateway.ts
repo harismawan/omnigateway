@@ -93,6 +93,7 @@ import { cpus, loadavg, release, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Subprocess } from "bun";
+import { processEnvironment } from "./bench-environment";
 import {
   type MatrixMeta,
   matches,
@@ -102,6 +103,7 @@ import {
   type Verdict,
 } from "./bench-matrix";
 import { seedOAuth } from "./bench-oauth";
+import { readOhaReport } from "./bench-oha-report";
 import {
   setupViaApi as apiSetup,
   RECOVERY_LATENESS_MS,
@@ -126,6 +128,7 @@ const { values: flags } = parseArgs({
     boots: { type: "string", default: "5" },
     only: { type: "string" },
     matrix: { type: "boolean", default: false },
+    "fresh-process": { type: "boolean", default: false },
     label: { type: "string" },
     cluster: { type: "boolean", default: false },
     replicas: { type: "string", default: "1" },
@@ -657,6 +660,7 @@ type OhaJson = {
 };
 
 type ScenarioResult = {
+  cpuMsPerRequestDrained?: number | null;
   integrity?: { errors: string[]; verifier: unknown; sizes?: unknown };
   name: string;
   what: string;
@@ -931,8 +935,28 @@ async function oha(
     const file = join(root, `${scenario.name}.oha.db`);
     rmSync(file, { force: true });
     args.push("--db-url", file);
+    const reportFile = join(root, `${scenario.name}.oha.json`);
+    rmSync(reportFile, { force: true });
+    args.push("--output", reportFile);
   }
   const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+  if (flags.matrix) {
+    const report = readOhaReport<OhaJson>(
+      join(root, `${scenario.name}.oha.json`),
+      proc.exited,
+      (r) => {
+        ohaCpuS += procSample(proc.pid)?.cpuS ?? 0;
+        matrixLoadEnd?.(r);
+      },
+    );
+    const [result, err, code] = await Promise.all([
+      report,
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (code !== 0) throw Error(`oha failed: ${err}`);
+    return result;
+  }
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -948,6 +972,7 @@ const ms = (v: number | null | undefined): number => (v == null ? Number.NaN : v
 
 /** CPU seconds every finished `oha` used, for telling the bench's own load from the host's. */
 let ohaCpuS = 0;
+let matrixLoadEnd: ((report: OhaJson) => void) | undefined;
 /** The upstream processes, whose CPU is the bench's own too. */
 const upstreamPids: number[] = [];
 
@@ -1083,6 +1108,56 @@ async function runScenario(
   let threadsFrom: Map<string, ThreadTime> | null = null;
   let threadsAt = 0;
   const started = performance.now();
+  let boundary:
+    | {
+        at: number;
+        epoch: number;
+        sample: ReturnType<typeof fleetSample>;
+        host: ReturnType<typeof cpuTimes>;
+        own: number;
+        reportedSeconds: number;
+      }
+    | undefined;
+  let drain:
+    | Promise<{ sample: ReturnType<typeof fleetSample>; at: number; complete: boolean }>
+    | undefined;
+  if (flags.matrix)
+    matrixLoadEnd = (r) => {
+      boundary = {
+        at: performance.now(),
+        epoch: Date.now(),
+        sample: fleetSample(pids),
+        host: cpuTimes(),
+        own:
+          ohaCpuS +
+          process.cpuUsage().user / 1e6 +
+          process.cpuUsage().system / 1e6 +
+          upstreamCpuS(),
+        reportedSeconds: r.summary.total,
+      };
+      sampling = false;
+      verifier?.kill("SIGTERM");
+      drain = (async () => {
+        const until = performance.now() + 30000;
+        const db = new Database(env.OMNI_DB_PATH, { readonly: true });
+        try {
+          for (;;) {
+            const row = db
+              .query(
+                "SELECT count(*) n,sum(state='done') done FROM request_logs WHERE at BETWEEN ? AND ? AND api_key_id IN (SELECT id FROM api_keys WHERE label='bench plain')",
+              )
+              .get(measuredFrom, boundary?.epoch ?? Date.now()) as { n: number; done: number };
+            if (row.n === answered(r) && row.done === row.n)
+              return { sample: fleetSample(pids), at: performance.now(), complete: true };
+            if (performance.now() > until)
+              return { sample: fleetSample(pids), at: performance.now(), complete: false };
+            await sleep(10);
+          }
+        } finally {
+          db.close();
+        }
+      })();
+    };
   const sampler = (async () => {
     while (sampling) {
       const s = fleetSample(pids);
@@ -1105,7 +1180,10 @@ async function runScenario(
   })();
 
   const { merged: report, perReplica } = await ohaFleet(scenario, key, flags.duration ?? "20s");
-  const measuredTo = Date.now();
+  const loadProcessReturnedAt = performance.now();
+  matrixLoadEnd = undefined;
+  const measuredTo = boundary?.epoch ?? Date.now();
+  const drained = await drain;
   let verification: { requests: number; errors: string[]; rate: number } = {
     requests: 0,
     errors: [],
@@ -1119,16 +1197,17 @@ async function runScenario(
   const recoveryStart = performance.now();
   sampling = false;
   await sampler;
-  const after = fleetSample(pids);
+  const after = boundary?.sample ?? fleetSample(pids);
   const backingAfter = backingCpuS();
-  const hostAfter = cpuTimes();
+  const hostAfter = boundary?.host ?? cpuTimes();
   const ownAfter =
     ohaCpuS + process.cpuUsage().user / 1e6 + process.cpuUsage().system / 1e6 + upstreamCpuS();
-  const windowS = (performance.now() - started) / 1000;
+  const windowS = ((boundary?.at ?? performance.now()) - started) / 1000;
   const gatewayCpuS = (after?.cpuS ?? 0) - (before?.cpuS ?? 0);
   const foreignCores = Math.max(
     0,
-    busyCores(hostBefore, hostAfter) - (gatewayCpuS + (ownAfter - ownBefore)) / windowS,
+    busyCores(hostBefore, hostAfter) -
+      (gatewayCpuS + ((boundary?.own ?? ownAfter) - ownBefore)) / windowS,
   );
   // Settle before the next scenario, then confirm the process still answers:
   // a scenario that leaves the gateway wedged is a result, not a crash. The
@@ -1176,6 +1255,9 @@ async function runScenario(
   const cpuSeconds = (after?.cpuS ?? 0) - (before?.cpuS ?? 0);
   const lp = report.latencyPercentiles;
   const integrityErrors: string[] = [];
+  if (flags.matrix && !drained?.complete) integrityErrors.push("common row drain incomplete");
+  if (flags.matrix && (!boundary || Math.abs(windowS - boundary.reportedSeconds) > 0.25))
+    integrityErrors.push("load report boundary differs from oha duration by more than 250ms");
   let sizeEvidence: unknown;
   if (flags.matrix) {
     integrityErrors.push(...verification.errors);
@@ -1223,6 +1305,19 @@ async function runScenario(
   }
   const fb = report.firstBytePercentiles;
   return {
+    ...(flags.matrix
+      ? {
+          cpuMsPerRequestDrained: requests
+            ? (((drained?.sample?.cpuS ?? 0) - (before?.cpuS ?? 0)) * 1000) / requests
+            : null,
+          loadWindow: {
+            observedSeconds: windowS,
+            reportedSeconds: boundary?.reportedSeconds,
+            reportToExitMs: loadProcessReturnedAt - (boundary?.at ?? loadProcessReturnedAt),
+            drainMs: (drained?.at ?? 0) - (boundary?.at ?? 0),
+          },
+        }
+      : {}),
     ...(flags.matrix
       ? { integrity: { errors: integrityErrors, verifier: verification, sizes: sizeEvidence } }
       : {}),
@@ -1533,6 +1628,7 @@ async function main(): Promise<void> {
         harnessCommit: string;
         loadBefore: number | undefined;
         loadAfter?: number;
+        environment?: Record<string, string>;
       }
     | undefined;
   if (flags.matrix) {
@@ -1589,6 +1685,7 @@ async function main(): Promise<void> {
   }
   if (keys === null) keys = await setupViaApi();
   const pids = gateways.map((g) => g.pid);
+  if (provenance) provenance.environment = processEnvironment(pids[0] as number);
   await sleep(2000);
   const idle = fleetSample(pids);
   if (!flags.matrix) await smoke(keys.plain);
@@ -1611,6 +1708,19 @@ async function main(): Promise<void> {
     )
       continue;
     const meta = flags.matrix ? (scenario as Scenario & MatrixMeta) : null;
+    if (meta && flags["fresh-process"]) {
+      await stopGateway(gateways[0] as Subprocess);
+      const replacement = startGateway();
+      gateways[0] = replacement;
+      pids[0] = replacement.pid;
+      if (!(await waitHealthy(30000))) throw Error("fresh gateway did not start");
+      if (
+        provenance &&
+        JSON.stringify(processEnvironment(replacement.pid)) !==
+          JSON.stringify(provenance.environment)
+      )
+        throw Error("effective environment changed after restart");
+    }
     if (meta) {
       const verdict = await matrixSmoke(BASE, keys.plain, meta);
       if (verdict.bytes !== undefined) (scenario as Scenario).smokeBytes = verdict.bytes;
@@ -1727,7 +1837,15 @@ async function main(): Promise<void> {
       gatewayCpus: flags["gateway-cpus"],
       upstreamCpus: flags["upstream-cpus"],
       loadCpus: flags["load-cpus"],
-      ...(flags.matrix ? { rate: flags.rate ?? null } : {}),
+      ...(flags.matrix
+        ? {
+            rate: flags.rate ?? null,
+            freshProcess: flags["fresh-process"],
+            processScope: flags["fresh-process"]
+              ? "fresh gateway per scenario"
+              : "one gateway serves scenarios in order; later RSS includes earlier workload history",
+          }
+        : {}),
       mode: CLUSTER ? "cluster" : "single",
       replicas: REPLICAS,
       cpuSets: CPU_SETS,
@@ -1756,11 +1874,11 @@ async function main(): Promise<void> {
   if (flags.matrix) {
     for (const provider of providers) {
       console.error(
-        `\n### ${provider.id}\n| scenario | result | req/s | p50 | p99 | CPU ms/req | RSS MiB |\n|---|---|---:|---:|---:|---:|---:|`,
+        `\n### ${provider.id}\n| scenario | result | req/s | p50 | p99 | CPU ms/req load | CPU ms/req drained | RSS MiB |\n|---|---|---:|---:|---:|---:|---:|---:|`,
       );
       for (const r of matrixResults.filter((r) => r.provider === provider.id))
         console.error(
-          `| ${r.name} | ${r.classification}: ${r.reason} | ${r.metrics?.rps ?? "–"} | ${r.metrics?.latencyMs.p50 ?? "–"} | ${r.metrics?.latencyMs.p99 ?? "–"} | ${r.metrics?.cpuMsPerRequest ?? "–"} | ${r.metrics?.rssPeakMb ?? "–"} |`,
+          `| ${r.name} | ${r.classification}: ${r.reason} | ${r.metrics?.rps ?? "–"} | ${r.metrics?.latencyMs.p50 ?? "–"} | ${r.metrics?.latencyMs.p99 ?? "–"} | ${r.metrics?.cpuMsPerRequest ?? "–"} | ${r.metrics?.cpuMsPerRequestDrained ?? "–"} | ${r.metrics?.rssPeakMb ?? "–"} |`,
         );
     }
     if (matrixResults.some((r) => r.classification === "failed")) process.exitCode = 1;
