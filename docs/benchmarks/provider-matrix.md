@@ -2,6 +2,16 @@
 
 ## Fix round 1: measured integrity
 
+Comparison safeguard update: ratios require matching duration, warmup, CPU sets,
+rate, harness commit, recorded environment, scenario concurrency and request
+body SHA256, both within and between sides. Missing metadata is rejected with
+the field named. Missing scenario observations are flagged and suppress ratios.
+Fewer than three successful observations per side yields `insufficient rounds`
+with a descriptive ratio, excluded from better/worse/inside-spread counts.
+Range overlap is descriptive, not a significance test. Environment capture and
+cross-runtime disclosure are still pending; current historical results are not
+silently accepted by this stricter comparator.
+
 Matrix smoke and a separate verifying client require the complete aggregate
 `lorem ipsum ` text (one repetition per chunk), 64 input tokens and two output
 tokens per chunk, valid termination and no error frames. The verifier has its
@@ -91,6 +101,25 @@ bun scripts/bench-compare.ts /tmp/opencode/bench-matrix/real/base /tmp/opencode/
 The runner alternates AB/BA round order, retains results, records uptime/load
 and refuses high starting load (`ALLOW_BUSY=1` overrides). `commands.sh` records
 shell-escaped exact per-round commands, including the Rust binary override.
+
+Use at least three interleaved rounds (five above is preferred). Until fix-round
+items 4–7 are complete, these are intended measurement commands, not a claim
+that current results are reportable. Direct recording sanity can be reproduced:
+
+```sh
+OUT=/tmp/opencode/bench-recording-new DURATION=2s \
+UPSTREAM_CPUS=4-5 LOAD_CPUS=6-7 bash scripts/bench-load-recording.sh
+bun scripts/bench-load-recording-summary.ts /tmp/opencode/bench-recording-new
+```
+
+This alternates recording off/on across three rounds at concurrency 64 and 1,
+driving two chat stub processes directly. The first shared-host check did not
+establish safe single-client recording headroom against the release gateway:
+direct recorded rates ranged both below and above the gateway observation.
+Latency ranges overlapped between recording modes; no isolated overhead or
+performance conclusion is justified. Keep the raw JSON and inspect rates and
+latency together. Item 6 remains open; do not treat the current instrumentation
+as cleared for real measurements.
 Duration and selection pass through unchanged, e.g. `--duration 2s --warmup 1s
 --only 'custom-chat.*'` selects all eight custom-chat cases in every round.
 
