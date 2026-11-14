@@ -12,6 +12,7 @@ type Metrics = {
   rssPeakMb: number;
 };
 export type Round = {
+  loadWait?: { startLoad: number };
   provenance: {
     gatewaySha256: string;
     harnessCommit?: string;
@@ -164,6 +165,7 @@ export function compare(
     diff = differences(be, he);
   if (options.requireSameEnv && diff.length) throw Error(`environment differs: ${diff.join(", ")}`);
   const header = [
+    `Largest start-of-run load: base ${base.every((r) => Number.isFinite(r.loadWait?.startLoad)) ? Math.max(...base.map((r) => r.loadWait?.startLoad ?? 0)) : "unknown"}; head ${head.every((r) => Number.isFinite(r.loadWait?.startLoad)) ? Math.max(...head.map((r) => r.loadWait?.startLoad ?? 0)) : "unknown"}`,
     `Base SHA256: \`${hash(base)}\``,
     `Head SHA256: \`${hash(head)}\``,
     `Effective base environment: ${JSON.stringify(base[0]?.provenance.environment)}`,

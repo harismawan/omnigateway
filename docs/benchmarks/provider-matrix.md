@@ -30,10 +30,16 @@ differences are printed under **environment differences between sides**. Use
 fixture certificate paths are copied under the scratch root so their ephemeral
 prefix follows this same rule; no allocator settings are normalized away.
 
-`bench-rounds.sh` requires empty OUT, checks load before each invocation, and
+`bench-rounds.sh` requires empty OUT, waits for load before each invocation, and
 writes per-side manifests containing expected/present round filenames. Directory
 comparison requires complete matching manifests. Failed rounds leave partial
 manifests, and cannot silently become a complete comparison.
+Before each side (including the first), load is polled every 5 seconds until
+at or below MAX_LOAD. LOAD_WAIT defaults to 600 seconds; expiry refuses with
+the last load seen. Wait start/end messages go to stderr. ALLOW_BUSY=1 bypasses
+waiting. Each round's before.txt and runner-added JSON loadWait record initial
+load, seconds waited and start load; comparison prints each side's largest
+start load (unknown for older/direct runs). The default gateway JSON is unchanged.
 
 Direct capacity probes now use 64 clients for single chunks, 16 for 2,000
 chunks, and a separate one-client probe. Anthropic token calls are appended to
@@ -61,7 +67,7 @@ Intended real-measurement command (quiet host, fresh OUT, at least three rounds)
 ```sh
 export OMNI_RUST_BINARY=/path/to/release/omnigateway
 BASE_GATEWAY=/path/to/frozen-ts HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
-CLI='bun apps/cli/src/index.ts' OUT=/tmp/opencode/bench-real ROUNDS=5 MAX_LOAD=1 \
+CLI='bun apps/cli/src/index.ts' OUT=/tmp/opencode/bench-real ROUNDS=5 MAX_LOAD=1 LOAD_WAIT=600 \
 bash scripts/bench-rounds.sh --duration 20s --warmup 3s --boots 5 \
   --gateway-cpus 0-3 --upstream-cpus 4-5 --load-cpus 6-7 --fresh-process
 bun scripts/bench-compare.ts /tmp/opencode/bench-real/base /tmp/opencode/bench-real/head

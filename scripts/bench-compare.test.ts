@@ -141,6 +141,13 @@ test("comparison carries measurement limits", () => {
   ])
     expect(text).toContain(limit);
 });
+test("comparison discloses largest runner start load per side", () => {
+  const a = round(1),
+    b = round(2);
+  Object.assign(a, { loadWait: { startLoad: 0.4 } });
+  Object.assign(b, { loadWait: { startLoad: 0.8 } });
+  expect(compare([a, b], [a])).toContain("Largest start-of-run load: base 0.8; head 0.4");
+});
 test("verifier counts come from measured metrics", () => {
   const a = round(1);
   const metric = a.scenarios[0]?.metrics;

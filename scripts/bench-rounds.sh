@@ -7,13 +7,8 @@ mkdir -p "$out"
 if find "$out" -mindepth 1 -print -quit | grep -q .; then echo 'refusing non-empty OUT' >&2; exit 2; fi
 out=$(cd -- "$out" && pwd)
 rounds=${ROUNDS:-5}
-threshold=${MAX_LOAD:-1.0}
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
-load=$(cut -d' ' -f1 /proc/loadavg)
-if [[ ${ALLOW_BUSY:-0} != 1 ]] && awk "BEGIN { exit !($load > $threshold) }"; then
-  echo "refusing load $load > $threshold; ALLOW_BUSY=1 overrides" >&2
-  exit 2
-fi
+source "$script_dir/bench-load-wait.sh"
 mkdir -p "$out/base" "$out/head"
 bun "$script_dir/bench-manifest.ts" "$out/base" "$rounds"
 bun "$script_dir/bench-manifest.ts" "$out/head" "$rounds"
@@ -23,8 +18,7 @@ for ((round=1; round<=rounds; round++)); do
   sides=(base head)
   if ((round % 2 == 0)); then sides=(head base); fi
   for side in "${sides[@]}"; do
-    load=$(cut -d' ' -f1 /proc/loadavg)
-    if [[ ${ALLOW_BUSY:-0} != 1 ]] && awk "BEGIN { exit !($load > $threshold) }"; then echo "refusing round: load $load > $threshold" >&2; exit 2; fi
+    wait_for_load
     gateway=$BASE_GATEWAY
     if [[ $side == head ]]; then gateway=$HEAD_GATEWAY; fi
     if [[ -e "$out/$side/$round.json" ]]; then
@@ -32,6 +26,7 @@ for ((round=1; round<=rounds; round++)); do
       exit 2
     fi
     uptime > "$out/$side/$round.before.txt"
+    printf 'load_begin=%s waited_seconds=%s start_load=%s\n' "$load_begin" "$load_waited" "$load_start" >> "$out/$side/$round.before.txt"
     command=(bash "$script_dir/bench-matrix.sh" --gateway "$gateway" --cli "$CLI"
       --label "$side-$round" --out "$out/$side/$round.json" "$@")
     if [[ -n ${OMNI_RUST_BINARY:-} ]]; then
@@ -41,6 +36,9 @@ for ((round=1; round<=rounds; round++)); do
     printf '\n' >> "$out/commands.sh"
     code=0
     "${command[@]}" > "$out/$side/$round.log" 2>&1 || code=$?
+    if [[ -f "$out/$side/$round.json" ]]; then
+      bun -e 'const [file, begin, waited, start] = process.argv.slice(1); const r = await Bun.file(file).json(); r.loadWait = {beginLoad: Number(begin), waitedSeconds: Number(waited), startLoad: Number(start)}; await Bun.write(file, JSON.stringify(r, null, 2) + "\n");' "$out/$side/$round.json" "$load_begin" "$load_waited" "$load_start"
+    fi
     bun "$script_dir/bench-manifest.ts" "$out/$side" "$rounds"
     if ((code != 0)); then exit "$code"; fi
     uptime > "$out/$side/$round.after.txt"
