@@ -1,5 +1,31 @@
 # Benchmark matrix report
 
+## Fix round 1
+
+CHECKPOINT — items 1 and 2 implemented/verified. Precise next step: item 3, add failing comparison tests for fewer than three observations, missing scenario observations and incompatible workload/provenance before modifying `scripts/bench-compare.ts`. Record scenario concurrency/body in matrix JSON to support comparison compatibility. Then items 4 and 5, each with failing checks and its own commit. Worktree clean after the two item commits. Measurements remain NOT REPORTABLE until those items pass. No performance findings.
+
+| Finding | Commit | Failing check first | Verification evidence |
+|---|---|---|---|
+| 1: smoke-only validation admitted broken measured traffic | `2a570d7c` | Review empty-load wrapper rerun reported supported with metrics (`before.json`) | All 12 `{ts,rust}-{empty-after-first,error-frame-after-first,500-after-first}-{json,stream}.json` failed with null metrics; normal runs below |
+| 2: failed observations leaked performance | `7027a570` (JSON null/diagnostics prerequisite included in item 1) | `ts-empty-after-first-stream.log` still printed numeric req/s despite failed classification | `no-failed-metrics.json/.log`: null metrics and no numeric req/s line; focused report guard test |
+| 3: comparison adequacy/compatibility | pending | not run | none |
+| 4: environment/drain CPU/fresh process | pending | not run | none |
+| 5: capacity concurrency/round guard/manifest/refresh/lifecycle | pending | not run | none |
+
+All fix evidence paths are relative to `/tmp/opencode/bench-matrix-fix1/`.
+
+| Fault | TS json | TS stream | Rust json | Rust stream |
+|---|---|---|---|---|
+| empty-after-first | FAILED/null | FAILED/null | FAILED/null | FAILED/null |
+| error-frame-after-first | FAILED/null | FAILED/null | FAILED/null | FAILED/null |
+| 500-after-first | FAILED/null | FAILED/null | FAILED/null | FAILED/null |
+
+All fault runs passed initial smoke then failed load integrity; diagnostics retain verifier violations, measured log count/status/usage failures and per-request size-band failures. Matrix implementation adds oha per-request SQLite size checks, success/usage/count checks for measured load-key rows, and a separately pinned full-body verifying process with its own key (4 requests/s maximum target, actual rate recorded). Smoke and verifier validate exact aggregate text and 64 input / 2×chunks output usage. Three after-first fault modes added to both stubs. Failed performance is omitted; diagnostic status/count information remains separate.
+
+Other-wire smoke+load sanity passed on both binaries for custom-responses.responses.stream and anthropic-oauth.messages.stream (`{ts,rust}-other-wires.json`). Not reverified: full 32 cases after integrity changes, fault cases through every upstream wire, default all-scenario run. Items 3–5 untouched. oha's per-request SQLite recording adds load-side overhead; verify load-generator capacity before any real measurement. Verifier is sampling, not exhaustive semantic body validation; size and semantic log checks cover every measured successful request. Size band is smoke bytes ±max(128,2%). Existing barrier/settle accounting remains until item 4's common drain wait. No claims about real measurement margins.
+
+Failing check first: review fault wrapper rerun on frozen TS produced `supported` with non-null metrics for empty-after-first; evidence `/tmp/opencode/bench-matrix-fix1/before.json`. Normal custom-chat runs on TS and release Rust passed all eight scenarios (`ts-normal.json`, `rust-normal.json`). Equal warmup/duration regression passed (`equal-duration.json`): oha size DB is replaced between warmup and measurement. Permanent functional regression driver: `scripts/bench-fault-check.sh`. Final focused tests: 15 pass / 0 fail / 58 assertions across five owned test files; typecheck 674 files passes; changed-file Biome and shell syntax pass. Functional binaries: `/tmp/opencode/bench-gate/bin/ts-frozen-f9cc6678`, `/tmp/opencode/bench-gate/bin/main-327f240f` (Rust through launcher). Older sections below describe prior work, not completion of fix-round items 3–5.
+
 Follow-up commits: `958b8b55` implementation, `c6db2950` documentation/verification. Worktree clean.
 
 **Follow-up complete:** `958b8b55` adds all-metric spread comparison and matrix provenance. Two interleaved rounds per side with `--only 'custom-chat.*' --duration 2s --warmup 1s` passed in `/tmp/opencode/bench-matrix/followup/`: all eight scenarios supported in each of four JSON files. Duration, selection, both load samples, actual binary hashes and harness commit verified in every round. `commands.sh` and `comparison.md` produced successfully. No performance findings. Original matrix status follows.
