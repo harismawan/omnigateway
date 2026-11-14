@@ -51,10 +51,16 @@ pub(crate) fn service_status(
             .unwrap_or_else(|| home.join(".local/state"))
             .join("omnigateway");
         let file = state.join("gateway.pid");
-        let mut p = match std::fs::read(&file) {
-            Ok(bytes) => pid(&String::from_utf8_lossy(&bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(omni_control::fs_error::fs_error(&error, "open", &file)),
+        let mut p = if !file.exists() {
+            None
+        } else {
+            match std::fs::read(&file) {
+                Ok(bytes) => pid(&String::from_utf8_lossy(&bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
+                    return Err("EISDIR: illegal operation on a directory, read".into());
+                }
+                Err(error) => return Err(omni_control::fs_error::fs_error(&error, "open", &file)),
+            }
         };
         if let Some(id) = p
             && !crate::process::alive(id)
