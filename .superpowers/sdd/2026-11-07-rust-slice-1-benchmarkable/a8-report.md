@@ -1,4 +1,55 @@
-# A8 — partial: malformed quota gap closed; history RED recorded
+# A8 complete for review
+
+All seven routes implemented; full closure passed. History implementation/fixture: `670bc8f4`. Product TypeScript untouched; no dependencies, unsafe, subagents, pushes or merges. External concurrent documentation commits and excluded local files were left alone.
+
+| Route | Commits | Targeted equal / failures | Failed first |
+|---|---|---|---|
+| login | `b4d8ffe1` | 39 / 0 | 34 failures, 404 |
+| logout | `6861c046`, `bbc20d35` | 21 / 0 | 12 failures, 404 |
+| summary | `2493a8a9` | 183 / 0 | Rust 404 |
+| logs | `b5973bb3`, `20cddcbc` | 379 / 0 | 368 failures; malformed-degradation RED 6 |
+| usage | `1d84ed0f`, `43263a90`, `327f240f` | 487 / 0 | 422 failures, 404 |
+| quota | `f95b99b9`, `9cbd3b8c` | 2887 / 0 | 578 failures; malformed metadata RED below |
+| quota/history | `670bc8f4` | 3621 / 0 | 192 failures, 404 (`history-red.log`); duplicate-bound comparisons failed before last-value fix |
+
+Summary isolation: verified-session id only; ignored identity attacks; B response bytes exclude A/C markers; shared caller matrix and post-login expiry.
+Summary lane: `require_client` before bounded read-only report reader and all parsing/reads.
+Logs isolation: explicit 19-field projection, removed excluded credential degradations, scoped foreign cursors/filters, B marker scans and complete paging.
+Logs lane: `require_client` before bounded read-only report reader and all parsing/reads.
+Usage isolation: scoped totals, B marker scans; allowed apiKey grouping stays scoped, credential grouping refused; all shared callers and expired key.
+Usage lane: authorization first; bounded read-only reader, direct bucket writer.
+Quota isolation: all shared callers × identity/encoded/duplicate/cursor attacks; orphan omitted, disabled included; every response scanned for three distinctive credential secrets.
+Quota lane: authorization first; bounded read-only reader; identity metadata read excludes secret columns, whole-list metadata validation retained.
+History isolation: same caller/attack matrix plus span edges/duplicates, malformed metadata/settings, orphan/disabled accounts, unusual numeric/BLOB cells, overflow and key expiry; every history response scans all three distinctive secrets.
+History lane: authorization before query parsing or reader; bounded read-only lane, newest 50,001 rows → binary reorder → trim 50,000 → projection/locale sort.
+
+Quota discloses exactly `{accounts:[{credentialId,label,provider,windowType,usedRatio,resetsAt,observedAt,windowMs,ratePerHourRatio,exhaustsAt,survives,stale,rolledOver}]}`.
+History discloses exactly `{samples:[{credentialId,label,provider,windowType,observedAt,usedRatio,resetsAt,windowMs}],truncated}`. Both equal TS on the recorded fixtures: all clients see all named accounts, including disabled credentials; orphans disappear. Raw used/limit/rate counts and secrets are absent; exact ratios can reveal ceilings. History's flag is one top-level boolean. No gateway-wide traffic rate is disclosed.
+
+Memory: at most 50,001 raw sample rows, 50,000 sort descriptors, metadata and output buffer; projected JSON held one row at a time. Full fixture process VmHWM: Rust 105136 kB, TS 141472 kB (not an isolated request allocation measurement), `final/admin-routes/client-history-{rust,ts}-rss.txt`.
+
+Known differences: accepted empty-413 content-length framing difference remains. No new client response difference observed. Existing non-client expected divergences remain in closure driver logs. Coverage is fixture-based, not proof over every malformed SQLite cell. Limits: neither gateway has a login attempt limiter; day boundary fixed at boot in both.
+
+All evidence below is under `/tmp/opencode/a8/`; results were waited for and read. Cargo used CARGO_INCREMENTAL=0, CARGO_PROFILE_DEV_DEBUG=0, CARGO_PROFILE_TEST_DEBUG=0.
+
+| Gate | Result | Log |
+|---|---|---|
+| workspace tests | 1158 passed, 0 failed, 11 ignored; 161 groups | `history-workspace-tests.log` |
+| workspace Clippy all targets -D warnings | pass | `history-workspace-clippy.log` |
+| workspace fmt check | pass | `history-workspace-fmt.log` |
+| fresh build / targeted history | 3621 equal, 0 failures | `history-build.log`, `history-green.log` |
+| admin-routes | 10873 equal, 10 expected, 0 failures | `final/admin-routes.log` |
+| admin-auth | 212 equal, 4 expected, 0 failures; 116 tokens | `final/admin-auth.log` |
+| surface | 620 equal, 61 expected, 0 failures (quota checkpoint: 618 equal) | `final/surface.log` |
+| run.ts | 64 pass rows, all equal | `final/run.log` |
+
+Manifest: `/tmp/opencode/a8/final/manifest.json`, implementation commit `670bc8f4`, external binary `/tmp/opencode/a8/final/rust`, Rust SHA256 `b3d92914c6827cb50c29f26c4bc69b8743fc2b6ee91f621286128506786d26d1`; TS `/tmp/opencode/a8/ts`, SHA256 `f9cc6678a7d2bc2300a71b3aae98caff1aaedbcb2d811baee3dffd4325009d63`. Drivers remove scratch on success; retained files are evidence. Initial fixture used future samples and an absolute backward clock; corrected to retained samples without changing the login clock. Initial compile used unsupported usize SQL binding; fixed before GREEN.
+
+D4 must wire authenticated client report readers to Postgres: session-derived key scope for summary/logs/usage, explicit projections, lossless metadata validation/coercion, quota-window and bounded quota-sample reads, inclusive span/clamp/settings semantics, newest-first cap then binary reorder and page trim, ICU locale output ordering and single top-level truncated. Preserve authorization-before-read and bounded lane ownership.
+
+---
+
+# Previous checkpoint — partial: malformed quota gap closed; history RED recorded
 
 **NEXT STEP (2026-11-14, malformed-quota checkpoint):** implement `/api/client/quota/history`. Item 1 is committed as `9cbd3b8c`; targeted GREEN is 2887 equal / 0 failures. A new `client-history` configuration and movable-clock enablement now record RED: 101 equal / 192 failures, Rust 404 (`/tmp/opencode/a8/history-red.log`). The fixture currently covers only empty history and shared callers/identity attacks: extend it with >50001 samples, orphan/disabled accounts, unusual cells, malformed credentials/settings, secret scans and expiration after login. Frozen `clientHistory.ts` (132 lines) and `history.ts` lines 1–150 have been read: **the actual wire result has a single top-level boolean `truncated`, NOT a per-series flag**, despite stale comments/request wording. `pageSamples` trims the store-reordered 50001 rows to 50000. Store `listQuotaSamples` first selects newest by observed_at DESC LIMIT 50001, then JS binary-id/window ordering and observed_at subtraction; read credentials.ts lines 530 onward for the rest. `retainedSpan` reads settings, clamps since to max(now-retentionDays*DAY, now-16*DAY), until to now; use frozen optionalNumber semantics (inspect schemas.ts). Reuse `credentials::validate_client_metadata` for whole-list parse failures, added in item 1. Authorize before reader/parsing; direct sample writer, bounded report lane; surface expectation still pending. Then run full closure and write final manifest. No subagents.
 
