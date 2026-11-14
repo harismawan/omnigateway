@@ -1,5 +1,60 @@
 # B3 OpenAI / Codex
 
+## Step A green — HEAD `da138696`
+
+**Item 2: first OAuth builder/codec corpus green; broad parity incomplete.**
+Commit `da138696` connects `OpenAiCodec`, selecting OAuth when access_token is
+Some (including an empty token), retaining the existing API-key-only entry.
+OAuth uses the Codex URL, profile/protocol headers, body zstd marker, shared
+identity validation, catalog/turn metadata and lite::to_lite. Turns and media
+provenance are recorded during wire assembly; orphan repair inserts None turn
+metadata for inheritance. No HTTP implementation change. Test is unignored.
+
+| OAuth corpus category | Rows | Status |
+|---|---:|---|
+|Three dialects × buffered/streaming|6|Exact URL, ordered/cased headers, JSON bytes, encoding marker, notes and decode-state equal|
+|Tools single/parallel/orphan, reasoning ladder, images/files|0|Step B pending|
+|Response format, lite switching, restrictions|0|Step B pending|
+|Stored identity variants, cache/history stability pairs|0|Step B pending|
+|OAuth upstream SSE|0|Step C pending|
+
+First RED remains row 0 Auth in `s4b-red-executing.log`. Implementation first
+compile failed at Map-versus-Value credential identity input (`s4b-a.log`),
+fixed by sharing the reader through a borrowed lookup closure. First executing
+implementation comparison passed all six; no header/body mismatch observed.
+Clippy then found test-only encode wrapper, tuple type complexity and discarded
+fmt Result; corrected. Header insertion order also corrected by inspection so
+operator order overrides retain frozen protocol insertion order.
+
+Clock/randomness: both oracle and Rust receive startedAt=1794000000123 and
+requestId="fixed-oauth-request"; accountId="account", stored secrets absent.
+Neither request builder calls a random generator; fallback identities derive
+deterministically. No clock patch, random override or shape-only comparisons.
+
+Gates passed on committed contents: 50 summaries, 223 passes (including child
+summaries), 4 ignored, zero failures. All three tripwires pass in the three-crate
+suite; strict all-target clippy, fmt and diff check pass. Logs
+`/tmp/opencode/b3/s4b-a-final-{tests,clippy,fmt}.log`; builds use incremental=0,
+dev debug=0, test debug=0. Prior 247 API request rows remain green.
+
+Known differences/deferred concerns: HTTP still refuses body encodings;
+prior compression probe empty-body difference unresolved; X1 unpaired-surrogate
+and nonnumeric usage ignores unchanged. Credential persistence and gateway
+startup profile capture remain deferred. OAuth depth not audited. Broad OAuth
+restrictions, provenance edge cases and stored identity behavior are implemented
+but not yet established by whole-codec corpus. Inspect effort-update selection
+for invalid vendor effort: frozen omits history update while metadata falls back;
+current builder uses the metadata fallback for both (outside these six rows).
+Fingerprint inventory unchanged: 4 ported +66 differential +51 later; 46
+fingerprint declarations still require Step C review. No new literal claim.
+
+**Next:** Step B one category/commit, starting tools single/parallel/orphan and
+mixed tool media, then effort ladder (including invalid vendor effort noted
+above), files/formats, lite models, restrictions, identity variants and paired
+history stability. Step C only after B: all 46 dispositions and OAuth SSE codec
+comparison. Then roadmap item 3 OAuth/lite depth, item 4 HTTP compression and
+empty-body question, item 5 remaining literals.
+
 ## OAuth RED-only checkpoint — HEAD `9e467195`
 
 **Item 2 remains incomplete: no OAuth builder implemented.** Commit
