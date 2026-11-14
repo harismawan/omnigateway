@@ -621,8 +621,8 @@ mod tests {
             let (tx, rx) = std::sync::mpsc::channel();
             let (entered, ready) = tokio::sync::oneshot::channel();
             let blocker = tokio::task::spawn_blocking(move || {
-                let _ = entered.send(());
-                let _ = rx.recv();
+                entered.send(()).expect("observer");
+                rx.recv().expect("release");
             });
             ready.await.expect("entered");
             let c = control.clone();
@@ -631,7 +631,7 @@ mod tests {
                 tokio::task::yield_now().await;
             }
             open.abort();
-            let _ = open.await;
+            assert!(open.await.is_err());
             let available = control.4.available_permits();
             tx.send(()).expect("release");
             blocker.await.expect("blocker");
