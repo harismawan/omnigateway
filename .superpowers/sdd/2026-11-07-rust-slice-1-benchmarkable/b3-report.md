@@ -1,5 +1,57 @@
 # B3 OpenAI / Codex
 
+## OAuth RED-only checkpoint — HEAD `9e467195`
+
+**Item 2 remains incomplete: no OAuth builder implemented.** Commit
+`9e467195` adds a real frozen-codec oracle and Rust comparison, explicitly
+ignored pending implementation. This is evidence scaffolding, not parity.
+Run `cargo test --offline -p omni-providers --test openai_oauth_request -- --ignored`
+to reproduce. The test currently invokes OpenAiApiKeyCodec with an OAuth-only
+credential; replace that with the credential-selecting codec when implemented.
+
+| OAuth corpus category | Generated rows | Observed comparison |
+|---|---:|---|
+|Three client dialects × buffered/streaming|6|Row 0 fails Auth; remaining rows not reached|
+|Tools, parallel/orphans, reasoning ladder, media/files, formats|0|Pending|
+|Cache/history pairs, lite switching, restrictions|0|Pending|
+|Stored identity variants|0|Pending whole-codec comparisons|
+
+First compile attempt failed because BodyEncoding is not Serialize
+(`s4b-red.log`); harness corrected to map its Zstd variant to `zstd`.
+First executable RED is buffered Anthropic row 0: `openai credential has no
+token` (`s4b-red-executing.log`). Oracle produces all six rows successfully.
+Assertions prepared for URL, ordered/cased headers, uncompressed body string,
+encoding marker, degradations and nativeReasoning decode state.
+Both sides receive requestStartedAt=1794000000123 and
+requestId="fixed-oauth-request". No clock monkeypatch or random generator
+override: frozen builder derives IDs deterministically with these inputs;
+stored secrets absent, accountId="account". No random-by-design fields have
+been compared by shape in this checkpoint.
+
+Fingerprint disposition unchanged: 46 declarations still await this session's
+requested review; overall prior inventory remains 4 ported +66 differential
++51 later. No new literal coverage claimed. No OAuth SSE comparison added.
+Known differences remain: OAuth request unsupported in Rust; HTTP encodings
+refused; compression empty rows differ in prior probe; parked X1 surrogate and
+non-numeric usage mismatches unchanged. Prior identity persistence and startup
+environment-capture integration remain deferred. No product TS/HTTP changes.
+
+Verification: required three-crate suite passed: 50 summaries, 222 passes
+including child summaries, 5 ignored (new OAuth RED plus prior 4), zero
+failures. Three source tripwires pass within that suite. All-target clippy
+`-D warnings`, fmt check and diff check pass. Logs `/tmp/opencode/b3/s4b-`
+`{tests,clippy,fmt}.log`; Rust builds used all three requested environment flags.
+
+**Precise next step:** finish item 2: read remaining frozen profile/identity and
+lite sections, implement crate-private catalog/codexTurn and OAuth wire options,
+populate positional turns/tool parts during assembly and orphan repair, reuse
+identity reader and lite::to_lite; connect credential-selected codec, unignore
+and pass these six comparisons, then expand requested corpus and review all
+46 fingerprint declarations. Codec decode is shared in frozen codec.ts:130–133;
+nativeReasoning comes from original client vendor include, not OAuth defaults.
+After item 2: item 3 depth for OAuth/lite carriers; item 4 HTTP compression
+including empty-body reachability/parity; item 5 remaining literals.
+
 ## Lite sub-checkpoint — HEAD `da0dcbf8`
 
 **Item 2 remains incomplete. Next: add codexTurn/catalog selection and OAuth
