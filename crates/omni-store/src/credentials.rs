@@ -226,10 +226,16 @@ fn open(r: &Row<'_>, key: &FieldKey, column: &'static str) -> Result<Secret, Sto
 
 fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> {
     let raw = row::text(r, T, "provider_data")?;
-    let lossless = omni_ir::jsjson::parse_js(&raw).map_err(StoreError::Corrupt)?;
+    let id = row::text(r, T, "id")?;
+    let lossless = omni_ir::jsjson::parse_js(&raw).map_err(|detail| StoreError::StoredJson {
+        table: T,
+        column: "provider_data",
+        row_id: id.clone(),
+        detail: detail.into(),
+    })?;
     Ok(Credential {
         lone_endpoint: lone_fields(&lossless, &["endpointId"]).remove("endpointId"),
-        id: row::text(r, T, "id")?,
+        id,
         provider: row::text(r, T, "provider")?,
         label: row::text(r, T, "label")?,
         auth_type: AuthType::parse(&row::text(r, T, "auth_type")?),

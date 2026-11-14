@@ -54,7 +54,14 @@ pub(crate) async fn list_keys(c: &impl GenericClient) -> Result<Vec<ApiKey>, Sto
     list_key_entries(c)
         .await?
         .into_iter()
-        .map(|e| e.map_err(|e| StoreError::Corrupt(e.message)))
+        .map(|e| {
+            e.map_err(|e| StoreError::StoredJson {
+                table: "api_keys",
+                column: "model_allowlist",
+                row_id: e.id,
+                detail: e.message.into(),
+            })
+        })
         .collect()
 }
 
@@ -67,7 +74,7 @@ fn to_key_entry(r: &Row) -> Result<Result<ApiKey, keys::KeyRowError>, StoreError
         Err(StoreError::StoredJson { detail, .. }) => Ok(Err(keys::KeyRowError {
             id: r.try_get("id")?,
             hash: r.try_get("hash")?,
-            message: detail,
+            message: detail.into_wire_detail(),
         })),
         Err(StoreError::Corrupt(e)) => {
             let raw: Option<String> = r.try_get("model_allowlist")?;
@@ -259,7 +266,7 @@ pub(crate) async fn get_operator_key(
             table: "api_keys",
             column: "model_allowlist",
             row_id: id.to_owned(),
-            detail: error,
+            detail: error.into(),
         });
     }
     to_operator_key(r).map(|k| Some(k.key))
@@ -280,11 +287,18 @@ fn open(r: &Row, key: &FieldKey, column: &str) -> Result<Secret, StoreError> {
 fn to_credential(r: &Row, key: &FieldKey) -> Result<Credential, StoreError> {
     let provider_data: String = r.try_get("provider_data")?;
     let refresh: Option<String> = r.try_get("refresh_token")?;
-    let lossless = omni_ir::jsjson::parse_js(&provider_data).map_err(StoreError::Corrupt)?;
+    let id: String = r.try_get("id")?;
+    let lossless =
+        omni_ir::jsjson::parse_js(&provider_data).map_err(|detail| StoreError::StoredJson {
+            table: "credentials",
+            column: "provider_data",
+            row_id: id.clone(),
+            detail: detail.into(),
+        })?;
     Ok(Credential {
         lone_endpoint: crate::credentials::lone_fields(&lossless, &["endpointId"])
             .remove("endpointId"),
-        id: r.try_get("id")?,
+        id,
         provider: r.try_get("provider")?,
         label: r.try_get("label")?,
         auth_type: AuthType::parse(r.try_get("auth_type")?),

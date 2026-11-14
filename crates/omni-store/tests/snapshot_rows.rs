@@ -51,7 +51,10 @@ fn one_malformed_model_row_is_reported_and_the_others_are_read() {
         .collect();
     assert_eq!(bad, ["b-not-json", "c-wrong-shape"]);
     let reason = &snap.models[1].as_ref().expect_err("bad").reason;
-    assert!(reason.contains("not JSON"), "{reason}");
+    assert_eq!(
+        reason,
+        "unreadable row: virtual_models.targets of b-not-json: not valid JSON"
+    );
 }
 
 #[test]

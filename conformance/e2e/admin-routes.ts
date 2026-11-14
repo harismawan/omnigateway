@@ -2748,6 +2748,12 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         check("stored session allowlist parse failure", await exchange({target:"/api/client/summary",headers:[["cookie",`omni_admin=${identities[0]!.cookie}`]]}), 500);
         check("stored operator allowlist parse failure", await exchange({target:"/api/keys",headers:[["cookie",`omni_admin=${cookies.admin}`]]}), 500);
         fixture.run("UPDATE api_keys SET model_allowlist=NULL WHERE id='client-A'");
+        fixture.run("INSERT INTO virtual_models VALUES('stored-parser-probe','storedTargetsSecretCanary','score',1)");
+        check("stored model targets parse failure", await exchange({target:"/api/models",headers:[["cookie",`omni_admin=${cookies.admin}`]]}), 500);
+        fixture.run("DELETE FROM virtual_models WHERE id='stored-parser-probe'");
+        fixture.run("INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('stored-parser-probe','custom','probe','apiKey','storedProviderSecretCanary',1,1)");
+        check("stored credential parse failure", await exchange({target:"/api/credentials",headers:[["cookie",`omni_admin=${cookies.admin}`]]}), 500);
+        fixture.run("DELETE FROM credentials WHERE id='stored-parser-probe'");
         for(const [who,cookie] of callers) {
           for(const attack of attacks) {
             const answer = await exchange({target:`/api/client/summary?${attack}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
@@ -3074,6 +3080,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       : []),
   ] as const) {
     const text = readFileSync(f);
+    if (label === "rust" && ["storedTargetsSecretCanary", "storedProviderSecretCanary"].some(c => text.includes(c)))
+      secretProblems.push(`${stream}: stored parser detail exposed`);
     if (label === "rust" && text.includes("storedAllowlistSecretCanary"))
       secretProblems.push(`${stream}: stored allowlist parser detail exposed`);
     if (label === "rust" && cfg.label === "client-history" && /panicked|does not correctly implement a total order/i.test(text.toString()))

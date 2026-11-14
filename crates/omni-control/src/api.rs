@@ -110,17 +110,13 @@ struct KeyRow {
 
 /// `JSON.parse` of a stored column, which throws (a `SyntaxError`, reported
 /// as INTERNAL) on anything `JSON.parse` refuses.
-fn parse_stored(raw: &str) -> Result<JsValue> {
-    crate::operator_json::parse(raw).map_err(Failure::internal)
-}
-
 fn parse_allowlist(raw: &str, id: &str) -> Result<JsValue> {
     crate::operator_json::parse(raw).map_err(|detail| {
         omni_store::StoreError::StoredJson {
             table: "api_keys",
             column: "model_allowlist",
             row_id: id.to_owned(),
-            detail,
+            detail: detail.into(),
         }
         .into()
     })
@@ -783,7 +779,17 @@ pub type Account = (String, JsValue);
 pub fn accounts(store: &SqliteStore) -> Result<Vec<Account>> {
     omni_store::models::operator_credentials(store.connection())?
         .into_iter()
-        .map(|(_, provider, _, _, data)| Ok((provider, parse_stored(&data)?)))
+        .map(|(id, provider, _, _, data)| {
+            let parsed = crate::operator_json::parse(&data).map_err(|detail| {
+                omni_store::StoreError::StoredJson {
+                    table: "credentials",
+                    column: "provider_data",
+                    row_id: id,
+                    detail: detail.into(),
+                }
+            })?;
+            Ok((provider, parsed))
+        })
         .collect()
 }
 

@@ -150,7 +150,7 @@ pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool
             table: "api_keys",
             column: "model_allowlist",
             row_id: id.to_owned(),
-            detail: error,
+            detail: error.into(),
         });
     }
     #[allow(clippy::cast_precision_loss)]

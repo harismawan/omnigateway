@@ -1,5 +1,24 @@
 use omni_crypto::field::FieldError;
 
+/// Parser input is available only to explicit wire consumers, never formatting.
+pub struct ParserDetail(String);
+
+impl From<String> for ParserDetail {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl ParserDetail {
+    pub fn into_wire_detail(self) -> String {
+        self.0
+    }
+}
+impl std::fmt::Debug for ParserDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<stored JSON parser detail redacted>")
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error(transparent)]
@@ -46,7 +65,7 @@ pub enum StoreError {
         table: &'static str,
         column: &'static str,
         row_id: String,
-        detail: String,
+        detail: ParserDetail,
     },
     /// A stored secret that does not decrypt under this key. TS throws here
     /// too, at the first use of the secret.
@@ -81,12 +100,20 @@ mod tests {
             table: "api_keys",
             column: "model_allowlist",
             row_id: "key-1".into(),
-            detail: "JSON Parse error: Unexpected identifier storedSecretCanary".into(),
+            detail: "JSON Parse error: Unexpected identifier storedSecretCanary"
+                .to_owned()
+                .into(),
         };
         assert_eq!(
             error.to_string(),
             "unreadable row: api_keys.model_allowlist of key-1: not valid JSON"
         );
         assert!(!error.to_string().contains("storedSecretCanary"));
+        assert!(!format!("{error:?}").contains("storedSecretCanary"));
+        if let StoreError::StoredJson { detail, .. } = error {
+            assert!(detail.into_wire_detail().contains("storedSecretCanary"));
+        } else {
+            panic!("wrong variant");
+        }
     }
 }

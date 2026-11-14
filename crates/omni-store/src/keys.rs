@@ -266,7 +266,7 @@ pub(crate) fn parse_allowlist(id: &str, raw: Option<String>) -> Result<Allowlist
         table: T,
         column: "model_allowlist",
         row_id: id.to_owned(),
-        detail,
+        detail: detail.into(),
     })?;
     Ok(match &parsed {
         JsValue::Null => (None, Vec::new()),
@@ -496,7 +496,7 @@ pub fn get_operator(conn: &Connection, id: &str) -> Result<Option<ApiKey>, Store
                 table: T,
                 column: "model_allowlist",
                 row_id: id.to_owned(),
-                detail: error,
+                detail: error.into(),
             });
         }
         key
@@ -509,7 +509,14 @@ pub fn get_operator(conn: &Connection, id: &str) -> Result<Option<ApiKey>, Store
 pub fn list(conn: &Connection) -> Result<Vec<ApiKey>, StoreError> {
     list_entries(conn)?
         .into_iter()
-        .map(|e| e.map_err(|e| StoreError::Corrupt(e.message)))
+        .map(|e| {
+            e.map_err(|e| StoreError::StoredJson {
+                table: T,
+                column: "model_allowlist",
+                row_id: e.id,
+                detail: e.message.into(),
+            })
+        })
         .collect()
 }
 
