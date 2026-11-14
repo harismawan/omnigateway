@@ -2,6 +2,21 @@
 
 ## Current review corrections
 
+The ordered `scenarios` array records workload selection/history. All rounds on
+both sides must match it, unless every round uses `--fresh-process`; that
+exception is printed and allows shared scenarios with different selections.
+Database history remains even with fresh processes. URL userinfo and credential
+query values are redacted alongside credential-named environment variables.
+Capacity gates all nine expected probe files, refusing missing/unknown files;
+single-client probes require every request to succeed, without a rate ratio.
+The verifier starts on fixed 250 ms ticks, skips/counts ticks while busy, and
+drains its in-flight request on SIGTERM. JSON and comparisons report started,
+completed, skipped ticks and violations per scenario/round.
+The comparison header carries CPU process/thread-only scope, 100 ms sampled
+resident memory, process/history mode, 250 ms report-file tolerance, extra
+verifier load and sampled integrity limits. Same-size wrong text in an
+unverified load response is not detectable; correctness is not exhaustive.
+
 Within each comparison side, effective environments must match after replacing
 only that round's recorded `OMNI_ROOT` scratch prefix in values by `<scratch>`.
 Remaining differences name the variable and refuse comparison. Between sides,

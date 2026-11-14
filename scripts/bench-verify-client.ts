@@ -11,21 +11,30 @@ export function runVerifier(
   },
 ) {
   const epoch = clock.now();
-  let started = 0, completed = 0, skippedTicks = 0;
+  let started = 0,
+    completed = 0,
+    skippedTicks = 0;
   let stopped = false;
   let pending: Promise<void> | undefined;
   const errors: string[] = [];
   const tick = () => {
     if (stopped) return;
-    if (pending) { skippedTicks++; return; }
+    if (pending) {
+      skippedTicks++;
+      return;
+    }
     started++;
     pending = (async () => {
       try {
         const verdict = await request();
         if (verdict.classification !== "supported") errors.push(verdict.reason);
-      } catch (error) { errors.push(String(error)); }
+      } catch (error) {
+        errors.push(String(error));
+      }
       completed++;
-    })().finally(() => { pending = undefined; });
+    })().finally(() => {
+      pending = undefined;
+    });
   };
   const cancel = clock.schedule(tick);
   tick();
@@ -34,9 +43,16 @@ export function runVerifier(
       stopped = true;
       cancel();
       await pending;
-      return { started, completed, skippedTicks, violations: errors.length,
-        requests: completed, errors, rate: 4,
-        actualRate: started / ((clock.now() - epoch) / 1000) };
+      return {
+        started,
+        completed,
+        skippedTicks,
+        violations: errors.length,
+        requests: completed,
+        errors,
+        rate: 4,
+        actualRate: started / ((clock.now() - epoch) / 1000),
+      };
     },
   };
 }

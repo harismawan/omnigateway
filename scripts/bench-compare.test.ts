@@ -43,14 +43,17 @@ test("missing observation is flagged", () => {
   expect(() => compare([round(1), missing], [round(2)])).toThrow("ordered selection");
 });
 test("ordered selection must match unless every round uses fresh processes", () => {
-  const a = round(1), b = round(2);
-  a.scenarios.unshift({ ...a.scenarios[0]!, name: "first" });
+  const a = round(1),
+    b = round(2);
+  const first = a.scenarios[0];
+  if (!first) throw Error("missing fixture");
+  a.scenarios.unshift({ ...first, name: "first" });
   expect(() => compare([a], [b])).toThrow("ordered selection");
   b.scenarios = [...a.scenarios].reverse();
   expect(() => compare([a], [b])).toThrow("ordered selection");
   a.config = { ...a.config, freshProcess: true };
   b.config = { ...b.config, freshProcess: true };
-  b.scenarios = [b.scenarios[0]!];
+  b.scenarios = [first];
   expect(compare([a], [b])).toContain("differing ordered selections allowed");
 });
 test("changed workload refused with differing field", () => {
@@ -129,6 +132,12 @@ test("only own scratch root prefix is normalized", () => {
 });
 test("comparison carries measurement limits", () => {
   const text = compare([round(1)], [round(2)]);
-  for (const limit of ["threads only", "100 ms", "250 ms tolerance", "extra gateway work", "not a proof"])
+  for (const limit of [
+    "threads only",
+    "100 ms",
+    "250 ms tolerance",
+    "extra gateway work",
+    "not a proof",
+  ])
     expect(text).toContain(limit);
 });

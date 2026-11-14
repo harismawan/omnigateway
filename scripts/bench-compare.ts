@@ -24,7 +24,14 @@ export type Round = {
     metrics: Metrics | null;
     concurrency?: number;
     bodySha256?: string;
-    integrity?: { verifier?: { started?: number; completed?: number; skippedTicks?: number; violations?: number } };
+    integrity?: {
+      verifier?: {
+        started?: number;
+        completed?: number;
+        skippedTicks?: number;
+        violations?: number;
+      };
+    };
   }[];
 };
 const metrics = [
@@ -94,7 +101,9 @@ export function compare(
   ] as const)
     for (const [i, r] of rounds.entries()) {
       if (!fresh && canonical(selection(reference)) !== canonical(selection(r)))
-        throw Error(`${side} round ${i + 1}: ordered selection differs: ${canonical(selection(reference))} vs ${canonical(selection(r))}`);
+        throw Error(
+          `${side} round ${i + 1}: ordered selection differs: ${canonical(selection(reference))} vs ${canonical(selection(r))}`,
+        );
       for (const field of fields) {
         const expected = reference.config?.[field],
           actual = r.config?.[field];
@@ -132,7 +141,10 @@ export function compare(
     if (!env) throw Error("missing environment");
     const root = env.OMNI_ROOT;
     return Object.fromEntries(
-      Object.entries(env).map(([k, v]) => [k, root && (v === root || v.startsWith(`${root}/`)) ? `<scratch>${v.slice(root.length)}` : v]),
+      Object.entries(env).map(([k, v]) => [
+        k,
+        root && (v === root || v.startsWith(`${root}/`)) ? `<scratch>${v.slice(root.length)}` : v,
+      ]),
     );
   };
   const differences = (a: Record<string, string>, b: Record<string, string>) =>
@@ -158,11 +170,15 @@ export function compare(
     `Effective head environment: ${JSON.stringify(head[0]?.provenance.environment)}`,
     "Rust's production launcher defaults MIMALLOC_PURGE_DELAY=1; this is not an allocator-neutral comparison.",
     "CPU covers the gateway process and its threads only (children excluded). Memory is resident memory sampled every 100 ms.",
-    fresh ? "--fresh-process was used; database history is retained." : "One process serves all scenarios; later scenarios include earlier process and database history.",
+    fresh
+      ? "--fresh-process was used; database history is retained."
+      : "One process serves all scenarios; later scenarios include earlier process and database history.",
     "The load interval ends at oha's report file, with a 250 ms tolerance.",
     "Verifier requests are extra gateway work, not counted in the request rate.",
     "Measured traffic integrity uses status, usage, per-request size and a sampling full-body verifier; this is not a proof that every response was correct.",
-    fresh ? "All rounds use --fresh-process; differing ordered selections allowed for shared scenarios (database state retained)." : "All rounds have the same ordered scenario selection.",
+    fresh
+      ? "All rounds use --fresh-process; differing ordered selections allowed for shared scenarios (database state retained)."
+      : "All rounds have the same ordered scenario selection.",
     "### environment differences between sides",
     "| variable | base | head |",
     "|---|---|---|",
@@ -173,12 +189,19 @@ export function compare(
     "",
   ];
   header.push("Verifier counts by round (started/completed/skipped ticks/violations):");
-  for (const [side, rounds] of [["base", base], ["head", head]] as const)
+  for (const [side, rounds] of [
+    ["base", base],
+    ["head", head],
+  ] as const)
     for (const [i, r] of rounds.entries())
-      header.push(`${side} round ${i + 1}: ${r.scenarios.map((s) => {
-        const v = s.integrity?.verifier;
-        return `${s.name}=${v?.started ?? "unknown"}/${v?.completed ?? "unknown"}/${v?.skippedTicks ?? "unknown"}/${v?.violations ?? "unknown"}`;
-      }).join(", ")}`);
+      header.push(
+        `${side} round ${i + 1}: ${r.scenarios
+          .map((s) => {
+            const v = s.integrity?.verifier;
+            return `${s.name}=${v?.started ?? "unknown"}/${v?.completed ?? "unknown"}/${v?.skippedTicks ?? "unknown"}/${v?.violations ?? "unknown"}`;
+          })
+          .join(", ")}`,
+      );
   const names = [...new Set([...base, ...head].flatMap((r) => r.scenarios.map((s) => s.name)))];
   const tables = new Map<string, string[]>();
   const counts = metrics.map(() => ({ better: 0, worse: 0, inside: 0 }));
