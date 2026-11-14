@@ -1,5 +1,133 @@
 mod common;
 
+async fn server_stream(
+    f: &common::Fixture,
+    deps: Arc<omni_gateway::dispatch::Deps>,
+    body: String,
+    mode: &str,
+) {
+    omni_gateway::clock::init_request_ids().expect("boot request IDs");
+    use omni_gateway::{admin_auth, admin_routes, server};
+    use omni_gateway_core::{
+        ratelimit::RateLimiter,
+        snapshot::{MissConfig, MissResolver},
+    };
+    use std::{sync::Mutex, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let store = || omni_store::SqliteStore::open(&f.path, 0).expect("store");
+    let now: admin_auth::Clock = Arc::new(|| 0);
+    let app = Arc::new(server::App {
+        deadline_workers: server::DeadlineWorkers::new(),
+        miss: MissResolver::new(
+            deps.holder.clone(),
+            Arc::new(Mutex::new(store())),
+            MissConfig::default(),
+        ),
+        deps,
+        limiter: RateLimiter::new(),
+        node_id: "depth".into(),
+        keepalive: Duration::from_secs(10),
+        idle_timeout: Duration::from_secs(20),
+        bench_endpoints: false,
+        bench_flush_timeout: Duration::from_secs(1),
+        metrics_token: None,
+        static_root: None,
+        admin: admin_auth::AdminAuth::new(
+            store(),
+            Arc::new(admin_auth::MemoryKv::new(now.clone())),
+            now,
+            admin_auth::SESSION_TTL_MS,
+        ),
+        base_url_https: false,
+        control: admin_routes::ControlStore::new(store()),
+        body_logging_allowed: false,
+        day_offset_minutes: 0,
+        reported_catalog_problems: Mutex::default(),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let addr = listener.local_addr().expect("addr");
+    let serving = app.clone();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let service = hyper::service::service_fn(move |req| server::handle(serving.clone(), req));
+        omni_gateway::http1_builder(Duration::from_secs(20))
+            .serve_connection(hyper_util::rt::TokioIo::new(socket), service)
+            .await
+    });
+    let mut socket = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    // Anthropic downstream preserves native blocks, and handles tools from either provider.
+    let body = body.replace("\"stream\":false", "\"stream\":true");
+    // The messages route uses Anthropic ingress and egress; convert only the
+    // fixture's tool definition to its native shape, retaining the deep schema.
+    let body = body
+        .replace(
+            "\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":",
+            "\"name\":\"f\",\"input_schema\":",
+        )
+        .replace("}}}],\"stream\"", "}}],\"stream\"");
+    socket.write_all(format!("POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer sk-depth\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.expect("request");
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let mut chunk = [0; 4096];
+            let n = socket.read(&mut chunk).await.expect("response");
+            if n == 0 {
+                break;
+            }
+            wire.extend_from_slice(&chunk[..n]);
+            if mode.ends_with("disconnect")
+                && wire.windows(100).any(|w| w.iter().all(|b| *b == b'['))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("response deadline");
+    drop(socket);
+    let result = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("handler deadline")
+        .expect("handler task");
+    if !mode.ends_with("disconnect") {
+        result.expect("normal HTTP completion");
+    }
+    app.deadline_workers.shutdown().await;
+    let text = String::from_utf8(wire).expect("utf8");
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    if mode.ends_with("disconnect") {
+        assert!(
+            text.contains(&"[".repeat(100)),
+            "received part of deep payload"
+        );
+        assert!(
+            !text.contains("event: message_stop"),
+            "disconnect before completion"
+        );
+    } else {
+        // Remove HTTP chunk framing before checking the uninterrupted JSON payload.
+        let mut rest = text.split_once("\r\n\r\n").expect("headers").1;
+        let mut decoded = String::new();
+        loop {
+            let (size, data) = rest.split_once("\r\n").expect("chunk header");
+            let n = usize::from_str_radix(size, 16).expect("chunk size");
+            if n == 0 {
+                break;
+            }
+            decoded.push_str(&data[..n]);
+            rest = &data[n + 2..];
+        }
+        assert!(
+            decoded.contains(&format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980))),
+            "complete deep content"
+        );
+        assert!(decoded.contains("event: message_stop"), "normal stream end");
+        assert!(!decoded.contains("event: error"), "no in-stream error");
+    }
+}
+
 #[test]
 fn operator_provider_data_rejects_deep_json_at_load() {
     let fixture = common::fixture(&["c0"]);
@@ -65,6 +193,17 @@ case!(custom_deep_error, false, "error");
 case!(anthropic_deep_error, true, "error");
 case!(custom_deep_cancel, false, "cancel");
 case!(anthropic_deep_cancel, true, "cancel");
+case!(custom_deep_server_stream, false, "stream");
+case!(anthropic_deep_server_stream, true, "stream");
+case!(custom_deep_server_disconnect, false, "stream_disconnect");
+case!(anthropic_deep_server_disconnect, true, "stream_disconnect");
+case!(anthropic_native_buffered, true, "native");
+case!(anthropic_native_server_stream, true, "native_stream");
+case!(
+    anthropic_native_server_disconnect,
+    true,
+    "native_stream_disconnect"
+);
 
 fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
     const CHILD: &str = "OMNI_DISPATCH_DEPTH_CHILD";
@@ -124,7 +263,10 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                     } else {
                         "data: {\"id\":\"m\",\"model\":\"up\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
                     };
-                    let body = if mode == "response" || mode == "cancel" {
+                    let body = if mode.starts_with("native") {
+                        let nested = format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980));
+                        format!("event: message_start\ndata: {{\"message\":{{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}}}\n\nevent: content_block_start\ndata: {{\"index\":0,\"content_block\":{{\"type\":\"web_search_tool_result\",\"content\":{nested}}}}}\n\nevent: content_block_stop\ndata: {{\"index\":0}}\n\nevent: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"end_turn\"}}}}\n\nevent: message_stop\ndata: {{}}\n\n")
+                    } else if mode == "response" || mode == "cancel" || mode.starts_with("stream") {
                         let nested = format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980));
                         let args = serde_json::to_string(&nested).expect("argument string");
                         if anthropic {
@@ -140,6 +282,12 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                 if anthropic {
                     rusqlite::Connection::open(&fixture.path).expect("db").execute("UPDATE credentials SET provider='anthropic',provider_data='{}'", []).expect("provider");
                 }
+                if mode.contains("stream") {
+                    rusqlite::Connection::open(&fixture.path).expect("db").execute(
+                        "INSERT INTO api_keys (id,label,prefix,hash,created_at) VALUES ('depth','depth',?,?,0)",
+                        rusqlite::params![omni_crypto::apikey::prefix("sk-depth"), omni_crypto::apikey::hash("sk-depth")],
+                    ).expect("api key");
+                }
                 let h = common::harness(&fixture, vec![]);
                 let deps = Arc::new(omni_gateway::dispatch::Deps {
                     http: Arc::new(Local { client: Client::new(), origin }),
@@ -149,6 +297,13 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                 // An arbitrary schema annotation, preserved by both codecs.
                 let nested = format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980));
                 let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"tools":[{{"type":"function","function":{{"name":"f","parameters":{{"type":"object","x-deep":{nested}}}}}}}],"stream":false}}"#);
+                if mode.contains("stream") {
+                    server_stream(&fixture, deps.clone(), body, mode).await;
+                    drop(deps);
+                    h.writer.close().await.expect("close");
+                    stub.join().expect("stub");
+                    return;
+                }
                 let mut mint = || "toolu_test".to_owned();
                 let request = omni_dialects::ingress::ingest(omni_dialects::ingress::Surface::OpenAi, &body, &omni_dialects::ingress::Headers::new(), &mut omni_dialects::ingress::IngressOptions { new_tool_use_id: &mut mint }).expect("ingest").request;
                 let mut d = omni_gateway::dispatch::dispatch(deps.clone(), omni_gateway::dispatch::Request { request, request_id: "deep".into(), api_key_id: Some("k1".into()), route_started_at: 0 });
@@ -174,7 +329,7 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                 let rendered = omni_dialects::egress::anthropic::response(&collected, "deep");
                 let encoded = omni_ir::jsjson::to_string(&rendered);
                 assert!(!encoded.is_empty());
-                if mode == "response" { assert!(encoded.contains(&"[".repeat(39_980))); }
+                if mode == "response" || mode == "native" { assert!(encoded.contains(&"[".repeat(39_980))); }
                 drop(rendered);
                 drop(collected);
                 }
