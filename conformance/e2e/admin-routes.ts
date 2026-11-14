@@ -2477,10 +2477,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
         const secrets = ["quota-distinct-access-token", "quota-distinct-refresh-token", "quota-distinct-api-key"];
         fixture.run("DELETE FROM quota_windows");
-        const probe = async (phase:string) => {
+        const probe = async (phase:string, expectedStatus=200) => {
           for(const [who,cookie] of callers) for(const [i,query] of attacks.entries()) {
             const answer = await exchange({target:`/api/client/quota?${query}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
-            check(`${phase} ${who} quota ${i}`,answer,["client-A","client-B","client-C"].includes(who)?200:401,secrets);
+            check(`${phase} ${who} quota ${i}`,answer,["client-A","client-B","client-C"].includes(who)?expectedStatus:401,secrets);
             if(answer.status===200) {
               const rows=JSON.parse(answer.body.toString()).accounts;
               for(const row of rows) if(Object.keys(row).join(",")!=="credentialId,label,provider,windowType,usedRatio,resetsAt,observedAt,windowMs,ratePerHourRatio,exhaustsAt,survives,stale,rolledOver") deadlineFailures.push(`${phase}: unexpected quota fields`);
@@ -2504,6 +2504,28 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           fixture.run(`UPDATE quota_windows SET observed_at=${cell},used=25,limit_value=100,resets_at=9000000000000,window_ms=3600000 WHERE credential_id='quota-${i}'`);
         }
         await probe("observed cells");
+        for (const [name,cell,status] of [["invalid-json","'{'",500],["array","'[]'",200],["null-json","'null'",200],["number-json","'42'",200]] as const) {
+          fixture.run(`UPDATE credentials SET provider_data=${cell} WHERE id='quota-0'`);
+          await probe(`credential data ${name}`,status);
+        }
+        fixture.run("UPDATE credentials SET provider_data='{}' WHERE id='quota-0'");
+        for (const column of ["label","provider"]) for (const [name,cell,status] of [["number","42",200],["blob","X'3132'",500]] as const) {
+          fixture.run(`UPDATE credentials SET ${column}=${cell} WHERE id='quota-0'`);
+          await probe(`credential ${column} ${name}`,status);
+          fixture.run(`UPDATE credentials SET ${column}='custom' WHERE id='quota-0'`);
+        }
+        fixture.run("INSERT OR REPLACE INTO settings(key,value) VALUES('settings','{')");
+        await probe("malformed settings",200);
+        fixture.run("DELETE FROM settings WHERE key='settings'");
+        fixture.run("PRAGMA foreign_keys=OFF");
+        fixture.run("CREATE TABLE nullable_credentials AS SELECT * FROM credentials");
+        fixture.run("DROP TABLE credentials");
+        fixture.run("ALTER TABLE nullable_credentials RENAME TO credentials");
+        for (const column of ["label","provider"]) {
+          fixture.run(`UPDATE credentials SET ${column}=NULL WHERE id='quota-0'`);
+          await probe(`credential ${column} null`,500);
+          fixture.run(`UPDATE credentials SET ${column}='custom' WHERE id='quota-0'`);
+        }
         fixture.run("UPDATE api_keys SET expires_at=1 WHERE id='client-C'");
         check("quota expired after login",await exchange({target:"/api/client/quota?since=bad",headers:[["cookie",`omni_admin=${identities[2]!.cookie}`]]}),401,secrets);
         fixture.close();

@@ -55,6 +55,7 @@ fn primitive(v: &Value) -> Option<String> {
     }
 }
 pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Failure> {
+    crate::credentials::validate_client_metadata(store)?;
     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
     let windows = omni_store::quota::client_windows(store.connection())?;
     let poll = store.get_settings()?.quota_poll_interval_ms;
