@@ -131,10 +131,12 @@ impl ControlStore {
             .map_err(|_| ApiError::internal())?;
         let path = self.2.clone();
         let offset = self.3;
-        let store = tokio::task::spawn_blocking(move || SqliteStore::open_reader(path, offset))
-            .await
-            .map_err(|_| ApiError::internal())?
-            .map_err(|_| ApiError::internal())?;
+        let (store, permit) = tokio::task::spawn_blocking(move || {
+            SqliteStore::open_reader(path, offset).map(|store| (store, permit))
+        })
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(|_| ApiError::internal())?;
         let mut reader = Self::new(store);
         reader.5 = Some(Arc::new(permit));
         Ok(reader)
@@ -338,6 +340,7 @@ pub async fn serve(
         }
         Admin::Nodes => {
             require_reader(req.headers(), &app.admin).await?;
+            let control = control.reader().await?;
             let node_id = app.node_id.clone();
             Ok(json_ok(
                 control
@@ -603,6 +606,41 @@ async fn viewer_password(app: &App, req: Request<Incoming>) -> Result<Response<B
 mod tests {
     use super::*;
     use hyper::Method;
+
+    #[test]
+    fn cancelled_queued_open_keeps_its_permit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("dir");
+            let control =
+                ControlStore::new(SqliteStore::open(dir.path().join("db"), 0).expect("store"));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = entered.send(());
+                let _ = rx.recv();
+            });
+            ready.await.expect("entered");
+            let c = control.clone();
+            let open = tokio::spawn(async move { c.reader().await });
+            while control.4.available_permits() == 4 {
+                tokio::task::yield_now().await;
+            }
+            open.abort();
+            let _ = open.await;
+            let available = control.4.available_permits();
+            tx.send(()).expect("release");
+            blocker.await.expect("blocker");
+            // Drain the queued opener before asserting (also on RED).
+            tokio::task::spawn_blocking(|| {}).await.expect("drain");
+            assert_eq!(available, 3, "queued opener must retain its permit");
+            assert_eq!(control.4.available_permits(), 4);
+        });
+    }
 
     #[test]
     fn routes_match_elysia_s_table() {
