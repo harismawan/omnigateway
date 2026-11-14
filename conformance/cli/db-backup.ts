@@ -70,6 +70,23 @@ try {
     }
     assert.deepEqual(results[1],results[0]); count++;
   }
+  for (const [value, expected] of [["3",3],["garbage",1],[-2,1],[2.5,3],[1e300,5]] as const) {
+    const results = [];
+    for (const cmd of commands) {
+      rmSync(join(root,"snapshots"),{recursive:true,force:true});
+      copyFileSync(join(root,"seed"),join(root,"db"));
+      const live = new Database(join(root,"db"));
+      live.run("INSERT OR REPLACE INTO settings(key,value) VALUES ('settings',?)",[JSON.stringify({snapshotKeepLatest:value,snapshotMaxAgeDays:1e300})]); live.close();
+      mkdirSync(join(root,"snapshots"));
+      for(let day=1;day<=4;day++) writeFileSync(join(root,"snapshots",`db_2025-01-0${day}T00-00-00-000Z_manual.sqlite`),"old");
+      const p = goldenSpawn([...cmd,"--root",root,"--db","db","db","backup","--json"],{env,stdout:"pipe",stderr:"pipe"});
+      const out=JSON.parse(await new Response(p.stdout).text()); const err=await new Response(p.stderr).text(); const code=await p.exited;
+      assert.equal(code,0); assert.equal(err,"");
+      const names=readdirSync(join(root,"snapshots")).filter(n=>n!==out.id).sort();
+      assert.equal(names.length+1,expected); results.push(names);
+    }
+    assert.deepEqual(results[1],results[0]); count++;
+  }
   await verifyGoldenExits("db-backup");
   console.log(`PASS ${count} backup comparisons`);
 } finally { rmSync(root,{recursive:true,force:true}); }

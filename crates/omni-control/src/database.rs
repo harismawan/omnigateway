@@ -20,8 +20,7 @@ pub fn create_snapshot(
     conn: &rusqlite::Connection,
     path: &Path,
     now: &dyn Fn() -> i64,
-    keep_latest: f64,
-    max_age_days: f64,
+    retention: &dyn Fn() -> Result<(f64, f64), String>,
 ) -> Result<Value, String> {
     let at = now();
     let stamp = chrono::DateTime::from_timestamp_millis(at)
@@ -50,12 +49,25 @@ pub fn create_snapshot(
         return Err(error.to_string());
     }
     let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":metadata(&target)?.map_or(0, |s| s.len()),"reason":"manual"});
+    let (keep_latest, max_age_days) = retention()?;
     prune(&dir, at, keep_latest, max_age_days)?;
     Ok(result)
 }
 
 fn size(path: &Path) -> u64 {
     path.metadata().map(|s| s.len()).unwrap_or(0)
+}
+
+/// Numeric coercion at the retention comparisons, without validating stored settings.
+pub fn retention_number(value: Option<&omni_ir::jsjson::JsValue>) -> Result<f64, String> {
+    use omni_ir::jsjson::JsValue as V;
+    Ok(match value {
+        None | Some(V::Undefined) => f64::NAN,
+        Some(V::Number(n)) => *n,
+        Some(V::Null) => 0.0,
+        Some(V::Bool(b)) => f64::from(*b),
+        Some(v) => omni_ir::js::string_to_number(&crate::operator_json::string(v)?),
+    })
 }
 
 fn metadata(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
@@ -79,6 +91,35 @@ fn unlink(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn retention_is_read_after_snapshot_is_written() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sentinel(value)").unwrap();
+        let result = create_snapshot(&conn, &path, &|| 1_700_000_000_000, &|| {
+            let entry = std::fs::read_dir(root.path().join("snapshots"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            let snapshot = rusqlite::Connection::open(entry.path()).unwrap();
+            assert_eq!(
+                snapshot
+                    .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            Err("settings read failed".into())
+        });
+        assert_eq!(result.unwrap_err(), "settings read failed");
+        assert_eq!(
+            std::fs::read_dir(root.path().join("snapshots"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+    #[test]
     fn same_instant_refused_and_failed_snapshot_cleaned() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("db");
@@ -86,19 +127,20 @@ mod tests {
         conn.execute_batch("CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (42)")
             .unwrap();
         let clock = || 1_700_000_000_000;
-        let first = create_snapshot(&conn, &path, &clock, 3.0, 30.0).unwrap();
+        let retention = || Ok((3.0, 30.0));
+        let first = create_snapshot(&conn, &path, &clock, &retention).unwrap();
         let snapshot = root
             .path()
             .join("snapshots")
             .join(first["id"].as_str().unwrap());
         let before = std::fs::read(&snapshot).unwrap();
         assert_eq!(
-            create_snapshot(&conn, &path, &clock, 3.0, 30.0).unwrap_err(),
+            create_snapshot(&conn, &path, &clock, &retention).unwrap_err(),
             "a snapshot for this instant already exists"
         );
         assert_eq!(std::fs::read(snapshot).unwrap(), before);
         conn.execute_batch("BEGIN").unwrap();
-        assert!(create_snapshot(&conn, &path, &|| clock() + 1, 3.0, 30.0).is_err());
+        assert!(create_snapshot(&conn, &path, &|| clock() + 1, &retention).is_err());
         assert_eq!(
             std::fs::read_dir(root.path().join("snapshots"))
                 .unwrap()
