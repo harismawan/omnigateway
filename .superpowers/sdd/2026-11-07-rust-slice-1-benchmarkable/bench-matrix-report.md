@@ -1,5 +1,9 @@
 # Benchmark matrix report
 
+Follow-up commits: `958b8b55` implementation, `c6db2950` documentation/verification. Worktree clean.
+
+**Follow-up complete:** `958b8b55` adds all-metric spread comparison and matrix provenance. Two interleaved rounds per side with `--only 'custom-chat.*' --duration 2s --warmup 1s` passed in `/tmp/opencode/bench-matrix/followup/`: all eight scenarios supported in each of four JSON files. Duration, selection, both load samples, actual binary hashes and harness commit verified in every round. `commands.sh` and `comparison.md` produced successfully. No performance findings. Original matrix status follows.
+
 **Status: complete; next step is parent review/integration.** Final all-32 runs on both TS and Rust passed: `/tmp/opencode/bench-matrix/{ts,rust}-final.json`. All six direct capacity gates passed against those final results. Final rerun verifies SSE terminator/error checks and matrix-only single-write chat frames. Worktree: `/home/homebrew/.local/share/opencode/worktree/1600a1/rust-bench`, branch `feat/bench-provider-matrix`.
 
 ## Status / commits
@@ -81,6 +85,19 @@ Fault results have null metrics, never fast successful measurements. Evidence `{
 
 ## Exact measurement commands
 
+Follow-up output: `comparison.md` now groups by provider with req/s, p50/p99,
+CPU ms/request and peak RSS; every metric has successful/total rounds,
+median/min–max, head/base median ratio, and inclusive-overlap `inside spread`.
+Top summary counts better/worse/inside-spread per metric. Any failed or
+unsupported round suppresses that scenario's ratios. Header prints both binary
+hashes; mixed or absent hashes within a side are refused.
+
+Existing JSON `config` already recorded gateway argv, duration/warmup and all
+CPU sets. New matrix `provenance` adds resolved executable path/SHA256, harness
+git commit, and 1-minute load before/after. Rust hashes OMNI_RUST_BINARY rather
+than its launcher. Default JSON is unchanged. `commands.sh` retains shell-escaped
+per-round argv and Rust override; `--duration` and `--only` pass through.
+
 From this worktree, on a quiet 8-CPU host, with fresh OUT:
 
 ```sh
@@ -96,6 +113,24 @@ bun scripts/bench-compare.ts /tmp/opencode/bench-matrix/real/base /tmp/opencode/
 
 Functional single run: `OMNI_RUST_BINARY=/tmp/opencode/merge-anthropic/rust bash scripts/bench-matrix.sh --gateway "sh $PWD/scripts/run-rust-gateway.sh" --cli 'bun apps/cli/src/index.ts' --duration 2s --warmup 1s --boots 1 --out /tmp/opencode/bench-matrix/check.json` (replace gateway argv with `/tmp/opencode/merge-anthropic/ts` for TS).
 
+Follow-up functional runner command (fresh output directory):
+
+```sh
+OMNI_RUST_BINARY=/tmp/opencode/merge-anthropic/rust \
+BASE_GATEWAY=/tmp/opencode/merge-anthropic/ts \
+HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
+CLI='bun apps/cli/src/index.ts' OUT=/tmp/opencode/bench-matrix/followup \
+ROUNDS=2 ALLOW_BUSY=1 bash scripts/bench-rounds.sh \
+  --only 'custom-chat.*' --duration 2s --warmup 1s --boots 1
+```
+
+Follow-up tests: 12 focused pass; full scripts 86 pass/3 unchanged failures;
+core typecheck (668 files) and changed-file lint pass. Actual executable hashes
+were independently checked against round provenance; mixed-binary rejection
+also verified using copied round data. Synthetic two-round formatting example
+is retained at `/tmp/opencode/bench-matrix/followup-synthetic-example.md` so no
+shared-host timing is presented as a finding.
+
 ## Not covered / concerns
 
-No stubs for openai/codex, antigravity, grok, kimi, kilo, muse, qoder (absent from Rust). No matrix cluster mode, OAuth refresh/rejection, real provider/network behavior, tools/images/reasoning semantics, or production performance claims. Existing non-matrix stress/cancellation cases remain separate. Comparison currently reports throughput ratios only, with successful/total rounds and median/min–max; latency/CPU/RSS remain in per-round JSON/provider markdown. Short measurements on this contended host cannot establish production speed or robust ceiling margins. A real measurement needs a quiet host, release Rust and rerun of direct fixture checks. Only HTTP rejection statuses classify unsupported; an unsupported capability represented as generic 503 will conservatively fail.
+No stubs for openai/codex, antigravity, grok, kimi, kilo, muse, qoder (absent from Rust). No matrix cluster mode, OAuth refresh/rejection, real provider/network behavior, tools/images/reasoning semantics, or production performance claims. Existing non-matrix stress/cancellation cases remain separate. Comparison covers throughput, p50/p99 latency, CPU/request and peak RSS with spread; overlapping ranges are descriptive, not a significance test. Short measurements on this contended host cannot establish production speed or robust ceiling margins. A real measurement needs a quiet host, release Rust and rerun of direct fixture checks. Only HTTP rejection statuses classify unsupported; an unsupported capability represented as generic 503 will conservatively fail. Provenance supports direct binaries and the known Rust launcher, not arbitrary wrapper resolution. Clean harness checkout and stable executables are required; historical files without binary hashes cannot be compared.
