@@ -114,6 +114,18 @@ fn parse_stored(raw: &str) -> Result<JsValue> {
     crate::operator_json::parse(raw).map_err(Failure::internal)
 }
 
+fn parse_allowlist(raw: &str, id: &str) -> Result<JsValue> {
+    crate::operator_json::parse(raw).map_err(|detail| {
+        omni_store::StoreError::StoredJson {
+            table: "api_keys",
+            column: "model_allowlist",
+            row_id: id.to_owned(),
+            detail,
+        }
+        .into()
+    })
+}
+
 /// `parseLimits`: the stored matrix through `parseLimitConfig` (strict,
 /// `__proto__` refused at any depth), or null when it does not parse.
 fn stored_limits(raw: &str) -> JsValue {
@@ -154,7 +166,7 @@ fn key_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<KeyRow>> {
             Ok(KeyRow {
                 allowlist: match &row.allowlist_json {
                     None => JsValue::Null,
-                    Some(raw) => parse_stored(raw)?,
+                    Some(raw) => parse_allowlist(raw, &row.key.id)?,
                 },
                 limits: {
                     let limits = stored_limits(&row.limits_json);
@@ -369,7 +381,7 @@ pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> R
             .get::<_, Option<String>>("model_allowlist")
             .map_err(Failure::internal)?
         {
-            Some(v) => parse_stored(&v)?,
+            Some(v) => parse_allowlist(&v, id)?,
             None => JsValue::Null,
         },
         limits: stored_limits(&row.get::<_, String>("limits").map_err(Failure::internal)?),

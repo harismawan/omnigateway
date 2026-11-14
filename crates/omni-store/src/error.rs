@@ -39,6 +39,15 @@ pub enum StoreError {
     /// A row the TS reader would also have thrown on.
     #[error("unreadable row: {0}")]
     Corrupt(String),
+    /// Parser diagnostics may quote stored content. Only explicit wire
+    /// consumers may read `detail`; Display is safe for internal error logs.
+    #[error("unreadable row: {table}.{column} of {row_id}: not valid JSON")]
+    StoredJson {
+        table: &'static str,
+        column: &'static str,
+        row_id: String,
+        detail: String,
+    },
     /// A stored secret that does not decrypt under this key. TS throws here
     /// too, at the first use of the secret.
     #[error("credential {credential_id} field {field} does not decrypt: {source}")]
@@ -59,5 +68,25 @@ impl From<deadpool_postgres::PoolError> for StoreError {
             deadpool_postgres::PoolError::Backend(e) => Self::Postgres(e),
             other => Self::Pool(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StoreError;
+
+    #[test]
+    fn stored_json_display_excludes_parser_detail() {
+        let error = StoreError::StoredJson {
+            table: "api_keys",
+            column: "model_allowlist",
+            row_id: "key-1".into(),
+            detail: "JSON Parse error: Unexpected identifier storedSecretCanary".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "unreadable row: api_keys.model_allowlist of key-1: not valid JSON"
+        );
+        assert!(!error.to_string().contains("storedSecretCanary"));
     }
 }

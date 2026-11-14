@@ -64,6 +64,11 @@ pub(crate) async fn list_keys(c: &impl GenericClient) -> Result<Vec<ApiKey>, Sto
 fn to_key_entry(r: &Row) -> Result<Result<ApiKey, keys::KeyRowError>, StoreError> {
     match to_key(r) {
         Ok(k) => Ok(Ok(k)),
+        Err(StoreError::StoredJson { detail, .. }) => Ok(Err(keys::KeyRowError {
+            id: r.try_get("id")?,
+            hash: r.try_get("hash")?,
+            message: detail,
+        })),
         Err(StoreError::Corrupt(e)) => {
             let raw: Option<String> = r.try_get("model_allowlist")?;
             Ok(Err(keys::KeyRowError {
@@ -250,7 +255,12 @@ pub(crate) async fn get_operator_key(
     if let Some(raw) = raw
         && let Some(error) = omni_ir::jsc_json::parse_error(&raw)
     {
-        return Err(StoreError::Corrupt(error));
+        return Err(StoreError::StoredJson {
+            table: "api_keys",
+            column: "model_allowlist",
+            row_id: id.to_owned(),
+            detail: error,
+        });
     }
     to_operator_key(r).map(|k| Some(k.key))
 }

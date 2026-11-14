@@ -2744,6 +2744,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       if (step.kind === "client-summary") {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
+        fixture.run("UPDATE api_keys SET model_allowlist='storedAllowlistSecretCanary' WHERE id='client-A'");
+        check("stored session allowlist parse failure", await exchange({target:"/api/client/summary",headers:[["cookie",`omni_admin=${identities[0]!.cookie}`]]}), 500);
+        check("stored operator allowlist parse failure", await exchange({target:"/api/keys",headers:[["cookie",`omni_admin=${cookies.admin}`]]}), 500);
+        fixture.run("UPDATE api_keys SET model_allowlist=NULL WHERE id='client-A'");
         for(const [who,cookie] of callers) {
           for(const attack of attacks) {
             const answer = await exchange({target:`/api/client/summary?${attack}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
@@ -3070,6 +3074,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       : []),
   ] as const) {
     const text = readFileSync(f);
+    if (label === "rust" && text.includes("storedAllowlistSecretCanary"))
+      secretProblems.push(`${stream}: stored allowlist parser detail exposed`);
     if (label === "rust" && cfg.label === "client-history" && /panicked|does not correctly implement a total order/i.test(text.toString()))
       secretProblems.push(`${stream}: history sort panic`);
     for (const raw of ["secret-a6-1", "secret-a6-2", "secret-a6-3", ...(cfg.label.startsWith("client-") ? ["providerDataSecretCanary", ...["quota","history"].flatMap(p=>[`${p}-distinct-access-token`,`${p}-distinct-refresh-token`,`${p}-distinct-api-key`])] : [])]) {
