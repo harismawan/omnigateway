@@ -93,6 +93,109 @@ use crate::fs_error::fs_error;
 use serde_json::{Value, json};
 use std::path::Path;
 
+/// Resolve and judge a candidate without swapping any files.
+pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
+    let invalid = || "BAD_REQUEST: invalid snapshot id".to_string();
+    let (stamp, reason) = id
+        .strip_prefix("db_")
+        .and_then(|s| s.strip_suffix(".sqlite"))
+        .and_then(|s| s.split_once('_'))
+        .ok_or_else(invalid)?;
+    if stamp.len() != 24
+        || reason.is_empty()
+        || !reason.bytes().all(|b| b.is_ascii_alphabetic())
+        || !stamp.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 | 13 | 16 | 19 => b == b'-',
+            10 => b == b'T',
+            23 => b == b'Z',
+            _ => b.is_ascii_digit(),
+        })
+    {
+        return Err(invalid());
+    }
+    let iso = format!(
+        "{}:{}:{}.{}",
+        &stamp[..13],
+        &stamp[14..16],
+        &stamp[17..19],
+        &stamp[20..]
+    );
+    if crate::date::parse(&iso).is_none() {
+        return Err(invalid());
+    }
+    let dir = live
+        .parent()
+        .ok_or("database has no parent")?
+        .join("snapshots");
+    let path = dir.join(id);
+    if let Ok(real) = path.canonicalize() {
+        let real_dir = dir.canonicalize().unwrap_or(dir);
+        if real.parent() != Some(real_dir.as_path()) {
+            return Err(invalid());
+        }
+    }
+    if metadata(&path)?.is_none() {
+        return Err("BAD_REQUEST: no such snapshot".into());
+    }
+    with_exclusive("a restore preview", || judge_candidate(&path))
+}
+
+fn judge_candidate(path: &Path) -> Result<Value, String> {
+    let inspect = || -> Result<(String, Vec<String>, Value), rusqlite::Error> {
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let check = conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))?;
+        let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
+        let tables = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut counts = json!({});
+        for table in [
+            "api_keys",
+            "credential_health",
+            "credentials",
+            "migrations",
+            "quota_windows",
+            "request_logs",
+            "settings",
+            "virtual_models",
+        ] {
+            if tables.iter().any(|t| t == table) {
+                counts[table] = json!(conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table}"),
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?);
+            }
+        }
+        Ok((check, tables, counts))
+    };
+    let (check, tables, counts) = inspect()
+        .map_err(|_| "BAD_REQUEST: that file failed its integrity check: unreadable".to_string())?;
+    if check != "ok" {
+        return Err(format!(
+            "BAD_REQUEST: that file failed its integrity check: {check}"
+        ));
+    }
+    if counts.as_object().is_none_or(|c| c.len() != 8) {
+        let description = if tables.is_empty() {
+            "it has no tables at all".into()
+        } else {
+            let mut text = format!("it has {}", tables[..tables.len().min(5)].join(", "));
+            if tables.len() > 5 {
+                text.push_str(&format!(" and {} more", tables.len() - 5));
+            }
+            text
+        };
+        return Err(format!(
+            "BAD_REQUEST: that file is a database, but not one of ours: {description}"
+        ));
+    }
+    Ok(counts)
+}
+
 pub fn create_snapshot(
     conn: &rusqlite::Connection,
     path: &Path,

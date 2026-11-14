@@ -58,7 +58,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
                     {
                         return Err((2, "snapshot id is required".into()));
                     }
-                    database::run(&command, &flags).map_err(|e| (1, e))
+                    database::run(&command, &flags, &positional).map_err(|e| (1, e))
                 } else if command == "status" {
                     status::run(&flags).map_err(|e| (1, e))
                 } else if command == "admin-set-password" {

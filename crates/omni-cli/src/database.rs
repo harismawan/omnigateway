@@ -1,6 +1,10 @@
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path};
-pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, String> {
+pub fn run(
+    command: &str,
+    flags: &HashMap<String, String>,
+    positional: &[String],
+) -> Result<String, String> {
     if command == "db-clear-bodies" && !flags.contains_key("yes") {
         use std::io::{BufRead, IsTerminal, Write};
         let question = "delete every captured body? there is no snapshot of them";
@@ -35,13 +39,16 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
                 "a gateway is running ({who}) against this installation; run omni stop first, or restore from the dashboard, which swaps the file behind its own quiesce latch"
             ));
         }
-        return Err("db restore is not yet available in the Rust CLI".into());
     }
     let path = ctx.path.clone();
     if command == "db-vacuum" && !flags.contains_key("json") {
         eprintln!("compacting; the gateway's writes will block until this finishes…");
     }
     let store = ctx.open()?;
+    if command == "db-restore" {
+        omni_control::database::validate_restore(&path, &positional[0])?;
+        return Err("db restore is not yet available in the Rust CLI".into());
+    }
     if command == "db-clear-bodies" {
         let result = omni_control::database::clear_bodies(
             store.connection(),
