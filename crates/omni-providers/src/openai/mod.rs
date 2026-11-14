@@ -3,6 +3,9 @@ pub mod decode;
 mod identity;
 #[cfg(test)]
 mod identity_tests;
+mod lite;
+#[cfg(test)]
+mod lite_tests;
 mod profile;
 mod wire;
 /// API-key leg only; OAuth identity/transport is the next migration increment.
