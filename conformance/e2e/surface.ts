@@ -493,7 +493,10 @@ const notFound = (path: string, head = false) => {
 const auth: [string, string] = ["authorization", `Bearer ${TOKEN}`];
 
 function staticRows(prefix: string): Row[] {
-  const rows: Row[] = [];
+  const rows: Row[] = [
+    { name: `${prefix}client login invalid key`, target: "/api/client/login", method: "POST", headers: [["content-type", "application/json"]], body: '{"key":"unknown"}' },
+    { name: `${prefix}client logout anonymous`, target: "/api/client/logout", method: "POST" },
+  ];
   const add = (target: string, extra: Partial<Row> = {}) =>
     rows.push({
       name: `${prefix}${extra.method ?? "GET"} ${target}${extra.headers?.length ? ` ${JSON.stringify(extra.headers)}` : ""}`,
