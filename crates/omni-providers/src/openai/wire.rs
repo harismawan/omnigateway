@@ -39,9 +39,27 @@ fn thread(seed: &str) -> String {
         &hex[20..]
     )
 }
+#[cfg(test)]
 pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec<String>, String) {
+    let (body, notes, key, _) = encode_mode(req, model, None);
+    (body, notes, key)
+}
+type Encoded = (
+    Map<String, Value>,
+    Vec<String>,
+    String,
+    Vec<(String, String)>,
+);
+pub(crate) fn encode_mode(
+    req: &ChatRequest,
+    model: &str,
+    oauth: Option<&crate::codec::CodecInput<'_>>,
+) -> Encoded {
     let mut notes = Vec::new();
     let mut input = Vec::new();
+    let mut turns = Vec::new();
+    let mut provenance = Vec::new();
+    let mut turn: i64 = -1;
     if req
         .betas
         .as_ref()
@@ -57,6 +75,7 @@ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec
             message.role.as_str()
         };
         let mut parts = Vec::new();
+        let mut tool_parts = Vec::new();
         let flush = |parts: &mut Vec<Value>, input: &mut Vec<Value>| {
             if !parts.is_empty() {
                 let mut m = Map::new();
@@ -70,7 +89,17 @@ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec
                 input.push(Value::Object(m));
             }
         };
+        let mut opened = false;
         for block in &message.content {
+            if message.role == Role::User
+                && !opened
+                && !matches!(block, ContentBlock::ToolResult(_))
+            {
+                opened = true;
+                turn += 1;
+            }
+            let before = input.len();
+            let old_parts = parts.len();
             match block {
  ContentBlock::Text(t)=>parts.push(json!({"type":if role=="assistant"{"output_text"}else{"input_text"},"text":t.text})),
  ContentBlock::Image(i)=>parts.push(json!({"type":"input_image","image_url":format!("data:{};base64,{}",i.media_type,i.data)})),
@@ -86,9 +115,22 @@ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec
  if files.dropped{note(&mut notes,"openai:files-dropped");}
  },
  ContentBlock::ProviderNative(n)=>{if n.provider=="openai"{flush(&mut parts,&mut input);let mut m=Map::new();deep::insert(&mut m,"type".into(),json!(n.block_type));for(k,v)in &n.data{if k!="id"{deep::insert(&mut m,k.clone(),deep::clone(v));}}input.push(Value::Object(m));}else{note(&mut notes,"openai:anthropic-native-block-dropped");}}
- }
+  }
+            for _ in before..input.len() {
+                turns.push(Some(usize::try_from(turn.max(0)).unwrap_or(0)));
+                provenance.push(std::mem::take(&mut tool_parts));
+            }
+            if matches!(block, ContentBlock::ToolResult(_)) {
+                let start = if input.len() > before { 0 } else { old_parts };
+                tool_parts.extend(start..parts.len());
+            }
         }
+        let before = input.len();
         flush(&mut parts, &mut input);
+        if input.len() > before {
+            turns.push(Some(usize::try_from(turn.max(0)).unwrap_or(0)));
+            provenance.push(tool_parts);
+        }
     }
     let answered: Vec<String> = input
         .iter()
@@ -96,15 +138,21 @@ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec
         .filter_map(|v| v["call_id"].as_str().map(str::to_owned))
         .collect();
     let mut repaired = Vec::new();
-    for item in input {
+    let mut repaired_turns = Vec::new();
+    let mut repaired_parts = Vec::new();
+    for ((item, turn), parts) in input.into_iter().zip(turns).zip(provenance) {
         let missing = (item["type"] == "function_call")
             .then(|| item["call_id"].as_str())
             .flatten()
             .filter(|id| !answered.iter().any(|a| a == id))
             .map(str::to_owned);
         repaired.push(item);
+        repaired_turns.push(turn);
+        repaired_parts.push(parts);
         if let Some(id) = missing {
             repaired.push(json!({"type":"function_call_output","call_id":id,"output":""}));
+            repaired_turns.push(None);
+            repaired_parts.push(Vec::new());
         }
     }
     let instructions = crate::system::system_text(req.system.as_deref(), "openai", &mut |s| {
@@ -138,27 +186,46 @@ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec
         let v = deep::Owned(Value::Object(m));
         jsjson::to_string(&v.0)
     };
+    let secrets = oauth.map(|o| super::identity::secrets_from_map(&o.credentials.provider_data));
+    let salt = secrets.as_ref().and_then(|s| s.id_salt.as_deref());
     let key = supplied
         .filter(|s| uuid(s))
         .map(str::to_owned)
-        .unwrap_or_else(|| thread(&seed));
+        .unwrap_or_else(|| thread(&omni_crypto::codex::keyed(salt, &seed)));
+    let catalog = super::oauth::catalog(model);
+    let mut lite_tools = None;
     let mut body = Map::new();
     deep::insert(&mut body, "model".into(), json!(model));
-    deep::insert(&mut body, "input".into(), Value::Array(repaired));
+    deep::insert(
+        &mut body,
+        "input".into(),
+        Value::Array(repaired.iter().map(deep::clone).collect()),
+    );
     deep::insert(&mut body, "stream".into(), json!(req.stream));
     deep::insert(&mut body, "store".into(), json!(false));
-    if let Some(s) = instructions.filter(|s| !s.is_empty()) {
+    if let Some(s) = instructions
+        .as_ref()
+        .filter(|s| !s.is_empty() && oauth.is_none())
+    {
         deep::insert(&mut body, "instructions".into(), json!(s));
     }
     if let Some(n) = req.max_tokens {
-        deep::insert(
-            &mut body,
-            "max_output_tokens".into(),
-            omni_ir::stream::number(n),
-        );
+        if oauth.is_some() {
+            note(&mut notes, "openai:max-tokens-dropped");
+        } else {
+            deep::insert(
+                &mut body,
+                "max_output_tokens".into(),
+                omni_ir::stream::number(n),
+            );
+        }
     }
     if let Some(n) = req.temperature {
-        deep::insert(&mut body, "temperature".into(), omni_ir::stream::number(n));
+        if oauth.is_some() {
+            note(&mut notes, "openai:temperature-dropped");
+        } else {
+            deep::insert(&mut body, "temperature".into(), omni_ir::stream::number(n));
+        }
     }
     if let Some(tools) = &req.tools {
         let mut out = Vec::new();
@@ -170,6 +237,9 @@ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec
                 if let Some(d) = &t.description {
                     deep::insert(&mut m, "description".into(), json!(d));
                 }
+                if oauth.is_some() {
+                    deep::insert(&mut m, "strict".into(), json!(false));
+                }
                 deep::insert(&mut m, "parameters".into(), deep::clone(&t.input_schema));
                 out.push(Value::Object(m));
             }
@@ -177,7 +247,11 @@ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec
         if out.len() != tools.len() {
             note(&mut notes, "openai:anthropic-tool-dropped");
         }
-        deep::insert(&mut body, "tools".into(), Value::Array(out));
+        if oauth.is_some() && catalog.lite {
+            lite_tools = Some(out);
+        } else {
+            deep::insert(&mut body, "tools".into(), Value::Array(out));
+        }
     }
     if let Some(c) = &req.tool_choice {
         deep::insert(
@@ -191,36 +265,143 @@ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec
             },
         );
     }
-    match &req.reasoning {
-        Some(ReasoningConfig::BetweenTools) => {
-            note(&mut notes, "openai:reasoning-between-tools-as-off")
+    if oauth.is_some() {
+        if req.tool_choice.is_none() {
+            deep::insert(&mut body, "tool_choice".into(), json!("auto"));
         }
-        Some(ReasoningConfig::Budget { .. }) => note(&mut notes, "openai:reasoning-budget-dropped"),
-        Some(ReasoningConfig::Adaptive {
-            effort, display, ..
-        }) => {
-            let mut r = Map::new();
-            deep::insert(
-                &mut r,
-                "effort".into(),
-                json!(effort.map_or("medium", |e| e.as_str())),
-            );
-            if !matches!(
-                display,
-                Some(ReasoningDisplay::Omitted | ReasoningDisplay::Updates)
-            ) {
-                deep::insert(&mut r, "summary".into(), json!("auto"));
+        deep::insert(
+            &mut body,
+            "parallel_tool_calls".into(),
+            json!(!catalog.lite),
+        );
+        let mut effort = catalog.effort;
+        let mut summary = false;
+        match &req.reasoning {
+            Some(ReasoningConfig::Off) => {
+                effort = "low";
+                note(&mut notes, "openai:reasoning-off-as-lowest");
             }
-            deep::insert(&mut body, "reasoning".into(), Value::Object(r));
+            Some(ReasoningConfig::BetweenTools) => {
+                effort = "low";
+                note(&mut notes, "openai:reasoning-between-tools-as-lowest");
+            }
+            Some(ReasoningConfig::Budget { .. }) => {
+                note(&mut notes, "openai:reasoning-budget-dropped")
+            }
+            Some(ReasoningConfig::Adaptive {
+                effort: e, display, ..
+            }) => {
+                effort = e.map_or(catalog.effort, |e| e.as_str());
+                summary = !matches!(
+                    display,
+                    Some(ReasoningDisplay::Omitted | ReasoningDisplay::Updates)
+                );
+            }
+            _ => {}
         }
-        _ => {}
+        let mut reasoning = Map::new();
+        deep::insert(&mut reasoning, "effort".into(), json!(effort));
+        if summary {
+            deep::insert(&mut reasoning, "summary".into(), json!("auto"));
+        }
+        if catalog.lite {
+            deep::insert(&mut reasoning, "context".into(), json!("all_turns"));
+        }
+        deep::insert(&mut body, "reasoning".into(), Value::Object(reasoning));
+        deep::insert(
+            &mut body,
+            "include".into(),
+            json!(["reasoning.encrypted_content"]),
+        );
+        deep::insert(
+            &mut body,
+            "text".into(),
+            json!({"verbosity":catalog.verbosity}),
+        );
+        if let Some(vendor) = req.vendor_bag("openai") {
+            for (k, v) in vendor {
+                if k == "client_metadata" {
+                    note(&mut notes, "openai:client-metadata-replaced");
+                    continue;
+                }
+                if (k == "text" || k == "reasoning")
+                    && let (Some(ours), Some(theirs)) = (
+                        body.get_mut(k).and_then(Value::as_object_mut),
+                        v.as_object(),
+                    )
+                {
+                    for (name, value) in theirs {
+                        deep::insert(ours, name.clone(), deep::clone(value));
+                    }
+                } else {
+                    deep::insert(&mut body, k.clone(), deep::clone(v));
+                }
+            }
+        }
+    } else {
+        match &req.reasoning {
+            Some(ReasoningConfig::BetweenTools) => {
+                note(&mut notes, "openai:reasoning-between-tools-as-off")
+            }
+            Some(ReasoningConfig::Budget { .. }) => {
+                note(&mut notes, "openai:reasoning-budget-dropped")
+            }
+            Some(ReasoningConfig::Adaptive {
+                effort, display, ..
+            }) => {
+                let mut r = Map::new();
+                deep::insert(
+                    &mut r,
+                    "effort".into(),
+                    json!(effort.map_or("medium", |e| e.as_str())),
+                );
+                if !matches!(
+                    display,
+                    Some(ReasoningDisplay::Omitted | ReasoningDisplay::Updates)
+                ) {
+                    deep::insert(&mut r, "summary".into(), json!("auto"));
+                }
+                deep::insert(&mut body, "reasoning".into(), Value::Object(r));
+            }
+            _ => {}
+        }
+        omni_ir::js::object_assign(&mut body, req.vendor_value("openai"));
     }
-    omni_ir::js::object_assign(&mut body, req.vendor_value("openai"));
     if let Some(n) = crate::response_format::move_to_responses_text(req, &mut body, "openai") {
         note(&mut notes, n);
     }
     deep::insert(&mut body, "prompt_cache_key".into(), json!(key));
-    (body, notes, key)
+    let mut headers = Vec::new();
+    if let Some(opts) = oauth {
+        let effort = body
+            .get("reasoning")
+            .and_then(|v| v.get("effort"))
+            .and_then(Value::as_str)
+            .filter(|e| super::oauth::is_effort(e))
+            .unwrap_or(catalog.effort)
+            .to_owned();
+        let args = super::lite::LiteArgs {
+            thread_id: key.clone(),
+            input: repaired,
+            tools: lite_tools,
+            instructions,
+            request_id: opts.request_id.map(str::to_owned),
+            started_at: opts.request_started_at,
+            id_salt: salt.map(str::to_owned),
+            lite: catalog.lite,
+            effort_update: catalog.updates.then_some(effort.clone()),
+        };
+        let built = super::lite::to_lite(&args, &repaired_turns, &repaired_parts);
+        deep::insert(&mut body, "input".into(), deep::clone(&built.0["input"]));
+        let (metadata, protocol) = super::oauth::turn(opts, &key, &seed, &built.0, &effort);
+        deep::insert(&mut body, "client_metadata".into(), metadata);
+        headers = protocol;
+    } else {
+        for item in repaired {
+            deep::drop(item);
+        }
+    }
+    (body, notes, key, headers)
 }
 #[cfg(test)]
 mod tests {

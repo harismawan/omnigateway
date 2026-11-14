@@ -1,10 +1,9 @@
 #![allow(clippy::unwrap_used)]
 use omni_dialects::ingress::{Headers, IngressOptions, Surface, ingest};
 use omni_providers::codec::{CodecInput, Credentials, ProviderCodec};
-use omni_providers::openai::OpenAiApiKeyCodec;
+use omni_providers::openai::OpenAiCodec;
 
 #[test]
-#[ignore = "RED checkpoint: OAuth provider codec not implemented; run explicitly before implementation"]
 fn oauth_codec_matches_frozen_ts() {
     let out = std::process::Command::new("bun")
         .arg("tests/openai-oauth-request-reference.ts")
@@ -39,7 +38,7 @@ fn oauth_codec_matches_frozen_ts() {
             provider_data: serde_json::from_str(r#"{"accountId":"account"}"#).unwrap(),
             ..Default::default()
         };
-        let got = OpenAiApiKeyCodec
+        let got = OpenAiCodec
             .build_request(&CodecInput {
                 request: &request,
                 model: row["model"].as_str().unwrap(),

@@ -25,14 +25,18 @@ pub(crate) fn is_uuid(s: &str) -> bool {
 // Used by the OAuth codec/refresh in the next increment; no JSON is cloned.
 #[allow(dead_code)]
 pub(crate) fn secrets_from(data: &Value) -> Secrets {
+    read_secrets(|key| data.get(key))
+}
+pub(crate) fn secrets_from_map(data: &serde_json::Map<String, Value>) -> Secrets {
+    read_secrets(|key| data.get(key))
+}
+fn read_secrets<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> Secrets {
     Secrets {
-        installation_id: data
-            .get("installationId")
+        installation_id: get("installationId")
             .and_then(Value::as_str)
             .filter(|s| is_uuid(s))
             .map(str::to_owned),
-        id_salt: data
-            .get("idSalt")
+        id_salt: get("idSalt")
             .and_then(Value::as_str)
             .filter(|s| {
                 s.len() == 64

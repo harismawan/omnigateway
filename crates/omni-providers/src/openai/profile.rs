@@ -27,6 +27,16 @@ fn env(name: &str, fallback: &str) -> String {
         .cloned()
         .unwrap_or_else(|| fallback.into())
 }
+pub(crate) fn sandbox() -> &'static str {
+    let platform = env("OMNI_OPENAI_UA_PLATFORM", "Windows 10.0.26200");
+    if platform.starts_with("Windows") {
+        "windows_elevated"
+    } else if platform.starts_with("Mac OS") || platform.starts_with("macOS") {
+        "seatbelt"
+    } else {
+        "seccomp"
+    }
+}
 pub(crate) fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     initialize();
     let version = env("OMNI_OPENAI_CLI_VERSION", "0.165.0");
