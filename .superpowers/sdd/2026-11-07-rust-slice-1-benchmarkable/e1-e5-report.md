@@ -1,12 +1,12 @@
 ## Database write commands
 
-**Partial checkpoint (db2/A4). A1–A4 complete; A5–A7 and B remain open. Next: A5 failure cleanup/refusal byte invariance, then A7, B, A6. db restore: not started.**
+**Partial checkpoint (db2/A7). A1–A4 and A7 complete; A5 partial; B and A6 open. Next: finish A5 deterministic CLI collision and live-WAL refusal coverage, then B, A6. db restore: not started.**
 
 Review I1: `1bb8836a` removes the ambient recursion marker and asserts/removes exactly one automatic import from the generated child. The reviewer's `OMNI_CONFIG_GATE_CHILD=1` command previously passed 302 without its negative child (`db-i1-before.log`); afterward it passes 302 plus seven diagnostic checks and the expected cluster-category child failure (`db-i1-after.log`, `db-i1-after-child.log`); normal invocation also passes (`db-i1-normal.log`, `db-i1-normal-child.log`). The two round-3 wording qualifications below are corrected.
 
 | Command | Commits | Suite / cases | Status |
 |---|---|---|---|
-| db backup | ea7cb71b; 71473672; aa9e2588; 254c3076; 679e399b; 54e11aaa | db-backup.ts / 20 | A1–A4 fixed; remaining coverage incomplete |
+| db backup | ea7cb71b; 71473672; aa9e2588; 254c3076; 679e399b; 54e11aaa; 59366f8a; 43b96666 | db-backup.ts / 22 | A1–A4, A7 complete; A5 partial |
 | db vacuum | 8ffb5d03; lint follow-up 71473672 | db-vacuum.ts / 4 | implemented, coverage incomplete |
 | db clear-bodies | none | none | unavailable |
 | db restore | none | none | unavailable |
@@ -31,11 +31,11 @@ Additional disturbance confirmation: invoked both real CLIs directly for each ne
 - A1 fixed in aa9e2588: moved existing JS-compatible parser into control and re-exported from CLI. Overflow-date fixture failed first (two manual files instead of one), then passed; `db2-a1-red.log` / `db2-a1-green.log`.
 - A4 fixed in 54e11aaa: listing had a lexical pre-sort; reverse-order golden failed (`db2-a4-list-red.log`), then passed after removing it. Listing and pruning both preserve enumeration order and stable-sort timestamps only. Both creation orders compare enumeration, listing and survivors; recreated fixtures enumerate identically on this filesystem. Inherited TS behavior: manual/preRestore ties require the same millisecond; manual-first keeps both, preRestore-first keeps only preRestore with keepLatest=1. User withdrew order-independence requirement.
 - A2 fixed in 254c3076: setup filesystem formatter moved to control; backup mkdir/stat/unlink/readdir use it, cleanup errors propagate. File-occupied snapshot directory failed first on EEXIST text (`db2-a2-red.log`), then passed. Mode-0500 refusal now golden; both cases assert live/-wal/-shm bytes and no stray snapshot. `db2-a2-green.log`: six comparisons.
-- Full-disk, half-written-file, prune-unlink-error and busy-database differential cases remain missing. Free-space refusal is NOT covered by a unit test; existing unit test covers collision and transaction-refused VACUUM cleanup only. Other native SQLite diagnostics remain unverified.
+- A5 partial in 59366f8a: injected free-bytes callback; control tests cover threshold minus one/exact/plus one and unknown, with nonempty WAL byte-invariance on refusal. Corrupt table-page golden exercises both CLIs' VACUUM failure, identical live/-wal/-shm bytes, empty snapshot directory; unit probe proves raw SQLite creates partial output before error. Collision and transaction refusal unit assertions now check live bytes too. Collision through both CLIs, live-WAL differential refusals, prune-unlink/busy errors remain open. No full-disk CLI injection; space refusal unit-only. These additions passed existing behavior; no red product defect claimed.
 - No process-local exclusive maintenance latch in the new control module yet; single-shot CLI use is covered, concurrent admin reuse needs it.
 - A3 fixed in 679e399b: deferred settings callback after VACUUM INTO; unit test verifies completed snapshot exists even when settings callback fails. Five golden values pin count coercion: "3" => 3 files, "garbage" => 1, -2 => 1, 2.5 => 3, 1e300 => all 5; huge maxAgeDays permits old fixtures. Numeric-string case failed first (`db2-a3-red.log`). A4 adds age variants "3", "garbage", -2, 2.5, 1e300 with 1/2/2.75/4-day fixtures (4/1/1/3/5 survivors including new snapshot). Concurrent edits remain untested.
 - No running-gateway fixture yet for backup/vacuum. Neither implementation adds a running-gateway gate.
-- Actual snapshot/live full-table equivalence and nonempty WAL refusal byte-invariance need broader fixtures; current backup comparison checks settings plus integrity, and absent sidecars for configuration refusals.
+- A7 complete in 43b96666: extracted password suite table enumeration into database-state.ts and reused it for every table in normal successful snapshots plus an open-connection/nonempty-WAL fixture. Snapshot/live and TS/Rust states match; password-bytes suite passes. Nonempty-WAL differential refusal invariance remains A5 work.
 - CLI clock has no injection option; only timestamp-derived fields/names are masked in backup. Vacuum masks measured duration. Control receives one clock callback. No new environment variable.
 - Added direct dependencies on already-workspace-used chrono (timestamp formatting) and rustix (safe free-space query); no new package versions, no unsafe, no product TypeScript or bun.lock changes.
 - Restore path traversal, outside symlink, corrupt/truncated/different-schema candidates and swap failure injections remain untested. Restore's preview, prompt, undo, swap and shared status extraction remain to implement.
@@ -46,10 +46,10 @@ Additional disturbance confirmation: invoked both real CLIs directly for each ne
 
 ### Verification
 
-Current gate counts: backup 20 (includes four listing/backup tie comparisons), vacuum 4; two database control unit tests. Changed backup suite fails under OMNI_PORT=invalid (`db2-a4-disturbance.log`); shared guards and histogram retained. No clear-bodies suite yet.
+Current gate counts: backup 22 (includes four listing/backup tie comparisons), vacuum 4; four database control unit tests. Changed backup and password-bytes suites fail under OMNI_PORT=invalid (`db2-a7-disturbance.log`, `db2-a7-password-disturbance.log`); shared guards/histogram retained. No clear-bodies suite yet.
 
-Binary source commit `54e11aaa2291a243af8d0408a75111c625135842`; `/tmp/opencode/e1-e5/db2-a4-omni-final`, SHA256 `d743e6e08a61a6a8cbfe044f97bcbb600925d4dff324d3b372702618df8bdd95`. Fresh abort binary `db2-a4-omni-final-abort`, SHA256 `905bd2035b0ac9b9d7c9ecfba712445e1ce7d9ffe086775949b9f12d311fba11`.
-On final code commit: offline tests 24 passed; clippy all-targets -D warnings and fmt passed (`db2-a4-test.log`, `db2-a4-clippy.log`, `db2-a4-fmt.log`), incremental/debug=0. Foreground matrix 30/30 exit=0, summary read: `/tmp/opencode/e1-e5/db2-a4-verified-summary.txt`; script `db2-a4-matrix.sh`. No failed matrix logs. Suite fixtures self-clean; no new suite added. Report-only checkpoint follows verification.
+Binary source commit `43b96666bb7476801266869e3f9a34e9dd5b945b`; `/tmp/opencode/e1-e5/db2-a7-omni-final`, SHA256 `257b24b9981801d6348c07efbb44621dad955a1766f3ca4000ff544bddc27149`. Fresh abort binary `db2-a7-omni-final-abort`, SHA256 `b582ae6b231f67f8b8b9d5a66bc9651cdb294fff7dd3f2a8c62b1732e4cfef09`.
+On final code commit: offline tests 26 passed; clippy all-targets -D warnings and fmt passed (`db2-a7-test.log`, `db2-a7-clippy.log`, `db2-a7-fmt.log`), incremental/debug=0. Foreground matrix 30/30 exit=0, summary read: `/tmp/opencode/e1-e5/db2-a7-verified-summary.txt`; script `db2-a7-matrix.sh`. No failed matrix logs. Suite fixtures self-clean; no new suite added. Report-only checkpoint follows verification.
 
 ## Fix round 3: complete for review
 
