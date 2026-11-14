@@ -4,6 +4,8 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
+import { checkPreviewGoldens } from "./db-preview-goldens.ts";
+checkPreviewGoldens();
 const root = mkdtempSync("/tmp/opencode/e1-e5/db6-restore-");
 const env = {...process.env, HOME:root, XDG_STATE_HOME:join(root,"state"), OMNI_ENCRYPTION_KEY:"database-golden-secret", NO_COLOR:"1"};
 const store = await createStore({path:join(root,"seed"),encryptionKey:await deriveKey(env.OMNI_ENCRYPTION_KEY)}); store.close();
@@ -63,5 +65,21 @@ try {
   if(kind==="truncated")assert.deepEqual(after[1],after[0],kind);
   count++;
  }
- await verifyGoldenExits("db-restore");console.log(`PASS ${count} restore comparisons`);
+ for(const json of [false,true]) {
+  const results=[];
+  for(const cmd of commands) {
+   for(const suffix of ["","-wal","-shm"])rmSync(join(root,"db")+suffix,{force:true});
+   for(const suffix of ["","-wal","-shm"])rmSync(join(root,"snapshots",id)+suffix,{recursive:true,force:true});
+   copyFileSync(join(root,"seed"),join(root,"db"));
+   copyFileSync(join(root,"db"),join(root,"snapshots",id));
+   const snapshot=new Database(join(root,"snapshots",id));snapshot.run("PRAGMA journal_mode=DELETE");snapshot.close();
+   const db=new Database(join(root,"db"));db.run("INSERT INTO request_bodies (request_id,at,rel_path,size_bytes,detail_state,truncated) VALUES ('changed',1,'body',1,'ready',0)");db.close();
+   const before=state();
+   const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","restore",id,"--dry-run",...(json?["--json"]:[])],{env,stdout:"pipe",stderr:"pipe"});
+   const result={out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited};
+   assert.equal(result.code,0);assert.deepEqual(state(),before);results.push(result);
+  }
+  assert.deepEqual(results[1],results[0]);count++;
+ }
+ await verifyGoldenExits("db-restore");console.log(`PASS ${count} restore comparisons; 6 formatter goldens`);
 } finally {rmSync(root,{recursive:true,force:true});}

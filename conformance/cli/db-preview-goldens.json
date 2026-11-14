@@ -1,0 +1,70 @@
+[
+  {
+    "preview": {
+      "snapshot": {
+        "zebra": 1,
+        "apple": 200
+      },
+      "live": {
+        "apple": 3,
+        "zebra": 40
+      }
+    },
+    "output": "TABLE  SNAPSHOT  LIVE\napple       200     3\nzebra         1    40"
+  },
+  {
+    "preview": {
+      "snapshot": {
+        "only_snapshot": 0,
+        "shared": 1
+      },
+      "live": {
+        "shared": 2
+      }
+    },
+    "output": "TABLE          SNAPSHOT  LIVE\nonly_snapshot         0     —\nshared                1     2"
+  },
+  {
+    "preview": {
+      "snapshot": {
+        "shared": 1
+      },
+      "live": {
+        "only_live": 0,
+        "shared": 2
+      }
+    },
+    "output": "TABLE      SNAPSHOT  LIVE\nonly_live         —     0\nshared            1     2"
+  },
+  {
+    "preview": {
+      "snapshot": {
+        "apple": 12
+      },
+      "live": null
+    },
+    "output": "TABLE  SNAPSHOT  LIVE\napple        12     —\n\nthe live database could not be read, so the LIVE column is unknown"
+  },
+  {
+    "preview": {
+      "snapshot": {},
+      "live": {}
+    },
+    "output": "TABLE  SNAPSHOT  LIVE"
+  },
+  {
+    "preview": {
+      "snapshot": {
+        "é😀long_table": 123456789,
+        "a": 0,
+        "😀": 1,
+        "": 2
+      },
+      "live": {
+        "a": 123456,
+        "é😀long_table": 7
+      }
+    },
+    "output": "TABLE           SNAPSHOT    LIVE\na                      0  123456\né😀long_table  123456789       7\n😀                     1       —\n                      2       —"
+  }
+]

@@ -47,10 +47,14 @@ pub fn run(
     let store = ctx.open()?;
     if command == "db-restore" {
         let preview = omni_control::database::validate_restore(&path, &positional[0])?;
-        if flags.contains_key("dry-run") && flags.contains_key("json") {
-            return Ok(omni_ir::jsjson::to_string_pretty(
-                &json!({"id": positional[0], "snapshot": preview["snapshot"], "live": preview["live"]}),
-            ));
+        if flags.contains_key("dry-run") {
+            return Ok(if flags.contains_key("json") {
+                omni_ir::jsjson::to_string_pretty(
+                    &json!({"id": positional[0], "snapshot": preview["snapshot"], "live": preview["live"]}),
+                )
+            } else {
+                preview_table(&preview)
+            });
         }
         return Err("db restore is not yet available in the Rust CLI".into());
     }
@@ -322,6 +326,51 @@ fn time(at: Option<i64>) -> String {
         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or("—".into())
 }
+fn preview_table(preview: &Value) -> String {
+    let mut names = ["snapshot", "live"]
+        .iter()
+        .filter_map(|side| preview[side].as_object())
+        .flat_map(|counts| counts.keys().cloned())
+        .collect::<Vec<_>>();
+    names.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+    names.dedup();
+    let rows = names
+        .into_iter()
+        .map(|name| {
+            let cell = |side: &str| {
+                preview[side]
+                    .get(&name)
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "—".into())
+            };
+            vec![name.clone(), cell("snapshot"), cell("live")]
+        })
+        .collect::<Vec<_>>();
+    let body = table(&["TABLE", "SNAPSHOT", "LIVE"], &rows, &[1, 2]);
+    if preview["live"].is_null() {
+        format!("{body}\n\nthe live database could not be read, so the LIVE column is unknown")
+    } else {
+        body
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    #[test]
+    fn frozen_formatter_goldens() {
+        let goldens: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../conformance/cli/db-preview-goldens.json"
+        ))
+        .unwrap();
+        for case in goldens.as_array().unwrap() {
+            assert_eq!(
+                super::preview_table(&case["preview"]),
+                case["output"].as_str().unwrap()
+            );
+        }
+    }
+}
+
 fn table(headers: &[&str], rows: &[Vec<String>], right: &[usize]) -> String {
     let widths = headers
         .iter()

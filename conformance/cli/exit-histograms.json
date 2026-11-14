@@ -1,5 +1,5 @@
 {
-  "db-restore": {"exit 2":1,"exit 1":14,"exit 0":2},
+  "db-restore": {"exit 2":1,"exit 1":14,"exit 0":4},
   "db-clear-bodies": {"exit 1":4,"environment OMNI_ENCRYPTION_KEY":1,"exit 0":6},
   "db-vacuum": {"exit 1":2,"environment OMNI_ENCRYPTION_KEY":2,"exit 0":2},
   "db-backup": {"exit 1":7,"environment unable to open database":1,"environment OMNI_ENCRYPTION_KEY":3,"exit 0":17},
