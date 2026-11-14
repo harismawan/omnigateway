@@ -247,12 +247,26 @@ pub fn create_snapshot_with_free_bytes(
     free_bytes: &dyn Fn(&Path) -> Option<u64>,
 ) -> Result<Value, String> {
     let _exclusive = EXCLUSIVE.enter("a snapshot")?;
+    write_snapshot(conn, path, now, retention, free_bytes, false)
+}
+
+// The restore caller already holds the exclusive guard. Its forced undo must
+// survive even a retention policy that would immediately prune every snapshot.
+fn write_snapshot(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    now: &dyn Fn() -> i64,
+    retention: &dyn Fn() -> Result<(f64, f64), String>,
+    free_bytes: &dyn Fn(&Path) -> Option<u64>,
+    force: bool,
+) -> Result<Value, String> {
     let at = now();
     let stamp = chrono::DateTime::from_timestamp_millis(at)
         .ok_or("invalid snapshot time")?
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         .replace([':', '.'], "-");
-    let name = format!("db_{stamp}_manual.sqlite");
+    let reason = if force { "preRestore" } else { "manual" };
+    let name = format!("db_{stamp}_{reason}.sqlite");
     let dir = path
         .parent()
         .ok_or("database has no parent")?
@@ -273,9 +287,11 @@ pub fn create_snapshot_with_free_bytes(
         unlink(&target)?;
         return Err(error.to_string());
     }
-    let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":crate::database_fs::stat(&target).map_or(0, |s| s.len()),"reason":"manual"});
-    let (keep_latest, max_age_days) = retention()?;
-    prune(&dir, at, keep_latest, max_age_days)?;
+    let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":crate::database_fs::stat(&target).map_or(0, |s| s.len()),"reason":reason});
+    if !force {
+        let (keep_latest, max_age_days) = retention()?;
+        prune(&dir, at, keep_latest, max_age_days)?;
+    }
     Ok(result)
 }
 
@@ -489,6 +505,43 @@ mod tests {
             0
         );
     }
+    #[test]
+    fn forced_undo_inside_restore_guard_preserves_old_snapshot() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        let root = tempfile::tempdir_in("/tmp/opencode/e1-e5").unwrap();
+        let path = root.path().join("db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (42)")
+            .unwrap();
+        let dir = root.path().join("snapshots");
+        std::fs::create_dir(&dir).unwrap();
+        let old = dir.join("db_2000-01-01T00-00-00-000Z_manual.sqlite");
+        std::fs::write(&old, b"retention sentinel").unwrap();
+        let result = with_exclusive("a restore", || {
+            write_snapshot(
+                &conn,
+                &path,
+                &|| 1_700_000_000_000,
+                &|| panic!("forced undo must not read retention settings"),
+                &|_| None,
+                true,
+            )
+        })
+        .unwrap();
+        assert_eq!(result["reason"], "preRestore");
+        assert_eq!(
+            result["id"],
+            "db_2023-11-14T22-13-20-000Z_preRestore.sqlite"
+        );
+        assert_eq!(std::fs::read(old).unwrap(), b"retention sentinel");
+        let undo = rusqlite::Connection::open(dir.join(result["id"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            undo.query_row("SELECT value FROM sentinel", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+    }
+
     #[test]
     fn retention_is_read_after_snapshot_is_written() {
         let _serial = TEST_LOCK.lock().unwrap();
