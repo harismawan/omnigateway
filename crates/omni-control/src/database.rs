@@ -22,6 +22,20 @@ pub fn create_snapshot(
     now: &dyn Fn() -> i64,
     retention: &dyn Fn() -> Result<(f64, f64), String>,
 ) -> Result<Value, String> {
+    create_snapshot_with_free_bytes(conn, path, now, retention, &|dir| {
+        rustix::fs::statfs(dir)
+            .ok()
+            .map(|s| s.f_bavail * s.f_bsize as u64)
+    })
+}
+
+pub fn create_snapshot_with_free_bytes(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    now: &dyn Fn() -> i64,
+    retention: &dyn Fn() -> Result<(f64, f64), String>,
+    free_bytes: &dyn Fn(&Path) -> Option<u64>,
+) -> Result<Value, String> {
     let at = now();
     let stamp = chrono::DateTime::from_timestamp_millis(at)
         .ok_or("invalid snapshot time")?
@@ -38,7 +52,7 @@ pub fn create_snapshot(
         return Err("a snapshot for this instant already exists".into());
     }
     let needed = (metadata(path)?.map_or(0, |s| s.len()) as f64 * 1.1).ceil();
-    if rustix::fs::statfs(&dir).is_ok_and(|s| ((s.f_bavail * s.f_bsize as u64) as f64) < needed) {
+    if free_bytes(&dir).is_some_and(|free| (free as f64) < needed) {
         return Err("not enough free disk space to write a snapshot".into());
     }
     if let Err(error) = conn.execute_batch(&format!(
@@ -90,6 +104,86 @@ fn unlink(path: &Path) -> Result<(), String> {
 #[allow(clippy::unwrap_used, clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    fn live_bytes(path: &Path) -> Vec<Option<Vec<u8>>> {
+        ["", "-wal", "-shm"]
+            .iter()
+            .map(|suffix| {
+                let path = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+                match std::fs::read(path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => panic!("read live state: {e}"),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_free_space_threshold_and_unknown() {
+        for free_offset in [Some(-1_i64), Some(0), Some(1), None] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("db");
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (42)").unwrap();
+            let needed = (size(&path) as f64 * 1.1).ceil() as i64;
+            let before = live_bytes(&path);
+            let result = create_snapshot_with_free_bytes(
+                &conn,
+                &path,
+                &|| 1_700_000_000_000,
+                &|| Ok((3.0, 30.0)),
+                &|_| free_offset.map(|offset| (needed + offset) as u64),
+            );
+            if free_offset == Some(-1) {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "not enough free disk space to write a snapshot"
+                );
+                assert_eq!(live_bytes(&path), before);
+                assert_eq!(
+                    std::fs::read_dir(root.path().join("snapshots"))
+                        .unwrap()
+                        .count(),
+                    0
+                );
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_table_snapshot_failure_removes_output() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA page_size=4096; CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (zeroblob(100000))").unwrap();
+        drop(conn);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4096] = 0xff;
+        std::fs::write(&path, bytes).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let before = live_bytes(&path);
+        // Verify SQLite actually creates a partial output on this failure.
+        let probe = root.path().join("probe");
+        assert!(
+            conn.execute_batch(&format!("VACUUM INTO '{}'", probe.display()))
+                .is_err()
+        );
+        assert!(probe.exists());
+        std::fs::remove_file(probe).unwrap();
+        assert_eq!(
+            create_snapshot(&conn, &path, &|| 1_700_000_000_000, &|| Ok((3.0, 30.0))).unwrap_err(),
+            "database disk image is malformed"
+        );
+        assert_eq!(live_bytes(&path), before);
+        assert_eq!(
+            std::fs::read_dir(root.path().join("snapshots"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
     #[test]
     fn retention_is_read_after_snapshot_is_written() {
         let root = tempfile::tempdir().unwrap();
@@ -134,13 +228,16 @@ mod tests {
             .join("snapshots")
             .join(first["id"].as_str().unwrap());
         let before = std::fs::read(&snapshot).unwrap();
+        let live_before = live_bytes(&path);
         assert_eq!(
             create_snapshot(&conn, &path, &clock, &retention).unwrap_err(),
             "a snapshot for this instant already exists"
         );
         assert_eq!(std::fs::read(snapshot).unwrap(), before);
+        assert_eq!(live_bytes(&path), live_before);
         conn.execute_batch("BEGIN").unwrap();
         assert!(create_snapshot(&conn, &path, &|| clock() + 1, &retention).is_err());
+        assert_eq!(live_bytes(&path), live_before);
         assert_eq!(
             std::fs::read_dir(root.path().join("snapshots"))
                 .unwrap()

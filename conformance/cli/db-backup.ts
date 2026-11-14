@@ -33,6 +33,25 @@ try {
     }
     assert.deepEqual(results[1],results[0]); count++;
   }
+  {
+    const results=[];
+    for(const cmd of commands) {
+      rmSync(join(root,"snapshots"),{recursive:true,force:true});
+      copyFileSync(join(root,"seed"),join(root,"db"));
+      const live=new Database(join(root,"db"));
+      live.run("CREATE TABLE broken(value)"); live.run("INSERT INTO broken VALUES (zeroblob(100000))");
+      const page=(live.query("SELECT rootpage FROM sqlite_master WHERE name='broken'").get() as any).rootpage;
+      const size=(live.query("PRAGMA page_size").get() as any).page_size; live.close();
+      const bytes=readFileSync(join(root,"db")); bytes[(page-1)*size]=255; writeFileSync(join(root,"db"),bytes);
+      const state=()=>["","-wal","-shm"].map(s=>{try{return readFileSync(join(root,`db${s}`));}catch(e:any){if(e.code==="ENOENT")return null;throw e;}});
+      const before=state();
+      const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","backup","--json"],{env,stdout:"pipe",stderr:"pipe"});
+      const out=await new Response(p.stdout).text();const err=await new Response(p.stderr).text();const code=await p.exited;
+      assert.equal(code,1); assert.match(err,/database disk image is malformed/); assert.deepEqual(state(),before);
+      assert.deepEqual(readdirSync(join(root,"snapshots")),[]); results.push({out,err,code});
+    }
+    assert.deepEqual(results[1],results[0]); count++;
+  }
   for (const bad of [true, false]) for (const json of [false, true]) {
     const results = [];
     for (const cmd of commands) {
