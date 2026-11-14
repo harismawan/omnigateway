@@ -2448,8 +2448,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         const aCursor = await exchange({target:"/api/logs?limit=1&apiKeyId=client-A&until=1000",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
         const cursor = JSON.parse(aCursor.body.toString()).nextCursor;
         if(aCursor.status!==200 || !cursor) throw new Error("fixture admin cursor missing");
-        // Rust logs is the next increment. TS mints the client cursor; its
-        // scoped operator counterpart has exactly the same wire encoding.
+        // Both implementations mint their own client cursor; the scoped
+        // operator counterpart has exactly the same wire encoding.
         const clientCursorResponse = await exchange({target:"/api/client/logs?limit=1&until=1000",headers:[["cookie",`omni_admin=${identities[0]!.cookie}`]]});
         if(clientCursorResponse.status!==200) throw new Error("unexpected client logs fixture status");
         const clientCursor = JSON.parse(clientCursorResponse.body.toString()).nextCursor;
@@ -2487,6 +2487,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         ]) {
           fixture.run(sql!);
           check(`own logs unusual ${name}`,await exchange({target:"/api/client/logs?until=1000",headers:[["cookie",`omni_admin=${identities[1]!.cookie}`]]}),200,forbidden);
+        }
+        for(const cell of ["{}", "[1]", "null", "not json"]) {
+          fixture.run("UPDATE request_logs SET degradations=? WHERE api_key_id='client-B'",[cell]);
+          check(`own malformed degradations ${cell}`,await exchange({target:"/api/client/logs?until=1000",headers:[["cookie",`omni_admin=${identities[1]!.cookie}`]]}),500,forbidden);
         }
         fixture.run("UPDATE api_keys SET expires_at=1 WHERE id='client-C'");
         check("logs expired after login",await exchange({target:"/api/client/logs?since=bad",headers:[["cookie",`omni_admin=${identities[2]!.cookie}`]]}),401);

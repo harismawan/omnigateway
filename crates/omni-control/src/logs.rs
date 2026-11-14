@@ -189,9 +189,20 @@ pub fn client_page(store: &SqliteStore, raw: &str, api_key_id: &str) -> Result<S
                         ] {
                             let mut value = field(row, key).cloned().unwrap_or(JsValue::Undefined);
                             if key == "degradations" {
-                                if let JsValue::Array(entries) = &mut value {
-                                    entries.retain(|entry| !matches!(entry, JsValue::String(s) if s.starts_with(&"excluded:".encode_utf16().collect::<Vec<_>>())));
+                                let JsValue::Array(entries) = &mut value else {
+                                    return Err(Failure::internal(
+                                        "degradations.filter is not a function",
+                                    ));
+                                };
+                                if entries
+                                    .iter()
+                                    .any(|entry| !matches!(entry, JsValue::String(_)))
+                                {
+                                    return Err(Failure::internal(
+                                        "entry.startsWith is not a function",
+                                    ));
                                 }
+                                entries.retain(|entry| !matches!(entry, JsValue::String(s) if s.starts_with(&"excluded:".encode_utf16().collect::<Vec<_>>())));
                             }
                             projected.push((key.encode_utf16().collect(), value));
                         }
