@@ -276,12 +276,13 @@ function dechunk(raw: Buffer): { body: Buffer; complete: boolean } {
     if (!/^[0-9a-fA-F]+$/.test(text)) return { body: Buffer.concat(parts), complete: false };
     const n = Number.parseInt(text, 16);
     at = end + 2;
-    if (n === 0) return { body: Buffer.concat(parts), complete: raw.length === at + 2 };
+    if (n === 0) return { body: Buffer.concat(parts), complete: raw.length === at + 2 && raw.subarray(at).toString() === "\r\n" };
     if (raw.length < at + n + 2) {
       parts.push(raw.subarray(at));
       return { body: Buffer.concat(parts), complete: false };
     }
     parts.push(raw.subarray(at, at + n));
+    if (raw.subarray(at+n, at+n+2).toString() !== "\r\n") return {body:Buffer.concat(parts),complete:false};
     at += n + 2;
   }
 }
@@ -342,6 +343,8 @@ function lengthProblem(method: string, x: Ex): string | null {
     ["GET", ex(200, [["transfer-encoding", "chunked"]], "2\r\nx"), false],
     ["GET", ex(200, [["transfer-encoding", "chunked"]], "zz\r\nx\r\n0\r\n\r\n"), false],
     ["GET", ex(200, [["transfer-encoding", "chunked"]], "0\r\n\r\n"), true],
+    ["GET", ex(200, [["transfer-encoding", "chunked"]], "1\r\naXX0\r\nYY"), false],
+    ["GET", ex(200, [["transfer-encoding", "chunked"]], "0\r\nYY"), false],
   ];
   for (const [method, x, ok] of cases)
     if ((lengthProblem(method, x) === null) !== ok)
