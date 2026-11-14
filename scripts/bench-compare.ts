@@ -24,6 +24,7 @@ export type Round = {
     metrics: Metrics | null;
     concurrency?: number;
     bodySha256?: string;
+    integrity?: { verifier?: { started?: number; completed?: number; skippedTicks?: number; violations?: number } };
   }[];
 };
 const metrics = [
@@ -166,6 +167,13 @@ export function compare(
     "Values: successful/total rounds; median [min–max]. Ratios are head/base. Range overlap is descriptive, not a significance test. Directional labels require at least three successful observations per side. RSS is per-scenario peak resident memory.",
     "",
   ];
+  header.push("Verifier counts by round (started/completed/skipped ticks/violations):");
+  for (const [side, rounds] of [["base", base], ["head", head]] as const)
+    for (const [i, r] of rounds.entries())
+      header.push(`${side} round ${i + 1}: ${r.scenarios.map((s) => {
+        const v = s.integrity?.verifier;
+        return `${s.name}=${v?.started ?? "unknown"}/${v?.completed ?? "unknown"}/${v?.skippedTicks ?? "unknown"}/${v?.violations ?? "unknown"}`;
+      }).join(", ")}`);
   const names = [...new Set([...base, ...head].flatMap((r) => r.scenarios.map((s) => s.name)))];
   const tables = new Map<string, string[]>();
   const counts = metrics.map(() => ({ better: 0, worse: 0, inside: 0 }));
