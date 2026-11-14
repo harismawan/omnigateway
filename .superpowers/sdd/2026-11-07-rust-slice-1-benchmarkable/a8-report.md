@@ -1,4 +1,24 @@
-# A8 complete for review
+# Fix round 1 — partial; I2 requires frozen sort reproduction
+
+**NEXT STEP:** I1 and I3 are committed and targeted GREEN. I2 is deliberately still RED (`e55be7ae`), per the instruction to stop rather than approximate comparison-order-dependent outcomes. Read `/tmp/opencode/a8/fix1/i2-sort-order.log`: initial rows `(id,provider,label)` = `(0,b,BLOB 3132),(1,a,x),(2,b,x)` compare `(1,0)` then `(2,0)` and succeed in Bun; moving the BLOB to row 2 throws on `(2,0)`. Receiver must be a string but argument is coerced. Rust eager validation rejects both. Both quota routes reproduce this, plus singleton/short-circuit/reached cases. Next implement only after determining/reproducing frozen JavaScriptCore sort pair order (including larger arrays); Rust sort plus lazy validation alone is not sufficient evidence. Then rerun targeted drivers and full closure, replacing the partial manifest. Exact-cap probes were not added this round; reviewer independently verified them.
+
+| Finding | Commit | Failed first | Evidence under `/tmp/opencode/a8/fix1/` |
+|---|---|---|---|
+| I1 fixed | `19e6cc27` | log canary: 2886 equal / 1 failure | `i1-red.log`; GREEN `i1-quota.log` 2887 equal, `i1-history.log` 3621 equal, zero failures |
+| I3 fixed | `21c8ed8c` | 5527 equal / 864 failures | `i3-red.log`; GREEN `i3-quota.log` 5959 equal, `i3-history.log` 9765 equal, zero failures |
+| I2 reproduced, unresolved | `e55be7ae` | singleton, short-circuit and three-row argument-only cases | `i2-red.log` 6030 equal / 18 failures; `i2-history-red.log` 9836 equal / 18 failures; `i2-sort-order.log` |
+
+I1 shared parser now carries only fixed reason and credential id, never the stored provider_data or parser error. Both syntactically invalid canary and valid array containing it are covered, with response and stdout/stderr secret scans. Grep found two direct shared-parser callers: client whole-list validation and operator `rows`. The latter serves list, health, patch lookups and create validation/result paths; they inherit the sanitization. Generic 500 wire response remains equal; Rust still logs its sanitized reason whereas frozen TS does not log that failure.
+
+I3 uses existing `js::own_cell` in credential identity, quota-window and quota-sample readers. Both routes compare invalid/truncated/overlong UTF-8 and embedded NUL in label/provider/id/window_type. BLOB identity is preserved. No product TypeScript/dependency/unsafe changes.
+
+Verification after I2 probe commit: workspace tests 1158 passed, 0 failed, 11 ignored, 161 groups (`tests.log`); workspace Clippy all targets -D warnings passed (`clippy.log`); fmt passed (`fmt.log`). All three requested Cargo environment variables used. Fresh builds copied outside checkout: `i1-build.log`, `i3-build.log`. `/tmp/opencode/a8/fix1/manifest.json` explicitly records partial status, binary hashes, product and driver commits; it is NOT full closure evidence. Full admin-routes/admin-auth/surface/run.ts closure is pending I2. Successful drivers remove scratch; failed comparison runs also completed normal teardown.
+
+Documentation correction: logs projection is 20 fields; final pre-review targeted summary counts were 207 each and logs 429 (reviewer's rerun). Earlier historical targeted counts below describe older fixture versions. Remaining differences: unresolved I2; sanitized metadata log still emitted by Rust; accepted empty-413 framing difference. No new claim about other edge cases.
+
+---
+
+# Previous completion checkpoint (superseded by review findings above)
 
 All seven routes implemented; full closure passed. History implementation/fixture: `670bc8f4`. Product TypeScript untouched; no dependencies, unsafe, subagents, pushes or merges. External concurrent documentation commits and excluded local files were left alone.
 
@@ -6,15 +26,15 @@ All seven routes implemented; full closure passed. History implementation/fixtur
 |---|---|---|---|
 | login | `b4d8ffe1` | 39 / 0 | 34 failures, 404 |
 | logout | `6861c046`, `bbc20d35` | 21 / 0 | 12 failures, 404 |
-| summary | `2493a8a9` | 183 / 0 | Rust 404 |
-| logs | `b5973bb3`, `20cddcbc` | 379 / 0 | 368 failures; malformed-degradation RED 6 |
+| summary | `2493a8a9` | 207 / 0 each | Rust 404 |
+| logs | `b5973bb3`, `20cddcbc` | 429 / 0 | 368 failures; malformed-degradation RED 6 |
 | usage | `1d84ed0f`, `43263a90`, `327f240f` | 487 / 0 | 422 failures, 404 |
 | quota | `f95b99b9`, `9cbd3b8c` | 2887 / 0 | 578 failures; malformed metadata RED below |
 | quota/history | `670bc8f4` | 3621 / 0 | 192 failures, 404 (`history-red.log`); duplicate-bound comparisons failed before last-value fix |
 
 Summary isolation: verified-session id only; ignored identity attacks; B response bytes exclude A/C markers; shared caller matrix and post-login expiry.
 Summary lane: `require_client` before bounded read-only report reader and all parsing/reads.
-Logs isolation: explicit 19-field projection, removed excluded credential degradations, scoped foreign cursors/filters, B marker scans and complete paging.
+Logs isolation: explicit 20-field projection, removed excluded credential degradations, scoped foreign cursors/filters, B marker scans and complete paging.
 Logs lane: `require_client` before bounded read-only report reader and all parsing/reads.
 Usage isolation: scoped totals, B marker scans; allowed apiKey grouping stays scoped, credential grouping refused; all shared callers and expired key.
 Usage lane: authorization first; bounded read-only reader, direct bucket writer.
