@@ -73,15 +73,9 @@ for (const parts of cases) {
     const row = db.query("SELECT value FROM settings WHERE key='adminPasswordHash'").get() as {
       value: string;
     } | null;
-    const state = (
-      db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as {
-        name: string;
-      }[]
-    ).map(({ name }) => [
+    const state = databaseState(db).map(([name, rows]) => [
       name,
-      db
-        .query(`SELECT * FROM "${name}"`)
-        .all()
+      rows
         .map((r) => {
           const value = r as Record<string, unknown>;
           return name === "settings" && value.key === "adminPasswordHash"
@@ -170,3 +164,4 @@ for (const rust of [false, true]) {
 }
 assert.deepEqual(mismatch[1], mismatch[0]);
 console.log("PASS UTF16 lone-surrogate versus replacement confirmation mismatch");
+import { databaseState } from "./database-state.ts";

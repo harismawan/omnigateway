@@ -4,6 +4,7 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirS
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
+import { databaseState } from "./database-state.ts";
 const root = mkdtempSync("/tmp/opencode/e1-e5/db-backup-");
 const env = { ...process.env, OMNI_ENCRYPTION_KEY: "database-golden-secret", NO_COLOR: "1" };
 const store = await createStore({ path: join(root,"seed"), encryptionKey: await deriveKey(env.OMNI_ENCRYPTION_KEY) });
@@ -80,7 +81,9 @@ try {
         assert.equal(readFileSync(join(root,"snapshots","unmanaged"),"utf8"),"keep");
         const db = new Database(join(root,"snapshots",ids[0]),{readonly:true});
         assert.equal((db.query("PRAGMA quick_check").get() as any).quick_check,"ok");
-        snapshotRows = db.query("SELECT * FROM settings ORDER BY key").all();
+        snapshotRows = databaseState(db);
+        const live=new Database(join(root,"db"),{readonly:true});
+        assert.deepEqual(snapshotRows,databaseState(live)); live.close();
         db.close();
         if(json) { const data=JSON.parse(out); assert.equal(data.id,ids[0]); assert.equal(typeof data.createdAt,"number"); data.id=data.filename="<id>";data.createdAt="<time>";out=JSON.stringify(data); }
         else out=out.replace(/db_[\dTZ-]+_manual\.sqlite/g,"<id>").replace(/(taken +)[^\n]+/,"$1<time>");
@@ -148,6 +151,24 @@ try {
       results.push({enumeration,listed,kept});
     }
     assert.deepEqual(results[1],results[0],"same creation sequence must enumerate identically"); count+=2;
+  }
+  {
+    const results=[];
+    for(const cmd of commands) {
+      rmSync(join(root,"snapshots"),{recursive:true,force:true});
+      copyFileSync(join(root,"seed"),join(root,"db"));
+      const live=new Database(join(root,"db"));
+      try {
+        live.run("PRAGMA journal_mode=WAL"); live.run("PRAGMA wal_autocheckpoint=0");
+        live.run("CREATE TABLE wal_fixture(value)"); live.run("INSERT INTO wal_fixture VALUES ('committed in WAL')");
+        assert(readFileSync(join(root,"db-wal")).length>32);
+        const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","backup","--json"],{env,stdout:"pipe",stderr:"pipe"});
+        const out=JSON.parse(await new Response(p.stdout).text()); assert.equal(await new Response(p.stderr).text(),""); assert.equal(await p.exited,0);
+        const snapshot=new Database(join(root,"snapshots",out.id),{readonly:true});
+        const state=databaseState(snapshot); assert.deepEqual(state,databaseState(live)); snapshot.close(); results.push(state);
+      } finally {live.close();}
+    }
+    assert.deepEqual(results[1],results[0]); count++;
   }
   await verifyGoldenExits("db-backup");
   console.log(`PASS ${count} backup comparisons`);
