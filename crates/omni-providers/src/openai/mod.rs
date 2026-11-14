@@ -7,6 +7,12 @@ use omni_ir::{
     error::{ErrorCode, GatewayError},
 };
 
+/// Capture OpenAI profile environment once, before serving requests.
+/// Hosts must call this at startup; library users otherwise capture on first use.
+pub fn initialize() {
+    profile::initialize();
+}
+
 /// API-key request boundary: assembly and temporary arbitrary JSON are scoped;
 /// only strings, headers and a boolean escape.
 pub fn build_api_key_request(input: CodecInput<'_>) -> Result<CodecRequest<bool>, GatewayError> {

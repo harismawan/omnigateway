@@ -1,4 +1,5 @@
 # Public-declaration superset; LIMIT entries are unresolved, not certified safe.
+omni-providers/src/openai/mod.rs :: fn initialize()	startup environment capture; strings only, no JSON ownership
 omni-providers/src/openai/mod.rs :: fn build_api_key_request(input: CodecInput<'_>) -> Result<CodecRequest<bool>, GatewayError>	borrowed IR; deep scope owns arbitrary JSON temporaries, only strings/headers/boolean escape
 omni-dialects/src/egress/anthropic.rs :: fn error_body(code: ErrorCode, message: &str) -> Value	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
 omni-dialects/src/egress/anthropic.rs :: fn error_type(code: ErrorCode) -> &'static str	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope

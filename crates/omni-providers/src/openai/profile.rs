@@ -5,15 +5,18 @@ pub(super) fn initialize() {
     let _ = raw("OMNI_OPENAI_CLI_VERSION");
 }
 fn raw(name: &str) -> Option<&'static String> {
-    ENV.get_or_init(|| {
+    capture(|| {
         std::env::vars_os()
             .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
             .filter(|(k, _)| {
                 k.starts_with("OMNI_OPENAI_") || k == "OMNI_UA_OPENAI" || k == "OMNI_ORDER_OPENAI"
             })
             .collect()
-    })
-    .get(name)
+    });
+    ENV.get().and_then(|env| env.get(name))
+}
+fn capture(source: impl FnOnce() -> HashMap<String, String>) {
+    ENV.get_or_init(source);
 }
 fn safe(s: &str) -> bool {
     !s.is_empty() && s.len() <= 200 && s.bytes().all(|b| (32..=126).contains(&b))
@@ -82,8 +85,18 @@ mod tests {
     #[test]
     fn environment_oracle_subprocess() {
         if std::env::var_os("OPENAI_PROFILE_CHILD").is_some() {
-            super::initialize();
-            assert!(super::ENV.set(Default::default()).is_err());
+            crate::openai::initialize();
+            let before = super::headers(vec![]);
+            // Rust 2024 set_var requires unsafe. Change the environment source
+            // at the same capture boundary instead, without process mutation.
+            super::capture(|| {
+                std::collections::HashMap::from([
+                    ("OMNI_OPENAI_CLI_VERSION".into(), "later".into()),
+                    ("OMNI_UA_OPENAI".into(), "later-agent".into()),
+                    ("OMNI_ORDER_OPENAI".into(), "user-agent".into()),
+                ])
+            });
+            assert_eq!(super::headers(vec![]), before);
             let extra = vec![
                 ("Accept".into(), "application/json".into()),
                 ("X-Extra".into(), "extra".into()),
