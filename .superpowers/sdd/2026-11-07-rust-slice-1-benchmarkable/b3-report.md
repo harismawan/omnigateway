@@ -1,5 +1,61 @@
 # B3 OpenAI / Codex
 
+## Encoder follow-up checkpoint — HEAD `34954c2c`
+
+**Next remains item 2: failing real-TS OAuth request/lite differential first.**
+This follow-up resolved the compression prerequisite and measured the encoder;
+items 2–5 are not implemented. Worktree clean after commit.
+
+| Item | Status / commit |
+|---|---|
+|0 encoder|Unblocked: exact approved zstd pin, `34954c2c`|
+|1 identity|Previous `646e38b3` unchanged|
+|2 OAuth/lite request|Pending|
+|3 OAuth/lite depth|Pending|
+|4 HTTP compression|Pending; existing transport refusal unchanged|
+|5 literals|Pending; 121 =4 ported +66 differential +51 later unchanged|
+
+### Dependency / frame evidence
+Exact dependency: zstd 0.14.4 default-features=false; resolved offline with
+zstd-safe 8.3.0, zstd-sys 2.1.3+zstd.1.5.7. Also adds jobserver 0.1.35 via cc;
+no existing dependency versions changed. Fetched manifest licences, correcting
+the provisional earlier note: zstd **BSD-3-Clause**, zstd-safe **BSD-3-Clause**,
+zstd-sys **BSD-3-Clause AND BSD-2-Clause**. Controller permits unsafe inside
+dependencies; no application unsafe added. Raw blocks/external executable rejected.
+
+| Frame category | Rows | Observation |
+|---|---:|---|
+|Sizes 0,1,7,62000,128KiB±1/at,507000,2MiB±1/at,8MiB × repeating/xorshift bytes|24|22/24 SHA-256 identical to frozen runtime; all 24 standard-decoded exactly|
+|OAuth corpus frames|0|Not yet assembled|
+|Identity corpus (prior)|96 hash +16 secret rows|Unchanged; suite green|
+
+Exact differences: both size=0 cases produce 9-byte frames; Rust header
+`28 b5 2f fd 20 00`, TS header `28 b5 2f fd 00 58`. All nonempty probe frames
+match. No general compressed-byte equivalence claimed. First RED used plain
+bytes and failed the real TS hash; actual streamed encoder then failed the
+strict equality check on empty input. Equality is now diagnostic as requested;
+decompression remains asserted. Prior identity mutation unchanged; no new depth
+mutation claimed. Logs under /tmp/opencode/b3: s4-zstd-red.log and
+s4-zstd-green.log. No HTTP/local-stub/capture assertion claimed yet.
+
+Gates passed: offline check; offline omni-gateway build once
+(`s4-zstd-gateway-build.log`); three-crate tests (`s4-zstd-tests.log`, 43 Running
+suites, 49 summaries totaling 221 passed/0 failed/4 ignored **including child
+summaries**); all three source tripwires; all-targets clippy -D warnings
+(`s4-zstd-clippy.log`); fmt check (`s4-zstd-fmt.log`).
+
+Persistence finding by inspection: codec.ts:43–45 only reads secrets.
+oauth.ts:146–170 puts ensureCodexSecrets(prior) in returned providerData on
+exchange/refresh. Step 5 must persist OAuth result providerData with credential
+updates; the provider OAuth result builder must call ensure_secrets(prior).
+No request-time persistence should be added.
+
+Known differences remain the two X1 cases and 40,000 depth policy below, plus
+the observed empty-frame representation difference. OAuth/lite and HTTP support
+remain absent. After items 2–5, next gateway step remains registration, startup
+initialize(), router catalog from generated descriptors, identity persistence,
+end-to-end driver, dispatch_depth cases, and benchmark-matrix entry.
+
 ## Step 4 checkpoint — 2026-11-14, HEAD `646e38b3`
 
 **Next: item 2, first failing real-TS OAuth codec/lite differential.** Read
