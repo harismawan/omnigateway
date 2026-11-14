@@ -2,6 +2,97 @@
 
 ## Fix round 1
 
+**LATEST COMMITTED CHECKPOINT — HEAD e3aea571, worktree clean.** A committed
+`3d587a9c`; B/item 4 implementation committed `e3aea571`. Final selected
+fresh-process checks passed on both supplied binaries: chat.stream and
+overhead-c1, each 2s/1s. Evidence `{ts,rust}-final.json` under
+`/tmp/opencode/bench-window/`; all four supported, load/drained CPU present,
+drained CPU >= load CPU, secrets masked, Rust MIMALLOC_PURGE_DELAY recorded as 1.
+Observed minus oha-reported duration was under 30ms for these four runs; the
+configured rejection tolerance is 250ms. Recorded post-report tails differed
+by request volume but were excluded from the load CPU/window/RSS sampling.
+
+**Precise next step:** resolve strict comparison environment compatibility
+without hiding performance settings. Current raw environments deliberately
+preserve all effective values; ephemeral roots/DB/cert paths differ across
+rounds and Rust alone defaults MIMALLOC_PURGE_DELAY=1. The comparator currently
+rejects these differences. Decide an explicit, disclosed experiment identity
+for ephemeral paths and allocator policy before claiming the requested
+two-round comparison works. Then implement item 5 (matching capacity clients,
+per-round guard, manifest/fresh OUT, refresh counter, Responses lifecycle),
+failing check first and one commit. Finally item 7: full 32 each, Responses and
+Anthropic faults each, twelve faults again, default list/key diff, two-round
+custom-chat comparison. NONE of those final reruns is claimed yet. The harness
+is NOT cleared for reportable measurement.
+
+Final checks at e3aea571: 20 owned tests pass / 0 fail / 80 assertions across
+seven files; typecheck 680 files passes; changed-file Biome and whitespace
+checks pass. Commit A contains the observer only; commit B contains report-file
+boundary reader, common drain, environment masking, fresh process, comparison
+CPU/drain disclosure and usage docs. Full scripts suite was not rerun here.
+
+Real-measurement command remains the documented `ROUNDS=5` interleaved command
+(minimum three), after the remaining blockers are resolved. Use
+`--fresh-process` for per-scenario memory isolation; omit it only when reporting
+the explicitly disclosed sequential-process workload. Do not override strict
+environment errors to produce a result. A's recording observation is a sanity
+check: c1 count ranges overlap but recorded counts trend lower in one set;
+busy-host variation prevents concluding zero load perturbation. SQLite stores
+retained request data after load; this does not establish zero shared data
+collection work during load, only the observed recording-write placement.
+
+CURRENT PRIORITY CHECKPOINT: A committed `3d587a9c` (post-run recording observer).
+B/item 4 implemented, selected functional rechecks running as
+`/tmp/opencode/bench-window/{ts,rust}-final.json`. Next: verify both scenarios
+on each side pass the final duration cross-check/environment restart assertion,
+commit B/item 4, then resolve cross-side environment compatibility explicitly
+(ephemeral paths and production allocator policy must not be silently ignored).
+After that item 5 and full item 7 including all twelve faults again. Do not
+treat prior fault runs or full matrix as verification of new window logic.
+
+| Window follow-up finding | Commit | Failing-first check | Evidence |
+|---|---|---|---|
+| A: recording overhead mechanism | `3d587a9c` | Earlier rate-headroom check was inconclusive; local polling/source establishes post-run write | `/tmp/opencode/bench-window/{observed,file-observed}/`, `{summary,file-summary}.txt`, `oha-lib.rs` |
+| B: end-on-oha-exit stretches sample | pending commit | c64 SQLite adds ~0.86–0.90s after explicit report; c1 ~0.25–0.47s; stdout JSON arrives too late | same timelines; final selected gateway runs pending inspection |
+
+No performance findings. A is a mechanism/sanity result, not a proof recording
+cannot perturb timing. The explicit report file still follows oha statistics
+and encoding, so boundary accuracy is limited by that time and 2ms polling;
+250ms observed-vs-reported interval tolerance fails suspicious scenarios.
+Common drain polling starts at report boundary and is independent of recording
+completion. Foreign CPU accounting samples oha CPU at that boundary, not after
+its database write. Final report exposes both load/drained CPU and the process
+reuse/fresh-process policy. Strict comparator currently refuses differing raw
+effective environments, including ephemeral paths; final comparison completion
+is still pending rather than normalized or claimed successful.
+
+LATEST WINDOW CHECKPOINT: A mechanism verified with oha 1.16.0 tagged source
+(`bench-window/oha-lib.rs`: print_result line 894, db::store line 898) and local
+100ms file polling at c64/c1. Source not found in local cargo registry; fetched
+the versioned upstream source. stdout JSON is buffered until exit; an initial
+stdout-boundary prototype was rejected by the observation. Explicit --output
+JSON file is complete before SQLite storage. Evidence `/tmp/opencode/bench-window/`
+`observed/`, `summary.txt`, `file-observed/`, `file-summary.txt`.
+Failing old-window check: recorded c64 process exits ~0.86–0.90s after report,
+c1 ~0.25–0.47s; without recording tails at most ~4ms. Thus old end-on-exit window
+includes variable recording time. File-reported load duration ~4.001–4.003s in
+both modes; c64 request-count ranges overlap; c1 recorded counts somewhat lower
+but ranges overlap. This busy-host sanity does not prove no timing perturbation.
+SQLite absent at every poll before report completion in the explicit-file runs.
+No gateway performance findings. A closes as mechanism/sanity, not headroom.
+
+B/item 4 WORKING TREE: matrix uses complete --output JSON file (2ms polling)
+as boundary, samples CPU/RSS/stops verifier there, starts identical SQLite
+row-count/done polling for both gateways before oha recording completes, records
+second CPU through drain. Boundary is delayed by oha statistics/JSON encoding
+and poll scheduling; deviation from reported duration >250ms fails integrity.
+Fresh-process flag, masked effective /proc environment and two CPU fields added.
+Next: inspect active `{ts,rust}-file.json` runs, rerun after final boundary
+cross-check edit, commit B/item 4 only if verified. Strict environment comparison
+still rejects ephemeral path/allocator differences; not resolved. Items 5/7
+remain untouched. Final full/default/12 faults not rerun yet. Current work is
+not a reportable benchmark; older checkpoint claims below are historical.
+
 LATEST CHECKPOINT (continuation from 7027a570): item 3 committed `4c545e77`;
 item 6 **not cleared**, diagnostic tooling/evidence committed `a2a9680e`.
 Lint-only module-spacing correction: `aa8b9e55`. Worktree clean.
