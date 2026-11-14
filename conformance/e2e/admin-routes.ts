@@ -76,6 +76,10 @@ const REPO = resolve(import.meta.dir, "../..");
 const KEY = "conformance-admin-routes-encryption-key-01";
 const FIELD_KEY = pbkdf2Sync(KEY, "omnigateway-field-encryption-v1", 210000, 32, "sha256");
 const PORT = Number(process.env.A7_TEST_PORT ?? 18443);
+const historyNonNumericFixtures: [string, string[]][] = [
+  ["history nonnumeric five", ["1794612x0","1794612x1","1794612005274","1794612x3","1794612002715"]],
+  ["history nonnumeric panic", ["1794612006145","1794612007035","1794612x2","1794612x3","1794612009023","1794612007113","1794612003443","1794612002941","1794612007863","1794612002017","1794612007307","1794612001045","1794612x12","1794612000082","1794612x14","1794612009811","1794612x16","1794612008264","1794612x18","1794612000433","1794612002571","1794612x21"]],
+];
 mkdirSync("/tmp/opencode", { recursive: true });
 const work = mkdtempSync("/tmp/opencode/omni-admin-routes-");
 const out = flags.out ?? join(work, "out");
@@ -2517,6 +2521,21 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       if (step.kind === "client-history") {
         const { fixture, check, attacks, callers } = await clientFixture();
         await quotaSortEdges(fixture,check,callers,true);
+        // Reviewer regressions require hand-altered TEXT timestamp affinity.
+        fixture.run("ALTER TABLE quota_samples RENAME TO saved_quota_samples");
+        fixture.run("CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at TEXT,window_ms)");
+        for (const [name, vals] of historyNonNumericFixtures) {
+          fixture.run("DELETE FROM quota_samples");
+          for (const [i, at] of vals.entries()) {
+            fixture.run("INSERT OR REPLACE INTO credentials(id,provider,label,auth_type,enabled,tier,weight,created_at,updated_at) VALUES(?,'a','x','api_key',1,1,1,1,1)", [`own-${i}`]);
+            fixture.run("INSERT INTO quota_samples VALUES(?,'daily',1,10,NULL,?,NULL)", [`own-${i}`, at]);
+          }
+          const cookie = callers.find(([who]) => who === "client-A")![1];
+          check(name, await exchange({target:"/api/client/quota/history",headers:[["cookie",`omni_admin=${cookie}`]]}), 200);
+        }
+        fixture.run("DROP TABLE quota_samples");
+        fixture.run("ALTER TABLE saved_quota_samples RENAME TO quota_samples");
+        fixture.run("DELETE FROM credentials WHERE id LIKE 'own-%'");
         const secrets = ["history-distinct-access-token", "history-distinct-refresh-token", "history-distinct-api-key"];
         const metadataCanary = "providerDataSecretCanary";
         const queries = [...attacks,"since=","until=bad","since=-1","until=-1","since=1.5&until=2.5","since=1e100","until=1e100","since=Infinity&until=NaN","since=9000000000001&until=0","since=0&since=1e100","until=0&until=1e100","since=%20&until=%20"];
@@ -3051,6 +3070,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       : []),
   ] as const) {
     const text = readFileSync(f);
+    if (label === "rust" && cfg.label === "client-history" && /panicked|does not correctly implement a total order/i.test(text.toString()))
+      secretProblems.push(`${stream}: history sort panic`);
     for (const raw of ["secret-a6-1", "secret-a6-2", "secret-a6-3", ...(cfg.label.startsWith("client-") ? ["providerDataSecretCanary", ...["quota","history"].flatMap(p=>[`${p}-distinct-access-token`,`${p}-distinct-refresh-token`,`${p}-distinct-api-key`])] : [])]) {
       if (text.includes(raw)) secretProblems.push(`${stream}: credential secret exposed`);
     }
@@ -3098,6 +3119,16 @@ for (const cfg of configs) {
     // Frozen outcomes observed in i2-observe-{quota,history}; pin full bytes,
     // not merely status, for the accepted engine-pair-order difference.
     const head=(status:number)=>`${status}\ncontent-length: <body length>\ncontent-type: application/json;charset=utf-8\ndate: <date>\n\n`;
+    if (cfg.label === "client-history") {
+      const orders = [
+        [[0,1,4,2,3], [4,2,0,1,3]],
+        [[13,11,9,6,0,1,5,10,12,14,19,8,17,15,16,18,2,20,21,3,7,4], [13,19,11,9,20,7,6,0,1,5,10,8,17,4,15,12,14,16,18,2,21,3]],
+      ];
+      for (const [n, [name, vals]] of historyNonNumericFixtures.entries()) {
+        const wire = (ids: number[]) => head(200) + JSON.stringify({samples: ids.map(i => ({credentialId:`own-${i}`,label:"x",provider:"a",windowType:"daily",observedAt:vals[i],usedRatio:0.1,resetsAt:null,windowMs:null})),truncated:false});
+        pinned.set(name, {why:"history order with non-numeric observedAt (hand-altered column affinity)",ts:wire(orders[n]![0]!),rust:wire(orders[n]![1]!)});
+      }
+    }
     for(const name of ["three bad argument","five argument"]) {
       const ids=name==="three bad argument"?[1,0,2]:[1,0,2,3,4];
       const history=cfg.label==="client-history";

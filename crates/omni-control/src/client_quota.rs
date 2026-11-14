@@ -69,6 +69,28 @@ fn primitive(v: &Value) -> Option<String> {
     }
 }
 
+// Numeric equivalence classes (including infinities and signed zero), then
+// one NaN class: a total preorder. Stable sort retains input order in ties.
+fn compare_numbers(a: f64, b: f64) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => a.partial_cmp(&b).expect("non-NaN numbers are ordered"),
+    }
+}
+
+// Disjoint numeric/string classes avoid JS relational coercion cycles.
+// Each class is totally ordered; strings use UTF-16 lexicographic order.
+fn compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (primitive(a), primitive(b)) {
+        (Some(a), Some(b)) => a.encode_utf16().cmp(b.encode_utf16()),
+        (None, None) => compare_numbers(number(a), number(b)),
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+    }
+}
+
 #[derive(Clone)]
 struct SortKey {
     text: Vec<u16>,
@@ -111,6 +133,7 @@ fn validate_sort(mut keys: Vec<&[SortKey; 3]>) -> Result<(), Failure> {
         if keys.iter().any(|k| !k[depth].string) {
             return Err(Failure::internal("localeCompare is not a function"));
         }
+        // ICU collation is a total preorder on these UTF-16 string keys.
         keys.sort_by(|a, b| crate::api::locale_compare(&a[depth].text, &b[depth].text));
         let mut start = 0;
         for end in 1..=keys.len() {
@@ -154,20 +177,11 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         omni_store::quota::list_quota_samples(store.connection(), since, until, MAX_SAMPLES + 1)?;
     crate::credentials::validate_client_metadata(store)?;
     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
-    let relational = |a: &Value, b: &Value| match (primitive(a), primitive(b)) {
-        (Some(a), Some(b)) => a.encode_utf16().cmp(b.encode_utf16()),
-        _ => number(a)
-            .partial_cmp(&number(b))
-            .unwrap_or(std::cmp::Ordering::Equal),
-    };
+    // Lexicographic composition of total preorders is total, even for corrupt cells.
     samples.sort_by(|a, b| {
-        relational(&a[0], &b[0])
-            .then_with(|| relational(&a[1], &b[1]))
-            .then_with(|| {
-                (number(&a[5]) - number(&b[5]))
-                    .partial_cmp(&0.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        compare_cells(&a[0], &b[0])
+            .then_with(|| compare_cells(&a[1], &b[1]))
+            .then_with(|| compare_numbers(number(&a[5]), number(&b[5])))
     });
     let truncated = samples.len() > MAX_SAMPLES;
     samples.truncate(MAX_SAMPLES);
@@ -183,14 +197,10 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         rows.push((i, c, keys));
     }
     validate_sort(rows.iter().map(|r| &r.2).collect())?;
+    // Three collation keys followed by numeric/NaN classes form a total preorder.
     rows.sort_by(|a, b| {
-        compare_keys(&a.2, &b.2).then_with(|| {
-            // Frozen fourth key is subtraction: non-numeric cells yield
-            // NaN, treated as an equal comparison, never an exception.
-            (number(&samples[a.0][5]) - number(&samples[b.0][5]))
-                .partial_cmp(&0.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        compare_keys(&a.2, &b.2)
+            .then_with(|| compare_numbers(number(&samples[a.0][5]), number(&samples[b.0][5])))
     });
     let mut out = String::from("{\"samples\":[");
     for (n, (i, c, _)) in rows.iter().enumerate() {
@@ -338,6 +348,7 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
         ));
     }
     validate_sort(rows.iter().map(|r| &r.0).collect())?;
+    // Lexicographic composition of three ICU collation preorders is total.
     rows.sort_by(|a, b| compare_keys(&a.0, &b.0));
     Ok(omni_ir::jsjson::stringify(&JsValue::Object(vec![(
         "accounts".encode_utf16().collect(),
@@ -349,6 +360,49 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
 #[cfg(test)]
 mod sort_tests {
     use super::*;
+    #[test]
+    fn adversarial_sorts_are_total_and_preserve_rows() {
+        let cells = [
+            Value::Real(f64::NAN),
+            Value::Real(f64::INFINITY),
+            Value::Real(f64::NEG_INFINITY),
+            Value::Real(-0.0),
+            Value::Null,
+            Value::Integer(2),
+            Value::Text("bad".into()),
+            Value::Text("2".into()),
+            Value::Blob(vec![1, 2]),
+        ];
+        let mut seed = 42_u64;
+        let mut rows = (0..8192)
+            .map(|id| {
+                let v: [Value; 3] = std::array::from_fn(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    cells[(seed >> 32) as usize % cells.len()].clone()
+                });
+                (id, v)
+            })
+            .collect::<Vec<_>>();
+        let raw = |a: &(usize, [Value; 3]), b: &(usize, [Value; 3])| {
+            compare_cells(&a.1[0], &b.1[0])
+                .then_with(|| compare_cells(&a.1[1], &b.1[1]))
+                .then_with(|| compare_numbers(number(&a.1[2]), number(&b.1[2])))
+        };
+        rows.sort_by(raw);
+        assert!(rows.windows(2).all(|w| !raw(&w[0], &w[1]).is_gt()));
+        let keys = sort_keys([&Value::Text("a".into()); 3]);
+        rows.sort_by(|a, b| {
+            compare_keys(&keys, &keys)
+                .then_with(|| compare_numbers(number(&a.1[2]), number(&b.1[2])))
+        });
+        assert!(
+            rows.windows(2)
+                .all(|w| !compare_numbers(number(&w[0].1[2]), number(&w[1].1[2])).is_gt())
+        );
+        let mut ids = rows.iter().map(|r| r.0).collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, (0..8192).collect::<Vec<_>>());
+    }
     #[test]
     fn map_id_primitives_and_object_identity() {
         assert!(!same_id(&Value::Blob(vec![49]), &Value::Blob(vec![49])));
