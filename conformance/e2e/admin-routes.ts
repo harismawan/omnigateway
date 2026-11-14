@@ -537,6 +537,7 @@ type HttpStep = {
   headers?: [string, string][];
 };
 type Step =
+  | { kind: "client-session"; name: string }
   | { kind: "logs-walk"; name: string }
   | { kind: "usage-traffic"; name: string }
   | HttpStep
@@ -1397,6 +1398,7 @@ const configs: Config[] = [
     {...as("anon", "POST", "/api/client/login", JSON.stringify({key:SEED_KEY}), "revoked client login"), expectedStatus:401},
   ]},
   { label: "client-logout", db: () => seedDb, steps: () => [
+    {kind:"client-session", name:"client login and logout clear cookie"},
     ...(["anon", "viewer", "admin"] as const).flatMap(who => [
       {...as(who, "POST", "/api/client/logout"), expectedStatus:200},
       {...as(who, "GET", "/api/keys"), expectedStatus:401},
@@ -2538,6 +2540,19 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         const c = await login(step.password, step.mode, seen);
         if (c !== null) cookies[step.who] = c;
         results.set(step.name, { text: c === null ? "refused" : "logged in", db: dump(file, m) });
+        continue;
+      }
+      if (step.kind === "client-session") {
+        const opened = await exchange({method:"POST",target:"/api/client/login",headers:[J],body:JSON.stringify({key:SEED_KEY})});
+        const setCookie = opened.head.find(([k]) => k === "set-cookie")?.[1];
+        const token = /^omni_admin=([A-Za-z0-9_-]{43});/.exec(setCookie ?? "")?.[1];
+        if (opened.status !== 200 || token === undefined) throw new Error("client session not minted");
+        // Cookie acceptance and logout are checked independently of response equality.
+        const before = await exchange({target:"/api/keys",headers:[["cookie",`omni_admin=${token}`]]});
+        if (before.status !== 401) throw new Error("client reached operator keys");
+        const ended = await exchange({method:"POST",target:"/api/client/logout",headers:[["cookie",`omni_admin=${token}`]]});
+        if (ended.status !== 200 || !ended.head.some(([k,v])=>k==="set-cookie" && v==="omni_admin=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")) throw new Error("client logout did not clear cookie");
+        results.set(step.name, {text:normalize("POST",ended,m),db:dump(file,m)});
         continue;
       }
       if (step.kind === "listed" || step.kind === "admitted") {
