@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { Database } from "bun:sqlite";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, lstatSync, readlinkSync, symlinkSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, lstatSync, readlinkSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
@@ -34,6 +34,25 @@ try {
   assert.deepEqual(results[1],results[0]);count++;
  }
  const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
+ for(const command of [["db","restore",id,"--yes"],["status"],["status","--json"]]) {
+  const results=[];
+  for(const cmd of commands) {
+   rmSync(unit,{force:true});
+   copyFileSync(join(root,"seed"),join(root,"db"));
+   copyFileSync(join(root,"seed"),join(root,"snapshots",id));
+   const pidfile=join(root,"state/omnigateway/gateway.pid");
+   writeFileSync(pidfile,String(process.pid));chmodSync(pidfile,0);
+   const before=state();
+   try {
+    const p=goldenSpawn([...cmd,"--root",root,"--db","db",...command],{env,stdout:"pipe",stderr:"pipe"});
+    const result={out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited};
+    assert.equal(result.code,1);assert.equal(result.out,"");
+    assert(result.err.includes(`EACCES: permission denied, open '${pidfile}'`));
+    assert.deepEqual(state(),before);results.push(result);
+   } finally {chmodSync(pidfile,0o600);assert.equal(readFileSync(pidfile,"utf8"),String(process.pid));rmSync(pidfile);}
+  }
+  assert.deepEqual(results[1],results[0]);count++;
+ }
  for(const kind of ["absent","slash","backslash","dotdot","symlink","directory","empty","unparsed","garbage","foreign-few","foreign-many","older","newer","truncated"]){
   const results=[], after=[];
   for(const cmd of commands){
