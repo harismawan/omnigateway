@@ -2439,6 +2439,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           const opened = await exchange({method:"POST",target:"/api/client/login",headers:[J],body:JSON.stringify({key:raw})});
           if(opened.status!==200 || !cookieOf(opened)) throw new Error(`fixture client ${letter} login ${opened.status}`);
           identities.push({id,key:raw,cookie:cookieOf(opened)!,marker});
+          fixture.run("INSERT INTO usage_daily(day,provider,credential_id,requested_model,resolved_model,api_key_id,requests) VALUES(?,?,?,?,?,?,?)",[100,"custom",`secret-credential-${letter}`,marker,marker,id,letter.charCodeAt(0)]);
         }
         fixture.run("UPDATE api_keys SET revoked_at=1 WHERE id='client-revoked'");
         if(!clientClock) throw new Error("client fixture needs movable clock");
@@ -2479,10 +2480,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           const invalid = ["groupBy=credential","splitBy=credential","grain=bad","groupBy=bad","grain=daily&groupBy=hour"].includes(query);
           const answer = await exchange({target:`/api/client/usage?${query}&until=1000`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
           check(`${who} usage ${i}`,answer,authorized?(invalid?400:200):401,who==="client-B"?forbidden:[]);
-          if(who==="client-B" && answer.status===200 && !query.includes("grain=daily")) {
+          if(who==="client-B" && answer.status===200) {
             const rows=JSON.parse(answer.body.toString());
             const total=rows.reduce((sum:number,row:{requests:number})=>sum+row.requests,0);
-            if(total!==(query==="since=101"?2:3)) deadlineFailures.push(`B usage ${i}: own total ${total}`);
+            if(total!==(query.includes("grain=daily")?66:query==="since=101"?2:3)) deadlineFailures.push(`B usage ${i}: own total ${total}`);
           }
         }
         fixture.run("UPDATE api_keys SET expires_at=1 WHERE id='client-C'");
