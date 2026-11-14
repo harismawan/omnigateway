@@ -2477,6 +2477,17 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     const quotaSortEdges = async (fixture:Database, check:ReturnType<typeof clientFixture> extends Promise<infer T> ? T extends {check:infer C} ? C : never : never, callers:[string,string|null][], history:boolean) => {
       const table=history?"quota_samples":"quota_windows";
       const route=history?"/api/client/quota/history":"/api/client/quota";
+      fixture.run(`DELETE FROM ${table}`);
+      fixture.run("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,created_at,updated_at) VALUES(X'3132','a','x','api_key',1,1,1,1,1)");
+      if(history) fixture.run(`INSERT INTO ${table}(credential_id,window_type,used,limit_value,observed_at) VALUES(X'3132','daily',1,10,1794612000000)`);
+      else fixture.run(`INSERT INTO ${table}(credential_id,window_type,starts_at,used,limit_value,observed_at) VALUES(X'3132','daily',0,1,10,1794612000000)`);
+      for(const [who,cookie] of callers) {
+        const answer=await exchange({target:route,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
+        check(`BLOB identity ${who}`,answer,["client-A","client-B","client-C"].includes(who)?200:401);
+        if(answer.status===200 && answer.body.toString()!==(history?'{"samples":[],"truncated":false}':'{"accounts":[]}')) deadlineFailures.push(`BLOB identity ${who}: row disclosed`);
+      }
+      fixture.run(`DELETE FROM ${table}`);
+      fixture.run("DELETE FROM credentials WHERE id=X'3132'");
       const cases = [
         {name:"singleton", providers:["a"], bad:0,status:200},
         {name:"short circuit",providers:["a","b"],bad:1,status:200},

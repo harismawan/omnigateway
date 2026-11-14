@@ -5,6 +5,20 @@ use rusqlite::types::Value;
 trait TextCell {
     fn as_str(&self) -> Option<&str>;
 }
+// Map uses SameValueZero for primitives; separately read Uint8Arrays are
+// distinct objects even when their bytes are identical. Never coerce text.
+fn same_id(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Blob(_), _) | (_, Value::Blob(_)) => false,
+        (Value::Null, Value::Null) => true,
+        (Value::Text(a), Value::Text(b)) => a == b,
+        (Value::Integer(_) | Value::Real(_), Value::Integer(_) | Value::Real(_)) => {
+            let (a, b) = (number(a), number(b));
+            a == b || (a.is_nan() && b.is_nan())
+        }
+        _ => false,
+    }
+}
 impl TextCell for Value {
     fn as_str(&self) -> Option<&str> {
         if let Value::Text(s) = self {
@@ -159,7 +173,7 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
     samples.truncate(MAX_SAMPLES);
     let mut rows = Vec::new();
     for (i, s) in samples.iter().enumerate() {
-        let Some(c) = accounts.iter().position(|c| c[0] == s[0]) else {
+        let Some(c) = accounts.iter().rposition(|c| same_id(&c[0], &s[0])) else {
             continue;
         };
         if s[3] == Value::Null || number(&s[3]) <= 0.0 {
@@ -227,7 +241,7 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
     let poll = store.get_settings()?.quota_poll_interval_ms;
     let mut rows = Vec::new();
     for w in windows {
-        let Some(c) = accounts.iter().find(|c| c[0] == w[0]) else {
+        let Some(c) = accounts.iter().rev().find(|c| same_id(&c[0], &w[0])) else {
             continue;
         };
         let used = number(&w[2]);
@@ -335,6 +349,16 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
 #[cfg(test)]
 mod sort_tests {
     use super::*;
+    #[test]
+    fn map_id_primitives_and_object_identity() {
+        assert!(!same_id(&Value::Blob(vec![49]), &Value::Blob(vec![49])));
+        assert!(!same_id(&Value::Integer(1), &Value::Text("1".into())));
+        assert!(same_id(&Value::Integer(1), &Value::Real(1.0)));
+        assert!(same_id(&Value::Integer(0), &Value::Real(-0.0)));
+        assert!(same_id(&Value::Real(f64::NAN), &Value::Real(f64::NAN)));
+        assert!(!same_id(&Value::Text("NaN".into()), &Value::Real(f64::NAN)));
+        assert!(same_id(&Value::Null, &Value::Null));
+    }
     #[test]
     fn grouped_rule_equals_all_ordered_pairs() {
         let cells = [
