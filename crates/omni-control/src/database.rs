@@ -80,6 +80,7 @@ pub fn vacuum(
     path: &std::path::Path,
     now: &dyn Fn() -> i64,
 ) -> Result<serde_json::Value, String> {
+    let _exclusive = EXCLUSIVE.enter("a vacuum")?;
     let before = size(path);
     let start = now();
     conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE)")
@@ -112,6 +113,7 @@ pub fn create_snapshot_with_free_bytes(
     retention: &dyn Fn() -> Result<(f64, f64), String>,
     free_bytes: &dyn Fn(&Path) -> Option<u64>,
 ) -> Result<Value, String> {
+    let _exclusive = EXCLUSIVE.enter("a snapshot")?;
     let at = now();
     let stamp = chrono::DateTime::from_timestamp_millis(at)
         .ok_or("invalid snapshot time")?
@@ -148,6 +150,49 @@ fn size(path: &Path) -> u64 {
     path.metadata().map(|s| s.len()).unwrap_or(0)
 }
 
+/// Process-local maintenance latch, shared by all database handles.
+#[derive(Default)]
+struct Exclusive(std::sync::Mutex<Option<&'static str>>);
+
+static EXCLUSIVE: Exclusive = Exclusive(std::sync::Mutex::new(None));
+
+struct ExclusiveGuard<'a>(&'a Exclusive);
+
+impl Exclusive {
+    fn enter(&self, label: &'static str) -> Result<ExclusiveGuard<'_>, String> {
+        let mut active = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(active) = *active {
+            return Err(format!("{active} is already running on this database"));
+        }
+        *active = Some(label);
+        Ok(ExclusiveGuard(self))
+    }
+}
+
+impl Drop for ExclusiveGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+pub fn with_exclusive<T>(
+    label: &'static str,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = EXCLUSIVE.enter(label)?;
+    operation()
+}
+
+pub fn with_exclusive_or_skip<T>(
+    label: &'static str,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    let Ok(_guard) = EXCLUSIVE.enter(label) else {
+        return Ok(None);
+    };
+    operation().map(Some)
+}
+
 /// Numeric coercion at the retention comparisons, without validating stored settings.
 pub fn retention_number(value: Option<&omni_ir::jsjson::JsValue>) -> Result<f64, String> {
     use omni_ir::jsjson::JsValue as V;
@@ -180,6 +225,36 @@ fn unlink(path: &Path) -> Result<(), String> {
 #[allow(clippy::unwrap_used, clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn exclusive_conflicts_skips_and_releases() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        with_exclusive("a snapshot", || {
+            assert_eq!(
+                with_exclusive("a vacuum", || Ok(())).unwrap_err(),
+                "a snapshot is already running on this database"
+            );
+            assert_eq!(
+                with_exclusive_or_skip("a snapshot sweep", || panic!("must skip"))?,
+                None::<()>
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            with_exclusive_or_skip("a snapshot sweep", || Ok(42)).unwrap(),
+            Some(42)
+        );
+        assert!(with_exclusive("a vacuum", || Err::<(), _>("failed".into())).is_err());
+        assert!(with_exclusive("a restore", || Ok(())).is_ok());
+        let _ = std::panic::catch_unwind(|| {
+            with_exclusive("a vacuum", || -> Result<(), String> {
+                panic!("operation panicked")
+            })
+        });
+        assert!(with_exclusive("a restore preview", || Ok(())).is_ok());
+    }
     fn live_bytes(path: &Path) -> Vec<Option<Vec<u8>>> {
         ["", "-wal", "-shm"]
             .iter()
@@ -196,6 +271,7 @@ mod tests {
 
     #[test]
     fn snapshot_free_space_threshold_and_unknown() {
+        let _serial = TEST_LOCK.lock().unwrap();
         for free_offset in [Some(-1_i64), Some(0), Some(1), None] {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("db");
@@ -230,6 +306,7 @@ mod tests {
 
     #[test]
     fn corrupt_table_snapshot_failure_removes_output() {
+        let _serial = TEST_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("db");
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -262,6 +339,7 @@ mod tests {
     }
     #[test]
     fn retention_is_read_after_snapshot_is_written() {
+        let _serial = TEST_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("db");
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -291,6 +369,7 @@ mod tests {
     }
     #[test]
     fn same_instant_refused_and_failed_snapshot_cleaned() {
+        let _serial = TEST_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("db");
         let conn = rusqlite::Connection::open(&path).unwrap();
