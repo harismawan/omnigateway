@@ -9,7 +9,7 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
  const dir=join(root,"snapshots"), id="db_2000-01-01T00-00-00-000Z_manual.sqlite";
  let count=0;
  try {
-  for(const kind of operation==="backup"?["unreadable","directory"]:["inaccessible","loop","long"]) {
+   for(const kind of operation==="backup"?["inaccessible","unreadable","directory"]:["inaccessible","loop","long"]) {
    const results=[];
    for(const cmd of commands) {
     rmSync(dir,{recursive:true,force:true}); mkdirSync(dir);
@@ -36,7 +36,11 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
      assert.equal(result.code,1);
      assert.equal(result.err,`Path is a directory: rm returned EISDIR (is a directory) ${join(dir,id)}\n`);
      assert.equal(readdirSync(dir).length,2);
-    } else if(operation==="backup") {
+     } else if(operation==="backup"&&kind==="inaccessible") {
+      assert.equal(result.code,1);
+      result.err=result.err.replace(/db_\d{4}-[^/']+_manual\.sqlite/g,"<snapshot>");
+      assert.equal(result.err,`EACCES: permission denied, rm '${join(dir,"<snapshot>")}'\n`);
+     } else if(operation==="backup") {
      assert.equal(result.code,0,kind);
      const data=JSON.parse(result.out);
      assert.equal(readFileSync(join(dir,id),"utf8"),"retention sentinel");

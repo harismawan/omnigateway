@@ -351,7 +351,7 @@ fn unlink(path: &Path) -> Result<(), String> {
             "Path is a directory: rm returned EISDIR (is a directory) {}",
             path.display()
         )),
-        Err(e) => Err(fs_error(&e, "unlink", path)),
+        Err(e) => Err(fs_error(&e, "rm", path)),
     }
 }
 
