@@ -14,14 +14,7 @@ fn note(notes: &mut Vec<String>, s: impl Into<String>) {
     }
 }
 fn uuid(s: &str) -> bool {
-    s.len() == 36
-        && s.bytes().enumerate().all(|(i, b)| {
-            if [8, 13, 18, 23].contains(&i) {
-                b == b'-'
-            } else {
-                b.is_ascii_hexdigit()
-            }
-        })
+    super::identity::is_uuid(s)
 }
 fn thread(seed: &str) -> String {
     let hash = Sha256::digest(format!("thread:{seed}"));

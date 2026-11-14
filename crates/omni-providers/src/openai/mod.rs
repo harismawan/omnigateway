@@ -1,5 +1,8 @@
 //! OpenAI API-key request assembly. OAuth and decoding are separate increments.
 pub mod decode;
+mod identity;
+#[cfg(test)]
+mod identity_tests;
 mod profile;
 mod wire;
 /// API-key leg only; OAuth identity/transport is the next migration increment.

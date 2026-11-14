@@ -11,6 +11,16 @@ use syn::{spanned::Spanned, visit::Visit};
 // Exact source-site exceptions with ownership/type justification.
 const ALLOW: &[(&str, &str, &str)] = &[
     (
+        "omni-providers/src/openai/identity.rs",
+        "bytes[6] = (bytes[6] & 15) | 64;",
+        "fixed [u8; 16] UUID version byte, not JSON",
+    ),
+    (
+        "omni-providers/src/openai/identity.rs",
+        "bytes[8] = (bytes[8] & 63) | 128;",
+        "fixed [u8; 16] UUID variant byte, not JSON",
+    ),
+    (
         "omni-dialects/src/egress/anthropic.rs",
         "self.suppressed.insert(*index);",
         "non-JSON collection: scalar indices, strings, or shallow typed entries",
