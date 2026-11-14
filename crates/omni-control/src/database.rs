@@ -43,8 +43,37 @@ pub fn clear_bodies(
     Ok(serde_json::json!({"removed":rows.len(),"orphans":orphans}))
 }
 
+// Node's POSIX path.join concatenates before normalizing, including absolute rels.
+fn node_join(root: &str, rel: &str) -> std::path::PathBuf {
+    let joined = [root, rel]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    let absolute = joined.starts_with('/');
+    let mut parts = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|p| *p != "..") => {
+                parts.pop();
+            }
+            ".." if absolute => {}
+            _ => parts.push(part),
+        }
+    }
+    let mut result = format!("{}{}", if absolute { "/" } else { "" }, parts.join("/"));
+    if result.is_empty() {
+        result.push('.');
+    }
+    if joined.ends_with('/') && !result.ends_with('/') {
+        result.push('/');
+    }
+    result.into()
+}
+
 fn delete_artifact(dir: &std::path::Path, rel: &str) {
-    let full = dir.join(rel);
+    let full = node_join(&dir.to_string_lossy(), rel);
     if std::fs::remove_file(&full).is_err() {
         return;
     }
@@ -333,6 +362,24 @@ fn unlink(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::items_after_test_module)]
 mod tests {
+    #[test]
+    fn node_join_matches_bun_posix_table() {
+        // Expected values captured from Bun path.join (dbfix1-c1-node-join.log).
+        for (root, rel, expected) in [
+            ("/root", "/outside", "/root/outside"),
+            ("/root", "../outside", "/outside"),
+            ("/root", "a//b/", "/root/a/b/"),
+            ("/root/", "./a/../b", "/root/b"),
+            ("/root", "", "/root"),
+            ("", "", "."),
+            ("", "/a//", "/a/"),
+            ("a", "../../b/", "../b/"),
+            ("/", "../../a", "/a"),
+            ("/root", ".", "/root"),
+        ] {
+            assert_eq!(super::node_join(root, rel).as_os_str(), expected);
+        }
+    }
     use super::*;
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
