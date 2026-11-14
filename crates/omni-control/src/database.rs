@@ -45,7 +45,7 @@ pub fn create_snapshot(
         "VACUUM INTO '{}'",
         target.to_string_lossy().replace('\'', "''")
     )) {
-        let _ = std::fs::remove_file(&target);
+        let _cleanup = std::fs::remove_file(&target);
         return Err(error.to_string());
     }
     let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":size(&target),"reason":"manual"});
@@ -58,6 +58,7 @@ fn size(path: &Path) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::items_after_test_module)]
 mod tests {
     use super::*;
     #[test]
