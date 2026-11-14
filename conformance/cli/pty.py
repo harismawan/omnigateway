@@ -20,7 +20,7 @@ env.pop("NO_COLOR", None)
 if "PTY_NO_COLOR" in env:
     env["NO_COLOR"] = env.pop("PTY_NO_COLOR")
 env["TERM"] = "xterm-256color"
-p = subprocess.Popen(sys.argv[2:], stdin=slave, stdout=slave, stderr=slave, env=env)
+p = subprocess.Popen(sys.argv[2:], stdin=slave, stdout=subprocess.PIPE if env.get("PTY_STDOUT_PIPE") == "1" else slave, stderr=slave, env=env)
 os.close(slave)
 out = bytearray()
 answered = False
@@ -49,4 +49,7 @@ while True:
         os.write(master, sys.argv[1].encode() + b"\n")
         answered = True
 os.close(master)
-print(json.dumps({"bytes": out.hex(), "code": p.wait()}))
+result = {"bytes": out.hex(), "code": p.wait()}
+if p.stdout is not None:
+    result["stdout"] = p.stdout.read().hex()
+print(json.dumps(result))

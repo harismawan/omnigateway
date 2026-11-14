@@ -6,7 +6,7 @@ import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 import { checkPreviewGoldens } from "./db-preview-goldens.ts";
 checkPreviewGoldens();
-const root = mkdtempSync("/tmp/opencode/e1-e5/db6-restore-");
+const root = mkdtempSync("/tmp/opencode/e1-e5/db7-restore-");
 const env = {...process.env, HOME:root, XDG_STATE_HOME:join(root,"state"), OMNI_ENCRYPTION_KEY:"database-golden-secret", NO_COLOR:"1"};
 const store = await createStore({path:join(root,"seed"),encryptionKey:await deriveKey(env.OMNI_ENCRYPTION_KEY)}); store.close();
 const commands = [["bun","--no-env-file",resolve("apps/cli/src/index.ts")],[resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]];
@@ -81,5 +81,29 @@ try {
   }
   assert.deepEqual(results[1],results[0]);count++;
  }
- await verifyGoldenExits("db-restore");console.log(`PASS ${count} restore comparisons; 6 formatter goldens`);
+ let rustOnly=0;
+ for(const json of [false,true]) for(const answer of ["pipe","n","","something else","y","--yes"]) {
+  const results=[];
+  const yes=answer==="y"||answer==="--yes";
+  for(const cmd of yes?[commands[1]]:commands) {
+   for(const suffix of ["","-wal","-shm"])rmSync(join(root,"db")+suffix,{force:true});
+   copyFileSync(join(root,"seed"),join(root,"db"));
+   const before=state();
+   const tty=answer!=="pipe"&&answer!=="--yes";
+   const args=[...cmd,"--root",root,"--db","db","db","restore",id,...(json?["--json"]:[]),...(answer==="--yes"?["--yes"]:[])];
+   const p=goldenSpawn(tty?["python3",resolve("conformance/cli/pty.py"),answer,...args]:args,{env:{...env,PTY_NO_COLOR:"1",PTY_STDOUT_PIPE:"1"},stdout:"pipe",stderr:"pipe"});
+   let out=await new Response(p.stdout).text(),err=await new Response(p.stderr).text(),code=await p.exited;
+   if(tty){assert.equal(err,"");const nested=JSON.parse(out);out=Buffer.from(nested.stdout,"hex").toString();err=Buffer.from(nested.bytes,"hex").toString();code=nested.code;}
+   assert.equal(code,1);assert.equal(out,"");assert.deepEqual(state(),before);
+   assert(err.startsWith("TABLE"));
+   const question=`replace ${join(root,"db")} with ${id}?`;
+   if(yes)assert(err.includes("db restore is not yet available in the Rust CLI"));
+   else assert(err.indexOf(question)>err.indexOf("SNAPSHOT"));
+   if(tty)assert(err.includes(`${question} [y/N] `));
+   if(!yes)assert(err.includes(answer==="pipe"?`${question} — refusing without --yes`:"cancelled"));
+   results.push({out,err,code});
+  }
+  if(yes)rustOnly++;else {assert.deepEqual(results[1],results[0]);count++;}
+ }
+ await verifyGoldenExits("db-restore");console.log(`PASS ${count} restore comparisons; 6 formatter goldens; ${rustOnly} Rust-only yes refusals`);
 } finally {rmSync(root,{recursive:true,force:true});}

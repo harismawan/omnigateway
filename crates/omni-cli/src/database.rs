@@ -6,25 +6,7 @@ pub fn run(
     positional: &[String],
 ) -> Result<String, String> {
     if command == "db-clear-bodies" && !flags.contains_key("yes") {
-        use std::io::{BufRead, IsTerminal, Write};
-        let question = "delete every captured body? there is no snapshot of them";
-        if !std::io::stdin().is_terminal() {
-            return Err(format!("{question} — refusing without --yes"));
-        }
-        eprint!("{question} [y/N] ");
-        std::io::stderr().flush().map_err(|e| e.to_string())?;
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
-        eprintln!();
-        if !matches!(
-            omni_ir::js::trim(&line).to_lowercase().as_str(),
-            "y" | "yes"
-        ) {
-            return Err("cancelled".into());
-        }
+        confirm("delete every captured body? there is no snapshot of them")?;
     }
     let ctx = crate::context::resolve(flags)?;
     if command == "db-restore" {
@@ -55,6 +37,14 @@ pub fn run(
             } else {
                 preview_table(&preview)
             });
+        }
+        eprintln!("{}", preview_table(&preview));
+        if !flags.contains_key("yes") {
+            confirm(&format!(
+                "replace {} with {}?",
+                path.display(),
+                positional[0]
+            ))?;
         }
         return Err("db restore is not yet available in the Rust CLI".into());
     }
@@ -326,6 +316,28 @@ fn time(at: Option<i64>) -> String {
         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or("—".into())
 }
+fn confirm(question: &str) -> Result<(), String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err(format!("{question} — refusing without --yes"));
+    }
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    eprintln!();
+    if !matches!(
+        omni_ir::js::trim(&line).to_lowercase().as_str(),
+        "y" | "yes"
+    ) {
+        return Err("cancelled".into());
+    }
+    Ok(())
+}
+
 fn preview_table(preview: &Value) -> String {
     let mut names = ["snapshot", "live"]
         .iter()
