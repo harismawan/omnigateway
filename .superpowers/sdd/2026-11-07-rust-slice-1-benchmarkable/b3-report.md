@@ -1,5 +1,73 @@
 # B3 OpenAI / Codex
 
+## Step B coverage checkpoint — HEAD `0e0d9d61`
+
+**272 request comparisons green: 256 OAuth +16 API-key controls.** B5–B8
+committed; Step C not started this turn. No production changes this turn.
+
+| Category | Rows | First failure / commit |
+|---|---:|---|
+|Three dialects buffered/streaming|6|Historical row 0 Auth; da138696|
+|B1 reasoning|76|Historical row 36 invalid effort; fixed 310b183f|
+|B2 tools/mixed results|16|First run green a3fff63f|
+|B3 media ingress|36|First run green 96dcdfc5|
+|B4 response format|12|First run green 9ca9634e|
+|B5 lite/catalog|28|First run green f2a06a4f|
+|B6 OAuth branch controls|36|First run green d352f767|
+|B7 identity|22|First run green 9c1185a1|
+|B8 cache/history pairs|40|First run green f8518b1b|
+
+Final lint-only commit 0e0d9d61 removes redundant Credentials default; first
+clippy failed needless_update. No differential failure in these four additions.
+B5: all 12 catalog entries +unlisted and __proto__, prefixes absent/present;
+native reasoning passthrough replacement, assistant text, user turns, developer
+message. B6: two models ×two credentials ×eight control/vendor patches plus
+unsafe model routing and missing/nonstring account IDs. Inventory in
+`conformance/openai-oauth-branches.md`: **24 OAuth/lite source decisions, 24
+reached both ways, 0 unreached** (inspection of inputs, not instrumentation).
+Nested routing/account/vendor decisions covered separately. Missing-both-token
+error arm is outside successful-row coverage; shared Rust API auth test exists,
+but credential-selected real-TS error comparison remains unperformed.
+
+B7: 11 provider-data shapes ×two models. Valid installation UUID preserved;
+valid lowercase 64-hex salt keys derived identities. Missing/malformed fields
+independently fall back; uppercase UUID accepted, uppercase salt rejected.
+Request bytes match for absent/account-only/complete/partial and malformed
+string/scalar/nested values. Codec reports no backfill field or degradation:
+it reads secrets, derives fallback installation ID, and does not persist them.
+Refresh remains responsible for backfill.
+B8: salted/unsalted ×four identity choices ×original/append/opening edit/system
+edit/later-assistant edit. Whole bytes compared independently against TS for
+every member of each group; no separate cross-row equality assertions added.
+
+Clock/randomness unchanged: both sides receive startedAt=1794000000123 and
+requestId=fixed-oauth-request. Request builder calls no randomness; exact
+deterministic IDs compared. No clock patch or shape-only comparison.
+
+Final gates after last commit: 50 summaries, 223 passes including children,
+4 ignored, zero failures; all three tripwires, strict all-target clippy, fmt,
+diff check pass. Worktree clean. Logs `/tmp/opencode/b3/s4b-b8-final-`
+`{tests,clippy,fmt}.log`, first runs `s4b-{catalog,branches,identity,cache}-first.log`.
+All Rust builds incremental=0/dev debug=0/test debug=0. No large scratch created.
+
+Known differences/examples unchanged: transport refuses Zstd marker on OAuth
+instead of compressing; prior empty-string compression probe differs in bytes
+and reachability remains unresolved. X1 escaped lone surrogate text and string
+usage counts remain parked ignored comparisons (not rerun). Gateway startup
+environment capture integration remains deferred: library first use can capture
+later than frozen module import. Refresh/persistence remains deferred: absent
+stored secrets are not persisted by builder. No mismatch observed in this
+corpus; OAuth/lite depth not audited. Fingerprint dispositions unchanged:
+4 ported +66 differential +51 later overall; all 46 fingerprint declarations
+still need Step C review against the expanded corpus.
+
+**Next: Step C**, read all 46 fingerprint tests in sections and update literal
+dispositions; add OAuth SSE codec comparison. Frozen codec.ts:109–112 reads
+nativeReasoning from original client include; :130–133 uses the same decoder
+for both credential modes, not the forced OAuth include. Then roadmap item 3
+OAuth/lite depth, item 4 HTTP compression including empty-body question, item 5
+remaining literals. Missing-token differential can join Step C codec edges.
+
 ## Step B categories 1–4 green — HEAD `9ca9634e`
 
 Item 2 remains partial: **146 whole OAuth request comparisons pass**. Each row
