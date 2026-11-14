@@ -3,7 +3,24 @@ use std::{collections::HashMap, path::Path};
 pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, String> {
     let ctx = crate::context::resolve(flags)?;
     let path = ctx.path.clone();
+    if command == "db-vacuum" && !flags.contains_key("json") {
+        eprintln!("compacting; the gateway's writes will block until this finishes…");
+    }
     let store = ctx.open()?;
+    if command == "db-vacuum" {
+        let result = omni_control::database::vacuum(store.connection(), &path, &|| {
+            chrono::Utc::now().timestamp_millis()
+        })?;
+        return Ok(if flags.contains_key("json") {
+            omni_ir::jsjson::to_string_pretty(&result)
+        } else {
+            format!(
+                "reclaimed  {}\ntook       {} ms",
+                bytes(result["reclaimedBytes"].as_u64().unwrap_or(0)),
+                result["durationMs"]
+            )
+        });
+    }
     let dir = path.parent().ok_or("database has no parent")?;
     if command == "db-backup" {
         let settings = omni_control::settings_value::read(&store)?;

@@ -1,4 +1,17 @@
 //! File-backed database maintenance shared by operator front ends.
+pub fn vacuum(
+    conn: &rusqlite::Connection,
+    path: &std::path::Path,
+    now: &dyn Fn() -> i64,
+) -> Result<serde_json::Value, String> {
+    let before = size(path);
+    let start = now();
+    conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE)")
+        .map_err(|e| e.to_string())?;
+    Ok(
+        serde_json::json!({"reclaimedBytes":before.saturating_sub(size(path)),"durationMs":(now()-start).max(0)}),
+    )
+}
 use serde_json::{Value, json};
 use std::path::Path;
 
