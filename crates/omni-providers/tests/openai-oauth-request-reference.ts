@@ -53,4 +53,12 @@ for(const model of ['gpt-6-astra','gpt-5.5']) for(const stream of [false,true]) 
   Object.assign(rows.at(-1),{dialect,client});
  }
 }
+for(const model of ['gpt-6-astra','gpt-5.5']) for(const vendor of [
+ {response_format:{type:'json_object'}},
+ {response_format:{type:'json_schema',json_schema:{name:'answer',strict:true,schema:{type:'object',properties:{answer:{type:'string'}}}}}},
+ {response_format:{type:'text'}},
+ {text:{format:{type:'json_schema',name:'answer',schema:{type:'object'}}}},
+ {text:{verbosity:'high',format:{type:'json_object'}},response_format:{type:'json_object'}},
+ {text:7,response_format:{type:'json_object'}},
+]) add('response-format',{...base,vendor:{openai:vendor}},model,JSON.stringify(vendor));
 console.log(JSON.stringify(rows));
