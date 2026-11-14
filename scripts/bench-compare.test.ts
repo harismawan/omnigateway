@@ -1,38 +1,44 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { compare, overlaps, type Round } from "./bench-compare";
 
-test("comparison reports spread and excludes failed fast responses", async () => {
-  const root = mkdtempSync("/tmp/opencode/bench-compare-");
-  try {
-    for (const side of ["base", "head"]) {
-      mkdirSync(join(root, side));
-      for (const [i, rps] of [10, 30, 99999].entries()) {
-        await Bun.write(
-          join(root, side, `${i}.json`),
-          JSON.stringify({
-            scenarios: [
-              { name: "case", classification: i === 2 ? "failed" : "supported", metrics: { rps } },
-            ],
-          }),
-        );
-      }
-    }
-    const proc = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dir, "bench-compare.ts"),
-        join(root, "base"),
-        join(root, "head"),
-      ],
-      { stdout: "pipe" },
-    );
-    const output = await new Response(proc.stdout).text();
-    expect(await proc.exited).toBe(0);
-    expect(output).toContain("2/3 rounds; 20 [10–30]");
-    expect(output).toContain("1.000");
+const round = (n: number, classification = "supported", hash = "a".repeat(64)): Round => ({
+  provenance: { gatewaySha256: hash },
+  scenarios: [
+    {
+      name: "custom-chat.chat.json",
+      provider: "custom-chat",
+      classification,
+      metrics: { rps: n, latencyMs: { p50: n, p99: n }, cpuMsPerRequest: n, rssPeakMb: n },
+    },
+  ],
+});
+test("inclusive overlap and disjoint ranges", () => {
+  expect(overlaps({ min: 1, max: 3 }, { min: 3, max: 4 })).toBe(true);
+  expect(overlaps({ min: 1, max: 3 }, { min: 2, max: 2 })).toBe(true);
+  expect(overlaps({ min: 1, max: 3 }, { min: 4, max: 5 })).toBe(false);
+  expect(compare([round(10), round(30)], [round(20), round(40)])).toContain(
+    "1.500 — inside spread",
+  );
+});
+test("unequal successful round counts are explicit", () => {
+  const output = compare([round(10), round(20)], [round(40)]);
+  expect(output).toContain("2/2; 15.000 [10.000–20.000]");
+  expect(output).toContain("1/1; 40.000 [40.000–40.000]");
+  expect(output).toContain("2.667 — better");
+  expect(output).toContain("2.667 — worse");
+});
+test("any failed or unsupported round suppresses scenario ratios", () => {
+  for (const status of ["failed", "unsupported"]) {
+    const output = compare([round(10), round(99999, status)], [round(20)]);
+    expect(output).toContain(`1/2; ${status}`);
     expect(output).not.toContain("99999");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
+    expect(output).not.toContain(" — better");
+    expect(output).not.toContain(" — worse");
   }
+});
+test("mixed or absent binary identity is refused", () => {
+  expect(() => compare([round(10), round(20, "supported", "b".repeat(64))], [round(20)])).toThrow(
+    "consistent",
+  );
+  expect(() => compare([round(10, "supported", "")], [round(20)])).toThrow("consistent");
 });

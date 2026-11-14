@@ -1,50 +1,139 @@
 #!/usr/bin/env bun
-/** Two files or round directories; failures are never included in ratios. */
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-type Row = {
-  name: string;
-  classification?: string;
-  rps?: number;
-  metrics?: { rps: number } | null;
+type Metrics = {
+  rps: number;
+  latencyMs: { p50: number; p99: number };
+  cpuMsPerRequest: number;
+  rssPeakMb: number;
 };
-async function load(path: string) {
+export type Round = {
+  provenance: { gatewaySha256: string };
+  scenarios: { name: string; provider: string; classification: string; metrics: Metrics | null }[];
+};
+const metrics = [
+  { name: "req/s", higher: true, get: (m: Metrics) => m.rps },
+  { name: "p50 ms", higher: false, get: (m: Metrics) => m.latencyMs.p50 },
+  { name: "p99 ms", higher: false, get: (m: Metrics) => m.latencyMs.p99 },
+  { name: "CPU ms/req", higher: false, get: (m: Metrics) => m.cpuMsPerRequest },
+  { name: "RSS peak MiB", higher: false, get: (m: Metrics) => m.rssPeakMb },
+];
+function spread(values: number[]) {
+  values.sort((a, b) => a - b);
+  const min = values[0],
+    max = values.at(-1);
+  if (min === undefined || max === undefined) return null;
+  return {
+    min,
+    max,
+    median:
+      ((values[Math.floor((values.length - 1) / 2)] ?? 0) +
+        (values[Math.floor(values.length / 2)] ?? 0)) /
+      2,
+  };
+}
+export function overlaps(a: { min: number; max: number }, b: { min: number; max: number }) {
+  return a.min <= b.max && b.min <= a.max;
+}
+function hash(rounds: Round[]) {
+  const hashes = new Set(rounds.map((r) => r.provenance?.gatewaySha256));
+  if (!rounds.length || hashes.size !== 1 || !/^[a-f0-9]{64}$/.test([...hashes][0] ?? ""))
+    throw Error("each side requires one consistent gateway binary SHA256 across all rounds");
+  return [...hashes][0];
+}
+export function compare(base: Round[], head: Round[]): string {
+  const header = [
+    `Base SHA256: \`${hash(base)}\``,
+    `Head SHA256: \`${hash(head)}\``,
+    "",
+    "Values: successful/total rounds; median [min–max]. Ratios are head/base; overlapping ranges are inside spread. RSS is per-scenario peak resident memory.",
+    "",
+  ];
+  const names = [...new Set([...base, ...head].flatMap((r) => r.scenarios.map((s) => s.name)))];
+  const tables = new Map<string, string[]>();
+  const counts = metrics.map(() => ({ better: 0, worse: 0, inside: 0 }));
+  for (const name of names) {
+    const sides = [base, head].map((rounds) => {
+      const rows = rounds.map((r) => r.scenarios.find((s) => s.name === name));
+      const successful = rows.filter(
+        (r) => r?.classification === "supported" && r.metrics !== null,
+      );
+      const statuses = [
+        ...new Set(
+          rows.filter((r) => r && r.classification !== "supported").map((r) => r?.classification),
+        ),
+      ];
+      if (successful.length === 0 && statuses.length === 0) statuses.push("missing");
+      return { rows, successful, statuses, total: rounds.length };
+    });
+    const provider = sides.flatMap((s) => s.rows).find(Boolean)?.provider ?? "unknown";
+    if (!tables.has(provider))
+      tables.set(provider, [
+        `### ${provider}`,
+        "| scenario | metric | base | head | head/base |",
+        "|---|---|---|---|---|",
+      ]);
+    for (const [i, metric] of metrics.entries()) {
+      const stats = sides.map((side) =>
+        spread(
+          side.successful.map((r) => metric.get(r?.metrics as Metrics)).filter(Number.isFinite),
+        ),
+      );
+      const cells = sides.map((side, j) => {
+        const s = stats[j];
+        return `${side.successful.length}/${side.total}; ${side.statuses.length ? `${side.statuses.join(", ")}; ` : ""}${s ? `${s.median.toFixed(3)} [${s.min.toFixed(3)}–${s.max.toFixed(3)}]` : "n/a"}`;
+      });
+      const [a, b] = stats;
+      let ratio = "n/a";
+      if (
+        a &&
+        b &&
+        a.median > 0 &&
+        sides.every((s) => s.statuses.length === 0) &&
+        stats.every(
+          (s, j) =>
+            s &&
+            sides[j]?.successful.every((r) => Number.isFinite(metric.get(r?.metrics as Metrics))),
+        )
+      ) {
+        const inside = overlaps(a, b);
+        const verdict = inside
+          ? "inside spread"
+          : b.median > a.median === metric.higher
+            ? "better"
+            : "worse";
+        const count = counts[i];
+        if (count) {
+          if (inside) count.inside++;
+          else if (verdict === "better") count.better++;
+          else count.worse++;
+        }
+        ratio = `${(b.median / a.median).toFixed(3)} — ${verdict}`;
+      }
+      tables
+        .get(provider)
+        ?.push(`| ${name} | ${metric.name} | ${cells[0]} | ${cells[1]} | ${ratio} |`);
+    }
+  }
+  header.push("| metric | better | worse | inside spread |", "|---|---:|---:|---:|");
+  for (const [i, metric] of metrics.entries())
+    header.push(
+      `| ${metric.name} | ${counts[i]?.better} | ${counts[i]?.worse} | ${counts[i]?.inside} |`,
+    );
+  return [...header, "", ...[...tables.values()].flatMap((lines) => [...lines, ""])].join("\n");
+}
+async function load(path: string): Promise<Round[]> {
   const paths = statSync(path).isDirectory()
     ? readdirSync(path)
         .filter((p) => p.endsWith(".json"))
         .sort()
         .map((p) => join(path, p))
     : [path];
-  return Promise.all(paths.map(async (p) => (await Bun.file(p).json()).scenarios as Row[]));
+  return Promise.all(paths.map((p) => Bun.file(p).json()));
 }
-const [a, b] = process.argv.slice(2);
-if (!a || !b) throw Error("usage: bench-compare.ts <base.json|directory> <head.json|directory>");
-const sides = await Promise.all([load(a), load(b)]);
-const names = [...new Set(sides.flat(2).map((r) => r.name))];
-const summary = (rounds: Row[][], name: string) => {
-  const values = rounds
-    .map((rows) => rows.find((r) => r.name === name))
-    .filter((r) => r && (r.classification === undefined || r.classification === "supported"))
-    .map((r) => r?.metrics?.rps ?? r?.rps)
-    .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0)
-    .sort((x, y) => x - y);
-  const n = values.length;
-  const median = n
-    ? ((values[Math.floor((n - 1) / 2)] ?? 0) + (values[Math.floor(n / 2)] ?? 0)) / 2
-    : null;
-  return {
-    median,
-    cell: `${n}/${rounds.length} rounds; ${median ?? "n/a"} [${values[0] ?? "n/a"}–${values[n - 1] ?? "n/a"}]`,
-  };
-};
-console.log(
-  "| scenario | base req/s median [min–max] | head req/s median [min–max] | head/base |\n|---|---|---|---:|",
-);
-for (const name of names) {
-  const base = summary(sides[0] ?? [], name),
-    head = summary(sides[1] ?? [], name);
-  console.log(
-    `| ${name} | ${base.cell} | ${head.cell} | ${base.median && head.median ? (head.median / base.median).toFixed(3) : "n/a"} |`,
-  );
+if (import.meta.main) {
+  const [a, b] = process.argv.slice(2);
+  if (!a || !b) throw Error("usage: bench-compare.ts <base.json|directory> <head.json|directory>");
+  console.log(compare(await load(a), await load(b)));
 }

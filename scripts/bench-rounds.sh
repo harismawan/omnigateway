@@ -27,8 +27,14 @@ for ((round=1; round<=rounds; round++)); do
       exit 2
     fi
     uptime > "$out/$side/$round.before.txt"
-    bash "$script_dir/bench-matrix.sh" --gateway "$gateway" --cli "$CLI" \
-      --label "$side-$round" --out "$out/$side/$round.json" "$@" > "$out/$side/$round.log" 2>&1
+    command=(bash "$script_dir/bench-matrix.sh" --gateway "$gateway" --cli "$CLI"
+      --label "$side-$round" --out "$out/$side/$round.json" "$@")
+    if [[ -n ${OMNI_RUST_BINARY:-} ]]; then
+      printf 'OMNI_RUST_BINARY=%q ' "$OMNI_RUST_BINARY" >> "$out/commands.sh"
+    fi
+    printf '%q ' "${command[@]}" >> "$out/commands.sh"
+    printf '\n' >> "$out/commands.sh"
+    "${command[@]}" > "$out/$side/$round.log" 2>&1
     uptime > "$out/$side/$round.after.txt"
   done
 done

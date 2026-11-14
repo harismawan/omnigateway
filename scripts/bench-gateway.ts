@@ -89,7 +89,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { cpus, release, totalmem } from "node:os";
+import { cpus, loadavg, release, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Subprocess } from "bun";
@@ -1435,6 +1435,36 @@ async function cliTimings(runs: number): Promise<{ p50Ms: number; maxMs: number 
 }
 
 async function main(): Promise<void> {
+  const loadBefore = loadavg()[0];
+  let provenance:
+    | {
+        gatewayBinary: string;
+        gatewaySha256: string;
+        harnessCommit: string;
+        loadBefore: number | undefined;
+        loadAfter?: number;
+      }
+    | undefined;
+  if (flags.matrix) {
+    const launcher = GATEWAY_ARGV.some((arg) => arg.endsWith("/run-rust-gateway.sh"));
+    const launcherPath = GATEWAY_ARGV.find((arg) => arg.endsWith("/run-rust-gateway.sh"));
+    const program = launcher
+      ? (process.env.OMNI_RUST_BINARY ??
+        resolve(launcherPath as string, "../../target/release/omnigateway"))
+      : (GATEWAY_ARGV[0] as string);
+    const binary = program.includes("/") ? resolve(root, program) : Bun.which(program);
+    if (!binary) throw Error(`cannot resolve gateway binary: ${program}`);
+    const commit = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: REPO });
+    if (commit.exitCode !== 0) throw Error("cannot identify harness commit");
+    provenance = {
+      gatewayBinary: binary,
+      gatewaySha256: new Bun.CryptoHasher("sha256")
+        .update(await Bun.file(binary).arrayBuffer())
+        .digest("hex"),
+      harnessCommit: commit.stdout.toString().trim(),
+      loadBefore,
+    };
+  }
   mkdirSync(join(root, "no-dashboard"), { recursive: true });
   // `--root` makes the CLI ignore an ambient OMNI_DB_PATH, so the root states
   // its own, which is how a real installation does it.
@@ -1569,6 +1599,7 @@ async function main(): Promise<void> {
   })();
 
   const output = {
+    ...(provenance ? { provenance: { ...provenance, loadAfter: loadavg()[0] } } : {}),
     label: flags.label ?? null,
     when: new Date().toISOString(),
     host: {
