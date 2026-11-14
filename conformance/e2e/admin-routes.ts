@@ -2478,12 +2478,13 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       if (step.kind === "client-history") {
         const { fixture, check, attacks, callers } = await clientFixture();
         const secrets = ["history-distinct-access-token", "history-distinct-refresh-token", "history-distinct-api-key"];
+        const metadataCanary = "providerDataSecretCanary";
         const queries = [...attacks,"since=","until=bad","since=-1","until=-1","since=1.5&until=2.5","since=1e100","until=1e100","since=Infinity&until=NaN","since=9000000000001&until=0","since=0&since=1e100","until=0&until=1e100","since=%20&until=%20"];
         fixture.run("DELETE FROM quota_samples");
         const probe = async (phase:string, status=200, overflow=false) => {
           for (const [who,cookie] of callers) for (const [i,query] of queries.entries()) {
             const answer=await exchange({target:`/api/client/quota/history?${query}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
-            check(`${phase} ${who} history ${i}`,answer,["client-A","client-B","client-C"].includes(who)?status:401,secrets);
+            check(`${phase} ${who} history ${i}`,answer,["client-A","client-B","client-C"].includes(who)?status:401,[...secrets,metadataCanary]);
             if(answer.status===200) {
               const result=JSON.parse(answer.body.toString());
               if(Object.keys(result).join(",")!=="samples,truncated") deadlineFailures.push(`${phase}: history result shape`);
@@ -2502,7 +2503,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         await probe("populated");
         for(const [i,cell] of ["'text'","NULL","X'3132'","9223372036854775807","0","-1","X'ff'"].entries()) fixture.run(`UPDATE quota_samples SET used=${cell==="NULL"?"0":cell},limit_value=${cell},resets_at=${cell},window_ms=${cell} WHERE credential_id='history-${i}'`);
         await probe("unusual");
-        for(const [name,cell,status] of [["invalid-json","'{'",500],["array","'[]'",200],["null-json","'null'",200],["number-json","'42'",200]] as const) {
+        for(const [name,cell,status] of [["invalid-json","'providerDataSecretCanary'",500],["array","'[\"providerDataSecretCanary\"]'",200],["null-json","'null'",200],["number-json","'42'",200]] as const) {
           fixture.run(`UPDATE credentials SET provider_data=${cell} WHERE id='history-0'`);
           await probe(`metadata ${name}`,status);
         }
@@ -2551,7 +2552,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         const probe = async (phase:string, expectedStatus=200) => {
           for(const [who,cookie] of callers) for(const [i,query] of attacks.entries()) {
             const answer = await exchange({target:`/api/client/quota?${query}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
-            check(`${phase} ${who} quota ${i}`,answer,["client-A","client-B","client-C"].includes(who)?expectedStatus:401,secrets);
+            check(`${phase} ${who} quota ${i}`,answer,["client-A","client-B","client-C"].includes(who)?expectedStatus:401,[...secrets,"providerDataSecretCanary"]);
             if(answer.status===200) {
               const rows=JSON.parse(answer.body.toString()).accounts;
               for(const row of rows) if(Object.keys(row).join(",")!=="credentialId,label,provider,windowType,usedRatio,resetsAt,observedAt,windowMs,ratePerHourRatio,exhaustsAt,survives,stale,rolledOver") deadlineFailures.push(`${phase}: unexpected quota fields`);
@@ -2575,7 +2576,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           fixture.run(`UPDATE quota_windows SET observed_at=${cell},used=25,limit_value=100,resets_at=9000000000000,window_ms=3600000 WHERE credential_id='quota-${i}'`);
         }
         await probe("observed cells");
-        for (const [name,cell,status] of [["invalid-json","'{'",500],["array","'[]'",200],["null-json","'null'",200],["number-json","'42'",200]] as const) {
+        for (const [name,cell,status] of [["invalid-json","'providerDataSecretCanary'",500],["array","'[\"providerDataSecretCanary\"]'",200],["null-json","'null'",200],["number-json","'42'",200]] as const) {
           fixture.run(`UPDATE credentials SET provider_data=${cell} WHERE id='quota-0'`);
           await probe(`credential data ${name}`,status);
         }
@@ -2987,7 +2988,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       : []),
   ] as const) {
     const text = readFileSync(f);
-    for (const raw of ["secret-a6-1", "secret-a6-2", "secret-a6-3"]) {
+    for (const raw of ["secret-a6-1", "secret-a6-2", "secret-a6-3", ...(cfg.label.startsWith("client-") ? ["providerDataSecretCanary", ...["quota","history"].flatMap(p=>[`${p}-distinct-access-token`,`${p}-distinct-refresh-token`,`${p}-distinct-api-key`])] : [])]) {
       if (text.includes(raw)) secretProblems.push(`${stream}: credential secret exposed`);
     }
     for (const raw of allRawKeys.keys())
