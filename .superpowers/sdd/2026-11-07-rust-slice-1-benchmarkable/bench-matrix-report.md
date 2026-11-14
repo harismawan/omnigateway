@@ -1,5 +1,44 @@
 # Benchmark matrix report
 
+## Fix round 2
+Functional checks passed; no performance conclusions on this shared build host. Evidence root: `/tmp/opencode/bench-fix2/` (paths below relative).
+| Finding | Commit | Failing check first | Evidence |
+|---|---|---|---|
+| a: ordered workload history | `1811d46f` | missing first/reversed selections accepted | `a-before.log`, `a-after.log`; existing ordered scenarios array retained |
+| b: credentials inside values | `0b668def` | URL userinfo/query credentials exposed | `b-before.log`, `b-after.log`, `secret-audit.json`, `secret-audit-check.log` |
+| d: fixed verifier schedule/counts | `11117fa1`, `ff4e9ed5` | missing scheduler export; then counts read at wrong nesting | `d-before.log`, `d-counts-before.log`, `tests-final.log`, `rounds/comparison.md` |
+| c: every capacity probe | `88fa5aa9` | failed single-client probe accepted | `c-before.log`, `c-after.log`, `capacity-reviewer.log` (reviewer's three c1 failures rejected) |
+| e: path-prefix normalization/disclosures | `71949a22` | middle-of-value roots normalized; limits absent | `e-before.log`, `e-after.log`, `rounds/comparison.md` |
+Documentation/formatting: `ff0c6cd9`. Final tests: 30 pass, 0 fail; core typecheck passes; changed-file lint passes. Full scripts lint retains pre-existing bench-probe.ts/test formatting/import errors (`lint-scripts.log`).
+Observed: 8/8 custom-chat cases per gateway; twelve faults failed with null metrics; six interleaved round files with two supported scenarios each; default ten names and top-level/scenario keys match baseline (`validation.log`). All 22 gateway scratch roots removed (including secret audit).
+Exact-value audit found no URL fixture password/token, upstream key, admin password, encryption secret, OAuth seed, generated verifier key or TLS private-key lines in audit JSON. Generated plain/limited keys were not retained for exact-value search (`secret-audit-check.log`).
+Runs recorded `ff0c6cd9` plus the subsequently committed count-reader fix; final-commit secret-audit run also passed. Header excerpt pasted from `rounds/comparison.md`:
+```text
+Rust's production launcher defaults MIMALLOC_PURGE_DELAY=1; this is not an allocator-neutral comparison.
+CPU covers the gateway process and its threads only (children excluded). Memory is resident memory sampled every 100 ms.
+One process serves all scenarios; later scenarios include earlier process and database history.
+The load interval ends at oha's report file, with a 250 ms tolerance.
+Verifier requests are extra gateway work, not counted in the request rate.
+Measured traffic integrity uses status, usage, per-request size and a sampling full-body verifier; this is not a proof that every response was correct.
+All rounds have the same ordered scenario selection.
+Verifier counts by round (started/completed/skipped ticks/violations):
+base round 1: custom-chat.chat.json=9/9/0/0, custom-chat.chat.stream=9/9/0/0
+base round 2: custom-chat.chat.json=9/9/0/0, custom-chat.chat.stream=9/9/0/0
+base round 3: custom-chat.chat.json=9/9/0/0, custom-chat.chat.stream=9/9/0/0
+head round 1: custom-chat.chat.json=9/9/0/0, custom-chat.chat.stream=9/9/0/0
+head round 2: custom-chat.chat.json=9/9/0/0, custom-chat.chat.stream=9/9/0/0
+head round 3: custom-chat.chat.json=9/9/0/0, custom-chat.chat.stream=9/9/0/0
+```
+Limit: same-size wrong text in an unverified load response is not detectable. Fresh-process selection exceptions retain database history. No production capacity/performance claim was tested.
+Exact real-measurement commands (quiet host, fresh OUT; not executed here):
+```sh
+cd /home/homebrew/.local/share/opencode/worktree/1600a1/rust-bench
+export OMNI_RUST_BINARY=/tmp/opencode/bench-gate/bin/main-327f240f
+OUT=/tmp/opencode/bench-real-capacity DURATION=20s bash scripts/bench-upstream-check.sh
+BASE_GATEWAY=/tmp/opencode/bench-gate/bin/ts-frozen-f9cc6678 HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" CLI='bun apps/cli/src/index.ts' OUT=/tmp/opencode/bench-real-rounds ROUNDS=5 MAX_LOAD=1 bash scripts/bench-rounds.sh --duration 20s --warmup 3s --boots 5 --gateway-cpus 0-3 --upstream-cpus 4-5 --load-cpus 6-7 --fresh-process
+bun scripts/bench-capacity.ts /tmp/opencode/bench-real-capacity /tmp/opencode/bench-real-rounds/{base,head}/[1-5].json
+```
+
 ## Fix round 1
 
 **Functional verification complete; next step: parent review.** Environment
