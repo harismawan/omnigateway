@@ -1,38 +1,75 @@
-# A7 — fix round 1 in progress
+# A7 — fix round 1 checkpoint
 
 ## Fix round 1
 
-**Status: partial checkpoint, NOT complete for review.** This section supersedes the earlier completion status. HEAD implementation `b2e6f9e9`. **NEXT STEP:** profile/fix usage-large memory and collect five fresh process RSS runs per binary before and after (use pre-fix `/tmp/opencode/a7-final/rust-final` and TS equivalent for baseline); then fix M1 JS whitespace and M2/M3 method-aware HEAD normalization/header parity with independent RED and all four routes × three roles. Finish detailed page breakdown (separate SQLite stepping from carrier decoding), explicit connection-release/bound saturation tests, final export matrix/volume/disconnect/slow-reader reruns, fresh binary manifest and all four drivers/full gates. Current workspace gate stopped at an existing snapshot timing assertion; investigate/rerun before claiming green. No background jobs outstanding.
+**Status: NOT complete for review — M2 remains unresolved.** All other requested work below is committed and verified. Last implementation/test commit **`5b0a2bae`**. **NEXT STEP: resolve M2 without weakening comparison**: Hyper 1.12's HTTP/1 `Server::can_chunked` explicitly rejects HEAD and its encoder discards even an explicitly supplied Transfer-Encoding header. `5deab832` currently pins eight exact differences rather than achieving requested parity; that is not an approved exception. Decide the transport-level implementation (or obtain explicit acceptance of this divergence), remove the eight pins when fixed, rerun HEAD plus final gates and regenerate manifest. Do not call this round complete merely because the pinned driver passes. No jobs outstanding. Unrelated lockfile/progress edits, untracked specs, stash and other worktrees left alone.
 
 ### Finding → commit → test
 
-| Finding | Commit | Evidence under `/tmp/opencode/a7-fix1/` |
+Evidence paths below relative to **`/tmp/opencode/a7-fix1/`**.
+
+| Finding | Commit | Evidence / RED status |
 |---|---|---|
-| Export contention/tight test | `ed3dc1c7` | `profile2.log` independently RED at 172.412ms against 10ms bound on shared-reader instrumented implementation; `isolated2.log`, `optimized.log`, `wal.log` GREEN 17 equal each |
-| Usage/log shared-control exposure | `0fca2fdc` | `reports-red2.log` independently RED; `reports-green.log` 11 equal; concurrent admin reads now 2.746ms during usage and 2.123ms during 500-row logs |
-| I1 typed raw cursor | `b3061657` | `cursor-red.log` broken framing against fractional 501 rows; `cursor-{fractional,long,blob}.log` each 17 equal/0 failures. Long IDs include non-ASCII; BLOB IDs retain SQL storage type |
-| I2 nonfinite CSV | `b2e6f9e9` | `nonfinite-red2.log` 15 equal/2 failures → `nonfinite-green2.log` 17/0; positive and negative Infinity, CSV/JSONL, roles |
-| M1–M3, usage memory | pending | not yet fixed/measured in this round |
+| Export contention + hard 10ms slow-reader bound | `ed3dc1c7` | `profile2.log` independently RED at 172.412ms; isolation/roundtrip removal GREEN. Final 1.873–2.363ms, hard 10ms unchanged |
+| Usage/log shared-control exposure | `0fca2fdc` | `reports-red2.log` RED; `reports-green.log` GREEN. `5deab832` samples concurrent reads five times, bounds median at 10ms to avoid single scheduler outliers; distinct from the slow-reader hard per-call bound |
+| I1 raw typed cursor | `b3061657` | fractional `cursor-red.log` RED; fractional/long/BLOB GREEN. Only fractional independently failed before fix |
+| I2 nonfinite CSV | `b2e6f9e9` | `nonfinite-red2.log` 15 equal/2 failures → `nonfinite-green2.log` 17/0 |
+| M1 JS-whitespace limit | `5deab832` | `m-red-logs.log` 215 equal/2 failures → `m-green-logs.log` 217/0. U+FEFF plus other whitespace/non-whitespace cases |
+| M3 method-aware HEAD normalization | `5deab832` | `m3-red.log` throws invalid chunk header on TS; subsequent HEAD driver completes. Also rejects incomplete GET chunk framing |
+| M2 HEAD export header | **unfixed**, pins in `5deab832` | `m-red-head-reports.log` 75 equal/8 failures. HEAD four routes × three roles, valid/invalid and empty/nonempty CSV/JSONL; eight success HEAD exports differ only in TE. Pins are documented evidence, not a fix |
+| Connection bounds + independent usage/log lane | `c04a176f` | `bounds-1.log`, `resume-export-bounds.log`, final driver GREEN. Existing implementation passed; deliberately broken five-slot build fails `bounds-mutant-five-slots.log`; shared-lane mutant fails `bounds-mutant-shared-lane.log`. No independent cancellation-bug RED claimed |
+| Usage memory | `8de0229b`, lint-only `5b0a2bae` | Five complete before runs establish excessive peak; five after runs per binary byte-equal. `resume-usage.log` 449/0, `resume-usage-large.log` 11/0 before commit. Three unit tests passed before/after refactor; no changed response behavior intended |
+| Alternate fixture port | `2d02753c` | `port-{usage-traffic,credential-identity,credentials}.log`: 9/75/179 equal; final whole driver on 19443/upstream 19444. No 18444 literal remains |
+| Page timing detail | `b99278f9` | `timing-volume.log` 17/0; final per-page preparation, stepping/collection, carrier decoding separately recorded |
 
-Initial `red.log` was contaminated by simultaneous review-driver port use; do not treat it as reliable evidence. Permanent driver now accepts A7_TEST_PORT; targeted runs use 19443/upstream 19444. Only the export-volume fixture's dynamically created upstream origin was adapted so far: other existing fixtures still embed 18444 and need adaptation before a full nondefault-port driver run. `profile2.log` is the uncontaminated RED. The initial nonfinite fixture failed NOT NULL before HTTP; corrected fixture is the independently failing `nonfinite-red2` run. I1 long/BLOB cases were added before implementation but only fractional had an independently executed RED.
+### Connection-bound behavior and evidence
 
-### Changes and measurements so far
+Final `final/admin-routes-last/bounds-{rust,ts}.json`: four Rust export WAL descriptors above baseline (6 → 10); fifth receives **no response headers or body** until a permit is available. No extra reader is opened while waiting. After one finishes, fifth first byte arrives **48.374ms** later. After a disconnect, next waiting export starts in **29.652ms**; with a previously abandoned waiter ahead of it, **34.955ms**. Bound 1000ms. All clients dropped: WAL descriptors return to baseline in **21.260ms**. Main database descriptors may remain cached by SQLite's POSIX-locking VFS after connection close; WAL descriptors count active read connections. Main descriptors grow at most baseline + eight (four exports plus four report readers), observed 6 → 14.
 
-Four export read-only SQLite connections maximum, controlled by a shared semaphore; excess requests await a permit before opening SQLite. Separate four-permit lane for ordinary usage/log report reads, so slow exports cannot exhaust that lane or the config control connection. TS has no corresponding explicit permit bound. Permits now travel with the private handle and any spawned blocking operation: a cancelled in-flight page retains its slot until completion. Connections use SQLITE_OPEN_READ_ONLY, 5-second busy timeout, no migration. SQLite SELECT's implicit transaction ends when its statement/rows are dropped each page; no explicit transaction spans pages. `wal.log` adds a successful TRUNCATE checkpoint while slow export is open and real request logs have committed. Explicit fd-drop/permit-saturation tests still to add; current socket test proves at most one more completed page, not fd closure directly.
+Usage/logs/nodes/keys and invalid export requests complete while four exports plus a waiter remain open, for admin and viewer. Eight simultaneous usage/log requests also finish (166.737ms total). Other-report individual bound 2000ms; usage 99.112/400.444ms, 500-row logs ~30ms, one-row logs ~1.9ms. These are not the separate tight slow-reader 10ms test.
 
-Encoding is on the private report handle rather than the shared control lock. Removed export page JSON stringify → parse round-trip. Filters are parsed once into typed Query; export advances with raw rusqlite Value timestamp/id pairs fetched directly from the last retained row, avoiding public cursor/query-string serialization and validation. `/api/logs` keeps its public cursor validation. CSV directly formats carrier values; +/-Infinity uses JS text and negative formula guard. Preparation still happens per page; it was tiny relative to decoding/serialization and has not been cached.
+TS has no export permit cap: fifth, sixth, seventh already receive bytes before another finishes/disconnects. This is an observable latency difference, and a Rust client may hit its own timeout waiting. Neither queue length nor wait time has a new explicit cap. A scratch fully stalled-client experiment (`stall/{ts,rust}.json`, script retained) also found TS closes its server socket ~256.226s after inactivity, while Rust remained open through 330s. This preexisting outbound idle-timeout difference can prolong permit occupancy; it is a concern, not a passing timeout-parity test.
 
-Profile before optimization (`profile2/export-volume-1-rust.log`, host load differs from original report): first page total **231.382ms**, prepare **0.137ms**, query+carrier decode **72.586ms**, read including page stringify **102.064ms**, JSON reparse **105.478ms**, final encoding **23.841ms**. Second page total **180.062ms**, preparation **0.170ms**, query+decode **86.683ms**, read+stringify **102.213ms**, reparse **62.281ms**, encode **15.568ms**. These quantify the clearly wasteful round-trip; SQL stepping and decoding not yet separated. Debug messages remain `log_page prepare_us/query_decode_us` and `export_page_read elapsed_us/read_us/parse_us/encode_us`; after removal parse_us is near-zero bookkeeping, not a JSON parse.
+### Usage memory — five fresh processes per gateway before and after
 
-EXPLAIN QUERY PLAN on a retained 30k-row fixture with `(at < ? OR (at = ? AND id < ?)) AND at >= ? AND at <= ? ORDER BY at DESC,id DESC LIMIT ?`: **SEARCH request_logs USING INDEX idx_request_logs_at (at>? AND at<?)**; no temporary sort reported. Bindings 20000,20000,'export-20000',0,40000,501. This was a Python sqlite3 examination, not yet a saved Bun-vs-rusqlite planner comparison. No index change made.
+Linux VmHWM in kB, same **300,000 rows / 70,000 buckets** fixture, three large usage responses per process (contention request plus viewer/admin comparisons). No release-vs-debug mixing: Rust dev build, incremental off, debug info off. Direct binaries outside checkout. Runs with default allocator settings do **not** use `scripts/run-rust-gateway.sh`; additional batches explicitly inherit **MIMALLOC_PURGE_DELAY=1**, the script's policy, into both gateways. No claim that environment variable controls TS's allocator.
 
-Slow export baseline original report Rust 55–144ms vs TS 0.48–0.72ms. Tight test isolated RED Rust **172.412ms**, idle 2.66–7.70ms (loaded host). `wal/slow-reader-{rust,ts}.json` after isolation/roundtrip removal: Rust **2.988/2.096/1.276ms**, idle **1.361–2.027ms**; TS **1.158/0.724/1.148ms**, idle **0.974–1.857ms**. Bound is a hard **10ms**, idle samples retained alongside results (not a computed 10× bound). Both confirm three real request rows while export remains open. Latest I1/I2 binaries still require this rerun.
+| Policy / phase | Rust five peaks (kB) | Rust range | TS range |
+|---|---|---|---|
+| Default before (`mem/before-{1..5}`) | 269444, 264104, 239428, 268420, 263320 | **239428–269444** | **153172–157592** |
+| Default after (`mem/after-{1..5}`) | 66216, 57848, 66224, 58268, 68940 | **57848–68940** | **153384–155884** |
+| Purge=1 before (`mem/before-purge1-{1..5}`) | 255140, 268300, 268700, 253952, 269276 | **253952–269276** | **142380–144028** |
+| Purge=1 after (`mem/after-purge1-{1..5}`) | 65096, 56632, 56068, 67856, 56996 | **56068–67856** | **140788–144172** |
 
-Largest usage fixture (300k rows, 70k buckets): `reports-red2/report-contention-rust.json` concurrent small log read **4256.051ms**, large request total **4805.434ms**; TS **2838.307ms**, total **2864.001ms**. 500-row log request concurrent small read Rust **27.858ms**, TS **0.940ms**. After isolation `reports-green`: Rust usage concurrent **2.746ms**, large response total **6518.593ms**; log concurrent **2.123ms**. TS usage concurrent **2180.134ms**, log **0.935ms**. Totals include transport/serialization and are not mutex hold timers; actual hold-time instrumentation remains pending. TS blocks its event loop during the large aggregation; Rust now leaves other admin work free. No memory improvement claim yet.
+Every one of these 40 gateway runs completed its comparison: each paired run 11 equal, zero failures. All five after Rust peaks are below every corresponding TS peak, with either allocator policy. Early `mem/base-*` attempts included two aborted runs due to single-sample contention bounds and are **not** the five-run baseline; initial `before-*` fixture harness attempts were rerun after allowing TS its single blocking sample. Summary files and per-process `usage-large-*-rss.txt` retain individual values.
 
-### Checkpoint verification (not final gates)
+Cause (`mem/probe-before.log`, `probe-after.log`): `JsValue` 32 bytes, field pair 56; tree requested **94,330 KiB in 1,050,003 allocations**. Keys replicated as owned UTF-16 per bucket, oversized field vectors, boxed string storage, and carrier overhead dominate. This is about 15 allocations/bucket for this split fixture (the product comment's 23/25 estimate overcounts; measured recursive allocation count is authoritative). Tree build adds ~109,204 KiB RSS in the scratch default-allocator control test. Stringification additionally builds **14,572,240-byte** JSON with 16,777,216-byte capacity; it does **not** clone the whole tree. Tree and response string coexist. Response `String` moves to `Bytes`/Full, without a second response-body copy. Scratch peak **132,700 → 26,204 KiB**, after dropping output **113,932 → 7,384 KiB**. These scratch tests use the test allocator, not gateway mimalloc.
 
-`clippy-checkpoint.log`: workspace/all-targets -D warnings clean. `fmt-checkpoint.log`: clean. `workspace-checkpoint.log`: stopped at `omni-gateway-core --test snapshot`, `the_refresher_picks_up_another_connections_commit_within_a_poll` failed timing assertion; prior completed summaries total 447 passed/1 ignored, failing suite 5 passed/1 failed. Full workspace NOT green. All used offline, CARGO_INCREMENTAL=0, dev/test debug=0. Final rebuilt artifacts/manifest/full-driver verification remain pending; earlier A7 final artifacts are baselines only.
+Gateway `mem/steps-*.json` separately demonstrates retention: original default-policy RSS after four sequential answers reaches 265,076 KiB and stays there after 1.5s idle; purge=1 does not guarantee immediate reclamation on idle allocation threads. Optimized default-policy fourth response RSS 79,664 KiB, purge=1 64,660 KiB. The structural fix avoids building/freeing that million-allocation carrier tree, writes one bucket at a time on the blocking reader thread, and moves one completed string into the HTTP body. SQLite still aggregates, memory still scales with buckets/output, and no new cardinality cap was introduced. All direct probe response hashes match TS (`9d13e1571856a32f…`, full SHA in `steps-*.json`).
+
+### Final export and page measurements
+
+Final full driver includes export-matrix, 30,000-row byte comparisons three configurations × CSV/JSONL × roles, fractional/long/BLOB cursors, nonfinite CSV, disconnect, connection saturation and hard slow-reader bound.
+
+`final/admin-routes-last/disconnect-rust.json`: pages at close **1**, after 500ms **2**, follow-up **200**. `slow-reader-rust.json`: **1.989 / 1.873 / 2.363ms**, idle **1.272–2.372ms**; TS **1.438 / 1.342 / 1.024ms**. Both three real committed request rows and export still open; hard **10ms** per call.
+
+261 final page events: prepare **112–769µs**, combined query/decode **152–56132µs**, stepping+collection **59–21279µs**, decoding **90–53950µs** (includes tiny final/one-row pages). First full page: prepare **648µs**, step/collection **6512µs**, decode **22262µs**; second prepare **132µs**, step/collection **6206µs**, decode **27743µs**. Stepping is measured as combined elapsed minus timed decoding, so includes binding/collection overhead, not pure SQLite CPU. Prepared statement caching could save sub-ms preparation per page, small relative to decoding/stepping; not implemented.
+
+### Final gates on `5b0a2bae` (passed, with M2 pins explicitly noted)
+
+All logs under `final/`; fresh TS built with `bun scripts/build-binary.ts /tmp/opencode/a7-fix1/final/ts`; Rust `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --offline -p omni-gateway`, copied to `/tmp/opencode/a7-fix1/final/rust`. Both outside checkout. `manifest.json` records full commit and both SHA256 hashes before drivers. Driver environment MIMALLOC_PURGE_DELAY=1; admin-routes A7_TEST_PORT=19443. Invocation `bun conformance/e2e/NAME.ts --ts /tmp/opencode/a7-fix1/final/ts --rust /tmp/opencode/a7-fix1/final/rust --out /tmp/opencode/a7-fix1/final/NAME`; admin-routes output uses `admin-routes-last`; run.ts omits --out.
+
+| Gate | Result | Log |
+|---|---|---|
+| `cargo test --offline --workspace` | **1049 passed, 0 failed, 7 ignored**, 117 suite summaries | `workspace-last.log` |
+| `cargo clippy --offline --workspace --all-targets -- -D warnings` | clean | `clippy.log` |
+| `cargo fmt --all -- --check` | clean | `fmt-last.log` |
+| admin-routes | **2653 equal, 10 expected, 0 failures** (8 new M2 pins + 2 prior) | `admin-routes-last.log` |
+| admin-auth | **212 equal, 4 expected, 0 failures** | `admin-auth.log` |
+| surface | **606 equal, 61 expected, 0 failures** | `surface.log` |
+| run.ts | **all rows equal** | `run.log` |
+
+First Clippy found `ok().expect()` in new test, fixed in `5b0a2bae`. First full driver (`admin-routes.log`) failed a WAL checkpoint busy assertion during Rust slow export. Targeted `volume-retry.log` and final full driver passed unchanged: a transient active page/writer can overlap checkpoint; no claim that the first failure was disproved. Prior snapshot timing failure was addressed by preexisting `614dfa35`; final workspace passed. Own failed-run scratch roots located from this task's logs were removed; list `removed-scratch.json`. No running commands remain.
 
 ---
 
