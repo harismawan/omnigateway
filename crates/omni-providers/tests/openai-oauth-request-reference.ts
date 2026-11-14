@@ -41,4 +41,16 @@ for(const model of ['gpt-6-astra','gpt-5.5']) for(const count of [1,2]) for(cons
  messages.push({role:'user',content:[{type:'text',text:'continue'}]});
  add('tools',{...base,messages,system:[{type:'text',text:'use tools'}],tools:[{kind:'portable',name:'read',description:'Read file',inputSchema:{type:'object',properties:{path:{type:'string'}}}}]},model,`${count}/${answered}/${mixed}`);
 }
+for(const model of ['gpt-6-astra','gpt-5.5']) for(const stream of [false,true]) for(const media of ['text/plain','application/pdf','application/octet-stream']) {
+ const url='data:image/png;base64,aA==';
+ for(const [dialect,parse,body] of [
+  ['anthropic',parseAnthropicRequest,{model:'pool',max_tokens:123,messages:[{role:'user',content:[{type:'text',text:'hi'},{type:'image',source:{type:'base64',media_type:'image/png',data:'aA=='}}]},{role:'assistant',content:[{type:'tool_use',id:'c',name:'read',input:{}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'c',content:[{type:'text',text:'done'},{type:'image',source:{type:'base64',media_type:'image/png',data:'aA=='}},{type:'document',source:{type:'base64',media_type:media,data:'aGk='}}]}]}]}],
+  ['openai',parseOpenAIRequest,{model:'pool',messages:[{role:'user',content:[{type:'text',text:'hi'},{type:'image_url',image_url:{url}}],attachments:[{url:`data:${media};base64,aGk=`,mediaType:media}]},{role:'assistant',tool_calls:[{id:'c',type:'function',function:{name:'read',arguments:'{}'}}]},{role:'tool',tool_call_id:'c',content:'done'}]}],
+  ['responses',parseResponsesRequest,{model:'pool',input:[{role:'user',content:[{type:'input_text',text:'hi'},{type:'input_image',image_url:url}]},{type:'function_call',call_id:'c',name:'read',arguments:'{}'},{type:'function_call_output',call_id:'c',output:[{type:'input_text',text:'done'},{type:'input_image',image_url:url},{type:'input_file',filename:'a',file_data:`data:${media};base64,aGk=`}]}]}],
+ ] as const) {
+  const client={...body,stream};
+  add('media',parse(client),model,`${dialect}/${stream}/${media}`);
+  Object.assign(rows.at(-1),{dialect,client});
+ }
+}
 console.log(JSON.stringify(rows));
