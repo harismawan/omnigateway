@@ -1,7 +1,8 @@
-//! SQLite report reads. Grouping happens in SQLite; only aggregate buckets are
-//! materialized, as in the frozen store's `aggregate().all().map()`.
+//! SQLite report reads. Grouping happens in SQLite, as in the frozen store's
+//! `aggregate().all().map()`; the usage report's buckets are written to the
+//! answer as SQLite yields them, never held as values.
 use crate::{SqliteStore, StoreError};
-use omni_ir::jsjson::{JsValue, write_number};
+use omni_ir::jsjson::{JsValue, write_number, write_str};
 use rusqlite::types::{Value, ValueRef};
 
 pub fn nodes(store: &SqliteStore, now: i64) -> Result<Vec<JsValue>, StoreError> {
@@ -57,7 +58,21 @@ fn label(cell: ValueRef<'_>) -> String {
     }
 }
 
-pub fn usage(store: &SqliteStore, q: UsageQuery<'_>) -> Result<Vec<JsValue>, StoreError> {
+/// The usage buckets as the JSON array `JSON.stringify` writes for TS's
+/// mapped rows, appended to `out`: one object per bucket, `key`, the ten
+/// measures, then `split` when the query has one.
+///
+/// Written row by row rather than built and then serialized. A bucket as a
+/// `JsValue` is 23 or 25 allocations (a UTF-16 key and a value per field) and
+/// about 1.3 kB against about 200 bytes of text: for 70,000 buckets that was
+/// 94 MB in a million allocations beside a 15 MB answer, built on one thread
+/// and freed on another. On an error `out` holds a partial array, which the
+/// caller discards with the error.
+pub fn usage_json(
+    store: &SqliteStore,
+    q: UsageQuery<'_>,
+    out: &mut String,
+) -> Result<(), StoreError> {
     let UsageQuery {
         daily,
         key,
@@ -121,36 +136,41 @@ pub fn usage(store: &SqliteStore, q: UsageQuery<'_>) -> Result<Vec<JsValue>, Sto
         split.map(|s| format!(", {s}")).unwrap_or_default()
     );
     let mut stmt = store.connection().prepare(&sql)?;
-    Ok(stmt
-        .query_map(rusqlite::params_from_iter(bindings), |r| {
-            let mut fields = vec![(
-                "key".encode_utf16().collect(),
-                JsValue::String(label(r.get_ref(0)?).encode_utf16().collect()),
-            )];
-            for (name, col) in [
-                ("requests", 2),
-                ("inputTokens", 5),
-                ("outputTokens", 6),
-                ("cacheReadTokens", 7),
-                ("cacheWriteTokens", 8),
-                ("rtkSavedTokens", 9),
-                ("rtkAppliedRequests", 10),
-                ("costUsd", 11),
-                ("errors", 3),
-                ("durationMsSum", 4),
-            ] {
-                fields.push((
-                    name.encode_utf16().collect(),
-                    JsValue::Number(r.get::<_, f64>(col)?),
-                ));
-            }
-            if split.is_some() {
-                fields.push((
-                    "split".encode_utf16().collect(),
-                    JsValue::String(label(r.get_ref(1)?).encode_utf16().collect()),
-                ));
-            }
-            Ok(JsValue::Object(fields))
-        })?
-        .collect::<Result<Vec<_>, _>>()?)
+    let mut rows = stmt.query(rusqlite::params_from_iter(bindings))?;
+    out.push('[');
+    let mut first = true;
+    while let Some(r) = rows.next()? {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str("{\"key\":");
+        // A label is well-formed UTF-8 (lossily decoded), so this is what
+        // `JSON.stringify` writes for the same string.
+        write_str(&label(r.get_ref(0)?), out);
+        for (name, col) in [
+            ("requests", 2),
+            ("inputTokens", 5),
+            ("outputTokens", 6),
+            ("cacheReadTokens", 7),
+            ("cacheWriteTokens", 8),
+            ("rtkSavedTokens", 9),
+            ("rtkAppliedRequests", 10),
+            ("costUsd", 11),
+            ("errors", 3),
+            ("durationMsSum", 4),
+        ] {
+            out.push_str(",\"");
+            out.push_str(name);
+            out.push_str("\":");
+            write_number(r.get::<_, f64>(col)?, out);
+        }
+        if split.is_some() {
+            out.push_str(",\"split\":");
+            write_str(&label(r.get_ref(1)?), out);
+        }
+        out.push('}');
+    }
+    out.push(']');
+    Ok(())
 }

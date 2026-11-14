@@ -1,7 +1,6 @@
 //! Validation for reader reports; aggregate SQL belongs to omni-store.
 use crate::api::Failure;
 use omni_ir::js::trim;
-use omni_ir::jsjson::JsValue;
 use omni_store::{SqliteStore, reports::UsageQuery};
 
 fn dimension(grain: &str, value: &str) -> Result<&'static str, Failure> {
@@ -32,7 +31,8 @@ fn dimension(grain: &str, value: &str) -> Result<&'static str, Failure> {
     })
 }
 
-pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<JsValue, Failure> {
+/// `GET /api/usage`'s body: `{"rows":[…]}`, as `JSON.stringify` writes it.
+pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<String, Failure> {
     let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
     let get = |name: &str| {
         pairs
@@ -75,7 +75,8 @@ pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<JsValue, Fail
             .filter(|n| n.is_finite())
             .unwrap_or(default)
     };
-    let rows = omni_store::reports::usage(
+    let mut out = String::from("{\"rows\":");
+    omni_store::reports::usage_json(
         store,
         UsageQuery {
             daily: grain == "daily",
@@ -86,11 +87,10 @@ pub fn usage(store: &SqliteStore, query: &str, now: f64) -> Result<JsValue, Fail
             api_key,
             credential,
         },
+        &mut out,
     )?;
-    Ok(JsValue::Object(vec![(
-        "rows".encode_utf16().collect(),
-        JsValue::Array(rows),
-    )]))
+    out.push('}');
+    Ok(out)
 }
 pub fn nodes(store: &omni_store::SqliteStore, now: i64, node_id: &str) -> Result<String, Failure> {
     use omni_ir::jsjson::{JsValue, stringify};

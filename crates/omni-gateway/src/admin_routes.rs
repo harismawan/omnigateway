@@ -300,12 +300,9 @@ pub async fn serve(
             #[allow(clippy::cast_precision_loss)]
             let now = now as f64;
             Ok(json_ok(
-                omni_ir::jsjson::stringify(
-                    &control
-                        .run(move |s| omni_control::reports::usage(s, &query, now))
-                        .await?,
-                )
-                .unwrap_or_else(|| "null".into()),
+                control
+                    .run(move |s| omni_control::reports::usage(s, &query, now))
+                    .await?,
             ))
         }
         Admin::ListCredentials => {
