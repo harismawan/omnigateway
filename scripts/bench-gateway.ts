@@ -98,9 +98,10 @@ import {
   matches,
   matrixScenarios,
   matrixSmoke,
-  providers,
+  allProviders as providers,
   type Verdict,
 } from "./bench-matrix";
+import { seedOAuth } from "./bench-oauth";
 import {
   setupViaApi as apiSetup,
   RECOVERY_LATENESS_MS,
@@ -1248,6 +1249,10 @@ async function setup(): Promise<Record<"plain" | "limited", string>> {
   if (flags.matrix) {
     if (CLUSTER) throw Error("matrix cluster setup is not implemented");
     for (const provider of providers) {
+      if (!matrixScenarios().some((s) => s.provider === provider.id && matches(s.name, flags.only)))
+        continue;
+      if (provider.provider === "anthropic" && !process.env.OMNI_BENCH_CERT)
+        throw Error("Anthropic matrix requires scripts/bench-matrix.sh");
       await cli(
         [
           "credentials",
@@ -1255,17 +1260,28 @@ async function setup(): Promise<Record<"plain" | "limited", string>> {
           provider.provider,
           "--label",
           provider.id,
-          "--endpoint-id",
-          provider.id,
-          "--endpoint-label",
-          provider.id,
-          "--origin",
-          provider.origin,
-          "--protocol",
-          provider.protocol,
+          ...(provider.provider === "custom"
+            ? [
+                "--endpoint-id",
+                provider.id,
+                "--endpoint-label",
+                provider.id,
+                "--origin",
+                provider.origin,
+                "--protocol",
+                provider.protocol,
+              ]
+            : []),
         ],
         "sk-bench-upstream\n",
       );
+      if (provider.protocol === "oauth")
+        await seedOAuth(env.OMNI_DB_PATH, ENCRYPTION_KEY, provider.id);
+      const db = new Database(env.OMNI_DB_PATH);
+      const credential = db.query("SELECT id FROM credentials WHERE label=?").get(provider.id) as {
+        id: string;
+      };
+      db.close();
       for (const chunks of [1, 2000]) {
         const id = `${provider.id}-c${chunks}`;
         const model = {
@@ -1275,7 +1291,9 @@ async function setup(): Promise<Record<"plain" | "limited", string>> {
           targets: [
             {
               provider: provider.provider,
-              endpointId: provider.id,
+              ...(provider.provider === "custom"
+                ? { endpointId: provider.id }
+                : { credentialId: credential.id }),
               model: `mock-c${chunks}-d0`,
               tier: 1,
               weight: 1,
@@ -1290,6 +1308,11 @@ async function setup(): Promise<Record<"plain" | "limited", string>> {
       }
     }
     const plain = (await cli(["keys", "create", "--label", "bench plain"])) as { key: string };
+    if (process.env.OMNI_BENCH_FAULT === "missing-credential") {
+      const db = new Database(env.OMNI_DB_PATH);
+      db.run("DELETE FROM credentials");
+      db.close();
+    }
     return { plain: plain.key, limited: plain.key };
   }
   await cli(
@@ -1335,7 +1358,13 @@ async function setup(): Promise<Record<"plain" | "limited", string>> {
 
 function startUpstreams(): void {
   if (flags.matrix) {
-    const upstreams = new Map(providers.map((provider) => [provider.origin, provider.script]));
+    const upstreams = new Map(
+      providers
+        .filter((p) =>
+          matrixScenarios().some((s) => s.provider === p.id && matches(s.name, flags.only)),
+        )
+        .map((provider) => [provider.origin, provider.script]),
+    );
     for (const [origin, script] of upstreams) {
       for (let i = 0; i < 2; i += 1) {
         const proc = Bun.spawn(
@@ -1346,7 +1375,15 @@ function startUpstreams(): void {
             process.execPath,
             join(import.meta.dir, script),
             "--port",
-            new URL(origin).port,
+            new URL(origin).port || "443",
+            ...(origin.startsWith("https:")
+              ? [
+                  "--cert",
+                  process.env.OMNI_BENCH_CERT ?? "",
+                  "--key",
+                  process.env.OMNI_BENCH_TLS_KEY ?? "",
+                ]
+              : []),
           ],
           { stdout: "ignore", stderr: "inherit" },
         );

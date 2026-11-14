@@ -18,6 +18,25 @@ export const providers = [
     script: "bench-gateway-upstream.ts",
   },
 ] as const;
+export const allProviders = [
+  ...providers,
+  {
+    id: "anthropic-key",
+    provider: "anthropic",
+    protocol: "apiKey",
+    nearest: "messages",
+    origin: "https://api.anthropic.com",
+    script: "bench-anthropic-upstream.ts",
+  },
+  {
+    id: "anthropic-oauth",
+    provider: "anthropic",
+    protocol: "oauth",
+    nearest: "messages",
+    origin: "https://api.anthropic.com",
+    script: "bench-anthropic-upstream.ts",
+  },
+] as const;
 export const ingresses = {
   chat: "/v1/chat/completions",
   messages: "/v1/messages",
@@ -38,7 +57,7 @@ export function matches(name: string, only?: string): boolean {
 }
 
 export function matrixScenarios() {
-  return providers.flatMap((provider) => {
+  return allProviders.flatMap((provider) => {
     const make = (
       ingress: Ingress,
       mode: "json" | "stream",
@@ -120,6 +139,20 @@ export function responseVerdict(
             : body.type === "response.output_text.delta" && body.delta?.includes("lorem ipsum"),
       );
       if (!valid) throw Error("missing content in expected SSE shape");
+      if (
+        frames.some(
+          (body) => body.error || body.type === "error" || body.type === "response.failed",
+        )
+      )
+        throw Error("error in SSE stream");
+      const completed =
+        meta.ingress === "chat"
+          ? text.includes("data: [DONE]")
+          : frames.some(
+              (body) =>
+                body.type === (meta.ingress === "messages" ? "message_stop" : "response.completed"),
+            );
+      if (!completed) throw Error("missing stream terminator");
     }
     return { classification: "supported", reason: "response shape passed" };
   } catch (error) {
