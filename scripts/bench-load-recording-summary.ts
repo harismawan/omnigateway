@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 export {};
+
 /** Sanity evidence only; ranges deliberately retained on a contended host. */
 const directory = process.argv[2];
 if (!directory) throw Error("usage: bench-load-recording-summary.ts <directory>");
