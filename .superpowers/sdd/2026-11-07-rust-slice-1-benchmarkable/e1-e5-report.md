@@ -1,6 +1,11 @@
 ## Database write commands
 
-**db5 checkpoint: restore group 1 only; commit `9365d16e`. Canonical detailed report updated at `/home/homebrew/code/omnigateway/.superpowers/sdd/2026-11-07-rust-slice-1-benchmarkable/e1-e5-report.md`.**
+**db6 checkpoint: restore groups 1–3 complete (`cb412bfc`, `006a6986`); 17 comparisons, histogram exit 2=1 / exit 1=14 / exit 0=2. Groups 4–5 remain. Canonical detailed report updated at `/home/homebrew/code/omnigateway/.superpowers/sdd/2026-11-07-rust-slice-1-benchmarkable/e1-e5-report.md`.**
+
+- Group-2 absent-ID red; group-3 schema acceptance red (dry-run parser), then JSON ordering fixed. Other candidate refusals already passed group-2 inspection. TS accepts older/newer schema IDs.
+- Truncated WAL-mode candidate creates -wal/-shm in TS; Rust matches byte-identical post-state. All other restore cases unchanged. OMNI_PORT=invalid now fails histogram with eight environment failures.
+- Code commit 006a69863292384af9924fd65c37b02da8d75e2d: offline tests 27 passed, clippy/fmt passed; foreground matrix 32/32, /tmp/opencode/e1-e5/db6-verified-summary.txt. Binary db6-omni-final SHA256 2bff39eded4492d4483a2107fb85f9496d50562232cc6c02b8ee6ba5e364a431.
+- Next: human preview plus frozen formatter unit goldens (union/missing/null), stderr ordering and confirmation cases; Rust-only yes refusal test. Valid non-JSON-dry-run paths currently unavailable. Only then begin swap with revalidation, undo/staging failure injection; remaining failure-state rows are swap work. No swap implemented.
 
 | Command | Current status |
 |---|---|
