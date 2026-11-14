@@ -1,4 +1,56 @@
-# A8 — partial: login/logout/summary/logs/usage delivered; quota routes remain
+# A8 — partial: six routes delivered; quota/history remains
+
+**NEXT STEP (quota checkpoint, 2026-11-14):** implement GET `/api/client/quota/history` with a failing comparison first. Read frozen `clientHistory.ts` and `history.ts` (retainedSpan, sample query cap, pageSamples, per-series truncated), then `listQuotaSamples`. Authorize before parsing/opening the bounded reader; write samples directly without a value tree. Extend the shared fixture clock to the history configuration, include limit overflow affecting only some series, orphan/disabled accounts, unusual cells, all callers and the distinctive credential-secret scan. Then run the full closure drivers and write `/tmp/opencode/a8/final/manifest.json`; that final manifest and full closure are NOT done. Existing history below is preserved. No subagents.
+
+## Latest checkpoint
+
+| Route | Commits | Comparisons | Failed first |
+|---|---|---|---|
+| login | `b4d8ffe1` | 39 equal / 0 failures | 34 failures, 404 |
+| logout | `6861c046` | 21 equal / 0 failures | 12 failures, 404 |
+| summary | `2493a8a9` | 183 equal / 0 failures | Rust 404 |
+| logs | `b5973bb3`, `20cddcbc` | 379 equal / 0 failures | 368 failures, then malformed-degradation RED 6 |
+| usage | `1d84ed0f`, `43263a90`, `327f240f` | 487 equal / 0 failures | 422 failures, 404 |
+| quota | `f95b99b9` | 775 equal / 0 failures | 294 equal / 578 failures, Rust 404 |
+| quota/history | pending | none | not run |
+
+Quota disclosure equals TS on the compared fixtures: `{accounts:[...]}` contains exactly credentialId, label, provider, windowType, usedRatio, resetsAt, observedAt, windowMs, ratePerHourRatio, exhaustsAt, survives, stale, rolledOver, in that order. Every valid client sees all named accounts, including disabled accounts; orphan windows disappear. Raw used/limit counts, raw rate, and secrets are absent. Exact fractions can reveal ceilings; this is intentional frozen behavior, not a secrecy claim. History disclosure is NOT implemented or verified.
+
+Quota isolation: shared A/B/C, operator, viewer, anonymous, revoked and genuinely expired-session callers × twelve identity/cursor/duplicate/encoded parameter attacks × empty/populated/unusual/observed-cell phases. Expired-after-login C also gets 401. All response headers/body bytes scanned for `quota-distinct-access-token`, `quota-distinct-refresh-token`, `quota-distinct-api-key`; zero leaks. Explicit field-list/orphan/disabled assertions pass.
+Quota lane: `require_client` precedes `app.control.reader()` and all DB reads; only the bounded read-only report lane runs the operation. New store reads select identity metadata and raw quota cells, never secret columns. Existing ICU root comparison matches tested labels é/E/e/Z/ä/A/a/Å/中; no new dependency.
+
+Summary isolation: verified-session id only, ignored URL identities; B responses scanned for A/C markers; shared fixture/caller coverage described below.
+Summary lane: authorizes before opening the bounded read-only report reader.
+
+Logs isolation: explicit 19-field projection, scoped cursors and filters, B byte scans and complete paging described below.
+Logs lane: authorizes before opening the bounded read-only report reader.
+
+Usage isolation: scoped bucket totals and B byte scans, allowed apiKey grouping and refused credential grouping described below.
+Usage lane: authorizes before opening the bounded reader; direct bucket writer.
+
+History isolation/lane: pending; no evidence claimed.
+
+### Latest verification (results read)
+
+All logs under `/tmp/opencode/a8/`; Cargo used CARGO_INCREMENTAL=0, CARGO_PROFILE_DEV_DEBUG=0, CARGO_PROFILE_TEST_DEBUG=0.
+
+| Gate | Result | Log |
+|---|---|---|
+| quota RED | 294 equal / 578 failures | `quota-red.log` |
+| quota GREEN, fresh external binary | 775 equal / 0 failures | `quota-green.log` |
+| workspace tests | 1158 passed / 0 failed / 11 ignored, 161 result groups | `quota-tests.log` |
+| workspace Clippy all targets -D warnings | pass | `quota-clippy.log` |
+| workspace fmt check | pass | `quota-fmt.log` |
+| fresh gateway build | pass | `quota-build.log` |
+| surface | 618 equal / 61 expected divergences / 0 failures | `quota-surface.log` |
+
+`quota-manifest.json` records commit `f95b99b9` and SHA256 of `/tmp/opencode/a8/rust-quota` and unchanged `/tmp/opencode/a8/ts`. Final manifest is deliberately not claimed. Full admin-routes/admin-auth/run.ts have not been rerun for this increment; previous evidence below applies to the previous binary. First workspace test build was terminated at the tool's 120-second deadline; rerun with 600 seconds completed successfully. Initial fixture attempts assumed an array rather than `{accounts}` and tried NULL in NOT NULL `used`; corrected before RED. Initial compile needed an explicit text-cell helper; Clippy required NaN-aware positive comparisons. All corrected before final GREEN.
+
+Known differences/limits: accepted empty-413 content-length difference remains. No new response difference observed in quota comparisons. Code-inspection difference still to close before review: invalid JSON in a credential's provider_data makes frozen credentials.list throw, while the new identity-only read never parses it. This case has not been compared. Malformed credential labels/providers and malformed settings also need dedicated comparisons. No universal parity claim for malformed credential records. No login attempt limiter in either gateway; day boundary fixed at boot in both. D4 must wire the authenticated client read lane and lossless quota/credential metadata reads to Postgres, preserve JS cell coercion, ICU ordering and output order, and add bounded quota sample reads plus retained-span/paging semantics for history.
+
+---
+
+## Prior checkpoint history
 
 **NEXT STEP:** implement GET `/api/client/quota` with a failing comparison first. `headroom.ts` was read completely: it DOES disclose `credentialId`, label, provider and window fractions (plus timing/estimate flags); it omits raw used/limit counts. Read `burn.ts`, credentials.list and settings semantics before porting; listQuota is an unfiltered `SELECT * FROM quota_windows`. Skip orphan windows, include disabled credentials, preserve JS coercion of unusual cells and locale sorting. Use the bounded report reader AFTER require_client. Extend shared fixture clock enablement (admin-routes.ts `clientClock`) to the new quota configuration. Commit quota when equal, then history with retainedSpan/sample cap/truncated. Neither quota route has a RED comparison yet. This session closes at the usage checkpoint due to context budget; A8 is not complete for review.
 
