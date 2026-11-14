@@ -1596,7 +1596,13 @@ async function main(): Promise<void> {
   const only = flags.only?.split(",");
   const results: ScenarioResult[] = [];
   const matrixResults: (MatrixMeta &
-    Verdict & { name: string; diagnostics?: unknown; metrics: ScenarioResult | null })[] = [];
+    Verdict & {
+      name: string;
+      concurrency: number;
+      bodySha256: string;
+      diagnostics?: unknown;
+      metrics: ScenarioResult | null;
+    })[] = [];
   for (const scenario of flags.matrix ? matrixScenarios() : scenarios()) {
     if (
       flags.matrix
@@ -1610,6 +1616,8 @@ async function main(): Promise<void> {
       if (verdict.bytes !== undefined) (scenario as Scenario).smokeBytes = verdict.bytes;
       if (verdict.classification !== "supported") {
         matrixResults.push({
+          concurrency: scenario.concurrency,
+          bodySha256: new Bun.CryptoHasher("sha256").update(scenario.body).digest("hex"),
           name: scenario.name,
           provider: meta.provider,
           ingress: meta.ingress,
@@ -1635,6 +1643,8 @@ async function main(): Promise<void> {
         Object.keys(result.errors).length > 0 ||
         Object.keys(result.status).some((status) => status !== "200");
       matrixResults.push({
+        concurrency: scenario.concurrency,
+        bodySha256: new Bun.CryptoHasher("sha256").update(scenario.body).digest("hex"),
         name: scenario.name,
         provider: meta.provider,
         ingress: meta.ingress,
@@ -1717,6 +1727,7 @@ async function main(): Promise<void> {
       gatewayCpus: flags["gateway-cpus"],
       upstreamCpus: flags["upstream-cpus"],
       loadCpus: flags["load-cpus"],
+      ...(flags.matrix ? { rate: flags.rate ?? null } : {}),
       mode: CLUSTER ? "cluster" : "single",
       replicas: REPLICAS,
       cpuSets: CPU_SETS,

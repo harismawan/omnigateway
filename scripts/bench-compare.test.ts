@@ -2,12 +2,22 @@ import { expect, test } from "bun:test";
 import { compare, overlaps, type Round } from "./bench-compare";
 
 const round = (n: number, classification = "supported", hash = "a".repeat(64)): Round => ({
-  provenance: { gatewaySha256: hash },
+  provenance: { gatewaySha256: hash, harnessCommit: "fixture", environment: {} },
+  config: {
+    duration: "2s",
+    warmup: "1s",
+    gatewayCpus: "0-3",
+    upstreamCpus: "4-5",
+    loadCpus: "6-7",
+    cpuSets: ["0-3"],
+  },
   scenarios: [
     {
       name: "custom-chat.chat.json",
       provider: "custom-chat",
       classification,
+      concurrency: 64,
+      bodySha256: "b".repeat(64),
       metrics: { rps: n, latencyMs: { p50: n, p99: n }, cpuMsPerRequest: n, rssPeakMb: n },
     },
   ],
@@ -17,15 +27,25 @@ test("inclusive overlap and disjoint ranges", () => {
   expect(overlaps({ min: 1, max: 3 }, { min: 2, max: 2 })).toBe(true);
   expect(overlaps({ min: 1, max: 3 }, { min: 4, max: 5 })).toBe(false);
   expect(compare([round(10), round(30)], [round(20), round(40)])).toContain(
-    "1.500 — inside spread",
+    "1.500 — insufficient rounds",
   );
 });
 test("unequal successful round counts are explicit", () => {
   const output = compare([round(10), round(20)], [round(40)]);
   expect(output).toContain("2/2; 15.000 [10.000–20.000]");
   expect(output).toContain("1/1; 40.000 [40.000–40.000]");
-  expect(output).toContain("2.667 — better");
-  expect(output).toContain("2.667 — worse");
+  expect(output).toContain("2.667 — insufficient rounds");
+  expect(output).not.toContain(" — better");
+});
+test("missing observation is flagged", () => {
+  const missing = round(1);
+  missing.scenarios = [];
+  expect(compare([round(1), missing], [round(2)])).toContain("missing observation");
+});
+test("changed workload refused with differing field", () => {
+  const a = round(1);
+  const b = { ...round(2), config: { ...round(2).config, duration: "3s" } };
+  expect(() => compare([a], [b])).toThrow("duration");
 });
 test("any failed or unsupported round suppresses scenario ratios", () => {
   for (const status of ["failed", "unsupported"]) {
@@ -41,4 +61,37 @@ test("mixed or absent binary identity is refused", () => {
     "consistent",
   );
   expect(() => compare([round(10, "supported", "")], [round(20)])).toThrow("consistent");
+});
+test("three observations permit direction; all compatibility fields enforced", () => {
+  expect(compare([round(1), round(2), round(3)], [round(4), round(5), round(6)])).toContain(
+    "2.500 — better",
+  );
+  for (const field of [
+    "duration",
+    "warmup",
+    "gatewayCpus",
+    "upstreamCpus",
+    "loadCpus",
+    "cpuSets",
+  ]) {
+    const b = round(2);
+    b.config = { ...b.config, [field]: "changed" };
+    expect(() => compare([round(1), b], [round(2)])).toThrow(field);
+    expect(() => compare([round(1)], [b])).toThrow(field);
+  }
+  for (const field of ["harnessCommit", "environment"] as const) {
+    const b = round(2);
+    if (field === "environment") b.provenance.environment = { OMNI_BENCH: "changed" };
+    else b.provenance.harnessCommit = "changed";
+    expect(() => compare([round(1)], [b])).toThrow(field);
+  }
+  for (const field of ["concurrency", "bodySha256"] as const) {
+    const b = round(2);
+    const s = b.scenarios[0];
+    if (s) {
+      if (field === "concurrency") s.concurrency = 1;
+      else s.bodySha256 = "changed";
+    }
+    expect(() => compare([round(1)], [b])).toThrow(field);
+  }
 });

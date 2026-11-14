@@ -9,8 +9,20 @@ type Metrics = {
   rssPeakMb: number;
 };
 export type Round = {
-  provenance: { gatewaySha256: string };
-  scenarios: { name: string; provider: string; classification: string; metrics: Metrics | null }[];
+  provenance: {
+    gatewaySha256: string;
+    harnessCommit?: string;
+    environment?: Record<string, string>;
+  };
+  config?: Record<string, unknown>;
+  scenarios: {
+    name: string;
+    provider: string;
+    classification: string;
+    metrics: Metrics | null;
+    concurrency?: number;
+    bodySha256?: string;
+  }[];
 };
 const metrics = [
   { name: "req/s", higher: true, get: (m: Metrics) => m.rps },
@@ -43,11 +55,67 @@ function hash(rounds: Round[]) {
   return [...hashes][0];
 }
 export function compare(base: Round[], head: Round[]): string {
+  hash(base);
+  hash(head);
+  const canonical = (value: unknown): string =>
+    JSON.stringify(
+      value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+        : value,
+    );
+  const reference = base[0] as Round;
+  const fields = [
+    "duration",
+    "warmup",
+    "gatewayCpus",
+    "upstreamCpus",
+    "loadCpus",
+    "cpuSets",
+    "rate",
+    "freshProcess",
+  ];
+  for (const [side, rounds] of [
+    ["base", base],
+    ["head", head],
+  ] as const)
+    for (const [i, r] of rounds.entries()) {
+      for (const field of fields) {
+        const expected = reference.config?.[field],
+          actual = r.config?.[field];
+        if (
+          !["rate", "freshProcess"].includes(field) &&
+          (expected === undefined || actual === undefined)
+        )
+          throw Error(`missing config.${field}`);
+        if (canonical(expected) !== canonical(actual))
+          throw Error(
+            `${side} round ${i + 1}: config.${field} differs: ${canonical(expected)} vs ${canonical(actual)}`,
+          );
+      }
+      for (const field of ["harnessCommit", "environment"] as const) {
+        if (reference.provenance[field] === undefined || r.provenance[field] === undefined)
+          throw Error(`missing provenance.${field}`);
+        if (canonical(reference.provenance[field]) !== canonical(r.provenance[field]))
+          throw Error(
+            `${side} round ${i + 1}: provenance.${field} differs: ${canonical(reference.provenance[field])} vs ${canonical(r.provenance[field])}`,
+          );
+      }
+      for (const s of r.scenarios) {
+        const ref = [...base, ...head].flatMap((x) => x.scenarios).find((x) => x.name === s.name);
+        if (s.concurrency === undefined || s.bodySha256 === undefined)
+          throw Error(`missing ${s.name} concurrency/bodySha256`);
+        for (const field of ["concurrency", "bodySha256"] as const)
+          if (ref?.[field] !== s[field])
+            throw Error(
+              `${side} round ${i + 1}: ${s.name}.${field} differs: ${ref?.[field]} vs ${s[field]}`,
+            );
+      }
+    }
   const header = [
     `Base SHA256: \`${hash(base)}\``,
     `Head SHA256: \`${hash(head)}\``,
     "",
-    "Values: successful/total rounds; median [min–max]. Ratios are head/base; overlapping ranges are inside spread. RSS is per-scenario peak resident memory.",
+    "Values: successful/total rounds; median [min–max]. Ratios are head/base. Range overlap is descriptive, not a significance test. Directional labels require at least three successful observations per side. RSS is per-scenario peak resident memory.",
     "",
   ];
   const names = [...new Set([...base, ...head].flatMap((r) => r.scenarios.map((s) => s.name)))];
@@ -64,7 +132,7 @@ export function compare(base: Round[], head: Round[]): string {
           rows.filter((r) => r && r.classification !== "supported").map((r) => r?.classification),
         ),
       ];
-      if (successful.length === 0 && statuses.length === 0) statuses.push("missing");
+      if (rows.some((r) => r === undefined)) statuses.push("missing observation");
       return { rows, successful, statuses, total: rounds.length };
     });
     const provider = sides.flatMap((s) => s.rows).find(Boolean)?.provider ?? "unknown";
@@ -98,13 +166,16 @@ export function compare(base: Round[], head: Round[]): string {
         )
       ) {
         const inside = overlaps(a, b);
-        const verdict = inside
-          ? "inside spread"
-          : b.median > a.median === metric.higher
-            ? "better"
-            : "worse";
+        const sufficient = sides.every((s) => s.successful.length >= 3);
+        const verdict = !sufficient
+          ? "insufficient rounds"
+          : inside
+            ? "inside spread"
+            : b.median > a.median === metric.higher
+              ? "better"
+              : "worse";
         const count = counts[i];
-        if (count) {
+        if (count && sufficient) {
           if (inside) count.inside++;
           else if (verdict === "better") count.better++;
           else count.worse++;
