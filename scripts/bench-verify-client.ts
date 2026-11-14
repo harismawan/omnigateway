@@ -60,5 +60,14 @@ export function runVerifier(
 if (import.meta.main) {
   const config = await Bun.file(process.argv[2] as string).json();
   const run = runVerifier(() => matrixSmoke(config.base, config.key, config.scenario));
-  process.once("SIGTERM", async () => console.log(JSON.stringify(await run.stop())));
+  // matrixSmoke's probeText deadline bounds connection + headers + body to 10s.
+  // Keep handlers installed while draining: subsequent signals must be harmless.
+  let reporting = false;
+  const stop = async () => {
+    if (reporting) return;
+    reporting = true;
+    console.log(JSON.stringify(await run.stop()));
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
 }

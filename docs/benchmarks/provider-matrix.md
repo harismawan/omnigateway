@@ -12,6 +12,11 @@ single-client probes require every request to succeed, without a rate ratio.
 The verifier starts on fixed 250 ms ticks, skips/counts ticks while busy, and
 drains its in-flight request on SIGTERM. JSON and comparisons report started,
 completed, skipped ticks and violations per scenario/round.
+Repeated SIGTERM/SIGINT signals are harmless during shutdown; exactly one report
+is printed. The pending request's 10-second connection/header/body deadline
+bounds draining and reports a violation on timeout. The harness stops once at
+the load boundary; a missing/malformed report fails that scenario with null
+metrics and diagnostic `verifier produced no report`, preserving the run JSON.
 The comparison header carries CPU process/thread-only scope, 100 ms sampled
 resident memory, process/history mode, 250 ms report-file tolerance, extra
 verifier load and sampled integrity limits. Same-size wrong text in an

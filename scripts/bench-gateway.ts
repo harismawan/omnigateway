@@ -113,6 +113,7 @@ import {
   smoke as smokeRequests,
 } from "./bench-probe";
 import { showPerformance } from "./bench-report";
+import { collectVerifierReport } from "./bench-verifier-report";
 
 const { values: flags } = parseArgs({
   options: {
@@ -1198,9 +1199,9 @@ async function runScenario(
     rate: 4,
   };
   if (verifier) {
-    verifier.kill("SIGTERM");
-    verification = JSON.parse(await new Response(verifier.stdout as ReadableStream).text());
-    await verifier.exited;
+    // Normally stopped at the report boundary; fall back only if it was absent.
+    if (!boundary) verifier.kill("SIGTERM");
+    verification = await collectVerifierReport(verifier);
   }
   const recoveryStart = performance.now();
   sampling = false;
