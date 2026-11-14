@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 pub const OAUTH_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Opt-in placement over successively larger prefixes. Explicit markers win.
-pub fn add_auto_cache(
+pub(crate) fn add_auto_cache(
     body: &mut Value,
     req: &omni_ir::request::ChatRequest,
     notes: &mut Vec<String>,

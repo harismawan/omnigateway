@@ -271,7 +271,7 @@ fn image_url(media_type: &str, data: &str) -> String {
 }
 
 /// `toCustomResponsesWire`.
-pub fn to_custom_responses_wire(req: &ChatRequest, model: &str) -> Encoded {
+pub(crate) fn to_custom_responses_wire(req: &ChatRequest, model: &str) -> Encoded {
     let mut notes = Notes::default();
     let mut input: Vec<Value> = Vec::new();
     note_betas(req, &mut notes);

@@ -703,7 +703,11 @@ fn response_value(collected: &CollectedResponse, render: &ResponsesRender) -> Va
 }
 
 /// `responsesResponse`, written as the bytes `JSON.stringify` produces.
-pub fn write_response(collected: &CollectedResponse, render: &ResponsesRender, out: &mut String) {
+pub(crate) fn write_response(
+    collected: &CollectedResponse,
+    render: &ResponsesRender,
+    out: &mut String,
+) {
     let rid = &render.request_id;
     let mut s = ResponsesStream::new(render.clone());
     s.model.clone_from(&collected.model);
