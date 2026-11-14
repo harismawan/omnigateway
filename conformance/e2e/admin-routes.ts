@@ -537,6 +537,7 @@ type HttpStep = {
   headers?: [string, string][];
 };
 type Step =
+  | { kind: "client-summary"; name: string }
   | { kind: "client-session"; name: string }
   | { kind: "logs-walk"; name: string }
   | { kind: "usage-traffic"; name: string }
@@ -1388,6 +1389,7 @@ type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?
 let healthSeed: string | undefined;
 const nodesNow = Date.now();
 const configs: Config[] = [
+  ...["0", "345", undefined].map(dayOffset => ({label:`client-summary-${dayOffset ?? "host"}`, dayOffset, db:()=>seedDb, steps:():Step[]=>[{kind:"client-summary",name:"three-key summary and isolation"}]})),
   { label: "client-login", db: () => seedDb, steps: () => [
     ...["null", "[]", "1", '"key"', "{}", '{"key":12}', '{"key":null}', '{"key":"unknown"}'].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 401})),
     ...["", "{", "{bad}"].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 400})),
@@ -2051,7 +2053,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     OMNI_DB_PATH: file,
     OMNI_ROOT: root,
     OMNI_STATIC_DIR: join(root, "no-dashboard"),
-    OMNI_DAY_OFFSET_MINUTES: cfg.dayOffset ?? "0",
+    OMNI_DAY_OFFSET_MINUTES: cfg.label === "client-summary-host" ? undefined : cfg.dayOffset ?? "0",
     ...(cfg.label === "export-volume-1" ? { OMNI_LOG_LEVEL: "debug", RUST_LOG: "debug" } : {}),
   };
   const logFile = join(out, `${cfg.label}-${label}.log`);
@@ -2411,6 +2413,66 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     };
     let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
+      if (step.kind === "client-summary") {
+        const fixture = new Database(file);
+        const identities: {id:string; key:string; cookie:string; marker:string}[] = [];
+        const check = (name:string, answer:Ex, status:number, forbidden:string[] = []) => {
+          if (answer.status !== status) deadlineFailures.push(`${name}: expected ${status}, got ${answer.status}`);
+          const bytes = Buffer.concat([Buffer.from(JSON.stringify(answer.head)), answer.body]);
+          for (const marker of forbidden) if (bytes.includes(marker)) secretProblems.push(`${name}: leaked ${marker}`);
+          results.set(name,{text:normalize("GET",answer,m),db:""});
+        };
+        for (const letter of ["A","B","C","revoked"]) {
+          const marker = `private-client-${letter}-marker`;
+          const raw = `sk-fixture-${marker}`;
+          const id = `client-${letter}`;
+          const hash = new Bun.CryptoHasher("sha256").update(raw).digest("hex");
+          fixture.run("INSERT INTO api_keys(id,label,prefix,hash,limits,created_at) VALUES(?,?,?,?,?,?)",[id,marker,marker,hash,"{}",1700000000000]);
+          for (let i=0;i<3;i++) fixture.run("INSERT INTO request_logs(id,at,api_key_id,requested_model,resolved_model,resolved_provider,status,duration_ms,error_code,degradations) VALUES(?,?,?,?,?,?,?,?,?,?)",[`${marker}-${i}`,100+i,id,marker,marker,"custom",500,letter.charCodeAt(0),marker,JSON.stringify([`excluded:secret-credential-${letter}:reason`,marker])]);
+          const opened = await exchange({method:"POST",target:"/api/client/login",headers:[J],body:JSON.stringify({key:raw})});
+          if(opened.status!==200 || !cookieOf(opened)) throw new Error(`fixture client ${letter} login ${opened.status}`);
+          identities.push({id,key:raw,cookie:cookieOf(opened)!,marker});
+        }
+        fixture.run("UPDATE api_keys SET revoked_at=1 WHERE id='client-revoked'");
+        const credential = await exchange({method:"POST",target:"/api/credentials",headers:[["cookie",`omni_admin=${cookies.admin}`],J],body:JSON.stringify({provider:"custom",apiKey:"secret-a6-2",endpointId:"client-fixture",endpointLabel:"fixture",origin:`http://127.0.0.1:${PORT+1}`,protocol:"chat_completions"})});
+        if(credential.status!==200) throw new Error(`fixture credential ${credential.status}`);
+        for(const identity of identities.slice(0,3)) fixture.run("INSERT INTO virtual_models VALUES(?,?,?,?)",[identity.marker,JSON.stringify([{provider:"custom",endpointId:"client-fixture",model:identity.marker,tier:1,weight:1,capabilities:{tools:false,images:false,reasoning:false},costPerMTok:{input:0,output:0}}]),"score",1]);
+        await sleep(700);
+        for(const identity of identities.slice(0,3)) {
+          const traffic = await exchange({method:"POST",target:"/v1/chat/completions",headers:[["authorization",`Bearer ${identity.key}`],J],body:JSON.stringify({model:identity.marker,messages:[{role:"user",content:"fixture"}]})});
+          if(traffic.status!==200) deadlineFailures.push(`fixture traffic ${identity.id}: ${traffic.status}`);
+        }
+        await sleep(700);
+        const aCursor = await exchange({target:"/api/logs?limit=1&apiKeyId=client-A&until=1000",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
+        const cursor = JSON.parse(aCursor.body.toString()).nextCursor;
+        if(aCursor.status!==200 || !cursor) throw new Error("fixture admin cursor missing");
+        // Rust logs is the next increment. TS mints the client cursor; its
+        // scoped operator counterpart has exactly the same wire encoding.
+        const clientCursorResponse = await exchange({target:"/api/client/logs?limit=1&until=1000",headers:[["cookie",`omni_admin=${identities[0]!.cookie}`]]});
+        if(clientCursorResponse.status!==(label==="ts"?200:404)) throw new Error("unexpected client logs fixture status");
+        const clientCursor = label==="ts"?JSON.parse(clientCursorResponse.body.toString()).nextCursor:cursor;
+        if(clientCursor!==cursor) throw new Error("client/operator cursor encoding differs");
+        const attacks = ["", "apiKeyId=client-A", "credentialId=secret-credential-A", "groupBy=apiKey", "splitBy=apiKey", `cursor=${encodeURIComponent(cursor)}`, `cursor=${encodeURIComponent(clientCursor)}&source=client`, "apiKeyId=client-B&apiKeyId=client-A", "%61piKeyId=client-A", "ApiKeyId=client-A", "dayOffsetMinutes=999", "since=bad&limit=bad"];
+        for(const [who,cookie] of [["admin",cookies.admin],["viewer",cookies.viewer],["anon",null],...identities.map(i=>[i.id,i.cookie])] as [string,string|null][]) {
+          for(const attack of attacks) {
+            const answer = await exchange({target:`/api/client/summary?${attack}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
+            check(`${who} summary ${attack.startsWith("cursor=")?`foreign cursor ${attack.includes("source=client")?"client":"admin"}`:attack}`,answer,["client-A","client-B","client-C"].includes(who)?200:401,who==="client-B"?[identities[0]!.marker,identities[2]!.marker]:[]);
+          }
+        }
+        for(const [name,sql] of [
+          ["text", "UPDATE api_keys SET created_at='odd',label='private-client-B-marker-text' WHERE id='client-B'"],
+          ["blob", "UPDATE api_keys SET created_at=x'ff',label=x'ff',prefix=x'01' WHERE id='client-B'"],
+          ["invalid UTF8", "UPDATE api_keys SET label=CAST(x'ff' AS TEXT),created_at=9007199254740993 WHERE id='client-B'"],
+          ["null", "UPDATE api_keys SET model_allowlist=NULL,guardrail_policy=NULL WHERE id='client-B'"],
+        ]) {
+          fixture.run(sql!);
+          check(`own unusual ${name}`,await exchange({target:"/api/client/summary",headers:[["cookie",`omni_admin=${identities[1]!.cookie}`]]}),200,[identities[0]!.marker,identities[2]!.marker]);
+        }
+        fixture.run("UPDATE api_keys SET expires_at=1 WHERE id='client-C'");
+        check("expired after login",await exchange({target:"/api/client/summary?since=bad",headers:[["cookie",`omni_admin=${identities[2]!.cookie}`]]}),401);
+        fixture.close();
+        continue;
+      }
       if(step.kind === "logs-walk") {
         const ids:string[]=[];
         const pages:unknown[]=[];

@@ -496,6 +496,7 @@ function staticRows(prefix: string): Row[] {
   const rows: Row[] = [
     { name: `${prefix}client login invalid key`, target: "/api/client/login", method: "POST", headers: [["content-type", "application/json"]], body: '{"key":"unknown"}' },
     { name: `${prefix}client logout anonymous`, target: "/api/client/logout", method: "POST" },
+    { name: `${prefix}client summary anonymous`, target: "/api/client/summary", method: "GET" },
   ];
   const add = (target: string, extra: Partial<Row> = {}) =>
     rows.push({

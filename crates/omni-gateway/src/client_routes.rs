@@ -7,6 +7,18 @@ use omni_ir::error::ErrorCode;
 use crate::api::{self, ApiError};
 use crate::server::{App, Body};
 
+pub async fn summary(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
+    let id = api::require_client(req.headers(), &app.admin).await?;
+    let reader = app.control.reader().await?;
+    let offset = app.day_offset_minutes;
+    let now = crate::clock::now_ms();
+    Ok(api::json_ok(
+        reader
+            .run(move |s| omni_control::api::client_summary(s, &id, now, offset))
+            .await?,
+    ))
+}
+
 pub async fn login(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
     let headers = req.headers().clone();
     let fields = api::read_json_fields(req, app.idle_timeout, &["key"]).await?;

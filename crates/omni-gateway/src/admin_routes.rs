@@ -122,7 +122,7 @@ impl ControlStore {
         .map_err(|_| ApiError::internal())?
     }
 
-    async fn reader(&self) -> Result<Self, ApiError> {
+    pub(crate) async fn reader(&self) -> Result<Self, ApiError> {
         let permit = self
             .4
             .clone()
@@ -145,7 +145,7 @@ impl ControlStore {
     /// One operation on the blocking pool. A failure that is not a
     /// `GatewayError` is `500 INTERNAL "internal error"` and logged here (TS
     /// logs nothing; the reason is useful and carries no request data).
-    async fn run<T: Send + 'static>(
+    pub(crate) async fn run<T: Send + 'static>(
         &self,
         f: impl FnOnce(&SqliteStore) -> Result<T, Failure> + Send + 'static,
     ) -> Result<T, ApiError> {

@@ -326,6 +326,92 @@ pub fn js_order(fields: &[(Vec<u16>, JsValue)]) -> Vec<usize> {
     indexed.into_iter().map(|(_, i)| i).chain(named).collect()
 }
 
+/// `readOwnKey`, with lossless display cells and the installation day boundary.
+pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> Result<String> {
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT * FROM api_keys WHERE id=?1")
+        .map_err(Failure::internal)?;
+    let mut rows = stmt.query([id]).map_err(Failure::internal)?;
+    let row = rows
+        .next()
+        .map_err(Failure::internal)?
+        .ok_or_else(|| Failure {
+            code: Some("AUTH"),
+            message: "no such api key".to_owned(),
+        })?;
+    let cell = |name: &str| -> Result<JsValue> {
+        use rusqlite::types::ValueRef;
+        Ok(match row.get_ref(name).map_err(Failure::internal)? {
+            ValueRef::Null => JsValue::Null,
+            ValueRef::Text(v) => text(&String::from_utf8_lossy(v)),
+            ValueRef::Blob(v) => JsValue::Object(
+                v.iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        (
+                            i.to_string().encode_utf16().collect(),
+                            JsValue::Number(f64::from(*b)),
+                        )
+                    })
+                    .collect(),
+            ),
+            #[allow(clippy::cast_precision_loss)]
+            ValueRef::Integer(v) => JsValue::Number(v as f64),
+            ValueRef::Real(v) => JsValue::Number(v),
+        })
+    };
+    let key = KeyRow {
+        id: id.to_owned(),
+        label: String::new(),
+        prefix: String::new(),
+        allowlist: match row
+            .get::<_, Option<String>>("model_allowlist")
+            .map_err(Failure::internal)?
+        {
+            Some(v) => parse_stored(&v)?,
+            None => JsValue::Null,
+        },
+        limits: stored_limits(&row.get::<_, String>("limits").map_err(Failure::internal)?),
+        body_logging_opt_out: matches!(
+            row.get_ref("body_logging_opt_out")
+                .map_err(Failure::internal)?,
+            rusqlite::types::ValueRef::Integer(1)
+        ),
+        created_at: serde_json::Value::Null,
+        revoked_at: serde_json::Value::Null,
+        expires_at: serde_json::Value::Null,
+        guardrail_policy: None,
+        smart_routing: matches!(
+            row.get_ref("smart_routing").map_err(Failure::internal)?,
+            rusqlite::types::ValueRef::Integer(1)
+        ),
+    };
+    let mut value = summary(store, key, now)?;
+    if let JsValue::Object(fields) = &mut value {
+        for (name, col) in [
+            ("label", "label"),
+            ("prefix", "prefix"),
+            ("createdAt", "created_at"),
+            ("revokedAt", "revoked_at"),
+            ("expiresAt", "expires_at"),
+            ("guardrailPolicy", "guardrail_policy"),
+        ] {
+            if let Some((_, v)) = fields
+                .iter_mut()
+                .find(|(k, _)| k.iter().copied().eq(name.encode_utf16()))
+            {
+                *v = cell(col)?;
+            }
+        }
+        fields.push((
+            "dayOffsetMinutes".encode_utf16().collect(),
+            JsValue::from(&serde_json::Value::from(offset)),
+        ));
+    }
+    Ok(stringify(&value).expect("summary"))
+}
+
 /// `GET /api/keys`: `{ keys: await listKeys(store) }`, newest first.
 pub fn list_keys(store: &SqliteStore, now: i64) -> Result<String> {
     let keys = key_rows(store, None)?
