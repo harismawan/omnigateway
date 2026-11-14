@@ -82,6 +82,20 @@ impl QuotaWindow {
 
 const Q: &str = "quota_windows";
 
+/// Bounded newest-first sample read; the caller applies the frozen JS re-sort.
+pub fn list_quota_samples(
+    conn: &Connection,
+    since: f64,
+    until: f64,
+    limit: usize,
+) -> Result<Vec<Vec<rusqlite::types::Value>>, StoreError> {
+    let mut stmt = conn.prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?")?;
+    let rows = stmt.query_map(rusqlite::params![since, until, limit as i64], |r| {
+        (0..7).map(|i| r.get(i)).collect()
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Lossless cells for the client projection; coercion belongs to control.
 pub fn client_windows(conn: &Connection) -> Result<Vec<Vec<rusqlite::types::Value>>, StoreError> {
     let mut stmt = conn.prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_windows")?;

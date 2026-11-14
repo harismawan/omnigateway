@@ -54,6 +54,122 @@ fn primitive(v: &Value) -> Option<String> {
         _ => None,
     }
 }
+
+/// Account history retains at most 50,001 raw samples and writes one row at a
+/// time. No projected sample value tree is retained alongside the raw page.
+pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result<String, Failure> {
+    const MAX_SAMPLES: usize = 50_000;
+    let settings = store.get_settings()?;
+    let oldest = (now - settings.log_retention_days * 86_400_000.0).max(now - 16.0 * 86_400_000.0);
+    let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
+    let optional = |key: &str, fallback: f64| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map_or(fallback, |(_, v)| {
+                let n = omni_ir::js::string_to_number(v);
+                if v.trim().is_empty() || !n.is_finite() {
+                    fallback
+                } else {
+                    n
+                }
+            })
+    };
+    let since = optional("since", oldest).max(oldest);
+    let until = optional("until", now).min(now);
+    let mut samples =
+        omni_store::quota::list_quota_samples(store.connection(), since, until, MAX_SAMPLES + 1)?;
+    crate::credentials::validate_client_metadata(store)?;
+    let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
+    let relational = |a: &Value, b: &Value| match (primitive(a), primitive(b)) {
+        (Some(a), Some(b)) => a.encode_utf16().cmp(b.encode_utf16()),
+        _ => number(a)
+            .partial_cmp(&number(b))
+            .unwrap_or(std::cmp::Ordering::Equal),
+    };
+    samples.sort_by(|a, b| {
+        relational(&a[0], &b[0])
+            .then_with(|| relational(&a[1], &b[1]))
+            .then_with(|| {
+                (number(&a[5]) - number(&b[5]))
+                    .partial_cmp(&0.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    let truncated = samples.len() > MAX_SAMPLES;
+    samples.truncate(MAX_SAMPLES);
+    let mut rows = Vec::new();
+    for (i, s) in samples.iter().enumerate() {
+        let Some(c) = accounts.iter().position(|c| c[0] == s[0]) else {
+            continue;
+        };
+        if s[3] == Value::Null || number(&s[3]) <= 0.0 {
+            continue;
+        }
+        let keys = [&accounts[c][2], &accounts[c][1], &s[1]]
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.encode_utf16().collect::<Vec<_>>())
+                    .ok_or_else(|| Failure::internal("localeCompare is not a function"))
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.push((i, c, keys));
+    }
+    rows.sort_by(|a, b| {
+        a.2.iter()
+            .zip(&b.2)
+            .map(|(a, b)| crate::api::locale_compare(a, b))
+            .find(|o| !o.is_eq())
+            .unwrap_or_else(|| {
+                (number(&samples[a.0][5]) - number(&samples[b.0][5]))
+                    .partial_cmp(&0.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    let mut out = String::from("{\"samples\":[");
+    for (n, (i, c, _)) in rows.iter().enumerate() {
+        if n != 0 {
+            out.push(',');
+        }
+        let s = &samples[*i];
+        let c = &accounts[*c];
+        let ratio = nan_max(number(&s[2]) / number(&s[3]), 0.0);
+        let fields = [
+            ("credentialId", json(&c[0])),
+            ("label", json(&c[1])),
+            ("provider", json(&c[2])),
+            ("windowType", json(&s[1])),
+            ("observedAt", json(&s[5])),
+            (
+                "usedRatio",
+                JsValue::Number(if ratio.is_nan() {
+                    ratio
+                } else {
+                    ratio.min(1.0)
+                }),
+            ),
+            ("resetsAt", json(&s[4])),
+            ("windowMs", json(&s[6])),
+        ];
+        out.push_str(
+            &omni_ir::jsjson::stringify(&JsValue::Object(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| (k.encode_utf16().collect(), v))
+                    .collect(),
+            ))
+            .unwrap_or_default(),
+        );
+    }
+    out.push_str(if truncated {
+        "],\"truncated\":true}"
+    } else {
+        "],\"truncated\":false}"
+    });
+    Ok(out)
+}
 pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Failure> {
     crate::credentials::validate_client_metadata(store)?;
     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;

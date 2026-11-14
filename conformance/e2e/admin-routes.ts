@@ -2477,9 +2477,70 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     for (const step of cfg.steps()) {
       if (step.kind === "client-history") {
         const { fixture, check, attacks, callers } = await clientFixture();
-        for (const [who,cookie] of callers) for (const [i,query] of attacks.entries()) {
-          check(`${who} history ${i}`,await exchange({target:`/api/client/quota/history?${query}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]}),["client-A","client-B","client-C"].includes(who)?200:401);
+        const secrets = ["history-distinct-access-token", "history-distinct-refresh-token", "history-distinct-api-key"];
+        const queries = [...attacks,"since=","until=bad","since=-1","until=-1","since=1.5&until=2.5","since=1e100","until=1e100","since=Infinity&until=NaN","since=9000000000001&until=0","since=0&since=1e100","until=0&until=1e100","since=%20&until=%20"];
+        fixture.run("DELETE FROM quota_samples");
+        const probe = async (phase:string, status=200, overflow=false) => {
+          for (const [who,cookie] of callers) for (const [i,query] of queries.entries()) {
+            const answer=await exchange({target:`/api/client/quota/history?${query}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
+            check(`${phase} ${who} history ${i}`,answer,["client-A","client-B","client-C"].includes(who)?status:401,secrets);
+            if(answer.status===200) {
+              const result=JSON.parse(answer.body.toString());
+              if(Object.keys(result).join(",")!=="samples,truncated") deadlineFailures.push(`${phase}: history result shape`);
+              if(i===0 && result.truncated!==overflow) deadlineFailures.push(`${phase}: wrong truncated`);
+              for(const row of result.samples) if(Object.keys(row).join(",")!=="credentialId,label,provider,windowType,observedAt,usedRatio,resetsAt,windowMs" || row.credentialId==="history-orphan") deadlineFailures.push(`${phase}: history projection`);
+              if(phase==="populated" && i===0 && !result.samples.some((r:any)=>r.credentialId==="history-0")) deadlineFailures.push("disabled history omitted");
+            }
+          }
+        };
+        await probe("empty");
+        for(const [i,label] of ["é","E","e","Z","ä","A","a","Å","中"].entries()) {
+          fixture.run("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,access_token,refresh_token,api_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",[`history-${i}`,"custom",label,"api_key",i===0?0:1,1,1,...secrets,1,1]);
+          for(const window of ["weekly","daily","five_hour"]) fixture.run("INSERT INTO quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms) VALUES(?,?,?,?,?,?,?)",[`history-${i}`,window,25,100,1794614400000,1794614400000-1800000,3600000]);
         }
+        fixture.run("INSERT INTO quota_samples(credential_id,window_type,used,limit_value,observed_at) VALUES('history-orphan','daily',1,10,1794612600000)");
+        await probe("populated");
+        for(const [i,cell] of ["'text'","NULL","X'3132'","9223372036854775807","0","-1","X'ff'"].entries()) fixture.run(`UPDATE quota_samples SET used=${cell==="NULL"?"0":cell},limit_value=${cell},resets_at=${cell},window_ms=${cell} WHERE credential_id='history-${i}'`);
+        await probe("unusual");
+        for(const [name,cell,status] of [["invalid-json","'{'",500],["array","'[]'",200],["null-json","'null'",200],["number-json","'42'",200]] as const) {
+          fixture.run(`UPDATE credentials SET provider_data=${cell} WHERE id='history-0'`);
+          await probe(`metadata ${name}`,status);
+        }
+        fixture.run("UPDATE credentials SET provider_data='{}' WHERE id='history-0'");
+        for(const column of ["label","provider"]) for(const [name,cell,status] of [["number","42",200],["blob","X'3132'",500]] as const) {
+          fixture.run(`UPDATE credentials SET ${column}=${cell} WHERE id='history-0'`);
+          // Malformed sort metadata only fails when samples survive the span.
+          const saved=queries.splice(0,queries.length,"");
+          await probe(`${column} ${name}`,status);
+          queries.splice(0,queries.length,...saved);
+          fixture.run(`UPDATE credentials SET ${column}='custom' WHERE id='history-0'`);
+        }
+        fixture.run("INSERT OR REPLACE INTO settings(key,value) VALUES('settings','{')");
+        await probe("malformed settings");
+        fixture.run("INSERT OR REPLACE INTO settings(key,value) VALUES('settings','{\"logRetentionDays\":0}')");
+        await probe("zero retention");
+        fixture.run("DELETE FROM settings WHERE key='settings'");
+        fixture.run("PRAGMA foreign_keys=OFF");
+        fixture.run("CREATE TABLE nullable_credentials AS SELECT * FROM credentials");
+        fixture.run("DROP TABLE credentials");
+        fixture.run("ALTER TABLE nullable_credentials RENAME TO credentials");
+        for(const column of ["label","provider"]) {
+          fixture.run(`UPDATE credentials SET ${column}=NULL WHERE id='history-0'`);
+          const saved=queries.splice(0,queries.length,"");
+          await probe(`${column} null`,500);
+          queries.splice(0,queries.length,...saved);
+          fixture.run(`UPDATE credentials SET ${column}='custom' WHERE id='history-0'`);
+        }
+        fixture.run("DELETE FROM quota_samples");
+        fixture.run("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<50002) INSERT INTO quota_samples(credential_id,window_type,used,limit_value,observed_at) SELECT CASE WHEN x%2=0 THEN 'history-0' ELSE 'history-1' END,'daily',x,60000,1794613400000+x FROM n");
+        // Keep overflow responses bounded in the driver as well as the gateway.
+        queries.splice(0,queries.length,"","since=1794613430000","since=9000000000000");
+        await probe("overflow",200,true);
+        fixture.run("UPDATE api_keys SET expires_at=1 WHERE id='client-C'");
+        const expired=callers.find(c=>c[0]==="client-C")!;
+        expired[0]="expired-key";
+        queries.splice(0,queries.length,"since=9000000000000");
+        await probe("expired key");
         fixture.close();
         continue;
       }
