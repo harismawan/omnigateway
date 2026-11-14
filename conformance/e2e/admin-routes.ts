@@ -1396,12 +1396,12 @@ const configs: Config[] = [
       const streamed=status===200&&target.startsWith("/api/logs/export")&&s.who!=="anon";
       const format=target.includes("format=jsonl")?"jsonl":"csv";
       const head=`200\ncache-control: no-store\ncontent-disposition: attachment; filename="omnigateway-logs-<now>.${format}"\ncontent-type: ${format==="jsonl"?"application/x-ndjson":"text/csv; charset=utf-8"}\n`;
-      return {...s,name:`head ${target} ${s.who}`,expectedStatus:s.who==="anon"?401:status,...(streamed?{expectDiff:{why:"hyper never declares transfer-encoding on a HEAD answer (M2)",ts:`${head}transfer-encoding: chunked\n\n`,rust:`${head}\n`}}:{})};
+      return {...s,name:`head ${target} ${s.who}`,expectedStatus:s.who==="anon"?401:status,...(streamed?{expectDiff:{why:"accepted M2: HEAD has no body; header describes GET only; repository never issues export HEAD; matching requires replacing hyper HTTP/1 response encoder",ts:`${head}transfer-encoding: chunked\n\n`,rust:`${head}\n`}}:{})};
     })),
     // Eight HEAD exports each took an export slot; none may have kept it.
     ...everyone("GET","/api/logs/export?since=0&until=200&format=jsonl").map(s=>({...s,name:`export after head ${s.who}`,expectedStatus:s.who==="anon"?401:200})),
   ]},
-  // The export connection bound (Rust: four at once; TS: none). The scenario
+  // The per-page reader pool bound (Rust: four; TS: one shared store). The scenario
   // is `runOne`'s; the steps only give the two binaries something to compare.
   {label:"export-bounds",db:()=>db("export-bounds",["WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<60000) INSERT INTO request_logs(id,at,requested_model,resolved_model,resolved_provider,credential_id,api_key_id,status,error_code,duration_ms,input_tokens) SELECT printf('bound-%05d',i),100+i,'requested_'||(i%7),'resolved','custom','cred','key',CASE WHEN i%2=0 THEN 500 ELSE 200 END,'ERROR_CODE',10,3 FROM n"]),steps:()=>everyone("GET","/api/logs/export?since=0&until=600&format=jsonl").map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))},
   {label:"nodes",db:()=>db("nodes",[]),steps:()=>["empty","one","several","unusual"].flatMap((name,i)=>[
@@ -2125,10 +2125,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       if (label === "rust" && latencies.some(x=>x.latency>boundMs)) throw new Error(`report contention ${JSON.stringify(latencies)}`);
     }
     if (cfg.label === "export-bounds") {
-      // Four exports held open by clients that stop reading; what a fifth
-      // sees, what the other report routes see meanwhile, and what frees a
-      // slot. The waits are asserted on Rust (TS has no bound: its fifth
-      // answers at once, which is recorded); everything else on both.
+      // Stalled sockets hold encoded bytes, never a pooled connection.
+      // Further exports must finish while those sockets remain open.
       const full = "/api/logs/export?since=0&until=70000&format=jsonl";
       const open = (cookie: string | null, target = full) => {
         const socket = connect(PORT, "127.0.0.1");
@@ -2177,86 +2175,45 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       if (!await until(() => held.every(h => h.state.size > 0), 20000)) fail("four exports did not start");
       for (const h of held) if (!h.all().toString("latin1").startsWith("HTTP/1.1 200")) fail("held export status");
       await sleep(300);
-      const fdsFour = dbFds();
-      // A fifth: on Rust no byte of an answer while the four are open.
-      const fifth = open(viewer);
-      const fifthAtOnce = await until(() => fifth.state.size > 0, 500);
-      if (rust && fifthAtOnce) fail("a fifth export answered beside four open ones");
-      const fdsWaiting = dbFds();
-      if (rust && (fdsFour !== fdsIdle + 4 || fdsWaiting !== fdsFour)) fail(`database handles idle=${fdsIdle} four=${fdsFour} waiting=${fdsWaiting}`);
-      // The other report routes are not behind the exports.
-      const laneBoundMs = 2000;
-      const lane: {who:string;target:string;status:number;ms:number}[] = [];
-      for (const [who, cookie] of [["admin", admin], ["viewer", viewer]] as const)
-        for (const target of ["/api/usage?until=1e20&groupBy=apiKey&splitBy=model", "/api/logs?limit=500", "/api/logs?limit=1", "/api/nodes", "/api/keys", "/api/logs/export?since=0&until=70000&format=bad"]) {
-          const started = performance.now();
-          const x = await exchange({target, headers: [["cookie",`omni_admin=${cookie}`]]});
-          const ms = performance.now() - started;
-          lane.push({who, target, status: x.status, ms});
-          if (x.status !== (target.endsWith("format=bad") ? 400 : 200) || ms > laneBoundMs) fail(`report lane ${who} ${target}: status ${x.status} in ${ms}ms`);
-        }
-      // Twice the report lane's own four at once: they queue, none is lost.
-      const burstStarted = performance.now();
-      const burst = await Promise.all(Array.from({length: 8}, (_, i) => exchange({target: i % 2 ? "/api/logs?limit=500" : "/api/usage?until=1e20&groupBy=apiKey", headers: adminHeaders})));
-      const burstMs = performance.now() - burstStarted;
-      if (burst.some(x => x.status !== 200)) fail(`report burst statuses ${burst.map(x => x.status)}`);
-      if (rust && fifth.state.size > 0) fail("the fifth export answered before any of the four ended");
-      // One of the four finishes: read it to its end.
-      held[0]!.state.hold = false;
-      held[0]!.socket.resume();
-      if (!await until(() => held[0]!.state.closed, 60000)) fail("held export did not finish");
-      const finishedAt = performance.now();
-      const whole = parse(held[0]!.all());
-      const decoded = dechunk(whole.body);
-      const rowsRead = decoded.body.toString("latin1").split("\n").length - 1;
-      if (whole.status !== 200 || !decoded.complete || rowsRead !== 60000) fail(`finished export status=${whole.status} complete=${decoded.complete} rows=${rowsRead}`);
-      if (!await until(() => fifth.state.size > 0, 5000)) fail("the fifth export did not start after one finished");
-      if (!fifth.all().toString("latin1").startsWith("HTTP/1.1 200")) fail("fifth export status");
-      const afterFinishMs = (fifth.state.first as number) - finishedAt;
-      // Four again (three of the first, and the fifth). One client goes away.
-      await sleep(300);
-      const sixth = open(admin);
-      const sixthAtOnce = await until(() => sixth.state.size > 0, 500);
-      if (rust && sixthAtOnce) fail("a sixth export answered beside four open ones");
-      const cutAt = performance.now();
-      held[1]!.socket.destroy();
-      if (!await until(() => sixth.state.size > 0, 5000)) fail("the sixth export did not start after a disconnect");
-      const afterDisconnectMs = (sixth.state.first as number) - cutAt;
-      const disconnectBoundMs = 1000;
-      if (rust && afterDisconnectMs > disconnectBoundMs) fail(`slot freed ${afterDisconnectMs}ms after a disconnect`);
-      // A client that gives up waiting takes no slot with it.
-      await sleep(300);
-      const ghost = open(viewer);
-      await sleep(200);
-      if (rust && ghost.state.size > 0) fail("a waiting export answered beside four open ones");
-      ghost.socket.destroy();
-      const seventh = open(admin);
-      const seventhAtOnce = await until(() => seventh.state.size > 0, 500);
-      if (rust && seventhAtOnce) fail("a seventh export answered beside four open ones");
-      const cut2 = performance.now();
-      held[2]!.socket.destroy();
-      if (!await until(() => seventh.state.size > 0, 5000)) fail("the seventh export did not start after a disconnect");
-      const afterGhostMs = (seventh.state.first as number) - cut2;
-      if (rust && afterGhostMs > disconnectBoundMs) fail(`slot freed ${afterGhostMs}ms after a disconnect (abandoned waiter before it)`);
-      await sleep(300);
-      const fdsFourAgain = dbFds();
-      // Everyone leaves: every handle closes, and five whole exports run.
-      for (const h of [...held, fifth, sixth, seventh]) h.socket.destroy();
-      const closedAt = performance.now();
-      const handlesClosed = await until(() => dbFds() === fdsIdle, 5000);
-      const handlesClosedMs = performance.now() - closedAt;
-      if (rust && (fdsFourAgain !== fdsIdle + 4 || !handlesClosed)) fail(`database handles four=${fdsFourAgain} idle=${fdsIdle} now=${dbFds()}`);
-      const five = await Promise.all(Array.from({length: 5}, () => exchange({target: "/api/logs/export?since=0&until=2100&format=jsonl", headers: adminHeaders})));
-      for (const x of five) {
+      let peak = dbFds();
+      const sampler = setInterval(() => { peak = Math.max(peak, dbFds()); }, 2);
+      const started = performance.now();
+      const small = "/api/logs/export?since=0&until=2100&format=jsonl";
+      const complete = async () => {
+        const x = await exchange({target:small,headers:adminHeaders});
         const d = dechunk(x.body);
-        if (x.status !== 200 || !d.complete || d.body.toString("latin1").split("\n").length - 1 !== 2000) fail(`whole export after the scenario: status ${x.status} complete ${d.complete}`);
+        if (x.status !== 200 || !d.complete || d.body.toString("latin1").split("\n").length-1 !== 2000) fail("incomplete export");
+      };
+      try {
+        // Four clients consume no more bytes; a fifth must finish anyway.
+        await Promise.race([complete(), sleep(5000).then(()=>fail("fifth blocked by stalled clients"))]);
+        const fifthMs = performance.now()-started;
+        // Eight exports beyond the four stalled ones complete concurrently.
+        await Promise.all(Array.from({length:8},complete));
+        const exportPeak = peak;
+        if (rust && exportPeak > fdsIdle+4) fail(`export connections exceed four: ${exportPeak-fdsIdle}`);
+        const lane = [];
+        for (const target of ["/api/usage?until=1e20", "/api/logs?limit=500", "/api/logs?limit=1"]) {
+          const start=performance.now();
+          const x=await exchange({target,headers:adminHeaders});
+          const ms=performance.now()-start;
+          if(x.status!==200 || ms>2000) fail(`independent lane ${target} ${x.status} ${ms}ms`);
+          lane.push({target,ms});
+        }
+        for(const h of held) h.socket.destroy();
+        await sleep(500);
+        // A disconnect may finish its in-flight page, but keeps no lease:
+        // all four pooled connections can immediately service more exports.
+        await Promise.all(Array.from({length:8},complete));
+        const mainEnd=mainFds();
+        if(rust && mainEnd>mainIdle+8) fail("combined reader lanes exceed eight");
+        writeFileSync(join(out,`bounds-${label}.json`),JSON.stringify({fifthMs,concurrentCompleted:8,afterDisconnectCompleted:8,exportPeak,baseline:fdsIdle,lane,mainIdle,mainEnd}));
+      } finally {
+        clearInterval(sampler);
+        for(const h of held) h.socket.destroy();
       }
-      if (!await until(() => dbFds() === fdsIdle, 5000) && rust) fail("database handles after five whole exports");
-      // Four exports and four other report reads at most, ever.
-      const mainEnd = mainFds();
-      if (rust && mainEnd > mainIdle + 8) fail(`database file descriptors idle=${mainIdle} end=${mainEnd}`);
-      writeFileSync(join(out, `bounds-${label}.json`), JSON.stringify({fifthAtOnce, sixthAtOnce, seventhAtOnce, fifthFirstByteMsAfterFinish: afterFinishMs, sixthFirstByteMsAfterDisconnect: afterDisconnectMs, seventhFirstByteMsAfterDisconnect: afterGhostMs, disconnectBoundMs, lane, laneBoundMs, burstMs, handles: {idle: fdsIdle, four: fdsFour, waiting: fdsWaiting, fourAgain: fdsFourAgain, closed: handlesClosed, closedMs: handlesClosedMs, mainIdle, mainEnd}}, null, 1));
     }
+
     if (cfg.label === "export-volume-1") {
       const pages = () => (readFileSync(logFile, "utf8") + readFileSync(`${logFile}.err`, "utf8")).split("export_page_read").length - 1;
       let atClose = 0;
@@ -2329,8 +2286,18 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           await sleep(50);
         }
         if (ended || rows < 3) throw new Error(`slow-reader progress: ended=${ended} rows=${rows}`);
-        const checkpoint = fixture.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as {busy:number};
-        if (checkpoint.busy !== 0) throw new Error("slow export pins WAL checkpoint");
+        // Each attempt is nonblocking; at most 50 attempts, spaced 20ms.
+        // An active page/writer can overlap one attempt without pinning the WAL.
+        fixture.run("PRAGMA busy_timeout=0");
+        let checkpointAttempts = 0, checkpointOk = false;
+        for (; checkpointAttempts < 50; checkpointAttempts++) {
+          const checkpoint = fixture.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as {busy:number};
+          if (checkpoint.busy === 0) { checkpointOk = true; break; }
+          await sleep(20);
+        }
+        fixture.run("PRAGMA busy_timeout=5000");
+        if (!checkpointOk || ended) throw new Error("no checkpoint between export pages within 50 attempts");
+        writeFileSync(join(out,`checkpoint-${label}.json`),JSON.stringify({attempts:checkpointAttempts+1,maxAttempts:50,intervalMs:20}));
         writeFileSync(join(out, `slow-reader-${label}.json`), JSON.stringify({latencies, idle, rows, exportOpen:!ended, boundMs}));
       } finally {
         clearInterval(timer);

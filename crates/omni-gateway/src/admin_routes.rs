@@ -36,7 +36,27 @@ pub struct ControlStore(
     i64,
     Arc<tokio::sync::Semaphore>,
     Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    Arc<Mutex<Vec<SqliteStore>>>,
 );
+
+/// Returns the connection even on task cancellation/panic. A started blocking
+/// page owns this lease and its permit until encoding finishes.
+struct ExportLease {
+    store: Option<SqliteStore>,
+    pool: Arc<Mutex<Vec<SqliteStore>>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for ExportLease {
+    fn drop(&mut self) {
+        if let Some(store) = self.store.take() {
+            self.pool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(store);
+        }
+    }
+}
 
 impl std::fmt::Debug for ControlStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,11 +75,56 @@ impl ControlStore {
             offset,
             Arc::new(tokio::sync::Semaphore::new(4)),
             None,
+            Arc::new(Mutex::new(Vec::new())),
         )
     }
 
-    async fn reader(&self, export: bool) -> Result<Self, ApiError> {
-        let permit = if export { &self.1 } else { &self.4 }
+    /// Pool at most four read-only connections across all exports. No lease
+    /// crosses a socket await: the blocking task returns it before its result.
+    async fn export_page(
+        &self,
+        query: omni_store::logs::Query,
+        jsonl: bool,
+    ) -> Result<(String, Option<omni_store::logs::Query>), ApiError> {
+        let permit = self
+            .1
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ApiError::internal())?;
+        let pool = self.6.clone();
+        let path = self.2.clone();
+        let offset = self.3;
+        tokio::task::spawn_blocking(move || {
+            let cached = pool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop();
+            let store = match cached {
+                Some(store) => store,
+                None => SqliteStore::open_reader(path, offset).map_err(|_| ApiError::internal())?,
+            };
+            let lease = ExportLease {
+                store: Some(store),
+                pool,
+                _permit: permit,
+            };
+            let result = omni_control::logs::export_page(
+                lease.store.as_ref().ok_or_else(ApiError::internal)?,
+                &query,
+                jsonl,
+            )
+            .map_err(failure);
+            drop(lease);
+            result
+        })
+        .await
+        .map_err(|_| ApiError::internal())?
+    }
+
+    async fn reader(&self) -> Result<Self, ApiError> {
+        let permit = self
+            .4
             .clone()
             .acquire_owned()
             .await
@@ -229,10 +294,7 @@ pub async fn serve(
                 .map_err(failure)?;
             let first_query = query.clone();
             let first_query = omni_control::logs::parse_query(&first_query).map_err(failure)?;
-            let control = control.reader(true).await?;
-            let (first, next) = control
-                .run(move |s| omni_control::logs::export_page(s, &first_query, jsonl))
-                .await?;
+            let (first, next) = control.export_page(first_query, jsonl).await?;
             let empty = jsonl && first.is_empty() && next.is_none();
             let stream = async_stream::try_stream! {
                 if !jsonl {yield hyper::body::Frame::data(bytes::Bytes::from_static(omni_control::logs::CSV_HEADER.as_bytes()));}
@@ -240,7 +302,7 @@ pub async fn serve(
                 let mut next=next;
                 while let Some(cursor)=next {
                     let q=cursor;
-                    let (chunk,cursor)=control.run(move |s|omni_control::logs::export_page(s,&q,jsonl)).await.map_err(|_|std::io::Error::other("log export read failed"))?;
+                    let (chunk,cursor)=control.export_page(q,jsonl).await.map_err(|_|std::io::Error::other("log export read failed"))?;
                     next=cursor;
                     yield hyper::body::Frame::data(bytes::Bytes::from(chunk));
                 }
@@ -285,7 +347,7 @@ pub async fn serve(
         }
         Admin::Logs => {
             require_reader(req.headers(), &app.admin).await?;
-            let control = control.reader(false).await?;
+            let control = control.reader().await?;
             let query = req.uri().query().unwrap_or("").to_owned();
             Ok(json_ok(
                 control
@@ -295,7 +357,7 @@ pub async fn serve(
         }
         Admin::Usage => {
             require_reader(req.headers(), &app.admin).await?;
-            let control = control.reader(false).await?;
+            let control = control.reader().await?;
             let query = req.uri().query().unwrap_or("").to_owned();
             #[allow(clippy::cast_precision_loss)]
             let now = now as f64;

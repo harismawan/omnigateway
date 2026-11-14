@@ -125,7 +125,7 @@ pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPa
         format!("WHERE {}", clauses.join(" AND "))
     };
     let start = std::time::Instant::now();
-    let mut stmt = store.connection().prepare(&format!(
+    let mut stmt = store.connection().prepare_cached(&format!(
         "SELECT * FROM request_logs {filter} ORDER BY at DESC,id DESC LIMIT ?"
     ))?;
     bindings.push(Value::Integer(
