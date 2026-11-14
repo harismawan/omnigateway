@@ -133,13 +133,24 @@ pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPa
     ));
     let prepared = start.elapsed().as_micros();
     let mut index = 0;
-    let mut next = None;
+    // Retain the boundary cells without strict UTF-8 decoding. Only turn them
+    // into binding values if the sentinel proves that another page exists.
+    let mut boundary = None;
     let mut decode_time = std::time::Duration::ZERO;
     let result = stmt
         .query_map(rusqlite::params_from_iter(&bindings), |r| {
             let decode_start = std::time::Instant::now();
             index += 1;
-            if index == q.limit { next = Some((r.get::<_,Value>("at")?, r.get::<_,Value>("id")?)); }
+            if index == q.limit {
+                let capture = |v: ValueRef<'_>| match v {
+                    ValueRef::Text(bytes) => (Value::Blob(bytes.to_vec()), true),
+                    ValueRef::Blob(bytes) => (Value::Blob(bytes.to_vec()), false),
+                    ValueRef::Integer(n) => (Value::Integer(n), false),
+                    ValueRef::Real(n) => (Value::Real(n), false),
+                    ValueRef::Null => (Value::Null, false),
+                };
+                boundary = Some((capture(r.get_ref("at")?), capture(r.get_ref("id")?)));
+            }
             let mut fields = Vec::new();
             for (name, col) in [
                 ("id", "id"),
@@ -212,8 +223,20 @@ pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPa
         start.elapsed().as_micros() - prepared - decode_time.as_micros(),
         decode_time.as_micros()
     );
-    if result.len() <= q.limit {
-        next = None;
-    }
+    let next = if result.len() > q.limit {
+        boundary.map(|(at, id)| {
+            let bind = |(v, text): (Value, bool)| match v {
+                Value::Blob(bytes) if text => {
+                    Value::Text(String::from_utf8_lossy(&bytes).into_owned())
+                }
+                #[allow(clippy::cast_precision_loss)]
+                Value::Integer(n) => Value::Real(n as f64),
+                other => other,
+            };
+            (bind(at), bind(id))
+        })
+    } else {
+        None
+    };
     Ok((result, next))
 }

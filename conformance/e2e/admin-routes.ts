@@ -1382,6 +1382,21 @@ type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?
 let healthSeed: string | undefined;
 const nodesNow = Date.now();
 const configs: Config[] = [
+  ...["boundary", "final", "middle", "replacement-order", "rounded-at"].map(kind=>({
+    label:`cursor-decoded-${kind}`,
+    db:()=>db(`cursor-decoded-${kind}`,[
+      "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<501) INSERT INTO request_logs(id,at,requested_model,status,duration_ms) SELECT printf('x%06d',i),100.5,'m',200,1 FROM n",
+      "UPDATE request_logs SET id=CAST(x'ff' AS TEXT),at=99 WHERE id='x000002'",
+      "UPDATE request_logs SET at=98 WHERE id='x000001'",
+      ...(kind==="final"?["DELETE FROM request_logs WHERE id='x000001'"]:[]),
+      ...(kind==="middle"?["UPDATE request_logs SET at=101 WHERE id=CAST(x'ff' AS TEXT)"]:[]),
+      // C0 decodes to U+FFFD, which sorts ABOVE the stored byte. TS repeats
+      // that boundary row on page two after rebinding the decoded string.
+      ...(kind==="replacement-order"?["UPDATE request_logs SET id=CAST(x'c0' AS TEXT) WHERE id=CAST(x'ff' AS TEXT)"]:[]),
+      ...(kind==="rounded-at"?["UPDATE request_logs SET at=9007199254740993 WHERE at>99", "UPDATE request_logs SET at=9007199254740992 WHERE at=99"]:[]),
+    ]),
+    steps:()=>["/api/logs?limit=500",...['csv','jsonl'].map(format=>`/api/logs/export?since=0&until=9007199254740991&format=${format}`)].flatMap(target=>everyone("GET",target).map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))),
+  })),
   {label:"export-nonfinite",db:()=>db("export-nonfinite",["INSERT INTO request_logs(id,at,requested_model,status,duration_ms,cost_usd) VALUES('positive',100,'m',200,1,1e999),('negative',101,'m',200,1,-1e999)"]),steps:()=>["csv","jsonl"].flatMap(format=>everyone("GET",`/api/logs/export?since=0&until=200&format=${format}`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200})))},
   ...["fractional","long","blob"].map(kind=>({label:`export-cursor-${kind}`,db:()=>db(`export-cursor-${kind}`,[`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<501) INSERT INTO request_logs(id,at,requested_model,status,duration_ms) SELECT ${kind==="blob"?"CAST(printf('x%04d',i) AS BLOB)":kind==="long"?"printf('%0300d',i)||'é'":"printf('x%04d',i)"},100.5,'m',200,1 FROM n`]),steps:()=>["csv","jsonl"].flatMap(format=>everyone("GET",`/api/logs/export?since=0&until=200&format=${format}`).map(s=>({...s,expectedStatus:s.who==="anon"?401:200})))})),
   // HEAD reaches every GET route: the same guard, status and headers, no body.
