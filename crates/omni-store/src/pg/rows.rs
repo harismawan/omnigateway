@@ -274,33 +274,6 @@ pub(crate) async fn get_operator_key(
 
 // --- credentials ----------------------------------------------------------
 
-#[cfg(test)]
-mod stored_json_tests {
-    use crate::StoreError;
-
-    #[test]
-    fn postgres_parse_failures_redact_formats_and_preserve_wire_detail() {
-        for (table, column) in [
-            ("api_keys", "model_allowlist"),
-            ("credentials", "provider_data"),
-            ("virtual_models", "targets"),
-        ] {
-            let e = StoreError::StoredJson {
-                table,
-                column,
-                row_id: "row-1".into(),
-                detail: "postgresStoredCanary".to_owned().into(),
-            };
-            assert!(!e.to_string().contains("postgresStoredCanary"));
-            assert!(!format!("{e:?}").contains("postgresStoredCanary"));
-            let StoreError::StoredJson { detail, .. } = e else {
-                unreachable!()
-            };
-            assert_eq!(detail.into_wire_detail(), "postgresStoredCanary");
-        }
-    }
-}
-
 fn open(r: &Row, key: &FieldKey, column: &str) -> Result<Secret, StoreError> {
     Ok(match r.try_get::<_, Option<String>>(column)? {
         None => Secret::Absent,
@@ -502,4 +475,31 @@ pub(crate) async fn write_raw_setting(
 pub(crate) async fn get_settings(c: &impl GenericClient) -> Result<Settings, StoreError> {
     let raw = read_raw_setting(c, "settings").await?;
     Ok(Settings::from_json(settings::settings_json(raw.as_deref())))
+}
+
+#[cfg(test)]
+mod stored_json_tests {
+    use crate::StoreError;
+
+    #[test]
+    fn postgres_parse_failures_redact_formats_and_preserve_wire_detail() {
+        for (table, column) in [
+            ("api_keys", "model_allowlist"),
+            ("credentials", "provider_data"),
+            ("virtual_models", "targets"),
+        ] {
+            let e = StoreError::StoredJson {
+                table,
+                column,
+                row_id: "row-1".into(),
+                detail: "postgresStoredCanary".to_owned().into(),
+            };
+            assert!(!e.to_string().contains("postgresStoredCanary"));
+            assert!(!format!("{e:?}").contains("postgresStoredCanary"));
+            let StoreError::StoredJson { detail, .. } = e else {
+                unreachable!()
+            };
+            assert_eq!(detail.into_wire_detail(), "postgresStoredCanary");
+        }
+    }
 }
