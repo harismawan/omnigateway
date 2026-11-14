@@ -2,6 +2,24 @@
 use omni_providers::codec::{CodecInput, Credentials};
 use omni_providers::openai::build_api_key_request;
 #[test]
+fn missing_token_is_auth() {
+    let request = serde_json::from_str(r#"{"model":"m","stream":false,"messages":[]}"#).unwrap();
+    let credentials = Credentials::default();
+    let err = build_api_key_request(CodecInput {
+        request: &request,
+        model: "m",
+        credentials: &credentials,
+        request_id: None,
+        auto_cache_enabled: None,
+        max_output_tokens: None,
+        request_started_at: None,
+    })
+    .err()
+    .expect("missing token");
+    assert_eq!(err.code, omni_ir::error::ErrorCode::Auth);
+    assert_eq!(err.message, "openai credential has no token");
+}
+#[test]
 fn captured_literal_and_small_stack() {
     if std::env::var_os("OPENAI_DEPTH_CHILD").is_none() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -63,6 +81,7 @@ fn api_key_codec_matches_frozen_ts() {
             api_key: Some("sk-oa".into()),
             ..Default::default()
         };
+        let before = omni_ir::jsjson::to_string(&serde_json::to_value(&request).unwrap());
         let got = build_api_key_request(CodecInput {
             request: &request,
             model: row["model"].as_str().unwrap(),
@@ -73,6 +92,13 @@ fn api_key_codec_matches_frozen_ts() {
             request_started_at: None,
         })
         .unwrap();
+        assert_eq!(
+            before,
+            omni_ir::jsjson::to_string(&serde_json::to_value(&request).unwrap()),
+            "request mutated {i}"
+        );
+        assert_eq!(got.request.url, "https://api.openai.com/v1/responses");
+        assert!(got.request.body_encoding.is_none());
         assert_eq!(
             got.request.body,
             row["codec"]["body"].as_str().unwrap(),
