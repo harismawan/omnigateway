@@ -20,6 +20,7 @@
  * the upstream from being the bottleneck it is measuring through.
  */
 import { parseArgs } from "node:util";
+import { faultResponse } from "./bench-fault";
 
 const { values } = parseArgs({
   options: {
@@ -170,6 +171,8 @@ Bun.serve({
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === "/health") return new Response("ok");
+    const fault = faultResponse();
+    if (fault) return fault;
     if (process.env.OMNI_BENCH_FAULT === "500")
       return Response.json({ error: { message: "injected upstream 500" } }, { status: 500 });
     if (

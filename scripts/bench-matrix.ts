@@ -1,3 +1,4 @@
+import { completeBody } from "./bench-integrity";
 import { probeText } from "./bench-probe";
 
 export const allProviders = [
@@ -71,6 +72,9 @@ export function matrixScenarios() {
       key: "plain" as const,
       concurrency,
       body: JSON.stringify({
+        ...(ingress === "chat" && mode === "stream"
+          ? { stream_options: { include_usage: true } }
+          : {}),
         model: `${provider.id}-c${chunks}`,
         stream: mode === "stream",
         max_tokens: 8192,
@@ -161,7 +165,7 @@ export async function matrixSmoke(
   base: string,
   key: string,
   scenario: MatrixMeta & { path: string; body: string },
-): Promise<Verdict> {
+): Promise<Verdict & { bytes?: number }> {
   try {
     const response = await probeText(`${base}${scenario.path}`, {
       method: "POST",
@@ -172,12 +176,19 @@ export async function matrixSmoke(
       },
       body: scenario.body,
     });
-    return responseVerdict(
+    const verdict = responseVerdict(
       scenario,
       response.status,
       response.headers.get("content-type") ?? "",
       response.text,
     );
+    if (verdict.classification === "supported")
+      completeBody(
+        scenario,
+        response.text,
+        Number(/-c(\d+)$/.exec(JSON.parse(scenario.body).model)?.[1] ?? 1),
+      );
+    return { ...verdict, bytes: Buffer.byteLength(response.text) };
   } catch (error) {
     return { classification: "failed", reason: String(error) };
   }

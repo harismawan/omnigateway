@@ -628,6 +628,7 @@ function agentBody(model: string): string {
 // ---------------------------------------------------------------- scenarios
 
 type Scenario = {
+  smokeBytes?: number;
   name: string;
   what: string;
   path: string;
@@ -655,6 +656,7 @@ type OhaJson = {
 };
 
 type ScenarioResult = {
+  integrity?: { errors: string[]; verifier: unknown; sizes?: unknown };
   name: string;
   what: string;
   concurrency: number;
@@ -924,6 +926,11 @@ async function oha(
     (scenario.requests === undefined ? flags["request-timeout"] : undefined);
   if (timeout !== undefined) args.push("-t", timeout);
   args.push(`${base}${scenario.path}`);
+  if (flags.matrix) {
+    const file = join(root, `${scenario.name}.oha.db`);
+    rmSync(file, { force: true });
+    args.push("--db-url", file);
+  }
   const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -1041,6 +1048,28 @@ async function runScenario(
     warmAnswered = answered((await ohaFleet(scenario, key, flags.warmup ?? "3s")).merged);
   await sleep(500);
 
+  const measuredFrom = Date.now();
+  let verifier: Subprocess | undefined;
+  if (flags.matrix) {
+    const verifyKey = (await cli(["keys", "create", "--label", `verify-${scenario.name}`])) as {
+      key: string;
+    };
+    const file = join(root, "verify.json");
+    writeFileSync(file, JSON.stringify({ base: BASE, key: verifyKey.key, scenario }));
+    verifier = Bun.spawn(
+      [
+        "taskset",
+        "-c",
+        flags["load-cpus"] ?? "6-7",
+        process.execPath,
+        join(import.meta.dir, "bench-verify-client.ts"),
+        file,
+      ],
+      { stdout: "pipe", stderr: "inherit" },
+    );
+    children.push(verifier);
+  }
+
   const before = fleetSample(pids);
   const backingBefore = backingCpuS();
   const hostBefore = cpuTimes();
@@ -1075,6 +1104,17 @@ async function runScenario(
   })();
 
   const { merged: report, perReplica } = await ohaFleet(scenario, key, flags.duration ?? "20s");
+  const measuredTo = Date.now();
+  let verification: { requests: number; errors: string[]; rate: number } = {
+    requests: 0,
+    errors: [],
+    rate: 4,
+  };
+  if (verifier) {
+    verifier.kill("SIGTERM");
+    verification = JSON.parse(await new Response(verifier.stdout as ReadableStream).text());
+    await verifier.exited;
+  }
   const recoveryStart = performance.now();
   sampling = false;
   await sampler;
@@ -1134,8 +1174,57 @@ async function runScenario(
     Object.values(report.errorDistribution).reduce((a, b) => a + b, 0);
   const cpuSeconds = (after?.cpuS ?? 0) - (before?.cpuS ?? 0);
   const lp = report.latencyPercentiles;
+  const integrityErrors: string[] = [];
+  let sizeEvidence: unknown;
+  if (flags.matrix) {
+    integrityErrors.push(...verification.errors);
+    if (!verification.requests) integrityErrors.push("no verifier requests");
+    const db = new Database(env.OMNI_DB_PATH, { readonly: true });
+    const chunks = Number(/-c(\d+)$/.exec(JSON.parse(scenario.body).model)?.[1] ?? 1);
+    const rows = db
+      .query(
+        "SELECT status,input_tokens,output_tokens,state FROM request_logs WHERE at BETWEEN ? AND ? AND api_key_id IN (SELECT id FROM api_keys WHERE label='bench plain')",
+      )
+      .all(measuredFrom, measuredTo) as {
+      status: number;
+      input_tokens: number;
+      output_tokens: number;
+      state: string;
+    }[];
+    db.close();
+    if (
+      rows.length !== (report.statusCodeDistribution["200"] ?? 0) ||
+      rows.some(
+        (r) =>
+          r.status !== 200 ||
+          r.state !== "done" ||
+          r.input_tokens !== 64 ||
+          r.output_tokens !== chunks * 2,
+      )
+    )
+      integrityErrors.push("measured log count/status/usage mismatch");
+    const sizes = new Database(join(root, `${scenario.name}.oha.db`), {
+      readonly: true,
+    });
+    const size = sizes
+      .query("SELECT min(len_bytes) lo,max(len_bytes) hi,count(*) n FROM oha")
+      .get() as { lo: number; hi: number; n: number };
+    sizes.close();
+    const expected = scenario.smokeBytes ?? 0;
+    const slack = Math.max(128, Math.ceil(expected * 0.02));
+    sizeEvidence = { ...size, expected, min: expected - slack, max: expected + slack };
+    if (
+      size.n !== (report.statusCodeDistribution["200"] ?? 0) ||
+      size.lo < expected - slack ||
+      size.hi > expected + slack
+    )
+      integrityErrors.push("per-request response size outside smoke band");
+  }
   const fb = report.firstBytePercentiles;
   return {
+    ...(flags.matrix
+      ? { integrity: { errors: integrityErrors, verifier: verification, sizes: sizeEvidence } }
+      : {}),
     name: scenario.name,
     what: scenario.what,
     concurrency: scenario.concurrency,
@@ -1505,8 +1594,8 @@ async function main(): Promise<void> {
 
   const only = flags.only?.split(",");
   const results: ScenarioResult[] = [];
-  const matrixResults: (MatrixMeta & Verdict & { name: string; metrics: ScenarioResult | null })[] =
-    [];
+  const matrixResults: (MatrixMeta &
+    Verdict & { name: string; diagnostics?: unknown; metrics: ScenarioResult | null })[] = [];
   for (const scenario of flags.matrix ? matrixScenarios() : scenarios()) {
     if (
       flags.matrix
@@ -1517,6 +1606,7 @@ async function main(): Promise<void> {
     const meta = flags.matrix ? (scenario as Scenario & MatrixMeta) : null;
     if (meta) {
       const verdict = await matrixSmoke(BASE, keys.plain, meta);
+      if (verdict.bytes !== undefined) (scenario as Scenario).smokeBytes = verdict.bytes;
       if (verdict.classification !== "supported") {
         matrixResults.push({
           name: scenario.name,
@@ -1536,6 +1626,7 @@ async function main(): Promise<void> {
     if (meta) {
       const failed =
         shed(result) ||
+        (result.integrity?.errors.length ?? 0) > 0 ||
         result.requests === 0 ||
         result.rows === null ||
         result.crashed > 0 ||
@@ -1549,7 +1640,15 @@ async function main(): Promise<void> {
         mode: meta.mode,
         classification: failed ? "failed" : "supported",
         reason: failed ? "load integrity check failed" : "shape and load integrity passed",
-        metrics: result,
+        metrics: failed ? null : result,
+        diagnostics: failed
+          ? {
+              integrity: result.integrity,
+              rows: result.rows,
+              status: result.status,
+              errors: result.errors,
+            }
+          : undefined,
       });
     }
     // A crash is a result, recorded above; the next scenario still needs a

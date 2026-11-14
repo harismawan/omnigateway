@@ -1,5 +1,29 @@
 # Provider matrix
 
+## Fix round 1: measured integrity
+
+Matrix smoke and a separate verifying client require the complete aggregate
+`lorem ipsum ` text (one repetition per chunk), 64 input tokens and two output
+tokens per chunk, valid termination and no error frames. The verifier has its
+own key and runs on load CPUs with a 4 requests/s maximum target; observed rate
+is recorded. Its requests are excluded from oha throughput/latency and from
+the measured load-key log query. Matrix chat streams request usage explicitly.
+
+Measured load-key rows must all be done/HTTP 200 with expected usage, and match
+oha's HTTP-200 count. Every oha response size is checked through oha's SQLite
+output against the validated smoke length ±max(128 bytes, 2%). Min/max/count
+and the band are retained. The size check adds load-generator persistence
+overhead: re-establish load-generator headroom for real measurements. Default
+scenarios do not enable this instrumentation.
+
+Permanent after-first faults: `empty-after-first`, `error-frame-after-first`,
+`500-after-first` through `OMNI_BENCH_FAULT`. Each stub process answers its first
+request normally. `TS_BINARY=... OMNI_RUST_BINARY=... bash
+scripts/bench-fault-check.sh` checks all three × both gateways × json/stream.
+This follow-up does not yet resolve comparison compatibility, effective
+environment disclosure, drained CPU, fresh-process mode, or runner manifests;
+measurements are not ready for reporting until those review items are addressed.
+
 `bun scripts/bench-gateway.ts --matrix --gateway <argv> --cli <argv>` generates
 eight cases per provider: chat/messages/responses × json/stream (64 clients,
 one upstream chunk), overhead-c1 (one client), and chunks-2000 (16 clients).
