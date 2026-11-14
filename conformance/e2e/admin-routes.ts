@@ -416,6 +416,8 @@ function normalize(method: string, x: Ex, m: Masker): string {
   const head = x.head
     .filter(([k, v]) => !(k === "connection" && v === "close"))
     .map(([k, v]) => {
+      if (k === "set-cookie" && /^omni_admin=[A-Za-z0-9_-]{43};/.test(v))
+        return `${k}: ${v.replace(/^omni_admin=[^;]+;/, "omni_admin=<session>;")}`;
       if(k==="content-disposition") {
         const match=/^attachment; filename="omnigateway-logs-(\d{4}-\d\d-\d\dT\d\d)-(\d\d)-(\d\d)-(\d{3})Z\.(csv|jsonl)"$/.exec(v);
         if(match && Math.abs(Date.parse(`${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`)-Date.now())<120000)return `content-disposition: attachment; filename="omnigateway-logs-<now>.${match[5]}"`;
@@ -1385,6 +1387,22 @@ type Config = { label: string; db: () => string; steps: () => Step[]; dayOffset?
 let healthSeed: string | undefined;
 const nodesNow = Date.now();
 const configs: Config[] = [
+  { label: "client-login", db: () => seedDb, steps: () => [
+    ...["null", "[]", "1", '"key"', "{}", '{"key":12}', '{"key":null}', '{"key":"unknown"}'].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 401})),
+    ...["", "{", "{bad}"].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 400})),
+    ...[undefined, "https", "HTTPS, http", "http, https"].map(proto => ({...as("anon", "POST", "/api/client/login", JSON.stringify({key:SEED_KEY}), `valid client login ${proto}`), headers: [J, ...(proto === undefined ? [] : [["x-forwarded-proto", proto] as [string,string]])], expectedStatus: 200})),
+    {kind:"sql", name:"expire client key", sql:[`UPDATE api_keys SET expires_at=1 WHERE id='${SEED_ID}'`]},
+    {...as("anon", "POST", "/api/client/login", JSON.stringify({key:SEED_KEY}), "expired client login"), expectedStatus:401},
+    {kind:"sql", name:"revoke client key", sql:[`UPDATE api_keys SET expires_at=NULL, revoked_at=1 WHERE id='${SEED_ID}'`]},
+    {...as("anon", "POST", "/api/client/login", JSON.stringify({key:SEED_KEY}), "revoked client login"), expectedStatus:401},
+  ]},
+  { label: "client-logout", db: () => seedDb, steps: () => [
+    ...(["anon", "viewer", "admin"] as const).flatMap(who => [
+      {...as(who, "POST", "/api/client/logout"), expectedStatus:200},
+      {...as(who, "GET", "/api/keys"), expectedStatus:401},
+    ]),
+    {...as("anon", "POST", "/api/client/logout", undefined, "secure logout"), headers:[["x-forwarded-proto","https"]], expectedStatus:200},
+  ]},
   ...["boundary", "final", "middle", "replacement-order", "rounded-at"].map(kind=>({
     label:`cursor-decoded-${kind}`,
     db:()=>db(`cursor-decoded-${kind}`,[

@@ -44,6 +44,7 @@ pub enum Route {
     Setup,
     Login,
     Logout,
+    ClientLogin,
     /// Keys, models, catalog, settings and passwords (A5).
     Admin(crate::admin_routes::Admin),
 }
@@ -56,6 +57,7 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
         (&Method::POST, "/api/setup") => Some(Route::Setup),
         (&Method::POST, "/api/login") => Some(Route::Login),
         (&Method::POST, "/api/logout") => Some(Route::Logout),
+        (&Method::POST, "/api/client/login") => Some(Route::ClientLogin),
         _ => crate::admin_routes::route(method, path).map(Route::Admin),
     }
 }
@@ -67,6 +69,7 @@ pub async fn serve(app: Arc<App>, route: Route, req: Request<Incoming>) -> Respo
         Route::Setup => setup(&app, req).await,
         Route::Login => login(&app, req).await,
         Route::Logout => logout(&app, &req).await,
+        Route::ClientLogin => crate::client_routes::login(&app, req).await,
         Route::Admin(admin) => crate::admin_routes::serve(&app, admin, req).await,
     };
     result.unwrap_or_else(|e| e.into_response())
@@ -109,7 +112,7 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         ApiError::Gateway(GatewayError::new(code, message))
     }
 
@@ -159,7 +162,7 @@ pub fn error_response(code: ErrorCode, message: &str) -> Response<Body> {
 
 /// A JSON answer, with an optional `set-cookie` (written first, as Elysia's
 /// `set.headers` precede the content type).
-fn json(status: u16, body: String, cookie: Option<String>) -> Response<Body> {
+pub(crate) fn json(status: u16, body: String, cookie: Option<String>) -> Response<Body> {
     let mut res = Response::new(full(body));
     *res.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let h = res.headers_mut();

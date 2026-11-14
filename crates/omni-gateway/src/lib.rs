@@ -8,6 +8,7 @@
 
 pub mod admin_auth;
 pub mod admin_routes;
+pub mod client_routes;
 pub mod api;
 pub mod clock;
 pub mod dispatch;
