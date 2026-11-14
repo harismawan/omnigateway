@@ -82,6 +82,13 @@ impl QuotaWindow {
 
 const Q: &str = "quota_windows";
 
+/// Lossless cells for the client projection; coercion belongs to control.
+pub fn client_windows(conn: &Connection) -> Result<Vec<Vec<rusqlite::types::Value>>, StoreError> {
+    let mut stmt = conn.prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_windows")?;
+    let rows = stmt.query_map([], |r| (0..7).map(|i| r.get(i)).collect())?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 fn opt_number(r: &rusqlite::Row<'_>, column: &str) -> Result<Option<f64>, StoreError> {
     match r.get_ref(column)? {
         rusqlite::types::ValueRef::Null => Ok(None),

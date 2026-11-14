@@ -540,6 +540,7 @@ type Step =
   | { kind: "client-summary"; name: string }
   | { kind: "client-logs"; name: string }
   | { kind: "client-usage"; name: string }
+  | { kind: "client-quota"; name: string }
   | { kind: "client-session"; name: string }
   | { kind: "logs-walk"; name: string }
   | { kind: "usage-traffic"; name: string }
@@ -1394,6 +1395,7 @@ const configs: Config[] = [
   ...["0", "345", undefined].map(dayOffset => ({label:`client-summary-${dayOffset ?? "host"}`, dayOffset, db:()=>seedDb, steps:():Step[]=>[{kind:"client-summary",name:"three-key summary and isolation"}]})),
   {label:"client-logs",db:()=>seedDb,steps:():Step[]=>[{kind:"client-logs",name:"scoped projected logs"}]},
   {label:"client-usage",db:()=>seedDb,steps:():Step[]=>[{kind:"client-usage",name:"scoped usage"}]},
+  {label:"client-quota",db:()=>seedDb,steps:():Step[]=>[{kind:"client-quota",name:"account fractions"}]},
   { label: "client-login", db: () => seedDb, steps: () => [
     ...["null", "[]", "1", '"key"', "{}", '{"key":12}', '{"key":null}', '{"key":"unknown"}'].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 401})),
     ...["", "{", "{bad}"].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 400})),
@@ -2052,7 +2054,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
   mkdirSync(root, { recursive: true });
   const file = join(root, "omni.db");
   copyFileSync(cfg.db(), file);
-  const clientClock = cfg.label.startsWith("client-summary") || ["client-logs", "client-usage"].includes(cfg.label) ? join(root,"clock") : null;
+  const clientClock = cfg.label.startsWith("client-summary") || ["client-logs", "client-usage", "client-quota"].includes(cfg.label) ? join(root,"clock") : null;
   if(clientClock) writeFileSync(clientClock,"+0");
   const e: Record<string, string | undefined> = {
     ...env,
@@ -2471,6 +2473,42 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     };
     let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
+      if (step.kind === "client-quota") {
+        const { fixture, identities, check, attacks, callers } = await clientFixture();
+        const secrets = ["quota-distinct-access-token", "quota-distinct-refresh-token", "quota-distinct-api-key"];
+        fixture.run("DELETE FROM quota_windows");
+        const probe = async (phase:string) => {
+          for(const [who,cookie] of callers) for(const [i,query] of attacks.entries()) {
+            const answer = await exchange({target:`/api/client/quota?${query}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
+            check(`${phase} ${who} quota ${i}`,answer,["client-A","client-B","client-C"].includes(who)?200:401,secrets);
+            if(answer.status===200) {
+              const rows=JSON.parse(answer.body.toString()).accounts;
+              for(const row of rows) if(Object.keys(row).join(",")!=="credentialId,label,provider,windowType,usedRatio,resetsAt,observedAt,windowMs,ratePerHourRatio,exhaustsAt,survives,stale,rolledOver") deadlineFailures.push(`${phase}: unexpected quota fields`);
+              if(rows.some((r:any)=>r.credentialId==="quota-orphan")) deadlineFailures.push("orphan quota disclosed");
+              if(phase==="populated" && !rows.some((r:any)=>r.credentialId==="quota-0")) deadlineFailures.push("disabled credential omitted");
+            }
+          }
+        };
+        await probe("empty");
+        for(const [i,label] of ["é","E","e","Z","ä","A","a","Å","中"].entries()) {
+          fixture.run("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,access_token,refresh_token,api_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",[`quota-${i}`,"custom",label,"api_key",i===0?0:1,1,1,...secrets,1,1]);
+          for(const window of ["weekly","daily","five_hour"]) fixture.run("INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at,window_ms) VALUES(?,?,?,?,?,?,?,?)",[`quota-${i}`,window,0,25,100,9000000000000,9000000000000-1800000,3600000]);
+        }
+        fixture.run("INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES('quota-orphan','daily',0,1,10,NULL,0)");
+        await probe("populated");
+        for(const [i,cell] of ["'text'","NULL","X'3132'","9223372036854775807","0","-1"].entries()) {
+          fixture.run(`UPDATE quota_windows SET used=${cell==="NULL"?"0":cell},limit_value=${cell},resets_at=${cell},window_ms=${cell} WHERE credential_id='quota-${i}'`);
+        }
+        await probe("unusual");
+        for(const [i,cell] of ["'9000000000000'","'text'","X'3132'","9223372036854775807","0","-1"].entries()) {
+          fixture.run(`UPDATE quota_windows SET observed_at=${cell},used=25,limit_value=100,resets_at=9000000000000,window_ms=3600000 WHERE credential_id='quota-${i}'`);
+        }
+        await probe("observed cells");
+        fixture.run("UPDATE api_keys SET expires_at=1 WHERE id='client-C'");
+        check("quota expired after login",await exchange({target:"/api/client/quota?since=bad",headers:[["cookie",`omni_admin=${identities[2]!.cookie}`]]}),401,secrets);
+        fixture.close();
+        continue;
+      }
       if (step.kind === "client-usage") {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
         const forbidden = [identities[0]!.marker, identities[2]!.marker, identities[0]!.id, identities[2]!.id, "secret-credential-"];

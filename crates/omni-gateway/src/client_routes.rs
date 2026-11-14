@@ -7,6 +7,17 @@ use omni_ir::error::ErrorCode;
 use crate::api::{self, ApiError};
 use crate::server::{App, Body};
 
+pub async fn quota(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
+    api::require_client(req.headers(), &app.admin).await?;
+    let reader = app.control.reader().await?;
+    let now = crate::clock::now_ms() as f64;
+    Ok(api::json_ok(
+        reader
+            .run(move |s| omni_control::client_quota::accounts(s, now))
+            .await?,
+    ))
+}
+
 pub async fn usage(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
     let id = api::require_client(req.headers(), &app.admin).await?;
     let raw = req.uri().query().unwrap_or_default().to_owned();

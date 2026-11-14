@@ -499,6 +499,7 @@ function staticRows(prefix: string): Row[] {
     { name: `${prefix}client summary anonymous`, target: "/api/client/summary", method: "GET" },
     { name: `${prefix}client logs anonymous`, target: "/api/client/logs", method: "GET" },
     { name: `${prefix}client usage anonymous`, target: "/api/client/usage", method: "GET" },
+    { name: `${prefix}client quota anonymous`, target: "/api/client/quota", method: "GET" },
   ];
   const add = (target: string, extra: Partial<Row> = {}) =>
     rows.push({

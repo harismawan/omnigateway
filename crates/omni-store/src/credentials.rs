@@ -572,3 +572,11 @@ pub fn read_health(
         .optional()?
         .transpose()
 }
+/// Named accounts disclosed by the client quota surface. Secret columns are never read.
+pub fn client_quota_accounts(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<Vec<rusqlite::types::Value>>, crate::error::StoreError> {
+    let mut stmt = conn.prepare("SELECT id,label,provider FROM credentials ORDER BY tier,label")?;
+    let rows = stmt.query_map([], |r| (0..3).map(|i| r.get(i)).collect())?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}

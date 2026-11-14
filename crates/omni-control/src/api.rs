@@ -747,7 +747,7 @@ fn public_rows(catalog: Option<&JsValue>) -> Vec<PublicRow> {
 
 /// `String.prototype.localeCompare` under Bun's default (root/`en`) ICU
 /// collation.
-fn locale_compare(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
+pub(crate) fn locale_compare(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
     static COLLATOR: std::sync::OnceLock<icu_collator::CollatorBorrowed<'static>> =
         std::sync::OnceLock::new();
     COLLATOR
