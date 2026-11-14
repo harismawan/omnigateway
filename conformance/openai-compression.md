@@ -1,5 +1,40 @@
 # Step 4 compression prerequisite (2026-11-14)
 
+## Encoder decision and measured prerequisite
+
+Controller approved exact `zstd = { version = "=0.14.4", default-features = false }`.
+Offline resolution/check and gateway build passed. Lock adds zstd 0.14.4,
+zstd-safe 8.3.0, zstd-sys 2.1.3+zstd.1.5.7, and jobserver 0.1.35 through cc;
+no existing package versions changed. Fetched Cargo.toml licences are
+**BSD-3-Clause**, **BSD-3-Clause**, and **BSD-3-Clause AND BSD-2-Clause** respectively.
+These supersede the provisional licence guesses below. Raw blocks and external
+executables are rejected by controller decision. Dependency-internal unsafe is
+approved; no application unsafe added.
+
+`openai_zstd` compares level-3 write::Encoder/write_all/finish against the real
+frozen zstdEncode. Sizes: 0, 1, 7, 62000, 131071/2/3, 507000,
+2097151/2/3, 8388608, each with repeating bytes and deterministic xorshift bytes.
+Frames **identical for 22 of 24** by SHA-256. The two empty-body rows differ:
+Rust 9 bytes, header `28 b5 2f fd 20 00`; TS 9 bytes, `28 b5 2f fd 00 58`.
+All 24 Rust frames decode exactly with libzstd. The probe has no OAuth corpus
+yet; this is encoder availability evidence, not item 4 completion.
+
+RED initially used uncompressed bytes and failed against TS; then the encoder
+comparison first failed for size 0. Since compressed byte equality is diagnostic
+rather than required, test reports differing cases and checks decompression.
+Logs: s4-zstd-red.log, s4-zstd-green.log, s4-zstd-resolution.log,
+s4-zstd-gateway-build.log, s4-zstd-tests.log, s4-zstd-clippy.log, s4-zstd-fmt.log
+under /tmp/opencode/b3. Full three-crate tests, all three source tripwires,
+clippy and fmt passed. HTTP implementation/refusal is still unchanged.
+
+Identity persistence: frozen codec.ts:43–45 only reads codexSecretsFrom.
+oauth.ts:146–170 returns ensureCodexSecrets(prior) in OAuth result providerData
+on exchange/refresh, not on request encoding. Step 5 host must persist that
+OAuth result providerData with the credential update; provider OAuth port must
+call ensure_secrets(prior) when constructing that result. No request-time write.
+
+## Original offline inspection (superseded blocker)
+
 Inspected frozen `packages/providers/src/http-client.ts:160–207`: UTF-8
 Buffer, `new CompressionStream("zstd", {level: 3})`, one write then close,
 concurrent output drain. No size threshold. Streaming does not pledge size;
