@@ -2411,9 +2411,9 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       seen(name, method, x);
     };
-    let mutationAck: number | undefined;
-    for (const step of cfg.steps()) {
-      if (step.kind === "client-summary") {
+    // Shared setup for client report routes: real sessions, marked SQL rows,
+    // stub traffic and cursors from both operator and client sessions.
+    const clientFixture = async () => {
         const fixture = new Database(file);
         const identities: {id:string; key:string; cookie:string; marker:string}[] = [];
         const check = (name:string, answer:Ex, status:number, forbidden:string[] = []) => {
@@ -2453,7 +2453,14 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         const clientCursor = label==="ts"?JSON.parse(clientCursorResponse.body.toString()).nextCursor:cursor;
         if(clientCursor!==cursor) throw new Error("client/operator cursor encoding differs");
         const attacks = ["", "apiKeyId=client-A", "credentialId=secret-credential-A", "groupBy=apiKey", "splitBy=apiKey", `cursor=${encodeURIComponent(cursor)}`, `cursor=${encodeURIComponent(clientCursor)}&source=client`, "apiKeyId=client-B&apiKeyId=client-A", "%61piKeyId=client-A", "ApiKeyId=client-A", "dayOffsetMinutes=999", "since=bad&limit=bad"];
-        for(const [who,cookie] of [["admin",cookies.admin],["viewer",cookies.viewer],["anon",null],...identities.map(i=>[i.id,i.cookie])] as [string,string|null][]) {
+        const callers = [["admin",cookies.admin],["viewer",cookies.viewer],["anon",null],...identities.map(i=>[i.id,i.cookie])] as [string,string|null][];
+        return { fixture, identities, check, attacks, callers };
+    };
+    let mutationAck: number | undefined;
+    for (const step of cfg.steps()) {
+      if (step.kind === "client-summary") {
+        const { fixture, identities, check, attacks, callers } = await clientFixture();
+        for(const [who,cookie] of callers) {
           for(const attack of attacks) {
             const answer = await exchange({target:`/api/client/summary?${attack}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
             check(`${who} summary ${attack.startsWith("cursor=")?`foreign cursor ${attack.includes("source=client")?"client":"admin"}`:attack}`,answer,["client-A","client-B","client-C"].includes(who)?200:401,who==="client-B"?[identities[0]!.marker,identities[2]!.marker]:[]);
