@@ -4,6 +4,8 @@
 //! changes as well as additions/removals. It cannot resolve macro re-exports,
 //! trait methods, generic JSON carriers or effective module visibility.
 //! Safety decisions and known limits live in public_json_boundary.tsv.
+//! The reference tripwire cannot see macros, re-exports through a fourth
+//! crate, or names built by token pasting; it does not perform name resolution.
 use std::collections::BTreeSet;
 use std::path::Path;
 use syn::{spanned::Spanned, visit::Visit};
@@ -104,7 +106,8 @@ fn public_boundary_inventory_matches() {
 
 /// Lexical tripwire: qualified paths/imports, including aliases, must not make
 /// these scoped assembly helpers into cross-crate production entry points.
-/// Macro-generated paths and unusual token formatting still require review.
+/// This is not name resolution: macros, re-exports through a fourth crate,
+/// and names built by token pasting are invisible to this tripwire.
 #[test]
 fn scoped_helpers_have_no_external_production_callers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -148,6 +151,11 @@ fn scoped_helpers_have_no_external_production_callers() {
                 );
             }
             if name != "omni-dialects" {
+                assert!(
+                    !forbidden_ingress(&source),
+                    "external ingress exposure: {}",
+                    path.display()
+                );
                 // Ban imports of parser modules as well as direct parse calls.
                 let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
                 for module in ["anthropic", "openai", "responses"] {
@@ -161,4 +169,85 @@ fn scoped_helpers_have_no_external_production_callers() {
             }
         }
     }
+}
+
+fn forbidden_ingress(source: &str) -> bool {
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    // The gateway imports named entry points (ingest, Headers, IngressOptions,
+    // Surface, random_tool_use_id); it does not import the ingress module.
+    compact.contains("useomni_dialects::ingressas")
+        || compact.contains("useomni_dialects::ingress;")
+        || compact.contains("useomni_dialects::ingress::*")
+        || compact.contains("pubuseomni_dialects::ingress")
+        || ["anthropic", "openai", "responses"].iter().any(|module| {
+            compact.contains(&format!("{module}::parse("))
+                || compact.contains(&format!("{module}::parse::<"))
+        })
+}
+
+#[test]
+fn ingress_exposure_negative_fixtures() {
+    for source in [
+        "use omni_dialects::ingress as parser; fn call(){ parser::openai::parse(); }",
+        "use omni_dialects::ingress::*; fn call(){ openai::parse(); }",
+        "pub use omni_dialects::ingress as parser; parser::openai::parse(body, headers, opts)",
+        "use omni_dialects::ingress::*; openai::parse(body, headers, opts)",
+        "use omni_dialects::ingress as parser;",
+        "arbitrary::responses::parse(body, headers, opts)",
+        "anthropic::parse(body, headers, opts)",
+    ] {
+        assert!(forbidden_ingress(source), "{source}");
+    }
+    assert!(!forbidden_ingress(
+        "use omni_dialects::ingress::{Headers, IngressOptions, Surface, ingest, random_tool_use_id};"
+    ));
+}
+
+fn reexports(root: &Path) -> Vec<String> {
+    fn visit(root: &Path, path: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(path).expect("source directory") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                visit(root, &path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let source = std::fs::read_to_string(&path).expect("source");
+                for statement in source.split("pub use ").skip(1) {
+                    let statement = statement.split_once(';').expect("use terminator").0;
+                    let statement = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+                    out.push(format!(
+                        "{}\tpub use {statement};",
+                        path.strip_prefix(root).expect("relative").display()
+                    ));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for owner in ["omni-ir", "omni-dialects", "omni-providers"] {
+        visit(root, &root.join(owner).join("src"), &mut out);
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn owner_reexports_are_pinned() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates");
+    let actual = reexports(root);
+    let expected: Vec<_> = include_str!("owner_reexports.tsv")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "review every new or renamed owner re-export"
+    );
+    let mut negative = actual.clone();
+    negative.push(
+        "omni-providers/src/lib.rs\tpub use custom::wire::to_custom_chat_wire as assemble;".into(),
+    );
+    negative.sort();
+    assert_ne!(negative, expected, "reviewer's owner-reexport fixture");
 }
