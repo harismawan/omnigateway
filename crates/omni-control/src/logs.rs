@@ -135,6 +135,75 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
     page_encoding(store, raw, false)
 }
 
+/// Only the ten client filters cross the HTTP boundary. Identity comes from
+/// the verified session, and projection is an allowlist, never subtraction.
+pub fn client_page(store: &SqliteStore, raw: &str, api_key_id: &str) -> Result<String, Failure> {
+    let mut forwarded = url::form_urlencoded::Serializer::new(String::new());
+    for (k, v) in url::form_urlencoded::parse(raw.as_bytes()) {
+        if [
+            "limit",
+            "cursor",
+            "since",
+            "until",
+            "state",
+            "failed",
+            "provider",
+            "requestedModel",
+            "resolvedModel",
+            "errorCode",
+        ]
+        .contains(&k.as_ref())
+        {
+            forwarded.append_pair(&k, &v);
+        }
+    }
+    let mut query = parse_query(&forwarded.finish())?;
+    query.api_key_id = Some(api_key_id.to_owned());
+    let mut page = page_from_query(store, &query, false)?;
+    if let JsValue::Object(fields) = &mut page {
+        for (name, value) in fields {
+            if name.iter().copied().eq("logs".encode_utf16()) {
+                if let JsValue::Array(rows) = value {
+                    for row in rows {
+                        let mut projected = Vec::new();
+                        for key in [
+                            "id",
+                            "state",
+                            "at",
+                            "requestedModel",
+                            "resolvedProvider",
+                            "resolvedModel",
+                            "attempts",
+                            "status",
+                            "errorCode",
+                            "inputTokens",
+                            "outputTokens",
+                            "cacheReadTokens",
+                            "cacheWriteTokens",
+                            "ttftMs",
+                            "durationMs",
+                            "costUsd",
+                            "degradations",
+                            "rtkApplied",
+                            "rtkEstimatedTokensSaved",
+                        ] {
+                            let mut value = field(row, key).cloned().unwrap_or(JsValue::Undefined);
+                            if key == "degradations" {
+                                if let JsValue::Array(entries) = &mut value {
+                                    entries.retain(|entry| !matches!(entry, JsValue::String(s) if s.starts_with(&"excluded:".encode_utf16().collect::<Vec<_>>())));
+                                }
+                            }
+                            projected.push((key.encode_utf16().collect(), value));
+                        }
+                        *row = JsValue::Object(projected);
+                    }
+                }
+            }
+        }
+    }
+    Ok(stringify(&page).unwrap_or_default())
+}
+
 fn page_encoding(store: &SqliteStore, raw: &str, csv: bool) -> Result<String, Failure> {
     Ok(stringify(&page_value(store, raw, csv)?).unwrap_or_default())
 }

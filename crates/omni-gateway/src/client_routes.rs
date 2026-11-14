@@ -7,6 +7,17 @@ use omni_ir::error::ErrorCode;
 use crate::api::{self, ApiError};
 use crate::server::{App, Body};
 
+pub async fn logs(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
+    let id = api::require_client(req.headers(), &app.admin).await?;
+    let raw = req.uri().query().unwrap_or_default().to_owned();
+    let reader = app.control.reader().await?;
+    Ok(api::json_ok(
+        reader
+            .run(move |s| omni_control::logs::client_page(s, &raw, &id))
+            .await?,
+    ))
+}
+
 pub async fn summary(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
     let id = api::require_client(req.headers(), &app.admin).await?;
     let reader = app.control.reader().await?;

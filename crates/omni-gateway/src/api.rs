@@ -46,6 +46,7 @@ pub enum Route {
     Logout,
     ClientLogin,
     ClientSummary,
+    ClientLogs,
     /// Keys, models, catalog, settings and passwords (A5).
     Admin(crate::admin_routes::Admin),
 }
@@ -61,6 +62,7 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
         (&Method::POST, "/api/client/logout") => Some(Route::Logout),
         (&Method::POST, "/api/client/login") => Some(Route::ClientLogin),
         (&Method::GET | &Method::HEAD, "/api/client/summary") => Some(Route::ClientSummary),
+        (&Method::GET | &Method::HEAD, "/api/client/logs") => Some(Route::ClientLogs),
         _ => crate::admin_routes::route(method, path).map(Route::Admin),
     }
 }
@@ -74,6 +76,7 @@ pub async fn serve(app: Arc<App>, route: Route, req: Request<Incoming>) -> Respo
         Route::Logout => logout(&app, &req).await,
         Route::ClientLogin => crate::client_routes::login(&app, req).await,
         Route::ClientSummary => crate::client_routes::summary(&app, req).await,
+        Route::ClientLogs => crate::client_routes::logs(&app, req).await,
         Route::Admin(admin) => crate::admin_routes::serve(&app, admin, req).await,
     };
     result.unwrap_or_else(|e| e.into_response())

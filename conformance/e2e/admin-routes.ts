@@ -538,6 +538,7 @@ type HttpStep = {
 };
 type Step =
   | { kind: "client-summary"; name: string }
+  | { kind: "client-logs"; name: string }
   | { kind: "client-session"; name: string }
   | { kind: "logs-walk"; name: string }
   | { kind: "usage-traffic"; name: string }
@@ -1390,6 +1391,7 @@ let healthSeed: string | undefined;
 const nodesNow = Date.now();
 const configs: Config[] = [
   ...["0", "345", undefined].map(dayOffset => ({label:`client-summary-${dayOffset ?? "host"}`, dayOffset, db:()=>seedDb, steps:():Step[]=>[{kind:"client-summary",name:"three-key summary and isolation"}]})),
+  {label:"client-logs",db:()=>seedDb,steps:():Step[]=>[{kind:"client-logs",name:"scoped projected logs"}]},
   { label: "client-login", db: () => seedDb, steps: () => [
     ...["null", "[]", "1", '"key"', "{}", '{"key":12}', '{"key":null}', '{"key":"unknown"}'].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 401})),
     ...["", "{", "{bad}"].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 400})),
@@ -2449,8 +2451,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         // Rust logs is the next increment. TS mints the client cursor; its
         // scoped operator counterpart has exactly the same wire encoding.
         const clientCursorResponse = await exchange({target:"/api/client/logs?limit=1&until=1000",headers:[["cookie",`omni_admin=${identities[0]!.cookie}`]]});
-        if(clientCursorResponse.status!==(label==="ts"?200:404)) throw new Error("unexpected client logs fixture status");
-        const clientCursor = label==="ts"?JSON.parse(clientCursorResponse.body.toString()).nextCursor:cursor;
+        if(clientCursorResponse.status!==200) throw new Error("unexpected client logs fixture status");
+        const clientCursor = JSON.parse(clientCursorResponse.body.toString()).nextCursor;
         if(clientCursor!==cursor) throw new Error("client/operator cursor encoding differs");
         const attacks = ["", "apiKeyId=client-A", "credentialId=secret-credential-A", "groupBy=apiKey", "splitBy=apiKey", `cursor=${encodeURIComponent(cursor)}`, `cursor=${encodeURIComponent(clientCursor)}&source=client`, "apiKeyId=client-B&apiKeyId=client-A", "%61piKeyId=client-A", "ApiKeyId=client-A", "dayOffsetMinutes=999", "since=bad&limit=bad"];
         const callers = [["admin",cookies.admin],["viewer",cookies.viewer],["anon",null],...identities.map(i=>[i.id,i.cookie])] as [string,string|null][];
@@ -2458,6 +2460,39 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     };
     let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
+      if (step.kind === "client-logs") {
+        const { fixture, identities, check, attacks, callers } = await clientFixture();
+        const forbidden = [identities[0]!.marker, identities[2]!.marker, "secret-credential-"];
+        const queries = [...attacks.slice(0,-1), "limit=1&until=1000", "since=100&until=102", "state=completed", "failed=true", "provider=custom", "requestedModel=private-client-B-marker", "resolvedModel=private-client-B-marker", "errorCode=private-client-B-marker", "cursor=bad", "since=bad", "state=bad", "limit=1&limit=2", "%6cimit=2", "Limit=1"];
+        for(const [who,cookie] of callers) for(const [i,query] of queries.entries()) {
+          const authorized = ["client-A","client-B","client-C"].includes(who);
+          const invalid = ["cursor=bad","since=bad","state=bad","state=completed"].includes(query);
+          check(`${who} logs ${i}`,await exchange({target:`/api/client/logs?${query}${query.includes("until=")?"":"&until=1000"}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]}),authorized?(invalid?400:200):401,who==="client-B"?forbidden:[]);
+        }
+        let cursor:string|null=null;
+        const ids:string[]=[];
+        for(let page=0;page<10;page++) {
+          const answer=await exchange({target:`/api/client/logs?limit=1&until=1000${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`,headers:[["cookie",`omni_admin=${identities[1]!.cookie}`]]});
+          check(`B page ${page}`,answer,200,forbidden);
+          if(answer.status!==200) break;
+          const value=JSON.parse(answer.body.toString()); ids.push(...value.logs.map((row:{id:string})=>row.id)); cursor=value.nextCursor;
+          if(!cursor) break;
+        }
+        if(ids.length!==3 || new Set(ids).size!==3 || cursor!==null) deadlineFailures.push("client logs incomplete paging");
+        for(const [name,sql] of [
+          ["text", "UPDATE request_logs SET duration_ms='odd',input_tokens='odd' WHERE api_key_id='client-B'"],
+          ["blob", "UPDATE request_logs SET requested_model=x'ff',duration_ms=x'01' WHERE api_key_id='client-B'"],
+          ["utf8", "UPDATE request_logs SET requested_model=CAST(x'ff' AS TEXT),input_tokens=9007199254740993 WHERE api_key_id='client-B'"],
+          ["null", "UPDATE request_logs SET resolved_model=NULL,error_code=NULL WHERE api_key_id='client-B'"],
+        ]) {
+          fixture.run(sql!);
+          check(`own logs unusual ${name}`,await exchange({target:"/api/client/logs?until=1000",headers:[["cookie",`omni_admin=${identities[1]!.cookie}`]]}),200,forbidden);
+        }
+        fixture.run("UPDATE api_keys SET expires_at=1 WHERE id='client-C'");
+        check("logs expired after login",await exchange({target:"/api/client/logs?since=bad",headers:[["cookie",`omni_admin=${identities[2]!.cookie}`]]}),401);
+        fixture.close();
+        continue;
+      }
       if (step.kind === "client-summary") {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
         for(const [who,cookie] of callers) {
