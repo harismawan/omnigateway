@@ -169,12 +169,11 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     ))
 }
 fn snapshots(dir: &Path) -> Vec<Value> {
-    let mut files = std::fs::read_dir(dir)
+    let files = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
         .collect::<Vec<_>>();
-    files.sort_by_key(|e| e.file_name());
     let mut out = Vec::new();
     for f in files {
         let name = f.file_name().to_string_lossy().into_owned();
@@ -213,6 +212,7 @@ fn snapshots(dir: &Path) -> Vec<Value> {
         };
         out.push(json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":size_of(&f.path()),"reason":reason}));
     }
+    // Stable sort: frozen TS retains directory enumeration order on ties.
     out.sort_by_key(|s| std::cmp::Reverse(s["createdAt"].as_i64()));
     out
 }

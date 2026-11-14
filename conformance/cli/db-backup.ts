@@ -87,6 +87,49 @@ try {
     }
     assert.deepEqual(results[1],results[0]); count++;
   }
+  for (const [value, expected] of [["3",4],["garbage",1],[-2,1],[2.5,3],[1e300,5]] as const) {
+    const results=[];
+    for(const cmd of commands) {
+      rmSync(join(root,"snapshots"),{recursive:true,force:true});
+      copyFileSync(join(root,"seed"),join(root,"db"));
+      const live=new Database(join(root,"db"));
+      live.run("INSERT OR REPLACE INTO settings(key,value) VALUES ('settings',?)",[JSON.stringify({snapshotKeepLatest:100,snapshotMaxAgeDays:value})]); live.close();
+      mkdirSync(join(root,"snapshots"));
+      for(const age of [1,2,2.75,4]) {
+        const stamp=new Date(Date.now()-age*86400000).toISOString().replace(/[:.]/g,"-");
+        writeFileSync(join(root,"snapshots",`db_${stamp}_manual.sqlite`),String(age));
+      }
+      const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","backup","--json"],{env,stdout:"pipe",stderr:"pipe"});
+      const out=JSON.parse(await new Response(p.stdout).text()); const err=await new Response(p.stderr).text();
+      assert.equal(await p.exited,0); assert.equal(err,"");
+      const kept=readdirSync(join(root,"snapshots")).filter(n=>n!==out.id).map(n=>readFileSync(join(root,"snapshots",n),"utf8")).sort();
+      assert.equal(kept.length+1,expected); results.push(kept);
+    }
+    assert.deepEqual(results[1],results[0]); count++;
+  }
+  for(const reasons of [["manual","preRestore"],["preRestore","manual"]]) {
+    const results=[];
+    for(const cmd of commands) {
+      rmSync(join(root,"snapshots"),{recursive:true,force:true});
+      copyFileSync(join(root,"seed"),join(root,"db"));
+      const live=new Database(join(root,"db"));
+      live.run("INSERT OR REPLACE INTO settings(key,value) VALUES ('settings',?)",[JSON.stringify({snapshotKeepLatest:1,snapshotMaxAgeDays:1e300})]); live.close();
+      mkdirSync(join(root,"snapshots"));
+      for(const reason of reasons) writeFileSync(join(root,"snapshots",`db_2099-01-01T00-00-00-000Z_${reason}.sqlite`),"tie");
+      const enumeration=readdirSync(join(root,"snapshots"));
+      const listing=goldenSpawn([...cmd,"--root",root,"--db","db","db","snapshots","--json"],{env,stdout:"pipe",stderr:"pipe"});
+      const listed=JSON.parse(await new Response(listing.stdout).text()).snapshots.map((s:any)=>s.id);
+      assert.equal(await new Response(listing.stderr).text(),""); assert.equal(await listing.exited,0);
+      assert.deepEqual(listed,enumeration);
+      const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","backup","--json"],{env,stdout:"pipe",stderr:"pipe"});
+      const out=JSON.parse(await new Response(p.stdout).text()); assert.equal(out.reason,"manual");
+      assert.equal(await new Response(p.stderr).text(),""); assert.equal(await p.exited,0);
+      const kept=readdirSync(join(root,"snapshots")).sort();
+      assert.deepEqual(kept,enumeration.filter((name,i)=>i===0||name.includes("preRestore")).sort());
+      results.push({enumeration,listed,kept});
+    }
+    assert.deepEqual(results[1],results[0],"same creation sequence must enumerate identically"); count+=2;
+  }
   await verifyGoldenExits("db-backup");
   console.log(`PASS ${count} backup comparisons`);
 } finally { rmSync(root,{recursive:true,force:true}); }

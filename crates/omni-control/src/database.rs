@@ -199,6 +199,7 @@ pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Resul
         };
         snapshots.push((at, reason.to_owned(), entry.path()));
     }
+    // Stable sort: frozen TS retains directory enumeration order on ties.
     snapshots.sort_by_key(|s| std::cmp::Reverse(s.0));
     let undo = snapshots.iter().position(|s| s.1 == "preRestore");
     for (i, (at, _, path)) in snapshots.iter().enumerate() {

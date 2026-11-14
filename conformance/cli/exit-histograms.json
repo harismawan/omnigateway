@@ -1,6 +1,6 @@
 {
   "db-vacuum": {"exit 1":2,"environment OMNI_ENCRYPTION_KEY":2,"exit 0":2},
-  "db-backup": {"exit 1":4,"environment unable to open database":1,"environment OMNI_ENCRYPTION_KEY":2,"exit 0":7},
+  "db-backup": {"exit 1":4,"environment unable to open database":1,"environment OMNI_ENCRYPTION_KEY":2,"exit 0":16},
   "settings": { "exit 0": 210, "exit 1": 68, "exit 2": 70 },
   "model-reads": { "exit 0": 163, "exit 1": 95, "exit 2": 4 },
   "keys-list": {
