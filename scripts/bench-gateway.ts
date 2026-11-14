@@ -110,6 +110,7 @@ import {
   sampleRecovery,
   smoke as smokeRequests,
 } from "./bench-probe";
+import { showPerformance } from "./bench-report";
 
 const { values: flags } = parseArgs({
   options: {
@@ -1661,19 +1662,20 @@ async function main(): Promise<void> {
       gateways[i] = replacement;
       pids[i] = replacement.pid;
     }
-    console.error(
-      `  ${result.rps.toFixed(0)} req/s  p50 ${result.latencyMs.p50.toFixed(2)} ms  ` +
-        `p99 ${result.latencyMs.p99.toFixed(2)} ms  cpu ${result.cpuMsPerRequest.toFixed(3)} ms/req  ` +
-        `rss peak ${result.rssPeakMb.toFixed(0)} MiB  ok ${(result.successRate * 100).toFixed(2)}%` +
-        (result.rows === null
-          ? ""
-          : `  rows ${result.rows.done}/${result.rows.answered} pending ${result.rows.pending}` +
-            `  writer ${writerCell(result.rows.writer)}` +
-            (shed(result) ? "  ROWS DROPPED" : "")) +
-        `  foreign ${result.foreignCores} cores` +
-        (result.threads === null ? "" : `  threads ${JSON.stringify(result.threads)}`) +
-        (result.crashed > 0 ? `  CRASHED ×${result.crashed}` : ""),
-    );
+    if (showPerformance(!!flags.matrix, matrixResults.at(-1)?.classification))
+      console.error(
+        `  ${result.rps.toFixed(0)} req/s  p50 ${result.latencyMs.p50.toFixed(2)} ms  ` +
+          `p99 ${result.latencyMs.p99.toFixed(2)} ms  cpu ${result.cpuMsPerRequest.toFixed(3)} ms/req  ` +
+          `rss peak ${result.rssPeakMb.toFixed(0)} MiB  ok ${(result.successRate * 100).toFixed(2)}%` +
+          (result.rows === null
+            ? ""
+            : `  rows ${result.rows.done}/${result.rows.answered} pending ${result.rows.pending}` +
+              `  writer ${writerCell(result.rows.writer)}` +
+              (shed(result) ? "  ROWS DROPPED" : "")) +
+          `  foreign ${result.foreignCores} cores` +
+          (result.threads === null ? "" : `  threads ${JSON.stringify(result.threads)}`) +
+          (result.crashed > 0 ? `  CRASHED ×${result.crashed}` : ""),
+      );
   }
   const final = fleetSample(pids);
   const shutdownMs = Math.max(...(await Promise.all(gateways.map(stopGateway))));
