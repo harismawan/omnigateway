@@ -1,4 +1,5 @@
 //! OpenAI API-key request assembly. OAuth and decoding are separate increments.
+pub mod decode;
 mod profile;
 mod wire;
 use crate::codec::{CodecHttpRequest, CodecInput, CodecRequest};
