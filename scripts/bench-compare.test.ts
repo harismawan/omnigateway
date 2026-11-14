@@ -141,3 +141,12 @@ test("comparison carries measurement limits", () => {
   ])
     expect(text).toContain(limit);
 });
+test("verifier counts come from measured metrics", () => {
+  const a = round(1);
+  const metric = a.scenarios[0]?.metrics;
+  if (!metric) throw Error("missing fixture");
+  Object.assign(metric, {
+    integrity: { verifier: { started: 8, completed: 8, skippedTicks: 1, violations: 0 } },
+  });
+  expect(compare([a], [a])).toContain("custom-chat.chat.json=8/8/1/0");
+});

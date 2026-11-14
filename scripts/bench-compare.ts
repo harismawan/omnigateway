@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { checkManifest } from "./bench-manifest";
 
 type Metrics = {
+  integrity?: { verifier?: VerifierCounts };
   rps: number;
   latencyMs: { p50: number; p99: number };
   cpuMsPerRequest: number;
@@ -24,15 +25,14 @@ export type Round = {
     metrics: Metrics | null;
     concurrency?: number;
     bodySha256?: string;
-    integrity?: {
-      verifier?: {
-        started?: number;
-        completed?: number;
-        skippedTicks?: number;
-        violations?: number;
-      };
-    };
+    diagnostics?: { integrity?: { verifier?: VerifierCounts } };
   }[];
+};
+type VerifierCounts = {
+  started?: number;
+  completed?: number;
+  skippedTicks?: number;
+  violations?: number;
 };
 const metrics = [
   { name: "req/s", higher: true, get: (m: Metrics) => m.rps },
@@ -197,7 +197,7 @@ export function compare(
       header.push(
         `${side} round ${i + 1}: ${r.scenarios
           .map((s) => {
-            const v = s.integrity?.verifier;
+            const v = s.metrics?.integrity?.verifier ?? s.diagnostics?.integrity?.verifier;
             return `${s.name}=${v?.started ?? "unknown"}/${v?.completed ?? "unknown"}/${v?.skippedTicks ?? "unknown"}/${v?.violations ?? "unknown"}`;
           })
           .join(", ")}`,
