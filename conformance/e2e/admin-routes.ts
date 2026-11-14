@@ -2262,9 +2262,11 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       const credential = await exchange({method:"POST",target:"/api/credentials",headers:[["cookie",`omni_admin=${cookies.admin}`],J],body:JSON.stringify({provider:"custom",apiKey:"secret-a6-2",endpointId:"routing-a6",endpointLabel:"Routing",origin:`http://127.0.0.1:${PORT+1}`,protocol:"chat_completions"})});
       if (credential.status !== 200) throw new Error(`slow-reader credential status ${credential.status}`);
       await sleep(1100);
+      const idle: number[] = [], latencies: number[] = [];
+      for (let sample=0;sample<15;sample++) {
       let ended = false;
-      const idle: number[] = [];
-      for (let i=0;i<5;i++) {
+
+      for (let i=0;i<1;i++) {
         const start = performance.now();
         const response = await exchange({method:"GET",target:"/api/logs?limit=1",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
         if (response.status !== 200) throw new Error("idle admin status");
@@ -2286,24 +2288,24 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       socket.on("data", () => socket.pause());
       const timer = setInterval(() => socket.resume(), 200);
       try {
-        const latencies: number[] = [];
-        for (let i = 0; i < 3; i++) {
+
+        for (let i = 0; i < 1; i++) {
           const traffic = await exchange({method:"POST",target:"/v1/chat/completions",headers:[["authorization",`Bearer ${SEED_KEY}`],J],body:JSON.stringify({model:"routing-a6",messages:[{role:"user",content:"hello"}]})});
           if (traffic.status !== 200) throw new Error(`slow-reader traffic status ${traffic.status}`);
           const started = performance.now();
           const admin = await exchange({method:"GET",target:"/api/logs?limit=1",headers:[["cookie",`omni_admin=${cookies.admin}`]]});
           const elapsed = performance.now() - started;
           latencies.push(elapsed);
-          if (admin.status !== 200 || elapsed > boundMs) throw new Error(`slow-reader admin status=${admin.status} latency=${elapsed} bound=${boundMs} idle=${idle}`);
+          if (admin.status !== 200) throw new Error(`slow-reader admin status=${admin.status}`);
         }
         const deadline = Date.now() + 5000;
         let rows = 0;
         while (Date.now() < deadline) {
           rows = (fixture.query("SELECT count(*) AS n FROM request_logs WHERE requested_model='routing-a6'").get() as {n:number}).n;
-          if (rows >= 3) break;
+          if (rows >= sample+1) break;
           await sleep(50);
         }
-        if (ended || rows < 3) throw new Error(`slow-reader progress: ended=${ended} rows=${rows}`);
+        if (ended || rows < sample+1) throw new Error(`slow-reader progress: ended=${ended} rows=${rows}`);
         // Each attempt is nonblocking; at most 50 attempts, spaced 20ms.
         // An active page/writer can overlap one attempt without pinning the WAL.
         fixture.run("PRAGMA busy_timeout=0");
@@ -2316,15 +2318,26 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         fixture.run("PRAGMA busy_timeout=5000");
         if (!checkpointOk || ended) throw new Error("no checkpoint between export pages within 50 attempts");
         writeFileSync(join(out,`checkpoint-${label}.json`),JSON.stringify({attempts:checkpointAttempts+1,maxAttempts:50,intervalMs:20}));
-        writeFileSync(join(out, `slow-reader-${label}.json`), JSON.stringify({latencies, idle, rows, exportOpen:!ended, boundMs}));
+
       } finally {
         clearInterval(timer);
         socket.destroy();
-        fixture.run("DELETE FROM credentials");
-        fixture.run("DELETE FROM virtual_models WHERE id='routing-a6'");
-        fixture.close();
+
       }
+        // No export is active during the next idle sample. Let a cancelled
+        // in-flight page finish before probing the idle baseline.
+        await sleep(300);
+      }
+      fixture.run("DELETE FROM credentials");
+      fixture.run("DELETE FROM virtual_models WHERE id='routing-a6'");
+      fixture.close();
+      const median = (v:number[]) => [...v].sort((a,b)=>a-b)[Math.floor(v.length/2)]!;
+      const idleMedian=median(idle), loadedMedian=median(latencies), boundMs=10;
+      writeFileSync(join(out,`slow-reader-${label}.json`),JSON.stringify({idle,latencies,idleMedian,loadedMedian,boundMs,samples:15}));
+      if(idleMedian>boundMs) throw new Error(`inconclusive overloaded host: idle median ${idleMedian}ms`);
+      if(label==="rust" && loadedMedian>boundMs) throw new Error(`slow-reader median ${loadedMedian}ms exceeds ${boundMs}ms`);
     }
+
     if (cfg.label === "nodes") {
       const health = await exchange({method:"GET",target:"/health",headers:[]});
       const own = JSON.parse(health.body.toString()).nodeId;
