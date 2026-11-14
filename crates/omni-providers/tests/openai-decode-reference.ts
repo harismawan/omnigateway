@@ -22,6 +22,12 @@ for(const event of ['response.completed','response.incomplete'])for(const status
 for(const code of ['rate_limit_exceeded','insufficient_quota','invalid_api_key','server_error','context_length_exceeded','content_policy_violation','constructor'])for(const event of ['error','response.failed'])for(const prefix of ['',text])add('errors',prefix+m(event,{error:{code,message:'bad'},response:{error:{code,message:'bad'}}}));
 for(const wire of ['',text,text+end+end,'data: [DONE]\n\n',m('unknown',{})+'data: [DONE]\n\n','event: response.output_text.delta\ndata: {broken}\n\n'+end,'event: unknown\ndata: broken\n\n',text+'event: response.completed\ndata: {',m('response.output_text.delta',{delta:'out of order'})+end,m('response.output_item.added',{item:{type:'unknown',payload:{opaque:1}}})+end,m('response.metadata',{})+m('keepalive',{})+end,m('response.output_text.delta',{delta:'x'.repeat(20000)})+end])add('malformed',wire);
 const rows=[];
+add('decoder-literal-edges',text+m('response.output_item.done',{output_index:2,item:{type:'message'}})+m('response.output_item.done',{output_index:2,item:{type:'message'}})+end);
+add('decoder-literal-edges',m('response.output_item.added',{item:{type:'reasoning'}})+m('response.reasoning_summary_text.delta',{delta:'why'})+m('response.output_item.done',{item:{type:'reasoning'}})+m('response.output_item.done',{item:{type:'reasoning'}})+text+end);
+add('decoder-literal-edges',text+end+'data: [DONE]\n\n');
+add('decoder-literal-edges',m('response.in_progress',{})+text+end);
+add('decoder-literal-edges',text+m('response.metadata',{metadata:{opaque:1}})+end);
+add('decoder-literal-edges',m('keepalive',{})+text+end);
 const malformedValues=[undefined,null,'2',2.5,-1,1e100,{},[],true];
 for(const value of malformedValues){
  add('coercion-index',m('response.output_item.added',{output_index:value,item:{type:'function_call',call_id:'c',name:'f'}})+m('response.function_call_arguments.delta',{output_index:value,delta:'{}'})+m('response.output_item.done',{output_index:value})+m('response.content_part.added',{output_index:value,content_index:value,part:{type:'output_text'}})+m('response.output_text.delta',{output_index:value,content_index:value,delta:'hi'})+m('response.content_part.done',{output_index:value,content_index:value})+end);

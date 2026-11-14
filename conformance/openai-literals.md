@@ -1,4 +1,4 @@
-# Frozen OpenAI test disposition (step 2)
+# Frozen OpenAI test disposition (steps 2–3)
 
 Numbers below are 1-based `test(...)` declaration order within each frozen file.
 Every declaration is assigned exactly once. Differential means exact wire JSON,
@@ -9,11 +9,11 @@ behavior (the image test forwards images; system turns become developer).
 
 | File | Total | Ported | Differential | Later |
 |---|---:|---:|---:|---:|
-| openai.test.ts |49|0|20|29|
+| openai.test.ts |49|0|47|2|
 | openaiCacheKey.test.ts |19|1|18|0|
 | openaiCodec.test.ts |7|3|1|3|
 | openaiCodexFingerprint.test.ts |46|0|0|46|
-| Total |121|4|39|78|
+| Total |121|4|66|51|
 
 ## Declaration-by-declaration disposition
 
@@ -25,13 +25,23 @@ the source authority: locate titles with `grep -n '^test('` in the named file.
 |---|---|---|
 | openai.test.ts |1,2,3,4,5,6,8,9,10|baseline differential (messages/system/tool choices/reasoning/images/max tokens)|
 | openai.test.ts |7|effort-ladder differential|
-| openai.test.ts |11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26|Later: decoder|
+| openai.test.ts |11|decoder text category|
+| openai.test.ts |12|decoder usage category (cache exceeds input)|
+| openai.test.ts |13|decoder malformed category (text without completion)|
+| openai.test.ts |14|decoder reasoning category (reasoning index 7 vs text index 2)|
+| openai.test.ts |15|decoder tools category|
+| openai.test.ts |16,17,18,19,20,21,22,25|decoder terminal category (event/status/reason cross product)|
+| openai.test.ts |23|decoder malformed category (DONE alone)|
+| openai.test.ts |24,26|decoder errors category (constructor and response.failed)|
 | openai.test.ts |27,28,29|baseline differential (developer turns, sampling)|
 | openai.test.ts |30,31|Later: OAuth|
-| openai.test.ts |32,33,34|Later: decoder|
+| openai.test.ts |32,33|decoder-literal-edges category (message and reasoning duplicate done)|
+| openai.test.ts |34|decoder usage category (prompt_tokens_details fallback)|
 | openai.test.ts |35|foreign-drops differential (1M beta)|
 | openai.test.ts |36|baseline differential (no beta)|
-| openai.test.ts |37,38,39,40,41,42,43,44|Later: decoder|
+| openai.test.ts |37,38|decoder malformed category (unknown JSON/non-JSON)|
+| openai.test.ts |39,40,41,42|decoder-literal-edges category (keepalive/in_progress/metadata/DONE after completion)|
+| openai.test.ts |43,44|decoder reasoning category (native false/true; whole native merge)|
 | openai.test.ts |45,47,48|baseline differential (native replay, orphan and answered calls)|
 | openai.test.ts |46|foreign-drops differential|
 | openai.test.ts |49|literal-edges differential (freeform IR flattened function)|
@@ -54,3 +64,11 @@ the frozen ingress drops non-image attachments rather than creating file IR.
 Messages document tool results and Responses input_file tool results do carry
 files. The corpus compares these actual dialect semantics rather than claiming
 every surface preserves files.
+
+None of these 121 original declarations is parked: their decoder literals use
+ordinary strings and numeric usage. Additional Rust tests parked under X1 are
+`openai_lossless::lone_surrogates_match_ts` and
+`openai_decode::malformed_usage_matches_ts`, with exact corpora documented in
+openai-lossless-blocker.md and openai-coercion.md. They do not count as ported
+original declarations. All 27 former "later: decoder" declarations above now
+have a named differential category; all compare buffered bytes too.
