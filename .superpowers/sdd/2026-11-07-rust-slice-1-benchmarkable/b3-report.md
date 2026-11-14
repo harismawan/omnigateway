@@ -1,5 +1,73 @@
 # B3 OpenAI / Codex
 
+## Step B categories 1–4 green — HEAD `9ca9634e`
+
+Item 2 remains partial: **146 whole OAuth request comparisons pass**. Each row
+compares URL, ordered/cased headers, uncompressed JSON bytes, zstd marker,
+degradations and nativeReasoning state against the real frozen codec.
+Worktree clean; no HTTP/product TS/IR public-type/dependency changes.
+
+| Category | Rows | First run / commit |
+|---|---:|---|
+|Three dialects × buffered/streaming (Step A)|6|Prior Auth RED; green da138696|
+|B1 reasoning|76|RED row 36: gpt-6-astra vendor effort="invalid"; fixed 310b183f|
+|B2 tools|16|First run green; a3fff63f|
+|B3 media ingress|36|First run green; 96dcdfc5|
+|B4 response format|12|First run green; 9ca9634e|
+|B5 dedicated lite/catalog coverage|0|Pending|
+|B6 exhaustive OAuth-flag branch inventory|0|Pending|
+|B7 stored identity variants|0|Pending|
+|B8 cache/history stability pairs|0|Pending|
+
+B1: two models (lite+effort updates gpt-6-astra / non-lite gpt-5.5), seven
+portable efforts × three displays, five reasoning modes/defaults, twelve vendor
+reasoning values including absent effort, ultra/persistent, invalid string,
+null, number, empty and CRLF. Fix separates accepted effort for history update
+from metadata fallback. Before fix row 36 added a low-effort update; frozen
+omits it. Other invalid rows were not individually run before correction.
+B2: two models × single/parallel × answered/orphan × plain/mixed results;
+mixed combines tool image/PDF and new user text/image within the same message,
+then a new user turn. Mixed flag duplicates the no-result orphan rows.
+B3: three actual ingress dialects × buffered/streaming × two models ×
+text/plain, application/pdf, application/octet-stream. Includes image forms,
+Anthropic result documents, OpenAI attachments, Responses result files/images.
+Body and notes match frozen movement/inlining/dropping behavior for those rows;
+this is not an exhaustive media-refusal inventory.
+B4: two models × six vendor shapes: JSON object/schema, text, text.format,
+explicit verbosity plus format, scalar text plus response_format.
+
+Clock/randomness unchanged: explicit startedAt=1794000000123 and
+requestId="fixed-oauth-request" on both sides. Credential accountId="account";
+stored secrets absent. No random generator invoked by builder; deterministic
+fallback IDs compared exactly, no shape-only fields or clock monkeypatch.
+
+Verification after last commit: required three-crate test suite passed with
+50 summaries, 223 passes including children, 4 ignored, zero failures; all
+three source tripwires, strict all-target clippy, fmt and diff check pass.
+Logs `/tmp/opencode/b3/s4b-b4-{tests,clippy,fmt}.log`; category runs
+`s4b-reasoning-{red,green}.log`, `s4b-{tools,media,format}-first.log`.
+All Rust builds use incremental=0/dev debug=0/test debug=0.
+
+Known differences with concrete examples: HTTP still rejects the OAuth
+request's Zstd marker instead of sending compressed JSON; prior empty-string
+compression probe differs in bytes (empty-body reachability unresolved).
+X1 parked upstream unpaired-surrogate escape and nonnumeric usage-count cases
+remain ignored, e.g. escaped lone high surrogate in event text and a string
+usage count. This turn did not rerun those ignored comparisons. Credential
+refresh/persistence and gateway startup profile capture remain deferred (e.g.
+absent stored secrets are deterministically derived, not persisted by builder;
+profile is captured at explicit initialize/first library use, not TS import).
+No mismatch observed in the 146 compared rows; no broad parity claim.
+The invalid-effort history-update difference from Step A is now fixed.
+
+**Next category: B5** all catalog rows/unlisted model, lite switching, prefix
+instructions/tools, native reasoning/history ID/provenance paths. Then B6 grep
+all OAuth branches and cover each, B7 whole-codec identity variants, B8 paired
+cache/thread histories. Step C remains untouched: review all 46 fingerprint
+declarations and OAuth SSE codec comparisons; inventory remains 4 ported +66
+differential +51 later. Afterwards item 3 depth for OAuth/lite carriers, item 4
+HTTP compression including empty-body question, item 5 remaining literals.
+
 ## Step A green — HEAD `da138696`
 
 **Item 2: first OAuth builder/codec corpus green; broad parity incomplete.**
