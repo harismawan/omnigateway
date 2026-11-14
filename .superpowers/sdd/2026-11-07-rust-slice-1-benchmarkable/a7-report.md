@@ -1,4 +1,57 @@
-# A7 — fix round 1 complete for review
+# A7 — fix round 2 complete for review
+
+## Fix round 2
+
+**Status: fix round 2 complete for review.** Final implementation/test commit `d0c11d29`. Evidence root **`/tmp/opencode/a7-fix2/`**. Independent review `a7-r1-review.md` read completely; this section supersedes round-1 cursor/latency/lane descriptions. No jobs outstanding; unrelated files, stash, roadmap and other worktrees untouched.
+
+| Finding | Commit | Test and independent RED |
+|---|---|---|
+| R1 decoded cursor | `7af16d7e` | `cursor-red.log`: 17 equal/12 failures against round-1 binary. `cursor-{boundary,final,middle,replacement-order,rounded-at}.log`: each 23 equal/0 failures. Both roles and anonymous, interactive logs plus CSV/JSONL |
+| M4 cancelled opener permit | `394f9341`, harness lint `d0c11d29` | Deterministic single-blocking-worker unit test queues opener then cancels its async caller: `open-red.log` sees all four permits incorrectly available; `open-green.log` passes, opener retains one until drained |
+| Nodes report lane | `394f9341` | `nodes.log` 29 equal/0 failures; final full nodes fixture passes. Routing/isolation change verified by code; no independent failing behavioral test for nodes was executed |
+| Latency statistic | `2a509db6` | `latency-red.log` fails pre-fix `/tmp/opencode/a7-final/rust-final`; `latency-green.log` 17 equal/0 failures; full final rerun passes |
+| Chunk CRLF validation | `5876f99c` | `framing-red.log` self-check fails on malformed `1\r\naXX0\r\nYY`; fixed self-check plus nodes comparison `framing-green.log` 29/0. Also rejects malformed final delimiter `0\r\nYY` |
+
+### Cursor semantics
+
+Boundary cells are captured without strict text decoding; conversion to the next-query binding happens only when a sentinel establishes another page. TEXT is decoded lossily, integer cells convert through f64 as Bun JS numbers, BLOB retains bytes, NULL remains NULL. No strict UTF-8 conversion can fail cursor extraction, and an exactly-full final page computes no next cursor. Cached statement rows and transaction reset remain unchanged.
+
+`cursor-decoded-boundary` reproduces review fixture: 499 rows at 100.5, invalid `0xFF` ID at 99, last row at 98. TS and Rust now return **501** JSONL rows; interactive page 500 rows. Exactly-full final fixture returns **500** rows. Middle invalid ID also matches. `replacement-order` changes boundary bytes to `0xC0`: TS binds U+FFFD (UTF-8 EF BF BD), which sorts above stored C0, so the boundary row appears again on the next page. Both export **502 rows from 501 stored rows**, identical response bytes; no deduplication is introduced. `rounded-at` covers integer 9007199254740993 rounding on interactive boundary values; export range's safe-integer maximum excludes those high timestamps in both gateways, so that fixture is not evidence of traversing such timestamps through export. Fractional/long/BLOB and prior export cases rerun in full driver.
+
+An initial build error (`Value::from(ValueRef)` unsupported) caused an exploratory run to reuse the old artifact; corrected build and all five final targeted comparisons passed. Those initial reused-artifact failures are not extra regression findings.
+
+### Permits, lane scope, known limits
+
+Report-opening task now owns the permit and returns `(store, permit)` together. Cancellation cannot release its slot while the blocking open remains queued/running. Nodes now acquires the independent report lane like usage/logs, after authorization; config reads remain on control. Export retains round-1 per-page pool behavior.
+
+Readers are read-only with **the same 5000ms busy timeout**, not the same pragmas: foreign_keys and synchronous are not set on readers; this does not affect SELECT. Both semaphore queues have **unlimited waiter count and waiting time**. One waiting future retains request/query state and a semaphore waiter but no reader connection; cancellation removes it. Four active tasks is not a total request-memory bound. TS has no corresponding semaphore bound. Accepted M2 pins and separately deferred outbound idle timeout remain exactly as documented below; no new difference pinned.
+
+### Latency gate and results
+
+15 loaded samples, each taken while an export is open, alternating with idle samples of the identical `/api/logs?limit=1` request. Each sample cycle closes its export and allows 300ms for a cancelled page to finish before the next idle probe. Rust **loaded median ≤10ms** is the gate; TS uses the same statistic for recording. Either gateway's **idle median >10ms fails inconclusive**, never passes. Individual scheduler outliers do not trigger the latency assertion. Status, open-export, committed real-request rows, checkpoint and framing assertions remain.
+
+| Run | Rust loaded / idle median ms | TS loaded / idle median ms |
+|---|---|---|
+| Pre-fix RED (`latency-red/`) | **58.691 / 1.883** | **0.956 / 1.571** |
+| Final (`final/admin-routes-last/`) | **2.021 / 2.388** | **0.654 / 1.266** |
+
+Raw 15-sample arrays retained in `slow-reader-{rust,ts}.json`. No retry-until-green or bound relaxation was used for this statistic.
+
+### Final gates
+
+Fresh TS built outside checkout and fresh Rust copied outside checkout to **`/tmp/opencode/a7-fix2/final/{ts,rust}`**. Manifest **`final/manifest.json`**, commit **`d0c11d299df0e7ef0ab49cb9ccde4197b393e99c`**, TS SHA256 `f9cc6678a7d2bc2300a71b3aae98caff1aaedbcb2d811baee3dffd4325009d63`, Rust `dd6095affdd10633ce0f17cadd99d4a402b9dcdb6c279b9015fd4fdb4cdf57cf`. Manifest written before last driver runs. Same prior commands, paths switched to a7-fix2/final; output directories/logs suffixed `-last`. CARGO_INCREMENTAL=0, DEV/TEST DEBUG=0; drivers MIMALLOC_PURGE_DELAY=1, admin-routes port 19443. All runs finished and results read.
+
+| Gate | Result | Log under `final/` |
+|---|---|---|
+| cargo test --offline --workspace | **1050 passed, 0 failed, 7 ignored** | `workspace-last.log` |
+| cargo clippy --offline --workspace --all-targets -- -D warnings | clean | `clippy-last.log` |
+| cargo fmt --all -- --check | clean | `fmt-last.log` |
+| admin-routes | **2768 equal / 10 expected / 0 failures** | `admin-routes-last.log` |
+| admin-auth | **212 equal / 4 expected / 0 failures** | `admin-auth-last.log` |
+| surface | **606 equal / 61 expected / 0 failures** | `surface-last.log` |
+| run.ts | **all rows equal** | `run-last.log` |
+
+Initial Clippy flagged ignored channel Results in the new cancellation test; `d0c11d29` asserts them, then every gate and fresh build was rerun. Own recorded scratch roots removed (`removed-scratch.json`).
 
 ## Fix round 1
 
