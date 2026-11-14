@@ -14,8 +14,7 @@ fn missing_token_is_auth() {
         max_output_tokens: None,
         request_started_at: None,
     })
-    .err()
-    .expect("missing token");
+    .expect_err("missing token");
     assert_eq!(err.code, omni_ir::error::ErrorCode::Auth);
     assert_eq!(err.message, "openai credential has no token");
 }
