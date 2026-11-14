@@ -123,4 +123,12 @@ test("only own scratch root prefix is normalized", () => {
   expect(() => compare([a, b], [a])).not.toThrow();
   b.provenance.environment.OMNI_DB_PATH = "/elsewhere/db";
   expect(() => compare([a, b], [a])).toThrow("OMNI_DB_PATH");
+  a.provenance.environment.OMNI_DB_PATH = "prefix/tmp/a/db";
+  b.provenance.environment.OMNI_DB_PATH = "prefix/tmp/b/db";
+  expect(() => compare([a, b], [a])).toThrow("OMNI_DB_PATH");
+});
+test("comparison carries measurement limits", () => {
+  const text = compare([round(1)], [round(2)]);
+  for (const limit of ["threads only", "100 ms", "250 ms tolerance", "extra gateway work", "not a proof"])
+    expect(text).toContain(limit);
 });

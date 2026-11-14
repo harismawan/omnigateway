@@ -132,7 +132,7 @@ export function compare(
     if (!env) throw Error("missing environment");
     const root = env.OMNI_ROOT;
     return Object.fromEntries(
-      Object.entries(env).map(([k, v]) => [k, root ? v.split(root).join("<scratch>") : v]),
+      Object.entries(env).map(([k, v]) => [k, root && (v === root || v.startsWith(`${root}/`)) ? `<scratch>${v.slice(root.length)}` : v]),
     );
   };
   const differences = (a: Record<string, string>, b: Record<string, string>) =>
@@ -157,6 +157,11 @@ export function compare(
     `Effective base environment: ${JSON.stringify(base[0]?.provenance.environment)}`,
     `Effective head environment: ${JSON.stringify(head[0]?.provenance.environment)}`,
     "Rust's production launcher defaults MIMALLOC_PURGE_DELAY=1; this is not an allocator-neutral comparison.",
+    "CPU covers the gateway process and its threads only (children excluded). Memory is resident memory sampled every 100 ms.",
+    fresh ? "--fresh-process was used; database history is retained." : "One process serves all scenarios; later scenarios include earlier process and database history.",
+    "The load interval ends at oha's report file, with a 250 ms tolerance.",
+    "Verifier requests are extra gateway work, not counted in the request rate.",
+    "Measured traffic integrity uses status, usage, per-request size and a sampling full-body verifier; this is not a proof that every response was correct.",
     fresh ? "All rounds use --fresh-process; differing ordered selections allowed for shared scenarios (database state retained)." : "All rounds have the same ordered scenario selection.",
     "### environment differences between sides",
     "| variable | base | head |",
