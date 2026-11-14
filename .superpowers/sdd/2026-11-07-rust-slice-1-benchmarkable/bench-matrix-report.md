@@ -2,6 +2,65 @@
 
 ## Fix round 1
 
+LATEST CHECKPOINT (continuation from 7027a570): item 3 committed `4c545e77`;
+item 6 **not cleared**, diagnostic tooling/evidence committed `a2a9680e`.
+Lint-only module-spacing correction: `aa8b9e55`. Worktree clean.
+Precise next step: resolve single-client load-generator recording headroom.
+`/tmp/opencode/bench-matrix-fix-rest/recording-summary.json` shows recorded
+direct-stub rates straddling the prior release gateway observation at c1.
+Inspect oha 1.16.0's recording implementation and seek an exact cheaper
+per-request size source (its current JSON only exposes aggregate
+sizePerRequest/totalData, not a size distribution). Do not substitute an average
+for the existing min/max check. If changing size collection, rerun all twelve
+fault cases. Then implement items 4,5,7, each failing-first and committed.
+Harness is NOT ready for reportable measurement. No performance findings.
+
+| Continuation finding | Commit | Failing check first | Evidence/status |
+|---|---|---|---|
+| 3: unsupported directional claims / missing observations / incompatible workloads | `4c545e77` | Four regression assertions failed against prior code | `bench-matrix-fix-rest/compare-before.log`; 7 comparison tests pass, including three-observation direction and every requested compatibility field within/between sides |
+| 6: possible load-side recording bottleneck | `a2a9680e` | Direct recorded c1 minimum below prior release-gateway c1 observation; cannot demonstrate safe headroom | `bench-matrix-fix-rest/recording/`, `recording-summary.json`, `oha-size-fields.txt`; unresolved, no replacement chosen |
+| 4: effective environment/common drain/fresh process | pending | not run | none |
+| 5: capacity concurrency/round manifest/refresh/lifecycle | pending | not run | none |
+| 7: final full/default/fault/interleaved reruns | pending | not run | none |
+
+Item 3 records scenario concurrency and body SHA256. Comparison refuses
+missing/incompatible configuration, harness commit and recorded environment;
+therefore old JSON lacking environment is rejected until item 4 captures it.
+Absent scenario observations are explicitly flagged and no ratio is shown.
+One/two observations produce descriptive ratio + `insufficient rounds`, no
+directional summary contribution. Range overlap header is explicitly not a
+significance test. Exact environment equality between TS/Rust will require an
+explicit decision in item 4: production allocator values differ, and ephemeral
+root/database paths differ too. Do not silently normalize away performance
+variables or claim comparison passes before resolving that incompatibility.
+
+Recording sanity method: two pinned chat stub processes on CPUs 4–5; oha 1.16.0
+on CPUs 6–7, one upstream chunk, concurrency 64 and 1; three 2-second paired
+rounds alternating off/on order, `-w`, same body; only `--db-url` changes.
+All 12 direct runs had HTTP 200 only and no client errors. On/off throughput
+and p50/p99 ranges overlap in both shapes. Host contention was large; a causal
+recording overhead cannot be isolated. Recorded c1 samples ranged below and
+above the earlier Rust gateway observation, so safe headroom is unproven.
+Raw rates/latencies retained in evidence, not published as gateway performance
+findings. No instrumentation replacement or twelve-fault rerun yet.
+
+Continuation checks: 18 owned tests pass / 0 fail / 77 assertions across five
+files; core typecheck 675 files passes. Changed-file lint passes after a final
+module-spacing correction. Shell syntax and diff whitespace checks pass.
+Docs include direct recording sanity commands and require at least three
+interleaved rounds (five recommended). All earlier final-run results below
+predate these continuation changes; they are not item 7 evidence.
+
+Continuation: item 3 committed `4c545e77`. Failing-first tests retained in
+`/tmp/opencode/bench-matrix-fix-rest/compare-before.log` (insufficient observations,
+missing observations, incompatible duration). Seven comparison tests now pass,
+including all compatibility fields within/between sides. Matrix JSON records
+concurrency and body SHA256. Missing environment metadata is deliberately
+refused pending item 4 capture. Item 6 direct-stub recording comparison is
+running via `scripts/bench-load-recording.sh`, evidence `bench-matrix-fix-rest/recording/`.
+Next: inspect recording on/off rate and latency spread, choose whether to keep
+recording, then item 4. Items 4,5,7 are not complete.
+
 CHECKPOINT — items 1 and 2 implemented/verified. Precise next step: item 3, add failing comparison tests for fewer than three observations, missing scenario observations and incompatible workload/provenance before modifying `scripts/bench-compare.ts`. Record scenario concurrency/body in matrix JSON to support comparison compatibility. Then items 4 and 5, each with failing checks and its own commit. Worktree clean after the two item commits. Measurements remain NOT REPORTABLE until those items pass. No performance findings.
 
 | Finding | Commit | Failing check first | Verification evidence |
