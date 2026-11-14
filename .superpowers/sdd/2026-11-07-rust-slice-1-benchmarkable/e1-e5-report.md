@@ -1,12 +1,12 @@
 ## Database write commands
 
-**Partial checkpoint (db2). A1–A2 complete; A3–A7 and B remain open. Next implementation step: A3, read retention after writing the snapshot and add malformed-setting differential cases. db restore: not started.**
+**Partial checkpoint (db2/A3). A1–A3 complete; A4–A7 and B remain open. Next: resolve A4's conflict between frozen directory-order-dependent behavior and requested order independence, then A5, A7, B, A6. db restore: not started.**
 
 Review I1: `1bb8836a` removes the ambient recursion marker and asserts/removes exactly one automatic import from the generated child. The reviewer's `OMNI_CONFIG_GATE_CHILD=1` command previously passed 302 without its negative child (`db-i1-before.log`); afterward it passes 302 plus seven diagnostic checks and the expected cluster-category child failure (`db-i1-after.log`, `db-i1-after-child.log`); normal invocation also passes (`db-i1-normal.log`, `db-i1-normal-child.log`). The two round-3 wording qualifications below are corrected.
 
 | Command | Commits | Suite / cases | Status |
 |---|---|---|---|
-| db backup | ea7cb71b; 71473672; aa9e2588; 254c3076 | db-backup.ts / 6 | A1–A2 fixed; remaining coverage incomplete |
+| db backup | ea7cb71b; 71473672; aa9e2588; 254c3076; 679e399b | db-backup.ts / 11 | A1–A3 fixed; remaining coverage incomplete |
 | db vacuum | 8ffb5d03; lint follow-up 71473672 | db-vacuum.ts / 4 | implemented, coverage incomplete |
 | db clear-bodies | none | none | unavailable |
 | db restore | none | none | unavailable |
@@ -29,11 +29,11 @@ Additional disturbance confirmation: invoked both real CLIs directly for each ne
 ### Known differences and open work
 
 - A1 fixed in aa9e2588: moved existing JS-compatible parser into control and re-exported from CLI. Overflow-date fixture failed first (two manual files instead of one), then passed; `db2-a1-red.log` / `db2-a1-green.log`.
-- Equal-timestamp retention order is not pinned: Rust read_dir order is platform-dependent before stable timestamp sorting; TS uses its filesystem adapter's readdir order. Add equal-instant/different-reason retention coverage.
+- A4 probe: future equal-instant manual/preRestore with keepLatest=1 keeps BOTH when manual created first, only preRestore when preRestore created first, in frozen TS. Lexical Rust sorting cannot match both. Failed probe `db2-a4-green.log` identifies TS/reverse insertion order. Experimental lexical change and uncommitted probe reverted; no A4 commit. Pin directory-order semantics next, resolving order-independence requirement first.
 - A2 fixed in 254c3076: setup filesystem formatter moved to control; backup mkdir/stat/unlink/readdir use it, cleanup errors propagate. File-occupied snapshot directory failed first on EEXIST text (`db2-a2-red.log`), then passed. Mode-0500 refusal now golden; both cases assert live/-wal/-shm bytes and no stray snapshot. `db2-a2-green.log`: six comparisons.
 - Full-disk, half-written-file, prune-unlink-error and busy-database differential cases remain missing. Free-space refusal is NOT covered by a unit test; existing unit test covers collision and transaction-refused VACUUM cleanup only. Other native SQLite diagnostics remain unverified.
 - No process-local exclusive maintenance latch in the new control module yet; single-shot CLI use is covered, concurrent admin reuse needs it.
-- Control takes numeric retention bounds from the CLI before snapshot creation; TS reads settings afterwards. Malformed setting coercion and concurrent retention edits are not covered.
+- A3 fixed in 679e399b: deferred settings callback after VACUUM INTO; unit test verifies completed snapshot exists even when settings callback fails. Five golden values pin count coercion: "3" => 3 files, "garbage" => 1, -2 => 1, 2.5 => 3, 1e300 => all 5; huge maxAgeDays permits old fixtures. Numeric-string case failed first (`db2-a3-red.log`). Age-field malformed variants and concurrent retention edits remain untested.
 - No running-gateway fixture yet for backup/vacuum. Neither implementation adds a running-gateway gate.
 - Actual snapshot/live full-table equivalence and nonempty WAL refusal byte-invariance need broader fixtures; current backup comparison checks settings plus integrity, and absent sidecars for configuration refusals.
 - CLI clock has no injection option; only timestamp-derived fields/names are masked in backup. Vacuum masks measured duration. Control receives one clock callback. No new environment variable.
@@ -46,10 +46,10 @@ Additional disturbance confirmation: invoked both real CLIs directly for each ne
 
 ### Verification
 
-Current gate counts: backup 6, vacuum 4; unchanged collision/cleanup control unit test. Changed backup suite fails under OMNI_PORT=invalid (`db2-backup-disturbance.log`); shared guards and histogram retained. No clear-bodies suite yet.
+Current gate counts: backup 11, vacuum 4; two database control unit tests. Changed backup suite fails under OMNI_PORT=invalid (`db2-a3-disturbance.log`); shared guards and histogram retained. No clear-bodies suite yet.
 
-Binary source commit `254c307698f0819aeec4f5d751e50ca6e0c6f679`; `/tmp/opencode/e1-e5/db2-omni-final`, SHA256 `1ac5de39dfa0ed66ad06a40c9a31e01ebe24283830e80c300dec321a2a4734cb`. Fresh abort binary `db2-omni-final-abort`, SHA256 `44c6d9fac9c60f9b871b6cc832e280fa3be4c47aed6de4ea05aeddefed476a1b`.
-On final code commit: offline tests 23 passed; clippy all-targets -D warnings and fmt passed (`db2-test.log`, `db2-clippy.log`, `db2-fmt.log`), incremental/debug=0. Foreground matrix 30/30 exit=0, summary read: `/tmp/opencode/e1-e5/db2-verified-summary.txt`; script `db2-verified-matrix.sh`. No failed matrix logs. Suite fixtures self-clean; no new suite added. Report-only checkpoint follows verification.
+Binary source commit `679e399b70e69f0e1ae5d4150a0d7da5bc81e258`; `/tmp/opencode/e1-e5/db2-a3-omni-final`, SHA256 `58e9582e7e979eead2a04bf6ff12ba3f09e96b555e9475a6c1ce2ef6c1d19f63`. Fresh abort binary `db2-a3-omni-final-abort`, SHA256 `19916f2fe6497330953867927ffa51d692a95029de075ef4608a36987cf5a687`.
+On final code commit: offline tests 24 passed; clippy all-targets -D warnings and fmt passed (`db2-a3-test.log`, `db2-a3-clippy.log`, `db2-a3-fmt.log`), incremental/debug=0. Foreground matrix 30/30 exit=0, summary read: `/tmp/opencode/e1-e5/db2-a3-verified-summary.txt`; script `db2-a3-matrix.sh`. No failed matrix logs. Suite fixtures self-clean; no new suite added. Report-only checkpoint follows verification.
 
 ## Fix round 3: complete for review
 
