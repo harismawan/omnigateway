@@ -55,6 +55,64 @@ fn primitive(v: &Value) -> Option<String> {
     }
 }
 
+#[derive(Clone)]
+struct SortKey {
+    text: Vec<u16>,
+    string: bool,
+}
+fn sort_keys(values: [&Value; 3]) -> [SortKey; 3] {
+    values.map(|v| SortKey {
+        text: match v {
+            Value::Text(s) => s.clone(),
+            Value::Blob(b) => b.iter().map(u8::to_string).collect::<Vec<_>>().join(","),
+            Value::Null => "null".into(),
+            _ => {
+                let mut s = String::new();
+                omni_ir::jsjson::write_number(number(v), &mut s);
+                s
+            }
+        }
+        .encode_utf16()
+        .collect(),
+        string: matches!(v, Value::Text(_)),
+    })
+}
+fn compare_keys(a: &[SortKey; 3], b: &[SortKey; 3]) -> std::cmp::Ordering {
+    a.iter()
+        .zip(b)
+        .map(|(a, b)| crate::api::locale_compare(&a.text, &b.text))
+        .find(|o| !o.is_eq())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+// Documented difference: reject iff SOME ordered pair of distinct rows would
+// throw in the frozen comparator, not merely pairs visited by an engine sort.
+// At each equal-prefix group, only receivers must be strings; arguments use JS
+// ToString (including comma-joined Uint8Array). A singleton never compares.
+// Sorting/grouping three levels costs O(n log n), rather than n squared.
+fn validate_sort(mut keys: Vec<&[SortKey; 3]>) -> Result<(), Failure> {
+    fn group(keys: &mut [&[SortKey; 3]], depth: usize) -> Result<(), Failure> {
+        if keys.len() < 2 || depth == 3 {
+            return Ok(());
+        }
+        if keys.iter().any(|k| !k[depth].string) {
+            return Err(Failure::internal("localeCompare is not a function"));
+        }
+        keys.sort_by(|a, b| crate::api::locale_compare(&a[depth].text, &b[depth].text));
+        let mut start = 0;
+        for end in 1..=keys.len() {
+            if end == keys.len()
+                || !crate::api::locale_compare(&keys[start][depth].text, &keys[end][depth].text)
+                    .is_eq()
+            {
+                group(&mut keys[start..end], depth + 1)?;
+                start = end;
+            }
+        }
+        Ok(())
+    }
+    group(&mut keys, 0)
+}
+
 /// Account history retains at most 50,001 raw samples and writes one row at a
 /// time. No projected sample value tree is retained alongside the raw page.
 pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result<String, Failure> {
@@ -107,26 +165,18 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         if s[3] == Value::Null || number(&s[3]) <= 0.0 {
             continue;
         }
-        let keys = [&accounts[c][2], &accounts[c][1], &s[1]]
-            .map(|v| {
-                v.as_str()
-                    .map(|s| s.encode_utf16().collect::<Vec<_>>())
-                    .ok_or_else(|| Failure::internal("localeCompare is not a function"))
-            })
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+        let keys = sort_keys([&accounts[c][2], &accounts[c][1], &s[1]]);
         rows.push((i, c, keys));
     }
+    validate_sort(rows.iter().map(|r| &r.2).collect())?;
     rows.sort_by(|a, b| {
-        a.2.iter()
-            .zip(&b.2)
-            .map(|(a, b)| crate::api::locale_compare(a, b))
-            .find(|o| !o.is_eq())
-            .unwrap_or_else(|| {
-                (number(&samples[a.0][5]) - number(&samples[b.0][5]))
-                    .partial_cmp(&0.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        compare_keys(&a.2, &b.2).then_with(|| {
+            // Frozen fourth key is subtraction: non-numeric cells yield
+            // NaN, treated as an equal comparison, never an exception.
+            (number(&samples[a.0][5]) - number(&samples[b.0][5]))
+                .partial_cmp(&0.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
     let mut out = String::from("{\"samples\":[");
     for (n, (i, c, _)) in rows.iter().enumerate() {
@@ -262,14 +312,7 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
             ("stale", JsValue::Bool(stale)),
             ("rolledOver", JsValue::Bool(rolled)),
         ];
-        let keys = [&c[2], &c[1], &w[1]]
-            .map(|v| {
-                v.as_str()
-                    .map(|s| s.encode_utf16().collect::<Vec<_>>())
-                    .ok_or_else(|| Failure::internal("localeCompare is not a function"))
-            })
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+        let keys = sort_keys([&c[2], &c[1], &w[1]]);
         rows.push((
             keys,
             JsValue::Object(
@@ -280,16 +323,62 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
             ),
         ));
     }
-    rows.sort_by(|a, b| {
-        a.0.iter()
-            .zip(&b.0)
-            .map(|(a, b)| crate::api::locale_compare(a, b))
-            .find(|o| !o.is_eq())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    validate_sort(rows.iter().map(|r| &r.0).collect())?;
+    rows.sort_by(|a, b| compare_keys(&a.0, &b.0));
     Ok(omni_ir::jsjson::stringify(&JsValue::Object(vec![(
         "accounts".encode_utf16().collect(),
         JsValue::Array(rows.into_iter().map(|(_, v)| v).collect()),
     )]))
     .unwrap_or_default())
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    #[test]
+    fn grouped_rule_equals_all_ordered_pairs() {
+        let cells = [
+            Value::Text("a".into()),
+            Value::Text("b".into()),
+            Value::Text("49,50".into()),
+            Value::Blob(vec![49, 50]),
+            Value::Null,
+            Value::Text("null".into()),
+            Value::Integer(1),
+            Value::Text("1".into()),
+            Value::Text("é".into()),
+            Value::Text("e\u{301}".into()),
+        ];
+        let mut seed = 42_u64;
+        for n in 0..9 {
+            for _ in 0..1000 {
+                let rows = (0..n)
+                    .map(|_| {
+                        let v = std::array::from_fn(|_| {
+                            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            &cells[(seed >> 32) as usize % cells.len()]
+                        });
+                        sort_keys(v)
+                    })
+                    .collect::<Vec<_>>();
+                let throws = rows.iter().enumerate().any(|(i, a)| {
+                    rows.iter().enumerate().any(|(j, b)| {
+                        if i == j {
+                            return false;
+                        }
+                        for k in 0..3 {
+                            if !a[k].string {
+                                return true;
+                            }
+                            if !crate::api::locale_compare(&a[k].text, &b[k].text).is_eq() {
+                                break;
+                            }
+                        }
+                        false
+                    })
+                });
+                assert_eq!(validate_sort(rows.iter().collect()).is_err(), throws);
+            }
+        }
+    }
 }

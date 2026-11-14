@@ -2483,6 +2483,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         {name:"reached",providers:["a","a"],bad:1,status:500},
         {name:"three bad argument",providers:["b","a","b"],bad:0,status:200},
         {name:"three bad receiver",providers:["b","a","b"],bad:2,status:500},
+        {name:"five argument",providers:["b","a","b","c","d"],bad:0,status:200},
+        {name:"eight receiver",providers:["b","a","b","c","d","e","f","g"],bad:2,status:500},
       ];
       for(const c of cases) {
         fixture.run(`DELETE FROM ${table}`);
@@ -2494,7 +2496,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         }
         for(const [who,cookie] of callers) {
           const answer=await exchange({target:route,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
-          check(`sort ${c.name} ${who}`,answer,["client-A","client-B","client-C"].includes(who)?c.status:401,["providerDataSecretCanary"]);
+          check(`sort ${c.name} ${who}`,answer,["client-A","client-B","client-C"].includes(who)?(label==="rust" && ["three bad argument","five argument"].includes(c.name)?500:c.status):401,["providerDataSecretCanary"]);
         }
       }
       fixture.run(`DELETE FROM ${table}`);
@@ -3081,6 +3083,24 @@ for (const cfg of configs) {
   const rs = await runOne("rust", resolve(REPO, flags.rust as string), cfg);
   const names = new Set([...ts.results.keys(), ...rs.results.keys()]);
   const pinned = new Map<string, ExpectDiff>();
+  if (["client-quota","client-history"].includes(cfg.label)) {
+    // Frozen outcomes observed in i2-observe-{quota,history}; pin full bytes,
+    // not merely status, for the accepted engine-pair-order difference.
+    const head=(status:number)=>`${status}\ncontent-length: <body length>\ncontent-type: application/json;charset=utf-8\ndate: <date>\n\n`;
+    for(const name of ["three bad argument","five argument"]) {
+      const ids=name==="three bad argument"?[1,0,2]:[1,0,2,3,4];
+      const history=cfg.label==="client-history";
+      const rows=ids.map(i=> {
+        const common={credentialId:`sort-${i}`,label:i===0?{"0":49,"1":50}:"x",provider:["b","a","b","c","d"][i],windowType:"daily"};
+        return history?{...common,observedAt:1794612600000+i,usedRatio:0.1,resetsAt:null,windowMs:null}:{...common,usedRatio:0.1,resetsAt:null,observedAt:1794612600000+i,windowMs:null,ratePerHourRatio:null,exhaustsAt:null,survives:null,stale:true,rolledOver:false};
+      });
+      for(const who of ["client-A","client-B","client-C"]) pinned.set(`sort ${name} ${who}`,{
+        why:"sort pair order (documented difference)",
+        ts:head(200)+JSON.stringify(history?{samples:rows,truncated:false}:{accounts:rows}),
+        rust:head(500)+'{"error":{"code":"INTERNAL","message":"internal error"}}',
+      });
+    }
+  }
   for (const step of cfg.steps())
     if (
       (step.kind === "v1" || step.kind === "http" || step.kind === undefined) &&
