@@ -2,6 +2,21 @@
 pub mod decode;
 mod profile;
 mod wire;
+/// API-key leg only; OAuth identity/transport is the next migration increment.
+pub struct OpenAiApiKeyCodec;
+impl crate::codec::ProviderCodec for OpenAiApiKeyCodec {
+    type State = bool;
+    fn build_request(&self, input: &CodecInput<'_>) -> Result<CodecRequest<bool>, GatewayError> {
+        build_api_key_request(*input)
+    }
+    fn decoder(
+        &self,
+        state: bool,
+        _headers: &crate::http::Headers,
+    ) -> Box<dyn crate::codec::StreamDecoder> {
+        Box::new(decode::OpenAiDecoder::new(state))
+    }
+}
 use crate::codec::{CodecHttpRequest, CodecInput, CodecRequest};
 use omni_ir::{
     deep,
