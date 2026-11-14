@@ -1,6 +1,27 @@
 # B3 OpenAI / Codex
 
-Status: **step 3 BLOCKED on public IR changes**, item 1 evidence committed `63b1aeaa`, atop `be5df952`. Stopped per explicit controller instruction: equality cannot be achieved with current public String/serde Value carriers. Items 2–5 pending; step 4 not started. Next: obtain approval/scope for lossless public stream/collected-value carriers and egress, then close item 1 using retained RED oracle. No approximation or production modification this turn.
+Status: **step 3 INCOMPLETE**. Item 1 parked under X1 by controller, disposition commit `01c1a3a3`. Item 2 rows committed `03667f76`, revealing a separate public Usage representation mismatch; not parked/accepted. Items 3–5 pending, step 4 not started. Next: controller decision on malformed output/cache counts (public f64 Usage cannot represent TS string/object/array/bool). No public IR or production changes made. Worktree clean.
+
+## Latest checkpoint: X1 disposition and malformed coercion
+- `01c1a3a3`: ignored reason exactly `parked: roadmap X1 (lossless UTF-16 stream text)`. Known difference: an upstream event containing an unpaired surrogate escape is dropped. Text/tool-arguments/native-item fixtures followed by valid completion succeed with missing content/empty input/empty native payload; they do NOT end in error. Dropped upstream error becomes premature-completion error. Library buffered renderers ignore errors; no gateway HTTP-path observation claimed. Updated `conformance/openai-lossless-blocker.md`.
+- `03667f76`: 61 new rows, first-run RED `coercion-first-red.log`. Index 9, nonstring delta 9, nonobject terminal response 9, missing item/type 7 all match. Usage 27: 19 match, eight remain RED. Full details in committed `conformance/openai-coercion.md`.
+- Actual failures: output_tokens and cached_tokens each as string "2", object {}, array [], boolean true. Frozen TS preserves raw values; Rust f64 Usage coerces to 2/NaN/0/1. Buffered totals can differ through JS concatenation/coercion. This is an existing shared IR exception, NOT X1 and NOT accepted as another parked difference. Retained `malformed_usage_matches_ts` ignored explicitly as unresolved; `--ignored` fails (`coercion-usage-red.log`).
+- Oracle correction: collecting JSON-round-tripped events converted NaN to null; now collects original TS events. Initial input_tokens={} buffer mismatch disappears. No product fix; no false claim of Rust equivalence on the eight remaining rows.
+
+### Current decoder corpus
+| Category | Rows | Status |
+|---|---:|---|
+| text/tools/reasoning/usage/terminal/errors/malformed |91|prior matching corpus|
+| coercion-index |9|equal|
+| coercion-delta |9|equal|
+| coercion-response |9|equal|
+| coercion-item |7|equal|
+| coercion-usage |27|19 equal, 8 RED|
+| Total main decoder corpus |152|144 equal ×3 chunkings (432 event,1296 buffered comparisons); 8 unresolved ×3|
+| raw invalid/truncated UTF-8 |2|equal ×3 (6 event,18 buffered)|
+| X1 lone-surrogate cases |4|parked RED ×3|
+
+Gates at checkpoint: full required three-crate test run **47 summaries, 217 passes including subprocess repetitions, 4 ignored** (`coercion-checkpoint-tests.log`). One additional ignore is unresolved malformed Usage; default green DOES NOT establish full parity. Strict all-target clippy passed (`coercion-checkpoint-clippy.log`), fmt/diff checks passed, all three tripwires passed. Builds incremental=0/dev+test debug=0. No new depth mutations or literal reclassification; previous tables below remain current for those items. Stop after committed item-2 evidence checkpoint; not step-3 completion.
 
 ## Latest: item 1 exact blocker evidence — 63b1aeaa
 Grep confirmed `jsjson::parse_js`, `JsValue` and `text::Text` exist, but public Delta Text/Thinking/ToolJson and StreamEvent Error.message still use String; native maps use serde Value. Collected TextBlock/ToolUseBlock/ProviderNativeBlock also use String/serde Value. A raw unpaired UTF-16 unit cannot inhabit these types. Parsing losslessly alone does not solve event equality or buffered answers. Full audit, TS emission table and continuation in committed `conformance/openai-lossless-blocker.md`.
