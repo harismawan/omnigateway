@@ -54,6 +54,10 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
                 if command.starts_with("db-") {
+                    if command == "db-restore" && positional.first().is_none_or(|id| id.is_empty())
+                    {
+                        return Err((2, "snapshot id is required".into()));
+                    }
                     database::run(&command, &flags).map_err(|e| (1, e))
                 } else if command == "status" {
                     status::run(&flags).map_err(|e| (1, e))

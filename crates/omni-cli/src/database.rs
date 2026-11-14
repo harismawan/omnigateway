@@ -23,6 +23,20 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
         }
     }
     let ctx = crate::context::resolve(flags)?;
+    if command == "db-restore" {
+        let running = crate::status::service_status(&ctx, flags)?;
+        if running["running"] == true {
+            let supervisor = running["supervisor"].as_str().unwrap_or("none");
+            let who = match running["pid"].as_f64() {
+                Some(pid) => format!("{supervisor}, pid {pid}"),
+                None => supervisor.to_string(),
+            };
+            return Err(format!(
+                "a gateway is running ({who}) against this installation; run omni stop first, or restore from the dashboard, which swaps the file behind its own quiesce latch"
+            ));
+        }
+        return Err("db restore is not yet available in the Rust CLI".into());
+    }
     let path = ctx.path.clone();
     if command == "db-vacuum" && !flags.contains_key("json") {
         eprintln!("compacting; the gateway's writes will block until this finishes…");

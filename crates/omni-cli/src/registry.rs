@@ -332,7 +332,7 @@ pub fn command_help(name: &str) -> String {
 pub fn implemented(name: &str) -> Option<String> {
     if matches!(
         name,
-        "db stats" | "db snapshots" | "db backup" | "db vacuum" | "db clear-bodies"
+        "db stats" | "db snapshots" | "db backup" | "db vacuum" | "db clear-bodies" | "db restore"
     ) {
         return Some(name.replace(' ', "-"));
     }

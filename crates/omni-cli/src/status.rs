@@ -1,8 +1,9 @@
 use serde_json::{Value, json};
 use std::{collections::HashMap, io::IsTerminal, process::Command};
-pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
-    let ctx = crate::context::resolve(flags)?;
-    let root = ctx.root.display().to_string();
+pub(crate) fn service_status(
+    ctx: &crate::context::Context,
+    flags: &HashMap<String, String>,
+) -> Result<Value, String> {
     let home = std::env::home_dir().unwrap_or_default();
     let unit = if flags.contains_key("system") {
         std::path::PathBuf::from("/etc/systemd/system/omnigateway.service")
@@ -66,6 +67,13 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             .unwrap_or_else(|| state.join("gateway.log").display().to_string());
         json!({"supervisor":if p.is_some(){"pidfile"}else{"none"},"running":p.is_some(),"pid":p,"state":null,"unitPath":null,"logFile":log})
     };
+    Ok(process)
+}
+
+pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
+    let ctx = crate::context::resolve(flags)?;
+    let root = ctx.root.display().to_string();
+    let process = service_status(&ctx, flags)?;
     let mut credentials = Vec::new();
     let mut lossless_credentials = Vec::new();
     let mut poll = 300_000.0;
