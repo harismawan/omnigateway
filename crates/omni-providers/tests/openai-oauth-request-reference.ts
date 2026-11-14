@@ -18,9 +18,10 @@ for(const stream of [false,true]) for(const [dialect,parse,body] of [
  rows.push({category:'three-dialects',dialect,client,model,codec:built.request,notes:built.degradations,state:built.decodeState});
 }
 const base={model:'pool',stream:false,messages:[{role:'user',content:[{type:'text',text:'hi'}]}]};
-function add(category:string, request:any, model:string, label:string) {
+function add(category:string, request:any, model:string, label:string, credential=credentials) {
+ const credentials=credential;
  const built=openaiCodec.buildRequest({request,model,credentials,requestId,requestStartedAt,fail:(c,m)=>new Error(c+':'+m)});
- rows.push({category,label,request,model,codec:built.request,notes:built.degradations,state:built.decodeState});
+ rows.push({category,label,request,model,credentials,codec:built.request,notes:built.degradations,state:built.decodeState});
 }
 for(const model of ['gpt-6-astra','gpt-5.5']) {
  for(const effort of ['none','minimal','low','medium','high','xhigh','max'])
@@ -65,4 +66,19 @@ for(const model of ['gpt-6-astra','gpt-6.1-sol','gpt-6.1-terra','gpt-6-sol','gpt
  const messages=[...base.messages,{role:'assistant',content:[{type:'providerNative',provider:'openai',blockType:'reasoning',data:{id:'discard',encrypted_content:'secret',internal_chat_message_metadata_passthrough:{bad:true}}},{type:'text',text:'answer'}]},{role:'user',content:[{type:'text',text:'next'}]},{role:'system',content:[{type:'text',text:'operator'}]}];
  add('lite-catalog',{...base,messages,...(prefix?{system:[{type:'text',text:'Unicode 日本語'}],tools:[{kind:'portable',name:'read',inputSchema:{type:'object'}}]}:{})},model,`prefix/${prefix}`);
 }
+const branchCases=[
+ ['baseline',{}],
+ ['controls',{system:[{type:'text',text:'instructions'}],maxTokens:123,temperature:0.4,reasoning:{mode:'betweenTools'},tools:[{kind:'portable',name:'read',inputSchema:{type:'object'}}]}],
+ ['choice',{toolChoice:{type:'tool',name:'read'},tools:[]}],
+ ['merge',{vendor:{openai:{text:{format:{type:'json_object'}},reasoning:{effort:'high'},client_metadata:{foreign:'secret'},input:[],instructions:'vendor instructions',tools:[],max_output_tokens:9,temperature:0.7,store:true,stream:false,parallel_tool_calls:true}}}],
+ ['scalar-merge',{vendor:{openai:{text:7,reasoning:null,client_metadata:null,include:[]}}}],
+ ['tier',{vendor:{openai:{service_tier:'priority',include:['reasoning.encrypted_content']}}}],
+ ['bad-tier',{vendor:{openai:{service_tier:'bad;tier'}}}],
+ ['invalid-effort',{vendor:{openai:{reasoning:{effort:'invalid'}}}}],
+] as const;
+for(const model of ['gpt-6-astra','gpt-5.5']) for(const oauth of [true,false]) for(const [name,patch] of branchCases) {
+ add('oauth-branches',{...base,...patch},model,`${oauth}/${name}`,{apiKey:oauth?null:'sk-oa',accessToken:oauth?'oauth-token':null,providerData:{accountId:'account',idSalt:'a'.repeat(64)}} as any);
+}
+for(const model of ['bad model','日本語']) add('oauth-branches',base,model,'routing-omitted');
+for(const accountId of [undefined,7]) add('oauth-branches',base,'gpt-6-astra','account-omitted',{...credentials,providerData:{accountId}} as any);
 console.log(JSON.stringify(rows));

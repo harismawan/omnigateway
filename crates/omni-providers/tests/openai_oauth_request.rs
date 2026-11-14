@@ -16,7 +16,7 @@ fn oauth_codec_matches_frozen_ts() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 174);
+    assert_eq!(rows.as_array().unwrap().len(), 210);
     for (i, row) in rows.as_array().unwrap().iter().enumerate() {
         let request = if let Some(dialect) = row["dialect"].as_str() {
             let surface = match dialect {
@@ -37,10 +37,22 @@ fn oauth_codec_matches_frozen_ts() {
         } else {
             serde_json::from_value(row["request"].clone()).unwrap()
         };
-        let credentials = Credentials {
-            access_token: Some("oauth-token".into()),
-            provider_data: serde_json::from_str(r#"{"accountId":"account"}"#).unwrap(),
-            ..Default::default()
+        let credentials = if row.get("credentials").is_some() {
+            Credentials {
+                api_key: row["credentials"]["apiKey"].as_str().map(str::to_owned),
+                access_token: row["credentials"]["accessToken"]
+                    .as_str()
+                    .map(str::to_owned),
+                provider_data: serde_json::from_value(row["credentials"]["providerData"].clone())
+                    .unwrap(),
+                ..Default::default()
+            }
+        } else {
+            Credentials {
+                access_token: Some("oauth-token".into()),
+                provider_data: serde_json::from_str(r#"{"accountId":"account"}"#).unwrap(),
+                ..Default::default()
+            }
         };
         let got = OpenAiCodec
             .build_request(&CodecInput {
