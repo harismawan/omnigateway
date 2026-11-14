@@ -2474,9 +2474,36 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         return { fixture, identities, check, attacks, callers };
     };
     let mutationAck: number | undefined;
+    const quotaSortEdges = async (fixture:Database, check:ReturnType<typeof clientFixture> extends Promise<infer T> ? T extends {check:infer C} ? C : never : never, callers:[string,string|null][], history:boolean) => {
+      const table=history?"quota_samples":"quota_windows";
+      const route=history?"/api/client/quota/history":"/api/client/quota";
+      const cases = [
+        {name:"singleton", providers:["a"], bad:0,status:200},
+        {name:"short circuit",providers:["a","b"],bad:1,status:200},
+        {name:"reached",providers:["a","a"],bad:1,status:500},
+        {name:"three bad argument",providers:["b","a","b"],bad:0,status:200},
+        {name:"three bad receiver",providers:["b","a","b"],bad:2,status:500},
+      ];
+      for(const c of cases) {
+        fixture.run(`DELETE FROM ${table}`);
+        for(const [i,provider] of c.providers.entries()) {
+          fixture.run("INSERT OR REPLACE INTO credentials(id,provider,label,auth_type,enabled,tier,weight,created_at,updated_at) VALUES(?,?,?,'api_key',1,1,1,1,1)",[`sort-${i}`,provider,"x"]);
+          if(i===c.bad) fixture.run("UPDATE credentials SET label=X'3132' WHERE id=?",[`sort-${i}`]);
+          if(history) fixture.run(`INSERT INTO ${table}(credential_id,window_type,used,limit_value,observed_at) VALUES(?,'daily',1,10,?)`,[`sort-${i}`,1794612600000+i]);
+          else fixture.run(`INSERT INTO ${table}(credential_id,window_type,starts_at,used,limit_value,observed_at) VALUES(?,'daily',0,1,10,?)`,[`sort-${i}`,1794612600000+i]);
+        }
+        for(const [who,cookie] of callers) {
+          const answer=await exchange({target:route,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]});
+          check(`sort ${c.name} ${who}`,answer,["client-A","client-B","client-C"].includes(who)?c.status:401,["providerDataSecretCanary"]);
+        }
+      }
+      fixture.run(`DELETE FROM ${table}`);
+      fixture.run("DELETE FROM credentials WHERE id LIKE 'sort-%'");
+    };
     for (const step of cfg.steps()) {
       if (step.kind === "client-history") {
         const { fixture, check, attacks, callers } = await clientFixture();
+        await quotaSortEdges(fixture,check,callers,true);
         const secrets = ["history-distinct-access-token", "history-distinct-refresh-token", "history-distinct-api-key"];
         const metadataCanary = "providerDataSecretCanary";
         const queries = [...attacks,"since=","until=bad","since=-1","until=-1","since=1.5&until=2.5","since=1e100","until=1e100","since=Infinity&until=NaN","since=9000000000001&until=0","since=0&since=1e100","until=0&until=1e100","since=%20&until=%20"];
@@ -2558,6 +2585,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       if (step.kind === "client-quota") {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
+        await quotaSortEdges(fixture,check,callers,false);
         const secrets = ["quota-distinct-access-token", "quota-distinct-refresh-token", "quota-distinct-api-key"];
         fixture.run("DELETE FROM quota_windows");
         const probe = async (phase:string, expectedStatus=200) => {
