@@ -1,4 +1,5 @@
 {
+  "db-clear-bodies": {"exit 1":4,"environment OMNI_ENCRYPTION_KEY":1,"exit 0":6},
   "db-vacuum": {"exit 1":2,"environment OMNI_ENCRYPTION_KEY":2,"exit 0":2},
   "db-backup": {"exit 1":5,"environment unable to open database":1,"environment OMNI_ENCRYPTION_KEY":2,"exit 0":17},
   "settings": { "exit 0": 210, "exit 1": 68, "exit 2": 70 },

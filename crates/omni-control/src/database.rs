@@ -1,4 +1,80 @@
 //! File-backed database maintenance shared by operator front ends.
+pub fn clear_bodies(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+    now: i64,
+) -> Result<serde_json::Value, String> {
+    let rows = conn
+        .prepare("SELECT request_id, rel_path FROM request_bodies WHERE at < ?")
+        .map_err(|e| e.to_string())?
+        .query_map([now], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (_, rel) in &rows {
+        if let Some(rel) = rel {
+            delete_artifact(dir, rel);
+        }
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    for (id, _) in &rows {
+        tx.execute("DELETE FROM request_bodies WHERE request_id = ?", [id])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    let mut files = Vec::new();
+    list_artifacts(dir, dir, &mut files);
+    let mut orphans = 0;
+    for rel in files {
+        let claimed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM request_bodies WHERE rel_path = ?",
+                [&rel],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if claimed == 0 {
+            delete_artifact(dir, &rel);
+            orphans += 1;
+        }
+    }
+    Ok(serde_json::json!({"removed":rows.len(),"orphans":orphans}))
+}
+
+fn delete_artifact(dir: &std::path::Path, rel: &str) {
+    let full = dir.join(rel);
+    if std::fs::remove_file(&full).is_err() {
+        return;
+    }
+    let mut parent = full.parent();
+    while let Some(path) = parent {
+        if path == dir || !path.starts_with(dir) || std::fs::remove_dir(path).is_err() {
+            break;
+        }
+        parent = path.parent();
+    }
+}
+
+fn list_artifacts(root: &std::path::Path, dir: &std::path::Path, files: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            list_artifacts(root, &entry.path(), files);
+        } else if kind.is_file()
+            && let Ok(rel) = entry.path().strip_prefix(root)
+        {
+            files.push(rel.to_string_lossy().into_owned());
+        }
+    }
+}
+
 pub fn vacuum(
     conn: &rusqlite::Connection,
     path: &std::path::Path,

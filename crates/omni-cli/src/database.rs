@@ -1,12 +1,51 @@
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path};
 pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, String> {
+    if command == "db-clear-bodies" && !flags.contains_key("yes") {
+        use std::io::{BufRead, IsTerminal, Write};
+        let question = "delete every captured body? there is no snapshot of them";
+        if !std::io::stdin().is_terminal() {
+            return Err(format!("{question} — refusing without --yes"));
+        }
+        eprint!("{question} [y/N] ");
+        std::io::stderr().flush().map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        eprintln!();
+        if !matches!(
+            omni_ir::js::trim(&line).to_lowercase().as_str(),
+            "y" | "yes"
+        ) {
+            return Err("cancelled".into());
+        }
+    }
     let ctx = crate::context::resolve(flags)?;
     let path = ctx.path.clone();
     if command == "db-vacuum" && !flags.contains_key("json") {
         eprintln!("compacting; the gateway's writes will block until this finishes…");
     }
     let store = ctx.open()?;
+    if command == "db-clear-bodies" {
+        let result = omni_control::database::clear_bodies(
+            store.connection(),
+            &path
+                .parent()
+                .ok_or("database has no parent")?
+                .join("request_bodies"),
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+        return Ok(if flags.contains_key("json") {
+            omni_ir::jsjson::to_string_pretty(&result)
+        } else {
+            format!(
+                "removed                 {}\norphaned files removed  {}",
+                result["removed"], result["orphans"]
+            )
+        });
+    }
     if command == "db-vacuum" {
         let result = omni_control::database::vacuum(store.connection(), &path, &|| {
             chrono::Utc::now().timestamp_millis()
