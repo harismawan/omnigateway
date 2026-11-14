@@ -61,6 +61,8 @@ for (const name of Object.keys(COMMANDS)) {
     name === "status" ||
     name === "db stats" ||
     name === "db snapshots" ||
+    name === "db backup" ||
+    name === "db vacuum" ||
     name.startsWith("settings ") ||
     (name.startsWith("models ") && name !== "models dry-run") ||
     name.startsWith("plugin ")
