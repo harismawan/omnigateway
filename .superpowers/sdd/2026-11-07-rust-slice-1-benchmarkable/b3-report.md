@@ -1,6 +1,39 @@
 # B3 OpenAI / Codex
 
-Status: **step 3 INCOMPLETE**. Item 1 parked under X1 by controller, disposition commit `01c1a3a3`. Item 2 rows committed `03667f76`, revealing a separate public Usage representation mismatch; not parked/accepted. Items 3–5 pending, step 4 not started. Next: controller decision on malformed output/cache counts (public f64 Usage cannot represent TS string/object/array/bool). No public IR or production changes made. Worktree clean.
+Status: **step 3 complete, with the two X1 differences**, at the API-key library boundary. Items 3–5 committed, worktree clean at `50d24918`. Next: **step 4: Codex identity/lite, OAuth mode and zstd request body** (decompressed bytes exact, header/order exact, valid zstd; compressed bytes need not match, report whether they do). Gateway registration/startup initialization/catalog/lifecycle/e2e remain step 5. No shared IR/public Usage changes.
+
+## Final step-3 completion
+- Item 2 disposition: controller parked nonnumeric counts under X1; exact ignored reason now `parked: roadmap X1 (non-numeric upstream usage counts)`.
+- Item 3 `ae2bebbf`: decoder depth audit in `conformance/openai-depth.md`. Arguments/unknown/error scope-removal mutations each PASS; logs `decode-noscope-{arguments,unknown,error}.log`. Restored production source unchanged. Structurally safe explanations: arguments remain String, collector owns independent parse scope and iterative ToolUseBlock release; unknown payload parsed into Owned and never retained; error coercion borrows JSON through stack-growing js::to_string. These are NOT claimed as demonstrated mutation failures. Prior native plain-clone mutation SIGSEGV remains the observed failing mutation (`decode-native-clone-red.log`). Restored suite passed `depth-restored-final.log`.
+- Item 4 `21b35eda`: all 27 former later-decoder tests mapped in `conformance/openai-literals.md`, six explicit decoder-literal-edge streams added (duplicate message/reasoning done, DONE after completion, in_progress, metadata, keepalive). No original frozen test is parked: X1 tests are additional malformed-value cases. Targeted pass `decoder-literals.log`.
+- Item 5 `50d24918`: OpenAiApiKeyCodec implements ProviderCodec, bool state from the same request reaches OpenAiDecoder. Eight real frozen codec comparisons (four include shapes × streaming/buffered), body/ordered headers/events exact. RED absent API `api-codec-red.log`; GREEN `api-codec-green.log`. No OAuth behavior or gateway registration claimed.
+
+### Final corpus counts
+| Decoder category | Rows | Result |
+|---|---:|---|
+| ordinary text |1|equal|
+| tools single/parallel/interleaved |4|equal|
+| reasoning native/non-native |2|equal|
+| usage variants |4|equal|
+| terminal combinations |40|equal|
+| upstream errors |28|equal|
+| malformed/order/long-line/missing terminal |12|equal|
+| decoder-literal-edges |6|equal|
+| malformed indexes/delta/response/item |34|equal|
+| malformed usage |27|19 equal, 8 parked X1|
+| Main total |158|150 equal × 3 chunkings: 450 event and 1350 buffered comparisons; 8 parked ×3|
+| invalid/truncated UTF-8 |2|6 event +18 buffered equal|
+| lone surrogates |4|parked X1 ×3|
+| IR→codec→decoder |8|equal|
+
+Frozen inventory totals: 121 declarations = 4 ported +66 named differential +51 later OAuth/lite/fingerprint. openai.test.ts: 49 =47 differential +2 later; CacheKey:19 =1 ported +18 differential; Codec:7 =3 ported +1 differential +3 later; Fingerprint:46 later. Request corpus remains 247 rows.
+
+### Known differences from TS / remaining concerns
+1. **X1 lossless text:** upstream JSON events containing unpaired surrogate escapes are dropped. Dropped content followed by valid completion can succeed with missing text/arguments/native data; dropped upstream error becomes premature-completion error. Exact corpus in openai-lossless-blocker.md; no gateway HTTP-path observation claimed.
+2. **X1 nonnumeric usage:** eight malformed output/cache count rows: Rust reports numeric 2/0/1 or no numeric value (NaN serialized null), where TS forwards raw string/object/array/bool. Client usage bytes and logged count differ for that request. This disposition is controller-approved; ignored RED remains. Details openai-coercion.md.
+3. Explicit JSON depth policy 40,000 differs from unbounded frozen in-process TS; malformed identity/state memory-budget hardening remains a broader gateway concern (current flat indexes use vectors, no added identity cap). No performance claim. Gateway success/failover/cancellation depth lifecycle remains step 5.
+
+Final gates: `cargo test --offline -p omni-providers -p omni-ir -p omni-dialects` passed with **48 summaries, 218 passes including subprocess repetitions, 4 ignored, 0 failures** (`step3-final-tests.log`). Two ignores are parked X1 comparisons; default green does not mean they match. Strict all-target clippy passed (`step3-final-clippy.log`); fmt/diff and all three tripwires pass. All builds incremental=0/dev+test debug=0. No release binary/e2e this increment. Earlier failure chronology preserved below: absent decoder API RED, unknown-event text mutation RED, native clone SIGSEGV, surrogate RED, usage RED (plus corrected oracle NaN round-trip), codec absence RED. No new behavioral mismatch in final six literal-edge/eight codec rows.
 
 ## Latest checkpoint: X1 disposition and malformed coercion
 - `01c1a3a3`: ignored reason exactly `parked: roadmap X1 (lossless UTF-16 stream text)`. Known difference: an upstream event containing an unpaired surrogate escape is dropped. Text/tool-arguments/native-item fixtures followed by valid completion succeed with missing content/empty input/empty native payload; they do NOT end in error. Dropped upstream error becomes premature-completion error. Library buffered renderers ignore errors; no gateway HTTP-path observation claimed. Updated `conformance/openai-lossless-blocker.md`.
