@@ -250,11 +250,14 @@ mod tests {
         );
         assert!(with_exclusive("a vacuum", || Err::<(), _>("failed".into())).is_err());
         assert!(with_exclusive("a restore", || Ok(())).is_ok());
-        let _ = std::panic::catch_unwind(|| {
-            with_exclusive("a vacuum", || -> Result<(), String> {
-                panic!("operation panicked")
+        assert!(
+            std::panic::catch_unwind(|| {
+                with_exclusive("a vacuum", || -> Result<(), String> {
+                    panic!("operation panicked")
+                })
             })
-        });
+            .is_err()
+        );
         assert!(with_exclusive("a restore preview", || Ok(())).is_ok());
     }
     fn live_bytes(path: &Path) -> Vec<Option<Vec<u8>>> {
