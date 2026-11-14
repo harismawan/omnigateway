@@ -1,6 +1,10 @@
 # Benchmark matrix report
 
 ## Fix round 2
+Verifier shutdown follow-up → `c4d0a286` → real repeated-signal test failed first (`/tmp/opencode/bench-fix3/signal-before.log`); report-collector check failed first (`report-before.log`); persistent SIGTERM/SIGINT handlers emit one report, harness stops once and missing reports fail/null the scenario.
+Bound: existing 10-second request deadline covers connection, headers and body; wedged-server check reported one timeout violation (`timeout-check.log`). Silent-stub integration retained both failed/null scenarios and full JSON (`silent.json`, `silent-check.log`). All paths here use `/tmp/opencode/bench-fix3/`.
+Final-commit reruns: reviewer's 600ms delayed reproduction supported on both gateways; TS verifier 3 started/3 completed/6 skipped/0 violations, Rust 4/4/6/0. Both custom-chat selections 8/8 supported; twelve faults failed/null (`validation.log`). All 17 gateway scratch roots removed.
+32 tests passed; core typecheck and changed-file lint passed (`tests-final.log`, `typecheck-final.log`, `lint-final.log`); worktree clean. Functional only; no performance conclusions. Reviewer independently closed the generated-key exact-value audit gap (`bench-matrix-recheck.md`).
 Functional checks passed; no performance conclusions on this shared build host. Evidence root: `/tmp/opencode/bench-fix2/` (paths below relative).
 | Finding | Commit | Failing check first | Evidence |
 |---|---|---|---|
