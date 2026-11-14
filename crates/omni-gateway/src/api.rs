@@ -57,6 +57,7 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
         (&Method::POST, "/api/setup") => Some(Route::Setup),
         (&Method::POST, "/api/login") => Some(Route::Login),
         (&Method::POST, "/api/logout") => Some(Route::Logout),
+        (&Method::POST, "/api/client/logout") => Some(Route::Logout),
         (&Method::POST, "/api/client/login") => Some(Route::ClientLogin),
         _ => crate::admin_routes::route(method, path).map(Route::Admin),
     }
