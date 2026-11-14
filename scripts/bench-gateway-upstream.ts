@@ -103,6 +103,59 @@ function stream(script: Script): ReadableStream<Uint8Array> {
   });
 }
 
+function responses(script: Script): Uint8Array {
+  const id = "resp_bench";
+  const item = {
+    id: "msg_bench",
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: "lorem ipsum ".repeat(script.chunks), annotations: [] }],
+  };
+  const response = {
+    id,
+    object: "response",
+    model: script.model,
+    status: "completed",
+    output: [item],
+    usage: {
+      input_tokens: 64,
+      output_tokens: script.chunks * 2,
+      total_tokens: 64 + script.chunks * 2,
+    },
+  };
+  const event = (type: string, rest: object) =>
+    encoder.encode(`event: ${type}\ndata: ${JSON.stringify({ type, ...rest })}\n\n`);
+  const delta = event("response.output_text.delta", {
+    item_id: item.id,
+    output_index: 0,
+    content_index: 0,
+    delta: "lorem ipsum ",
+  });
+  return Buffer.concat([
+    event("response.created", { response: { ...response, status: "in_progress", output: [] } }),
+    event("response.output_item.added", {
+      output_index: 0,
+      item: { ...item, status: "in_progress", content: [] },
+    }),
+    event("response.content_part.added", {
+      item_id: item.id,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+    }),
+    ...Array.from({ length: script.chunks }, () => delta),
+    event("response.output_text.done", {
+      item_id: item.id,
+      output_index: 0,
+      content_index: 0,
+      text: item.content[0]?.text,
+    }),
+    event("response.output_item.done", { output_index: 0, item }),
+    event("response.completed", { response }),
+  ]);
+}
+
 Bun.serve({
   port,
   hostname: values.host,
@@ -111,7 +164,10 @@ Bun.serve({
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === "/health") return new Response("ok");
-    if (request.method !== "POST" || !path.endsWith("/chat/completions")) {
+    if (
+      request.method !== "POST" ||
+      !(path.endsWith("/chat/completions") || path.endsWith("/responses"))
+    ) {
       return new Response("not found", { status: 404 });
     }
     let body: unknown;
@@ -127,7 +183,7 @@ Bun.serve({
         { status: 400 },
       );
     }
-    return new Response(stream(script), {
+    return new Response(path.endsWith("/responses") ? responses(script) : stream(script), {
       headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
     });
   },

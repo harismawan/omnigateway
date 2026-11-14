@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import { setupViaApi as apiSetup, smoke as smokeRequests, recoveryVerdict, sampleRecovery, RECOVERY_LATENESS_MS, type RecoverySample } from "./bench-probe";
 /**
  * Black-box latency, throughput, CPU and memory benchmark for the gateway.
  *
@@ -94,6 +93,22 @@ import { cpus, release, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Subprocess } from "bun";
+import {
+  type MatrixMeta,
+  matches,
+  matrixScenarios,
+  matrixSmoke,
+  providers,
+  type Verdict,
+} from "./bench-matrix";
+import {
+  setupViaApi as apiSetup,
+  RECOVERY_LATENESS_MS,
+  type RecoverySample,
+  recoveryVerdict,
+  sampleRecovery,
+  smoke as smokeRequests,
+} from "./bench-probe";
 
 const { values: flags } = parseArgs({
   options: {
@@ -108,6 +123,7 @@ const { values: flags } = parseArgs({
     streams: { type: "string", default: "1000" },
     boots: { type: "string", default: "5" },
     only: { type: "string" },
+    matrix: { type: "boolean", default: false },
     label: { type: "string" },
     cluster: { type: "boolean", default: false },
     replicas: { type: "string", default: "1" },
@@ -139,6 +155,9 @@ const ENCRYPTION_KEY = "bench-only-encryption-key-0123456789";
 const GATEWAY_PORT = 18200;
 const UPSTREAM_PORT = 18100;
 const CLUSTER = flags.cluster === true;
+if (flags.matrix && CLUSTER) throw Error("matrix cluster setup is not implemented");
+if (flags.matrix && !matrixScenarios().some((s) => matches(s.name, flags.only)))
+  throw Error("--only matched no matrix scenarios");
 const REPLICAS = CLUSTER ? Number(flags.replicas) : 1;
 const ADMIN_PASSWORD = "bench-admin-password";
 const PORTS = Array.from({ length: REPLICAS }, (_, i) => GATEWAY_PORT + i);
@@ -490,7 +509,11 @@ async function waitHealthy(timeoutMs: number, base = BASE): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
     try {
-      const res = await fetch(`${base}/health`, {signal: AbortSignal.timeout(Math.max(1, Math.min(1000, Math.ceil(deadline - performance.now()))))});
+      const res = await fetch(`${base}/health`, {
+        signal: AbortSignal.timeout(
+          Math.max(1, Math.min(1000, Math.ceil(deadline - performance.now()))),
+        ),
+      });
       await res.body?.cancel();
       if (res.ok) return true;
     } catch {
@@ -1070,10 +1093,15 @@ async function runScenario(
   // settle also lets the writer flush the scenario's last batch (≤ 200 ms).
   let recoverySamples: RecoverySample[] = [];
   if (scenario.clientTimeout !== undefined) {
-    recoverySamples = await sampleRecovery(recoveryStart, () => performance.now(), sleep, () => {
-      const sample = fleetSample(pids);
-      return sample === null ? null : sample.rssKb / 1024;
-    });
+    recoverySamples = await sampleRecovery(
+      recoveryStart,
+      () => performance.now(),
+      sleep,
+      () => {
+        const sample = fleetSample(pids);
+        return sample === null ? null : sample.rssKb / 1024;
+      },
+    );
   } else {
     await sleep(1000);
   }
@@ -1134,7 +1162,10 @@ async function runScenario(
     rssEndMb: (settled?.rssKb ?? 0) / 1024,
     recoverySamples,
     recoveryLatenessToleranceMs: RECOVERY_LATENESS_MS,
-    recoveryVerdict: scenario.clientTimeout === undefined ? null : recoveryVerdict(before === null ? null : before.rssKb / 1024, recoverySamples, crashed),
+    recoveryVerdict:
+      scenario.clientTimeout === undefined
+        ? null
+        : recoveryVerdict(before === null ? null : before.rssKb / 1024, recoverySamples, crashed),
     healthyAfter,
     crashed,
     rows,
@@ -1194,14 +1225,73 @@ const NEVER_DENY = {
  * operator of a cluster has as well.
  */
 async function setupViaApi(): Promise<Record<"plain" | "limited", string>> {
-  return apiSetup(BASE, ADMIN_PASSWORD, {
-    provider: "custom", apiKey: "sk-bench-upstream", label: "bench upstream",
-    endpointId: "bench", endpointLabel: "Bench", origin: `http://127.0.0.1:${UPSTREAM_PORT}`,
-    protocol: "chat_completions",
-  }, Object.fromEntries(Object.entries(BENCH_MODELS).map(([id, upstream]) => [id, benchModel(id, upstream)])), NEVER_DENY);
+  return apiSetup(
+    BASE,
+    ADMIN_PASSWORD,
+    {
+      provider: "custom",
+      apiKey: "sk-bench-upstream",
+      label: "bench upstream",
+      endpointId: "bench",
+      endpointLabel: "Bench",
+      origin: `http://127.0.0.1:${UPSTREAM_PORT}`,
+      protocol: "chat_completions",
+    },
+    Object.fromEntries(
+      Object.entries(BENCH_MODELS).map(([id, upstream]) => [id, benchModel(id, upstream)]),
+    ),
+    NEVER_DENY,
+  );
 }
 
 async function setup(): Promise<Record<"plain" | "limited", string>> {
+  if (flags.matrix) {
+    if (CLUSTER) throw Error("matrix cluster setup is not implemented");
+    for (const provider of providers) {
+      await cli(
+        [
+          "credentials",
+          "add-key",
+          provider.provider,
+          "--label",
+          provider.id,
+          "--endpoint-id",
+          provider.id,
+          "--endpoint-label",
+          provider.id,
+          "--origin",
+          provider.origin,
+          "--protocol",
+          provider.protocol,
+        ],
+        "sk-bench-upstream\n",
+      );
+      for (const chunks of [1, 2000]) {
+        const id = `${provider.id}-c${chunks}`;
+        const model = {
+          id,
+          strategy: "priority",
+          isAlias: false,
+          targets: [
+            {
+              provider: provider.provider,
+              endpointId: provider.id,
+              model: `mock-c${chunks}-d0`,
+              tier: 1,
+              weight: 1,
+              costPerMTok: { input: 1, output: 2 },
+              capabilities: { tools: true, images: true, reasoning: true },
+            },
+          ],
+        };
+        const file = join(root, `${id}.model.json`);
+        writeFileSync(file, JSON.stringify(model));
+        await cli(["models", "put", id, "-f", file]);
+      }
+    }
+    const plain = (await cli(["keys", "create", "--label", "bench plain"])) as { key: string };
+    return { plain: plain.key, limited: plain.key };
+  }
   await cli(
     [
       "credentials",
@@ -1244,6 +1334,28 @@ async function setup(): Promise<Record<"plain" | "limited", string>> {
 }
 
 function startUpstreams(): void {
+  if (flags.matrix) {
+    const upstreams = new Map(providers.map((provider) => [provider.origin, provider.script]));
+    for (const [origin, script] of upstreams) {
+      for (let i = 0; i < 2; i += 1) {
+        const proc = Bun.spawn(
+          [
+            "taskset",
+            "-c",
+            flags["upstream-cpus"] ?? "4-5",
+            process.execPath,
+            join(import.meta.dir, script),
+            "--port",
+            new URL(origin).port,
+          ],
+          { stdout: "ignore", stderr: "inherit" },
+        );
+        children.push(proc);
+        upstreamPids.push(proc.pid);
+      }
+    }
+    return;
+  }
   // Two copies on one port: the upstream must never be the ceiling.
   for (let i = 0; i < 2; i += 1) {
     const proc = Bun.spawn(
@@ -1321,15 +1433,57 @@ async function main(): Promise<void> {
   const pids = gateways.map((g) => g.pid);
   await sleep(2000);
   const idle = fleetSample(pids);
-  await smoke(keys.plain);
+  if (!flags.matrix) await smoke(keys.plain);
 
   const only = flags.only?.split(",");
   const results: ScenarioResult[] = [];
-  for (const scenario of scenarios()) {
-    if (only !== undefined && !only.includes(scenario.name)) continue;
+  const matrixResults: (MatrixMeta & Verdict & { name: string; metrics: ScenarioResult | null })[] =
+    [];
+  for (const scenario of flags.matrix ? matrixScenarios() : scenarios()) {
+    if (
+      flags.matrix
+        ? !matches(scenario.name, flags.only)
+        : only !== undefined && !only.includes(scenario.name)
+    )
+      continue;
+    const meta = flags.matrix ? (scenario as Scenario & MatrixMeta) : null;
+    if (meta) {
+      const verdict = await matrixSmoke(BASE, keys.plain, meta);
+      if (verdict.classification !== "supported") {
+        matrixResults.push({
+          name: scenario.name,
+          provider: meta.provider,
+          ingress: meta.ingress,
+          mode: meta.mode,
+          ...verdict,
+          metrics: null,
+        });
+        console.error(`${scenario.name}: ${verdict.classification}: ${verdict.reason}`);
+        continue;
+      }
+    }
     console.error(`running ${scenario.name}…`);
     const result = await runScenario(scenario, pids, keys);
     results.push(result);
+    if (meta) {
+      const failed =
+        shed(result) ||
+        result.requests === 0 ||
+        result.rows === null ||
+        result.crashed > 0 ||
+        !result.healthyAfter ||
+        Object.keys(result.errors).length > 0 ||
+        Object.keys(result.status).some((status) => status !== "200");
+      matrixResults.push({
+        name: scenario.name,
+        provider: meta.provider,
+        ingress: meta.ingress,
+        mode: meta.mode,
+        classification: failed ? "failed" : "supported",
+        reason: failed ? "load integrity check failed" : "shape and load integrity passed",
+        metrics: result,
+      });
+    }
     // A crash is a result, recorded above; the next scenario still needs a
     // fleet to measure, so a dead replica is replaced before it starts.
     for (let i = 0; i < gateways.length; i += 1) {
@@ -1412,13 +1566,24 @@ async function main(): Promise<void> {
     cliKeysList: cli,
     calibration,
     writerDropped,
-    scenarios: results,
+    scenarios: flags.matrix ? matrixResults : results,
   };
 
   const json = `${JSON.stringify(output, null, 2)}\n`;
   if (flags.out !== undefined) writeFileSync(resolve(REPO, flags.out), json);
   else process.stdout.write(json);
-  console.error(markdown(output));
+  if (flags.matrix) {
+    for (const provider of providers) {
+      console.error(
+        `\n### ${provider.id}\n| scenario | result | req/s | p50 | p99 | CPU ms/req | RSS MiB |\n|---|---|---:|---:|---:|---:|---:|`,
+      );
+      for (const r of matrixResults.filter((r) => r.provider === provider.id))
+        console.error(
+          `| ${r.name} | ${r.classification}: ${r.reason} | ${r.metrics?.rps ?? "–"} | ${r.metrics?.latencyMs.p50 ?? "–"} | ${r.metrics?.latencyMs.p99 ?? "–"} | ${r.metrics?.cpuMsPerRequest ?? "–"} | ${r.metrics?.rssPeakMb ?? "–"} |`,
+        );
+    }
+    if (matrixResults.some((r) => r.classification === "failed")) process.exitCode = 1;
+  } else console.error(markdown({ ...output, scenarios: results }));
 }
 
 /**
