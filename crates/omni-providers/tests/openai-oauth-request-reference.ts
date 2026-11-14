@@ -87,4 +87,11 @@ for(const providerData of [{},{accountId:'account'},{installationId,idSalt:'a'.r
  {installationId:installationId.toUpperCase(),idSalt:'0'.repeat(64)},{installationId:'',idSalt:'a'.repeat(63)},
  {installationId:installationId+'\n',idSalt:'a'.repeat(64)+'\n'}])
  for(const model of ['gpt-6-astra','gpt-5.5']) add('identity',base,model,JSON.stringify(providerData),{...credentials,providerData} as any);
+for(const idSalt of [undefined,'a'.repeat(64)]) for(const identity of [{},{conversationId:'conversation'},{vendor:{openai:{prompt_cache_key:'caller-key'}}},{vendor:{openai:{prompt_cache_key:installationId}}}]) {
+ for(const change of ['original','append','opening','system','later']) {
+  const messages=[{role:'user',content:[{type:'text',text:change==='opening'?'changed':'hi'}]},{role:'assistant',content:[{type:'text',text:change==='later'?'changed':'answer'}]}];
+  if(change==='append') messages.push({role:'user',content:[{type:'text',text:'next'}]});
+  add('cache-pairs',{...base,...identity,messages,system:[{type:'text',text:change==='system'?'changed':'instructions'}]},'gpt-6-astra',`${idSalt?'salted':'unsalted'}/${JSON.stringify(identity)}/${change}`,{...credentials,providerData:{accountId:'account',idSalt}} as any);
+ }
+}
 console.log(JSON.stringify(rows));
