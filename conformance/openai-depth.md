@@ -1,5 +1,30 @@
 # OpenAI request depth evidence (A1)
 
+## Decoder depth (step 3 item 3)
+
+Four 39,990-level/2 MiB subprocess fixtures in `openai_decode::decoder_depth`
+build events, collect and drop them. Native plain-clone mutation terminates
+with SIGSEGV (`decode-native-clone-red.log`, prior checkpoint).
+Scope removal alone passes arguments, unknown and error (`decode-noscope-
+arguments.log`, `decode-noscope-unknown.log`, `decode-noscope-error.log`).
+Mutation restored. These three are structurally safe without that outer scope:
+
+- Function argument payload is a String, not a recursive JSON owner. Collector
+  parse_tool_json supplies its own scope and stack-growing parser; ToolUseBlock
+  releases the parsed input iteratively. Removing decoder scope cannot remove
+  these independent collector protections. No clone of argument JSON occurs
+  in the decoder. This is not a mutation-proven collector protection claim.
+- Unknown output payload is ignored; parser grows its stack, parsed Owned
+  releases iteratively, and decoder retains no payload. Removing outer scope
+  leaves those helpers intact; no recursive decoder operation remains.
+- Error-message coercion borrows parsed JSON; js::to_string guards array
+  recursion with deep::grow. Result is String; parsed Owned releases iteratively.
+  No retained arbitrary JSON and no recursive unguarded decoder drop.
+
+No additional unsafe scratch ownership copies were introduced merely to force
+failure. Passing removal results and helper-based structural reasoning are
+reported separately from the native mutation's observed process failure.
+
 `openai_depth.rs` constructs shallow typed IR, then moves in 39,990 nested
 arrays. Each case builds and drops the result and request on a 2 MiB thread in
 an isolated process. Payload size assertions distinguish retained from discarded

@@ -84,7 +84,7 @@ fn frozen_decoder_chunkings() {
 }
 
 #[test]
-#[ignore = "unresolved: malformed usage requires public Usage representation decision; retained RED"]
+#[ignore = "parked: roadmap X1 (non-numeric upstream usage counts)"]
 fn malformed_usage_matches_ts() {
     compare_decoder(true);
 }

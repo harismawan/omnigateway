@@ -1,5 +1,11 @@
 # Malformed upstream fields: item 2 checkpoint
 
+Controller disposition: the eight non-numeric count rows are now **parked under
+roadmap X1 (non-numeric upstream usage counts)**. No shared Usage change here.
+Rust reports a number (2, 0, 1) or no numeric value (NaN renders null) where TS
+forwards raw data; client usage bytes and the logged count differ for that
+request. Historical unresolved wording below records the original checkpoint.
+
 61 rows added before implementation changes: indexes 9, delta 9, terminal
 response 9, usage 27, missing/item/type 7. Values are absent, null, string "2",
 2.5, -1, 1e100, object, array, true. Every row compares events and three buffered
