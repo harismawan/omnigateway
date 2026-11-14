@@ -14,6 +14,7 @@ pub mod custom;
 pub mod http;
 pub mod http_error;
 pub mod oauth;
+pub mod openai;
 pub mod response_format;
 pub mod sse;
 pub mod system;
