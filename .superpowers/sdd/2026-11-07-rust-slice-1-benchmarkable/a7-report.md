@@ -1,8 +1,47 @@
-# A7 — fix round 1 checkpoint
+# A7 — fix round 1 complete for review
 
 ## Fix round 1
 
-**Status: NOT complete for review — M2 remains unresolved.** All other requested work below is committed and verified. Last implementation/test commit **`5b0a2bae`**. **NEXT STEP: resolve M2 without weakening comparison**: Hyper 1.12's HTTP/1 `Server::can_chunked` explicitly rejects HEAD and its encoder discards even an explicitly supplied Transfer-Encoding header. `5deab832` currently pins eight exact differences rather than achieving requested parity; that is not an approved exception. Decide the transport-level implementation (or obtain explicit acceptance of this divergence), remove the eight pins when fixed, rerun HEAD plus final gates and regenerate manifest. Do not call this round complete merely because the pinned driver passes. No jobs outstanding. Unrelated lockfile/progress edits, untracked specs, stash and other worktrees left alone.
+**Status: fix round 1 complete for review.** Final implementation `3702b018`; this section supersedes the older stream-lifetime permit description and unresolved-M2 status below. M2 is now explicitly accepted by the owner. No other new difference was pinned. No jobs outstanding.
+
+### Final per-page pool design and verification
+
+`3702b018` replaces stream-lifetime export leases with **at most four pooled read-only SQLite connections**. Every page acquires a semaphore permit, takes an idle connection (or opens one lazily within the bound), steps/decodes/encodes on the blocking pool, returns the connection, then releases its permit **before returning encoded bytes to the body**. A started blocking task owns its RAII lease even if its async caller disconnects; it finishes at most that page and returns the connection. Cancellation while waiting acquires nothing. Pool connections stay open for reuse; their presence after disconnect is intentional, not a held lease. No statement/transaction remains active between pages. Typed raw cursors allow any pooled connection to serve the next page. `prepare_cached` now reuses statements per pooled connection. Separate usage/log four-permit lane and config connection remain independent.
+
+A stalled client holds encoded response bytes/socket state and its cursor, **no reader lease or permit**. More exports can proceed regardless of that client's socket progress. Admission can briefly wait for an active page, never for an earlier client's consumption. SQL/encoding errors return the lease too; the RAII guard also returns it during unwinding.
+
+New driver test was independently **RED** on the old binary: `page-red.log`, fifth export blocked behind four stalled clients past 5 seconds. New build GREEN `page-export-bounds.log`; permanent test completes a fifth while four stop reading, then eight concurrent exports and eight after disconnect. Bound mutant (eight permits) independently RED in `page-mutant.log`: eight export connections observed. This replaces the obsolete five-slot mutation check; old shared-lane mutant evidence remains historical, while the current permanent test exercises usage/log reads with four stalled exports. No new shared-lane mutant claim.
+
+Final `page-final/admin-routes-retry/bounds-rust.json`: fifth completes **239.593ms**, eight concurrent and eight post-disconnect completed. Export WAL descriptor peak **10**, baseline **6**, hence **four** pooled readers. Usage **1115.442ms**, 500-row logs **32.654ms**, one-row logs **1.880ms**, all within the independent-lane 2000ms test bound. These are distinct from the tight single-export 10ms test.
+
+### Checkpoint, export bytes and final gates
+
+TRUNCATE assertion now uses **at most 50 nonblocking attempts, 20ms between attempts** (~1s retry budget plus execution/scheduling). Test resets fixture busy_timeout to zero during these probes and restores it afterward; export must still be open when checkpoint succeeds. Final Rust succeeds on attempt **3**, TS on **1**. The previously failed checkpoint overlapped possible active page/writer work; old logs do not identify the exact lock holder, so no stronger causal attribution is made.
+
+Targeted post-change `page-export-{bounds,volume-1,volume-2,volume-3,matrix}.log`: **11 / 17 / 17 / 17 / 173 equal**, zero failures. The final full driver reruns all matrices and three 30,000-row byte comparisons. Final disconnect **1 page at close, 2 after settling**, follow-up **200**. Final hard 10ms slow-reader samples Rust **2.009 / 1.838 / 1.703ms**; TS **0.725 / 0.605 / 0.827ms**, three committed real request rows and export still open.
+
+Fresh outside-checkout artifacts under **`/tmp/opencode/a7-fix1/page-final/`**, manifest **`page-final/manifest.json`**, implementation commit **`3702b0183da74929924889e7188bf1545faa8429`**. TS SHA256 `f9cc6678a7d2bc2300a71b3aae98caff1aaedbcb2d811baee3dffd4325009d63`; Rust `802505944ebfaeda9ac8778a17296bfc657da31c62a34c158ba087c72cd62666`. Same build/driver commands documented below with directory `page-final`, admin-routes output `admin-routes-retry`. All Rust builds/tests incremental=0, DEV/TEST debug=0. Drivers MIMALLOC_PURGE_DELAY=1; admin-routes port 19443. Manifest written before drivers.
+
+| Gate on final implementation | Result | Log under `page-final/` |
+|---|---|---|
+| workspace offline tests | **1049 passed / 0 failed / 7 ignored** | `workspace.log` |
+| workspace all-target Clippy -D warnings | clean | `clippy.log` |
+| fmt --all --check | clean | `fmt.log` |
+| admin-routes | **2653 equal / 10 expected / 0 failures** | `admin-routes-retry.log` |
+| admin-auth | **212 equal / 4 expected / 0 failures** | `admin-auth.log` |
+| surface | **606 equal / 61 expected / 0 failures** | `surface.log` |
+| run.ts | **all rows equal** | `run.log` |
+
+First full attempt `page-final/admin-routes.log` failed **TS** slow-reader latency at 95.096ms (Rust volume process had not started). Unchanged final retry passed; threshold was not relaxed. Both attempts retained. Own recorded failed-driver scratch roots removed (`page-final/removed-scratch.json`).
+
+### Known differences and deferred work
+
+- **Accepted M2**, eight exact HEAD-export pins: HEAD has no body, header describes GET framing only, repository issues no HEAD export requests, matching requires replacing Hyper's HTTP/1 response encoder. Each pin's `why` carries that reason; no response masks or additional pins introduced.
+- Preexisting two admin-routes expected differences, four admin-auth and 61 surface expected differences unchanged.
+- Outbound idle timeout is a separate owner-assigned roadmap item across response kinds, not fixed here. Retained script **`/tmp/opencode/a7-fix1/stall/stall.ts`**, `stall/{ts,rust}.json`: TS closes ~**256.226s**, Rust still open at **330s**. With per-page leases this cannot monopolize export permits. Roadmap file untouched.
+- Usage memory improvement and five-process before/after tables below remain applicable; this change does not alter usage serialization.
+
+### Historical checkpoint evidence (superseded where stated above)
 
 ### Finding → commit → test
 
