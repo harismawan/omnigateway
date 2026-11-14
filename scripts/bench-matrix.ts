@@ -1,6 +1,6 @@
 import { probeText } from "./bench-probe";
 
-export const providers = [
+export const allProviders = [
   {
     id: "custom-chat",
     provider: "custom",
@@ -17,9 +17,6 @@ export const providers = [
     origin: "http://127.0.0.1:18100",
     script: "bench-gateway-upstream.ts",
   },
-] as const;
-export const allProviders = [
-  ...providers,
   {
     id: "anthropic-key",
     provider: "anthropic",

@@ -1376,6 +1376,7 @@ function startUpstreams(): void {
             join(import.meta.dir, script),
             "--port",
             new URL(origin).port || "443",
+            ...(script === "bench-gateway-upstream.ts" ? ["--matrix"] : []),
             ...(origin.startsWith("https:")
               ? [
                   "--cert",

@@ -10,7 +10,9 @@
  * per-request value the gateway forwards untouched — no side channel, no
  * gateway-specific hook. `mock-c<chunks>-d<delayMs>` streams `<chunks>` content
  * deltas `<delayMs>` apart, then a usage chunk and `[DONE]`. Every reply is
- * chat-completions SSE, which is all the custom codec ever asks for.
+ * chat-completions SSE by default. `/v1/responses` serves Responses SSE;
+ * both custom codecs always ask upstream for a stream. `--matrix` combines
+ * instant chat frames into one write while preserving the legacy default.
  *
  *   bun scripts/bench-gateway-upstream.ts --port 18100
  *
@@ -20,7 +22,11 @@
 import { parseArgs } from "node:util";
 
 const { values } = parseArgs({
-  options: { port: { type: "string" }, host: { type: "string", default: "127.0.0.1" } },
+  options: {
+    port: { type: "string" },
+    host: { type: "string", default: "127.0.0.1" },
+    matrix: { type: "boolean", default: false },
+  },
 });
 const port = Number(values.port);
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -72,11 +78,11 @@ function stream(script: Script): ReadableStream<Uint8Array> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(first);
+      if (!values.matrix || script.delayMs !== 0) controller.enqueue(first);
       if (script.delayMs === 0) {
         // Instant replies go out as one write: what is being measured is the
         // gateway's decode/translate loop, not this process's scheduler.
-        const parts: Uint8Array[] = [];
+        const parts: Uint8Array[] = values.matrix ? [first] : [];
         for (let i = 0; i < script.chunks; i += 1) parts.push(delta);
         parts.push(finish, usage, DONE);
         controller.enqueue(Buffer.concat(parts));
@@ -164,6 +170,8 @@ Bun.serve({
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === "/health") return new Response("ok");
+    if (process.env.OMNI_BENCH_FAULT === "500")
+      return Response.json({ error: { message: "injected upstream 500" } }, { status: 500 });
     if (
       request.method !== "POST" ||
       !(path.endsWith("/chat/completions") || path.endsWith("/responses"))
