@@ -134,8 +134,10 @@ pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPa
     let prepared = start.elapsed().as_micros();
     let mut index = 0;
     let mut next = None;
+    let mut decode_time = std::time::Duration::ZERO;
     let result = stmt
         .query_map(rusqlite::params_from_iter(&bindings), |r| {
+            let decode_start = std::time::Instant::now();
             index += 1;
             if index == q.limit { next = Some((r.get::<_,Value>("at")?, r.get::<_,Value>("id")?)); }
             let mut fields = Vec::new();
@@ -199,13 +201,16 @@ pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPa
                 };
                 fields.push((name.encode_utf16().collect(), value));
             }
+            decode_time += decode_start.elapsed();
             Ok(JsValue::Object(fields))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     tracing::debug!(
-        "log_page prepare_us={} query_decode_us={}",
+        "log_page prepare_us={} query_decode_us={} step_collect_us={} decode_us={}",
         prepared,
-        start.elapsed().as_micros() - prepared
+        start.elapsed().as_micros() - prepared,
+        start.elapsed().as_micros() - prepared - decode_time.as_micros(),
+        decode_time.as_micros()
     );
     if result.len() <= q.limit {
         next = None;
