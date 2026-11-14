@@ -1,4 +1,4 @@
-// Standalone suite, not a helper: `OMNI_CLI_BIN=<omni> bun conformance/cli/config-gate.ts`.
+// Automatically run by model-puts.ts; also runnable directly with bun.
 //
 // 1. The environment gate's list is every diagnostic the frozen loader throws.
 // 2. Negative test: one model-puts case is run under an unrelated cluster
@@ -60,7 +60,7 @@ suite = suite.replace(
 );
 writeFileSync(join(root, "model-puts.ts"), suite);
 const p = Bun.spawn(["bun", join(root, "model-puts.ts")], {
-  env: process.env,
+  env: { ...process.env, OMNI_CONFIG_GATE_CHILD: "1" },
   stdout: "pipe",
   stderr: "pipe",
 });
