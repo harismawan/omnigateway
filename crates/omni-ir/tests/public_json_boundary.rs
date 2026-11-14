@@ -211,6 +211,7 @@ fn reexports(root: &Path) -> Vec<String> {
                 visit(root, &path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let source = std::fs::read_to_string(&path).expect("source");
+                let source = source.split_whitespace().collect::<Vec<_>>().join(" ");
                 for statement in source.split("pub use ").skip(1) {
                     let statement = statement.split_once(';').expect("use terminator").0;
                     let statement = statement.split_whitespace().collect::<Vec<_>>().join(" ");

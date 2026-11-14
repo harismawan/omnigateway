@@ -5,6 +5,8 @@ async fn server_stream(
     deps: Arc<omni_gateway::dispatch::Deps>,
     body: String,
     mode: &str,
+    gated: Arc<std::sync::atomic::AtomicBool>,
+    closed: tokio::sync::oneshot::Receiver<()>,
 ) {
     omni_gateway::clock::init_request_ids().expect("boot request IDs");
     use omni_gateway::{admin_auth, admin_routes, server};
@@ -58,16 +60,38 @@ async fn server_stream(
     });
     let mut socket = tokio::net::TcpStream::connect(addr).await.expect("connect");
     // Anthropic downstream preserves native blocks, and handles tools from either provider.
-    let body = body.replace("\"stream\":false", "\"stream\":true");
+    let buffered = mode.ends_with("buffered");
+    let responses = mode.ends_with("responses");
+    let body = if buffered {
+        body
+    } else {
+        body.replace("\"stream\":false", "\"stream\":true")
+    };
     // The messages route uses Anthropic ingress and egress; convert only the
     // fixture's tool definition to its native shape, retaining the deep schema.
-    let body = body
+    let body = if responses {
+        body.replace(
+            "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]",
+            "\"input\":\"hi\"",
+        )
         .replace(
+            "\"type\":\"function\",\"function\":{",
+            "\"type\":\"function\",",
+        )
+        .replace("}}}],\"stream\"", "}}],\"stream\"")
+    } else {
+        body.replace(
             "\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":",
             "\"name\":\"f\",\"input_schema\":",
         )
-        .replace("}}}],\"stream\"", "}}],\"stream\"");
-    socket.write_all(format!("POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer sk-depth\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.expect("request");
+        .replace("}}}],\"stream\"", "}}],\"stream\"")
+    };
+    let path = if responses {
+        "/v1/responses"
+    } else {
+        "/v1/messages"
+    };
+    socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer sk-depth\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.expect("request");
     let mut wire = Vec::new();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -86,7 +110,19 @@ async fn server_stream(
     })
     .await
     .expect("response deadline");
+    if mode.ends_with("disconnect") {
+        assert!(
+            gated.load(std::sync::atomic::Ordering::SeqCst),
+            "upstream terminators withheld"
+        );
+    }
     drop(socket);
+    if mode.ends_with("disconnect") {
+        tokio::time::timeout(Duration::from_secs(10), closed)
+            .await
+            .expect("upstream close deadline")
+            .expect("upstream observed closure");
+    }
     let result = tokio::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("handler deadline")
@@ -110,20 +146,36 @@ async fn server_stream(
         // Remove HTTP chunk framing before checking the uninterrupted JSON payload.
         let mut rest = text.split_once("\r\n\r\n").expect("headers").1;
         let mut decoded = String::new();
-        loop {
-            let (size, data) = rest.split_once("\r\n").expect("chunk header");
-            let n = usize::from_str_radix(size, 16).expect("chunk size");
-            if n == 0 {
-                break;
+        if text
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked")
+        {
+            loop {
+                let (size, data) = rest.split_once("\r\n").expect("chunk header");
+                let n = usize::from_str_radix(size, 16).expect("chunk size");
+                if n == 0 {
+                    break;
+                }
+                decoded.push_str(&data[..n]);
+                rest = &data[n + 2..];
             }
-            decoded.push_str(&data[..n]);
-            rest = &data[n + 2..];
+        } else {
+            decoded.push_str(rest);
         }
         assert!(
             decoded.contains(&format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980))),
             "complete deep content"
         );
-        assert!(decoded.contains("event: message_stop"), "normal stream end");
+        if !buffered {
+            assert!(
+                decoded.contains(if responses {
+                    "event: response.completed"
+                } else {
+                    "event: message_stop"
+                }),
+                "normal stream end"
+            );
+        }
         assert!(!decoded.contains("event: error"), "no in-stream error");
     }
 }
@@ -171,12 +223,6 @@ impl HttpClient for Local {
     }
 }
 
-#[test]
-fn deep_requests_through_dispatch_and_http() {
-    run_case("deep_requests_through_dispatch_and_http", false, "request");
-    run_case("deep_requests_through_dispatch_and_http", true, "request");
-}
-
 macro_rules! case {
     ($name:ident, $anthropic:expr, $mode:literal) => {
         #[test]
@@ -186,6 +232,18 @@ macro_rules! case {
     };
 }
 case!(custom_deep_response_buffered, false, "response");
+case!(custom_deep_request_success, false, "request");
+case!(anthropic_deep_request_success, true, "request");
+case!(
+    anthropic_native_server_buffered,
+    true,
+    "native_stream_buffered"
+);
+case!(
+    anthropic_native_server_responses,
+    true,
+    "native_stream_responses"
+);
 case!(anthropic_deep_response_buffered, true, "response");
 case!(custom_deep_retry, false, "retry");
 case!(anthropic_deep_retry, true, "retry");
@@ -221,6 +279,10 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
             {
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
                 let origin = format!("http://{}", listener.local_addr().expect("addr"));
+                let gated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stub_gate = gated.clone();
+                let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+                let mut closed_tx = Some(closed_tx);
                 let stub = std::thread::spawn(move || {
                     use std::io::{Read, Write};
                     listener.set_nonblocking(true).expect("nonblocking");
@@ -275,7 +337,24 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                             format!("data: {{\"id\":\"m\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"t\",\"type\":\"function\",\"function\":{{\"name\":\"f\",\"arguments\":{args}}}}}]}},\"finish_reason\":null}}]}}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n")
                         }
                     } else { body.to_owned() };
-                    write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("response");
+                    if mode.ends_with("disconnect") {
+                        let end = if anthropic { body.find("event: content_block_stop").expect("stop") } else { body.find("\n\n").expect("first record") + 2 };
+                        stub_gate.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // Native starts alone are precommit-buffered. A text delta
+                        // commits the attempt while its deep request remains live.
+                        let commit = if mode.starts_with("native") { "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"committed\"}}\n\n" } else { "" };
+                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}{commit}", body.len() + commit.len(), &body[..end]).expect("gated prefix");
+                        // Keep the terminators withheld until the gateway closes upstream.
+                        let mut byte = [0];
+                        match socket.read(&mut byte) {
+                            Ok(0) => {},
+                            Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => {},
+                            other => panic!("upstream must close while gated: {other:?}"),
+                        }
+                        closed_tx.take().expect("one close").send(()).expect("observer");
+                    } else {
+                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("response");
+                    }
                     }
                 });
                 let fixture = common::fixture(if mode == "retry" { &["c0", "c1"] } else { &["c0"] });
@@ -298,7 +377,7 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                 let nested = format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980));
                 let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"tools":[{{"type":"function","function":{{"name":"f","parameters":{{"type":"object","x-deep":{nested}}}}}}}],"stream":false}}"#);
                 if mode.contains("stream") {
-                    server_stream(&fixture, deps.clone(), body, mode).await;
+                    server_stream(&fixture, deps.clone(), body, mode, gated, closed_rx).await;
                     drop(deps);
                     h.writer.close().await.expect("close");
                     stub.join().expect("stub");
