@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { goldenSpawn } from "./exit-gate.ts";
+import { fileState } from "./db-file-state.ts";
 
 export async function adapterCases(commands: string[][], seed: string, env: Record<string,string|undefined>, operation: "backup"|"restore") {
  const root=mkdtempSync("/tmp/opencode/e1-e5/db-adapter-");
@@ -22,6 +23,7 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
      const p=goldenSpawn([...cmd,"--root",root,"--db","db","db",...args],{env,stdout:"pipe",stderr:"pipe"});
      return {out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited};
     };
+    const before=fileState(root);
     chmodSync(dir,mode);
     let listing, result;
     try {
@@ -37,6 +39,7 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
      assert(readFileSync(join(dir,data.id)).length>0);
      data.id=data.filename="<id>";data.createdAt="<time>";result.out=JSON.stringify(data);
     } else {
+     assert.deepEqual(fileState(root),before,kind);
      assert.equal(result.code,1,kind);
      assert.match(result.err,/BAD_REQUEST: no such snapshot/,kind);
     }

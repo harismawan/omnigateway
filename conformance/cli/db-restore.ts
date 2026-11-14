@@ -6,6 +6,8 @@ import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 import { checkPreviewGoldens } from "./db-preview-goldens.ts";
 import { adapterCases } from "./db-adapter-cases.ts";
+import { fileState } from "./db-file-state.ts";
+import { refusalStateCases } from "./db-refusal-state-cases.ts";
 checkPreviewGoldens();
 const root = mkdtempSync("/tmp/opencode/e1-e5/db7-restore-");
 const env = {...process.env, HOME:root, XDG_STATE_HOME:join(root,"state"), OMNI_ENCRYPTION_KEY:"database-golden-secret", NO_COLOR:"1"};
@@ -17,9 +19,10 @@ mkdirSync(join(root,"state/omnigateway"),{recursive:true});
 mkdirSync(join(root,"bin"));mkdirSync(join(root,"snapshots"));
 writeFileSync(join(root,"snapshots/sentinel"),"snapshot sentinel");
 writeFileSync(join(root,"bin/systemctl"),'#!/bin/sh\ncase "$*" in *is-active*) echo active;; *) echo 0;; esac\n',{mode:0o755});
-const state=()=>({live:["","-wal","-shm"].map(s=>{try{return readFileSync(join(root,`db${s}`));}catch(e:any){if(e.code==="ENOENT")return null;throw e;}}),snapshots:readdirSync(join(root,"snapshots")).map(n=>{const p=join(root,"snapshots",n),s=lstatSync(p);return [n,s.isSymbolicLink()?readlinkSync(p):s.isDirectory()?readdirSync(p):readFileSync(p)];})});
+const state=()=>fileState(root);
 let count=0;
 try {
+ count+=await refusalStateCases(commands,join(root,"seed"),env);
  count+=await adapterCases(commands,join(root,"seed"),env,"restore");
  for(const kind of ["missing","pid","supervisor"]){
   const results=[];

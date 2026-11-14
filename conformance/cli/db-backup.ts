@@ -6,6 +6,7 @@ import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 import { databaseState } from "./database-state.ts";
 import { adapterCases } from "./db-adapter-cases.ts";
+import { fileState } from "./db-file-state.ts";
 const root = mkdtempSync("/tmp/opencode/e1-e5/db-backup-");
 const env = { ...process.env, OMNI_ENCRYPTION_KEY: "database-golden-secret", NO_COLOR: "1" };
 const store = await createStore({ path: join(root,"seed"), encryptionKey: await deriveKey(env.OMNI_ENCRYPTION_KEY) });
@@ -37,7 +38,7 @@ try {
             writeFileSync(join(root,"snapshots",`db_${stamp}_manual.sqlite`),"existing snapshot sentinel");
           }
         }
-        const state=()=>({live:["","-wal","-shm"].map(s=>{try{return readFileSync(join(root,`db${s}`));}catch(e:any){if(e.code==="ENOENT")return null;throw e;}}),snapshots:readdirSync(join(root,"snapshots")).sort().map(n=>[n,readFileSync(join(root,"snapshots",n))])});
+        const state=()=>fileState(root);
         const before=state();
         const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","backup"],{env:{...env,...(kind==="wal-refusal"?{OMNI_ENCRYPTION_KEY:"short"}:{})},stdout:"pipe",stderr:"pipe"});
         const out=await new Response(p.stdout).text();
@@ -58,9 +59,7 @@ try {
       copyFileSync(join(root,"seed"),join(root,"db"));
       if (kind === "file") writeFileSync(join(root,"snapshots"), "sentinel");
       else { mkdirSync(join(root,"snapshots")); chmodSync(join(root,"snapshots"),0o500); }
-      const state = () => ["", "-wal", "-shm"].map(suffix => {
-        try { return readFileSync(join(root,`db${suffix}`)); } catch (e: any) { if(e.code === "ENOENT") return null; throw e; }
-      });
+      const state = () => fileState(root);
       const before = state();
       const p = goldenSpawn([...cmd,"--root",root,"--db","db","db","backup"],{env,stdout:"pipe",stderr:"pipe"});
       const out = await new Response(p.stdout).text();
@@ -83,7 +82,8 @@ try {
       const page=(live.query("SELECT rootpage FROM sqlite_master WHERE name='broken'").get() as any).rootpage;
       const size=(live.query("PRAGMA page_size").get() as any).page_size; live.close();
       const bytes=readFileSync(join(root,"db")); bytes[(page-1)*size]=255; writeFileSync(join(root,"db"),bytes);
-      const state=()=>["","-wal","-shm"].map(s=>{try{return readFileSync(join(root,`db${s}`));}catch(e:any){if(e.code==="ENOENT")return null;throw e;}});
+      mkdirSync(join(root,"snapshots"));
+      const state=()=>fileState(root);
       const before=state();
       const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","backup","--json"],{env,stdout:"pipe",stderr:"pipe"});
       const out=await new Response(p.stdout).text();const err=await new Response(p.stderr).text();const code=await p.exited;
@@ -103,7 +103,7 @@ try {
       writeFileSync(join(root,"snapshots","db_2000-01-01T00-00-00-000Z_manual.sqlite"), "old");
       writeFileSync(join(root,"snapshots","db_2025-02-30T00-00-00-000Z_manual.sqlite"), "overflow date");
       writeFileSync(join(root,"snapshots","db_2000-01-02T00-00-00-000Z_preRestore.sqlite"), "undo");
-      const before = readFileSync(join(root,"db"));
+      const before = fileState(root);
       const p = goldenSpawn([...cmd,"--root",root,"--db","db","db","backup",...(json?["--json"]:[])],{env:{...env,...(bad?{OMNI_ENCRYPTION_KEY:"short"}:{})},stdout:"pipe",stderr:"pipe"});
       let out = await new Response(p.stdout).text();
       const err = await new Response(p.stderr).text();
@@ -111,8 +111,7 @@ try {
       assert.equal(code,bad?1:0);
       let snapshotRows;
       if (bad) {
-        assert.deepEqual(readFileSync(join(root,"db")), before);
-        for(const suffix of ["-wal","-shm"]) assert(!readdirSync(root).includes(`db${suffix}`));
+        assert.deepEqual(fileState(root), before);
       } else {
         const ids = readdirSync(join(root,"snapshots")).filter(x=>x.endsWith("_manual.sqlite"));
         assert.equal(ids.length,1);

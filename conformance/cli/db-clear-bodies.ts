@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 import { databaseState } from "./database-state.ts";
+import { fileState } from "./db-file-state.ts";
 const root = mkdtempSync("/tmp/opencode/e1-e5/db3-clear-");
 const env = {...process.env, OMNI_ENCRYPTION_KEY:"database-golden-secret", NO_COLOR:"1"};
 const store = await createStore({path:join(root,"seed"),encryptionKey:await deriveKey(env.OMNI_ENCRYPTION_KEY)}); store.close();
@@ -31,14 +32,15 @@ try {
     }
    db.close();
    const state=()=>({db:["","-wal","-shm"].map(s=>{try{return readFileSync(join(root,`db${s}`));}catch(e:any){if(e.code==="ENOENT")return null;throw e;}}),files:readdirSync(join(root,"request_bodies"),{recursive:true,withFileTypes:true}).filter(e=>e.isFile()).map(e=>[e.name,readFileSync(join(e.parentPath,e.name))])});
-   const before=state(); const refusal=["pipe","n","empty","bad"].includes(kind);
+   mkdirSync(join(root,"snapshots"),{recursive:true});writeFileSync(join(root,"snapshots","sentinel"),"snapshot sentinel");
+   const before=state(); const beforeState=fileState(root,true); const refusal=["pipe","n","empty","bad"].includes(kind);
    if(kind==="unremovable") chmodSync(join(root,"request_bodies","aa"),0o500);
    const tty=["n","empty","yes"].includes(kind);
    const args=[...cmd,"--root",root,"--db","db","db","clear-bodies",...(!tty&&kind!=="pipe"?["--yes"]:[]),...(["zero","orphans","unremovable"].includes(kind)?["--json"]:[])];
    const p=goldenSpawn(tty?["python3",resolve("conformance/cli/pty.py"),kind==="empty"?"":kind==="yes"?" YeS ":"n",...args]:args,{env:{...env,PTY_NO_COLOR:"1",...(kind==="bad"?{OMNI_ENCRYPTION_KEY:"short"}:{})},stdout:"pipe",stderr:"pipe"});
    let out=await new Response(p.stdout).text();const err=await new Response(p.stderr).text();let code=await p.exited;
    if(tty){const nested=JSON.parse(out);out=Buffer.from(nested.bytes,"hex").toString();code=nested.code;}
-    assert.equal(code,refusal?1:0);if(refusal)assert.deepEqual(state(),before);
+    assert.equal(code,refusal?1:0);if(refusal)assert.deepEqual(fileState(root,true),beforeState);
     assert.equal(existsSync(outside),!["parent","symlink"].includes(kind),`${kind}: outside sentinel`);
    if(kind==="unremovable"){assert.deepEqual(state().files,before.files);chmodSync(join(root,"request_bodies","aa"),0o700);}
    if(!refusal) {

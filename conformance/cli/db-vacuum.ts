@@ -4,6 +4,7 @@ import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
+import { fileState } from "./db-file-state.ts";
 const root=mkdtempSync("/tmp/opencode/e1-e5/db-vacuum-");
 const env={...process.env,OMNI_ENCRYPTION_KEY:"database-golden-secret",NO_COLOR:"1"};
 const store=await createStore({path:join(root,"seed"),encryptionKey:await deriveKey(env.OMNI_ENCRYPTION_KEY)});store.close();
@@ -16,11 +17,11 @@ try {
   const results=[];
   for(const cmd of commands) {
    for(const suffix of ["","-wal","-shm"]) rmSync(join(root,`db${suffix}`),{force:true});
-   copyFileSync(join(root,"seed"),join(root,"db"));const before=readFileSync(join(root,"db"));
+   copyFileSync(join(root,"seed"),join(root,"db"));const before=readFileSync(join(root,"db"));const beforeState=fileState(root);
    const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","vacuum",...(json?["--json"]:[])],{env:{...env,...(bad?{OMNI_ENCRYPTION_KEY:"short"}:{})},stdout:"pipe",stderr:"pipe"});
    let out=await new Response(p.stdout).text();const err=await new Response(p.stderr).text();const code=await p.exited;
    assert.equal(code,bad?1:0);
-   if(bad) assert.deepEqual(readFileSync(join(root,"db")),before);
+   if(bad) assert.deepEqual(fileState(root),beforeState);
    else {
     assert(readFileSync(join(root,"db")).length<before.length);
     if(json) {const data=JSON.parse(out);assert(data.durationMs>=0);assert(data.reclaimedBytes>0);data.durationMs="<duration>";out=JSON.stringify(data);}
