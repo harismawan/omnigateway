@@ -75,6 +75,8 @@ export function compare(
         : value,
     );
   const reference = base[0] as Round;
+  const fresh = [...base, ...head].every((r) => r.config?.freshProcess === true);
+  const selection = (r: Round) => r.scenarios.map((s) => s.name);
   const fields = [
     "duration",
     "warmup",
@@ -90,6 +92,8 @@ export function compare(
     ["head", head],
   ] as const)
     for (const [i, r] of rounds.entries()) {
+      if (!fresh && canonical(selection(reference)) !== canonical(selection(r)))
+        throw Error(`${side} round ${i + 1}: ordered selection differs: ${canonical(selection(reference))} vs ${canonical(selection(r))}`);
       for (const field of fields) {
         const expected = reference.config?.[field],
           actual = r.config?.[field];
@@ -152,6 +156,7 @@ export function compare(
     `Effective base environment: ${JSON.stringify(base[0]?.provenance.environment)}`,
     `Effective head environment: ${JSON.stringify(head[0]?.provenance.environment)}`,
     "Rust's production launcher defaults MIMALLOC_PURGE_DELAY=1; this is not an allocator-neutral comparison.",
+    fresh ? "All rounds use --fresh-process; differing ordered selections allowed for shared scenarios (database state retained)." : "All rounds have the same ordered scenario selection.",
     "### environment differences between sides",
     "| variable | base | head |",
     "|---|---|---|",

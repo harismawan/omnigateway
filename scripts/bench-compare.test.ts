@@ -40,7 +40,18 @@ test("unequal successful round counts are explicit", () => {
 test("missing observation is flagged", () => {
   const missing = round(1);
   missing.scenarios = [];
-  expect(compare([round(1), missing], [round(2)])).toContain("missing observation");
+  expect(() => compare([round(1), missing], [round(2)])).toThrow("ordered selection");
+});
+test("ordered selection must match unless every round uses fresh processes", () => {
+  const a = round(1), b = round(2);
+  a.scenarios.unshift({ ...a.scenarios[0]!, name: "first" });
+  expect(() => compare([a], [b])).toThrow("ordered selection");
+  b.scenarios = [...a.scenarios].reverse();
+  expect(() => compare([a], [b])).toThrow("ordered selection");
+  a.config = { ...a.config, freshProcess: true };
+  b.config = { ...b.config, freshProcess: true };
+  b.scenarios = [b.scenarios[0]!];
+  expect(compare([a], [b])).toContain("differing ordered selections allowed");
 });
 test("changed workload refused with differing field", () => {
   const a = round(1);
