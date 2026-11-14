@@ -9,14 +9,15 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
  const dir=join(root,"snapshots"), id="db_2000-01-01T00-00-00-000Z_manual.sqlite";
  let count=0;
  try {
-  for(const kind of operation==="backup"?["unreadable"]:["inaccessible","loop","long"]) {
+  for(const kind of operation==="backup"?["unreadable","directory"]:["inaccessible","loop","long"]) {
    const results=[];
    for(const cmd of commands) {
     rmSync(dir,{recursive:true,force:true}); mkdirSync(dir);
     for(const s of ["","-wal","-shm"])rmSync(join(root,"db")+s,{force:true});
     copyFileSync(seed,join(root,"db"));
     const input=kind==="long"?id.replace("manual","a".repeat(300)):id;
-    if(kind==="loop")symlinkSync(id,join(dir,id));
+    if(kind==="directory")mkdirSync(join(dir,id));
+    else if(kind==="loop")symlinkSync(id,join(dir,id));
     else writeFileSync(join(dir,id),"retention sentinel");
     const mode=kind==="unreadable"?0o300:kind==="inaccessible"?0:0o700;
     const run=async(args:string[])=>{
@@ -31,7 +32,11 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
      result=await run(operation==="backup"?["backup","--json"]:["restore",input]);
     } finally {chmodSync(dir,0o700);}
     assert.equal(listing.code,0,kind);
-    if(operation==="backup") {
+    if(kind==="directory") {
+     assert.equal(result.code,1);
+     assert.equal(result.err,`Path is a directory: rm returned EISDIR (is a directory) ${join(dir,id)}\n`);
+     assert.equal(readdirSync(dir).length,2);
+    } else if(operation==="backup") {
      assert.equal(result.code,0,kind);
      const data=JSON.parse(result.out);
      assert.equal(readFileSync(join(dir,id),"utf8"),"retention sentinel");

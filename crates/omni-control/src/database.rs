@@ -347,6 +347,10 @@ fn unlink(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => Err(format!(
+            "Path is a directory: rm returned EISDIR (is a directory) {}",
+            path.display()
+        )),
         Err(e) => Err(fs_error(&e, "unlink", path)),
     }
 }
