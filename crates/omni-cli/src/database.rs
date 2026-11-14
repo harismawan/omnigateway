@@ -5,6 +5,35 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     let path = ctx.path.clone();
     let store = ctx.open()?;
     let dir = path.parent().ok_or("database has no parent")?;
+    if command == "db-backup" {
+        let settings = omni_control::settings_value::read(&store)?;
+        let setting = |key| {
+            omni_control::settings_value::get(&settings, key)
+                .map(omni_control::settings_value::shallow)
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+        };
+        let snapshot = omni_control::database::create_snapshot(
+            store.connection(),
+            &path,
+            &|| chrono::Utc::now().timestamp_millis(),
+            setting("snapshotKeepLatest"),
+            setting("snapshotMaxAgeDays"),
+        )?;
+        return Ok(if flags.contains_key("json") {
+            omni_ir::jsjson::to_string_pretty(&snapshot)
+        } else {
+            eprintln!(
+                "a snapshot carries encrypted credentials and key hashes; captured bodies are not in it"
+            );
+            format!(
+                "snapshot  {}\nsize      {}\ntaken     {}",
+                snapshot["id"].as_str().unwrap_or(""),
+                bytes(snapshot["sizeBytes"].as_u64().unwrap_or(0)),
+                time(snapshot["createdAt"].as_i64())
+            )
+        });
+    }
     let snaps = snapshots(&dir.join("snapshots"));
     if command == "db-snapshots" {
         return Ok(if flags.contains_key("json") {

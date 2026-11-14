@@ -6,6 +6,7 @@ pub mod body_schema;
 pub mod catalog;
 pub mod config;
 pub mod credentials;
+pub mod database;
 #[cfg(test)]
 mod http_oracle_tests;
 pub mod keys;

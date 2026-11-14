@@ -1470,12 +1470,14 @@ dependencies = [
 name = "omni-control"
 version = "0.16.0"
 dependencies = [
+ "chrono",
  "icu_collator",
  "omni-crypto",
  "omni-ir",
  "omni-ratelimit",
  "omni-store",
  "rusqlite",
+ "rustix",
  "serde_json",
  "tempfile",
  "thiserror",
