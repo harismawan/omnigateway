@@ -163,7 +163,7 @@ pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
             return Err(invalid());
         }
     }
-    if metadata(&path)?.is_none() {
+    if crate::database_fs::stat(&path).is_none() {
         return Err("BAD_REQUEST: no such snapshot".into());
     }
     with_exclusive("a restore preview", || {
@@ -262,10 +262,10 @@ pub fn create_snapshot_with_free_bytes(
         .join("snapshots");
     std::fs::create_dir_all(&dir).map_err(|e| fs_error(&e, "mkdir", &dir))?;
     let target = dir.join(&name);
-    if metadata(&target)?.is_some() {
+    if crate::database_fs::stat(&target).is_some() {
         return Err("CONFLICT: a snapshot for this instant already exists".into());
     }
-    let needed = (metadata(path)?.map_or(0, |s| s.len()) as f64 * 1.1).ceil();
+    let needed = (crate::database_fs::stat(path).map_or(0, |s| s.len()) as f64 * 1.1).ceil();
     if free_bytes(&dir).is_some_and(|free| (free as f64) < needed) {
         return Err("not enough free disk space to write a snapshot".into());
     }
@@ -276,7 +276,7 @@ pub fn create_snapshot_with_free_bytes(
         unlink(&target)?;
         return Err(error.to_string());
     }
-    let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":metadata(&target)?.map_or(0, |s| s.len()),"reason":"manual"});
+    let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":crate::database_fs::stat(&target).map_or(0, |s| s.len()),"reason":"manual"});
     let (keep_latest, max_age_days) = retention()?;
     prune(&dir, at, keep_latest, max_age_days)?;
     Ok(result)
@@ -341,14 +341,6 @@ pub fn retention_number(value: Option<&omni_ir::jsjson::JsValue>) -> Result<f64,
         Some(V::Bool(b)) => f64::from(*b),
         Some(v) => omni_ir::js::string_to_number(&crate::operator_json::string(v)?),
     })
-}
-
-fn metadata(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
-    match path.metadata() {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(fs_error(&e, "stat", path)),
-    }
 }
 
 fn unlink(path: &Path) -> Result<(), String> {
@@ -569,13 +561,8 @@ mod tests {
 
 pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Result<(), String> {
     let mut snapshots = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(fs_error(&e, "scandir", dir)),
-    };
+    let entries = crate::database_fs::readdir(dir);
     for entry in entries {
-        let entry = entry.map_err(|e| fs_error(&e, "scandir", dir))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some((stamp, reason)) = name
             .strip_prefix("db_")

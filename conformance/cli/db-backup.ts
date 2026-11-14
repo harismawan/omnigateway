@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 import { databaseState } from "./database-state.ts";
+import { adapterCases } from "./db-adapter-cases.ts";
 const root = mkdtempSync("/tmp/opencode/e1-e5/db-backup-");
 const env = { ...process.env, OMNI_ENCRYPTION_KEY: "database-golden-secret", NO_COLOR: "1" };
 const store = await createStore({ path: join(root,"seed"), encryptionKey: await deriveKey(env.OMNI_ENCRYPTION_KEY) });
@@ -12,6 +13,7 @@ store.close();
 const commands = [["bun", "--no-env-file", resolve("apps/cli/src/index.ts")], [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]];
 let count = 0;
 try {
+  count+=await adapterCases(commands,join(root,"seed"),env,"backup");
   for (const kind of ["collision", "wal-refusal"]) {
     const results=[];
     for (const cmd of commands) {

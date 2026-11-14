@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 import { checkPreviewGoldens } from "./db-preview-goldens.ts";
+import { adapterCases } from "./db-adapter-cases.ts";
 checkPreviewGoldens();
 const root = mkdtempSync("/tmp/opencode/e1-e5/db7-restore-");
 const env = {...process.env, HOME:root, XDG_STATE_HOME:join(root,"state"), OMNI_ENCRYPTION_KEY:"database-golden-secret", NO_COLOR:"1"};
@@ -19,6 +20,7 @@ writeFileSync(join(root,"bin/systemctl"),'#!/bin/sh\ncase "$*" in *is-active*) e
 const state=()=>({live:["","-wal","-shm"].map(s=>{try{return readFileSync(join(root,`db${s}`));}catch(e:any){if(e.code==="ENOENT")return null;throw e;}}),snapshots:readdirSync(join(root,"snapshots")).map(n=>{const p=join(root,"snapshots",n),s=lstatSync(p);return [n,s.isSymbolicLink()?readlinkSync(p):s.isDirectory()?readdirSync(p):readFileSync(p)];})});
 let count=0;
 try {
+ count+=await adapterCases(commands,join(root,"seed"),env,"restore");
  for(const kind of ["missing","pid","supervisor"]){
   const results=[];
   for(const cmd of commands){

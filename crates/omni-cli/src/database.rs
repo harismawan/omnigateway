@@ -228,11 +228,7 @@ pub fn run(
     ))
 }
 fn snapshots(dir: &Path) -> Vec<Value> {
-    let files = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
+    let files = omni_control::database_fs::readdir(dir);
     let mut out = Vec::new();
     for f in files {
         let name = f.file_name().to_string_lossy().into_owned();
@@ -276,7 +272,7 @@ fn snapshots(dir: &Path) -> Vec<Value> {
     out
 }
 fn size_of(p: &Path) -> u64 {
-    std::fs::metadata(p).map(|s| s.len()).unwrap_or(0)
+    omni_control::database_fs::stat(p).map_or(0, |s| s.len())
 }
 fn dir_bytes(p: &Path) -> u64 {
     std::fs::read_dir(p)
