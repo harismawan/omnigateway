@@ -50,11 +50,11 @@ fn responses_coerced_arguments_match_scanned_text() {
             result.expect("valid JSON string");
             for e in out {
                 if let StreamEvent::BlockDelta {
-                    delta: Delta::ToolJson { partial },
+                    delta: Delta::ToolJson { ref partial },
                     ..
                 } = e
                 {
-                    emitted.push_str(&partial);
+                    emitted.push_str(partial);
                 }
             }
         }

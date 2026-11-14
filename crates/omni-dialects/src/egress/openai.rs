@@ -111,6 +111,12 @@ impl OpenAiStream {
     }
 
     pub fn push(&mut self, event: &StreamEvent, out: &mut String) {
+        if event.has_json_payload() {
+            return omni_ir::deep::scope(|| self.push_inner(event, out));
+        }
+        self.push_inner(event, out);
+    }
+    fn push_inner(&mut self, event: &StreamEvent, out: &mut String) {
         match event {
             StreamEvent::Start { model, .. } => self.model.clone_from(model),
             StreamEvent::BlockStart { index, block } => match block {
@@ -239,8 +245,9 @@ fn response_value(collected: &CollectedResponse, request_id: &str, created: i64)
         }
     }
     let mut message = Map::new();
-    message.insert("role".into(), "assistant".into());
-    message.insert(
+    omni_ir::deep::insert(&mut message, "role".into(), "assistant".into());
+    omni_ir::deep::insert(
+        &mut message,
         "content".into(),
         if !tool_calls.is_empty() && text.is_empty() {
             Value::Null
@@ -249,10 +256,14 @@ fn response_value(collected: &CollectedResponse, request_id: &str, created: i64)
         },
     );
     if !reasoning.is_empty() {
-        message.insert("reasoning_content".into(), Value::String(reasoning));
+        omni_ir::deep::insert(
+            &mut message,
+            "reasoning_content".into(),
+            Value::String(reasoning),
+        );
     }
     if !tool_calls.is_empty() {
-        message.insert("tool_calls".into(), Value::Array(tool_calls));
+        omni_ir::deep::insert(&mut message, "tool_calls".into(), Value::Array(tool_calls));
     }
     #[allow(clippy::cast_precision_loss)]
     let created = number(created as f64);

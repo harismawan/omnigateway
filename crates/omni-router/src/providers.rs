@@ -47,13 +47,28 @@ fn descriptor(capabilities: Capabilities, prefixes: &[&str]) -> Descriptor {
 impl Providers {
     /// The built-in registry (`packages/providers/src/descriptors.ts`).
     ///
-    /// Catalogs are empty in this slice: only `custom` is ported, and its
-    /// catalog is empty in TS too. A synthesised built-in target therefore
-    /// prices as unpriced until its provider's catalog is ported.
+    /// Anthropic uses the generated frozen catalog; other providers retain
+    /// empty catalogs until their codecs are ported.
     pub fn builtin() -> Self {
         let all = caps(true, true, true);
         let mut p = Self::default();
-        p.register("anthropic", descriptor(all, &["claude-"]));
+        let mut anthropic = descriptor(all, &["claude-"]);
+        let generated: serde_json::Value = serde_json::from_str(include_str!(
+            "../../omni-control/data/provider-catalog.json"
+        ))
+        .expect("generated provider catalog");
+        anthropic.catalog = generated["anthropic"]["catalog"]["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .map(|m| CatalogModel {
+                id: m["id"].as_str().expect("model id").into(),
+                pricing: serde_json::from_value(m["pricing"].clone()).expect("catalog pricing"),
+                context_window: m["limits"]["contextWindow"].as_f64(),
+                max_output_tokens: m["limits"]["maxOutputTokens"].as_f64(),
+            })
+            .collect();
+        p.register("anthropic", anthropic);
         p.register("openai", descriptor(all, &["gpt-", "o1", "o3", "o4"]));
         p.register(
             "kimi",

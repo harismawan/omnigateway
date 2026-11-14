@@ -66,7 +66,7 @@ fn safeguard(vendor: Option<&Map<String, Value>>) -> Option<&Value> {
 /// block, not per delta).
 fn with_type_last(data: &Map<String, Value>, t: &str) -> Value {
     let mut m = omni_ir::deep::clone_map(data);
-    m.insert("type".into(), Value::String(t.into()));
+    omni_ir::deep::insert(&mut m, "type".into(), Value::String(t.into()));
     Value::Object(m)
 }
 
@@ -95,6 +95,12 @@ impl AnthropicStream {
     }
 
     pub fn push(&mut self, event: &StreamEvent, out: &mut String) {
+        if event.has_json_payload() {
+            return omni_ir::deep::scope(|| self.push_inner(event, out));
+        }
+        self.push_inner(event, out);
+    }
+    fn push_inner(&mut self, event: &StreamEvent, out: &mut String) {
         match event {
             StreamEvent::Start { model, .. } => {
                 self.model.clone_from(model);
@@ -245,12 +251,12 @@ pub fn response(collected: &CollectedResponse, request_id: &str) -> Owned {
 fn response_value(collected: &CollectedResponse, request_id: &str) -> Value {
     let mut m = Map::new();
     if let Some(v) = safeguard(collected.vendor.as_ref()) {
-        m.insert("safeguard_results".into(), omni_ir::deep::clone(v));
+        omni_ir::deep::insert(&mut m, "safeguard_results".into(), omni_ir::deep::clone(v));
     }
-    m.insert("id".into(), request_id.into());
-    m.insert("type".into(), "message".into());
-    m.insert("role".into(), "assistant".into());
-    m.insert("model".into(), collected.model.as_str().into());
+    omni_ir::deep::insert(&mut m, "id".into(), request_id.into());
+    omni_ir::deep::insert(&mut m, "type".into(), "message".into());
+    omni_ir::deep::insert(&mut m, "role".into(), "assistant".into());
+    omni_ir::deep::insert(&mut m, "model".into(), collected.model.as_str().into());
     let content: Vec<Value> = collected
         .content
         .iter()
@@ -261,10 +267,11 @@ fn response_value(collected: &CollectedResponse, request_id: &str) -> Value {
         .map(|b| match b {
             ContentBlock::Text(t) => {
                 let mut o = Map::new();
-                o.insert("type".into(), "text".into());
-                o.insert("text".into(), t.text.as_str().into());
+                omni_ir::deep::insert(&mut o, "type".into(), "text".into());
+                omni_ir::deep::insert(&mut o, "text".into(), t.text.as_str().into());
                 if let Some(c) = &t.citations {
-                    o.insert(
+                    omni_ir::deep::insert(
+                        &mut o,
                         "citations".into(),
                         Value::Array(c.iter().map(omni_ir::deep::clone).collect()),
                     );
@@ -278,23 +285,24 @@ fn response_value(collected: &CollectedResponse, request_id: &str) -> Value {
             }),
             ContentBlock::ToolUse(t) => {
                 let mut o = Map::new();
-                o.insert("type".into(), "tool_use".into());
-                o.insert("id".into(), t.id.as_str().into());
-                o.insert("name".into(), t.name.as_str().into());
-                o.insert("input".into(), omni_ir::deep::clone(&t.input));
+                omni_ir::deep::insert(&mut o, "type".into(), "tool_use".into());
+                omni_ir::deep::insert(&mut o, "id".into(), t.id.as_str().into());
+                omni_ir::deep::insert(&mut o, "name".into(), t.name.as_str().into());
+                omni_ir::deep::insert(&mut o, "input".into(), omni_ir::deep::clone(&t.input));
                 Value::Object(o)
             }
             ContentBlock::ProviderNative(n) => with_type_last(&n.data, &n.block_type),
             _ => json!({ "type": "text", "text": "" }),
         })
         .collect();
-    m.insert("content".into(), Value::Array(content));
-    m.insert(
+    omni_ir::deep::insert(&mut m, "content".into(), Value::Array(content));
+    omni_ir::deep::insert(
+        &mut m,
         "stop_reason".into(),
         stop_reason(collected.stop_reason).into(),
     );
-    m.insert("stop_sequence".into(), Value::Null);
-    m.insert("usage".into(), usage_value(&collected.usage));
+    omni_ir::deep::insert(&mut m, "stop_sequence".into(), Value::Null);
+    omni_ir::deep::insert(&mut m, "usage".into(), usage_value(&collected.usage));
     Value::Object(m)
 }
 

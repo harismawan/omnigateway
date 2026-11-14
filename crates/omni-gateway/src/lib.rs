@@ -308,6 +308,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     // PBKDF2 at 210 000 rounds is most of boot (~24 ms in release) and is a
     // storage contract, so it is not shortened: it runs on its own blocking
     // thread while the store opens, migrates and sweeps, which need no key.
+    omni_providers::anthropic::profile::initialize();
     let kdf = {
         let secret = config.encryption_key.clone();
         tokio::task::spawn_blocking(move || omni_crypto::field::derive_key(&secret))
@@ -491,8 +492,23 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             client
         }
     };
+    let http = Arc::new(http);
+    let refresh_store = omni_store::Store::open(
+        omni_store::StoreConfig::Sqlite { path: path.clone() },
+        offset,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let oauth_refresher = Arc::new(refresh::Refresher::new(
+        Arc::new(refresh_store),
+        key.clone(),
+        http.clone(),
+        clock::now_ms,
+    ));
+    let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone());
     let deps = Arc::new(dispatch::Deps {
-        http: Arc::new(http),
+        refresher: oauth_refresher,
+        http,
         telemetry,
         writer: handle.clone(),
         holder,
@@ -560,6 +576,9 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             }
         }
         drop(listener);
+        let shutdown_until = tokio::time::Instant::now() + deadline;
+        oauth_scheduler.abort();
+        drop(oauth_scheduler.await);
         tracing::info!(reason = "signal", "shutdown requested");
         if tokio::time::timeout(deadline, graceful.shutdown())
             .await
@@ -580,8 +599,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         app.deadline_workers.shutdown().await;
         #[cfg(test)]
         app.deadline_workers.before_writer_close();
-        drop(app);
+        drop(tokio::time::timeout_at(shutdown_until, app.deps.refresher.drain()).await);
         refresher.abort();
+        drop(refresher.await);
+        drop(tokio::time::timeout_at(shutdown_until, app.deps.holder.drain_publications()).await);
+        drop(app);
         preseeder.abort();
         overlay_sweeper.abort();
         asker.abort();
@@ -696,4 +718,61 @@ mod tests {
         running.shutdown();
         running.wait().await.expect("stop");
     }
+
+    /// b1-refresh-r2, lifecycle: a credential publication whose request was
+    /// cancelled is still running on the blocking pool. Shutdown waits for it
+    /// (within the grace period) instead of closing underneath it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // The held lock is what keeps the job in flight.
+    async fn shutdown_waits_for_a_cancelled_requests_snapshot_publication() {
+        use std::future::Future as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("gateway.db");
+        let env = std::collections::HashMap::from([
+            (
+                "OMNI_ENCRYPTION_KEY".into(),
+                "test-encryption-key-0123456789".into(),
+            ),
+            ("OMNI_DB_PATH".into(), path.to_str().expect("path").into()),
+        ]);
+        let mut config = omni_gateway_core::config::load_config(&env, || 0).expect("config");
+        config.port = 0;
+        let running = crate::start(
+            config,
+            crate::Options {
+                stop_deadline: Duration::from_secs(60),
+                ..crate::Options::default()
+            },
+        )
+        .await
+        .expect("start");
+        let holder = running.app.deps.holder.clone();
+        let backend = running.app.deps.refresher.store.clone();
+        let omni_store::Store::Sqlite { store, .. } = backend.as_ref() else {
+            panic!("the gateway boots on SQLite");
+        };
+        let held = store.lock().expect("refresh store");
+        let mut publication = Box::pin(holder.refresh_credential(backend.clone(), "c".into()));
+        std::future::poll_fn(|cx| {
+            assert!(publication.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(publication); // The request was cancelled; its job was not.
+        running.shutdown();
+        let started = tokio::time::Instant::now();
+        let stopped = tokio::spawn(running.wait());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !stopped.is_finished(),
+            "shutdown finished while a snapshot publication was still running"
+        );
+        drop(held);
+        stopped.await.expect("join").expect("stop");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "shutdown ran out its grace period instead of seeing the job end"
+        );
+    }
 }
+pub mod refresh;

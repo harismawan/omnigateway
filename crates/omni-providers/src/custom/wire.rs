@@ -85,11 +85,11 @@ fn function_fields(
     description: Option<&String>,
     schema: &Value,
 ) {
-    out.insert("name".into(), json!(name));
+    omni_ir::deep::insert(out, "name".into(), json!(name));
     if let Some(d) = description {
-        out.insert("description".into(), json!(d));
+        omni_ir::deep::insert(out, "description".into(), json!(d));
     }
-    out.insert("parameters".into(), omni_ir::deep::clone(schema));
+    omni_ir::deep::insert(out, "parameters".into(), omni_ir::deep::clone(schema));
 }
 
 fn note_betas(req: &ChatRequest, notes: &mut Notes) {
@@ -165,18 +165,22 @@ pub fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded {
     }
 
     let mut body = Map::new();
-    body.insert("model".into(), json!(model));
-    body.insert("messages".into(), Value::Array(messages));
-    body.insert("stream".into(), json!(req.stream));
-    body.insert("stream_options".into(), json!({"include_usage": true}));
+    omni_ir::deep::insert(&mut body, "model".into(), json!(model));
+    omni_ir::deep::insert(&mut body, "messages".into(), Value::Array(messages));
+    omni_ir::deep::insert(&mut body, "stream".into(), json!(req.stream));
+    omni_ir::deep::insert(
+        &mut body,
+        "stream_options".into(),
+        json!({"include_usage": true}),
+    );
     if let Some(v) = req.max_tokens {
-        body.insert("max_tokens".into(), num(v));
+        omni_ir::deep::insert(&mut body, "max_tokens".into(), num(v));
     }
     if let Some(v) = req.temperature {
-        body.insert("temperature".into(), num(v));
+        omni_ir::deep::insert(&mut body, "temperature".into(), num(v));
     }
     if let Some(stop) = &req.stop_sequences {
-        body.insert("stop".into(), json!(stop));
+        omni_ir::deep::insert(&mut body, "stop".into(), json!(stop));
     }
     if let Some(tools) = &req.tools {
         let portable: Vec<Value> = tools
@@ -191,8 +195,8 @@ pub fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded {
                         &t.input_schema,
                     );
                     let mut tool = Map::new();
-                    tool.insert("type".into(), json!("function"));
-                    tool.insert("function".into(), Value::Object(function));
+                    omni_ir::deep::insert(&mut tool, "type".into(), json!("function"));
+                    omni_ir::deep::insert(&mut tool, "function".into(), Value::Object(function));
                     Some(Value::Object(tool))
                 }
                 ToolDef::Provider(_) => None,
@@ -201,17 +205,17 @@ pub fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded {
         if portable.len() != tools.len() {
             notes.note("custom:anthropic-tool-dropped");
         }
-        body.insert("tools".into(), Value::Array(portable));
+        omni_ir::deep::insert(&mut body, "tools".into(), Value::Array(portable));
     }
     if let Some(c) = &req.tool_choice {
-        body.insert("tool_choice".into(), chat_tool_choice(c));
+        omni_ir::deep::insert(&mut body, "tool_choice".into(), chat_tool_choice(c));
     }
 
     if matches!(req.reasoning, Some(ReasoningConfig::BetweenTools)) {
         notes.note("custom:reasoning-between-tools-as-off");
     }
     if let Some(effort) = custom_effort(req.reasoning.as_ref()) {
-        body.insert("reasoning_effort".into(), json!(effort));
+        omni_ir::deep::insert(&mut body, "reasoning_effort".into(), json!(effort));
     } else if matches!(req.reasoning, Some(ReasoningConfig::Budget { .. })) {
         notes.note("custom:reasoning-budget-dropped");
     }
@@ -226,13 +230,13 @@ pub fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded {
         ResponseFormatRead::Readable(format) => {
             if !body.contains_key("response_format") {
                 let mut spec = Map::new();
-                spec.insert("name".into(), json!(format.name));
-                spec.insert("schema".into(), Value::Object(format.schema));
-                spec.insert("strict".into(), Value::Bool(true));
+                omni_ir::deep::insert(&mut spec, "name".into(), json!(format.name));
+                omni_ir::deep::insert(&mut spec, "schema".into(), Value::Object(format.schema));
+                omni_ir::deep::insert(&mut spec, "strict".into(), Value::Bool(true));
                 let mut format = Map::new();
-                format.insert("type".into(), json!("json_schema"));
-                format.insert("json_schema".into(), Value::Object(spec));
-                body.insert("response_format".into(), Value::Object(format));
+                omni_ir::deep::insert(&mut format, "type".into(), json!("json_schema"));
+                omni_ir::deep::insert(&mut format, "json_schema".into(), Value::Object(spec));
+                omni_ir::deep::insert(&mut body, "response_format".into(), Value::Object(format));
                 notes.note("custom:response-format-translated");
             }
         }
@@ -267,7 +271,7 @@ fn image_url(media_type: &str, data: &str) -> String {
 }
 
 /// `toCustomResponsesWire`.
-pub fn to_custom_responses_wire(req: &ChatRequest, model: &str) -> Encoded {
+pub(crate) fn to_custom_responses_wire(req: &ChatRequest, model: &str) -> Encoded {
     let mut notes = Notes::default();
     let mut input: Vec<Value> = Vec::new();
     note_betas(req, &mut notes);
@@ -352,20 +356,20 @@ pub fn to_custom_responses_wire(req: &ChatRequest, model: &str) -> Encoded {
     }
 
     let mut body = Map::new();
-    body.insert("model".into(), json!(model));
-    body.insert("input".into(), Value::Array(input));
-    body.insert("stream".into(), json!(req.stream));
-    body.insert("store".into(), json!(false));
+    omni_ir::deep::insert(&mut body, "model".into(), json!(model));
+    omni_ir::deep::insert(&mut body, "input".into(), Value::Array(input));
+    omni_ir::deep::insert(&mut body, "stream".into(), json!(req.stream));
+    omni_ir::deep::insert(&mut body, "store".into(), json!(false));
 
     let instructions = system_text(req.system.as_deref(), "custom", &mut |d| notes.note(d));
     if let Some(instructions) = instructions.filter(|s| !s.is_empty()) {
-        body.insert("instructions".into(), json!(instructions));
+        omni_ir::deep::insert(&mut body, "instructions".into(), json!(instructions));
     }
     if let Some(v) = req.max_tokens {
-        body.insert("max_output_tokens".into(), num(v));
+        omni_ir::deep::insert(&mut body, "max_output_tokens".into(), num(v));
     }
     if let Some(v) = req.temperature {
-        body.insert("temperature".into(), num(v));
+        omni_ir::deep::insert(&mut body, "temperature".into(), num(v));
     }
     if let Some(tools) = &req.tools {
         let portable: Vec<Value> = tools
@@ -373,7 +377,7 @@ pub fn to_custom_responses_wire(req: &ChatRequest, model: &str) -> Encoded {
             .filter_map(|t| match t {
                 ToolDef::Portable(t) => {
                     let mut tool = Map::new();
-                    tool.insert("type".into(), json!("function"));
+                    omni_ir::deep::insert(&mut tool, "type".into(), json!("function"));
                     function_fields(&mut tool, &t.name, t.description.as_ref(), &t.input_schema);
                     Some(Value::Object(tool))
                 }
@@ -383,10 +387,10 @@ pub fn to_custom_responses_wire(req: &ChatRequest, model: &str) -> Encoded {
         if portable.len() != tools.len() {
             notes.note("custom:anthropic-tool-dropped");
         }
-        body.insert("tools".into(), Value::Array(portable));
+        omni_ir::deep::insert(&mut body, "tools".into(), Value::Array(portable));
     }
     if let Some(c) = &req.tool_choice {
-        body.insert("tool_choice".into(), responses_tool_choice(c));
+        omni_ir::deep::insert(&mut body, "tool_choice".into(), responses_tool_choice(c));
     }
 
     if matches!(req.reasoning, Some(ReasoningConfig::BetweenTools)) {
@@ -405,7 +409,7 @@ pub fn to_custom_responses_wire(req: &ChatRequest, model: &str) -> Encoded {
         } else {
             json!({"effort": effort, "summary": "auto"})
         };
-        body.insert("reasoning".into(), reasoning);
+        omni_ir::deep::insert(&mut body, "reasoning".into(), reasoning);
     } else if matches!(req.reasoning, Some(ReasoningConfig::Budget { .. })) {
         notes.note("custom:reasoning-budget-dropped");
     }

@@ -420,7 +420,13 @@ impl ResponsesStream {
     /// [`Self::push`] for an event the caller is done with: a native
     /// `merge` delta's payload is moved into the open item rather than
     /// copied. Every frame is written from borrowed data, as `push` writes it.
-    pub fn push_owned(&mut self, mut event: StreamEvent, out: &mut String) {
+    pub fn push_owned(&mut self, event: StreamEvent, out: &mut String) {
+        if event.has_json_payload() {
+            return omni_ir::deep::scope(|| self.push_owned_inner(event, out));
+        }
+        self.push_owned_inner(event, out);
+    }
+    fn push_owned_inner(&mut self, mut event: StreamEvent, out: &mut String) {
         let merge = match &mut event {
             StreamEvent::BlockDelta {
                 delta:
@@ -482,14 +488,14 @@ impl ResponsesStream {
             match merge {
                 Merge::Moved(moved) => {
                     for (k, v) in moved {
-                        item.native.insert(k, v);
+                        omni_ir::deep::insert(&mut item.native, k, v);
                     }
                 }
                 // A borrowed event has to be copied to be kept; `push_owned`
                 // moves it instead.
                 Merge::Borrowed => {
                     for (k, v) in data {
-                        item.native.insert(k.clone(), omni_ir::deep::clone(v));
+                        omni_ir::deep::insert(&mut item.native, k.clone(), omni_ir::deep::clone(v));
                     }
                 }
             }
@@ -503,6 +509,12 @@ impl ResponsesStream {
     }
 
     pub fn push(&mut self, event: &StreamEvent, out: &mut String) {
+        if event.has_json_payload() {
+            return omni_ir::deep::scope(|| self.push_inner(event, out));
+        }
+        self.push_inner(event, out);
+    }
+    fn push_inner(&mut self, event: &StreamEvent, out: &mut String) {
         match event {
             StreamEvent::Start { model, .. } => {
                 self.model.clone_from(model);
@@ -691,7 +703,11 @@ fn response_value(collected: &CollectedResponse, render: &ResponsesRender) -> Va
 }
 
 /// `responsesResponse`, written as the bytes `JSON.stringify` produces.
-pub fn write_response(collected: &CollectedResponse, render: &ResponsesRender, out: &mut String) {
+pub(crate) fn write_response(
+    collected: &CollectedResponse,
+    render: &ResponsesRender,
+    out: &mut String,
+) {
     let rid = &render.request_id;
     let mut s = ResponsesStream::new(render.clone());
     s.model.clone_from(&collected.model);

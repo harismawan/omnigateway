@@ -264,3 +264,46 @@ async fn a_rebuild_makes_every_earlier_negative_read_again() {
     let _ = h.resolver.resolve(&k).await;
     assert_eq!(h.resolver.reads(), 2);
 }
+
+// A miss read publishes into the snapshot as well: the shutdown drain must
+// wait for one whose waiters are all gone.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abandoned_miss_read_is_a_publication_the_shutdown_drain_waits_for() {
+    use std::future::Future;
+    let h = harness(MissConfig::default());
+    key_row(
+        &Connection::open(&h.path).expect("c"),
+        "k-drain",
+        "sk-omni-drain",
+    );
+    let guard = h.store.lock().expect("lock");
+    let waiter = {
+        let (r, k) = (h.resolver.clone(), hash("sk-omni-drain"));
+        tokio::spawn(async move { r.resolve(&k).await })
+    };
+    for _ in 0..500 {
+        if h.resolver.reads() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(h.resolver.reads(), 1);
+    waiter.abort();
+    drop(waiter.await);
+    let mut drain = Box::pin(h.holder.drain_publications());
+    std::future::poll_fn(|cx| {
+        assert!(
+            drain.as_mut().poll(cx).is_pending(),
+            "the drain ignored a miss read still in flight"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(guard);
+    drain.await;
+    assert!(matches!(
+        h.holder.load().authenticate(Some("sk-omni-drain"), 0),
+        AuthOutcome::Ok(_)
+    ));
+}

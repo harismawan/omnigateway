@@ -207,7 +207,10 @@ mod tests {
         let text = |t: &str, cc: bool| {
             let mut b = serde_json::json!({ "type": "text", "text": t });
             if cc {
-                b["cacheControl"] = serde_json::json!({ "type": "ephemeral" });
+                crate::deep::replace(
+                    &mut b["cacheControl"],
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
             }
             b
         };

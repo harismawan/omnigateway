@@ -238,7 +238,10 @@ fn start_read(
     let holder = core.holder.clone();
     let store = core.store.clone();
     let read_hash = hash.clone();
+    // A found key is published into the snapshot: the shutdown drain waits.
+    let job = holder.publication_job();
     let read = tokio::task::spawn_blocking(move || {
+        let _job = job;
         let store = store.lock().unwrap_or_else(PoisonError::into_inner);
         holder.lookup_miss(&store, &read_hash)
     });

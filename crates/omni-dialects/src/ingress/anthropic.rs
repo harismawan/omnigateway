@@ -409,7 +409,7 @@ fn native_block(t: &str, parsed: &Value) -> ProviderNativeBlock {
                 "type" => {}
                 "cache_control" => cache_control = ir_cache_control(present(Some(v))),
                 _ => {
-                    data.insert(k.clone(), omni_ir::deep::clone(v));
+                    omni_ir::deep::insert(&mut data, k.clone(), omni_ir::deep::clone(v));
                 }
             }
         }
@@ -786,15 +786,15 @@ pub fn parse(
         && let Some(Value::Object(raw_thinking)) = raw.get("thinking")
         && let Some(t) = extra_fields(raw_thinking, &["type", "display", "budget_tokens"])
     {
-        extras.insert("thinking".into(), Value::Object(t));
+        omni_ir::deep::insert(&mut extras, "thinking".into(), Value::Object(t));
     }
     let safeguards = matches!(extras.get("safeguards"), Some(Value::Array(a)) if !a.is_empty());
     if safeguards && let Some(system) = raw.get("system") {
-        extras.insert("system".into(), omni_ir::deep::clone(system));
+        omni_ir::deep::insert(&mut extras, "system".into(), omni_ir::deep::clone(system));
     }
     if !extras.is_empty() {
         let mut vendor = Map::new();
-        vendor.insert("anthropic".into(), Value::Object(extras));
+        omni_ir::deep::insert(&mut vendor, "anthropic".into(), Value::Object(extras));
         request.vendor = Some(vendor);
     }
 
@@ -805,12 +805,16 @@ pub fn parse(
     let mut protocol = Map::new();
     for (name, value) in headers.sorted() {
         if name.starts_with("anthropic-") {
-            protocol.insert(name.to_string(), Value::String(value.to_string()));
+            omni_ir::deep::insert(
+                &mut protocol,
+                name.to_string(),
+                Value::String(value.to_string()),
+            );
         }
     }
     if !protocol.is_empty() {
         let mut ph = Map::new();
-        ph.insert("anthropic".into(), Value::Object(protocol));
+        omni_ir::deep::insert(&mut ph, "anthropic".into(), Value::Object(protocol));
         request.provider_headers = Some(ph);
     }
 

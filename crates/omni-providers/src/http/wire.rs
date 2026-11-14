@@ -35,16 +35,16 @@ pub(crate) struct RequestFacts {
 
 /// Parses a URL the way `new URL(...)` plus `node:http` accept it.
 pub(crate) fn parse_target(raw: &str) -> Result<Target, HttpError> {
-    let url = url::Url::parse(raw).map_err(|_| HttpError::InvalidUrl(raw.to_string()))?;
+    let url = url::Url::parse(raw).map_err(|_| HttpError::InvalidUrl(raw.into()))?;
     let scheme = match url.scheme() {
         "http" => Scheme::Http,
         "https" => Scheme::Https,
-        _ => return Err(HttpError::InvalidUrl(raw.to_string())),
+        _ => return Err(HttpError::InvalidUrl(raw.into())),
     };
     let host = url
         .host_str()
         .filter(|h| !h.is_empty())
-        .ok_or_else(|| HttpError::InvalidUrl(raw.to_string()))?;
+        .ok_or_else(|| HttpError::InvalidUrl(raw.into()))?;
     let default_port = match scheme {
         Scheme::Http => 80,
         Scheme::Https => 443,
@@ -256,6 +256,22 @@ pub(crate) fn encode(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invalid_url_diagnostics_omit_credentials_and_query() {
+        let error =
+            super::parse_target("ftp://user:password@example.com/path?token=secret#fragment")
+                .expect_err("unsupported scheme");
+        for text in [
+            format!("{error}"),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(text.contains("ftp://example.com"), "{text}");
+            for secret in ["user", "password", "token", "secret", "fragment"] {
+                assert!(!text.contains(secret), "{text}");
+            }
+        }
+    }
     use super::*;
 
     #[test]

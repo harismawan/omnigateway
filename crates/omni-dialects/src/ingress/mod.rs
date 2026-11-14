@@ -379,7 +379,11 @@ pub(crate) fn extra_fields(
     let mut extras = Map::new();
     for key in js_keys(body) {
         if !known.contains(&key) && key != "__proto__" {
-            extras.insert(key.to_string(), omni_ir::deep::clone(&body[key]));
+            omni_ir::deep::insert(
+                &mut extras,
+                key.to_string(),
+                omni_ir::deep::clone(&body[key]),
+            );
         }
     }
     (!extras.is_empty()).then_some(extras)

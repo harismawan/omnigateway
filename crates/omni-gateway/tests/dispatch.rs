@@ -32,6 +32,125 @@ async fn flush(h: Harness) {
 }
 
 #[tokio::test]
+async fn rejected_refresh_falls_back_and_removes_credential_from_snapshot() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',weight=CASE id WHEN 'c0' THEN 100000 ELSE 1 END,tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END", []).expect("providers");
+    conn.execute(
+        "UPDATE credentials SET auth_type='oauth',expires_at=1,refresh_token=? WHERE id='c0'",
+        [omni_crypto::field::encrypt(&key(), "rejected")],
+    )
+    .expect("oauth");
+    let body = "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}\n\nevent: message_stop\ndata: {}\n\n";
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(400, vec![], vec![r#"{"error":"invalid_grant"}"#.into()]),
+            Reply::Http(200, vec![], vec![body.into()]),
+            Reply::Http(200, vec![], vec![body.into()]),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}; calls={:?}",
+        h.script.seen.lock().expect("seen")
+    );
+    assert_eq!(h.script.seen.lock().expect("seen").len(), 2);
+    assert!(
+        !h.deps
+            .holder
+            .load()
+            .routing
+            .credentials
+            .iter()
+            .find(|c| c.id == "c0")
+            .expect("credential")
+            .enabled
+    );
+    let mut second = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    assert!(matches!(
+        drain(&mut second).await.last(),
+        Some(StreamEvent::End { .. })
+    ));
+    assert_eq!(h.script.seen.lock().expect("seen").len(), 3);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn expired_anthropic_refreshes_before_inference() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',expires_at=1,refresh_token=?", [omni_crypto::field::encrypt(&key(), "refresh")]).expect("oauth");
+    let body = "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}\n\nevent: message_stop\ndata: {}\n\n";
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(
+                200,
+                vec![],
+                vec![r#"{"access_token":"rotated","expires_in":3600}"#.into()],
+            ),
+            Reply::Http(200, vec![], vec![body.into()]),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.last(), Some(StreamEvent::End { .. })));
+    assert_eq!(h.script.seen.lock().expect("seen").len(), 2);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn anthropic_401_refreshes_and_retries_once() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',access_token=?,refresh_token=?", rusqlite::params![omni_crypto::field::encrypt(&key(), "old"), omni_crypto::field::encrypt(&key(), "refresh")]).expect("oauth");
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(401, vec![], vec!["{}".into()]),
+            Reply::Http(200, vec![], vec![r#"{"access_token":"rotated"}"#.into()]),
+            Reply::Http(401, vec![], vec!["{}".into()]),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    while d.events.next().await.is_some() {}
+    assert_eq!(h.script.seen.lock().expect("seen").len(), 3);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn anthropic_api_key_dispatch_uses_messages_codec() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='anthropic', provider_data='{}'",
+        [],
+    )
+    .expect("provider");
+    let body = "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":10}}}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\nevent: message_stop\ndata: {}\n\n";
+    let h = harness(&f, vec![Reply::Http(200, vec![], vec![body.into()])]);
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let sent = h.script.seen.lock().expect("seen")[0].clone();
+    assert_eq!(sent.url, "https://api.anthropic.com/v1/messages");
+    assert!(sent.headers.iter().any(|(k, _)| k == "x-api-key"));
+    assert!(sent.body.contains("cch="));
+    assert_eq!(
+        d.log.lock().expect("log").cost_usd,
+        (10.0 * 4.0 + 4.0 * 20.0) / 1e6
+    );
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn a_healthy_stream_is_forwarded_and_begins_one_pending_row() {
     let f = fixture(&["c0"]);
     let h = harness(&f, vec![sse_ok(2)]);
@@ -305,6 +424,154 @@ async fn a_429_parks_the_credential_with_its_retry_after() {
         "{until} vs {now}"
     );
     flush(h).await;
+}
+
+#[tokio::test]
+async fn delayed_disable_cannot_undo_admin_reenable() {
+    let f = fixture(&["c0"]);
+    let h = harness(&f, vec![]);
+    let db = omni_store::SqliteStore::open(&f.path, 0).expect("store");
+    db.connection()
+        .execute("UPDATE credentials SET enabled=0", [])
+        .expect("disable");
+    let _delayed = h
+        .deps
+        .refresher
+        .store
+        .credential(&key(), "c0")
+        .await
+        .expect("read")
+        .expect("row");
+    db.connection()
+        .execute(
+            "UPDATE credentials SET enabled=1,label='admin',weight=19",
+            [],
+        )
+        .expect("admin edit");
+    h.deps.holder.rebuild(&db).expect("rebuild");
+    h.deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into())
+        .await
+        .expect("fresh publication");
+    let snapshot = h.deps.holder.load();
+    assert!(snapshot.routing.credentials[0].enabled);
+    assert_eq!(snapshot.routing.credentials[0].label, "admin");
+    assert_eq!(snapshot.routing.credentials[0].weight, 19.0);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn delayed_rebuild_and_equal_stamp_patch_cannot_restore_old_credential() {
+    let f = fixture(&["c0"]);
+    let h = harness(&f, vec![]);
+    let store = omni_store::SqliteStore::open(&f.path, 0).expect("store");
+    store
+        .connection()
+        .execute("UPDATE credentials SET enabled=0", [])
+        .expect("same-stamp disable");
+    h.deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into())
+        .await
+        .expect("publish");
+    assert!(!h.deps.holder.load().routing.credentials[0].enabled);
+    store
+        .connection()
+        .execute("DELETE FROM credentials", [])
+        .expect("delete");
+    h.deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into())
+        .await
+        .expect("publish deletion");
+    assert!(h.deps.holder.load().routing.credentials.is_empty());
+    // A targeted refresh never discovers a new row, even if it exists in DB.
+    store.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('c0','anthropic','new','oauth',1,1,1,'{}',0,0)", []).expect("reinsert");
+    h.deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into())
+        .await
+        .expect("missing snapshot row");
+    assert!(h.deps.holder.load().routing.credentials.is_empty());
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn null_expiry_does_not_trigger_refresh() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',access_token=?,refresh_token=?,expires_at=NULL",rusqlite::params![omni_crypto::field::encrypt(&key(),"access"),omni_crypto::field::encrypt(&key(),"refresh")]).expect("oauth");
+    let h = harness(
+        &f,
+        vec![Reply::Http(
+            200,
+            vec![],
+            vec!["event: message_stop\ndata: {}\n\n".into()],
+        )],
+    );
+    let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+    drain(&mut d).await;
+    {
+        let seen = h.script.seen.lock().expect("seen");
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].url.ends_with("/v1/messages"));
+    }
+    assert_eq!(h.deps.refresher.sweep(None).await.expect("sweep"), 0);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn concurrent_snapshot_publication_never_regresses_rotation() {
+    let f = fixture(&["c0"]);
+    let h = harness(&f, vec![]);
+    let db = rusqlite::Connection::open(&f.path).expect("db");
+    db.execute("UPDATE credentials SET token_version=2,updated_at=100", [])
+        .expect("rotate");
+    let a = h
+        .deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into());
+    let b = h
+        .deps
+        .holder
+        .refresh_credential(h.deps.refresher.store.clone(), "c0".into());
+    let (a, b) = tokio::join!(a, b);
+    a.expect("first");
+    b.expect("second");
+    assert_eq!(h.deps.holder.load().routing.credentials[0].token_version, 2);
+    assert_eq!(h.deps.holder.load().routing.credentials[0].updated_at, 100);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn refresh_waits_obey_dispatch_deadline() {
+    for preemptive in [true, false] {
+        let f = fixture(&["c0"]);
+        set_setting(&f.path, "requestDeadlineMs", "150");
+        let conn = rusqlite::Connection::open(&f.path).expect("db");
+        conn.execute("UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',access_token=?,refresh_token=?,expires_at=?", rusqlite::params![omni_crypto::field::encrypt(&key(), "old"),omni_crypto::field::encrypt(&key(), "refresh"),if preemptive {1_i64} else {4102444800000}]).expect("oauth");
+        let replies = if preemptive {
+            vec![Reply::Hang]
+        } else {
+            vec![Reply::Http(401, vec![], vec!["{}".into()]), Reply::Hang]
+        };
+        let h = harness(&f, replies);
+        let mut d = dispatch(h.deps.clone(), req("claude-opus-5-5"));
+        let events = tokio::time::timeout(Duration::from_secs(2), drain(&mut d))
+            .await
+            .expect("refresh waiter must respect deadline");
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Error {
+                code: ErrorCode::Timeout,
+                ..
+            })
+        ));
+        drop(d);
+        assert!(h.deps.load.counts().is_empty());
+        flush(h).await;
+    }
 }
 
 #[tokio::test]

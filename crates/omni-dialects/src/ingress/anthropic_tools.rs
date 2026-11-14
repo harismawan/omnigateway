@@ -244,7 +244,7 @@ fn parse_anthropic_tool(
             continue;
         }
         if !parsed.is_null() {
-            wire.insert(key.to_string(), parsed);
+            omni_ir::deep::insert(&mut wire, key.to_string(), parsed);
         }
     }
 
@@ -326,7 +326,7 @@ fn parse_custom_tool(raw: &Map<String, Value>, path: &str) -> Result<ToolDef, Ga
         }
         let v = field(path, key, &raw[key])?;
         if !v.is_null() {
-            options.insert(key.to_string(), v);
+            omni_ir::deep::insert(&mut options, key.to_string(), v);
         }
     }
 

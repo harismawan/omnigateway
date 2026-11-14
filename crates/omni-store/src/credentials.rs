@@ -173,6 +173,47 @@ pub fn remove(conn: &Connection, id: Option<&str>) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// A complete OAuth rotation. All four secret columns are replaced, including
+/// NULLs; the expiry belongs to the same atomic versioned write.
+/// Deliberately has no Debug implementation: contains plaintext secrets.
+#[derive(Clone)]
+pub struct TokenUpdate {
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub api_key: Option<String>,
+    pub id_token: Option<String>,
+    pub expires_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+impl TokenUpdate {
+    pub(crate) fn sealed(&self, key: &FieldKey) -> [Option<String>; 4] {
+        [
+            &self.access_token,
+            &self.refresh_token,
+            &self.api_key,
+            &self.id_token,
+        ]
+        .map(|s| s.as_deref().map(|s| omni_crypto::field::encrypt(key, s)))
+    }
+}
+
+/// Compare-and-swap against the version read before calling the token endpoint.
+/// A missing row or a lost race returns false without changing any column.
+pub fn update_tokens(
+    conn: &Connection,
+    key: &FieldKey,
+    id: &str,
+    update: &TokenUpdate,
+    expected_version: i64,
+) -> Result<bool, StoreError> {
+    let sealed = update.sealed(key);
+    Ok(conn.execute(
+        "UPDATE credentials SET access_token=?, refresh_token=?, api_key=?, id_token=?, expires_at=?, updated_at=?, token_version=token_version+1 WHERE id=? AND token_version=?",
+        rusqlite::params![sealed[0], sealed[1], sealed[2], sealed[3], update.expires_at, update.updated_at, id, expected_version],
+    )? > 0)
+}
+
 fn open(r: &Row<'_>, key: &FieldKey, column: &'static str) -> Result<Secret, StoreError> {
     Ok(match row::opt_text(r, T, column)? {
         None => Secret::Absent,
@@ -215,6 +256,13 @@ fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> 
 }
 
 /// `CredentialRepo.list`, ordered by tier then label, secrets decrypted.
+pub fn get(conn: &Connection, key: &FieldKey, id: &str) -> Result<Option<Credential>, StoreError> {
+    let mut stmt = conn.prepare_cached("SELECT * FROM credentials WHERE id=?")?;
+    let mut rows = stmt.query([id])?;
+    rows.next()?.map(|r| to_credential(r, key)).transpose()
+}
+
+/// All credentials, in routing order.
 pub fn list(conn: &Connection, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {
     read_list(conn, key, false)
 }

@@ -40,7 +40,7 @@ fn push_string(value: Option<&Value>, out: &mut String) {
         Some(Value::Number(n)) => write_number(number_value(n), out),
         Some(Value::String(s)) => out.push_str(s),
         Some(Value::Object(_)) => out.push_str("[object Object]"),
-        Some(Value::Array(items)) => {
+        Some(Value::Array(items)) => crate::deep::grow(|| {
             // `Array.prototype.join`: null and undefined elements are empty.
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
@@ -50,7 +50,7 @@ fn push_string(value: Option<&Value>, out: &mut String) {
                     push_string(Some(item), out);
                 }
             }
-        }
+        }),
     }
 }
 
@@ -324,24 +324,21 @@ pub fn object_assign(target: &mut serde_json::Map<String, Value>, source: Option
     match source {
         Some(Value::Object(map)) => {
             for (k, v) in map {
-                if k != "__proto__"
-                    && let Some(old) = target.insert(k.clone(), crate::deep::clone(v))
-                {
-                    crate::deep::drop(old);
+                if k != "__proto__" {
+                    crate::deep::insert(target, k.clone(), crate::deep::clone(v));
                 }
             }
         }
         Some(Value::Array(items)) => {
             for (i, v) in items.iter().enumerate() {
-                if let Some(old) = target.insert(i.to_string(), crate::deep::clone(v)) {
-                    crate::deep::drop(old);
-                }
+                crate::deep::insert(target, i.to_string(), crate::deep::clone(v));
             }
         }
         Some(Value::String(s)) => {
             let units: Vec<u16> = s.encode_utf16().collect();
             for (i, unit) in units.iter().enumerate() {
-                target.insert(
+                crate::deep::insert(
+                    target,
                     i.to_string(),
                     Value::String(String::from_utf16_lossy(std::slice::from_ref(unit))),
                 );

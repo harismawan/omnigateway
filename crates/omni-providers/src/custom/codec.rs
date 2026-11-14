@@ -83,7 +83,7 @@ impl ProviderCodec for CustomCodec {
 }
 
 // A bounded-depth iterator stack, rather than a pending node per sibling.
-fn needs_scope(value: &Value) -> bool {
+pub(crate) fn needs_scope(value: &Value) -> bool {
     fn children(value: &Value) -> Option<Box<dyn Iterator<Item = &Value> + '_>> {
         match value {
             Value::Array(a) => Some(Box::new(a.iter())),
@@ -135,7 +135,7 @@ fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<Protocol>, Gatew
         Protocol::Responses => to_custom_responses_wire(input.request, input.model),
     };
     // `{ ...encoded.body, stream: true }`: keeps `stream`'s position.
-    encoded.body.insert("stream".into(), Value::Bool(true));
+    omni_ir::deep::insert(&mut encoded.body, "stream".into(), Value::Bool(true));
     let body = jsjson::to_string(&Value::Object(encoded.body));
 
     Ok(CodecRequest {

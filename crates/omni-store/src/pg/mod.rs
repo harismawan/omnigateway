@@ -335,6 +335,56 @@ impl PgStore {
         Ok(())
     }
 
+    pub async fn credential(
+        &self,
+        key: &FieldKey,
+        id: &str,
+    ) -> Result<Option<Credential>, StoreError> {
+        let mut client = self.client().await?;
+        let tx = client.build_transaction().read_only(true).start().await?;
+        let row = rows::credential(&tx, key, id).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    pub async fn refresh_metadata(
+        &self,
+        id: &str,
+        email: Option<String>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.client().await?.execute("UPDATE credentials SET account_email=COALESCE($1,account_email),updated_at=$2 WHERE id=$3", &[&email,&now,&id]).await?;
+        Ok(())
+    }
+
+    pub async fn disable_rejected_token(&self, id: &str, now: i64) -> Result<(), StoreError> {
+        self.disable_credential(id, now, "tokenRejected").await
+    }
+
+    pub async fn disable_credential(
+        &self,
+        id: &str,
+        now: i64,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        self.client().await?.execute("UPDATE credentials SET enabled=false,disabled_reason=$3,disabled_at=$1,updated_at=$1 WHERE id=$2", &[&now,&id,&reason]).await?;
+        Ok(())
+    }
+
+    pub async fn update_tokens(
+        &self,
+        key: &FieldKey,
+        id: &str,
+        update: &crate::credentials::TokenUpdate,
+        expected_version: i64,
+    ) -> Result<bool, StoreError> {
+        let sealed = update.sealed(key);
+        Ok(self.client().await?.execute(
+            "UPDATE credentials SET access_token=$1, refresh_token=$2, api_key=$3, id_token=$4, expires_at=$5, updated_at=$6, token_version=token_version+1 WHERE id=$7 AND token_version=$8::bigint",
+            &[&sealed[0], &sealed[1], &sealed[2], &sealed[3], &update.expires_at, &update.updated_at, &id, &expected_version],
+        ).await? > 0)
+    }
+
     pub async fn list_health(&self) -> Result<Vec<CredentialHealth>, StoreError> {
         rows::list_health(&self.client().await?).await
     }

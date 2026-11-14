@@ -43,7 +43,7 @@ pub enum BodyEncoding {
 ///
 /// Headers are ordered and cased; the body is the finished string. There is no
 /// `signal`: the deadline is the caller dropping the future or the body.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct HttpRequest {
     pub provider: String,
     pub url: String,
@@ -54,19 +54,55 @@ pub struct HttpRequest {
     /// Gateway correlation for logs. Never sent on the wire.
     pub request_id: Option<String>,
 }
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HttpRequest(<redacted>)")
+    }
+}
 
 /// The response head plus an incrementally readable body.
-#[derive(Debug)]
 pub struct HttpResponse {
     pub status: u16,
     pub headers: Headers,
     pub body: ResponseBody,
 }
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Diagnostics retain only a parsed scheme and host, never URL credentials.
+#[derive(Debug)]
+pub struct RejectedUrl(String);
+
+impl From<&str> for RejectedUrl {
+    fn from(raw: &str) -> Self {
+        Self(url::Url::parse(raw).ok().map_or_else(
+            || "[unparseable URL]".into(),
+            |url| {
+                format!(
+                    "{}://{}",
+                    url.scheme(),
+                    url.host_str().unwrap_or("[no host]")
+                )
+            },
+        ))
+    }
+}
+
+impl std::fmt::Display for RejectedUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
     #[error("invalid url: {0}")]
-    InvalidUrl(String),
+    InvalidUrl(RejectedUrl),
     #[error("invalid http method: {0}")]
     InvalidMethod(String),
     /// A header name that is not a token, or a value node would refuse.

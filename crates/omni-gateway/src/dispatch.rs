@@ -64,7 +64,13 @@ fn event_size(e: &StreamEvent) -> usize {
                 block_type, data, ..
             } => {
                 block_type.len()
-                    + omni_ir::jsjson::to_string(&serde_json::Value::Object(data.clone())).len()
+                    + omni_ir::jsjson::to_string(
+                        &omni_ir::deep::Owned(serde_json::Value::Object(omni_ir::deep::clone_map(
+                            data,
+                        )))
+                        .0,
+                    )
+                    .len()
             }
             _ => 0,
         },
@@ -72,10 +78,17 @@ fn event_size(e: &StreamEvent) -> usize {
             Delta::Text { text } | Delta::Thinking { text } => text.len(),
             Delta::ThinkingSignature { signature } => signature.len(),
             Delta::ToolJson { partial } => partial.len(),
-            other => format!("{other:?}").len(),
+            Delta::ProviderNativeJson { partial, .. } => partial.len(),
+            Delta::ProviderNative { data, .. } => omni_ir::jsjson::to_string(
+                &omni_ir::deep::Owned(serde_json::Value::Object(omni_ir::deep::clone_map(data))).0,
+            )
+            .len(),
         },
         StreamEvent::End { vendor, .. } => vendor.as_ref().map_or(0, |v| {
-            omni_ir::jsjson::to_string(&serde_json::Value::Object(v.clone())).len()
+            omni_ir::jsjson::to_string(
+                &omni_ir::deep::Owned(serde_json::Value::Object(omni_ir::deep::clone_map(v))).0,
+            )
+            .len()
         }),
         StreamEvent::Error { message, .. } => message.len(),
         StreamEvent::BlockEnd { .. } => 0,
@@ -91,6 +104,7 @@ pub type EventsStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, GatewayErr
 
 /// What every dispatch shares: one per process.
 pub struct Deps {
+    pub refresher: Arc<crate::refresh::Refresher>,
     pub http: Arc<dyn HttpClient>,
     pub writer: WriterHandle,
     pub holder: Arc<SnapshotHolder>,
@@ -296,14 +310,20 @@ impl Deps {
         after
     }
 
-    /// The OAuth refresh hook. No OAuth provider is ported yet, so there is
-    /// nothing to refresh with; the structure around it is kept.
-    fn refresh(&self, c: &Credential) -> Result<omni_store::CredentialSecrets, GatewayError> {
-        Err(GatewayError::new(
-            ErrorCode::Internal,
-            format!("no OAuth provider for {}", safe_token(&c.provider)),
-        )
-        .gateway_authored())
+    /// Shared OAuth refresh service for preemptive and reactive retries.
+    async fn refresh(&self, c: &Credential) -> Result<omni_store::CredentialSecrets, GatewayError> {
+        let result = self.refresher.refresh(c).await;
+        match self
+            .holder
+            .refresh_credential(self.refresher.store.clone(), c.id.clone())
+            .await
+        {
+            Ok(()) => {}
+            Err(_) => {
+                tracing::warn!(credentialId = %c.id, "credential snapshot publication failed; retaining previous snapshot")
+            }
+        }
+        result
     }
 }
 
@@ -673,9 +693,9 @@ fn run(mut s: RunState) -> EventsStream {
             let mut retry_secrets: Option<omni_store::CredentialSecrets> = None;
             let attempt_now = now();
             let preemptive_refresh_required = c.credential.auth_type == AuthType::OAuth
-                && c.credential.expires_at.is_some_and(|at| at - REFRESH_LEAD_MS <= attempt_now);
+                && c.credential.expires_at.is_some_and(|at| at.saturating_sub(REFRESH_LEAD_MS) <= attempt_now);
 
-            if c.target.provider != omni_providers::custom::ID {
+            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" {
                 let ttft = lock(&log).ttft_ms;
                 slot.release(ttft);
                 yield Err(GatewayError::new(
@@ -696,7 +716,7 @@ fn run(mut s: RunState) -> EventsStream {
                                 "credential expired with no refresh token",
                             ).with_provider(c.credential.provider.clone()));
                         }
-                        match deps.refresh(&c.credential) {
+                        match within(s.deadline, Box::pin(deps.refresh(&c.credential))).await.and_then(|r| r) {
                             Ok(sec) => retry_secrets = Some(sec),
                             Err(e) => break 'attempt Err(e),
                         }
@@ -710,16 +730,19 @@ fn run(mut s: RunState) -> EventsStream {
                     {
                         ar.request_started_at = Some(s.started_at as f64);
                     }
-                    let sent = within(
-                        s.deadline,
-                        omni_providers::adapter::send(
+                    let sent = if c.target.provider == "anthropic" {
+                            within(s.deadline, Box::pin(omni_providers::adapter::send(
+                                &omni_providers::anthropic::codec::AnthropicCodec,
+                                "anthropic", ar, deps.http.as_ref(),
+                            ))).await
+                        } else {
+                        within(s.deadline, omni_providers::adapter::send(
                             &omni_providers::custom::CustomCodec,
                             omni_providers::custom::ID,
                             ar,
                             deps.http.as_ref(),
-                        ),
-                    )
-                    .await;
+                        )).await
+                        };
                     let mut result = match sent {
                         Err(t) => break 'attempt Err(t),
                         Ok(Err(e)) => break 'attempt Err(classify_send(e)),
@@ -874,7 +897,7 @@ fn run(mut s: RunState) -> EventsStream {
                         model = %c.target.model, credentialId = %c.credential.id,
                         attempt = i + 1, code = failure.code.as_str(),
                         "attempt authentication failed; refreshing credential");
-                    match deps.refresh(&c.credential) {
+                    match within(s.deadline, Box::pin(deps.refresh(&c.credential))).await.and_then(|r| r) {
                         Ok(sec) => {
                             retry_secrets = Some(sec);
                             continue;

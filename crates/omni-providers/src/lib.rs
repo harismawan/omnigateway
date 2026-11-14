@@ -8,10 +8,12 @@
 //! - [`custom`]: the custom OpenAI-compatible provider.
 
 pub mod adapter;
+pub mod anthropic;
 pub mod codec;
 pub mod custom;
 pub mod http;
 pub mod http_error;
+pub mod oauth;
 pub mod response_format;
 pub mod sse;
 pub mod system;

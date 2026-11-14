@@ -606,7 +606,7 @@ fn rebuild_inner(z: &Z, value: Option<&Value>) -> Option<Value> {
                         continue;
                     }
                     if let Some(r) = rebuild(inner, map.get(key)) {
-                        out.insert(key.to_string(), r);
+                        omni_ir::deep::insert(&mut out, key.to_string(), r);
                     }
                 }
                 Some(Value::Object(out))
@@ -661,7 +661,7 @@ fn rebuild_object(shape: &[(&'static str, Z)], map: &Map<String, Value>) -> Valu
     let mut out = Map::new();
     for (key, field) in shape {
         if let Some(r) = rebuild(field, map.get(*key)) {
-            out.insert((*key).to_string(), r);
+            omni_ir::deep::insert(&mut out, (*key).to_string(), r);
         }
     }
     Value::Object(out)

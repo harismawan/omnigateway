@@ -148,11 +148,11 @@ fn fragmented_tool_depth_is_enforced_by_both_public_decoders() {
                 }
                 for e in out {
                     if let StreamEvent::BlockDelta {
-                        delta: Delta::ToolJson { partial },
+                        delta: Delta::ToolJson { ref partial },
                         ..
                     } = e
                     {
-                        reconstructed.push_str(&partial);
+                        reconstructed.push_str(partial);
                     }
                 }
             }

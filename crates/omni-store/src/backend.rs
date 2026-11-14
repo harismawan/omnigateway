@@ -174,6 +174,92 @@ impl Store {
         }
     }
 
+    /// Fresh credential view for refresh lock deduplication and CAS losers.
+    pub async fn credential(
+        &self,
+        key: &FieldKey,
+        id: &str,
+    ) -> Result<Option<Credential>, StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let key = key.clone();
+                let id = id.to_owned();
+                on_sqlite!(store, |s| crate::credentials::get(
+                    s.connection(),
+                    &key,
+                    &id
+                ))
+            }
+            Self::Postgres(pg) => pg.credential(key, id).await,
+        }
+    }
+
+    /// Refresh metadata never changes token_version. Called only by the CAS winner.
+    pub async fn refresh_metadata(
+        &self,
+        id: &str,
+        email: Option<String>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let id = id.to_owned();
+                on_sqlite!(store, |s| {
+                    s.connection().execute("UPDATE credentials SET account_email=COALESCE(?,account_email),updated_at=? WHERE id=?", rusqlite::params![email,now,id])?;
+                    Ok(())
+                })
+            }
+            Self::Postgres(pg) => pg.refresh_metadata(id, email, now).await,
+        }
+    }
+
+    pub async fn disable_rejected_token(&self, id: &str, now: i64) -> Result<(), StoreError> {
+        self.disable_credential(id, now, "tokenRejected").await
+    }
+
+    pub async fn disable_credential(
+        &self,
+        id: &str,
+        now: i64,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let id = id.to_owned();
+                let reason = reason.to_owned();
+                on_sqlite!(store, |s| {
+                    s.connection().execute("UPDATE credentials SET enabled=0,disabled_reason=?,disabled_at=?,updated_at=? WHERE id=?", rusqlite::params![reason,now,now,id])?;
+                    Ok(())
+                })
+            }
+            Self::Postgres(pg) => pg.disable_credential(id, now, reason).await,
+        }
+    }
+
+    pub async fn update_tokens(
+        &self,
+        key: &FieldKey,
+        id: &str,
+        update: &crate::credentials::TokenUpdate,
+        expected_version: i64,
+    ) -> Result<bool, StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let key = key.clone();
+                let id = id.to_owned();
+                let update = update.clone();
+                on_sqlite!(store, |s| crate::credentials::update_tokens(
+                    s.connection(),
+                    &key,
+                    &id,
+                    &update,
+                    expected_version
+                ))
+            }
+            Self::Postgres(pg) => pg.update_tokens(key, id, update, expected_version).await,
+        }
+    }
+
     pub async fn list_models(
         &self,
     ) -> Result<Vec<Result<VirtualModel, ModelRowError>>, StoreError> {
