@@ -1,5 +1,20 @@
 # Step 3 item 1: public IR blocker
 
+Controller disposition: parked as roadmap **X1 (lossless UTF-16 stream text)**.
+No public IR change in this provider increment. The retained ignored oracle is
+X1's corpus, not an active prerequisite to the remaining provider work.
+
+Observed client consequences in the retained RED run: text delta is lost and
+the later valid completion succeeds with empty text; tool-argument delta is
+lost and the completion succeeds with empty tool input; native done is lost
+and completion succeeds with an empty native block. These three fixtures do
+NOT end in an error. The fourth fixture's surrogate-bearing upstream error is
+dropped, then finish emits a retryable premature-completion error. Buffered
+collector/egress fixtures ignore error events and render empty content; this
+is a library comparison, not a gateway HTTP error-path observation. Thus a
+dropped terminal error still fails this stream, while dropped content followed
+by a valid completion can silently succeed. No behavior was changed.
+
 The frozen decoder accepts escaped unpaired UTF-16 units. `jsjson::parse_js`
 and `JsValue::String(Vec<u16>)` can represent them, and `text::Text` is available.
 They are not wired into the public stream/collected-request carriers at this

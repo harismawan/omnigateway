@@ -91,7 +91,7 @@ fn raw_utf8_matches_ts() {
 }
 
 #[test]
-#[ignore = "blocked on public IR String/serde Value carriers; run --ignored for retained RED evidence"]
+#[ignore = "parked: roadmap X1 (lossless UTF-16 stream text)"]
 fn lone_surrogates_match_ts() {
     compare(true);
 }
