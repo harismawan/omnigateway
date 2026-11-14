@@ -1,5 +1,62 @@
 # B3 OpenAI / Codex
 
+## C1 captured-fingerprint checkpoint — HEAD `b43d7310`
+
+**C1 committed; C2 and C3 not started.** Stopping at the permitted C1 checkpoint
+to preserve context. No production change. OAuth request codec: **285 exact
+whole-request comparisons green (269 OAuth +16 API-key controls)**, previously
+272. Added `fingerprint-behavior` (9 rows: prefix absence, opening/next/mixed
+turns, orphan repair, future and near-UUID keys) and `fingerprint-clock` (4 rows:
+two request IDs × absent/present start). Rust consumes each row's ID/start when
+provided; prior 272 rows retain their original fixed identity inputs.
+
+Read all 46 frozen fingerprint declarations in <=120-line sections. Six tests
+in `openai_fingerprint_literals.rs` pin 31 original declarations: captured
+header order/casing/constants, metadata keys/order/values, body order/shape,
+prefix UUID vectors, history metadata, catalog rows, provenance, ID formats,
+stored installation ID, include/decode flag, and client overrides. Remaining
+15 receive named behavioral corpus dispositions. Literal table across 121:
+**35 ported /81 differential /5 still later (C3 pending)**. This is not yet
+the requested final no-undecided inventory. The five are openai.test.ts 30/31
+and openaiCodec.test.ts 1/2/7. No fingerprint declaration is deferred to refresh
+or connect routes; test 2 pins the zstd marker only, not the transport frame.
+
+**No literal failed first:** initial three functions passed, then expanded
+five, then final six. No request differential mismatch in the 13 new rows.
+Prefix declaration 7 pins its two provider-visible UUIDv5 vectors; its standalone
+Python.org helper vector was not copied. Mixed behavior/format tests name both
+literal and differential evidence in the disposition table.
+
+Final code gates: three-crate cargo tests **51 successful summaries, 229 passes
+including subprocess repetitions, 4 ignored, zero failures**; strict all-target
+clippy, fmt check, diff check passed. All three source tripwires pass within
+that suite (`json_writes_use_iterative_release`, `public_boundary_inventory_matches`,
+`owner_reexports_are_pinned`). Logs `/tmp/opencode/b3/s4c-final-tests.log` and
+`s4c-final-clippy.log`; literal first/expanded and C1 focused runs use `s4c-`
+prefix too. Cargo builds use incremental=0/dev debug=0/test debug=0.
+
+Decode status unchanged: shared decoder differential is still the earlier
+158 rows ×3 chunkings with buffered three-dialect output. **No OAuth codec-level
+SSE comparison added this turn; no new claim about OAuth decode behavior.**
+Prior inspection below says native reasoning derives from original client
+include, not OAuth's forced include; C2 must verify that through the codec.
+
+Known differences unchanged: HTTP transport refuses the OAuth Zstd marker;
+empty-body compressed bytes/reachability question remains in
+`conformance/openai-compression.md`. X1 unpaired-surrogate upstream escapes and
+non-numeric usage counts retain their two ignored tests unchanged. Startup
+environment capture timing and refresh persistence remain deferred. No new
+production mismatch observed; OAuth/lite depth remains unaudited.
+
+**Precise next session:** finish C2 (grep/read frozen codec.ts/decode.ts OAuth
+and native state; reuse SSE corpus through codec decode state, compare events
+and buffered answers for all three dialects), then C3's five declarations,
+updating table to zero undecided rows. Then depth for **every arbitrary-JSON
+carrier on OAuth/lite**: 2 MiB subprocess cases near 40,000 levels, each with
+a scratch mutation, or a structural-safety statement. Then compressed HTTP
+body, including the empty-body frame question in openai-compression.md; then
+gateway integration. Preserve X1 ignores and the frozen product TypeScript.
+
 ## Step B coverage checkpoint — HEAD `0e0d9d61`
 
 **272 request comparisons green: 256 OAuth +16 API-key controls.** B5–B8
