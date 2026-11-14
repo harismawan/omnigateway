@@ -2501,6 +2501,17 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         }
         fixture.run("INSERT INTO quota_samples(credential_id,window_type,used,limit_value,observed_at) VALUES('history-orphan','daily',1,10,1794612600000)");
         await probe("populated");
+        for(const [name,hex] of [["invalid","ff"],["truncated","e282"],["overlong","c0af"],["nul","610062"]]) {
+          for(const column of ["label","provider","id","window_type"]) {
+            const table=column==="window_type"?"quota_samples":"credentials";
+            const where=column==="window_type"?"credential_id='history-0' AND window_type='daily'":"id='history-0'";
+            fixture.run(`UPDATE ${table} SET ${column}=CAST(X'${hex}' AS TEXT) WHERE ${where}`);
+            if(column==="id") fixture.run(`UPDATE quota_samples SET credential_id=CAST(X'${hex}' AS TEXT) WHERE credential_id='history-0'`);
+            await probe(`utf8 ${column} ${name}`);
+            fixture.run(`UPDATE ${table} SET ${column}=? WHERE ${column}=CAST(X'${hex}' AS TEXT)`,[column==="id"?"history-0":column==="window_type"?"daily":"custom"]);
+            if(column==="id") fixture.run(`UPDATE quota_samples SET credential_id='history-0' WHERE credential_id=CAST(X'${hex}' AS TEXT)`);
+          }
+        }
         for(const [i,cell] of ["'text'","NULL","X'3132'","9223372036854775807","0","-1","X'ff'"].entries()) fixture.run(`UPDATE quota_samples SET used=${cell==="NULL"?"0":cell},limit_value=${cell},resets_at=${cell},window_ms=${cell} WHERE credential_id='history-${i}'`);
         await probe("unusual");
         for(const [name,cell,status] of [["invalid-json","'providerDataSecretCanary'",500],["array","'[\"providerDataSecretCanary\"]'",200],["null-json","'null'",200],["number-json","'42'",200]] as const) {
@@ -2568,6 +2579,17 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         }
         fixture.run("INSERT INTO quota_windows(credential_id,window_type,starts_at,used,limit_value,resets_at,observed_at) VALUES('quota-orphan','daily',0,1,10,NULL,0)");
         await probe("populated");
+        for(const [name,hex] of [["invalid","ff"],["truncated","e282"],["overlong","c0af"],["nul","610062"]]) {
+          for(const column of ["label","provider","id","window_type"]) {
+            const table=column==="window_type"?"quota_windows":"credentials";
+            const where=column==="window_type"?"credential_id='quota-0' AND window_type='daily'":"id='quota-0'";
+            fixture.run(`UPDATE ${table} SET ${column}=CAST(X'${hex}' AS TEXT) WHERE ${where}`);
+            if(column==="id") fixture.run(`UPDATE quota_windows SET credential_id=CAST(X'${hex}' AS TEXT) WHERE credential_id='quota-0'`);
+            await probe(`utf8 ${column} ${name}`);
+            fixture.run(`UPDATE ${table} SET ${column}=? WHERE ${column}=CAST(X'${hex}' AS TEXT)`,[column==="id"?"quota-0":column==="window_type"?"daily":"custom"]);
+            if(column==="id") fixture.run(`UPDATE quota_windows SET credential_id='quota-0' WHERE credential_id=CAST(X'${hex}' AS TEXT)`);
+          }
+        }
         for(const [i,cell] of ["'text'","NULL","X'3132'","9223372036854775807","0","-1"].entries()) {
           fixture.run(`UPDATE quota_windows SET used=${cell==="NULL"?"0":cell},limit_value=${cell},resets_at=${cell},window_ms=${cell} WHERE credential_id='quota-${i}'`);
         }

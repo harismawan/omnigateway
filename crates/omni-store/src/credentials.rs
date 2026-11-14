@@ -577,6 +577,10 @@ pub fn client_quota_accounts(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<Vec<rusqlite::types::Value>>, crate::error::StoreError> {
     let mut stmt = conn.prepare("SELECT id,label,provider FROM credentials ORDER BY tier,label")?;
-    let rows = stmt.query_map([], |r| (0..3).map(|i| r.get(i)).collect())?;
+    let rows = stmt.query_map([], |r| {
+        (0..3)
+            .map(|i| r.get_ref(i).map(crate::js::own_cell))
+            .collect()
+    })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
