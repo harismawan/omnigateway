@@ -1,4 +1,28 @@
-# Fix round 2 — partial checkpoint: R1 and R2 fixed; R3 and closure pending
+# Fix round 2 — partial checkpoint: R3 allowlist reproduction fixed; remaining producers and closure pending
+
+**NEXT STEP (latest):** continue R3 from `ab409566`. New `StoreError::StoredJson { table, column, row_id, detail }` has sanitised Display; only explicit wire consumers should read detail. Session-key allowlist -> summary reproduction now passes its log canary. Full admin-routes passed after the partial conversion. Remaining work: convert other stored JSON producers below, add per-column request canaries, then final-commit closure (all Cargo gates and four drivers, fresh external binary, manifest). The older NEXT STEP paragraph below is historical; its claim that R3 is entirely unfixed is superseded here. Do not pursue the deferred identity audit.
+
+R3 partial finding -> commit -> failed first -> evidence: `ab409566`; `r3-red.log` 208 equal / 0 expected / 1 failure, captured stdout contains storedAllowlistSecretCanary from summary; `r3-green.log` passed initial summary reproduction. Expanded client summary scenarios also request operator `/api/keys` with that canary. Full `r3-admin-routes.log`: **20347 equal / 24 expected / 0 failures**, 38 raw keys minted; full exchanges/stdout/stderr retained in `r3-admin-routes/`. `r3-admin-auth.log`: **212 equal / 4 expected / 0 failures**, 116 tokens. All paths under `/tmp/opencode/a8/fix2/`.
+
+R3 producers converted:
+- `omni-control/src/admin_password.rs`: session allowlist validation -> StoredJson.
+- `omni-store/src/keys.rs`: parse_allowlist and get_operator -> StoredJson. The allowlist_parse_error helper and KeyRowError wire message remain verbatim; existing auth comparisons pass.
+- `omni-store/src/pg/rows.rs`: get_operator_key -> StoredJson; to_key_entry explicitly extracts StoredJson.detail for wire auth refusal. Shared parse_allowlist uses new variant. No live Postgres canary run; SQLite request fixtures cover the converted column, not the PostgreSQL execution path.
+- `omni-control/src/api.rs`: key_rows and read-own-key allowlist parses -> StoredJson -> Failure's Display string.
+
+R3 producers NOT CONVERTED (audit incomplete, not a claim they require wider changes):
+- `omni-store/src/keys.rs` list and `pg/rows.rs` list_keys reconstruct Corrupt(e.message); need trace list consumers and preserve key refusal semantics.
+- `omni-store/src/credentials.rs:229`, `pg/rows.rs` to_credential: parse_js still maps to Corrupt; wire/log consumers not traced.
+- `omni-store/src/models.rs:210–216`: serde diagnostic and parse_js String errors; consumers not fully traced.
+- `omni-control/src/models.rs:17,51`: String error propagation; need typed stored error conversion and route canaries for targets/provider_data.
+- `omni-control/src/api.rs` remaining parse_stored is used by credential provider_data projection; not converted, needs id retained and provider_data canary request.
+- `omni-control/src/keys.rs:509`: operator allowlist parser in String result; CLI/wire consumers not traced.
+- Settings/logs/usage parsers found with fallback behavior (`settings.rs:170`, logs.rs, usage.rs, pg/usage.rs, pg/bodies.rs); no conversion yet, audit propagation fully before disposition.
+- Existing shared control credentials parser remains sanitised by `19e6cc27`.
+
+R3 log sinks checked: gateway `api.rs:160` uses `%e` (StoreError Display); gateway `admin_routes.rs:177` logs `%e.message` (Failure::internal copies Display, generic INTERNAL wire); store `keys.rs:375` logs `%e` for skipped hashless row. None of these reads StoredJson.detail. Remaining tracing sinks, including writer/health and refresh consumers, are not yet fully audited. Derived Debug still includes detail; audit must ensure sinks never use Debug for this variant.
+
+Observed gates on the source subsequently committed as `ab409566`: `r3-tests.log` **1162 passed, 0 failed, 11 ignored, 161 groups**; `r3-clippy.log` full workspace all-targets -D warnings passed; `r3-fmt.log` passed; `r3-test.log` new Display canary unit test passed; `r3-build.log` gateway build passed. All Cargo commands used the three requested environment settings. External `/tmp/opencode/a8/fix2/rust-r1` now contains this partial R3 build. These runs preceded the commit and are NOT final closure; surface/run.ts and manifest pending. Known differences remain those below plus remaining unsanitised stored JSON paths. Scratch teardown completed for successful drivers.
 
 **NEXT STEP:** R3 first, then full closure. Do NOT pursue the broader operator identity audit below: it is a separate roadmap item. R2 is committed in `1d692b74`; both reviewer fixtures now pin full exchanges and Rust logs are checked for panic lines. R3 is UNFIXED: start at `admin_password.rs:146–149` (session allowlist parse error -> StoreError::Corrupt -> gateway api.rs auth logging), then trace every site listed below through wire/log consumers before changing messages. `keys.rs:291` deliberately supplies verbatim wire auth refusal text; do not globally redact that helper. `omni-control/src/models.rs:17,51` propagate parser strings via Result<_, String>; consumers not yet traced. Add stored canaries per changed site and preserve operator wire comparisons. Then run workspace tests (timeout >=15 minutes), Clippy all targets, fmt, fresh build and all four drivers, and write `/tmp/opencode/a8/fix2/manifest.json`. No full closure or manifest exists for this checkpoint. External binary `/tmp/opencode/a8/fix2/rust-r1` was overwritten with the R2 build (despite its historical name); only one copied Rust binary was kept in fix2.
 
