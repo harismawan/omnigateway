@@ -541,6 +541,7 @@ type Step =
   | { kind: "client-logs"; name: string }
   | { kind: "client-usage"; name: string }
   | { kind: "client-quota"; name: string }
+  | { kind: "client-history"; name: string }
   | { kind: "client-session"; name: string }
   | { kind: "logs-walk"; name: string }
   | { kind: "usage-traffic"; name: string }
@@ -1396,6 +1397,7 @@ const configs: Config[] = [
   {label:"client-logs",db:()=>seedDb,steps:():Step[]=>[{kind:"client-logs",name:"scoped projected logs"}]},
   {label:"client-usage",db:()=>seedDb,steps:():Step[]=>[{kind:"client-usage",name:"scoped usage"}]},
   {label:"client-quota",db:()=>seedDb,steps:():Step[]=>[{kind:"client-quota",name:"account fractions"}]},
+  {label:"client-history",db:()=>seedDb,steps:():Step[]=>[{kind:"client-history",name:"account history"}]},
   { label: "client-login", db: () => seedDb, steps: () => [
     ...["null", "[]", "1", '"key"', "{}", '{"key":12}', '{"key":null}', '{"key":"unknown"}'].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 401})),
     ...["", "{", "{bad}"].map(body => ({...as("anon", "POST", "/api/client/login", body), expectedStatus: 400})),
@@ -2054,7 +2056,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
   mkdirSync(root, { recursive: true });
   const file = join(root, "omni.db");
   copyFileSync(cfg.db(), file);
-  const clientClock = cfg.label.startsWith("client-summary") || ["client-logs", "client-usage", "client-quota"].includes(cfg.label) ? join(root,"clock") : null;
+  const clientClock = cfg.label.startsWith("client-summary") || ["client-logs", "client-usage", "client-quota", "client-history"].includes(cfg.label) ? join(root,"clock") : null;
   if(clientClock) writeFileSync(clientClock,"+0");
   const e: Record<string, string | undefined> = {
     ...env,
@@ -2473,6 +2475,14 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     };
     let mutationAck: number | undefined;
     for (const step of cfg.steps()) {
+      if (step.kind === "client-history") {
+        const { fixture, check, attacks, callers } = await clientFixture();
+        for (const [who,cookie] of callers) for (const [i,query] of attacks.entries()) {
+          check(`${who} history ${i}`,await exchange({target:`/api/client/quota/history?${query}`,headers:cookie?[["cookie",`omni_admin=${cookie}`]]:[]}),["client-A","client-B","client-C"].includes(who)?200:401);
+        }
+        fixture.close();
+        continue;
+      }
       if (step.kind === "client-quota") {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
         const secrets = ["quota-distinct-access-token", "quota-distinct-refresh-token", "quota-distinct-api-key"];

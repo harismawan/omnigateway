@@ -1,4 +1,27 @@
-# A8 — partial: six routes delivered; quota/history remains
+# A8 — partial: malformed quota gap closed; history RED recorded
+
+**NEXT STEP (2026-11-14, malformed-quota checkpoint):** implement `/api/client/quota/history`. Item 1 is committed as `9cbd3b8c`; targeted GREEN is 2887 equal / 0 failures. A new `client-history` configuration and movable-clock enablement now record RED: 101 equal / 192 failures, Rust 404 (`/tmp/opencode/a8/history-red.log`). The fixture currently covers only empty history and shared callers/identity attacks: extend it with >50001 samples, orphan/disabled accounts, unusual cells, malformed credentials/settings, secret scans and expiration after login. Frozen `clientHistory.ts` (132 lines) and `history.ts` lines 1–150 have been read: **the actual wire result has a single top-level boolean `truncated`, NOT a per-series flag**, despite stale comments/request wording. `pageSamples` trims the store-reordered 50001 rows to 50000. Store `listQuotaSamples` first selects newest by observed_at DESC LIMIT 50001, then JS binary-id/window ordering and observed_at subtraction; read credentials.ts lines 530 onward for the rest. `retainedSpan` reads settings, clamps since to max(now-retentionDays*DAY, now-16*DAY), until to now; use frozen optionalNumber semantics (inspect schemas.ts). Reuse `credentials::validate_client_metadata` for whole-list parse failures, added in item 1. Authorize before reader/parsing; direct sample writer, bounded report lane; surface expectation still pending. Then run full closure and write final manifest. No subagents.
+
+## This session's completed increment
+
+| Item | Commit / result | Evidence |
+|---|---|---|
+| malformed quota credentials | `9cbd3b8c`; 2887 equal, 0 failures | `/tmp/opencode/a8/quota-malformed-green.log` |
+| malformed quota RED | 2467 equal, 144 failures (36 real invalid-JSON differences plus expected-status failures from the initial incorrect malformed-settings assumption) | `/tmp/opencode/a8/quota-malformed-red.log` |
+| history | RED only; 101 equal, 192 failures | `/tmp/opencode/a8/history-red.log` |
+| targeted omni-control tests | 22 passed, 0 failed | `/tmp/opencode/a8/quota-malformed-tests.log` |
+| control + gateway Clippy all targets -D warnings | pass | `/tmp/opencode/a8/quota-malformed-clippy.log` |
+| workspace fmt check | pass | `/tmp/opencode/a8/quota-malformed-fmt.log` |
+
+Item 1 outcomes (status AND response bytes compared): invalid provider_data JSON among valid credentials → 500 INTERNAL/internal error; valid JSON array/null/number → 200; number stored in TEXT label/provider → 200; BLOB or NULL label/provider → 500; malformed settings JSON → 200 fallback. NULL cases use a fixture-only nullable replacement table because production schema rejects NULL. Existing operator provider-data parser was extracted and reused; metadata validation opens only provider_data, never secret columns. No other implemented client route lists credentials. Quota continues to disclose exactly the fields listed below, identically to TS; all callers and all response bytes/headers in all malformed phases were checked for the three distinctive credential secrets, with zero leaks. Authorization/lane placement unchanged.
+
+Fresh external binary `/tmp/opencode/a8/rust-quota-malformed`: SHA256 `1d874fdd6e8b40f7785092d3ceea50df1cf73bd0be29f306a5153cb7df6536a7`; TS `/tmp/opencode/a8/ts`: SHA256 `f9cc6678a7d2bc2300a71b3aae98caff1aaedbcb2d811baee3dffd4325009d63`. Built with all three required Cargo environment settings (`quota-malformed-build.log`). No final manifest or full closure claimed. Initial history fixture run failed because clock enablement was missing; corrected before recorded RED. Build artifact is `target/debug/omnigateway`, not `omni-gateway`.
+
+Known differences/limits: the prior invalid-JSON quota gap is CLOSED on the compared cases. Accepted empty-413 content-length difference remains; no new quota difference observed. History remains unimplemented; no per-series flag exists in frozen history's actual response. No login attempt limiter in either gateway; day boundary fixed at boot in both. D4 obligations below still apply. `bench-matrix-report.md` changed externally during this session and was left untouched, along with bun.lock and all other excluded work.
+
+---
+
+# Previous checkpoint (historical; open quota item below is now closed)
 
 **NEXT STEP (quota checkpoint, 2026-11-14):** implement GET `/api/client/quota/history` with a failing comparison first. Read frozen `clientHistory.ts` and `history.ts` (retainedSpan, sample query cap, pageSamples, per-series truncated), then `listQuotaSamples`. Authorize before parsing/opening the bounded reader; write samples directly without a value tree. Extend the shared fixture clock to the history configuration, include limit overflow affecting only some series, orphan/disabled accounts, unusual cells, all callers and the distinctive credential-secret scan. Then run the full closure drivers and write `/tmp/opencode/a8/final/manifest.json`; that final manifest and full closure are NOT done. Existing history below is preserved. No subagents.
 
