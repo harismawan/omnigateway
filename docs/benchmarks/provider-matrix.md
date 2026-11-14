@@ -65,8 +65,44 @@ bun scripts/bench-compare.ts /tmp/opencode/bench-matrix/real/base /tmp/opencode/
 ```
 
 The runner alternates AB/BA round order, retains results, records uptime/load
-and refuses high starting load (`ALLOW_BUSY=1` overrides). Comparison reports
-successful/total rounds, median and min–max alongside throughput ratios.
+and refuses high starting load (`ALLOW_BUSY=1` overrides). `commands.sh` records
+shell-escaped exact per-round commands, including the Rust binary override.
+Duration and selection pass through unchanged, e.g. `--duration 2s --warmup 1s
+--only 'custom-chat.*'` selects all eight custom-chat cases in every round.
+
+Comparison prints binary SHA256 headers, a better/worse/inside-spread summary
+per metric, and one table per provider. Each scenario has rows for req/s,
+p50/p99 latency, CPU ms/request and peak resident memory (MiB). Each side shows
+successful/total rounds and median [min–max]; head/base ratios use the medians.
+Overlapping ranges (including touching endpoints) are marked `inside spread`.
+Higher throughput is better; lower latency/CPU/RSS is better. Any failed or
+unsupported observation on either side suppresses that scenario's ratios and
+shows its status, while preserving successful-round statistics. Such cases are
+excluded from the summary counts. Missing scenarios/metrics produce n/a when
+no valid comparison is available; unequal round counts are displayed explicitly.
+
+Every matrix JSON retains existing `config.gateway` argv, duration/warmup,
+gateway/upstream/load CPU sets and replica CPU sets. Added `provenance` records
+resolved binary path, its SHA256, harness git commit, and 1-minute load averages
+before/after the run. For `run-rust-gateway.sh`, the hash is of `OMNI_RUST_BINARY`
+(or the launcher's default executable), not the shell script. Other wrappers
+are not resolved: use a direct executable or this Rust launcher. Use a clean
+harness checkout and stable binaries for measurements. Comparison refuses
+missing hashes and mixed binary hashes within either side; older results need
+remeasurement rather than guessed provenance. Default non-matrix JSON remains
+unchanged. Hashing occurs before calibration/measurement.
+
+For a short functional two-round selection check (not a performance claim):
+
+```sh
+OMNI_RUST_BINARY=/tmp/opencode/merge-anthropic/rust \
+BASE_GATEWAY=/tmp/opencode/merge-anthropic/ts \
+HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
+CLI='bun apps/cli/src/index.ts' OUT=/tmp/opencode/bench-matrix/check-rounds \
+ROUNDS=2 ALLOW_BUSY=1 bash scripts/bench-rounds.sh \
+  --only 'custom-chat.*' --duration 2s --warmup 1s --boots 1
+```
+
 Short functional runs on the shared host are not performance evidence.
 Fault injection: `OMNI_BENCH_FAULT=500` or `missing-credential` with one selected
 scenario checks that fast failures cannot become supported measurements.

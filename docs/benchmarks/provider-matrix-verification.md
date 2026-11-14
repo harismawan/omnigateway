@@ -66,6 +66,25 @@ real measurements; these short sanity checks do not establish production rates.
 No cluster matrix, real upstream behavior, OAuth refresh/error paths, tool/image/
 reasoning semantics, or stubs for openai/codex, antigravity, grok, kimi, kilo,
 muse, qoder. Those providers are absent from Rust. Comparison currently reports
-throughput ratios with rounds/median/min–max; other metrics remain per-round.
+throughput, p50/p99 latency, CPU/request and peak RSS ratios with
+rounds/median/min–max and overlap labels (added in the provenance follow-up).
 Measurement commands and provider extension contract are in
 [provider-matrix.md](provider-matrix.md).
+
+## Comparison/provenance follow-up
+
+Implementation commit `958b8b55`. Functional evidence:
+`/tmp/opencode/bench-matrix/followup/` (two interleaved rounds per side,
+`--only 'custom-chat.*' --duration 2s --warmup 1s --boots 1`). Round config,
+provenance, command transcript and comparison are retained. The binary hashes
+and both load samples were verified for every round; all eight selected cases
+were supported in each of four JSON files with duration 2s and warmup 1s.
+The binary hashes
+are checked against the external executable files, including the Rust binary
+behind the launcher. No observed comparison is a performance finding.
+
+Twelve focused benchmark tests passed; full scripts suite: 86 passed and the
+same three existing workflow/Docker version failures. Core typecheck and changed
+file Biome checks passed. Tests cover inclusive overlap, unequal successful
+round counts, failed/unsupported ratio suppression, and binary-mix refusal.
+Old results without SHA256 provenance now fail comparison explicitly.
