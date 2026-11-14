@@ -2052,12 +2052,15 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
   mkdirSync(root, { recursive: true });
   const file = join(root, "omni.db");
   copyFileSync(cfg.db(), file);
+  const clientClock = cfg.label.startsWith("client-summary") || ["client-logs", "client-usage"].includes(cfg.label) ? join(root,"clock") : null;
+  if(clientClock) writeFileSync(clientClock,"+0");
   const e: Record<string, string | undefined> = {
     ...env,
     OMNI_DB_PATH: file,
     OMNI_ROOT: root,
     OMNI_STATIC_DIR: join(root, "no-dashboard"),
     OMNI_DAY_OFFSET_MINUTES: cfg.label === "client-summary-host" ? undefined : cfg.dayOffset ?? "0",
+    ...(clientClock ? {LD_PRELOAD:"/home/linuxbrew/.linuxbrew/lib/faketime/libfaketimeMT.so.1",FAKETIME_TIMESTAMP_FILE:clientClock,FAKETIME_NO_CACHE:"1",FAKETIME_DONT_FAKE_MONOTONIC:"1"} : {}),
     ...(cfg.label === "export-volume-1" ? { OMNI_LOG_LEVEL: "debug", RUST_LOG: "debug" } : {}),
   };
   const logFile = join(out, `${cfg.label}-${label}.log`);
@@ -2438,6 +2441,11 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           identities.push({id,key:raw,cookie:cookieOf(opened)!,marker});
         }
         fixture.run("UPDATE api_keys SET revoked_at=1 WHERE id='client-revoked'");
+        if(!clientClock) throw new Error("client fixture needs movable clock");
+        writeFileSync(clientClock,"-43201");
+        const aged = await exchange({method:"POST",target:"/api/client/login",headers:[J],body:JSON.stringify({key:identities[1]!.key})});
+        writeFileSync(clientClock,"+0");
+        if(aged.status!==200 || !cookieOf(aged)) throw new Error("aged client login failed");
         const credential = await exchange({method:"POST",target:"/api/credentials",headers:[["cookie",`omni_admin=${cookies.admin}`],J],body:JSON.stringify({provider:"custom",apiKey:"secret-a6-2",endpointId:"client-fixture",endpointLabel:"fixture",origin:`http://127.0.0.1:${PORT+1}`,protocol:"chat_completions"})});
         if(credential.status!==200) throw new Error(`fixture credential ${credential.status}`);
         for(const identity of identities.slice(0,3)) fixture.run("INSERT INTO virtual_models VALUES(?,?,?,?)",[identity.marker,JSON.stringify([{provider:"custom",endpointId:"client-fixture",model:identity.marker,tier:1,weight:1,capabilities:{tools:false,images:false,reasoning:false},costPerMTok:{input:0,output:0}}]),"score",1]);
@@ -2457,7 +2465,7 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         const clientCursor = JSON.parse(clientCursorResponse.body.toString()).nextCursor;
         if(clientCursor!==cursor) throw new Error("client/operator cursor encoding differs");
         const attacks = ["", "apiKeyId=client-A", "credentialId=secret-credential-A", "groupBy=apiKey", "splitBy=apiKey", `cursor=${encodeURIComponent(cursor)}`, `cursor=${encodeURIComponent(clientCursor)}&source=client`, "apiKeyId=client-B&apiKeyId=client-A", "%61piKeyId=client-A", "ApiKeyId=client-A", "dayOffsetMinutes=999", "since=bad&limit=bad"];
-        const callers = [["admin",cookies.admin],["viewer",cookies.viewer],["anon",null],...identities.map(i=>[i.id,i.cookie])] as [string,string|null][];
+        const callers = [["admin",cookies.admin],["viewer",cookies.viewer],["anon",null],["expired-session",cookieOf(aged)],...identities.map(i=>[i.id,i.cookie])] as [string,string|null][];
         return { fixture, identities, check, attacks, callers };
     };
     let mutationAck: number | undefined;
