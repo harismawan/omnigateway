@@ -77,13 +77,15 @@ test("three observations permit direction; all compatibility fields enforced", (
     const b = round(2);
     b.config = { ...b.config, [field]: "changed" };
     expect(() => compare([round(1), b], [round(2)])).toThrow(field);
-    expect(() => compare([round(1)], [b])).toThrow(field);
+    if (field === "environment")
+      expect(() => compare([round(1), b], [round(1)])).toThrow("environment");
+    else expect(() => compare([round(1)], [b])).toThrow(field);
   }
   for (const field of ["harnessCommit", "environment"] as const) {
     const b = round(2);
     if (field === "environment") b.provenance.environment = { OMNI_BENCH: "changed" };
     else b.provenance.harnessCommit = "changed";
-    expect(() => compare([round(1)], [b])).toThrow(field);
+    expect(() => compare([round(1), b], [round(1)])).toThrow(field);
   }
   for (const field of ["concurrency", "bodySha256"] as const) {
     const b = round(2);
@@ -94,4 +96,20 @@ test("three observations permit direction; all compatibility fields enforced", (
     }
     expect(() => compare([round(1)], [b])).toThrow(field);
   }
+});
+test("environment differences disclosed between sides but strict on demand", () => {
+  const a = round(1),
+    b = round(2);
+  b.provenance.environment = { MIMALLOC_PURGE_DELAY: "1" };
+  expect(compare([a], [b])).toContain("environment differences between sides");
+  expect(() => compare([a], [b], { requireSameEnv: true })).toThrow("MIMALLOC_PURGE_DELAY");
+});
+test("only own scratch root prefix is normalized", () => {
+  const a = round(1),
+    b = round(2);
+  a.provenance.environment = { OMNI_ROOT: "/tmp/a", OMNI_DB_PATH: "/tmp/a/db" };
+  b.provenance.environment = { OMNI_ROOT: "/tmp/b", OMNI_DB_PATH: "/tmp/b/db" };
+  expect(() => compare([a, b], [a])).not.toThrow();
+  b.provenance.environment.OMNI_DB_PATH = "/elsewhere/db";
+  expect(() => compare([a, b], [a])).toThrow("OMNI_DB_PATH");
 });

@@ -1620,6 +1620,16 @@ async function cliTimings(runs: number): Promise<{ p50Ms: number; maxMs: number 
 }
 
 async function main(): Promise<void> {
+  if (flags.matrix) {
+    for (const name of ["OMNI_BENCH_CERT", "OMNI_BENCH_TLS_KEY"]) {
+      const value = process.env[name];
+      if (value) {
+        const path = join(root, name);
+        writeFileSync(path, readFileSync(value));
+        (env as Record<string, string | undefined>)[name] = path;
+      }
+    }
+  }
   const loadBefore = loadavg()[0];
   let provenance:
     | {

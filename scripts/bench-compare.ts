@@ -60,7 +60,11 @@ function hash(rounds: Round[]) {
     throw Error("each side requires one consistent gateway binary SHA256 across all rounds");
   return [...hashes][0];
 }
-export function compare(base: Round[], head: Round[]): string {
+export function compare(
+  base: Round[],
+  head: Round[],
+  options: { requireSameEnv?: boolean } = {},
+): string {
   hash(base);
   hash(head);
   const canonical = (value: unknown): string =>
@@ -98,7 +102,7 @@ export function compare(base: Round[], head: Round[]): string {
             `${side} round ${i + 1}: config.${field} differs: ${canonical(expected)} vs ${canonical(actual)}`,
           );
       }
-      for (const field of ["harnessCommit", "environment"] as const) {
+      for (const field of ["harnessCommit"] as const) {
         if (reference.provenance[field] === undefined || r.provenance[field] === undefined)
           throw Error(`missing provenance.${field}`);
         if (canonical(reference.provenance[field]) !== canonical(r.provenance[field]))
@@ -117,12 +121,41 @@ export function compare(base: Round[], head: Round[]): string {
             );
       }
     }
+  const environment = (r: Round) => {
+    const env = r.provenance.environment;
+    if (!env) throw Error("missing environment");
+    const root = env.OMNI_ROOT;
+    return Object.fromEntries(
+      Object.entries(env).map(([k, v]) => [k, root ? v.split(root).join("<scratch>") : v]),
+    );
+  };
+  const differences = (a: Record<string, string>, b: Record<string, string>) =>
+    [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => a[k] !== b[k]);
+  for (const [side, rs] of [
+    ["base", base],
+    ["head", head],
+  ] as const) {
+    const first = environment(rs[0] as Round);
+    for (const r of rs) {
+      const diff = differences(first, environment(r));
+      if (diff.length) throw Error(`${side} environment differs: ${diff.join(", ")}`);
+    }
+  }
+  const be = environment(base[0] as Round),
+    he = environment(head[0] as Round),
+    diff = differences(be, he);
+  if (options.requireSameEnv && diff.length) throw Error(`environment differs: ${diff.join(", ")}`);
   const header = [
     `Base SHA256: \`${hash(base)}\``,
     `Head SHA256: \`${hash(head)}\``,
     `Effective base environment: ${JSON.stringify(base[0]?.provenance.environment)}`,
     `Effective head environment: ${JSON.stringify(head[0]?.provenance.environment)}`,
-    "Rust's production launcher defaults MIMALLOC_PURGE_DELAY=1; this is not an allocator-neutral comparison. Environments must match explicitly; differences are refused.",
+    "Rust's production launcher defaults MIMALLOC_PURGE_DELAY=1; this is not an allocator-neutral comparison.",
+    "### environment differences between sides",
+    "| variable | base | head |",
+    "|---|---|---|",
+    ...diff.map((k) => `| ${k} | ${be[k] ?? "<unset>"} | ${he[k] ?? "<unset>"} |`),
+    ...(diff.length ? [] : ["None."]),
     "",
     "Values: successful/total rounds; median [min–max]. Ratios are head/base. Range overlap is descriptive, not a significance test. Directional labels require at least three successful observations per side. RSS is per-scenario peak resident memory.",
     "",
@@ -213,7 +246,11 @@ async function load(path: string): Promise<Round[]> {
   return Promise.all(paths.map((p) => Bun.file(p).json()));
 }
 if (import.meta.main) {
-  const [a, b] = process.argv.slice(2);
+  const [a, b] = process.argv.slice(2).filter((a) => a !== "--require-same-env");
   if (!a || !b) throw Error("usage: bench-compare.ts <base.json|directory> <head.json|directory>");
-  console.log(compare(await load(a), await load(b)));
+  console.log(
+    compare(await load(a), await load(b), {
+      requireSameEnv: process.argv.includes("--require-same-env"),
+    }),
+  );
 }
