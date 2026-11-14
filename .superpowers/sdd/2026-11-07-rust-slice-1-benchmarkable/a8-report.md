@@ -1,4 +1,30 @@
-# Fix round 1 — complete for review
+# Fix round 2 — partial checkpoint: quota R1 fixed; audits/R2/R3 pending
+
+**NEXT STEP:** finish R1's broader operator identity audit below, then R2, then R3. Product commit `30411500` fixes both quota joins, including last-entry-wins Map semantics. R2 is UNFIXED: read reviewer scripts `/tmp/opencode/a8-review/fix-nan.ts` and `fix-panic.ts` with grep/short slices, port the 5/22-row fixtures into the driver, record RED, replace both sample sorting comparators with total orders (numeric timestamps ascending, NaN after numbers stable), pin full frozen/Rust exchanges with the requested reason, and test thousands of adversarial rows. R3 is UNFIXED: stored JSON errors still leak through other paths; audit log vs wire boundaries before sanitizing. Full closure and `/tmp/opencode/a8/fix2/manifest.json` remain pending; do not claim completion.
+
+| Finding | Commit | Failed first | Evidence under `/tmp/opencode/a8/fix2/` |
+|---|---|---|---|
+| R1 quota joins fixed; wider audit incomplete | `30411500` | 6078 equal / 6 expected / 6 failures, BLOB rows disclosed | `r1-red.log`; GREEN `r1-quota.log` 6081 equal / 6 expected, `r1-history.log` 9887 equal / 6 expected, zero failures |
+| R2 | pending | review's 5-row order mismatch and 22-row panic | `/tmp/opencode/a8-review/fix-nan.log`, `fix-panic/` |
+| R3 | pending | review summary canary disclosure | `/tmp/opencode/a8-review/fix-canary2/` |
+
+R1 semantics: independent BLOB reads never join; text matches only text; INTEGER/REAL compare as JS numbers with SameValueZero (including ±0 and NaN); NULL matches NULL; reverse lookup reproduces Map's last entry on duplicate primitive keys. Bun SQLite probe `r1-map-semantics.log` observes numeric 1 vs text "1" distinct, ±0 equal, bound NaN stored as NULL, BLOB objects distinct. Rust `map_id_primitives_and_object_identity` passed (`r1-test.log`); synthetic NaN tested there, not claimed as a readable SQLite NaN cell. Fresh external binary `/tmp/opencode/a8/fix2/rust-r1`, build `r1-build.log`, all requested Cargo environment settings. No full workspace gate this increment.
+
+R1 audit so far (not exhaustive, no universal parity claim):
+- `client_quota.rs` history/live account joins: structural BLOB equality fixed above. Other client summary/logs/usage paths use session-derived SQL scope, not these in-memory account joins.
+- `catalog.rs:choice`, `api.rs:852–861` static ids/public model grouping: string keys or generated catalog values; BLOB/numeric raw cells do not enter those comparators as keys. `public_rows` validates JSON catalog entries; deeper verification still needed.
+- `models.rs:31,77,105–138` model id / credential pin / provider / auth membership: Rust `models::operator_credentials` uses strict String reads (`omni-store/src/models.rs:35–43`), and model ids use `row::opt_text` (`models.rs:140–150`). BLOB or numeric storage cells fail before matching; frozen strict equality would not match a string request/target to those cells. This is a possible whole-request-vs-no-match difference, NOT yet reproduced; fixing requires widening operator read carriers and validating downstream projections, not just changing one equality.
+- `models.rs:94–99,124` grandfathered target pairs deliberately stringify JSON provider/model, rather than comparing raw row identities. `keys.rs:429` matches projected key id to request string; store/projection behavior for malformed ids remains to audit.
+- `credentials.rs:189–205` health last-used lookup reads projected ids then queries SQL; `sql_value` turns BLOB into text. Potential malformed-id behavior requires comparison with frozen health/readOwnKey code; no fix or equality claim yet.
+- Further client/operator matches and store/auth paths need examination; grep results are starting points, not a completed audit.
+
+R3 initial grep (unfixed): `admin_password.rs:147` model_allowlist parse_error; `omni-store/src/keys.rs:291,379,490` allowlist diagnostics; `pg/rows.rs:72,251` related diagnostics; `omni-store/src/models.rs:214` targets parse message; `omni-control/src/models.rs:17,51` targets and credential provider_data parsers outside the previously sanitized helper. Settings/policies/limits and all wire-vs-log consumers still need tracing. Preserve operator error response bytes while removing parser input from logs.
+
+Known differences still include accepted sort pair order, history nonnumeric timestamp ordering/panic (R2), stored JSON log leakage outside the shared credential parser (R3), and empty-413 framing. Shared metadata error log is **fixed reason plus the credential id**; the id is an accepted operator-visible identifier. Grouped-rule unit test shares production key extraction and collation with its all-pairs evaluation: it verifies grouping, not independent JS coercion; differential cases check coercion. Successful drivers completed normal scratch teardown. Excluded local work untouched.
+
+---
+
+# Fix round 1 — historical completion before re-review
 
 I2 rule: fail with generic 500 iff some ordered pair of distinct projected rows would throw under the frozen left-to-right comparator. Validate equal-prefix groups in O(n log n), requiring only reached receivers to be strings and using JS argument coercion; otherwise use stable sorting with the same field ordering. History's fourth key is numeric subtraction: non-numeric observedAt produces NaN, treated as equal without throwing (frozen `clientHistory.ts:128`).
 
