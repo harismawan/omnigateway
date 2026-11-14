@@ -1,5 +1,60 @@
 # B3 OpenAI / Codex
 
+## Lite sub-checkpoint — HEAD `da0dcbf8`
+
+**Item 2 remains incomplete. Next: add codexTurn/catalog selection and OAuth
+wire/codec builder, first failing real-TS whole-request comparison.** Reuse
+crate-private lite::to_lite; its positional turns/tool_parts must be populated
+during wire assembly, including orphan repair/mixed media, not guessed from
+final item roles. See conformance/openai-lite.md. Worktree clean.
+
+| Item | Status |
+|---|---|
+|0 encoder|Accepted previous 34954c2c, exact pin/licences below|
+|1 identity|Complete helper checkpoint 646e38b3; persistence deferred|
+|2 OAuth request|Partial da0dcbf8: isolated lite assembly only; no OAuth builder/codec yet|
+|3 depth|Pending 40k tests/mutations for lite and future OAuth carriers|
+|4 HTTP|Pending; refusal unchanged; empty-body reachability/parity still must be resolved|
+|5 literals|Pending, inventory unchanged|
+
+| Corpus | Rows | Observation |
+|---|---:|---|
+|Lite helper|24|2 lite modes ×2 identity/time modes ×3 histories ×2 prefix/effort modes; exact JSON bytes/key order equal|
+|Whole OAuth codec|0|Not yet implemented|
+|Frozen literals|121|4 ported +66 differential +51 later unchanged|
+|Compression probe (prior)|24|22 identical; both empty rows differ, all decode exactly|
+
+Lite history includes text/image, assistant annotation replacement, function
+call/output, reasoning passthrough replacement, file tool provenance, unknown
+native item. Prefix tools/schema/instructions and effort insertion compared.
+First RED missing module s4-lite-red.log. Intermediate compile corrected
+js::to_string argument; first executing harness corrected expected row count
+48→24. No production byte mismatch observed in these 24 rows thereafter.
+
+| Mutation | Result |
+|---|---|
+|Suppress lite base-instruction provenance|Fails real-TS row 13, s4-lite-mutation.log; restored green|
+|Depth mutation|Not yet run; no claim of proven deep safety|
+
+Ownership by inspection: LiteArgs iteratively releases input/tools; output is
+deep::Owned; intermediate JSON assembly within deep::scope, replacements use
+deep::insert, removed reasoning passthrough uses deep::drop. Exact tripwire
+exception for history Vec::insert shifts elements without replacing/dropping
+them in the scope. All three tripwires pass; no public API or IR type changes.
+
+Verification: three-crate tests pass, 49 summaries totaling 222 passed/0 failed/
+4 ignored **including subprocess summaries**; clippy all-targets -D warnings,
+fmt check, offline gateway build pass. Logs /tmp/opencode/b3/s4-lite-
+{tests,clippy,fmt,build}.log; restored targeted comparison 1 passed in
+s4-lite-green.log. Required CARGO settings used. No scratch retained.
+
+Known differences unchanged: X1 surrogate/non-numeric usage, depth policy,
+empty compressed frame representation. OAuth/lite not connected and HTTP
+compression not implemented; no wire/capture or fingerprint completeness claim.
+Step 5 remains registration, startup initialize(), router generated catalog,
+**persist the OAuth result's provider data, calling ensure_secrets(prior) when
+that result is built**, end-to-end driver, dispatch_depth, benchmark-matrix entry.
+
 ## Encoder follow-up checkpoint — HEAD `34954c2c`
 
 **Next remains item 2: failing real-TS OAuth request/lite differential first.**
