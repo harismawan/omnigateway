@@ -12,8 +12,8 @@ behavior (the image test forwards images; system turns become developer).
 | openai.test.ts |49|0|47|2|
 | openaiCacheKey.test.ts |19|1|18|0|
 | openaiCodec.test.ts |7|3|1|3|
-| openaiCodexFingerprint.test.ts |46|0|0|46|
-| Total |121|4|66|51|
+| openaiCodexFingerprint.test.ts |46|31|15|0|
+| Total |121|35|81|5|
 
 ## Declaration-by-declaration disposition
 
@@ -54,10 +54,25 @@ the source authority: locate titles with `grep -n '^test('` in the named file.
 | openaiCodec.test.ts |5|Ported: missing_token_is_auth; pure builder has no transport to send|
 | openaiCodec.test.ts |6|baseline differential nativeReasoning flag|
 | openaiCodec.test.ts |7|Later: OAuth half; API half in baseline/literal-edges|
-| openaiCodexFingerprint.test.ts |1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19|Later: OAuth/lite/fingerprint|
-| openaiCodexFingerprint.test.ts |20,21,22,23,24,25,26,27,28,29,30,31|Later: OAuth/lite/fingerprint/catalog|
-| openaiCodexFingerprint.test.ts |32|Later: OAuth effort-update half; public API shape in baseline (no configuration/provenance)|
-| openaiCodexFingerprint.test.ts |33,34,35,36,37,38,39,40,41,42,43,44,45,46|Later: OAuth/lite/fingerprint/catalog|
+| openaiCodexFingerprint.test.ts |1,2,3,5,25|Ported: openai_fingerprint_literals::captured_headers_and_metadata (zstd marker only; wire frame belongs to transport compression)|
+| openaiCodexFingerprint.test.ts |4,6,7,8,11,36,38,44|Ported: captured_body_prefix_and_history (7 pins both provider-visible UUIDv5 prefix vectors; helper vector remains in frozen test)|
+| openaiCodexFingerprint.test.ts |28,29,30,33,34|Ported: catalog_and_non_lite_literals|
+| openaiCodexFingerprint.test.ts |10,14,20,21,22,23,32,35|Ported: overrides_and_identity_literals; 10/14 behavioral portions also identity/fingerprint-clock; 32 API half oauth-branches|
+| openaiCodexFingerprint.test.ts |31,37,39|Ported: media_and_system_provenance_literals|
+| openaiCodexFingerprint.test.ts |15,17|Ported: stored_and_derived_id_literals; behavior also identity/cache-pairs|
+| openaiCodexFingerprint.test.ts |9,12,13,40,41,42,43|Differential: fingerprint-behavior (prefix absence, turn progression/mixed result, orphan repair, future/invalid UUIDs)|
+| openaiCodexFingerprint.test.ts |16,18,19|Differential: identity + cache-pairs (salted identity and caller keys; invalid stored values)|
+| openaiCodexFingerprint.test.ts |24,26|Differential: reasoning + lite-catalog (mode/effort/default catalog and invalid effort header sanitization)|
+| openaiCodexFingerprint.test.ts |27|Differential: oauth-branches routing-omitted (Unicode model ASCII metadata)|
+| openaiCodexFingerprint.test.ts |45|Differential: fingerprint-behavior + cache-pairs (new user turn ids)|
+| openaiCodexFingerprint.test.ts |46|Differential: fingerprint-clock (absent/present start, two request ids); no clock API in Rust builder|
+
+C1 checkpoint: six Rust literal test functions cover 31 frozen declarations;
+all passed on first execution (first three before expansion, then remaining
+three). Behavioral differential disposition names a category rather than claiming
+each original expect was copied. 285 whole-request rows now include 13 new
+fingerprint boundary rows (269 OAuth + 16 API-key controls). The remaining five
+later declarations above await C3, after C2 OAuth codec-level decode comparisons.
 
 Chat-completions file attachments are deliberately supplied in rich-ingress;
 the frozen ingress drops non-image attachments rather than creating file IR.

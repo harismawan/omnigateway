@@ -16,7 +16,7 @@ fn oauth_codec_matches_frozen_ts() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 272);
+    assert_eq!(rows.as_array().unwrap().len(), 285);
     for (i, row) in rows.as_array().unwrap().iter().enumerate() {
         let request = if let Some(dialect) = row["dialect"].as_str() {
             let surface = match dialect {
@@ -58,8 +58,10 @@ fn oauth_codec_matches_frozen_ts() {
                 request: &request,
                 model: row["model"].as_str().unwrap(),
                 credentials: &credentials,
-                request_id: Some("fixed-oauth-request"),
-                request_started_at: Some(1794000000123.0),
+                request_id: Some(row["requestId"].as_str().unwrap_or("fixed-oauth-request")),
+                request_started_at: row
+                    .get("requestStartedAt")
+                    .map_or(Some(1794000000123.0), serde_json::Value::as_f64),
                 auto_cache_enabled: None,
                 max_output_tokens: None,
             })

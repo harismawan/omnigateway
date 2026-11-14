@@ -94,4 +94,24 @@ for(const idSalt of [undefined,'a'.repeat(64)]) for(const identity of [{},{conve
   add('cache-pairs',{...base,...identity,messages,system:[{type:'text',text:change==='system'?'changed':'instructions'}]},'gpt-6-astra',`${idSalt?'salted':'unsalted'}/${JSON.stringify(identity)}/${change}`,{...credentials,providerData:{accountId:'account',idSalt}} as any);
  }
 }
+// Fingerprint behavioral boundaries not pinned by the captured literal suite.
+const fp={...base,system:[{type:'text',text:'be brief'}],tools:[{kind:'portable',name:'wait',inputSchema:{type:'object'}}],messages:[
+ {role:'user',content:[{type:'text',text:'one'}]},
+ {role:'assistant',content:[{type:'toolUse',id:'c',name:'wait',input:{}}]},
+ {role:'user',content:[{type:'toolResult',toolUseId:'c',content:'done'}]},
+]};
+for(const patch of [
+ {tools:[],system:[]},
+ {messages:fp.messages.slice(0,1)},
+ {messages:[...fp.messages,{role:'assistant',content:[{type:'text',text:'hi'}]},{role:'user',content:[{type:'text',text:'again'}]}]},
+ {messages:[...fp.messages.slice(0,2),{role:'user',content:[{type:'toolResult',toolUseId:'c',content:'done'},{type:'text',text:'next'}]}]},
+ {messages:[{role:'user',content:[{type:'text',text:'one'}]},{role:'assistant',content:[{type:'text',text:'ok'}]},{role:'user',content:[{type:'text',text:'two'}]},fp.messages[1]]},
+ ...['03bb2cc3-d800-7abc-8def-0123456789ab','zzzzzzzz-3401-73a0-96db-901f105e1409','01a143df-3401-73a0-96db-901f105e140','01a143df340173a096db901f105e1409'].map(prompt_cache_key=>({vendor:{openai:{prompt_cache_key}}})),
+]) add('fingerprint-behavior',{...fp,...patch},'gpt-6-astra',JSON.stringify(patch));
+for(const requestId of ['req_1','req_2']) for(const requestStartedAt of [undefined,1794000000123]) {
+ const request={...fp,vendor:{openai:{prompt_cache_key:'0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b'}}};
+ const model='gpt-6-astra';
+ const built=openaiCodec.buildRequest({request,model,credentials,requestId,requestStartedAt,fail:(c,m)=>new Error(c+':'+m)});
+ rows.push({category:'fingerprint-clock',request,model,credentials,requestId,requestStartedAt:requestStartedAt??null,codec:built.request,notes:built.degradations,state:built.decodeState});
+}
 console.log(JSON.stringify(rows));
