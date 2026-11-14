@@ -1,4 +1,10 @@
-//! Conservative AST guard: all insert/index writes need a reviewed exception.
+//! Syntactic tripwire for method `.insert` and direct index assignments in
+//! the three crates' Rust sources (including cfg(test), excluding integration
+//! tests and macro expansions). Exceptions match file + trimmed starting line.
+//! This is not a type/ownership proof: removals, retain/extend/clear, aliased
+//! assignments, UFCS calls, macro bodies and ordinary destruction are not
+//! detected. Public JSON boundaries require a separate ownership audit.
+use std::collections::HashSet;
 use std::path::Path;
 use syn::{spanned::Spanned, visit::Visit};
 
@@ -72,7 +78,7 @@ const ALLOW: &[(&str, &str, &str)] = &[
     (
         "omni-providers/src/anthropic/profile.rs",
         "base[i] = pair;",
-        "fixed byte or header array, not JSON",
+        "Vec of header string pairs, not JSON",
     ),
     (
         "omni-providers/src/anthropic/decode.rs",
@@ -87,7 +93,7 @@ const ALLOW: &[(&str, &str, &str)] = &[
     (
         "omni-providers/src/anthropic/cloak.rs",
         "cloak.from_wire.insert(alias.clone(), name.clone());",
-        "Vec insertion moves elements; it cannot displace or release a JSON value",
+        "HashMap<String, String>; replacing a string cannot release JSON",
     ),
     (
         "omni-providers/src/anthropic/wire.rs",
@@ -97,7 +103,7 @@ const ALLOW: &[(&str, &str, &str)] = &[
     (
         "omni-providers/src/anthropic/wire.rs",
         "parts.insert(0, json!({\"type\":\"text\",\"text\":text}));",
-        "non-JSON collection: scalar indices, strings, or shallow typed entries",
+        "Vec<Value> insertion moves elements, including deep JSON; nothing is displaced",
     ),
     (
         "omni-providers/src/custom/decode/chat.rs",
@@ -114,17 +120,13 @@ const ALLOW: &[(&str, &str, &str)] = &[
         "self.owns_block.insert(key);",
         "non-JSON collection: scalar indices, strings, or shallow typed entries",
     ),
-    (
-        "omni-providers/src/custom/decode/responses.rs",
-        "self.owns_block.insert(key);",
-        "non-JSON collection: scalar indices, strings, or shallow typed entries",
-    ),
 ];
 
 struct Scanner<'a> {
     path: &'a str,
     source: &'a str,
     failures: &'a mut Vec<String>,
+    used: &'a mut HashSet<usize>,
 }
 impl Scanner<'_> {
     fn check(&mut self, span: proc_macro2::Span) {
@@ -135,10 +137,11 @@ impl Scanner<'_> {
             .nth(line - 1)
             .expect("valid source tree")
             .trim();
-        if !ALLOW
-            .iter()
-            .any(|(path, site, reason)| !reason.is_empty() && *path == self.path && *site == text)
-        {
+        if let Some(index) = ALLOW.iter().position(|(path, site, reason)| {
+            !reason.is_empty() && *path == self.path && *site == text
+        }) {
+            self.used.insert(index);
+        } else {
             self.failures.push(format!("{}:{line}: {text}", self.path));
         }
     }
@@ -157,11 +160,11 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         syn::visit::visit_expr_assign(self, node);
     }
 }
-fn scan(root: &Path, dir: &Path, failures: &mut Vec<String>) {
+fn scan(root: &Path, dir: &Path, failures: &mut Vec<String>, used: &mut HashSet<usize>) {
     for entry in std::fs::read_dir(dir).expect("valid source tree") {
         let path = entry.expect("valid source tree").path();
         if path.is_dir() {
-            scan(root, &path, failures);
+            scan(root, &path, failures, used);
         } else if path.extension().is_some_and(|x| x == "rs") {
             let source = std::fs::read_to_string(&path).expect("valid source tree");
             let relative = path
@@ -173,6 +176,7 @@ fn scan(root: &Path, dir: &Path, failures: &mut Vec<String>) {
                 path: relative,
                 source: &source,
                 failures,
+                used,
             }
             .visit_file(&syn::parse_file(&source).expect("valid source tree"));
         }
@@ -186,8 +190,19 @@ fn json_writes_use_iterative_release() {
         .to_path_buf();
     let root = std::env::var_os("OMNI_JSON_SCAN_ROOT").map_or(default, Into::into);
     let mut failures = Vec::new();
+    let mut used = HashSet::new();
     for name in ["omni-ir", "omni-dialects", "omni-providers"] {
-        scan(&root, &root.join(name).join("src"), &mut failures);
+        scan(
+            &root,
+            &root.join(name).join("src"),
+            &mut failures,
+            &mut used,
+        );
+    }
+    for (index, (path, site, _)) in ALLOW.iter().enumerate() {
+        if !used.contains(&index) {
+            failures.push(format!("unused or duplicate exception: {path}: {site}"));
+        }
     }
     assert!(
         failures.is_empty(),

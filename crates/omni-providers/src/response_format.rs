@@ -5,19 +5,24 @@
 //! The IR here is parsed JSON, so the cycle and `canSerialize` checks TS runs
 //! for in-process plugin values cannot fire and are not ported; the depth cap,
 //! which can, is.
+//!
+//! Mutation helpers are crate-private; callers use a scoped provider codec.
+//! ```compile_fail
+//! use omni_providers::response_format::move_to_responses_text;
+//! ```
 
 use omni_ir::request::ChatRequest;
 use serde_json::{Map, Value, json};
 
 /// The client's schema and its name for it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResponseFormat {
+pub(crate) struct ResponseFormat {
     pub schema: Map<String, Value>,
     pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ResponseFormatRead {
+pub(crate) enum ResponseFormatRead {
     Absent,
     Malformed,
     TooDeep,
@@ -53,12 +58,12 @@ const SUBSCHEMA_MAP: [&str; 6] = [
 ];
 
 /// `isRecord`: an object that is not an array.
-pub fn is_record(v: Option<&Value>) -> bool {
+pub(crate) fn is_record(v: Option<&Value>) -> bool {
     matches!(v, Some(Value::Object(_)))
 }
 
 /// `readResponseFormatResult`.
-pub fn read_response_format(req: &ChatRequest) -> ResponseFormatRead {
+pub(crate) fn read_response_format(req: &ChatRequest) -> ResponseFormatRead {
     let openai = req.vendor_value("openai");
     let chat = omni_ir::js::prop(openai, "response_format");
     if let Some(chat) = chat {
@@ -92,7 +97,7 @@ pub fn read_response_format(req: &ChatRequest) -> ResponseFormatRead {
 }
 
 /// `readableFormat`: structural only.
-pub fn readable_format(spec: Option<&Value>) -> bool {
+pub(crate) fn readable_format(spec: Option<&Value>) -> bool {
     let Some(Value::Object(spec)) = spec else {
         return false;
     };
@@ -173,11 +178,13 @@ fn too_deep(schema: &Map<String, Value>) -> bool {
 
 /// `moveToResponsesText`: moves a structured-output request onto a
 /// Responses-shaped body. Returns the degradation to record, if any.
-pub fn move_to_responses_text(
+pub(crate) fn move_to_responses_text(
     req: &ChatRequest,
     body: &mut Map<String, Value>,
     provider: &str,
 ) -> Option<String> {
+    // Internal helper: CustomCodec scopes deep request assembly. Keeping this
+    // private avoids repeating its carrier scan on every ordinary request.
     let raw = body.shift_remove("response_format");
 
     let malformed_text = body.get("text").is_some_and(|t| !t.is_object());
@@ -241,6 +248,46 @@ pub fn move_to_responses_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_json_on_small_stack() {
+        const CHILD: &str = "OMNI_RESPONSE_FORMAT_DEPTH_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(|| {
+                    let req = serde_json::from_str::<ChatRequest>(
+                        r#"{"model":"m","messages":[],"stream":true}"#,
+                    )
+                    .expect("request");
+                    let mut value = Value::Null;
+                    for _ in 0..39_990 {
+                        value = Value::Array(vec![value]);
+                    }
+                    let mut body = Map::new();
+                    omni_ir::deep::insert(&mut body, "text".into(), value);
+                    assert_eq!(
+                        omni_ir::deep::scope(|| move_to_responses_text(&req, &mut body, "custom")),
+                        Some("custom:response-format-dropped".into())
+                    );
+                    omni_ir::deep::drop_map(body);
+                })
+                .expect("spawn")
+                .join()
+                .expect("join");
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("exe"))
+            .args([
+                "--exact",
+                "response_format::tests::removed_json_on_small_stack",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("child");
+        assert!(status.success(), "deep removal child: {status}");
+    }
 
     fn nested(levels: usize) -> Value {
         let mut node = json!({"type": "string"});
