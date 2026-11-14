@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { Database } from "bun:sqlite";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, lstatSync, readlinkSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
@@ -31,22 +32,36 @@ try {
   assert.deepEqual(results[1],results[0]);count++;
  }
  const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
- for(const kind of ["absent","slash","backslash","dotdot","symlink","directory","empty","unparsed"]){
-  const results=[];
+ for(const kind of ["absent","slash","backslash","dotdot","symlink","directory","empty","unparsed","garbage","foreign-few","foreign-many","older","newer","truncated"]){
+  const results=[], after=[];
   for(const cmd of commands){
    rmSync(unit,{force:true});rmSync(join(root,"state/omnigateway/gateway.pid"),{force:true});
    copyFileSync(join(root,"seed"),join(root,"db"));
    const candidate=join(root,"snapshots",id);rmSync(candidate,{recursive:true,force:true});
+   for(const suffix of ["-wal","-shm"])rmSync(candidate+suffix,{force:true});
    if(kind==="symlink")symlinkSync(join(root,"seed"),candidate);
    if(kind==="directory")mkdirSync(candidate);
    if(kind==="empty")writeFileSync(candidate,"");
+   if(kind==="garbage")writeFileSync(candidate,"not a SQLite database");
+   if(kind.startsWith("foreign-")){
+    const db=new Database(candidate);for(const name of (kind==="foreign-few"?["zebra","apple"]:["zebra","apple","bravo","delta","echo","foxtrot","golf"]))db.run(`CREATE TABLE ${name}(id INTEGER)`);db.close();
+   }
+   if(kind==="older"||kind==="newer"){
+    copyFileSync(join(root,"seed"),candidate);const db=new Database(candidate);db.run("PRAGMA journal_mode=DELETE");db.run(`UPDATE migrations SET id=id${kind==="older"?"-1000":"+1000"}`);db.close();
+   }
+   if(kind==="truncated")writeFileSync(candidate,readFileSync(join(root,"seed")).subarray(0,5000));
    const input=({slash:`sub/${id}`,backslash:`sub\\${id}`,dotdot:`../${id}`,unparsed:"sentinel"} as Record<string,string>)[kind]??id;
    const before=state();
-   const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","restore",input],{env,stdout:"pipe",stderr:"pipe"});
+   const accepted=kind==="older"||kind==="newer";
+   const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","restore",input,...(accepted?["--dry-run","--json"]:[])],{env,stdout:"pipe",stderr:"pipe"});
    const result={out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited};
-   assert.equal(result.code,1);assert.deepEqual(state(),before,kind);results.push(result);
+   assert.equal(result.code,accepted?0:1);
+   if(kind==="truncated")after.push(state());else assert.deepEqual(state(),before,kind);
+   results.push(result);
   }
-  assert.deepEqual(results[1],results[0],kind);count++;
+  assert.deepEqual(results[1],results[0],kind);
+  if(kind==="truncated")assert.deepEqual(after[1],after[0],kind);
+  count++;
  }
  await verifyGoldenExits("db-restore");console.log(`PASS ${count} restore comparisons`);
 } finally {rmSync(root,{recursive:true,force:true});}

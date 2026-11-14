@@ -137,7 +137,11 @@ pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
     if metadata(&path)?.is_none() {
         return Err("BAD_REQUEST: no such snapshot".into());
     }
-    with_exclusive("a restore preview", || judge_candidate(&path))
+    with_exclusive("a restore preview", || {
+        let snapshot = judge_candidate(&path)?;
+        let live = judge_candidate(live).ok();
+        Ok(json!({"snapshot": snapshot, "live": live}))
+    })
 }
 
 fn judge_candidate(path: &Path) -> Result<Value, String> {

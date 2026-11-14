@@ -46,7 +46,12 @@ pub fn run(
     }
     let store = ctx.open()?;
     if command == "db-restore" {
-        omni_control::database::validate_restore(&path, &positional[0])?;
+        let preview = omni_control::database::validate_restore(&path, &positional[0])?;
+        if flags.contains_key("dry-run") && flags.contains_key("json") {
+            return Ok(omni_ir::jsjson::to_string_pretty(
+                &json!({"id": positional[0], "snapshot": preview["snapshot"], "live": preview["live"]}),
+            ));
+        }
         return Err("db restore is not yet available in the Rust CLI".into());
     }
     if command == "db-clear-bodies" {
