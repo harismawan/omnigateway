@@ -1,5 +1,33 @@
 ## Database write commands
 
+### db restore swap
+
+- Partial checkpoint: stage 0 complete `0f1c6e61`; stage 0b R1 `bbd92cd0`, R2 `0e383e52` complete. I3 residual and orphan scan pending. Stages 1–4 not started; accepted restore still unavailable, no Rust swap enabled.
+- Stage 0: six tiny Bun argv code-unit probes show U+FFFD replacement (including truncated sequences, surrogate encoding and overlong bytes). args_os + to_string_lossy matches; invalid root/positional/string-option differential3 pass, full database post-state compared. Red exit101 panic `db9-argv-red.log`; green `db9-argv-green.log`; pinned exits1=3.
+- R1: frozen existsSync then read reproduced for mode000 parent, self-link, directory, mode000 file, each status human/JSON and restore. Red `db9-r1-red.log`; green `db9-r1-green.log` PASS12. Unresolvable paths report stopped/reach candidate validation; existing unreadable file still refuses; directory reports read EISDIR. Full database post-state compared. Pinned exits0=4/1=8, EACCES=3.
+- R2: mode000 snapshot directory backup cleanup first failed on unlink vs rm (`db9-r2-red.log`), then PASS27 backup comparisons (`db9-r2-green.log`). General cleanup formatter now uses rm, existing EISDIR form retained. Pinned backup exits0=21/1=9, EACCES=1, encryption-key=3, unable-open=1.
+- I3 attempt NOT committed: explicit body sentinel assertion failed against opt-in helper (`db9-i3-red.log`). Enabling default body capture plus full failed-backup comparison exposed a post-state mismatch for directory (and successful mode0300 backup) in `db9-i3-db-backup.log`; cause not isolated. Attempt reverted, clean checkpoint; no byte-mask expansion. Orphan scan not attempted; no failing-first evidence claimed.
+- Contract below carries forward the db8 observations; no new swap execution or failure injection in this session.
+
+| Swap stage (frozen order) | how tested | state left |
+|---|---|---|
+| snapshotPath/stat, guard, judge again | prior preview differential; post-prompt not tested | Frozen logic: no undo/staging/swap on refusal. |
+| forced undo mkdir/collision/free space/snapshotTo/stat; no retention | prior TS-only successes; faults untested | Observed old-live undo and stale sentinel retained; logic removes partial undo on write failure. |
+| hashes before copy | prior TS-only password cases | Logic: undo retained, no staging on getter failure. |
+| main-file copy to incoming/cleanup | prior TS-only candidate-WAL case; faults untested | Observed WAL-only row lost; cleanup error wins by logic. |
+| close | untested | Logic: wraps swap error, tries reopen; old live/incoming retained before rename. |
+| unlink live-wal then live-shm | untested | Logic: completed removals persist; old live/incoming retained, recovery reopen attempted. |
+| rename | prior TS-only success; failure untested | Observed candidate installed, undo retained, incoming absent. |
+| initial/recovery reopen | prior TS-only shifted-ledger failures | Observed candidate left live, undo retained, no rollback. |
+| hashes after reopen | prior TS-only password cases; faults untested | Logic: new live/undo retained on getter error. |
+| rebuilds/plugin schema | prior TS-only success; faults untested | Logic swallows failures; restore succeeds. |
+
+- Inherited swap hazards remain TS-only observations from db8, NOT observed in both CLIs: candidate WAL rows lost; reopen failure leaves candidate installed without rollback. No swap parity claim. No SIGKILL experiment performed.
+- Known differences: accepted y/--yes restore unavailable; migrate unavailable; orphan partial-list semantics unresolved. Full failed-backup state mismatch above needs diagnosis. No claim that all argv byte patterns were exhaustively tested.
+- Final commit offline tests29 (CLI3/control26), clippy all-targets -D warnings and fmt pass with required cargo settings: `db9-tests.log`, `db9-clippy.log`, `db9-fmt.log` under `/tmp/opencode/e1-e5/`. Foreground matrix34/34 exit0; summary `db9-verified-summary.txt`, manifest `db9-verified-manifest.json`. db restore/backup/clear/vacuum/reads and pid-edge suite each exit1 under OMNI_PORT=invalid (`db9-disturbance-*.log`).
+- Binary `/tmp/opencode/e1-e5/db9-omni-final`, commit `0e383e52e77d52aaa544c119071938d93df4a772`, sha256 `8422114adae483b5d3120f2b5c1883c2ec7c2b9a8d5bbaa88e5d2e35ff07c5f6`. Password-abort retains prior binary explicitly identified in matrix manifest. Worktree clean; temporary test roots removed.
+- Precise next step: finish stage0b I3 (isolate full-state backup mismatch without extra masks) and orphan scan in separate commits; then read complete frozen swap implementation and implement stage1 + round trips/real schema/live WAL fixtures, stages2–4; only then `db migrate`.
+
 ### db fix round 1
 
 - C1 `969b7aea`; I2 `13b87af5`; I3 `198f2a56`; directory diagnostic `868e5e09`; low-space diagnostic `8ead4979`. No restore-swap or migrate changes.
