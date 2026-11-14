@@ -1429,7 +1429,7 @@ const configs: Config[] = [
     label: "usage-traffic",
     db: () => db("usage-traffic", ["INSERT INTO virtual_models VALUES('routing-a6','[{\"provider\":\"custom\",\"endpointId\":\"routing-a6\",\"model\":\"m\",\"tier\":1,\"weight\":1,\"capabilities\":{\"tools\":false,\"images\":false,\"reasoning\":false},\"costPerMTok\":{\"input\":0,\"output\":0}}]','score',1)"]),
     steps: () => [
-      {...as("admin", "POST", "/api/credentials", '{"provider":"custom","apiKey":"secret-a6-2","endpointId":"routing-a6","endpointLabel":"Routing","origin":"http://127.0.0.1:18444","protocol":"chat_completions"}'), expectedStatus:200},
+      {...as("admin", "POST", "/api/credentials", `{"provider":"custom","apiKey":"secret-a6-2","endpointId":"routing-a6","endpointLabel":"Routing","origin":"http://127.0.0.1:${PORT+1}","protocol":"chat_completions"}`), expectedStatus:200},
       {kind:"usage-traffic",name:"one real request usage"},
     ],
   },
@@ -1489,7 +1489,7 @@ const configs: Config[] = [
               apiKey: "secret-a6-2",
               endpointId: endpoint,
               endpointLabel: `endpoint-${i}`,
-              origin: "http://127.0.0.1:18444",
+              origin: `http://127.0.0.1:${PORT+1}`,
               protocol: "chat_completions",
             }),
           ),
@@ -1788,7 +1788,7 @@ const configs: Config[] = [
           "admin",
           "POST",
           "/api/credentials",
-          '{"provider":"custom","apiKey":"secret-a6-2","endpointId":"routing-a6","endpointLabel":"Routing","origin":"http://127.0.0.1:18444","protocol":"chat_completions"}',
+          `{"provider":"custom","apiKey":"secret-a6-2","endpointId":"routing-a6","endpointLabel":"Routing","origin":"http://127.0.0.1:${PORT+1}","protocol":"chat_completions"}`,
         ),
       );
       steps.push({ kind: "credential-routing", name: "created credential routes", enabled: true });
