@@ -8,6 +8,7 @@ import { databaseState } from "./database-state.ts";
 import { adapterCases } from "./db-adapter-cases.ts";
 import { fileState } from "./db-file-state.ts";
 const root = mkdtempSync("/tmp/opencode/e1-e5/db-backup-");
+mkdirSync(join(root,"request_bodies"));writeFileSync(join(root,"request_bodies/sentinel"),"body sentinel");
 const env = { ...process.env, OMNI_ENCRYPTION_KEY: "database-golden-secret", NO_COLOR: "1" };
 const store = await createStore({ path: join(root,"seed"), encryptionKey: await deriveKey(env.OMNI_ENCRYPTION_KEY) });
 store.close();

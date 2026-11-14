@@ -7,6 +7,7 @@ import { fileState, frozenPostState } from "./db-file-state.ts";
 
 export async function refusalStateCases(commands:string[][],seed:string,env:Record<string,string|undefined>) {
  const root=mkdtempSync("/tmp/opencode/e1-e5/db-refusal-state-");
+ mkdirSync(join(root,"request_bodies"));writeFileSync(join(root,"request_bodies/sentinel"),"body sentinel");
  try {
   for(const mode of ["delete","wal"]) {
    const results=[];

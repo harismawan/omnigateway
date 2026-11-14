@@ -10,11 +10,11 @@ function tree(path: string): unknown {
   return readFileSync(path);
  } catch(error:any) {if(error.code==="ENOENT")return null;throw error;}
 }
-export function fileState(root: string, bodies=false) {
+export function fileState(root: string, bodies=true) {
  return {live:["","-wal","-shm"].map(s=>tree(join(root,"db"+s))),snapshots:tree(join(root,"snapshots")),...(bodies?{bodies:tree(join(root,"request_bodies"))}:{})};
 }
 // Only SQLite's writer-version field in the live database header is masked.
-export function frozenPostState(root: string, bodies=false) {
+export function frozenPostState(root: string, bodies=true) {
  const state=fileState(root,bodies);
  const db=state.live[0];
  if(Buffer.isBuffer(db)&&db.length>=100)db.fill(0,96,100);

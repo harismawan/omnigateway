@@ -1,11 +1,12 @@
 import { strict as assert } from "node:assert";
 import { Database } from "bun:sqlite";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 import { fileState } from "./db-file-state.ts";
 const root=mkdtempSync("/tmp/opencode/e1-e5/db-vacuum-");
+mkdirSync(join(root,"request_bodies"));writeFileSync(join(root,"request_bodies/sentinel"),"body sentinel");
 const env={...process.env,OMNI_ENCRYPTION_KEY:"database-golden-secret",NO_COLOR:"1"};
 const store=await createStore({path:join(root,"seed"),encryptionKey:await deriveKey(env.OMNI_ENCRYPTION_KEY)});store.close();
 const seed=new Database(join(root,"seed"));

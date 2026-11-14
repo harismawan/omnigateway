@@ -2,13 +2,16 @@ import { strict as assert } from "node:assert";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { goldenSpawn } from "./exit-gate.ts";
-import { fileState } from "./db-file-state.ts";
+import { fileState, frozenPostState } from "./db-file-state.ts";
+import { Database } from "bun:sqlite";
+import { databaseState } from "./database-state.ts";
 
 export async function adapterCases(commands: string[][], seed: string, env: Record<string,string|undefined>, operation: "backup"|"restore") {
  const root=mkdtempSync("/tmp/opencode/e1-e5/db-adapter-");
  const dir=join(root,"snapshots"), id="db_2000-01-01T00-00-00-000Z_manual.sqlite";
  let count=0;
- try {
+  try {
+   mkdirSync(join(root,"request_bodies"));writeFileSync(join(root,"request_bodies/sentinel"),"body sentinel");
    for(const kind of operation==="backup"?["inaccessible","unreadable","directory"]:["inaccessible","loop","long"]) {
    const results=[];
    for(const cmd of commands) {
@@ -52,9 +55,22 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
      assert.equal(result.code,1,kind);
      assert.match(result.err,/BAD_REQUEST: no such snapshot/,kind);
     }
-    results.push({listing,result});
+     const post=frozenPostState(root);
+     const fresh=readdirSync(dir).filter(name=>name!==id);
+     const tables=fresh.map(name=>{const db=new Database(join(dir,name),{readonly:true});try{return databaseState(db);}finally{db.close();}});
+     post.snapshots=(post.snapshots as any[]).map(([name,bytes])=>[name===id?name:"<new snapshot>",bytes]);
+     results.push({listing,result,post,tables});
    }
-   assert.deepEqual(results[1],results[0],kind); count++;
+    if(operation==="backup"&&kind!=="inaccessible") {
+     const a=(results[0].post.snapshots as any[]).find(([name])=>name==="<new snapshot>")[1] as Buffer;
+     const b=(results[1].post.snapshots as any[]).find(([name])=>name==="<new snapshot>")[1] as Buffer;
+     const offsets=Array.from({length:Math.max(a.length,b.length)},(_,i)=>i).filter(i=>a[i]!==b[i]);
+     console.log(`${kind}: snapshots/<new snapshot> differing offsets ${JSON.stringify(offsets)}; TS=${JSON.stringify(offsets.map(i=>a[i]))}; Rust=${JSON.stringify(offsets.map(i=>b[i]))}`);
+     assert.deepEqual(results[1].tables,results[0].tables,"new snapshot contents table by table");
+     assert(offsets.every(i=>i>=96&&i<100),"only SQLite writer-version bytes may differ");
+     a.fill(0,96,100);b.fill(0,96,100);
+    }
+    assert.deepEqual(results[1],results[0],kind); count++;
   }
  } finally {try{chmodSync(dir,0o700);}catch{}rmSync(root,{recursive:true,force:true});}
  return count;

@@ -10,6 +10,7 @@ import { fileState } from "./db-file-state.ts";
 import { refusalStateCases } from "./db-refusal-state-cases.ts";
 checkPreviewGoldens();
 const root = mkdtempSync("/tmp/opencode/e1-e5/db7-restore-");
+mkdirSync(join(root,"request_bodies"));writeFileSync(join(root,"request_bodies/sentinel"),"body sentinel");
 const env = {...process.env, HOME:root, XDG_STATE_HOME:join(root,"state"), OMNI_ENCRYPTION_KEY:"database-golden-secret", NO_COLOR:"1"};
 const store = await createStore({path:join(root,"seed"),encryptionKey:await deriveKey(env.OMNI_ENCRYPTION_KEY)}); store.close();
 const commands = [["bun","--no-env-file",resolve("apps/cli/src/index.ts")],[resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]];
