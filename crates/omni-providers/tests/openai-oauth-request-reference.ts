@@ -81,4 +81,10 @@ for(const model of ['gpt-6-astra','gpt-5.5']) for(const oauth of [true,false]) f
 }
 for(const model of ['bad model','日本語']) add('oauth-branches',base,model,'routing-omitted');
 for(const accountId of [undefined,7]) add('oauth-branches',base,'gpt-6-astra','account-omitted',{...credentials,providerData:{accountId}} as any);
+const installationId='12345678-1234-4234-8234-123456789abc';
+for(const providerData of [{},{accountId:'account'},{installationId,idSalt:'a'.repeat(64)},{installationId},{idSalt:'b'.repeat(64)},
+ {installationId:'bad',idSalt:'A'.repeat(64)},{installationId:7,idSalt:null},{installationId:{nested:[]},idSalt:[]},
+ {installationId:installationId.toUpperCase(),idSalt:'0'.repeat(64)},{installationId:'',idSalt:'a'.repeat(63)},
+ {installationId:installationId+'\n',idSalt:'a'.repeat(64)+'\n'}])
+ for(const model of ['gpt-6-astra','gpt-5.5']) add('identity',base,model,JSON.stringify(providerData),{...credentials,providerData} as any);
 console.log(JSON.stringify(rows));
