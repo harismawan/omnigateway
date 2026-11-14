@@ -1,0 +1,47 @@
+# Rust migration roadmap (remaining work after CLI catalog, 9f22ec23)
+
+Source: read-only inventory ses_e34c713c6ffeLoim0Xtydrbc5o (Nov 11). Implementers opus-pr#high, reviewers gpt-6-astra#high. Serial implementers only (shared gateway binary, no worktrees per repo rule). Each row: brief → implement → review → fix loop → mark done here with commit.
+
+Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, benchmarks); CLI keys (8), settings (2), models list/show/put(-f, --from-catalog)/rm/catalog.
+
+## A. Single-node gateway parity
+- [x] A1 (S) /metrics + telemetry registry (same series, cardinality cap) — 6e63d9f3+bb6d3401, reviewed clean
+- [x] A2 (S) static serving OMNI_STATIC_DIR + SPA fallback; plugin boot warning; /api/plugins* 501 — 6e63d9f3+bb6d3401, reviewed clean
+- [ ] A3 (M) body capture: OGBA seal, request_bodies files via writer, read path
+- [x] A4 (M) admin auth core: argon2, sessions, cookie, /api/status setup login logout, /api router — 369aaf0d+49923524, reviewed clean
+- [x] A5 (M) admin keys/models/catalog/settings/password routes — 5da6af7e..9248cd45, reviewed clean (3 fix rounds)
+- [x] A6 (M) credentials routes — d2757acb..9624fa13, approved after 2 fix rounds; routing-path bench vs 66020396: no measurable regression; PG gateway leg + live-PG proof + PG row isolation → D4 + encrypted credential writes + health
+- [x] A7 (M) usage, logs, logs/export, nodes — 6d2a7a8e..d0c11d29, approved after 2 fix rounds (a7-r2-review.md); bounded read-only readers (export pool 4, report lane 4); usage-large peak RSS 58–69 MB vs TS 153–156 MB; documented difference: HEAD export lacks transfer-encoding; requests/:id/body → with A3; agent-setup → after CLI branch merge; PG readers → D4
+- [ ] A8 (S) /api/client/* (7)
+- [ ] A9 (L) /api/stream WebSocket + console live view
+- [ ] A10 (M) database routes, quiesce latch, lifecycle restart/shutdown
+- [ ] A11 (S) maintenance loop (pruning, heartbeat)
+- [ ] A12 (S) models dry-run (API + CLI)
+- [ ] A13 (M) OTLP export
+- [ ] A14 (S) outbound idle timeout: close a response whose client stops reading (Bun idleTimeout 255 s parity), all response kinds; found in A7 fix round 1
+
+## B. Providers
+- [~] B1 (M) OAuth framework (in progress with B2, worktree feat/rust-provider-anthropic), refresh() with token_version CAS, 60 s sweep, /api/connect/*
+- [~] B2 (L) anthropic (b66c1016: refresh approved for merge; codec round 5 = lifecycle small-stack tests in progress; overhead-c1 re-measure + merge pending)   - [ ] B3 (L) openai/codex   - [ ] B4 (L) antigravity
+- [ ] B5 (M) grok  - [ ] B6 (M) kimi  - [ ] B7 (M) kilo  - [ ] B8 (M) muse  - [ ] B9 (M) qoder
+- [ ] B10 (M) quota poller + oauthUsage + quota routes + resets/redeem
+
+## C. Request-path features
+- [ ] C1 (M) smart router + guardrail (replace screen() stub)
+- [x] C2 (M) RTK with its tests — merged c7fdf1f3 (reviewed)  (C3 ponytail: DROPPED, operator plans to remove the feature)
+
+## D. Cluster
+- [x] D1 (L) Postgres store — feat/rust-postgres-store 2a2bcbfb, reviewed clean merged 9b04c3a1 (TLS + gateway wiring are integration gates)   - [x] D2 (L) Redis coordination — feat/rust-redis-coord 5b212de1, reviewed clean merged 51a54e5a (TLS, metrics export, gateway wiring are integration gates)   - [x] D3 (L) cluster rate limiting — feat/rust-cluster-ratelimit b192a1d7, reviewed clean merged f7c48e57 (D4 must honour the 7-point contract in d3-r2-review.md)
+- [ ] D4 (M) breaker/health shared queue, /health mode, /api/nodes, cluster bench vs targets
+
+## E. CLI (remaining 49 commands)
+- [~] E1 status, admin set-password, db group (in progress, worktree feat/rust-cli-e1-e5)   - [ ] E2 credentials group + connect
+- [ ] E3 logs, logs export, usage, bodies, console, quota group
+- [ ] E4 start/stop/restart/service install/uninstall (Rust binary), doctor
+- [~] E5 setup claude/opencode, plugin * refusals (exit 1), real --help (in progress, worktree feat/rust-cli-e1-e5)
+
+## F. Packaging and cutover
+- [x] F1 CI cargo + release assets — merged 66020396 (arm64/macOS + publish proven only by CI)   - [x] F2 Dockerfile — merged 66020396; k8s Recreate staged on feat/rust-first-rollout d461aba0 for the promotion PR
+- [ ] X1 lossless UTF-16 stream text end-to-end (shared IR StreamEvent text, collectors, all egress dialects; parked B2 codec I3/I5)
+- [ ] X2 TS-exact credential expiry carrier (fractional/non-finite expires_at as REAL/NULL through store, snapshot, router; reading a TS-written REAL must not drop the credential; PG oracle) — parked from B1
+- [ ] F3 cutover runbook, npm final notice, cross-read gate SQLite+Postgres, full conformance gate
