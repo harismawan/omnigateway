@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { Database } from "bun:sqlite";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
@@ -11,6 +11,28 @@ store.close();
 const commands = [["bun", "--no-env-file", resolve("apps/cli/src/index.ts")], [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]];
 let count = 0;
 try {
+  for (const kind of ["file", "unwritable"]) {
+    const results = [];
+    for (const cmd of commands) {
+      rmSync(join(root,"snapshots"), {recursive:true,force:true});
+      copyFileSync(join(root,"seed"),join(root,"db"));
+      if (kind === "file") writeFileSync(join(root,"snapshots"), "sentinel");
+      else { mkdirSync(join(root,"snapshots")); chmodSync(join(root,"snapshots"),0o500); }
+      const state = () => ["", "-wal", "-shm"].map(suffix => {
+        try { return readFileSync(join(root,`db${suffix}`)); } catch (e: any) { if(e.code === "ENOENT") return null; throw e; }
+      });
+      const before = state();
+      const p = goldenSpawn([...cmd,"--root",root,"--db","db","db","backup"],{env,stdout:"pipe",stderr:"pipe"});
+      const out = await new Response(p.stdout).text();
+      const err = (await new Response(p.stderr).text()).replace(/db_[\dTZ-]+_manual\.sqlite/g,"<id>");
+      const code = await p.exited;
+      assert.equal(code,1); assert.deepEqual(state(),before);
+      if(kind === "file") assert.equal(readFileSync(join(root,"snapshots"),"utf8"),"sentinel");
+      else { assert.deepEqual(readdirSync(join(root,"snapshots")),[]); chmodSync(join(root,"snapshots"),0o700); }
+      results.push({out,err,code});
+    }
+    assert.deepEqual(results[1],results[0]); count++;
+  }
   for (const bad of [true, false]) for (const json of [false, true]) {
     const results = [];
     for (const cmd of commands) {

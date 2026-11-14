@@ -12,6 +12,7 @@ pub fn vacuum(
         serde_json::json!({"reclaimedBytes":before.saturating_sub(size(path)),"durationMs":(now()-start).max(0)}),
     )
 }
+use crate::fs_error::fs_error;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -32,12 +33,12 @@ pub fn create_snapshot(
         .parent()
         .ok_or("database has no parent")?
         .join("snapshots");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| fs_error(&e, "mkdir", &dir))?;
     let target = dir.join(&name);
-    if target.metadata().is_ok() {
+    if metadata(&target)?.is_some() {
         return Err("a snapshot for this instant already exists".into());
     }
-    let needed = (size(path) as f64 * 1.1).ceil();
+    let needed = (metadata(path)?.map_or(0, |s| s.len()) as f64 * 1.1).ceil();
     if rustix::fs::statfs(&dir).is_ok_and(|s| ((s.f_bavail * s.f_bsize as u64) as f64) < needed) {
         return Err("not enough free disk space to write a snapshot".into());
     }
@@ -45,16 +46,32 @@ pub fn create_snapshot(
         "VACUUM INTO '{}'",
         target.to_string_lossy().replace('\'', "''")
     )) {
-        let _cleanup = std::fs::remove_file(&target);
+        unlink(&target)?;
         return Err(error.to_string());
     }
-    let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":size(&target),"reason":"manual"});
+    let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":metadata(&target)?.map_or(0, |s| s.len()),"reason":"manual"});
     prune(&dir, at, keep_latest, max_age_days)?;
     Ok(result)
 }
 
 fn size(path: &Path) -> u64 {
     path.metadata().map(|s| s.len()).unwrap_or(0)
+}
+
+fn metadata(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
+    match path.metadata() {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(fs_error(&e, "stat", path)),
+    }
+}
+
+fn unlink(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(fs_error(&e, "unlink", path)),
+    }
 }
 
 #[cfg(test)]
@@ -99,7 +116,13 @@ mod tests {
 
 pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Result<(), String> {
     let mut snapshots = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(fs_error(&e, "scandir", dir)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| fs_error(&e, "scandir", dir))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some((stamp, reason)) = name
             .strip_prefix("db_")
@@ -144,7 +167,7 @@ pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Resul
         {
             continue;
         }
-        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+        unlink(path)?;
     }
     Ok(())
 }

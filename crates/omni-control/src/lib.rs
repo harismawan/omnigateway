@@ -7,6 +7,8 @@ pub mod catalog;
 pub mod config;
 pub mod credentials;
 pub mod database;
+pub mod date;
+pub mod fs_error;
 #[cfg(test)]
 mod http_oracle_tests;
 pub mod keys;
@@ -16,4 +18,3 @@ pub mod operator_json;
 pub mod plugins;
 pub mod settings;
 pub mod settings_value;
-pub mod date;
