@@ -367,6 +367,7 @@ fn preview_table(preview: &Value) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module, clippy::unwrap_used)]
 mod preview_tests {
     #[test]
     fn frozen_formatter_goldens() {
