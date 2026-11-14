@@ -162,52 +162,52 @@ pub fn client_page(store: &SqliteStore, raw: &str, api_key_id: &str) -> Result<S
     let mut page = page_from_query(store, &query, false)?;
     if let JsValue::Object(fields) = &mut page {
         for (name, value) in fields {
-            if name.iter().copied().eq("logs".encode_utf16()) {
-                if let JsValue::Array(rows) = value {
-                    for row in rows {
-                        let mut projected = Vec::new();
-                        for key in [
-                            "id",
-                            "state",
-                            "at",
-                            "requestedModel",
-                            "resolvedProvider",
-                            "resolvedModel",
-                            "attempts",
-                            "status",
-                            "errorCode",
-                            "inputTokens",
-                            "outputTokens",
-                            "cacheReadTokens",
-                            "cacheWriteTokens",
-                            "ttftMs",
-                            "durationMs",
-                            "costUsd",
-                            "degradations",
-                            "rtkApplied",
-                            "rtkEstimatedTokensSaved",
-                        ] {
-                            let mut value = field(row, key).cloned().unwrap_or(JsValue::Undefined);
-                            if key == "degradations" {
-                                let JsValue::Array(entries) = &mut value else {
-                                    return Err(Failure::internal(
-                                        "degradations.filter is not a function",
-                                    ));
-                                };
-                                if entries
-                                    .iter()
-                                    .any(|entry| !matches!(entry, JsValue::String(_)))
-                                {
-                                    return Err(Failure::internal(
-                                        "entry.startsWith is not a function",
-                                    ));
-                                }
-                                entries.retain(|entry| !matches!(entry, JsValue::String(s) if s.starts_with(&"excluded:".encode_utf16().collect::<Vec<_>>())));
+            if name.iter().copied().eq("logs".encode_utf16())
+                && let JsValue::Array(rows) = value
+            {
+                for row in rows {
+                    let mut projected = Vec::new();
+                    for key in [
+                        "id",
+                        "state",
+                        "at",
+                        "requestedModel",
+                        "resolvedProvider",
+                        "resolvedModel",
+                        "attempts",
+                        "status",
+                        "errorCode",
+                        "inputTokens",
+                        "outputTokens",
+                        "cacheReadTokens",
+                        "cacheWriteTokens",
+                        "ttftMs",
+                        "durationMs",
+                        "costUsd",
+                        "degradations",
+                        "rtkApplied",
+                        "rtkEstimatedTokensSaved",
+                    ] {
+                        let mut value = field(row, key).cloned().unwrap_or(JsValue::Undefined);
+                        if key == "degradations" {
+                            let JsValue::Array(entries) = &mut value else {
+                                return Err(Failure::internal(
+                                    "degradations.filter is not a function",
+                                ));
+                            };
+                            if entries
+                                .iter()
+                                .any(|entry| !matches!(entry, JsValue::String(_)))
+                            {
+                                return Err(Failure::internal(
+                                    "entry.startsWith is not a function",
+                                ));
                             }
-                            projected.push((key.encode_utf16().collect(), value));
+                            entries.retain(|entry| !matches!(entry, JsValue::String(s) if s.starts_with(&"excluded:".encode_utf16().collect::<Vec<_>>())));
                         }
-                        *row = JsValue::Object(projected);
+                        projected.push((key.encode_utf16().collect(), value));
                     }
+                    *row = JsValue::Object(projected);
                 }
             }
         }
