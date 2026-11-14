@@ -382,4 +382,4 @@ await verifyGoldenExits("model-puts");
 
 // Run the same-exit substitution regression with the normal suite. The child
 // created by config-gate must not recursively launch another negative test.
-if (process.env.OMNI_CONFIG_GATE_CHILD !== "1") await import("./config-gate.ts");
+await import("./config-gate.ts");

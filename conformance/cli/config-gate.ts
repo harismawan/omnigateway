@@ -51,6 +51,9 @@ assert.equal(configDiagnostic("OMNI_PORT=9000 OMNI_CLUSTER_MODE=true"), undefine
 
 const root = mkdtempSync("/tmp/opencode/e1-e5/config-gate-");
 let suite = readFileSync("conformance/cli/model-puts.ts", "utf8");
+const automaticImport = 'await import("./config-gate.ts");';
+assert.equal(suite.split(automaticImport).length, 2, "expected exactly one automatic config-gate import");
+suite = suite.replace(automaticImport, "");
 suite = suite.replace(/from "(\.[^"]+)"/g, (_, p) => `from "${resolve("conformance/cli", p)}"`);
 suite = suite.replaceAll("import.meta.dir", JSON.stringify(resolve("conformance/cli")));
 assert(suite.includes("\n        env,"));
@@ -60,7 +63,7 @@ suite = suite.replace(
 );
 writeFileSync(join(root, "model-puts.ts"), suite);
 const p = Bun.spawn(["bun", join(root, "model-puts.ts")], {
-  env: { ...process.env, OMNI_CONFIG_GATE_CHILD: "1" },
+  env: process.env,
   stdout: "pipe",
   stderr: "pipe",
 });
