@@ -61,4 +61,8 @@ for(const model of ['gpt-6-astra','gpt-5.5']) for(const vendor of [
  {text:{verbosity:'high',format:{type:'json_object'}},response_format:{type:'json_object'}},
  {text:7,response_format:{type:'json_object'}},
 ]) add('response-format',{...base,vendor:{openai:vendor}},model,JSON.stringify(vendor));
+for(const model of ['gpt-6-astra','gpt-6.1-sol','gpt-6.1-terra','gpt-6-sol','gpt-6-luna','gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna','gpt-daybreak-blue-latest','gpt-daybreak-red-latest','gpt-5.5','codex-auto-review','unlisted','__proto__']) for(const prefix of [false,true]) {
+ const messages=[...base.messages,{role:'assistant',content:[{type:'providerNative',provider:'openai',blockType:'reasoning',data:{id:'discard',encrypted_content:'secret',internal_chat_message_metadata_passthrough:{bad:true}}},{type:'text',text:'answer'}]},{role:'user',content:[{type:'text',text:'next'}]},{role:'system',content:[{type:'text',text:'operator'}]}];
+ add('lite-catalog',{...base,messages,...(prefix?{system:[{type:'text',text:'Unicode 日本語'}],tools:[{kind:'portable',name:'read',inputSchema:{type:'object'}}]}:{})},model,`prefix/${prefix}`);
+}
 console.log(JSON.stringify(rows));
