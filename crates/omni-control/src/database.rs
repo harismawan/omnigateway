@@ -267,7 +267,7 @@ pub fn create_snapshot_with_free_bytes(
     }
     let needed = (crate::database_fs::stat(path).map_or(0, |s| s.len()) as f64 * 1.1).ceil();
     if free_bytes(&dir).is_some_and(|free| (free as f64) < needed) {
-        return Err("not enough free disk space to write a snapshot".into());
+        return Err("CONFLICT: not enough free disk space to write a snapshot".into());
     }
     if let Err(error) = conn.execute_batch(&format!(
         "VACUUM INTO '{}'",
@@ -444,7 +444,7 @@ mod tests {
             if free_offset == Some(-1) {
                 assert_eq!(
                     result.unwrap_err(),
-                    "not enough free disk space to write a snapshot"
+                    "CONFLICT: not enough free disk space to write a snapshot"
                 );
                 assert_eq!(live_bytes(&path), before);
                 assert_eq!(
