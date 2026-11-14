@@ -19,10 +19,11 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 - [ ] A12 (S) models dry-run (API + CLI)
 - [ ] A13 (M) OTLP export
 - [ ] A14 (S) outbound idle timeout: close a response whose client stops reading (Bun idleTimeout 255 s parity), all response kinds; found in A7 fix round 1
+- [ ] A15 (S) /api/connect/* routes (start, finish, poll) over the B1 provider functions
 
 ## B. Providers
-- [~] B1 (M) OAuth framework (in progress with B2, worktree feat/rust-provider-anthropic), refresh() with token_version CAS, 60 s sweep, /api/connect/*
-- [~] B2 (L) anthropic (b66c1016: refresh approved for merge; codec round 5 = lifecycle small-stack tests in progress; overhead-c1 re-measure + merge pending)   - [ ] B3 (L) openai/codex   - [ ] B4 (L) antigravity
+- [x] B1 (M) OAuth framework: refresh() with token_version CAS, 60 s sweep, snapshot publication (W→P mutexes) — merged 8f6f84f9, refresh approved after 3 review rounds; /api/connect/* HTTP routes → A15
+- [x] B2 (L) anthropic — merged 8f6f84f9, codec approved after 6 rounds (b2-codec-r6-review.md); bench 7 rounds vs 04c3c5af: overhead-c1 +1.5 %, chat-stream −0.8 % (inside base range)   - [ ] B3 (L) openai/codex   - [ ] B4 (L) antigravity
 - [ ] B5 (M) grok  - [ ] B6 (M) kimi  - [ ] B7 (M) kilo  - [ ] B8 (M) muse  - [ ] B9 (M) qoder
 - [ ] B10 (M) quota poller + oauthUsage + quota routes + resets/redeem
 
