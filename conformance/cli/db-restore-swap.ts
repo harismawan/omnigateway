@@ -19,6 +19,7 @@ const cases = [
   { name: "terminal-json-both", json: true, tty: true, hashes: ["adminPasswordHash", "viewerPasswordHash"] },
   { name: "older-ledger", json: true, tty: false, hashes: [], ledger: -1000 },
   { name: "newer-ledger", json: true, tty: false, hashes: [], ledger: 1000 },
+  { name: "candidate-wal-only-row", json: true, tty: false, hashes: [], wal: true },
 ];
 function rows(path: string) {
   const db = new Database(path, { readonly: true });
@@ -52,6 +53,15 @@ try {
       for (const key of test.hashes) incoming.run("UPDATE settings SET value='different-hash' WHERE key=?", [key]);
       if (test.ledger) incoming.run("UPDATE migrations SET id=id+?", [test.ledger]);
       incoming.close();
+      const installedRows = rows(candidate);
+      let wal: Database | undefined;
+      if (test.wal) {
+        wal = new Database(candidate);
+        wal.run("PRAGMA journal_mode=WAL");
+        wal.run("PRAGMA wal_autocheckpoint=0");
+        wal.run("INSERT INTO settings (key,value) VALUES ('wal-only','lost on restore')");
+        assert(readFileSync(candidate + "-wal").length > 0);
+      }
       copyFileSync(seed, join(root, "snapshots", stale));
       const oldRows = rows(live), candidateRows = rows(candidate), candidateBytes = readFileSync(candidate);
       const env = { ...process.env, HOME: root, XDG_STATE_HOME: join(root, "state"), OMNI_ENCRYPTION_KEY: "database-golden-secret", NO_COLOR: "1", PTY_NO_COLOR: "1", PTY_STDOUT_PIPE: "1" };
@@ -76,7 +86,7 @@ try {
       const undo = undoIds[0];
       assert.match(undo, /^db_\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z_preRestore\.sqlite$/);
       assert.deepEqual(rows(join(root, "snapshots", undo)), oldRows, "undo contains every old table");
-      assert.deepEqual(rows(live), candidateRows, "candidate installed table by table");
+      assert.deepEqual(rows(live), installedRows, "candidate main file installed table by table (WAL excluded)");
       assert.deepEqual(readFileSync(candidate), candidateBytes, "candidate retained byte-identically");
       assert(existsSync(join(root, "snapshots", stale)), "forced undo skips all retention");
       assert(!existsSync(live + ".incoming"));
@@ -98,6 +108,12 @@ try {
           assert.equal(data.counts.settings, candidateRows.find(([name]) => name === "settings")![1].length);
           assert.deepEqual(Object.keys(data.counts), ["api_keys", "credential_health", "credentials", "migrations", "quota_windows", "request_logs", "settings", "virtual_models"]);
           for (const [table, count] of Object.entries(data.counts)) assert.equal(count, candidateRows.find(([name]) => name === table)![1].length);
+          if (test.wal) {
+            assert.equal(data.counts.settings, 4);
+            assert.equal(rows(live).find(([name]) => name === "settings")![1].length, 3);
+            assert.match(result.err, /settings\s+4\s+3/);
+            console.log("candidate WAL hazard: preview/result settings=4; restored live settings=3; WAL-only row LOST");
+          }
           data.preRestoreSnapshot.id = data.preRestoreSnapshot.filename = "<undo>";
           data.preRestoreSnapshot.createdAt = "<time>";
           result.out = JSON.stringify(data);
@@ -115,8 +131,9 @@ try {
       result.err = result.err.replaceAll(root, "<root>");
       results.push({ result, sidecars });
       console.log(`${test.name} ${index === 0 ? "TS" : "Rust"}: exit=${result.code}, sidecars=${JSON.stringify(sidecars)}, undo retained, incoming absent`);
+      wal?.close();
     }
     if (results.length === 2) assert.deepEqual(results[1], results[0], test.name);
   }
-  console.log(`PASS ${cases.length} frozen swap characterizations${commands.length === 2 ? " with Rust parity" : " (TS only)"}; 4 round trips`);
+  console.log(`PASS ${cases.length} frozen swap characterizations${commands.length === 2 ? " with Rust parity" : " (TS only)"}; 5 round trips`);
 } finally { rmSync(base, { recursive: true, force: true }); }
