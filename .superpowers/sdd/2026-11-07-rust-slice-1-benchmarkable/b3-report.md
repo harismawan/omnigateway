@@ -1,5 +1,95 @@
 # B3 OpenAI / Codex
 
+## Step 4 checkpoint — 2026-11-14, HEAD `646e38b3`
+
+**Next: item 2, first failing real-TS OAuth codec/lite differential.** Read
+`conformance/openai-identity.md` and `openai-compression.md`; reuse crate-private
+identity reader and existing `omni_crypto::codex` primitives. Items 0–1 are this
+session's checkpoint; no OAuth request implementation is claimed.
+
+| Item | Status | Commit |
+|---|---|---|
+|0 compression prerequisite|Inspected; offline encoder blocked, options below|`2a468bb8`|
+|1 identity|Reader/backfill/random generation + existing hash primitives compared; persistence deferred|`646e38b3`|
+|2 OAuth request/lite|Not started|—|
+|3 OAuth/lite depth|Not started; identity structurally safe by inspection below|—|
+|4 HTTP compression|Deferred pending encoder decision|—|
+|5 literal inventory|Unchanged; all 51 still later pending full OAuth assertions|—|
+
+### Corpus / literals / verification
+| Category | Count | Result |
+|---|---:|---|
+|Identity hashes|96|8 seeds ×3 salt choices ×4 instants; keyed/v4/v7/thread/prefix/instant/UUID matches|
+|Stored secrets|16|read + deterministic backfill matches; absent/partial/complete and malformed values|
+|Production random generation/preservation|1 test|UUID version/variant, salt length, distinct samples, no remint on valid stored data|
+|Prior API request corpus|247|Existing suite passed|
+|Frozen literal inventory|121|4 ported +66 named differential +51 later (unchanged)|
+
+Full requested `cargo test --offline -p omni-providers -p omni-ir -p omni-dialects`
+passed (`s4-tests.log`): 42 Running suites, 48 successful summaries totaling
+220 passed /0 failed /4 ignored **including subprocess summaries**, not a unique
+test count. Both X1 ignored tests remain unchanged. All three source tripwires
+passed. Clippy all-targets -D warnings and fmt --check passed (`s4-clippy.log`,
+`s4-fmt.log`). Required CARGO_* settings used. Final targeted identity run:
+2 passed (`s4-identity-green.log`). Logs under `/tmp/opencode/b3/`.
+
+First RED was the missing identity module (`s4-identity-red.log`). First
+executing comparison failed hash row 0 on serde integer-vs-float equality of
+the same instant; test fixed to compare f64 (intermediate log overwritten).
+No production hash mismatch observed in corpus. Initial source tripwire found
+two UUID byte writes; added exact exceptions justified as fixed [u8;16], not
+JSON. Initial clippy found byte-char-slices in test; corrected.
+
+| Mutation | Observation |
+|---|---|
+|Remove installation UUID validation|Real TS comparison fails stored row 9: empty string retained vs absent; `s4-identity-mutation.log`; restored green|
+|Identity deep JSON|No mutation claimed: two borrowed root lookups only; arbitrary values never cloned, retained, replaced or dropped; only validated strings owned|
+
+### Item 0 findings (full)
+Frozen `http-client.ts:160–207`: UTF-8 Buffer into
+`new CompressionStream("zstd", {level:3})`, one write and close, concurrently
+drained output. No size threshold. Source documents streamed unpledged size,
+no frame content size, non-single-segment and 2 MiB window; these frame details
+were inspected, not independently measured here. OAuth codec always sets
+bodyEncoding=zstd and retains uncompressed JSON for capture. Protocol inserts
+content-encoding before content-type; profile default orders it after accept
+and before content-type. Transport copies headers, removes none, does not add
+content-encoding, and appends Content-Length of **compressed bytes** for a
+nonempty source body without supplied length. CodecAdapter rejects encoded
+requests containing any content-length or lacking exactly one matching
+content-encoding; it does not strip headers.
+
+Cargo.lock has no zstd crate. Local cache contains only ruzstd-0.7.3 (MIT),
+whose manifest says decoder and lib exports FrameDecoder/StreamingDecoder,
+not an encoder. No usable offline encoder found. Rust rejects body_encoding at
+`crates/omni-providers/src/http/mod.rs:248–249`; unchanged. No dependency added.
+Options needing controller decision:
+1. Provision `zstd` and dependency closure (MIT wrapper family; native upstream
+   BSD-3-Clause; verify exact selected package metadata before addition). Fetch
+   required before offline build. Streaming level 3 can target frozen shape.
+2. Explicitly authorize raw/uncompressed zstd blocks: standard-valid but larger
+   than JSON, no compression. No hand-rolled encoder implemented.
+3. External encoder executable introduces runtime dependency/process overhead;
+   executable availability not checked. Direct system-library FFI would violate
+   this increment's no-unsafe rule.
+Acceptance remains exact decompressed bytes + encoding header/order + valid
+standard-decodable frame; compressed-byte identity not tested without encoder.
+
+### Differences / remaining scope
+- Existing X1 unpaired-surrogate events and nonnumeric usage differences below
+  remain untouched, as does the 40,000 depth policy.
+- OAuth request/lite/transport not implemented in this checkpoint. Salted OAuth
+  cache selection and history IDs remain item 2; identity helpers themselves
+  match the tested valid hash input domain and malformed stored-field corpus.
+- Backfill helper uses injected generators for exact comparison and existing
+  rand for production; OAuth credential persistence/connect/refresh not wired.
+- No gateway registration, catalog, startup, lifecycle/e2e, push or merge.
+- No claim of coverage for malformed UUID namespaces outside normal prefix
+  namespace derivation, lone-surrogate identity strings, or arbitrary malformed
+  threadInstant inputs beyond the seeds listed in the reference harness.
+
+## Previous checkpoint / history
+
 Status: **step 3 complete, with the two X1 differences**, at the API-key library boundary. Items 3–5 committed, worktree clean at `50d24918`. Next: **step 4: Codex identity/lite, OAuth mode and zstd request body** (decompressed bytes exact, header/order exact, valid zstd; compressed bytes need not match, report whether they do). Gateway registration/startup initialization/catalog/lifecycle/e2e remain step 5. No shared IR/public Usage changes.
 
 ## Final step-3 completion
