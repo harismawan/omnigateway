@@ -127,7 +127,7 @@ pub fn create_snapshot_with_free_bytes(
     std::fs::create_dir_all(&dir).map_err(|e| fs_error(&e, "mkdir", &dir))?;
     let target = dir.join(&name);
     if metadata(&target)?.is_some() {
-        return Err("a snapshot for this instant already exists".into());
+        return Err("CONFLICT: a snapshot for this instant already exists".into());
     }
     let needed = (metadata(path)?.map_or(0, |s| s.len()) as f64 * 1.1).ceil();
     if free_bytes(&dir).is_some_and(|free| (free as f64) < needed) {
@@ -162,7 +162,9 @@ impl Exclusive {
     fn enter(&self, label: &'static str) -> Result<ExclusiveGuard<'_>, String> {
         let mut active = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(active) = *active {
-            return Err(format!("{active} is already running on this database"));
+            return Err(format!(
+                "CONFLICT: {active} is already running on this database"
+            ));
         }
         *active = Some(label);
         Ok(ExclusiveGuard(self))
@@ -233,7 +235,7 @@ mod tests {
         with_exclusive("a snapshot", || {
             assert_eq!(
                 with_exclusive("a vacuum", || Ok(())).unwrap_err(),
-                "a snapshot is already running on this database"
+                "CONFLICT: a snapshot is already running on this database"
             );
             assert_eq!(
                 with_exclusive_or_skip("a snapshot sweep", || panic!("must skip"))?,
@@ -386,7 +388,7 @@ mod tests {
         let live_before = live_bytes(&path);
         assert_eq!(
             create_snapshot(&conn, &path, &clock, &retention).unwrap_err(),
-            "a snapshot for this instant already exists"
+            "CONFLICT: a snapshot for this instant already exists"
         );
         assert_eq!(std::fs::read(snapshot).unwrap(), before);
         assert_eq!(live_bytes(&path), live_before);

@@ -12,6 +12,43 @@ store.close();
 const commands = [["bun", "--no-env-file", resolve("apps/cli/src/index.ts")], [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]];
 let count = 0;
 try {
+  for (const kind of ["collision", "wal-refusal"]) {
+    const results=[];
+    for (const cmd of commands) {
+      rmSync(join(root,"snapshots"),{recursive:true,force:true});
+      for(const suffix of ["","-wal","-shm"]) rmSync(join(root,`db${suffix}`),{force:true});
+      copyFileSync(join(root,"seed"),join(root,"db"));
+      mkdirSync(join(root,"snapshots"));
+      const live=new Database(join(root,"db"));
+      try {
+        if(kind==="wal-refusal") {
+          live.run("PRAGMA journal_mode=WAL"); live.run("PRAGMA wal_autocheckpoint=0");
+          live.run("CREATE TABLE wal_refusal(value)"); live.run("INSERT INTO wal_refusal VALUES ('sentinel')");
+          assert(readFileSync(join(root,"db-wal")).length>32);
+        } else {
+          // Neither CLI exposes a clock override. Occupy every millisecond in a
+          // bounded window; require the conflict diagnostic so expiration fails
+          // the fixture rather than masking an accidentally successful backup.
+          const start=Date.now();
+          for(let at=start;at<start+30000;at++) {
+            const stamp=new Date(at).toISOString().replace(/[:.]/g,"-");
+            writeFileSync(join(root,"snapshots",`db_${stamp}_manual.sqlite`),"existing snapshot sentinel");
+          }
+        }
+        const state=()=>({live:["","-wal","-shm"].map(s=>{try{return readFileSync(join(root,`db${s}`));}catch(e:any){if(e.code==="ENOENT")return null;throw e;}}),snapshots:readdirSync(join(root,"snapshots")).sort().map(n=>[n,readFileSync(join(root,"snapshots",n))])});
+        const before=state();
+        const p=goldenSpawn([...cmd,"--root",root,"--db","db","db","backup"],{env:{...env,...(kind==="wal-refusal"?{OMNI_ENCRYPTION_KEY:"short"}:{})},stdout:"pipe",stderr:"pipe"});
+        const out=await new Response(p.stdout).text();
+        const err=(await new Response(p.stderr).text()).replace(/db_[\dTZ-]+_manual\.sqlite/g,"<id>");
+        const code=await p.exited;
+        assert.equal(code,1);
+        if(kind==="collision") assert.match(err,/a snapshot for this instant already exists/);
+        else assert.match(err,/OMNI_ENCRYPTION_KEY/);
+        assert.deepEqual(state(),before); results.push({out,err,code});
+      } finally {chmodSync(join(root,"snapshots"),0o700);live.close();}
+    }
+    assert.deepEqual(results[1],results[0]);count++;
+  }
   for (const kind of ["file", "unwritable"]) {
     const results = [];
     for (const cmd of commands) {
