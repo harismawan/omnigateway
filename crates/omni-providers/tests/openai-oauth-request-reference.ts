@@ -31,4 +31,14 @@ for(const model of ['gpt-6-astra','gpt-5.5']) {
  for(const reasoning of [{},{effort:'high'},{effort:'ultra'},{effort:'persistent'},{effort:'invalid'},{effort:null},{effort:7},{effort:''},{effort:'bad\r\nheader'},null,7,'invalid'])
   add('reasoning',{...base,vendor:{openai:{reasoning}}},model,`vendor/${JSON.stringify(reasoning)}`);
 }
+for(const model of ['gpt-6-astra','gpt-5.5']) for(const count of [1,2]) for(const answered of [false,true]) for(const mixed of [false,true]) {
+ const calls=Array.from({length:count},(_,i)=>({type:'toolUse',id:`call-${i}`,name:'read',input:{path:`file-${i}`}}));
+ const messages:any[]=[...base.messages,{role:'assistant',content:[{type:'text',text:'checking'},...calls]}];
+ if(answered) messages.push({role:'user',content:calls.flatMap((c,i)=>[
+  {type:'toolResult',toolUseId:c.id,content:'result',...(mixed?{images:[{mediaType:'image/png',data:'aA=='}],files:[{mediaType:'application/pdf',data:'aA==',name:'doc.pdf'}]}:{})},
+  ...(mixed?[{type:'text',text:`followup-${i}`},{type:'image',mediaType:'image/png',data:'aA=='}]:[])
+ ])});
+ messages.push({role:'user',content:[{type:'text',text:'continue'}]});
+ add('tools',{...base,messages,system:[{type:'text',text:'use tools'}],tools:[{kind:'portable',name:'read',description:'Read file',inputSchema:{type:'object',properties:{path:{type:'string'}}}}]},model,`${count}/${answered}/${mixed}`);
+}
 console.log(JSON.stringify(rows));
