@@ -101,3 +101,64 @@ fn public_boundary_inventory_matches() {
         "review additions/removals and update the boundary inventory"
     );
 }
+
+/// Lexical tripwire: qualified paths/imports, including aliases, must not make
+/// these scoped assembly helpers into cross-crate production entry points.
+/// Macro-generated paths and unusual token formatting still require review.
+#[test]
+fn scoped_helpers_have_no_external_production_callers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates");
+    let helpers = [
+        ("omni-providers", "to_custom_chat_wire"),
+        ("omni-providers", "to_wire"),
+        ("omni-providers", "to_wire_with_options"),
+        ("omni-providers", "encode_block"),
+        ("omni-providers", "apply_system"),
+    ];
+    fn files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        if !dir.exists() {
+            return;
+        }
+        for entry in std::fs::read_dir(dir).expect("directory") {
+            let p = entry.expect("entry").path();
+            if p.is_dir() {
+                files(&p, out);
+            } else if p.extension().is_some_and(|e| e == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    for entry in std::fs::read_dir(root).expect("crates") {
+        let crate_dir = entry.expect("crate").path();
+        let name = crate_dir.file_name().expect("name").to_str().expect("utf8");
+        let mut sources = Vec::new();
+        files(&crate_dir.join("src"), &mut sources);
+        for path in sources {
+            let source = std::fs::read_to_string(&path).expect("source");
+            let tokens: Vec<_> = source
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .collect();
+            for (owner, helper) in helpers {
+                assert!(
+                    name == owner || !tokens.contains(&helper),
+                    "external internal-helper reference: {}: {helper}",
+                    path.display()
+                );
+            }
+            if name != "omni-dialects" {
+                // Ban imports of parser modules as well as direct parse calls.
+                let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+                for module in ["anthropic", "openai", "responses"] {
+                    assert!(
+                        !compact.contains(&format!("ingress::{module}"))
+                            && !compact.contains(&format!("ingress::{{{module}")),
+                        "external ingress parser module reference: {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}

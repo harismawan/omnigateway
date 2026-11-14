@@ -25,7 +25,7 @@ omni-dialects/src/egress/responses.rs :: fn open_native(&self) -> Option<&Map<St
 omni-dialects/src/egress/responses.rs :: fn push(&mut self, event: &StreamEvent, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
 omni-dialects/src/egress/responses.rs :: fn push_owned(&mut self, event: StreamEvent, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
 omni-dialects/src/egress/responses.rs :: fn response(collected: &CollectedResponse, render: &ResponsesRender) -> Owned	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
-omni-dialects/src/ingress/anthropic.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	LIMIT: direct parser externally used by tests/examples; temporary JSON lifetime needs audit; normal ingest scopes it
+omni-dialects/src/ingress/anthropic.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
 omni-dialects/src/ingress/mod.rs :: fn append(&mut self, name: &str, value: &str)	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
 omni-dialects/src/ingress/mod.rs :: fn check_model_allowed(model: &str, allowed: bool) -> Result<(), GatewayError>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
 omni-dialects/src/ingress/mod.rs :: fn check_model_allowlist( model: &str, allowlist: Option<&[String]>, ) -> Result<(), GatewayError>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
@@ -39,8 +39,8 @@ omni-dialects/src/ingress/mod.rs :: fn parse_body(text: &str) -> Option<Owned>	b
 omni-dialects/src/ingress/mod.rs :: fn parse_body_checked(text: &str) -> Result<Owned, GatewayError>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
 omni-dialects/src/ingress/mod.rs :: fn random_tool_use_id() -> String	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
 omni-dialects/src/ingress/mod.rs :: fn sorted(&self) -> Vec<(&str, &str)>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
-omni-dialects/src/ingress/openai.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	LIMIT: direct parser externally used by tests/examples; temporary JSON lifetime needs audit; normal ingest scopes it
-omni-dialects/src/ingress/responses.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	LIMIT: direct parser externally used by tests/examples; temporary JSON lifetime needs audit; normal ingest scopes it
+omni-dialects/src/ingress/openai.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-dialects/src/ingress/responses.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
 omni-dialects/src/ingress/zod.rs :: fn arr(elem: Z) -> Z	private module: not externally reachable; ingress owns scope
 omni-dialects/src/ingress/zod.rs :: fn arr_min(elem: Z, min: usize) -> Z	private module: not externally reachable; ingress owns scope
 omni-dialects/src/ingress/zod.rs :: fn as_string(&self) -> String	private module: not externally reachable; ingress owns scope
@@ -108,8 +108,8 @@ omni-ir/src/js.rs :: fn prop<'a>(value: Option<&'a Value>, key: &str) -> Option<
 omni-ir/src/js.rs :: fn replace_lone_surrogates(text: &str) -> Option<String>	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
 omni-ir/src/js.rs :: fn safe_token(value: &str) -> &str	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
 omni-ir/src/js.rs :: fn string_to_number(s: &str) -> f64	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
-omni-ir/src/js.rs :: fn to_number(value: Option<&Value>) -> f64	LIMIT: recursive array coercion lacks boundary scope; no ordinary-path scan added
-omni-ir/src/js.rs :: fn to_string(value: Option<&Value>) -> String	LIMIT: recursive array coercion lacks boundary scope; no ordinary-path scan added
+omni-ir/src/js.rs :: fn to_number(value: Option<&Value>) -> f64	array recursion guarded by deep::grow; scalar/string branches unchanged, borrowed JSON is not released
+omni-ir/src/js.rs :: fn to_string(value: Option<&Value>) -> String	array recursion guarded by deep::grow; scalar/string branches unchanged, borrowed JSON is not released
 omni-ir/src/js.rs :: fn trim(s: &str) -> &str	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
 omni-ir/src/js.rs :: fn truthy(value: Option<&Value>) -> bool	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
 omni-ir/src/js.rs :: fn utf16_len(s: &str) -> usize	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
@@ -160,7 +160,7 @@ omni-providers/src/adapter.rs :: fn bounded_degradations(entries: &[String]) -> 
 omni-providers/src/adapter.rs :: fn code(&self) -> ErrorCode	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
 omni-providers/src/adapter.rs :: fn is_sendable_url(value: &str) -> bool	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
 omni-providers/src/adapter.rs :: fn new(request: &'a ChatRequest, model: &'a str, credentials: &'a Credentials) -> Self	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
-omni-providers/src/anthropic/body.rs :: fn apply_system(system: &[Value], first_user_text: &str) -> Vec<Value>	LIMIT: cache_control.clone is recursive; returned Vec<Value> requires deep release
+omni-providers/src/anthropic/body.rs :: fn apply_system(system: &[Value], first_user_text: &str) -> Vec<Value>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
 omni-providers/src/anthropic/cloak.rs :: fn build(request: &ChatRequest) -> Self	borrows IR names only; produces string maps, never clones/releases nested JSON
 omni-providers/src/anthropic/cloak.rs :: fn name<'a>(&'a self, name: &'a str) -> &'a str	borrows IR names only; produces string maps, never clones/releases nested JSON
 omni-providers/src/anthropic/decode.rs :: fn is_fingerprint_message(message: &str) -> bool	scalar/string API; no arbitrary JSON ownership
@@ -171,13 +171,13 @@ omni-providers/src/anthropic/oauth.rs :: fn token_result( status: u16, text: &st
 omni-providers/src/anthropic/profile.rs :: fn env(name: &str, fallback: &str) -> String	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/anthropic/profile.rs :: fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)>	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/anthropic/profile.rs :: fn initialize()	scalar/string API; no arbitrary JSON ownership
-omni-providers/src/anthropic/wire.rs :: fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, GatewayError>	LIMIT: direct wire assembly relies on codec scope; external tests/example use it; raw output recursively drops without deep release
-omni-providers/src/anthropic/wire.rs :: fn to_wire( req: &omni_ir::request::ChatRequest, model: &str, oauth: bool, cloak: &ToolCloak, saved_max: Option<f64>, ) -> Result<(Value, Vec<String>), GatewayError>	LIMIT: direct wire assembly relies on codec scope; external tests/example use it; raw output recursively drops without deep release
-omni-providers/src/anthropic/wire.rs :: fn to_wire_with_options( req: &omni_ir::request::ChatRequest, model: &str, oauth: bool, cloak: &ToolCloak, saved_max: Option<f64>, preserve_system: bool, auto_cache: bool, ) -> Result<(Value, Vec<String>), GatewayError>	LIMIT: direct wire assembly relies on codec scope; external tests/example use it; raw output recursively drops without deep release
+omni-providers/src/anthropic/wire.rs :: fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-providers/src/anthropic/wire.rs :: fn to_wire( req: &omni_ir::request::ChatRequest, model: &str, oauth: bool, cloak: &ToolCloak, saved_max: Option<f64>, ) -> Result<(Value, Vec<String>), GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-providers/src/anthropic/wire.rs :: fn to_wire_with_options( req: &omni_ir::request::ChatRequest, model: &str, oauth: bool, cloak: &ToolCloak, saved_max: Option<f64>, preserve_system: bool, auto_cache: bool, ) -> Result<(Value, Vec<String>), GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
 omni-providers/src/custom/codec.rs :: fn endpoint_url(origin: &str, base_path: &str, protocol: Protocol) -> String	endpoint URL string only (re-exported); no JSON
 omni-providers/src/custom/decode/chat.rs :: fn new() -> Self	constructor creates empty decoder; queued StreamEvent owns iterative Drop
 omni-providers/src/custom/decode/responses.rs :: fn new() -> Self	constructor creates empty decoder; queued StreamEvent owns iterative Drop
-omni-providers/src/custom/wire.rs :: fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded	LIMIT: direct wire assembly relies on codec scope; external tests/example use it; raw output recursively drops without deep release
+omni-providers/src/custom/wire.rs :: fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded	internal: caller must be inside a deep scope; production entry points are the codec and ingest
 omni-providers/src/http/body.rs :: async fn next_chunk(&mut self) -> Option<Result<Bytes, HttpError>>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
 omni-providers/src/http/body.rs :: async fn text(mut self) -> Result<String, HttpError>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
 omni-providers/src/http/body.rs :: fn append_received(&mut self, name: &str, value: &str)	bytes/strings or HTTP state; no parsed arbitrary JSON ownership

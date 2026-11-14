@@ -40,7 +40,7 @@ fn push_string(value: Option<&Value>, out: &mut String) {
         Some(Value::Number(n)) => write_number(number_value(n), out),
         Some(Value::String(s)) => out.push_str(s),
         Some(Value::Object(_)) => out.push_str("[object Object]"),
-        Some(Value::Array(items)) => {
+        Some(Value::Array(items)) => crate::deep::grow(|| {
             // `Array.prototype.join`: null and undefined elements are empty.
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
@@ -50,7 +50,7 @@ fn push_string(value: Option<&Value>, out: &mut String) {
                     push_string(Some(item), out);
                 }
             }
-        }
+        }),
     }
 }
 
