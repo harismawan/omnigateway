@@ -6,9 +6,7 @@
 use omni_store::SqliteStore;
 
 fn report(store: &SqliteStore, query: &str) -> String {
-    omni_control::reports::usage(store, query, 2e12)
-        .ok()
-        .expect("usage report")
+    omni_control::reports::usage(store, query, 2e12).expect("usage report")
 }
 
 fn store() -> (tempfile::TempDir, SqliteStore) {
