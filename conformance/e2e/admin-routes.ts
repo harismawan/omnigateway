@@ -42,7 +42,17 @@
  */
 import { Database } from "bun:sqlite";
 import { createDecipheriv, pbkdf2Sync } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { connect } from "node:net";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -1391,6 +1401,9 @@ const configs: Config[] = [
     // Eight HEAD exports each took an export slot; none may have kept it.
     ...everyone("GET","/api/logs/export?since=0&until=200&format=jsonl").map(s=>({...s,name:`export after head ${s.who}`,expectedStatus:s.who==="anon"?401:200})),
   ]},
+  // The export connection bound (Rust: four at once; TS: none). The scenario
+  // is `runOne`'s; the steps only give the two binaries something to compare.
+  {label:"export-bounds",db:()=>db("export-bounds",["WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<60000) INSERT INTO request_logs(id,at,requested_model,resolved_model,resolved_provider,credential_id,api_key_id,status,error_code,duration_ms,input_tokens) SELECT printf('bound-%05d',i),100+i,'requested_'||(i%7),'resolved','custom','cred','key',CASE WHEN i%2=0 THEN 500 ELSE 200 END,'ERROR_CODE',10,3 FROM n"]),steps:()=>everyone("GET","/api/logs/export?since=0&until=600&format=jsonl").map(s=>({...s,expectedStatus:s.who==="anon"?401:200}))},
   {label:"nodes",db:()=>db("nodes",[]),steps:()=>["empty","one","several","unusual"].flatMap((name,i)=>[
     {kind:"sql" as const,name:`nodes seed ${name}`,sql:["DELETE FROM nodes",...(i===0?[]:[`INSERT INTO nodes VALUES('peer',${nodesNow+600000})`]),...(i<2?[]:[`INSERT INTO nodes VALUES('older',${nodesNow+500000}),('stale',1)`]),...(i<3?[]:["INSERT INTO nodes VALUES(CAST(x'ff' AS TEXT),'text-time'),(x'0102',1e999),(NULL,'zzz')"])]},
     ...everyone("GET","/api/nodes").map(s=>({...s,name:`nodes ${name} ${s.who}`,expectedStatus:s.who==="anon"?401:200}))
@@ -2110,6 +2123,139 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       writeFileSync(join(out, `report-contention-${label}.json`), JSON.stringify({boundMs,latencies}));
       if (label === "rust" && latencies.some(x=>x.latency>boundMs)) throw new Error(`report contention ${JSON.stringify(latencies)}`);
+    }
+    if (cfg.label === "export-bounds") {
+      // Four exports held open by clients that stop reading; what a fifth
+      // sees, what the other report routes see meanwhile, and what frees a
+      // slot. The waits are asserted on Rust (TS has no bound: its fifth
+      // answers at once, which is recorded); everything else on both.
+      const full = "/api/logs/export?since=0&until=70000&format=jsonl";
+      const open = (cookie: string | null, target = full) => {
+        const socket = connect(PORT, "127.0.0.1");
+        const chunks: Buffer[] = [];
+        const state = { size: 0, first: undefined as number | undefined, closed: false, hold: true };
+        socket.on("error", () => {});
+        socket.on("close", () => { state.closed = true; });
+        socket.on("connect", () => socket.write(`GET ${target} HTTP/1.1\r\nhost: 127.0.0.1:${PORT}\r\nconnection: close\r\ncookie: omni_admin=${cookie}\r\n\r\n`));
+        socket.on("data", d => {
+          state.first ??= performance.now();
+          chunks.push(d);
+          state.size += d.length;
+          if (state.hold) socket.pause();
+        });
+        return { socket, state, all: () => Buffer.concat(chunks) };
+      };
+      const until = async (cond: () => boolean, ms: number) => {
+        const end = performance.now() + ms;
+        while (performance.now() < end) { if (cond()) return true; await sleep(5); }
+        return cond();
+      };
+      // Open connections are counted by their WAL descriptors: one per
+      // connection that has read, closed with it. Descriptors on the database
+      // file itself are not a count of connections: SQLite keeps a closed
+      // connection's descriptor while any other connection in the process
+      // holds a lock on the file (closing it would drop that lock: POSIX
+      // advisory locks are per process) and hands it to the next open, so
+      // their number is the most readers there have been at once.
+      const real = realpathSync(file);
+      const links = (path: string) => {
+        try {
+          return readdirSync(`/proc/${proc.pid}/fd`).filter(f => {
+            try { return readlinkSync(`/proc/${proc.pid}/fd/${f}`) === path; } catch { return false; }
+          }).length;
+        } catch { return -1; }
+      };
+      const dbFds = () => links(`${real}-wal`);
+      const mainFds = () => links(real);
+      const mainIdle = mainFds();
+      const fail = (what: string) => { throw new Error(`export bounds (${label}): ${what}`); };
+      const rust = label === "rust";
+      const admin = cookies.admin, viewer = cookies.viewer;
+      const adminHeaders: [string,string][] = [["cookie",`omni_admin=${admin}`]];
+      const fdsIdle = dbFds();
+      const held = [admin, viewer, admin, viewer].map(c => open(c));
+      if (!await until(() => held.every(h => h.state.size > 0), 20000)) fail("four exports did not start");
+      for (const h of held) if (!h.all().toString("latin1").startsWith("HTTP/1.1 200")) fail("held export status");
+      await sleep(300);
+      const fdsFour = dbFds();
+      // A fifth: on Rust no byte of an answer while the four are open.
+      const fifth = open(viewer);
+      const fifthAtOnce = await until(() => fifth.state.size > 0, 500);
+      if (rust && fifthAtOnce) fail("a fifth export answered beside four open ones");
+      const fdsWaiting = dbFds();
+      if (rust && (fdsFour !== fdsIdle + 4 || fdsWaiting !== fdsFour)) fail(`database handles idle=${fdsIdle} four=${fdsFour} waiting=${fdsWaiting}`);
+      // The other report routes are not behind the exports.
+      const laneBoundMs = 2000;
+      const lane: {who:string;target:string;status:number;ms:number}[] = [];
+      for (const [who, cookie] of [["admin", admin], ["viewer", viewer]] as const)
+        for (const target of ["/api/usage?until=1e20&groupBy=apiKey&splitBy=model", "/api/logs?limit=500", "/api/logs?limit=1", "/api/nodes", "/api/keys", "/api/logs/export?since=0&until=70000&format=bad"]) {
+          const started = performance.now();
+          const x = await exchange({target, headers: [["cookie",`omni_admin=${cookie}`]]});
+          const ms = performance.now() - started;
+          lane.push({who, target, status: x.status, ms});
+          if (x.status !== (target.endsWith("format=bad") ? 400 : 200) || ms > laneBoundMs) fail(`report lane ${who} ${target}: status ${x.status} in ${ms}ms`);
+        }
+      // Twice the report lane's own four at once: they queue, none is lost.
+      const burstStarted = performance.now();
+      const burst = await Promise.all(Array.from({length: 8}, (_, i) => exchange({target: i % 2 ? "/api/logs?limit=500" : "/api/usage?until=1e20&groupBy=apiKey", headers: adminHeaders})));
+      const burstMs = performance.now() - burstStarted;
+      if (burst.some(x => x.status !== 200)) fail(`report burst statuses ${burst.map(x => x.status)}`);
+      if (rust && fifth.state.size > 0) fail("the fifth export answered before any of the four ended");
+      // One of the four finishes: read it to its end.
+      held[0]!.state.hold = false;
+      held[0]!.socket.resume();
+      if (!await until(() => held[0]!.state.closed, 60000)) fail("held export did not finish");
+      const finishedAt = performance.now();
+      const whole = parse(held[0]!.all());
+      const decoded = dechunk(whole.body);
+      const rowsRead = decoded.body.toString("latin1").split("\n").length - 1;
+      if (whole.status !== 200 || !decoded.complete || rowsRead !== 60000) fail(`finished export status=${whole.status} complete=${decoded.complete} rows=${rowsRead}`);
+      if (!await until(() => fifth.state.size > 0, 5000)) fail("the fifth export did not start after one finished");
+      if (!fifth.all().toString("latin1").startsWith("HTTP/1.1 200")) fail("fifth export status");
+      const afterFinishMs = (fifth.state.first as number) - finishedAt;
+      // Four again (three of the first, and the fifth). One client goes away.
+      await sleep(300);
+      const sixth = open(admin);
+      const sixthAtOnce = await until(() => sixth.state.size > 0, 500);
+      if (rust && sixthAtOnce) fail("a sixth export answered beside four open ones");
+      const cutAt = performance.now();
+      held[1]!.socket.destroy();
+      if (!await until(() => sixth.state.size > 0, 5000)) fail("the sixth export did not start after a disconnect");
+      const afterDisconnectMs = (sixth.state.first as number) - cutAt;
+      const disconnectBoundMs = 1000;
+      if (rust && afterDisconnectMs > disconnectBoundMs) fail(`slot freed ${afterDisconnectMs}ms after a disconnect`);
+      // A client that gives up waiting takes no slot with it.
+      await sleep(300);
+      const ghost = open(viewer);
+      await sleep(200);
+      if (rust && ghost.state.size > 0) fail("a waiting export answered beside four open ones");
+      ghost.socket.destroy();
+      const seventh = open(admin);
+      const seventhAtOnce = await until(() => seventh.state.size > 0, 500);
+      if (rust && seventhAtOnce) fail("a seventh export answered beside four open ones");
+      const cut2 = performance.now();
+      held[2]!.socket.destroy();
+      if (!await until(() => seventh.state.size > 0, 5000)) fail("the seventh export did not start after a disconnect");
+      const afterGhostMs = (seventh.state.first as number) - cut2;
+      if (rust && afterGhostMs > disconnectBoundMs) fail(`slot freed ${afterGhostMs}ms after a disconnect (abandoned waiter before it)`);
+      await sleep(300);
+      const fdsFourAgain = dbFds();
+      // Everyone leaves: every handle closes, and five whole exports run.
+      for (const h of [...held, fifth, sixth, seventh]) h.socket.destroy();
+      const closedAt = performance.now();
+      const handlesClosed = await until(() => dbFds() === fdsIdle, 5000);
+      const handlesClosedMs = performance.now() - closedAt;
+      if (rust && (fdsFourAgain !== fdsIdle + 4 || !handlesClosed)) fail(`database handles four=${fdsFourAgain} idle=${fdsIdle} now=${dbFds()}`);
+      const five = await Promise.all(Array.from({length: 5}, () => exchange({target: "/api/logs/export?since=0&until=2100&format=jsonl", headers: adminHeaders})));
+      for (const x of five) {
+        const d = dechunk(x.body);
+        if (x.status !== 200 || !d.complete || d.body.toString("latin1").split("\n").length - 1 !== 2000) fail(`whole export after the scenario: status ${x.status} complete ${d.complete}`);
+      }
+      if (!await until(() => dbFds() === fdsIdle, 5000) && rust) fail("database handles after five whole exports");
+      // Four exports and four other report reads at most, ever.
+      const mainEnd = mainFds();
+      if (rust && mainEnd > mainIdle + 8) fail(`database file descriptors idle=${mainIdle} end=${mainEnd}`);
+      writeFileSync(join(out, `bounds-${label}.json`), JSON.stringify({fifthAtOnce, sixthAtOnce, seventhAtOnce, fifthFirstByteMsAfterFinish: afterFinishMs, sixthFirstByteMsAfterDisconnect: afterDisconnectMs, seventhFirstByteMsAfterDisconnect: afterGhostMs, disconnectBoundMs, lane, laneBoundMs, burstMs, handles: {idle: fdsIdle, four: fdsFour, waiting: fdsWaiting, fourAgain: fdsFourAgain, closed: handlesClosed, closedMs: handlesClosedMs, mainIdle, mainEnd}}, null, 1));
     }
     if (cfg.label === "export-volume-1") {
       const pages = () => (readFileSync(logFile, "utf8") + readFileSync(`${logFile}.err`, "utf8")).split("export_page_read").length - 1;
