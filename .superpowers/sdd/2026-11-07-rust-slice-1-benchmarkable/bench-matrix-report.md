@@ -1,6 +1,8 @@
 # Benchmark matrix report
 
 ## Fix round 2
+Quiet-host runner follow-up → `87df5e96` → falling-load/timeout/bypass and comparison-header checks failed first (`/tmp/opencode/bench-fix4/before.log`); bounded load waiting and per-round loadWait metadata implemented. 34 tests, core typecheck, changed-file lint and shell syntax passed.
+Real ROUNDS=2 MAX_LOAD=1 LOAD_WAIT=600 run without ALLOW_BUSY completed all four invocations (eight supported observations), ending with “insufficient rounds”; waits in invocation order base/1, head/1, head/2, base/2: 0s, 0s, 30s, 75s. Header: “Largest start-of-run load: base 1; head 0.95” (`bench-fix4/validation.log`, `real-run.log`, `rounds/`). All four scratch roots removed; no timeout or performance conclusion.
 Verifier shutdown follow-up → `c4d0a286` → real repeated-signal test failed first (`/tmp/opencode/bench-fix3/signal-before.log`); report-collector check failed first (`report-before.log`); persistent SIGTERM/SIGINT handlers emit one report, harness stops once and missing reports fail/null the scenario.
 Bound: existing 10-second request deadline covers connection, headers and body; wedged-server check reported one timeout violation (`timeout-check.log`). Silent-stub integration retained both failed/null scenarios and full JSON (`silent.json`, `silent-check.log`). All paths here use `/tmp/opencode/bench-fix3/`.
 Final-commit reruns: reviewer's 600ms delayed reproduction supported on both gateways; TS verifier 3 started/3 completed/6 skipped/0 violations, Rust 4/4/6/0. Both custom-chat selections 8/8 supported; twelve faults failed/null (`validation.log`). All 17 gateway scratch roots removed.
