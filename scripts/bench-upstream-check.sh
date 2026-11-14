@@ -24,9 +24,11 @@ for wire in chat responses messages; do
     pids+=("$!")
   done
   sleep 1
-  for chunks in 1 2000; do
-    taskset -c "${LOAD_CPUS:-6-7}" oha --insecure --no-tui --output-format json --wait-ongoing-requests-after-deadline -z "${DURATION:-2s}" -c 64 \
-      -m POST -H 'content-type: application/json' -d "{\"model\":\"mock-c$chunks-d0\",\"stream\":true}" "$url" > "$out/$wire-c$chunks.json"
+  for shape in 1:64 1:1 2000:16; do
+    chunks=${shape%:*}; clients=${shape#*:}
+    suffix=""; if [[ $clients == 1 ]]; then suffix="-clients1"; fi
+    taskset -c "${LOAD_CPUS:-6-7}" oha --insecure --no-tui --output-format json --wait-ongoing-requests-after-deadline -z "${DURATION:-2s}" -c "$clients" \
+      -m POST -H 'content-type: application/json' -d "{\"model\":\"mock-c$chunks-d0\",\"stream\":true}" "$url" > "$out/$wire-c$chunks$suffix.json"
   done
   kill "${pids[@]}"
   wait "${pids[@]}" 2>/dev/null || true

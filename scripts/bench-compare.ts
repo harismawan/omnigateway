@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { checkManifest } from "./bench-manifest";
 
 type Metrics = {
   rps: number;
@@ -237,9 +238,10 @@ export function compare(
   return [...header, "", ...[...tables.values()].flatMap((lines) => [...lines, ""])].join("\n");
 }
 async function load(path: string): Promise<Round[]> {
+  if (statSync(path).isDirectory()) await checkManifest(path);
   const paths = statSync(path).isDirectory()
     ? readdirSync(path)
-        .filter((p) => p.endsWith(".json"))
+        .filter((p) => /^\d+\.json$/.test(p))
         .sort()
         .map((p) => join(path, p))
     : [path];

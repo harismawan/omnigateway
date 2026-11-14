@@ -1075,6 +1075,14 @@ async function runScenario(
   await sleep(500);
 
   const measuredFrom = Date.now();
+  const refreshCount = () => {
+    try {
+      return readFileSync(join(root, "refresh.log"), "utf8").length;
+    } catch {
+      return 0;
+    }
+  };
+  const refreshBefore = flags.matrix ? refreshCount() : 0;
   let verifier: Subprocess | undefined;
   if (flags.matrix) {
     const verifyKey = (await cli(["keys", "create", "--label", `verify-${scenario.name}`])) as {
@@ -1256,6 +1264,8 @@ async function runScenario(
   const lp = report.latencyPercentiles;
   const integrityErrors: string[] = [];
   if (flags.matrix && !drained?.complete) integrityErrors.push("common row drain incomplete");
+  if (flags.matrix && refreshCount() !== refreshBefore)
+    integrityErrors.push("OAuth refresh during measurement");
   if (flags.matrix && (!boundary || Math.abs(windowS - boundary.reportedSeconds) > 0.25))
     integrityErrors.push("load report boundary differs from oha duration by more than 250ms");
   let sizeEvidence: unknown;
@@ -1620,6 +1630,7 @@ async function cliTimings(runs: number): Promise<{ p50Ms: number; maxMs: number 
 }
 
 async function main(): Promise<void> {
+  if (flags.matrix) process.env.OMNI_BENCH_REFRESH_LOG = join(root, "refresh.log");
   if (flags.matrix) {
     for (const name of ["OMNI_BENCH_CERT", "OMNI_BENCH_TLS_KEY"]) {
       const value = process.env[name];

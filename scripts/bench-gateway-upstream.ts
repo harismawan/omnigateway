@@ -131,16 +131,21 @@ function responses(script: Script): Uint8Array {
       total_tokens: 64 + script.chunks * 2,
     },
   };
+  let sequence = 0;
   const event = (type: string, rest: object) =>
-    encoder.encode(`event: ${type}\ndata: ${JSON.stringify({ type, ...rest })}\n\n`);
-  const delta = event("response.output_text.delta", {
+    encoder.encode(
+      `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...rest })}\n\n`,
+    );
+  const delta = {
     item_id: item.id,
     output_index: 0,
     content_index: 0,
     delta: "lorem ipsum ",
-  });
+  };
+  const { usage: _usage, ...pending } = response;
   return Buffer.concat([
-    event("response.created", { response: { ...response, status: "in_progress", output: [] } }),
+    event("response.created", { response: { ...pending, status: "in_progress", output: [] } }),
+    event("response.in_progress", { response: { ...pending, status: "in_progress", output: [] } }),
     event("response.output_item.added", {
       output_index: 0,
       item: { ...item, status: "in_progress", content: [] },
@@ -151,12 +156,18 @@ function responses(script: Script): Uint8Array {
       content_index: 0,
       part: { type: "output_text", text: "", annotations: [] },
     }),
-    ...Array.from({ length: script.chunks }, () => delta),
+    ...Array.from({ length: script.chunks }, () => event("response.output_text.delta", delta)),
     event("response.output_text.done", {
       item_id: item.id,
       output_index: 0,
       content_index: 0,
       text: item.content[0]?.text,
+    }),
+    event("response.content_part.done", {
+      item_id: item.id,
+      output_index: 0,
+      content_index: 0,
+      part: item.content[0],
     }),
     event("response.output_item.done", { output_index: 0, item }),
     event("response.completed", { response }),

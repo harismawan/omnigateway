@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
 /** TLS-only fixture. The namespace wrapper maps the real provider origins here. */
 import { parseArgs } from "node:util";
 import { faultResponse } from "./bench-fault";
@@ -31,12 +32,15 @@ Bun.serve({
         five_hour: { utilization: 0, resets_at: null },
         seven_day: { utilization: 0, resets_at: null },
       });
-    if (path === "/v1/oauth/token")
+    if (path === "/v1/oauth/token") {
+      if (process.env.OMNI_BENCH_REFRESH_LOG)
+        appendFileSync(process.env.OMNI_BENCH_REFRESH_LOG, "refresh\n");
       return Response.json({
         access_token: "bench-access",
         refresh_token: "bench-refresh",
         expires_in: 86400,
       });
+    }
     if (path !== "/v1/messages" || req.method !== "POST")
       return Response.json({ error: { type: "not_found", message: path } }, { status: 404 });
     const body = (await req.json()) as { model?: string; stream?: boolean };
