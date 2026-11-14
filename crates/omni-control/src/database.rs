@@ -87,10 +87,7 @@ fn delete_artifact(dir: &std::path::Path, rel: &str) {
 }
 
 fn list_artifacts(root: &std::path::Path, dir: &std::path::Path, files: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    for entry in crate::database_fs::readdir(dir) {
         let Ok(kind) = entry.file_type() else {
             continue;
         };

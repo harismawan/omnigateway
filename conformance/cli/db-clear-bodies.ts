@@ -12,7 +12,7 @@ const store = await createStore({path:join(root,"seed"),encryptionKey:await deri
 const commands = [["bun","--no-env-file",resolve("apps/cli/src/index.ts")],[resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]];
 let count=0;
 try {
- for (const kind of ["absolute","parent","symlink","pipe","n","empty","bad","zero","rows","orphans","unremovable","yes","future"]) {
+ for (const kind of ["inaccessible","absolute","parent","symlink","pipe","n","empty","bad","zero","rows","orphans","unremovable","yes","future"]) {
   const results=[];
   for (const cmd of commands) {
    for(const s of ["","-wal","-shm"]) rmSync(join(root,`db${s}`),{force:true});
@@ -20,7 +20,7 @@ try {
    mkdirSync(join(root,"request_bodies","aa"),{recursive:true});
    if(kind!=="zero") writeFileSync(join(root,"request_bodies","aa","body"),"body sentinel");
    const db=new Database(join(root,"db"));
-   if(!["zero","orphans"].includes(kind)) db.run("INSERT INTO request_bodies (request_id,at,rel_path,size_bytes,detail_state,truncated) VALUES ('old',1,'aa/body',13,'ready',0)");
+    if(!["inaccessible","zero","orphans"].includes(kind)) db.run("INSERT INTO request_bodies (request_id,at,rel_path,size_bytes,detail_state,truncated) VALUES ('old',1,'aa/body',13,'ready',0)");
     if(kind==="future") db.run("UPDATE request_bodies SET at = 8000000000000");
     mkdirSync(join(root,"outside-dir"),{recursive:true});
     const outside=join(root,"outside-dir","outside");
@@ -34,21 +34,23 @@ try {
    const state=()=>({db:["","-wal","-shm"].map(s=>{try{return readFileSync(join(root,`db${s}`));}catch(e:any){if(e.code==="ENOENT")return null;throw e;}}),files:readdirSync(join(root,"request_bodies"),{recursive:true,withFileTypes:true}).filter(e=>e.isFile()).map(e=>[e.name,readFileSync(join(e.parentPath,e.name))])});
    mkdirSync(join(root,"snapshots"),{recursive:true});writeFileSync(join(root,"snapshots","sentinel"),"snapshot sentinel");
    const before=state(); const beforeState=fileState(root,true); const refusal=["pipe","n","empty","bad"].includes(kind);
-   if(kind==="unremovable") chmodSync(join(root,"request_bodies","aa"),0o500);
+    if(kind==="unremovable") chmodSync(join(root,"request_bodies","aa"),0o500);
+    if(kind==="inaccessible") chmodSync(join(root,"request_bodies","aa"),0);
    const tty=["n","empty","yes"].includes(kind);
    const args=[...cmd,"--root",root,"--db","db","db","clear-bodies",...(!tty&&kind!=="pipe"?["--yes"]:[]),...(["zero","orphans","unremovable"].includes(kind)?["--json"]:[])];
    const p=goldenSpawn(tty?["python3",resolve("conformance/cli/pty.py"),kind==="empty"?"":kind==="yes"?" YeS ":"n",...args]:args,{env:{...env,PTY_NO_COLOR:"1",...(kind==="bad"?{OMNI_ENCRYPTION_KEY:"short"}:{})},stdout:"pipe",stderr:"pipe"});
-   let out=await new Response(p.stdout).text();const err=await new Response(p.stderr).text();let code=await p.exited;
+    let out=await new Response(p.stdout).text();const err=await new Response(p.stderr).text();let code=await p.exited;
+    if(kind==="inaccessible") chmodSync(join(root,"request_bodies","aa"),0o700);
    if(tty){const nested=JSON.parse(out);out=Buffer.from(nested.bytes,"hex").toString();code=nested.code;}
     assert.equal(code,refusal?1:0);if(refusal)assert.deepEqual(fileState(root,true),beforeState);
     assert.equal(existsSync(outside),!["parent","symlink"].includes(kind),`${kind}: outside sentinel`);
    if(kind==="unremovable"){assert.deepEqual(state().files,before.files);chmodSync(join(root,"request_bodies","aa"),0o700);}
    if(!refusal) {
-    const removed=["zero","orphans","future"].includes(kind)?0:1;
+     const removed=["inaccessible","zero","orphans","future"].includes(kind)?0:1;
     const orphans=["orphans","unremovable"].includes(kind)?1:0;
     if(["zero","orphans","unremovable"].includes(kind)) assert.deepEqual(JSON.parse(out),{removed,orphans});
     else assert(out.includes(`removed                 ${removed}`));
-    assert.equal(state().files.length,["unremovable","future"].includes(kind)?1:0);
+     assert.equal(state().files.length,["inaccessible","unremovable","future"].includes(kind)?1:0);
    }
    const check=new Database(join(root,"db"));const tables=databaseState(check);check.close();
    results.push({out,err,code,tables,files:state().files});
