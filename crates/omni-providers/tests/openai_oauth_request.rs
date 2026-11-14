@@ -16,23 +16,27 @@ fn oauth_codec_matches_frozen_ts() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 6);
+    assert_eq!(rows.as_array().unwrap().len(), 82);
     for (i, row) in rows.as_array().unwrap().iter().enumerate() {
-        let surface = match row["dialect"].as_str().unwrap() {
-            "anthropic" => Surface::Anthropic,
-            "openai" => Surface::OpenAi,
-            _ => Surface::Responses,
+        let request = if let Some(dialect) = row["dialect"].as_str() {
+            let surface = match dialect {
+                "anthropic" => Surface::Anthropic,
+                "openai" => Surface::OpenAi,
+                _ => Surface::Responses,
+            };
+            ingest(
+                surface,
+                &row["client"].to_string(),
+                &Headers::new(),
+                &mut IngressOptions {
+                    new_tool_use_id: &mut || "fixed".into(),
+                },
+            )
+            .unwrap()
+            .request
+        } else {
+            serde_json::from_value(row["request"].clone()).unwrap()
         };
-        let request = ingest(
-            surface,
-            &row["client"].to_string(),
-            &Headers::new(),
-            &mut IngressOptions {
-                new_tool_use_id: &mut || "fixed".into(),
-            },
-        )
-        .unwrap()
-        .request;
         let credentials = Credentials {
             access_token: Some("oauth-token".into()),
             provider_data: serde_json::from_str(r#"{"accountId":"account"}"#).unwrap(),
@@ -57,7 +61,10 @@ fn oauth_codec_matches_frozen_ts() {
         assert_eq!(
             got.request.body,
             row["codec"]["body"].as_str().unwrap(),
-            "body {i}"
+            "body {i}: {} {} {}",
+            row["category"],
+            row["model"],
+            row["label"]
         );
         assert_eq!(
             serde_json::json!(got.request.headers),

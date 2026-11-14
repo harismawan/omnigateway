@@ -378,8 +378,7 @@ pub(crate) fn encode_mode(
             .and_then(|v| v.get("effort"))
             .and_then(Value::as_str)
             .filter(|e| super::oauth::is_effort(e))
-            .unwrap_or(catalog.effort)
-            .to_owned();
+            .map(str::to_owned);
         let args = super::lite::LiteArgs {
             thread_id: key.clone(),
             input: repaired,
@@ -389,11 +388,17 @@ pub(crate) fn encode_mode(
             started_at: opts.request_started_at,
             id_salt: salt.map(str::to_owned),
             lite: catalog.lite,
-            effort_update: catalog.updates.then_some(effort.clone()),
+            effort_update: effort.clone().filter(|_| catalog.updates),
         };
         let built = super::lite::to_lite(&args, &repaired_turns, &repaired_parts);
         deep::insert(&mut body, "input".into(), deep::clone(&built.0["input"]));
-        let (metadata, protocol) = super::oauth::turn(opts, &key, &seed, &built.0, &effort);
+        let (metadata, protocol) = super::oauth::turn(
+            opts,
+            &key,
+            &seed,
+            &built.0,
+            effort.as_deref().unwrap_or(catalog.effort),
+        );
         deep::insert(&mut body, "client_metadata".into(), metadata);
         headers = protocol;
     } else {

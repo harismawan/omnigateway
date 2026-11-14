@@ -17,4 +17,18 @@ for(const stream of [false,true]) for(const [dialect,parse,body] of [
  const built=openaiCodec.buildRequest({request,model,credentials,requestId,requestStartedAt,fail:(c,m)=>new Error(c+':'+m)});
  rows.push({category:'three-dialects',dialect,client,model,codec:built.request,notes:built.degradations,state:built.decodeState});
 }
+const base={model:'pool',stream:false,messages:[{role:'user',content:[{type:'text',text:'hi'}]}]};
+function add(category:string, request:any, model:string, label:string) {
+ const built=openaiCodec.buildRequest({request,model,credentials,requestId,requestStartedAt,fail:(c,m)=>new Error(c+':'+m)});
+ rows.push({category,label,request,model,codec:built.request,notes:built.degradations,state:built.decodeState});
+}
+for(const model of ['gpt-6-astra','gpt-5.5']) {
+ for(const effort of ['none','minimal','low','medium','high','xhigh','max'])
+  for(const display of [undefined,'omitted','updates'])
+   add('reasoning', {...base,reasoning:{mode:'adaptive',effort,display}},model,`${effort}/${display}`);
+ for(const reasoning of [undefined,{mode:'off'},{mode:'betweenTools'},{mode:'budget',budgetTokens:1024},{mode:'adaptive'}])
+  add('reasoning',{...base,reasoning},model,`mode/${reasoning?.mode}`);
+ for(const reasoning of [{},{effort:'high'},{effort:'ultra'},{effort:'persistent'},{effort:'invalid'},{effort:null},{effort:7},{effort:''},{effort:'bad\r\nheader'},null,7,'invalid'])
+  add('reasoning',{...base,vendor:{openai:{reasoning}}},model,`vendor/${JSON.stringify(reasoning)}`);
+}
 console.log(JSON.stringify(rows));
