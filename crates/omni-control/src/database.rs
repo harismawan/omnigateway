@@ -129,10 +129,10 @@ pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Resul
             &stamp[17..19],
             &stamp[20..]
         );
-        let Ok(date) = chrono::DateTime::parse_from_rfc3339(&iso) else {
+        let Some(at) = crate::date::parse(&iso) else {
             continue;
         };
-        snapshots.push((date.timestamp_millis(), reason.to_owned(), entry.path()));
+        snapshots.push((at, reason.to_owned(), entry.path()));
     }
     snapshots.sort_by_key(|s| std::cmp::Reverse(s.0));
     let undo = snapshots.iter().position(|s| s.1 == "preRestore");

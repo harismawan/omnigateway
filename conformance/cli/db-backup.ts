@@ -20,6 +20,7 @@ try {
       mkdirSync(join(root,"snapshots"));
       writeFileSync(join(root,"snapshots","unmanaged"), "keep");
       writeFileSync(join(root,"snapshots","db_2000-01-01T00-00-00-000Z_manual.sqlite"), "old");
+      writeFileSync(join(root,"snapshots","db_2025-02-30T00-00-00-000Z_manual.sqlite"), "overflow date");
       writeFileSync(join(root,"snapshots","db_2000-01-02T00-00-00-000Z_preRestore.sqlite"), "undo");
       const before = readFileSync(join(root,"db"));
       const p = goldenSpawn([...cmd,"--root",root,"--db","db","db","backup",...(json?["--json"]:[])],{env:{...env,...(bad?{OMNI_ENCRYPTION_KEY:"short"}:{})},stdout:"pipe",stderr:"pipe"});
