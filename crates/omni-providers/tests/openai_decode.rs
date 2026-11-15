@@ -137,7 +137,7 @@ fn compare_decoder_mode(malformed_usage: bool, codec: bool) {
             let mut decoder: Box<dyn StreamDecoder> = if codec {
                 use omni_providers::codec::{CodecInput, Credentials, ProviderCodec};
                 use omni_providers::openai::OpenAiCodec;
-                let request = serde_json::from_value(row["request"].clone()).unwrap();
+                let request = serde_json::from_value(row["request"].clone()).expect("request");
                 let credentials = Credentials {
                     access_token: Some("oauth-token".into()),
                     ..Default::default()
@@ -152,8 +152,8 @@ fn compare_decoder_mode(malformed_usage: bool, codec: bool) {
                         auto_cache_enabled: None,
                         max_output_tokens: None,
                     })
-                    .unwrap();
-                assert_eq!(built.decode_state, row["native"].as_bool().unwrap());
+                    .expect("OAuth build");
+                assert_eq!(built.decode_state, row["native"].as_bool().expect("native"));
                 OpenAiCodec.decoder(built.decode_state, &Default::default())
             } else {
                 Box::new(OpenAiDecoder::new(row["native"].as_bool().expect("native")))
