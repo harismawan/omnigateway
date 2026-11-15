@@ -44,6 +44,48 @@ use omni_gateway_core::snapshot::SnapshotHolder;
 use crate::load::{LoadRegistry, LoadSlot, Probes};
 use crate::price::price_of;
 
+// Erase provider-specific send futures before entering the dispatch state
+// machine, so each adapter shares a single bounded await slot.
+fn send_provider<'a>(
+    provider: &str,
+    request: AdapterRequest<'a>,
+    http: &'a dyn HttpClient,
+) -> Pin<
+    Box<
+        dyn std::future::Future<Output = Result<omni_providers::adapter::AdapterResult, SendError>>
+            + Send
+            + 'a,
+    >,
+> {
+    use omni_providers::adapter::send;
+    match provider {
+        "anthropic" => Box::pin(send(
+            &omni_providers::anthropic::codec::AnthropicCodec,
+            "anthropic",
+            request,
+            http,
+        )),
+        "openai" => Box::pin(send(
+            &omni_providers::openai::OpenAiCodec,
+            "openai",
+            request,
+            http,
+        )),
+        "antigravity" => Box::pin(send(
+            &omni_providers::antigravity::codec::AntigravityCodec,
+            "antigravity",
+            request,
+            http,
+        )),
+        _ => Box::pin(send(
+            &omni_providers::custom::CustomCodec,
+            omni_providers::custom::ID,
+            request,
+            http,
+        )),
+    }
+}
+
 /// Pre-commit buffering cap: events held before the first delta. Past
 /// either bound the attempt commits (flushes and streams on); a failure
 /// after that point is in-stream, with no failover.
@@ -699,7 +741,7 @@ fn run(mut s: RunState) -> EventsStream {
             let preemptive_refresh_required = c.credential.auth_type == AuthType::OAuth
                 && c.credential.expires_at.is_some_and(|at| at.saturating_sub(REFRESH_LEAD_MS) <= attempt_now);
 
-            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" && c.target.provider != "openai" {
+            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" && c.target.provider != "openai" && c.target.provider != "antigravity" {
                 let ttft = lock(&log).ttft_ms;
                 slot.release(ttft);
                 yield Err(GatewayError::new(
@@ -734,24 +776,7 @@ fn run(mut s: RunState) -> EventsStream {
                     {
                         ar.request_started_at = Some(s.started_at as f64);
                     }
-                    let sent = if c.target.provider == "anthropic" {
-                            within(s.deadline, Box::pin(omni_providers::adapter::send(
-                                &omni_providers::anthropic::codec::AnthropicCodec,
-                                "anthropic", ar, deps.http.as_ref(),
-                            ))).await
-                        } else if c.target.provider == "openai" {
-                            within(s.deadline, Box::pin(omni_providers::adapter::send(
-                                &omni_providers::openai::OpenAiCodec,
-                                "openai", ar, deps.http.as_ref(),
-                            ))).await
-                        } else {
-                        within(s.deadline, omni_providers::adapter::send(
-                            &omni_providers::custom::CustomCodec,
-                            omni_providers::custom::ID,
-                            ar,
-                            deps.http.as_ref(),
-                        )).await
-                        };
+                    let sent = within(s.deadline, send_provider(&c.target.provider, ar, deps.http.as_ref())).await;
                     let mut result = match sent {
                         Err(t) => break 'attempt Err(t),
                         Ok(Err(e)) => break 'attempt Err(classify_send(e)),
