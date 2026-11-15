@@ -12,6 +12,21 @@ Inherited behaviour: a key whose stored allowlist is not valid JSON makes reques
 
 ## History (everything below)
 
+### B follow-up sink trace (current observation)
+| Sink under crates/ | Printed value; stored JSON reachability |
+|---|---|
+| omni-store/src/writer/health.rs:403 | JoinError Display, not StoreError (corrects earlier inventory). No stored JSON reader in worker health path. |
+| omni-store/src/writer/health.rs:500,536 | StoreError Display from read_health/update_health (:419); health rows contain typed scalar/vocabulary fields, no JSON parse. StoredJson would format safely if introduced. |
+| omni-store/src/writer/health.rs:486,504,522 | Refused/UncertainCommit/Panicked strings; database commit classification or mutation panic, not stored JSON diagnostics. |
+| omni-store/src/writer/pg_batch.rs:234 | StoreError Display from apply(event); range/value validation of incoming log event, not stored JSON parse. read_row reads scalar fields. |
+| omni-store/src/writer/task.rs:517 | rusqlite Error Display from PRAGMA wal_checkpoint, no cell JSON. |
+| omni-store/src/writer/task.rs:916,928 | StoreError Display from SQLite/PG batch persistence; log/usage/health scalar readers and SQL operations, no JSON parser. |
+| omni-gateway/src/lib.rs:624 | Writer::close StoreError Display; joins worker (task.rs:607-619), no stored JSON parser on worker path. |
+| omni-gateway/src/main.rs:54,87 | Config error / signal-install IO error Display respectively; no database read. |
+| omni-gateway/src/main.rs:79 | String from start; store/snapshot errors converted with Display at lib.rs:323-339. Stored JSON producers are isolated in snapshot or sanitised via StoredJson Display before this sink. |
+
+Other error-bearing sinks were inventoried in r3-tracing-audit.txt: PG migration connection and gateway connection termination print protocol/transport errors; admin task failure prints JoinError; catalog warning prints fixed CatalogProblem fields; dispatch eligibility prints router vocabulary. Stored JSON-capable sinks are the inherited inference sinks, sanitised admin/auth sinks and store isolation warnings listed below. No additional product conversion found in B.
+
 **NEXT STEP (current):** Item 1 disposition committed as `eef79df4`. Item 2 found an unresolved stored-allowlist parser leak through inference authentication: omni-store KeyRowError.message → omni-gateway-core/src/snapshot.rs:117 GatewayError.message → omni-gateway/src/server.rs:1278 (token count), :1311 (model listing), and finish.rs:179 → dispatch.rs:179 (request rejection). Preserve wire text, sanitise ONLY logged error. Add a stored-allowlist canary authenticated with its raw API key for all three inference paths; prove failing first. `dispatch.rs`, `omni-gateway-core`, and `omni-ir` are excluded from edits: do not change them without scope authorisation; investigate an allowed gateway-side logging boundary rather than losing wire detail. No implementation attempted for this newly discovered path. Finish remaining sink trace, then final closure. Do NOT mark complete. Older NEXT STEP paragraphs below are history.
 
 Item 2 sink table so far (NOT complete; source-traced, no new runtime verification):
