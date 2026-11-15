@@ -67,11 +67,11 @@ pub fn remove(store: &SqliteStore, id: &str) -> Result<(), String> {
 }
 
 pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String> {
-    put_with(store, id, input, |e| e.to_string())
+    put_with(store, id, input, |e| e.to_string(), false)
 }
 
 pub fn cli_put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String> {
-    put_with(store, id, input, crate::cli_error::store)
+    put_with(store, id, input, crate::cli_error::store, true)
 }
 
 fn put_with(
@@ -79,6 +79,7 @@ fn put_with(
     id: &str,
     input: &JsValue,
     render: fn(omni_store::StoreError) -> String,
+    terminal: bool,
 ) -> Result<(), String> {
     use crate::settings_value::get;
     let model = crate::model_schema::parse(input)?;
@@ -86,21 +87,40 @@ fn put_with(
     if get(&model, "id") != Some(&text(id)) {
         return Err("BAD_REQUEST: model id in the path and body must match".into());
     }
-    let credentials = omni_store::models::operator_credentials(store.connection())
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|(id, p, l, a, d)| {
-            let parsed = crate::operator_json::parse(&d).map_err(|detail| {
-                render(omni_store::StoreError::StoredJson {
-                    table: "credentials",
-                    column: "provider_data",
-                    row_id: id.clone(),
-                    detail: detail.into(),
-                })
-            })?;
-            Ok((id, p, l, a, parsed))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let credentials = if terminal {
+        crate::credentials::cli_rows(store)?
+            .into_iter()
+            .map(|c| {
+                let field = |k| match get(&c, k) {
+                    Some(JsValue::String(s)) => String::from_utf16_lossy(s),
+                    _ => String::new(),
+                };
+                (
+                    field("id"),
+                    field("provider"),
+                    field("label"),
+                    field("authType"),
+                    get(&c, "providerData").cloned().unwrap_or(JsValue::Null),
+                )
+            })
+            .collect()
+    } else {
+        omni_store::models::operator_credentials(store.connection())
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(id, p, l, a, d)| {
+                let parsed = crate::operator_json::parse(&d).map_err(|detail| {
+                    render(omni_store::StoreError::StoredJson {
+                        table: "credentials",
+                        column: "provider_data",
+                        row_id: id.clone(),
+                        detail: detail.into(),
+                    })
+                })?;
+                Ok((id, p, l, a, parsed))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    };
     let Some(JsValue::Array(targets)) = get(&model, "targets") else {
         unreachable!()
     };

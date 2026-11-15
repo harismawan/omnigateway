@@ -116,17 +116,17 @@ pub fn list(s: &SqliteStore) -> Result<String> {
 }
 /// Frozen CLI status propagates JSON.parse diagnostics; HTTP retains its safe failures.
 pub fn cli_list(s: &SqliteStore) -> std::result::Result<String, String> {
+    Ok(stringify(&obj(vec![(
+        "credentials",
+        JsValue::Array(cli_rows(s)?),
+    )])))
+}
+pub fn cli_rows(s: &SqliteStore) -> std::result::Result<Vec<JsValue>, String> {
     let rows = rows_with(s, None, |raw, _| {
-        if matches!(raw, ValueRef::Null) {
-            return Ok(JsValue::Null);
-        }
-        crate::operator_json::parse(&String::from_utf8_lossy(
-            raw.as_bytes().map_err(Failure::internal)?,
-        ))
-        .map_err(Failure::internal)
+        crate::cli_cell::json(raw).map_err(Failure::internal)
     })
     .map_err(|e| e.message)?;
-    Ok(stringify(&obj(vec![("credentials", JsValue::Array(rows))])))
+    Ok(rows)
 }
 pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
     let mut statement = s

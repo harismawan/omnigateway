@@ -108,9 +108,10 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     let base = ctx.base_url()?;
     let store = ctx.open()?;
     let models = omni_control::models::cli_list(&store)?;
+    let credentials = omni_control::credentials::cli_rows(&store)?;
     let descriptions = models
         .iter()
-        .map(|m| describe(m, &store))
+        .map(|m| describe(m, &credentials))
         .collect::<Result<Vec<_>, _>>()?;
     if models.is_empty() {
         return Err("no virtual models configured; add one with `omni models put`".into());
@@ -265,7 +266,7 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     })
 }
 
-fn describe(model: &V, store: &omni_store::SqliteStore) -> Result<V, String> {
+fn describe(model: &V, credentials: &[V]) -> Result<V, String> {
     let mut result = object();
     let mut label = get(model, "id").expect("id").clone();
     let mut context: Option<f64> = None;
@@ -284,28 +285,22 @@ fn describe(model: &V, store: &omni_store::SqliteStore) -> Result<V, String> {
         {
             label = v.clone();
         }
-        let mut stmt = store
-            .connection()
-            .prepare(
-                "SELECT id,auth_type,provider_data FROM credentials WHERE provider=? AND enabled=1",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([&provider], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
+        let rows = credentials
+            .iter()
+            .filter(|c| {
+                get(c, "provider") == Some(&text(&provider))
+                    && get(c, "enabled") == Some(&V::Bool(true))
             })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
+            .map(|c| {
+                (
+                    string(get(c, "id").expect("credential id")),
+                    string(get(c, "authType").expect("auth type")),
+                    get(c, "providerData").expect("provider data"),
+                )
+            })
+            .collect::<Vec<_>>();
         let pin = rows.iter().find(|(id, _, data)| {
-            get(t, "credentialId") == Some(&text(id))
-                && operator_json::parse(data)
-                    .ok()
-                    .is_some_and(|d| serves_pin(t, id, &provider, &d))
+            get(t, "credentialId") == Some(&text(id)) && serves_pin(t, id, &provider, data)
         });
         let auths = if let Some((_, a, _)) = pin {
             vec![a.as_str()]
