@@ -6,6 +6,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { databaseState } from "./database-state.ts";
+import { restorePostState } from "./db-file-state.ts";
 
 const base = mkdtempSync("/tmp/opencode/e1-e5/db8-swap-");
 const commands = [["bun", "--no-env-file", resolve("apps/cli/src/index.ts")]];
@@ -89,7 +90,8 @@ try {
       assert.deepEqual(rows(live), installedRows, "candidate main file installed table by table (WAL excluded)");
       assert.deepEqual(readFileSync(candidate), candidateBytes, "candidate retained byte-identically");
       assert(existsSync(join(root, "snapshots", stale)), "forced undo skips all retention");
-      assert(!existsSync(live + ".incoming"));
+       assert(!existsSync(live + ".incoming"));
+       const postState = restorePostState(root, undo);
       if (test.ledger) {
         assert.equal(result.out, "");
         assert.match(result.err, /the database swap failed and the database may be incomplete/);
@@ -129,7 +131,7 @@ try {
         assert.equal(readdirSync(join(root, "snapshots")).filter(name => name.endsWith("_preRestore.sqlite")).length, 2);
       }
       result.err = result.err.replaceAll(root, "<root>");
-      results.push({ result, sidecars });
+       results.push({ result, sidecars, postState });
       console.log(`${test.name} ${index === 0 ? "TS" : "Rust"}: exit=${result.code}, sidecars=${JSON.stringify(sidecars)}, undo retained, incoming absent`);
       wal?.close();
     }

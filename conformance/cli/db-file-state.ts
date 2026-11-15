@@ -20,3 +20,14 @@ export function frozenPostState(root: string, bodies=true) {
  if(Buffer.isBuffer(db)&&db.length>=100)db.fill(0,96,100);
  return state;
 }
+
+// A newly generated undo has a clock-derived name and SQLite writer version.
+export function restorePostState(root: string, undo: string) {
+ const state=frozenPostState(root);
+ state.snapshots=(state.snapshots as [string,unknown][]).map(([name,value])=>{
+  if(name!==undo)return [name,value];
+  if(Buffer.isBuffer(value)&&value.length>=100)value.fill(0,96,100);
+  return ["<undo>",value];
+ }).sort(([a],[b])=>String(a).localeCompare(String(b)));
+ return state;
+}
