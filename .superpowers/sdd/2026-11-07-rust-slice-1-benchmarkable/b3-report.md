@@ -1,5 +1,65 @@
 # B3 OpenAI / Codex
 
+## C2/C3 complete — HEAD `31db790c`; D next
+
+**C2 `c0875139`, C3 `31db790c` committed. D not started.** Stopping at a
+committed-item boundary for context. No production changes. Request codec now
+matches **289 whole requests: 271 OAuth +18 API-key controls**; four added
+`unsafe-affinity` rows cover both hosts with CRLF/Unicode client keys. Literal
+inventory: **121 =35 ported +86 differential +0 later/undecided**. C1 literals
+still passed first; no new literals in C2/C3 and no comparison failures observed.
+
+**OAuth changes nothing on the decode side for the same client include.**
+Frozen codec.ts:103–132 reads nativeReasoning from the original client bag,
+not OAuth's forced upstream encrypted-content include. Both modes call the
+same SSE parser/decoder; no credential argument reaches decode, and there is
+no codec error-classifier override. decode.ts:119–125,266–351 uses the same
+native folding, error mapping and usage rules. Buffered output uses the same
+collector/renderers. This statement concerns codec behavior, not HTTP errors
+or transport integration.
+
+Evidence: new `openai-oauth-decode-reference.ts` reuses all 158 decoder rows,
+builds both credential modes, passes actual build decodeState to frozen codec
+decode, and checks events plus buffered three-dialect bytes against the direct
+decoder oracle at all three chunkings. All match. Rust OAuth codec path checks
+**152 non-parked rows ×3 =456 event comparisons +1,368 buffered comparisons**.
+Six non-numeric usage rows remain excluded by the existing X1 filter; TS-only
+agreement on those is not a Rust parity claim. Native false/true reasoning
+rows cover the distinction between client include and forced upstream include.
+Details: `conformance/openai-oauth-decode.md`. First C2/C3 runs green.
+
+Gates **after final commit**: three-crate tests **51 summaries, 230 passes
+including subprocess repetitions, 4 ignored, zero failures**. Strict all-target
+clippy, fmt check, diff check pass; all three source tripwires pass in suite
+(`json_writes_use_iterative_release`, `public_boundary_inventory_matches`,
+`owner_reexports_are_pinned`). Logs `/tmp/opencode/b3/s4d-{c2,c3,final-tests,final-clippy}.log`.
+All builds incremental=0/dev debug=0/test debug=0. Worktree clean.
+
+### D depth status (no new cases or mutations run)
+
+| OAuth/lite carrier | Observed mutation/outcome this turn |
+|---|---|
+| Vendor per-field merge/scalar replacement | Not investigated; D pending |
+| Client metadata replacement/drop | Not investigated; D pending |
+| Tool schema OAuth strict rewrite | Not investigated; D pending |
+| Tool inputs/results into lite history | Not investigated; D pending |
+| Native reasoning passthrough/replacement | Not investigated; D pending |
+| Response-format schema | Not investigated; D pending |
+
+No structural-safety claim is made for these paths. **Next session: D**, using
+`openai_depth.rs` and `conformance/openai-depth.md` as patterns: enumerate every
+arbitrary-JSON carrier held/replaced/merged/dropped in OAuth/lite, run ~40,000
+levels on 2 MiB subprocess threads, each with scratch mutation and observed
+process outcome (restored, log retained), or justify structural safety when
+mutation does not fail. Commit D, then run final gates. After D: compressed
+body in HTTP client, resolving the empty-body frame question in
+`conformance/openai-compression.md`; then gateway integration.
+
+Known differences unchanged: transport refuses OAuth Zstd marker; empty-body
+compression bytes/reachability unresolved; X1 lone-surrogate escapes and
+non-numeric usage ignored comparisons unchanged; startup environment capture
+timing and refresh persistence deferred. No HTTP/refresh/registration changes.
+
 ## C1 captured-fingerprint checkpoint — HEAD `b43d7310`
 
 **C1 committed; C2 and C3 not started.** Stopping at the permitted C1 checkpoint
