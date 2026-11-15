@@ -360,8 +360,8 @@ async fn openai_exchange_create_and_reconnect_replace_metadata() {
     let (_dir, service, _, _) = fixture(200).await;
     let mut prior = serde_json::json!({});
     for reconnect in [false, true] {
-        let result = omni_providers::openai::oauth::token_result(200, r#"{"access_token":"exchange","refresh_token":"r","id_token":"h.eyJlbWFpbCI6Im1haWwifQ.s"}"#, None, 1000.0, &prior).unwrap();
-        let data = serde_json::Value::Object(result.provider_data);
+        let mut result = omni_providers::openai::oauth::token_result(200, r#"{"access_token":"exchange","refresh_token":"r","id_token":"h.eyJlbWFpbCI6Im1haWwifQ.s"}"#, None, 1000.0, &prior).unwrap();
+        let data = serde_json::Value::Object(std::mem::take(&mut result.provider_data));
         if reconnect {
             assert_eq!(data["installationId"], prior["installationId"]);
             assert_eq!(data["idSalt"], prior["idSalt"]);
@@ -371,7 +371,10 @@ async fn openai_exchange_create_and_reconnect_replace_metadata() {
             access_token: Some(String::from_utf16_lossy(&result.access_token)),
             refresh_token: Some("r".into()),
             api_key: None,
-            id_token: result.id_token.map(|s| String::from_utf16_lossy(&s)),
+            id_token: result
+                .id_token
+                .as_ref()
+                .map(|s| String::from_utf16_lossy(s)),
             expires_at: None,
             updated_at: 1000,
         };

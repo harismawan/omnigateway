@@ -56,7 +56,6 @@ impl std::fmt::Debug for AuthRequest {
 }
 
 // Deliberately no Debug: these values contain live credentials.
-#[derive(Clone)]
 pub struct FlowResult {
     pub id_token: Option<Vec<u16>>,
     pub provider_data: serde_json::Map<String, Value>,
@@ -64,6 +63,23 @@ pub struct FlowResult {
     pub refresh_token: Option<omni_ir::jsjson::JsValue>,
     pub expires_at: Option<f64>,
     pub account_email: Option<omni_ir::jsjson::JsValue>,
+}
+impl Clone for FlowResult {
+    fn clone(&self) -> Self {
+        Self {
+            id_token: self.id_token.clone(),
+            provider_data: omni_ir::deep::clone_map(&self.provider_data),
+            access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            expires_at: self.expires_at,
+            account_email: self.account_email.clone(),
+        }
+    }
+}
+impl Drop for FlowResult {
+    fn drop(&mut self) {
+        omni_ir::deep::drop_map_in_place(&mut self.provider_data);
+    }
 }
 
 pub fn token_error(status: u16, body: &Value) -> GatewayError {

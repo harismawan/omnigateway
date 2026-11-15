@@ -262,7 +262,7 @@ impl Refresher {
                 (self.now)() as f64,
             )
         };
-        let result = match result {
+        let mut result = match result {
             Ok(result) => result,
             Err(error) => {
                 if error.code == ErrorCode::Auth {
@@ -305,7 +305,7 @@ impl Refresher {
                 .as_object()
                 .map(omni_ir::deep::clone_map)
                 .unwrap_or_default();
-            for (key, value) in result.provider_data {
+            for (key, value) in std::mem::take(&mut result.provider_data) {
                 omni_ir::deep::insert(&mut data, key, value);
             }
             let data = omni_ir::deep::Owned(serde_json::Value::Object(data));
