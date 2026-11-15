@@ -288,6 +288,11 @@ fn normalize(provider: &str, pending: &PendingFlow, code: &str) -> Result<String
     }
     Ok(format!("{code}#{state}"))
 }
+fn exchange_failure(provider: &str) -> GatewayError {
+    // Frozen step runner raises transport failures into the exchange generator.
+    // Neither built-in catches them, so rethrow classifies them as UPSTREAM.
+    GatewayError::new(ErrorCode::Upstream, format!("{provider} oauth exchange threw"))
+}
 async fn complete(
     host: Arc<crate::refresh::Refresher>,
     flow: JsValue,
@@ -333,8 +338,8 @@ async fn complete(
         Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
     })
     .await
-    .map_err(|_| GatewayError::new(ErrorCode::Timeout, "token request timed out"))?
-    .map_err(|_| GatewayError::new(ErrorCode::Network, "token request failed"))?;
+    .map_err(|_| exchange_failure(&provider))?
+    .map_err(|_| exchange_failure(&provider))?;
     #[allow(clippy::cast_precision_loss)]
     let now = (host.now)() as f64;
     let result = if provider == "openai" {
