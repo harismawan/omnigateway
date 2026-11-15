@@ -8,13 +8,19 @@ pub fn clear_bodies(
         .prepare("SELECT request_id, rel_path FROM request_bodies WHERE at < ?")
         .map_err(|e| e.to_string())?
         .query_map([now], |r| {
-            Ok((bun_cell(r.get_ref(0)?), bun_cell(r.get_ref(1)?)))
+            let rel = match r.get_ref(1)? {
+                rusqlite::types::ValueRef::Text(bytes) => {
+                    Some(String::from_utf8_lossy(bytes).into_owned())
+                }
+                _ => r.get::<_, Option<String>>(1)?,
+            };
+            Ok((bun_cell(r.get_ref(0)?), rel))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     for (_, rel) in &rows {
-        if let rusqlite::types::Value::Text(rel) = rel {
+        if let Some(rel) = rel {
             delete_artifact(dir, rel);
         }
     }
