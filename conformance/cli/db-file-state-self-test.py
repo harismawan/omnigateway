@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import socket
+import tempfile
 
 if "--root" in sys.argv:
     result = subprocess.run([os.environ["DB_STATE_REAL_BIN"], *sys.argv[1:]])
@@ -39,3 +41,15 @@ for mutation in ("file", "mode", "directory"):
 pinned = json.loads(Path("conformance/cli/exit-histograms.json").read_text())
 assert histogram == pinned["db-file-state-self-test"], histogram
 print("EXIT HISTOGRAM db-file-state-self-test", json.dumps(histogram))
+with tempfile.TemporaryDirectory(dir="/tmp/opencode/e1-e5", prefix="db18-special-") as root:
+    node = Path(root) / "node"
+    os.mkfifo(node)
+    def capture():
+        return subprocess.check_output(["bun", "-e", 'import {fileState} from "./conformance/cli/db-file-state.ts"; console.log(JSON.stringify(fileState(process.argv[1])))', root])
+    before = capture()
+    node.unlink()
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.bind(str(node))
+        after = capture()
+    assert before != after and b'"fifo"' in before and b'"socket"' in after
+    print("PASS fourth mutation: FIFO to socket detected without reading either")

@@ -5,7 +5,9 @@ import { join } from "node:path";
 // Otherwise HOME=root makes TS execution itself populate .bun/install/cache.
 process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = "0";
 
-type Entry = { path: string; type: "file" | "directory" | "symlink" | "other"; mode?: number; bytes?: Buffer; target?: string };
+// Excludes mtime, inode and allocation: these vary across cloned fixture roots
+// and runtimes without changing logical contents. Special nodes are never read.
+type Entry = { path: string; type: "file" | "directory" | "symlink" | "fifo" | "socket" | "block" | "char" | "other"; mode?: number; bytes?: Buffer; target?: string };
 // Capture everything before opening inspection handles; never follow links.
 export function fileState(root: string, _bodies=true): Entry[] {
  const entries: Entry[]=[];
@@ -16,7 +18,7 @@ export function fileState(root: string, _bodies=true): Entry[] {
    entries.push({path,type:"directory",mode:stat.mode&0o7777});
    for(const name of readdirSync(absolute).sort())visit(path?`${path}/${name}`:name);
   } else if(stat.isFile())entries.push({path,type:"file",mode:stat.mode&0o7777,bytes:readFileSync(absolute)});
-  else entries.push({path,type:"other"});
+  else entries.push({path,type:stat.isFIFO()?"fifo":stat.isSocket()?"socket":stat.isBlockDevice()?"block":stat.isCharacterDevice()?"char":"other",mode:stat.mode&0o7777});
  }
  visit("");return entries;
 }

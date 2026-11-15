@@ -84,8 +84,17 @@ try:
         if target and answered:
             # strace prints the syscall entry before the injected delay ends.
             text = open(log+".trace").read()
-            matches = re.findall(r"^"+str(child)+r"\s+"+target[0]+r"\(", text, re.M)
+            matches = re.findall(r"^"+str(child)+r"\s+"+target[0]+r"\(.*", text, re.M)
             if len(matches) >= target[1]:
+                replay = matches[target[1]-1]
+                root = cmd[cmd.index("--root")+1]
+                expected = {"K3": "/db.incoming", "K4": "/db-wal", "K5": "/db-shm", "K6": "/db.incoming", "K7": "/db.incoming", "K8": '/db"'}.get(point)
+                valid = root in replay and (("_preRestore.sqlite>" in replay) if point == "K2" else root+expected in replay)
+                if not valid:
+                    os.kill(child, signal.SIGKILL)
+                    killed = True
+                    print("not reached: delayed syscall PATH mismatch:", replay, flush=True)
+                    break
                 time.sleep(.15)
                 try:
                     os.kill(child, signal.SIGKILL)

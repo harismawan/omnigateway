@@ -1,4 +1,6 @@
-// Opt-in strace experiment; deliberately outside the pinned matrix.
+// Observation tool, outside the pinned matrix. K3 is BEFORE copy, not mid-copy;
+// K8 is reopen entry, not migration. Deeper schema-19 migration probe:
+// /tmp/opencode/db-review/r3/kill-migration.ts (reviewer evidence, not run here).
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
@@ -29,7 +31,7 @@ try {
    const p=Bun.spawn(["python3",resolve("conformance/cli/db-kill-driver.py"),point,log,`/tmp/opencode/e1-e5/db17-kill-trace-${i}.trace`,...cmd,"--root",root,"--db","db","db","restore",id],{env:{...env,HOME:root,XDG_STATE_HOME:join(root,"state")},stdout:"pipe",stderr:"pipe"});
    const out=await new Response(p.stdout).text(),err=await new Response(p.stderr).text();const code=await p.exited;
    console.log(point,i===0?"TS":"Rust",out.trim(),err.trim());
-   if(code!==0||out.includes("not reached")){results.push(null);continue;}
+   if(code!==0||out.includes("not reached")){different=true;results.push(null);continue;}
    const state=capture(root);await Bun.write(log+".state.json",JSON.stringify(state));
    console.log("LIST",JSON.stringify(listing(state)));
    if(point==="trace"){results.push(state);continue;}
@@ -48,7 +50,9 @@ try {
    const afterSets=afters.map(s=>JSON.stringify(s.map(e=>[e.path,e.type])));
    const equal=sets[0]===sets[1]&&afterSets[0]===afterSets[1];
    const sizes=results.map(s=>JSON.stringify(listing(s!)));
-   console.log(`TABLE ${point} file-set-equal=${equal} sizes-and-modes-equal=${sizes[0]===sizes[1]} follow-exits-equal=${JSON.stringify(followResults[0])===JSON.stringify(followResults[1])}`);if(!equal){different=true;break;}
+   const metadataEqual=sizes[0]===sizes[1]&&JSON.stringify(listing(afters[0]))===JSON.stringify(listing(afters[1]));
+   const exitsEqual=JSON.stringify(followResults[0])===JSON.stringify(followResults[1]);
+   console.log(`TABLE ${point} file-set-equal=${equal} sizes-and-modes-equal=${metadataEqual} follow-exits-equal=${exitsEqual}`);if(!equal||!metadataEqual||!exitsEqual){different=true;break;}
   }
  }
 } finally {rmSync(base,{recursive:true,force:true});}
