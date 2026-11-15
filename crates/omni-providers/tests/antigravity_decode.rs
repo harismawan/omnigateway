@@ -72,11 +72,7 @@ fn bounded_depth_expected_divergence() {
                 result => panic!("{name}: unexpected {result:?}"),
             }
         }
-        assert_eq!(
-            refusal,
-            Some("upstream JSON exceeds depth 40000"),
-            "{name}"
-        );
+        assert_eq!(refusal, Some("upstream JSON exceeds depth 40000"), "{name}");
         let actual = serde_json::Value::Array(
             out.iter()
                 .map(|e| serde_json::from_str(&e.to_json()).expect("event"))
