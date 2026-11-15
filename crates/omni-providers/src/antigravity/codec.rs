@@ -15,6 +15,13 @@ impl AntigravityCodec {
         &self,
         input: &CodecInput<'_>,
     ) -> Result<CodecRequest<DecodeState>, GatewayError> {
+        omni_ir::deep::scope(|| self.build_request_scoped(input))
+    }
+
+    fn build_request_scoped(
+        &self,
+        input: &CodecInput<'_>,
+    ) -> Result<CodecRequest<DecodeState>, GatewayError> {
         let token = input
             .credentials
             .access_token

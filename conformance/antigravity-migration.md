@@ -104,3 +104,28 @@ response-schema case is green because the reader drops it before serialization.
 X1 lone-surrogate text (`"\ud800"`) remains ignored and unnormalized. Non-BMP
 vendor strings also need X1 coverage: Object.assign splits UTF-16 code units.
 Decode, full depth parity and independent review remain pending; B4 is incomplete.
+
+## Turn 4: request depth boundary
+
+The retained ignored depth test is replaced by five active 2 MiB-thread tests
+through `AntigravityCodec::build_request`: tool input, vendor.extra, tool schema,
+and response schema at 39,990 levels compare body length and SHA-256 with frozen
+Bun; tool input at 39,996 asserts successful serialization. All five pass.
+`build_request` now encloses encoding, serialization and body disposal in
+`deep::scope`, consistent with the sibling codecs. The wire path already uses
+deep clone/insert/drop for client Values.
+
+Documented difference: Rust grows its stack rather than emulating JSC's stringify
+stack threshold. Controller measurements place the first frozen tool-input failure
+at 39,994 nested levels and vendor.extra failure at 39,999; successful Rust
+serialization in this narrow band is intentional. Ingress still rejects JSON
+beyond MAX_DEPTH. These tests build IR iteratively and do not extend ingress.
+
+Important contrary evidence: the valid 39,990 input test also passes at baseline
+and with the added scope removed (mutation log `turn4/depth-mutation.log`). Thus
+this session does **not** establish that missing scope caused the predecessor's
+abort, nor identify a product line that overflows. An initial test-fixture attempt
+using an ordinary recursive serde deserializer inside a 16 MiB scope SIGSEGV'd;
+the replacement builds the nested Value iteratively. That fixture failure is not
+evidence of a codec defect. The scope is defensive hardening, not a demonstrated
+crash fix. No product red commit is justified by these measurements.
