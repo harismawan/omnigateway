@@ -1,0 +1,3184 @@
+{
+  "provenance": {
+    "gatewayBinary": "/tmp/opencode/bench-gate/bin/ts-frozen-f9cc6678",
+    "gatewaySha256": "f9cc6678a7d2bc2300a71b3aae98caff1aaedbcb2d811baee3dffd4325009d63",
+    "harnessCommit": "87df5e96084508212db8be5bab2ac5f5b0bbd94b",
+    "loadBefore": 0.93,
+    "environment": {
+      "OMNI_BENCH_TLS_KEY": "<set>",
+      "OMNI_RUST_BINARY": "/tmp/opencode/bench-gate/bin/main-327f240f",
+      "OMNI_BENCH_CERT": "/tmp/opencode/omni-bench-JQvLdt/OMNI_BENCH_CERT",
+      "OMNI_ENCRYPTION_KEY": "<set>",
+      "OMNI_DB_PATH": "/tmp/opencode/omni-bench-JQvLdt/omni.db",
+      "OMNI_HOST": "127.0.0.1",
+      "OMNI_PORT": "18200",
+      "OMNI_ROOT": "/tmp/opencode/omni-bench-JQvLdt",
+      "OMNI_STATIC_DIR": "/tmp/opencode/omni-bench-JQvLdt/no-dashboard",
+      "OMNI_LOG_LEVEL": "warn",
+      "OMNI_BENCH": "1"
+    },
+    "loadAfter": 1.24
+  },
+  "label": "base-3",
+  "when": "2026-11-14T16:41:55.931Z",
+  "host": {
+    "cpu": "13th Gen Intel(R) Core(TM) i5-13400",
+    "cores": 8,
+    "memGb": 15,
+    "kernel": "6.12.0-211.69.1.el10_2.x86_64"
+  },
+  "config": {
+    "gateway": [
+      "/tmp/opencode/bench-gate/bin/ts-frozen-f9cc6678"
+    ],
+    "cli": [
+      "bun",
+      "apps/cli/src/index.ts"
+    ],
+    "duration": "10s",
+    "warmup": "3s",
+    "gatewayCpus": "0-3",
+    "upstreamCpus": "4-5",
+    "loadCpus": "6-7",
+    "rate": null,
+    "freshProcess": false,
+    "processScope": "one gateway serves scenarios in order; later RSS includes earlier workload history",
+    "mode": "single",
+    "replicas": 1,
+    "cpuSets": [
+      "0-3"
+    ]
+  },
+  "binaryBytes": 116226224,
+  "boot": {
+    "p50Ms": 62.682402000000366,
+    "maxMs": 62.682402000000366
+  },
+  "shutdownMs": {
+    "idleP50": 10.985241000000315,
+    "afterLoad": 7.39164400001755
+  },
+  "idleRssMb": 57.41015625,
+  "finalRssMb": 121.8984375,
+  "dbBytesAfter": 310497280,
+  "cliKeysList": {
+    "p50Ms": 102.9426659999881,
+    "maxMs": 107.30473600002006
+  },
+  "calibration": {
+    "alone": {
+      "0": 479,
+      "1": 484,
+      "2": 464,
+      "3": 478,
+      "4": 490,
+      "5": 478,
+      "6": 472,
+      "7": 482
+    },
+    "together": {
+      "0": 551,
+      "1": 530,
+      "2": 538,
+      "3": 535,
+      "4": 554,
+      "5": 544,
+      "6": 533,
+      "7": 531
+    },
+    "mhzUnderLoad": [
+      2496,
+      2496,
+      2496,
+      2496,
+      2496,
+      2496,
+      2496,
+      2496
+    ],
+    "foreignCoresBefore": 0.18
+  },
+  "writerDropped": null,
+  "scenarios": [
+    {
+      "concurrency": 64,
+      "bodySha256": "71fc5640c6125d6b8863878fb2c302f8810aa5ee30f82b873371f02d5a454d02",
+      "name": "custom-chat.chat.json",
+      "provider": "custom-chat",
+      "ingress": "chat",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5118994162550515,
+        "loadWindow": {
+          "observedSeconds": 10.03803501,
+          "reportedSeconds": 10.028186104,
+          "reportToExitMs": 55.79936000000089,
+          "drainMs": 6.375233999999182
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.086498635139955
+          },
+          "sizes": {
+            "lo": 334,
+            "hi": 334,
+            "n": 15589,
+            "expected": 334,
+            "min": 206,
+            "max": 462
+          }
+        },
+        "name": "custom-chat.chat.json",
+        "what": "custom-chat → chat json, 1 chunks",
+        "concurrency": 64,
+        "requests": 15589,
+        "successRate": 1,
+        "rps": 1554.5184182194153,
+        "latencyMs": {
+          "p50": 39.80628,
+          "p90": 51.194007,
+          "p99": 62.93261999999999,
+          "p999": 72.625356,
+          "p9999": 81.33789800000001
+        },
+        "ttfbMs": {
+          "p50": 39.806146,
+          "p99": 62.93248
+        },
+        "status": {
+          "200": 15589
+        },
+        "errors": {},
+        "cpuSeconds": 7.9799999999999995,
+        "cpuMsPerRequest": 0.5118994162550515,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 102.90625,
+        "rssPeakMb": 133.3984375,
+        "rssEndMb": 102.1015625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 19549,
+          "done": 19590,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.17,
+        "windowFrom": 1794674023670,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 63,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 7,
+            "runqueue": 0
+          },
+          "JITWorker#2": {
+            "cpu": 1,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "374bb8ec58aa673d89d42770007110fca13f3cd2b39680d82ee2d2a95147c06e",
+      "name": "custom-chat.chat.stream",
+      "provider": "custom-chat",
+      "ingress": "chat",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5059443393677383,
+        "loadWindow": {
+          "observedSeconds": 10.043624818999996,
+          "reportedSeconds": 10.037142487,
+          "reportToExitMs": 54.77901800000109,
+          "drainMs": 5.994140000002517
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.084243836800343
+          },
+          "sizes": {
+            "lo": 808,
+            "hi": 808,
+            "n": 14804,
+            "expected": 808,
+            "min": 680,
+            "max": 936
+          }
+        },
+        "name": "custom-chat.chat.stream",
+        "what": "custom-chat → chat stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 14804,
+        "successRate": 1,
+        "rps": 1474.921773719361,
+        "latencyMs": {
+          "p50": 41.189471999999995,
+          "p90": 55.35415,
+          "p99": 64.8232,
+          "p999": 76.891108,
+          "p9999": 81.32339800000001
+        },
+        "ttfbMs": {
+          "p50": 41.185911,
+          "p99": 64.819405
+        },
+        "status": {
+          "200": 14804
+        },
+        "errors": {},
+        "cpuSeconds": 7.489999999999998,
+        "cpuMsPerRequest": 0.5059443393677383,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 112.71484375,
+        "rssPeakMb": 126.53125,
+        "rssEndMb": 114.01171875,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 19068,
+          "done": 19109,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.18,
+        "windowFrom": 1794674038493,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 65,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 7,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "71fc5640c6125d6b8863878fb2c302f8810aa5ee30f82b873371f02d5a454d02",
+      "name": "custom-chat.messages.json",
+      "provider": "custom-chat",
+      "ingress": "messages",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.4618098796180987,
+        "loadWindow": {
+          "observedSeconds": 10.164837481000003,
+          "reportedSeconds": 10.155929656,
+          "reportToExitMs": 156.11869400000433,
+          "drainMs": 4.498982000004617
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 29,
+            "completed": 29,
+            "skippedTicks": 12,
+            "violations": 0,
+            "requests": 29,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 2.8548590115611088
+          },
+          "sizes": {
+            "lo": 308,
+            "hi": 308,
+            "n": 9636,
+            "expected": 308,
+            "min": 180,
+            "max": 436
+          }
+        },
+        "name": "custom-chat.messages.json",
+        "what": "custom-chat → messages json, 1 chunks",
+        "concurrency": 64,
+        "requests": 9636,
+        "successRate": 1,
+        "rps": 948.8053114179625,
+        "latencyMs": {
+          "p50": 39.791048,
+          "p90": 56.22307,
+          "p99": 820.183551,
+          "p999": 880.81314,
+          "p9999": 885.429624
+        },
+        "ttfbMs": {
+          "p50": 39.790913999999994,
+          "p99": 820.183416
+        },
+        "status": {
+          "200": 9636
+        },
+        "errors": {},
+        "cpuSeconds": 4.449999999999999,
+        "cpuMsPerRequest": 0.4618098796180987,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 106.76171875,
+        "rssPeakMb": 126.046875,
+        "rssEndMb": 106.45703125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 14336,
+          "done": 14365,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674053309,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 15,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "ceb588d94ae16ca882b6a703acf4b83c0619eb5786ebdd1e935d21fa528eb65a",
+      "name": "custom-chat.messages.stream",
+      "provider": "custom-chat",
+      "ingress": "messages",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5220306513409961,
+        "loadWindow": {
+          "observedSeconds": 10.056649817000006,
+          "reportedSeconds": 10.047299828,
+          "reportToExitMs": 30.626909999991767,
+          "drainMs": 3.3208659999945667
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 36,
+            "completed": 36,
+            "skippedTicks": 5,
+            "violations": 0,
+            "requests": 36,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.5827825960788053
+          },
+          "sizes": {
+            "lo": 911,
+            "hi": 911,
+            "n": 6264,
+            "expected": 911,
+            "min": 783,
+            "max": 1039
+          }
+        },
+        "name": "custom-chat.messages.stream",
+        "what": "custom-chat → messages stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 6264,
+        "successRate": 1,
+        "rps": 623.4510870814634,
+        "latencyMs": {
+          "p50": 76.752571,
+          "p90": 159.084528,
+          "p99": 466.05844,
+          "p999": 615.2755410000001,
+          "p9999": 616.615588
+        },
+        "ttfbMs": {
+          "p50": 76.749292,
+          "p99": 466.049409
+        },
+        "status": {
+          "200": 6264
+        },
+        "errors": {},
+        "cpuSeconds": 3.2699999999999996,
+        "cpuMsPerRequest": 0.5220306513409961,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 101.296875,
+        "rssPeakMb": 123.390625,
+        "rssEndMb": 112.72265625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 6681,
+          "done": 6717,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674068315,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 36,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "82fc0257c997db41dfed97a9474398e903ba770434218127e907c5b1b83d74ce",
+      "name": "custom-chat.responses.json",
+      "provider": "custom-chat",
+      "ingress": "responses",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.4602323503127793,
+        "loadWindow": {
+          "observedSeconds": 10.037840182,
+          "reportedSeconds": 10.029150151,
+          "reportToExitMs": 56.64515599999868,
+          "drainMs": 7.4264859999966575
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.086106374116506
+          },
+          "sizes": {
+            "lo": 506,
+            "hi": 506,
+            "n": 15666,
+            "expected": 506,
+            "min": 378,
+            "max": 634
+          }
+        },
+        "name": "custom-chat.responses.json",
+        "what": "custom-chat → responses json, 1 chunks",
+        "concurrency": 64,
+        "requests": 15666,
+        "successRate": 1,
+        "rps": 1562.0466105433622,
+        "latencyMs": {
+          "p50": 38.935697,
+          "p90": 51.909251,
+          "p99": 63.259398,
+          "p999": 72.015838,
+          "p9999": 78.707459
+        },
+        "ttfbMs": {
+          "p50": 38.935382999999995,
+          "p99": 63.258635999999996
+        },
+        "status": {
+          "200": 15666
+        },
+        "errors": {},
+        "cpuSeconds": 7.210000000000001,
+        "cpuMsPerRequest": 0.4602323503127793,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 113.7734375,
+        "rssPeakMb": 128.33984375,
+        "rssEndMb": 103.32421875,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 20364,
+          "done": 20405,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.19,
+        "windowFrom": 1794674084392,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 63,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "864e8f93e8b41d680addd83ce3b0ab96c24103df27108752483404e970e7a473",
+      "name": "custom-chat.responses.stream",
+      "provider": "custom-chat",
+      "ingress": "responses",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.6589147286821679,
+        "loadWindow": {
+          "observedSeconds": 10.43237990700001,
+          "reportedSeconds": 10.426170168,
+          "reportToExitMs": 193.7328770000022,
+          "drainMs": 0.9522480000014184
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 9,
+            "completed": 9,
+            "skippedTicks": 33,
+            "violations": 0,
+            "requests": 9,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 0.8632299718770639
+          },
+          "sizes": {
+            "lo": 2616,
+            "hi": 2616,
+            "n": 774,
+            "expected": 2616,
+            "min": 2488,
+            "max": 2744
+          }
+        },
+        "name": "custom-chat.responses.stream",
+        "what": "custom-chat → responses stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 774,
+        "successRate": 1,
+        "rps": 74.236271567441,
+        "latencyMs": {
+          "p50": 835.73453,
+          "p90": 1346.132938,
+          "p99": 1712.13724,
+          "p999": 2440.948386,
+          "p9999": 2440.948386
+        },
+        "ttfbMs": {
+          "p50": 835.727588,
+          "p99": 1712.128618
+        },
+        "status": {
+          "200": 774
+        },
+        "errors": {},
+        "cpuSeconds": 0.509999999999998,
+        "cpuMsPerRequest": 0.6589147286821679,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 98.28515625,
+        "rssPeakMb": 122.546875,
+        "rssEndMb": 97.87890625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1901,
+          "done": 1910,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.17,
+        "windowFrom": 1794674099199,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 5,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 1,
+      "bodySha256": "374bb8ec58aa673d89d42770007110fca13f3cd2b39680d82ee2d2a95147c06e",
+      "name": "custom-chat.overhead-c1",
+      "provider": "custom-chat",
+      "ingress": "chat",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.7856810785681101,
+        "loadWindow": {
+          "observedSeconds": 10.034062831999996,
+          "reportedSeconds": 10.026605962,
+          "reportToExitMs": 116.58855600000243,
+          "drainMs": 1.519507999997586
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 39,
+            "completed": 39,
+            "skippedTicks": 2,
+            "violations": 0,
+            "requests": 39,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.889029574921557
+          },
+          "sizes": {
+            "lo": 808,
+            "hi": 808,
+            "n": 2151,
+            "expected": 808,
+            "min": 680,
+            "max": 936
+          }
+        },
+        "name": "custom-chat.overhead-c1",
+        "what": "custom-chat → chat stream, 1 chunks",
+        "concurrency": 1,
+        "requests": 2151,
+        "successRate": 1,
+        "rps": 214.52922436087653,
+        "latencyMs": {
+          "p50": 0.739178,
+          "p90": 1.0369140000000001,
+          "p99": 180.782621,
+          "p999": 367.365225,
+          "p9999": 376.10744
+        },
+        "ttfbMs": {
+          "p50": 0.731729,
+          "p99": 180.771113
+        },
+        "status": {
+          "200": 2151
+        },
+        "errors": {},
+        "cpuSeconds": 1.6900000000000048,
+        "cpuMsPerRequest": 0.7856810785681101,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 100.01953125,
+        "rssPeakMb": 111.46875,
+        "rssEndMb": 97.390625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 2466,
+          "done": 2505,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.15,
+        "windowFrom": 1794674115721,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 20,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 16,
+      "bodySha256": "53d2d74feba82e97329b8707b8bbfbdab2edd7b38bca8fd5c400152090d9af28",
+      "name": "custom-chat.chunks-2000",
+      "provider": "custom-chat",
+      "ingress": "chat",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 6.731843575418995,
+        "loadWindow": {
+          "observedSeconds": 10.092951350999996,
+          "reportedSeconds": 10.088274359,
+          "reportToExitMs": 20.859040000010282,
+          "drainMs": 1.4418690000020433
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.0616405015795465
+          },
+          "sizes": {
+            "lo": 460592,
+            "hi": 460592,
+            "n": 1432,
+            "expected": 460592,
+            "min": 451380,
+            "max": 469804
+          }
+        },
+        "name": "custom-chat.chunks-2000",
+        "what": "custom-chat → chat stream, 2000 chunks",
+        "concurrency": 16,
+        "requests": 1432,
+        "successRate": 1,
+        "rps": 141.9469722016905,
+        "latencyMs": {
+          "p50": 106.688345,
+          "p90": 135.74107099999998,
+          "p99": 224.13877300000001,
+          "p999": 242.632305,
+          "p9999": 248.41914300000002
+        },
+        "ttfbMs": {
+          "p50": 102.242945,
+          "p99": 217.49675900000003
+        },
+        "status": {
+          "200": 1432
+        },
+        "errors": {},
+        "cpuSeconds": 9.64,
+        "cpuMsPerRequest": 6.731843575418995,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 104.47265625,
+        "rssPeakMb": 159.53125,
+        "rssEndMb": 96.20703125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1809,
+          "done": 1850,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.18,
+        "windowFrom": 1794674130895,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 87,
+            "runqueue": 0
+          },
+          "HeapHelper": {
+            "cpu": 2,
+            "runqueue": 0
+          },
+          "HeapHelper#2": {
+            "cpu": 2,
+            "runqueue": 0
+          },
+          "HeapHelper#3": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "e4a2250165d67256a7084eaa7fb5af44ea7e3b16383b9474508a4b8840d3f5bf",
+      "name": "custom-responses.chat.json",
+      "provider": "custom-responses",
+      "ingress": "chat",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.4888242776667275,
+        "loadWindow": {
+          "observedSeconds": 10.877830537000001,
+          "reportedSeconds": 10.868519243,
+          "reportToExitMs": 217.66873100001249,
+          "drainMs": 5.879784999997355
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 32,
+            "completed": 32,
+            "skippedTicks": 12,
+            "violations": 0,
+            "requests": 32,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 2.943468529241502
+          },
+          "sizes": {
+            "lo": 334,
+            "hi": 334,
+            "n": 11006,
+            "expected": 334,
+            "min": 206,
+            "max": 462
+          }
+        },
+        "name": "custom-responses.chat.json",
+        "what": "custom-responses → chat json, 1 chunks",
+        "concurrency": 64,
+        "requests": 11006,
+        "successRate": 1,
+        "rps": 1012.6494468957716,
+        "latencyMs": {
+          "p50": 42.455141000000005,
+          "p90": 55.521691,
+          "p99": 943.201288,
+          "p999": 1586.796001,
+          "p9999": 1847.18103
+        },
+        "ttfbMs": {
+          "p50": 42.454961,
+          "p99": 943.20114
+        },
+        "status": {
+          "200": 11006
+        },
+        "errors": {},
+        "cpuSeconds": 5.380000000000003,
+        "cpuMsPerRequest": 0.4888242776667275,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 118.53125,
+        "rssPeakMb": 130.203125,
+        "rssEndMb": 103.08203125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 15440,
+          "done": 15472,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674145794,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 32,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "350f031fdf0780f8d14ca3df4ea2b32542457f384904bd8c2fd2ada82a811f25",
+      "name": "custom-responses.chat.stream",
+      "provider": "custom-responses",
+      "ingress": "chat",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.6027987082884847,
+        "loadWindow": {
+          "observedSeconds": 10.399250931000017,
+          "reportedSeconds": 10.389860519,
+          "reportToExitMs": 123.76888399999007,
+          "drainMs": 1.0494360000011511
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 12,
+            "completed": 12,
+            "skippedTicks": 30,
+            "violations": 0,
+            "requests": 12,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 1.1544214756618452
+          },
+          "sizes": {
+            "lo": 808,
+            "hi": 808,
+            "n": 929,
+            "expected": 808,
+            "min": 680,
+            "max": 936
+          }
+        },
+        "name": "custom-responses.chat.stream",
+        "what": "custom-responses → chat stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 929,
+        "successRate": 1,
+        "rps": 89.41409735974146,
+        "latencyMs": {
+          "p50": 589.030439,
+          "p90": 1071.91261,
+          "p99": 1330.382671,
+          "p999": 1552.396351,
+          "p9999": 1552.396351
+        },
+        "ttfbMs": {
+          "p50": 589.02311,
+          "p99": 1330.374873
+        },
+        "status": {
+          "200": 929
+        },
+        "errors": {},
+        "cpuSeconds": 0.5600000000000023,
+        "cpuMsPerRequest": 0.6027987082884847,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 104.2578125,
+        "rssPeakMb": 111.09765625,
+        "rssEndMb": 105.55078125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1182,
+          "done": 1194,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674161584,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 5,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "e4a2250165d67256a7084eaa7fb5af44ea7e3b16383b9474508a4b8840d3f5bf",
+      "name": "custom-responses.messages.json",
+      "provider": "custom-responses",
+      "ingress": "messages",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.4997788589119854,
+        "loadWindow": {
+          "observedSeconds": 10.063734993999999,
+          "reportedSeconds": 10.051270907,
+          "reportToExitMs": 57.4185989999969,
+          "drainMs": 4.731474000000162
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 38,
+            "completed": 38,
+            "skippedTicks": 3,
+            "violations": 0,
+            "requests": 38,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.7776220916547167
+          },
+          "sizes": {
+            "lo": 308,
+            "hi": 308,
+            "n": 9044,
+            "expected": 308,
+            "min": 180,
+            "max": 436
+          }
+        },
+        "name": "custom-responses.messages.json",
+        "what": "custom-responses → messages json, 1 chunks",
+        "concurrency": 64,
+        "requests": 9044,
+        "successRate": 1,
+        "rps": 899.7867119173451,
+        "latencyMs": {
+          "p50": 50.992125,
+          "p90": 129.906881,
+          "p99": 234.543572,
+          "p999": 740.8351359999999,
+          "p9999": 801.463254
+        },
+        "ttfbMs": {
+          "p50": 50.991946000000006,
+          "p99": 234.543175
+        },
+        "status": {
+          "200": 9044
+        },
+        "errors": {},
+        "cpuSeconds": 4.519999999999996,
+        "cpuMsPerRequest": 0.4997788589119854,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 108.83984375,
+        "rssPeakMb": 123.2421875,
+        "rssEndMb": 107.21484375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 9521,
+          "done": 9559,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.17,
+        "windowFrom": 1794674177222,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 56,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "da1677f14b5a913d9ac262c45a524a3c2b27626f2115b2224046cee80275e1bf",
+      "name": "custom-responses.messages.stream",
+      "provider": "custom-responses",
+      "ingress": "messages",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5292893250074331,
+        "loadWindow": {
+          "observedSeconds": 10.038737781000004,
+          "reportedSeconds": 10.03151428,
+          "reportToExitMs": 50.8507399999944,
+          "drainMs": 5.980887999990955
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.086165466311776
+          },
+          "sizes": {
+            "lo": 911,
+            "hi": 911,
+            "n": 13452,
+            "expected": 911,
+            "min": 783,
+            "max": 1039
+          }
+        },
+        "name": "custom-responses.messages.stream",
+        "what": "custom-responses → messages stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 13452,
+        "successRate": 1,
+        "rps": 1340.9740169357563,
+        "latencyMs": {
+          "p50": 46.886154,
+          "p90": 59.100494000000005,
+          "p99": 84.040394,
+          "p999": 89.327721,
+          "p9999": 117.169269
+        },
+        "ttfbMs": {
+          "p50": 46.879109,
+          "p99": 84.036754
+        },
+        "status": {
+          "200": 13452
+        },
+        "errors": {},
+        "cpuSeconds": 7.11999999999999,
+        "cpuMsPerRequest": 0.5292893250074331,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 102.97265625,
+        "rssPeakMb": 122.97265625,
+        "rssEndMb": 106.69140625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 17562,
+          "done": 17603,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.17,
+        "windowFrom": 1794674192390,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 66,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "0080a8204cb5f4bbaa5a1dcc6b6a428049509065a1584e9eeca89245f4e0396d",
+      "name": "custom-responses.responses.json",
+      "provider": "custom-responses",
+      "ingress": "responses",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.46263582427838135,
+        "loadWindow": {
+          "observedSeconds": 10.055419924000017,
+          "reportedSeconds": 10.046297624,
+          "reportToExitMs": 54.36726100000669,
+          "drainMs": 6.887603999988642
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.080169363785948
+          },
+          "sizes": {
+            "lo": 506,
+            "hi": 506,
+            "n": 15001,
+            "expected": 506,
+            "min": 378,
+            "max": 634
+          }
+        },
+        "name": "custom-responses.responses.json",
+        "what": "custom-responses → responses json, 1 chunks",
+        "concurrency": 64,
+        "requests": 15001,
+        "successRate": 1,
+        "rps": 1493.1868994368149,
+        "latencyMs": {
+          "p50": 42.233278999999996,
+          "p90": 54.025874,
+          "p99": 66.688903,
+          "p999": 76.833054,
+          "p9999": 81.691586
+        },
+        "ttfbMs": {
+          "p50": 42.23302,
+          "p99": 66.688768
+        },
+        "status": {
+          "200": 15001
+        },
+        "errors": {},
+        "cpuSeconds": 6.939999999999998,
+        "cpuMsPerRequest": 0.46263582427838135,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 113.1796875,
+        "rssPeakMb": 123.8359375,
+        "rssEndMb": 110.48828125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 19660,
+          "done": 19701,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674207214,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 64,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 1,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "6ba35d2820d570d1c3ad20afb36a467c9a05fe94aacd18ae224c3ed4dd545e5e",
+      "name": "custom-responses.responses.stream",
+      "provider": "custom-responses",
+      "ingress": "responses",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.56011676701332,
+        "loadWindow": {
+          "observedSeconds": 11.174833436000016,
+          "reportedSeconds": 11.168368091,
+          "reportToExitMs": 124.04998300000443,
+          "drainMs": 6.051410999993095
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 20,
+            "completed": 20,
+            "skippedTicks": 25,
+            "violations": 0,
+            "requests": 20,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 1.7902769200957651
+          },
+          "sizes": {
+            "lo": 2616,
+            "hi": 2616,
+            "n": 5481,
+            "expected": 2616,
+            "min": 2488,
+            "max": 2744
+          }
+        },
+        "name": "custom-responses.responses.stream",
+        "what": "custom-responses → responses stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 5481,
+        "successRate": 1,
+        "rps": 490.7610454222806,
+        "latencyMs": {
+          "p50": 48.742226,
+          "p90": 66.177112,
+          "p99": 1696.102461,
+          "p999": 1927.485642,
+          "p9999": 2506.331388
+        },
+        "ttfbMs": {
+          "p50": 48.735276,
+          "p99": 1696.095652
+        },
+        "status": {
+          "200": 5481
+        },
+        "errors": {},
+        "cpuSeconds": 3.0700000000000074,
+        "cpuMsPerRequest": 0.56011676701332,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 107.93359375,
+        "rssPeakMb": 130.03515625,
+        "rssEndMb": 105.34765625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 9268,
+          "done": 9288,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.18,
+        "windowFrom": 1794674222023,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 4,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 1,
+      "bodySha256": "6ba35d2820d570d1c3ad20afb36a467c9a05fe94aacd18ae224c3ed4dd545e5e",
+      "name": "custom-responses.overhead-c1",
+      "provider": "custom-responses",
+      "ingress": "responses",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.8262711864406792,
+        "loadWindow": {
+          "observedSeconds": 10.253271626000002,
+          "reportedSeconds": 10.244949779,
+          "reportToExitMs": 488.98743400000967,
+          "drainMs": 0.9511300000012852
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 26,
+            "completed": 26,
+            "skippedTicks": 15,
+            "violations": 0,
+            "requests": 26,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 2.5368273242364237
+          },
+          "sizes": {
+            "lo": 2616,
+            "hi": 2616,
+            "n": 944,
+            "expected": 2616,
+            "min": 2488,
+            "max": 2744
+          }
+        },
+        "name": "custom-responses.overhead-c1",
+        "what": "custom-responses → responses stream, 1 chunks",
+        "concurrency": 1,
+        "requests": 944,
+        "successRate": 1,
+        "rps": 92.14296022563255,
+        "latencyMs": {
+          "p50": 0.782524,
+          "p90": 1.028705,
+          "p99": 351.76966,
+          "p999": 833.61807,
+          "p9999": 833.61807
+        },
+        "ttfbMs": {
+          "p50": 0.772067,
+          "p99": 351.757589
+        },
+        "status": {
+          "200": 944
+        },
+        "errors": {},
+        "cpuSeconds": 0.7800000000000011,
+        "cpuMsPerRequest": 0.8262711864406792,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 99.83203125,
+        "rssPeakMb": 109.0234375,
+        "rssEndMb": 102.4453125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1192,
+          "done": 1218,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.12,
+        "windowFrom": 1794674238015,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 8,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 16,
+      "bodySha256": "90401039d3099f43e82e957de95db12b633db1e052dd24e5bb479729d435fa9f",
+      "name": "custom-responses.chunks-2000",
+      "provider": "custom-responses",
+      "ingress": "responses",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 7.433155080213907,
+        "loadWindow": {
+          "observedSeconds": 10.108233253000012,
+          "reportedSeconds": 10.102650919,
+          "reportToExitMs": 56.32834800001001,
+          "drainMs": 1.2820380000048317
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.054955621580126
+          },
+          "sizes": {
+            "lo": 535283,
+            "hi": 535283,
+            "n": 1309,
+            "expected": 535283,
+            "min": 524577,
+            "max": 545989
+          }
+        },
+        "name": "custom-responses.chunks-2000",
+        "what": "custom-responses → responses stream, 2000 chunks",
+        "concurrency": 16,
+        "requests": 1309,
+        "successRate": 1,
+        "rps": 129.56995252980292,
+        "latencyMs": {
+          "p50": 121.3752,
+          "p90": 163.871828,
+          "p99": 218.76110400000002,
+          "p999": 245.388035,
+          "p9999": 245.80370000000002
+        },
+        "ttfbMs": {
+          "p50": 117.199636,
+          "p99": 207.755952
+        },
+        "status": {
+          "200": 1309
+        },
+        "errors": {},
+        "cpuSeconds": 9.730000000000004,
+        "cpuMsPerRequest": 7.433155080213907,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 102.28125,
+        "rssPeakMb": 167.09375,
+        "rssEndMb": 95.7578125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1635,
+          "done": 1676,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.17,
+        "windowFrom": 1794674253968,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 91,
+            "runqueue": 0
+          },
+          "HeapHelper": {
+            "cpu": 2,
+            "runqueue": 0
+          },
+          "HeapHelper#2": {
+            "cpu": 2,
+            "runqueue": 0
+          },
+          "HeapHelper#3": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "7364b96cbaf26fbf6d5b98efba6702b80dd8a5c86aace5ff2d10ae5b149d7240",
+      "name": "anthropic-key.chat.json",
+      "provider": "anthropic-key",
+      "ingress": "chat",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5503306392358556,
+        "loadWindow": {
+          "observedSeconds": 10.046403072999965,
+          "reportedSeconds": 10.037532604,
+          "reportToExitMs": 51.85917100001825,
+          "drainMs": 6.785915000014938
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.083138668659922
+          },
+          "sizes": {
+            "lo": 334,
+            "hi": 334,
+            "n": 13610,
+            "expected": 334,
+            "min": 206,
+            "max": 462
+          }
+        },
+        "name": "anthropic-key.chat.json",
+        "what": "anthropic-key → chat json, 1 chunks",
+        "concurrency": 64,
+        "requests": 13610,
+        "successRate": 1,
+        "rps": 1355.910913263321,
+        "latencyMs": {
+          "p50": 46.346534,
+          "p90": 58.336036,
+          "p99": 69.258813,
+          "p999": 81.65328099999999,
+          "p9999": 88.21414299999999
+        },
+        "ttfbMs": {
+          "p50": 46.346301,
+          "p99": 69.258592
+        },
+        "status": {
+          "200": 13610
+        },
+        "errors": {},
+        "cpuSeconds": 7.489999999999995,
+        "cpuMsPerRequest": 0.5503306392358556,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 115.73828125,
+        "rssPeakMb": 133.1015625,
+        "rssEndMb": 104.83984375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 17111,
+          "done": 17152,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.17,
+        "windowFrom": 1794674268974,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 66,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 6,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "42c96b8ba68fafa005d8c4a2c02a11008bbf8d121dad4e50c674752689ffe2ec",
+      "name": "anthropic-key.chat.stream",
+      "provider": "anthropic-key",
+      "ingress": "chat",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.6263736263736189,
+        "loadWindow": {
+          "observedSeconds": 10.096079400000047,
+          "reportedSeconds": 10.090928836,
+          "reportToExitMs": 74.49105899996357,
+          "drainMs": 1.7870969999930821
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 9,
+            "completed": 9,
+            "skippedTicks": 32,
+            "violations": 0,
+            "requests": 9,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 0.8921550308320542
+          },
+          "sizes": {
+            "lo": 808,
+            "hi": 808,
+            "n": 910,
+            "expected": 808,
+            "min": 680,
+            "max": 936
+          }
+        },
+        "name": "anthropic-key.chat.stream",
+        "what": "anthropic-key → chat stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 910,
+        "successRate": 1,
+        "rps": 90.18000372309831,
+        "latencyMs": {
+          "p50": 630.0147860000001,
+          "p90": 1016.2369010000001,
+          "p99": 1133.829671,
+          "p999": 1587.296913,
+          "p9999": 1587.296913
+        },
+        "ttfbMs": {
+          "p50": 630.011376,
+          "p99": 1133.826073
+        },
+        "status": {
+          "200": 910
+        },
+        "errors": {},
+        "cpuSeconds": 0.5699999999999932,
+        "cpuMsPerRequest": 0.6263736263736189,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 107.01953125,
+        "rssPeakMb": 116.421875,
+        "rssEndMb": 113.1328125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 2932,
+          "done": 2941,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.15,
+        "windowFrom": 1794674283789,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 5,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "7364b96cbaf26fbf6d5b98efba6702b80dd8a5c86aace5ff2d10ae5b149d7240",
+      "name": "anthropic-key.messages.json",
+      "provider": "anthropic-key",
+      "ingress": "messages",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5598999061620289,
+        "loadWindow": {
+          "observedSeconds": 10.140923543000012,
+          "reportedSeconds": 10.132692404,
+          "reportToExitMs": 72.57072900002822,
+          "drainMs": 2.3418020000099204
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 33,
+            "completed": 33,
+            "skippedTicks": 8,
+            "violations": 0,
+            "requests": 33,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.256802266835516
+          },
+          "sizes": {
+            "lo": 308,
+            "hi": 308,
+            "n": 3197,
+            "expected": 308,
+            "min": 180,
+            "max": 436
+          }
+        },
+        "name": "anthropic-key.messages.json",
+        "what": "anthropic-key → messages json, 1 chunks",
+        "concurrency": 64,
+        "requests": 3197,
+        "successRate": 1,
+        "rps": 315.5133771491915,
+        "latencyMs": {
+          "p50": 166.87260700000002,
+          "p90": 351.617608,
+          "p99": 547.781973,
+          "p999": 549.672402,
+          "p9999": 552.568873
+        },
+        "ttfbMs": {
+          "p50": 166.872465,
+          "p99": 547.78184
+        },
+        "status": {
+          "200": 3197
+        },
+        "errors": {},
+        "cpuSeconds": 1.7900000000000063,
+        "cpuMsPerRequest": 0.5598999061620289,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 109.86328125,
+        "rssPeakMb": 126.15625,
+        "rssEndMb": 114.20703125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 3654,
+          "done": 3687,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.14,
+        "windowFrom": 1794674298705,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 21,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "794515409f3568762325649730a8f8bc0836d75e2a6d66c72f071a4e2b12276e",
+      "name": "anthropic-key.messages.stream",
+      "provider": "anthropic-key",
+      "ingress": "messages",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5710090545721511,
+        "loadWindow": {
+          "observedSeconds": 11.263126671999984,
+          "reportedSeconds": 11.255333438,
+          "reportToExitMs": 376.79349000001093,
+          "drainMs": 6.301040999998804
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 40,
+            "completed": 40,
+            "skippedTicks": 5,
+            "violations": 0,
+            "requests": 40,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.5514827583774164
+          },
+          "sizes": {
+            "lo": 911,
+            "hi": 911,
+            "n": 12259,
+            "expected": 911,
+            "min": 783,
+            "max": 1039
+          }
+        },
+        "name": "anthropic-key.messages.stream",
+        "what": "anthropic-key → messages stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 12259,
+        "successRate": 1,
+        "rps": 1089.1725302967432,
+        "latencyMs": {
+          "p50": 49.988186,
+          "p90": 58.765165,
+          "p99": 92.92199199999999,
+          "p999": 1694.85829,
+          "p9999": 1695.3000339999999
+        },
+        "ttfbMs": {
+          "p50": 49.982205,
+          "p99": 92.918318
+        },
+        "status": {
+          "200": 12259
+        },
+        "errors": {},
+        "cpuSeconds": 6.990000000000009,
+        "cpuMsPerRequest": 0.5701933273513344,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 112.8125,
+        "rssPeakMb": 136.171875,
+        "rssEndMb": 105.47265625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 15242,
+          "done": 15282,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674314062,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 62,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "9874bbda73bbda6f4e93c2f1a05dc6125328bad9a21de419e1dc0f3a0127f111",
+      "name": "anthropic-key.responses.json",
+      "provider": "anthropic-key",
+      "ingress": "responses",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.686695278969973,
+        "loadWindow": {
+          "observedSeconds": 10.110718989000015,
+          "reportedSeconds": 10.104434792,
+          "reportToExitMs": 167.3239000000176,
+          "drainMs": 1.274366999976337
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 12,
+            "completed": 12,
+            "skippedTicks": 29,
+            "violations": 0,
+            "requests": 12,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 1.1874161092559683
+          },
+          "sizes": {
+            "lo": 506,
+            "hi": 506,
+            "n": 932,
+            "expected": 506,
+            "min": 378,
+            "max": 634
+          }
+        },
+        "name": "anthropic-key.responses.json",
+        "what": "anthropic-key → responses json, 1 chunks",
+        "concurrency": 64,
+        "requests": 932,
+        "successRate": 1,
+        "rps": 92.23672765327694,
+        "latencyMs": {
+          "p50": 620.240324,
+          "p90": 1057.75017,
+          "p99": 1126.591068,
+          "p999": 1128.849919,
+          "p9999": 1128.849919
+        },
+        "ttfbMs": {
+          "p50": 620.239903,
+          "p99": 1126.5909199999999
+        },
+        "status": {
+          "200": 932
+        },
+        "errors": {},
+        "cpuSeconds": 0.6400000000000148,
+        "cpuMsPerRequest": 0.686695278969973,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 107.21875,
+        "rssPeakMb": 119.47265625,
+        "rssEndMb": 108.7109375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1201,
+          "done": 1213,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.1,
+        "windowFrom": 1794674330420,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 5,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "47b84c6fe1a92383f6dae210824c7d5d0602427759e02c0fdab2cc63853f82ca",
+      "name": "anthropic-key.responses.stream",
+      "provider": "anthropic-key",
+      "ingress": "responses",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.6606869394005648,
+        "loadWindow": {
+          "observedSeconds": 10.068245531000022,
+          "reportedSeconds": 10.060294154,
+          "reportToExitMs": 80.87846799998078,
+          "drainMs": 2.951903000008315
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 32,
+            "completed": 32,
+            "skippedTicks": 9,
+            "violations": 0,
+            "requests": 32,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.1796576397714498
+          },
+          "sizes": {
+            "lo": 2616,
+            "hi": 2616,
+            "n": 4571,
+            "expected": 2616,
+            "min": 2488,
+            "max": 2744
+          }
+        },
+        "name": "anthropic-key.responses.stream",
+        "what": "anthropic-key → responses stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 4571,
+        "successRate": 1,
+        "rps": 454.36047197313394,
+        "latencyMs": {
+          "p50": 112.275713,
+          "p90": 245.982858,
+          "p99": 516.40525,
+          "p999": 537.555549,
+          "p9999": 674.683099
+        },
+        "ttfbMs": {
+          "p50": 112.26805900000001,
+          "p99": 516.3942529999999
+        },
+        "status": {
+          "200": 4571
+        },
+        "errors": {},
+        "cpuSeconds": 3.019999999999982,
+        "cpuMsPerRequest": 0.6606869394005648,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 113.72265625,
+        "rssPeakMb": 130.42578125,
+        "rssEndMb": 114.55078125,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 4964,
+          "done": 4996,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.18,
+        "windowFrom": 1794674346779,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 36,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 1,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 1,
+      "bodySha256": "794515409f3568762325649730a8f8bc0836d75e2a6d66c72f071a4e2b12276e",
+      "name": "anthropic-key.overhead-c1",
+      "provider": "anthropic-key",
+      "ingress": "messages",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.8167141500474828,
+        "loadWindow": {
+          "observedSeconds": 10.010781900000001,
+          "reportedSeconds": 10.001691999,
+          "reportToExitMs": 38.561722000013106,
+          "drainMs": 4.157365999999456
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 40,
+            "completed": 40,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 40,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.99821245198912
+          },
+          "sizes": {
+            "lo": 911,
+            "hi": 911,
+            "n": 8424,
+            "expected": 911,
+            "min": 783,
+            "max": 1039
+          }
+        },
+        "name": "anthropic-key.overhead-c1",
+        "what": "anthropic-key → messages stream, 1 chunks",
+        "concurrency": 1,
+        "requests": 8424,
+        "successRate": 1,
+        "rps": 842.257490116898,
+        "latencyMs": {
+          "p50": 0.837119,
+          "p90": 1.1015510000000002,
+          "p99": 11.516223,
+          "p999": 25.222071,
+          "p9999": 56.874896
+        },
+        "ttfbMs": {
+          "p50": 0.830364,
+          "p99": 11.507767000000001
+        },
+        "status": {
+          "200": 8424
+        },
+        "errors": {},
+        "cpuSeconds": 6.8799999999999955,
+        "cpuMsPerRequest": 0.8167141500474828,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 119.00390625,
+        "rssPeakMb": 128.734375,
+        "rssEndMb": 106.4140625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 10985,
+          "done": 11025,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.21,
+        "windowFrom": 1794674361804,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": null
+      }
+    },
+    {
+      "concurrency": 16,
+      "bodySha256": "b624e874362a6e3530655c8b06b3a5358dd4e2aeaea8d240bd849f403b5bb640",
+      "name": "anthropic-key.chunks-2000",
+      "provider": "anthropic-key",
+      "ingress": "messages",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 6.479663394109383,
+        "loadWindow": {
+          "observedSeconds": 10.101295585000015,
+          "reportedSeconds": 10.095178939,
+          "reportToExitMs": 68.45026699994924,
+          "drainMs": 1.5042259999900125
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.059483136690017
+          },
+          "sizes": {
+            "lo": 254790,
+            "hi": 254790,
+            "n": 1426,
+            "expected": 254790,
+            "min": 249694,
+            "max": 259886
+          }
+        },
+        "name": "anthropic-key.chunks-2000",
+        "what": "anthropic-key → messages stream, 2000 chunks",
+        "concurrency": 16,
+        "requests": 1426,
+        "successRate": 1,
+        "rps": 141.2555447126384,
+        "latencyMs": {
+          "p50": 106.013469,
+          "p90": 142.562229,
+          "p99": 244.577594,
+          "p999": 257.37669800000003,
+          "p9999": 326.721165
+        },
+        "ttfbMs": {
+          "p50": 102.397236,
+          "p99": 240.082083
+        },
+        "status": {
+          "200": 1426
+        },
+        "errors": {},
+        "cpuSeconds": 9.23999999999998,
+        "cpuMsPerRequest": 6.479663394109383,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 143.03125,
+        "rssPeakMb": 169.75390625,
+        "rssEndMb": 112.0234375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1878,
+          "done": 1919,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674376513,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 91,
+            "runqueue": 0
+          },
+          "HeapHelper": {
+            "cpu": 1,
+            "runqueue": 0
+          },
+          "HeapHelper#2": {
+            "cpu": 1,
+            "runqueue": 0
+          },
+          "HeapHelper#3": {
+            "cpu": 1,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "810805852e7bf9e209b35e12b58586af220ee699fcedc94619d641397a370145",
+      "name": "anthropic-oauth.chat.json",
+      "provider": "anthropic-oauth",
+      "ingress": "chat",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5490734385724082,
+        "loadWindow": {
+          "observedSeconds": 10.046425688999996,
+          "reportedSeconds": 10.037392727,
+          "reportToExitMs": 46.963361000001896,
+          "drainMs": 5.608747999998741
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.084512495014561
+          },
+          "sizes": {
+            "lo": 334,
+            "hi": 334,
+            "n": 13113,
+            "expected": 334,
+            "min": 206,
+            "max": 462
+          }
+        },
+        "name": "anthropic-oauth.chat.json",
+        "what": "anthropic-oauth → chat json, 1 chunks",
+        "concurrency": 64,
+        "requests": 13113,
+        "successRate": 1,
+        "rps": 1306.4149582118866,
+        "latencyMs": {
+          "p50": 47.880917000000004,
+          "p90": 60.308681,
+          "p99": 78.018524,
+          "p999": 91.52095,
+          "p9999": 107.077084
+        },
+        "ttfbMs": {
+          "p50": 47.880777,
+          "p99": 78.01838799999999
+        },
+        "status": {
+          "200": 13113
+        },
+        "errors": {},
+        "cpuSeconds": 7.199999999999989,
+        "cpuMsPerRequest": 0.5490734385724082,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 119.08203125,
+        "rssPeakMb": 138.078125,
+        "rssEndMb": 123.83984375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 16837,
+          "done": 16878,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.18,
+        "windowFrom": 1794674391456,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 64,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "e4dd0070b8ad8058121e41bb708109b0657ba621d720c1b3f5d204694d9120b7",
+      "name": "anthropic-oauth.chat.stream",
+      "provider": "anthropic-oauth",
+      "ingress": "chat",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.587219343696028,
+        "loadWindow": {
+          "observedSeconds": 11.116093307000003,
+          "reportedSeconds": 11.106846384,
+          "reportToExitMs": 230.9161160000367,
+          "drainMs": 5.044336999999359
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 36,
+            "completed": 36,
+            "skippedTicks": 9,
+            "violations": 0,
+            "requests": 36,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.2403250768320517
+          },
+          "sizes": {
+            "lo": 808,
+            "hi": 808,
+            "n": 10422,
+            "expected": 808,
+            "min": 680,
+            "max": 936
+          }
+        },
+        "name": "anthropic-oauth.chat.stream",
+        "what": "anthropic-oauth → chat stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 10422,
+        "successRate": 1,
+        "rps": 938.3401588243304,
+        "latencyMs": {
+          "p50": 50.81204,
+          "p90": 62.89430899999999,
+          "p99": 585.519487,
+          "p999": 1259.9507489999999,
+          "p9999": 1264.837549
+        },
+        "ttfbMs": {
+          "p50": 50.808697,
+          "p99": 585.5158700000001
+        },
+        "status": {
+          "200": 10422
+        },
+        "errors": {},
+        "cpuSeconds": 6.110000000000014,
+        "cpuMsPerRequest": 0.5862598349644995,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 122.671875,
+        "rssPeakMb": 136.87890625,
+        "rssEndMb": 115.6484375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 14301,
+          "done": 14337,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.22,
+        "windowFrom": 1794674406266,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 45,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "810805852e7bf9e209b35e12b58586af220ee699fcedc94619d641397a370145",
+      "name": "anthropic-oauth.messages.json",
+      "provider": "anthropic-oauth",
+      "ingress": "messages",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.6440382941688256,
+        "loadWindow": {
+          "observedSeconds": 10.529027956000006,
+          "reportedSeconds": 10.521417467,
+          "reportToExitMs": 108.3033759999671,
+          "drainMs": 2.2314749999786727
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 15,
+            "completed": 15,
+            "skippedTicks": 28,
+            "violations": 0,
+            "requests": 15,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 1.4257676068743252
+          },
+          "sizes": {
+            "lo": 308,
+            "hi": 308,
+            "n": 1149,
+            "expected": 308,
+            "min": 180,
+            "max": 436
+          }
+        },
+        "name": "anthropic-oauth.messages.json",
+        "what": "anthropic-oauth → messages json, 1 chunks",
+        "concurrency": 64,
+        "requests": 1149,
+        "successRate": 1,
+        "rps": 109.20581790464945,
+        "latencyMs": {
+          "p50": 554.872483,
+          "p90": 964.319859,
+          "p99": 1047.282012,
+          "p999": 1052.703341,
+          "p9999": 1053.1364780000001
+        },
+        "ttfbMs": {
+          "p50": 554.872338,
+          "p99": 1047.281866
+        },
+        "status": {
+          "200": 1149
+        },
+        "errors": {},
+        "cpuSeconds": 0.7399999999999807,
+        "cpuMsPerRequest": 0.6440382941688256,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 111.08203125,
+        "rssPeakMb": 117.79296875,
+        "rssEndMb": 110.87890625,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1401,
+          "done": 1416,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.14,
+        "windowFrom": 1794674422301,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 7,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "fd9d960d61e426a596ac54ddd6c544e18202a0d1f74d235e2152a23b7739ee64",
+      "name": "anthropic-oauth.messages.stream",
+      "provider": "anthropic-oauth",
+      "ingress": "messages",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5928518400678761,
+        "loadWindow": {
+          "observedSeconds": 10.05125862800004,
+          "reportedSeconds": 10.043825164,
+          "reportToExitMs": 39.18458100000862,
+          "drainMs": 4.5110550000099465
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 38,
+            "completed": 38,
+            "skippedTicks": 3,
+            "violations": 0,
+            "requests": 38,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.783769676996963
+          },
+          "sizes": {
+            "lo": 911,
+            "hi": 911,
+            "n": 9429,
+            "expected": 911,
+            "min": 783,
+            "max": 1039
+          }
+        },
+        "name": "anthropic-oauth.messages.stream",
+        "what": "anthropic-oauth → messages stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 9429,
+        "successRate": 1,
+        "rps": 938.7857560281204,
+        "latencyMs": {
+          "p50": 52.891531,
+          "p90": 104.072052,
+          "p99": 255.669257,
+          "p999": 950.090371,
+          "p9999": 951.839883
+        },
+        "ttfbMs": {
+          "p50": 52.887127,
+          "p99": 255.66600099999997
+        },
+        "status": {
+          "200": 9429
+        },
+        "errors": {},
+        "cpuSeconds": 5.590000000000003,
+        "cpuMsPerRequest": 0.5928518400678761,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 112.4296875,
+        "rssPeakMb": 132.73046875,
+        "rssEndMb": 117.68359375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 11409,
+          "done": 11447,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.18,
+        "windowFrom": 1794674438412,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 68,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "dc29d8a25ae0d84cfd748c3a90e03c9104c3b1953e09da0d8c2119d3c463c865",
+      "name": "anthropic-oauth.responses.json",
+      "provider": "anthropic-oauth",
+      "ingress": "responses",
+      "mode": "json",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.5454196274246214,
+        "loadWindow": {
+          "observedSeconds": 10.727454354999994,
+          "reportedSeconds": 10.719795598,
+          "reportToExitMs": 256.03312799998093,
+          "drainMs": 3.3365360000170767
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 21,
+            "completed": 21,
+            "skippedTicks": 22,
+            "violations": 0,
+            "requests": 21,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 1.9592819829505348
+          },
+          "sizes": {
+            "lo": 506,
+            "hi": 506,
+            "n": 5207,
+            "expected": 506,
+            "min": 378,
+            "max": 634
+          }
+        },
+        "name": "anthropic-oauth.responses.json",
+        "what": "anthropic-oauth → responses json, 1 chunks",
+        "concurrency": 64,
+        "requests": 5207,
+        "successRate": 1,
+        "rps": 485.73687365563893,
+        "latencyMs": {
+          "p50": 49.337253,
+          "p90": 87.191873,
+          "p99": 1324.7769289999999,
+          "p999": 1362.54914,
+          "p9999": 1364.60355
+        },
+        "ttfbMs": {
+          "p50": 49.337119,
+          "p99": 1324.77673
+        },
+        "status": {
+          "200": 5207
+        },
+        "errors": {},
+        "cpuSeconds": 2.8400000000000034,
+        "cpuMsPerRequest": 0.5454196274246214,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 119.4609375,
+        "rssPeakMb": 133.10546875,
+        "rssEndMb": 106.375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 8978,
+          "done": 8999,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.15,
+        "windowFrom": 1794674453279,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 3,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 64,
+      "bodySha256": "7c1a6c7c43dd881b2bd21cba268608cca95e76ccb67bc70708106d390c711eb6",
+      "name": "anthropic-oauth.responses.stream",
+      "provider": "anthropic-oauth",
+      "ingress": "responses",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.7597851112816428,
+        "loadWindow": {
+          "observedSeconds": 10.345800616000023,
+          "reportedSeconds": 10.341300459,
+          "reportToExitMs": 90.75123900000472,
+          "drainMs": 1.377727999992203
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 15,
+            "completed": 15,
+            "skippedTicks": 27,
+            "violations": 0,
+            "requests": 15,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 1.450449218298631
+          },
+          "sizes": {
+            "lo": 2616,
+            "hi": 2616,
+            "n": 1303,
+            "expected": 2616,
+            "min": 2488,
+            "max": 2744
+          }
+        },
+        "name": "anthropic-oauth.responses.stream",
+        "what": "anthropic-oauth → responses stream, 1 chunks",
+        "concurrency": 64,
+        "requests": 1303,
+        "successRate": 1,
+        "rps": 125.9996269488528,
+        "latencyMs": {
+          "p50": 457.676265,
+          "p90": 877.966676,
+          "p99": 1092.216684,
+          "p999": 1208.691854,
+          "p9999": 1353.6939860000002
+        },
+        "ttfbMs": {
+          "p50": 457.663072,
+          "p99": 1092.207183
+        },
+        "status": {
+          "200": 1303
+        },
+        "errors": {},
+        "cpuSeconds": 0.9899999999999807,
+        "cpuMsPerRequest": 0.7597851112816428,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 107.26171875,
+        "rssPeakMb": 125.33984375,
+        "rssEndMb": 108.60546875,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 1573,
+          "done": 1588,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.17,
+        "windowFrom": 1794674468951,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 9,
+            "runqueue": 0
+          },
+          "JITWorker": {
+            "cpu": 1,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 1,
+      "bodySha256": "fd9d960d61e426a596ac54ddd6c544e18202a0d1f74d235e2152a23b7739ee64",
+      "name": "anthropic-oauth.overhead-c1",
+      "provider": "anthropic-oauth",
+      "ingress": "messages",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 0.8001285347043686,
+        "loadWindow": {
+          "observedSeconds": 10.01698412899999,
+          "reportedSeconds": 10.009680623,
+          "reportToExitMs": 30.41475699999137,
+          "drainMs": 6.181190999981482
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 39,
+            "completed": 39,
+            "skippedTicks": 2,
+            "violations": 0,
+            "requests": 39,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 3.8950326613414616
+          },
+          "sizes": {
+            "lo": 911,
+            "hi": 911,
+            "n": 6224,
+            "expected": 911,
+            "min": 783,
+            "max": 1039
+          }
+        },
+        "name": "anthropic-oauth.overhead-c1",
+        "what": "anthropic-oauth → messages stream, 1 chunks",
+        "concurrency": 1,
+        "requests": 6224,
+        "successRate": 1,
+        "rps": 621.7980607391853,
+        "latencyMs": {
+          "p50": 0.8267730000000001,
+          "p90": 1.081005,
+          "p99": 11.950431,
+          "p999": 131.159325,
+          "p9999": 745.3881690000001
+        },
+        "ttfbMs": {
+          "p50": 0.821081,
+          "p99": 11.940239
+        },
+        "status": {
+          "200": 6224
+        },
+        "errors": {},
+        "cpuSeconds": 4.97999999999999,
+        "cpuMsPerRequest": 0.8001285347043686,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 113.5703125,
+        "rssPeakMb": 121.37890625,
+        "rssEndMb": 116.1796875,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 7554,
+          "done": 7593,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674485176,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 66,
+            "runqueue": 0
+          }
+        }
+      }
+    },
+    {
+      "concurrency": 16,
+      "bodySha256": "01f5e6bf2c2b3f05c86a1acd219d6fd42b2e004dd34dd42401cafa5ebf5fc065",
+      "name": "anthropic-oauth.chunks-2000",
+      "provider": "anthropic-oauth",
+      "ingress": "messages",
+      "mode": "stream",
+      "classification": "supported",
+      "reason": "shape and load integrity passed",
+      "metrics": {
+        "cpuMsPerRequestDrained": 6.313131313131313,
+        "loadWindow": {
+          "observedSeconds": 10.103431760000007,
+          "reportedSeconds": 10.096701405,
+          "reportToExitMs": 23.426375999988522,
+          "drainMs": 3.098461000015959
+        },
+        "integrity": {
+          "errors": [],
+          "verifier": {
+            "started": 41,
+            "completed": 41,
+            "skippedTicks": 0,
+            "violations": 0,
+            "requests": 41,
+            "errors": [],
+            "rate": 4,
+            "actualRate": 4.054605547762577
+          },
+          "sizes": {
+            "lo": 254790,
+            "hi": 254790,
+            "n": 1584,
+            "expected": 254790,
+            "min": 249694,
+            "max": 259886
+          }
+        },
+        "name": "anthropic-oauth.chunks-2000",
+        "what": "anthropic-oauth → messages stream, 2000 chunks",
+        "concurrency": 16,
+        "requests": 1584,
+        "successRate": 1,
+        "rps": 156.88292012038562,
+        "latencyMs": {
+          "p50": 102.817729,
+          "p90": 121.05621699999999,
+          "p99": 141.620908,
+          "p999": 155.662883,
+          "p9999": 201.617732
+        },
+        "ttfbMs": {
+          "p50": 99.637203,
+          "p99": 138.04682
+        },
+        "status": {
+          "200": 1584
+        },
+        "errors": {},
+        "cpuSeconds": 10,
+        "cpuMsPerRequest": 6.313131313131313,
+        "backingCpuMsPerRequest": null,
+        "rssStartMb": 140.9765625,
+        "rssPeakMb": 170.99609375,
+        "rssEndMb": 121.8984375,
+        "recoverySamples": [],
+        "recoveryLatenessToleranceMs": 25,
+        "recoveryVerdict": null,
+        "healthyAfter": true,
+        "crashed": 0,
+        "rows": {
+          "answered": 2070,
+          "done": 2111,
+          "pending": 0,
+          "missing": 0,
+          "writer": "unsupported"
+        },
+        "foreignCores": 0.16,
+        "windowFrom": 1794674500048,
+        "gatewayMhz": [
+          2496,
+          2496,
+          2496,
+          2496
+        ],
+        "threads": {
+          "ts-frozen-f9cc6": {
+            "cpu": 94,
+            "runqueue": 0
+          },
+          "HeapHelper": {
+            "cpu": 2,
+            "runqueue": 0
+          },
+          "HeapHelper#2": {
+            "cpu": 2,
+            "runqueue": 0
+          },
+          "HeapHelper#3": {
+            "cpu": 2,
+            "runqueue": 0
+          }
+        }
+      }
+    }
+  ],
+  "loadWait": {
+    "beginLoad": 1.19,
+    "waitedSeconds": 15,
+    "startLoad": 0.93
+  }
+}
