@@ -343,32 +343,39 @@ async function run(label: string, binary: string): Promise<Row[]> {
       rows.push({ name, response: { requests: wires.length, responses: normalized, credentials: credentials.length, access: await Promise.all(credentials.map(c => decrypt(fieldKey, c.access_token))) }, wire: [] });
       await row(`${name}/consumed`, "poll", JSON.stringify({ flowId: start.flowId }));
     }
-    for (const provider of ["anthropic", "openai"]) {
+    for (const provider of ["anthropic", "openai"]) for (const reconnect of [false, true]) for (let trial = 0; trial < (reconnect && process.env.A15_VISIBILITY_TRIALS === "10" ? 10 : 1); trial++) {
+      const name = `${provider}/${reconnect ? "reconnect-first" : "visibility-lag"}/${trial}`;
+      const model = `inference-${provider}-${reconnect}`;
+      const key = await request("/api/keys", JSON.stringify({ label: model }));
+      const target = (credentialId?: string) => JSON.stringify({ id: model, strategy: "priority", isAlias: false, targets: [{ provider, model: provider === "openai" ? "gpt-5" : "claude-sonnet-4-5", credentialId, tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: true, reasoning: true } }] });
+      if (reconnect) {
+        await request(`/api/models/${model}`, target(`${provider}-full`), cookie, "PUT");
+        await request(`/api/credentials/${provider}-full`, JSON.stringify({ enabled: false }), cookie, "PATCH");
+      }
+      await Bun.sleep(650);
       tokenStatus = 200;
-      tokenBody = JSON.stringify({ access_token: `${provider}-inference-access`, refresh_token: "inference-refresh", expires_in: 3600 });
-      const start = await row(`${provider}/inference/start`, "start", JSON.stringify({ provider, label: "inference" }));
+      tokenBody = JSON.stringify({ access_token: `${provider}-inference-access-${trial}`, refresh_token: "inference-refresh", expires_in: 3600 });
+      const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: "inference", credentialId: reconnect ? `${provider}-full` : undefined }));
       const url = validateStart(start);
       const connected = await request("/api/connect/finish", JSON.stringify({ flowId: start.flowId, code: `code#${url.searchParams.get("state")}` }));
-      if (connected.status !== 200 || !uuid4.test(connected.body.id)) throw Error("inference connect failed");
+      if (connected.status !== 200 || (reconnect ? connected.body.id !== `${provider}-full` : !uuid4.test(connected.body.id))) throw Error("inference connect failed");
       const begin = Date.now();
-      const model = `inference-${provider}`;
-      const put = await request(`/api/models/${model}`, JSON.stringify({ id: model, strategy: "priority", isAlias: false, targets: [{ provider, model: provider === "openai" ? "gpt-5" : "claude-sonnet-4-5", credentialId: connected.body.id, tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: true, reasoning: true } }] }), cookie, "PUT");
-      if (put.status !== 200) throw Error(`model create: ${JSON.stringify(put)}`);
-      const key = await request("/api/keys", JSON.stringify({ label: model }));
+      if (!reconnect) await request(`/api/models/${model}`, target(connected.body.id), cookie, "PUT");
       if (key.status !== 200 || typeof key.body.key !== "string") throw Error(`key create: ${JSON.stringify(key)}`);
       inference = true; wires = [];
       let status = 0, answer: any, delay = 0;
+      const attempts: any[] = [];
       do {
         const r = await fetch("http://127.0.0.1:18515/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${key.body.key}`, "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: "hello" }], max_tokens: 32, stream: false }) });
         status = r.status; answer = await r.json(); delay = Date.now() - begin;
-        if (status === 200 || delay >= 5000) break;
+        attempts.push({ status, answer, delay });
+        if (reconnect || status === 200 || delay >= 1000) break;
         await Bun.sleep(50);
-      } while (Date.now() - begin < 5000);
+      } while (Date.now() - begin < 1000);
       inference = false;
-      await Bun.write(join(root, `${provider}-routable.json`), JSON.stringify({ delay, status, answer, wires }, null, 2));
-      if (status !== 200) throw Error(`${label}/${provider} not routable within 5s: ${JSON.stringify(answer)}`);
-      if (answer.choices?.[0]?.message?.content !== "fixture answer" || wires.length !== 1 || !wires[0]!.headers.some(h => h.toLowerCase() === `authorization: bearer ${provider}-inference-access`)) throw Error(`${label}/${provider} inference mismatch`);
-      rows.push({ name: `${provider}/inference/result`, response: { status, answer: answer.choices[0].message.content, authorization: `${provider}-inference-access`, requests: wires.length }, wire: [] });
+      await Bun.write(join(root, `${provider}-${reconnect}-${trial}-routable.json`), JSON.stringify({ delay, status, answer, wires, attempts }, null, 2));
+      const valid = status === 200 && answer.choices?.[0]?.message?.content === "fixture answer" && wires.length === 1 && wires[0]!.headers.some(h => h.toLowerCase() === `authorization: bearer ${provider}-inference-access-${trial}`);
+      rows.push({ name: `${name}/result`, response: reconnect ? { status, valid } : { first: attempts[0], delay, status, valid }, wire: [] });
     }
     return rows;
   } finally { proc.kill(); await proc.exited; }
@@ -403,6 +410,10 @@ try {
   for (const name of names) {
     const a = ts.find(r => r.name === name), b = rust.find(r => r.name === name);
     const ar = a?.response as any, br = b?.response as any;
+    if (name.includes("/visibility-lag/") && name.endsWith("/result")) {
+      if (ar?.first.status === 200 && ar.valid && br?.valid && br.delay <= 1000) { expectedDivergences++; continue; }
+      failed++; console.log(`FAILED ${name}`); continue;
+    }
     const frozen = "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder";
     if (name === "start/provider/grok" || name === "start/provider/muse") {
       const expected = name === "start/provider/grok" ? "grok oauth start threw" : "muse oauth begin threw";
