@@ -58,6 +58,32 @@ Implementer logs scanned in `implementer-gates.json`: workspace **1276 passed/0 
 - Numeric/NUL SQLite experiment `numeric-nul.json`: -0/+0 normalized equality, distinct binary64 0.3 versus 0.30000000000000004, valid Unicode and embedded NUL order all match numeric/UTF-8 comparator. Invalid TEXT bytes are the exception above.
 - Driver row-name diff: **none removed**, exactly four changed-label rows added (`row-names.json`). Current driver **365/0 failed/18 expected**, exit 0. This does not cover changed-to-equal older row or invalid UTF-8 metadata.
 
-## Carry-forward constraints / unverified
+## Regression sweep and counts
+
+All twelve operation/provider/route cells (fresh, immediate reconnect, disabled-existing reconnect × anthropic/openai × finish/poll) achieved **20/20 first-request successes per binary**, validating answer and new bearer, no retry. `trials/` 320 start/result pairs; `ordinary-clean/` and `ordinary-poll/` 80 each. Prior missing-entry reproduction `missing-clean/` 80 equal. All their `.exit` files 0. These close the earlier publication visibility defects, not the order defects above.
+
+I1 lifecycle success/refusal/transport-close/timeout last-waiter cancellation: 10 equal pairs. Delayed transport-close follow-up 2 equal. Held poll/finish race 2 equal, two token requests/two credentials both sides. SIGTERM one Anthropic finish pair equal: exit 0, one credential, shutdown 815 ms frozen /818 ms Rust. Corresponding `.exit` files all 0. No new lifecycle failure observed.
+
+Selected paired records (not individual HTTP requests; `selected-counts.json`):
+
+| Group | Pairs | Equal | Different |
+|---|---:|---:|---:|
+| current driver |365|347|18 expected|
+| unequal-label admin/direct, tier REAL, unchanged, unchanged-equal (5×80) |400|400|0|
+| unique-model equal-key priority |80|40|40|
+| equal-key roundRobin |80|40|40|
+| equal-key weighted zero-total fallback |80|41|39|
+| invalid UTF-8 two-provider + isolated OpenAI |6|3|3|
+| fresh/immediate reconnect trials |320|320|0|
+| disabled reconnect finish/poll |160|160|0|
+| missing-entry rerun |80|80|0|
+| lifecycle/delayed-close/held-race/SIGTERM |15|15|0|
+| **Total** |**1586**|**1446**|**140: 18 expected, 122 unexpected**|
+
+Positive-weight random run and original/repeated exploratory confirmations excluded from totals. The 122 unexpected records comprise 119 order-selection records plus three invalid-label records; these are repeated evidence for two product findings, not 122 independent defects. Legacy scratch first-request assertions can exit 1 when both correctly select the other account; pair counts are calculated from complete saved row arrays, and selection wires reviewed independently.
+
+`gates-4/done` absent at final check; controller e2e gates unavailable to this review, not awaited/polled. Prior round's frozen-side admin timeout is not counted against this branch. No product edits or workspace rerun performed in this round.
+
+## Overall branch disposition and carry-forward limits
 
 Provider refusal list differs by supported build (12 provider-list and six unported-provider expected rows). Pending KV process-local, 600000 ms, lost on restart, no global expired-entry sweep/admin-start cap. PKCE poll intentionally exchanges empty code; held poll/finish can exchange twice/create two credentials. X2 fractional/nonfinite expiry carrier remains parked. Publication waits without a helper timeout; shutdown has overall grace deadline. No live Postgres, explicit TCP RST, exhaustive callback/TTL boundary HTTP matrix, blocking-pool saturation or disconnected-SIGTERM certification. Earlier rounds' passing error/privacy/type/lifecycle checks remain evidence, not proof of every possible malformed input. Overall approval withheld for ordering findings.
