@@ -69,16 +69,16 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("oracle JSON");
         let mut failures = 0;
-        for row in rows.as_array().unwrap() {
+        for row in rows.as_array().expect("corpus rows") {
             let models: Vec<VirtualModel> = row["models"]
                 .as_array()
-                .unwrap()
+                .expect("models")
                 .iter()
                 .map(|m| VirtualModel {
-                    id: m["id"].as_str().unwrap().into(),
-                    targets: serde_json::from_value(m["targets"].clone()).unwrap(),
+                    id: m["id"].as_str().expect("model id").into(),
+                    targets: serde_json::from_value(m["targets"].clone()).expect("targets"),
                     strategy: omni_store::Strategy::Priority,
                     is_alias: false,
                 })
@@ -86,17 +86,19 @@ mod tests {
             let refs: Vec<_> = models.iter().collect();
             let credentials: Vec<_> = row["credentials"]
                 .as_array()
-                .unwrap()
+                .expect("credentials")
                 .iter()
                 .map(|c| {
                     use omni_store::credentials::{CredentialSecrets, Secret};
                     Credential {
                         lone_endpoint: None,
-                        id: c["id"].as_str().unwrap().into(),
-                        provider: c["provider"].as_str().unwrap().into(),
+                        id: c["id"].as_str().expect("credential id").into(),
+                        provider: c["provider"].as_str().expect("provider").into(),
                         label: String::new(),
-                        auth_type: omni_store::AuthType::parse(c["authType"].as_str().unwrap()),
-                        enabled: c["enabled"].as_bool().unwrap(),
+                        auth_type: omni_store::AuthType::parse(
+                            c["authType"].as_str().expect("auth"),
+                        ),
+                        enabled: c["enabled"].as_bool().expect("enabled"),
                         tier: 1.0,
                         weight: 1.0,
                         expires_at: None,
@@ -117,13 +119,13 @@ mod tests {
                     }
                 })
                 .collect();
-            if list_body(&refs, &credentials) != row["expected"].as_str().unwrap() {
+            if list_body(&refs, &credentials) != row["expected"].as_str().expect("expected bytes") {
                 failures += 1;
             }
         }
         eprintln!(
             "listing corpus: {} rows, {failures} failing",
-            rows.as_array().unwrap().len()
+            rows.as_array().expect("rows").len()
         );
         assert_eq!(failures, 0);
     }
