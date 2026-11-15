@@ -304,9 +304,23 @@ impl EventStream {
 
     /// Feeds messages to the decoder; `true` if it stopped (or threw).
     fn decode_all(&mut self, messages: &[SseMessage]) -> bool {
+        let mut terminal = false;
         for msg in messages {
+            let start = self.pending.len();
             match self.decoder.message(msg, &mut self.pending) {
-                Ok(Flow::Continue) => {}
+                Ok(Flow::Continue) => {
+                    // Dispatch stops at End. Finish the body before delivering
+                    // it even when a decoder leaves its own parser running.
+                    if self
+                        .pending
+                        .iter()
+                        .skip(start)
+                        .any(|event| matches!(event, StreamEvent::End { .. }))
+                    {
+                        self.stop();
+                        terminal = true;
+                    }
+                }
                 Ok(Flow::Stop) => {
                     self.stop();
                     return true;
@@ -323,7 +337,9 @@ impl EventStream {
                 }
             }
         }
-        false
+        // Preserve decoder output from messages already parsed in this chunk
+        // (including post-End events), as the frozen adapter does.
+        terminal
     }
 
     /// Reads nothing more. A body whose remainder is already buffered goes
