@@ -23,7 +23,7 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 
 ## B. Providers
 - [x] B1 (M) OAuth framework: refresh() with token_version CAS, 60 s sweep, snapshot publication (W→P mutexes) — merged 8f6f84f9, refresh approved after 3 review rounds; /api/connect/* HTTP routes → A15
-- [x] B2 (L) anthropic — merged 8f6f84f9, codec approved after 6 rounds (b2-codec-r6-review.md); bench 7 rounds vs 04c3c5af: overhead-c1 +1.5 %, chat-stream −0.8 % (inside base range)   - [ ] B3 (L) openai/codex   - [ ] B4 (L) antigravity
+- [x] B2 (L) anthropic — merged 8f6f84f9, codec approved after 6 rounds (b2-codec-r6-review.md); bench 7 rounds vs 04c3c5af: overhead-c1 +1.5 %, chat-stream −0.8 % (inside base range)   - [x] B3 (L) openai/codex — merged d6238477; codec + integration approved (b3-request-rereview.md, b3-decode-rereview.md, b3-integration-rereview.md); post-merge workspace 1,264 passed, 56 HTTP rows + run.ts 47 rows equal; open, non-blocking: deep native-disconnect case, TS PG write differential, bench load-wait needs Bash 5+; connect routes → A15   - [ ] B4 (L) antigravity
 - [ ] B5 (M) grok  - [ ] B6 (M) kimi  - [ ] B7 (M) kilo  - [ ] B8 (M) muse  - [ ] B9 (M) qoder
 - [ ] B10 (M) quota poller + oauthUsage + quota routes + resets/redeem
 
