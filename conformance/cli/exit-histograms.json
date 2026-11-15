@@ -1,4 +1,5 @@
 {
+  "db-clear-cells": { "exit 0": 22 },
   "db-snapshot-missing": {"exit 0":2},
   "db-file-state-self-test": {"exit 1":3},
   "db-restore-hashes": {"exit 0":24},
