@@ -1,4 +1,16 @@
-# Fix round 2 — item 1 committed; item 2 found inference-auth log leak; closure pending
+# Fix round 2 — inference observation complete; sink audit and closure pending
+
+**NEXT STEP (current, supersedes below):** A passes: inference parser logging is inherited, not an R3 defect. Finish B writer/boot consumer tracing, then C fresh final-commit gates and four drivers/manifest, then D complete top block. No product change needed for A. Driver pins response canary and combined captured stdout/stderr canary on BOTH binaries for each path. `/tmp/opencode/a8/fix2/inference-observation.log`: **221 equal / 0 expected / 0 failures**; raw logs/exchanges in `inference-observation/`. Used existing external rust-r1 build; fresh closure still required. No failing-first run: observation passed on both binaries initially.
+
+| Observed inference path | Frozen log canary | Rust log canary | Response canary (both) |
+|---|---|---|---|
+| POST /v1/chat/completions | yes | yes | yes |
+| POST /v1/messages/count_tokens | yes | yes | yes |
+| GET /v1/models | yes | yes | yes |
+
+Inherited behaviour: a key whose stored allowlist is not valid JSON makes requests with that key answer 500 quoting the parser diagnostic of the stored value, and that text is logged in both gateways (observed on the three paths above). Earlier classification as an unresolved defect was incorrect under the parity rule. R3 concerns Rust-only logging on client/operator paths.
+
+## History (everything below)
 
 **NEXT STEP (current):** Item 1 disposition committed as `eef79df4`. Item 2 found an unresolved stored-allowlist parser leak through inference authentication: omni-store KeyRowError.message → omni-gateway-core/src/snapshot.rs:117 GatewayError.message → omni-gateway/src/server.rs:1278 (token count), :1311 (model listing), and finish.rs:179 → dispatch.rs:179 (request rejection). Preserve wire text, sanitise ONLY logged error. Add a stored-allowlist canary authenticated with its raw API key for all three inference paths; prove failing first. `dispatch.rs`, `omni-gateway-core`, and `omni-ir` are excluded from edits: do not change them without scope authorisation; investigate an allowed gateway-side logging boundary rather than losing wire detail. No implementation attempted for this newly discovered path. Finish remaining sink trace, then final closure. Do NOT mark complete. Older NEXT STEP paragraphs below are history.
 

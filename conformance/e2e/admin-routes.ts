@@ -2744,6 +2744,19 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       if (step.kind === "client-summary") {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
+        // Inference auth intentionally retains the frozen parser diagnostic on
+        // both the wire and in rejection logs; separate keys pin each sink.
+        for (const [name,target,method] of [["Proxy","/v1/chat/completions","POST"],["Count","/v1/messages/count_tokens","POST"],["Models","/v1/models","GET"]] as const) {
+          const id = `inference-parser-${name}`;
+          const raw = `sk-fixture-${id}`;
+          const canary = `inference${name}StoredCanary`;
+          const hash = new Bun.CryptoHasher("sha256").update(raw).digest("hex");
+          fixture.run("INSERT INTO api_keys(id,label,prefix,hash,limits,created_at,model_allowlist) VALUES(?,?,?,?,?,?,?)",[id,id,id,hash,"{}",1,canary]);
+          const answer = await exchange({method,target,headers:[["authorization",`Bearer ${raw}`],J],...(method === "POST" ? {body:JSON.stringify({model:"probe",messages:[{role:"user",content:"probe"}]})} : {})});
+          check(`inherited stored parser ${name}`,answer,500);
+          if (!answer.body.includes(canary)) secretProblems.push(`${name}: inherited parser diagnostic missing from response`);
+          fixture.run("DELETE FROM api_keys WHERE id=?",[id]);
+        }
         fixture.run("UPDATE api_keys SET model_allowlist='storedAllowlistSecretCanary' WHERE id='client-A'");
         check("stored session allowlist parse failure", await exchange({target:"/api/client/summary",headers:[["cookie",`omni_admin=${identities[0]!.cookie}`]]}), 500);
         check("stored operator allowlist parse failure", await exchange({target:"/api/keys",headers:[["cookie",`omni_admin=${cookies.admin}`]]}), 500);
@@ -3069,6 +3082,12 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
     )
     .map((l) => m.text(l));
   // What the process wrote to stdout and stderr counts as sent too.
+  if (cfg.label.startsWith("client-summary")) {
+    const captured = Buffer.concat([readFileSync(logFile),readFileSync(`${logFile}.err`)]);
+    for (const name of ["Proxy","Count","Models"])
+      if (!captured.includes(`inference${name}StoredCanary`))
+        secretProblems.push(`${name}: inherited parser diagnostic missing from captured logs`);
+  }
   for (const [stream, f] of [
     ["stdout", logFile],
     ["stderr", `${logFile}.err`],
