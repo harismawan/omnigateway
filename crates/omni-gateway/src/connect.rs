@@ -373,6 +373,17 @@ async fn complete(
     } else {
         omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)?
     };
+    // The frozen connect host validates flow secrets before persistence.
+    if result
+        .refresh_token
+        .as_ref()
+        .is_some_and(|v| !matches!(v, JsValue::String(_)))
+    {
+        return Err(GatewayError::new(
+            ErrorCode::Upstream,
+            format!("{provider} oauth exchange returned something the host cannot use"),
+        ));
+    }
     let tokens = omni_store::credentials::TokenUpdate {
         access_token: Some(String::from_utf16_lossy(&result.access_token)),
         refresh_token: result.refresh_token.as_ref().map(crate::refresh::js_text),
@@ -388,7 +399,8 @@ async fn complete(
         .account_email
         .as_ref()
         .map(|v| crate::refresh::email_text(v, host.store.engine()))
-        .transpose()?;
+        .transpose()
+        .map_err(|_| internal())?;
     let id = reconnect.clone().unwrap_or_else(|| {
         omni_crypto::codex::uuid_v4_from(&omni_providers::oauth::random_state())
     });
