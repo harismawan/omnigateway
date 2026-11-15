@@ -1,5 +1,60 @@
 # B3 OpenAI / Codex
 
+## D2 checkpoint — HEAD `f40aca5f` — depth defect fixed
+
+**Product defect observed without mutation:** tool-schema, native function-call
+arguments and native function output cases SIGSEGV at 39,990 levels on 2 MiB
+threads. Lite `json!` expression serialization recursively traversed arbitrary
+JSON despite its scope. Fixed tool-prefix construction, function fields and
+final result wrapping using deep cloning/insert, Owned temporary and value
+moves. Prefix-only fix still failed; fixing final wrapping made schema pass.
+Key order preserved; 289 whole-request comparisons still pass. No public IR,
+dependency, HTTP or tripwire exception changes. Commit `f40aca5f`.
+
+14 depth cases now pass (six prior vendor +eight new); eight new scratch clone
+mutations all SIGSEGV, restored. Complete current inventory is in
+`conformance/openai-depth.md`; D is **not complete**, no step-4 completion claim.
+
+| Carrier/source under crates/omni-providers/src | Mutation/outcome |
+|---|---|
+| text/reasoning per-field merge wire.rs:334 | plain clone → SIGSEGV (D1) |
+| reasoning array replacement wire.rs:337 | plain clone → SIGSEGV (D1) |
+| vendor input wire.rs:394 / stream mod.rs:90 | plain insert + scope removal → SIGABRT (D1) |
+| client metadata wire.rs:323–325,402 | scope removal passes: borrowed/skipped, shallow replacement (D1) |
+| Tool schema wire.rs:241–243; lite.rs:59–69 | plain schema clone → SIGSEGV |
+| Native reasoning payload + old passthrough lite.rs:183–189 | plain item clone → SIGSEGV, each case |
+| Native user message content lite.rs:147 | plain content clone → SIGSEGV |
+| Native function arguments/output lite.rs:169,177 | plain field clone → SIGSEGV, each case |
+| Unknown native lite.rs:192 | plain item clone → SIGSEGV |
+| Cache fallback wire.rs:184 | plain first-item clone → SIGSEGV |
+| Ordinary tool input/result/media; ignored native result | Pending |
+| Response-format schema/text replacement | Pending |
+| Credential arbitrary data | Pending |
+| Foreign-native/system/provider-tool ignored payloads | Pending |
+| Native assistant annotations; function name/call_id aliases | Pending |
+| Explicit non-lite schema control/shared helper inventory | Pending |
+
+Logs `/tmp/opencode/b3/s4d-native-baseline.log`, `s4d-schema-prefix-only.log`,
+`s4d-native-first-{native_call,native_output}.log`, and
+`s4d-native-clone-{tool_schema,native_reasoning,native_metadata,native_message,native_call,native_output,native_unknown,cache_fallback}.log`.
+Post-commit gates: **52 successful summaries, 231 passes including subprocess
+repetitions, 4 ignored, zero failures**; strict all-target clippy, fmt/diff and
+all three source tripwires pass. Logs `s4d-native-final-{tests,clippy}.log`.
+Cargo incremental/dev debug/test debug all zero. Worktree clean.
+
+**Next fresh session: finish pending D rows above**, using source inventory,
+unmodified failing-first depth cases and restored scratch mutations. Then
+compressed HTTP request body, rules/open empty-body question in
+`conformance/openai-compression.md`; then gateway integration (registration,
+startup initialize(), generated-descriptor catalog, persist OAuth result provider
+data, end-to-end driver, dispatch_depth, benchmark-matrix entry).
+
+Known differences unchanged: X1 surrogate/non-numeric usage ignores, unsupported
+OAuth Zstd transport, unresolved empty-body frame, startup environment capture
+and refresh persistence/integration deferred. OAuth decode comparison and
+literal inventory remain 35 ported /86 differential /0 undecided. This turn
+stops after a committed carrier set to preserve context for the remaining audit.
+
 ## D1 vendor-depth checkpoint — HEAD `8ec4c4a5`
 
 **D partially complete: six vendor carriers committed; remaining D below.**
