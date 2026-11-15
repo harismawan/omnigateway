@@ -179,8 +179,8 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
     // Lexicographic composition of total preorders is total, even for corrupt cells.
     samples.sort_by(|a, b| {
-        compare_cells(&a[0], &b[0])
-            .then_with(|| compare_cells(&a[1], &b[1]))
+        history_compare_cells(&a[0], &b[0])
+            .then_with(|| history_compare_cells(&a[1], &b[1]))
             .then_with(|| compare_numbers(number(&a[5]), number(&b[5])))
     });
     let truncated = samples.len() > MAX_SAMPLES;
@@ -244,6 +244,14 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
     });
     Ok(out)
 }
+// Borrow normal TEXT cells; retain the corrupt-cell coercion rules above.
+fn history_compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::Text(a), Value::Text(b)) => a.encode_utf16().cmp(b.encode_utf16()),
+        _ => compare_cells(a, b),
+    }
+}
+
 pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Failure> {
     crate::credentials::validate_client_metadata(store)?;
     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
@@ -355,6 +363,92 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
         JsValue::Array(rows.into_iter().map(|(_, v)| v).collect()),
     )]))
     .unwrap_or_default())
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "release benchmark and byte snapshots; A8_CAPTURE=1 records baseline"]
+    fn history_speed() {
+        let dir = std::path::Path::new("/tmp/opencode/a8/speed");
+        std::fs::create_dir_all(dir).expect("scratch directory");
+        let store = omni_store::SqliteStore::open(":memory:", 0).expect("store");
+        let db = store.connection();
+        db.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE credentials; CREATE TABLE credentials(id,label,provider,tier,provider_data); INSERT INTO credentials VALUES('history-0','custom','custom',1,NULL),('history-1','custom','custom',1,NULL); DROP TABLE quota_samples; CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms);").expect("fixture");
+        let capture = std::env::var_os("A8_CAPTURE").is_some();
+        let check = |name: &str| {
+            let output = match history(&store, "", 1794614400000.0) {
+                Ok(s) => s,
+                Err(e) => format!("ERROR {:?}:{}", e.code, e.message),
+            };
+            let path = dir.join(format!("baseline-{name}.json"));
+            if capture {
+                std::fs::write(path, output.as_bytes()).expect("capture");
+            } else {
+                assert!(
+                    std::fs::read(path).expect("baseline") == output.as_bytes(),
+                    "bytes: {name}"
+                );
+            }
+            output.len()
+        };
+        for count in [1000, 10000, 50002] {
+            db.execute_batch(&format!("DELETE FROM quota_samples; WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<{count}) INSERT INTO quota_samples SELECT CASE WHEN x%2=0 THEN 'history-0' ELSE 'history-1' END,'daily',x,60000,NULL,1794613400000+x,NULL FROM n;")).expect("samples");
+            let bytes = check(&count.to_string());
+            let mut times = Vec::new();
+            for _ in 0..9 {
+                let start = std::time::Instant::now();
+                std::hint::black_box(history(&store, "", 1794614400000.0).expect("history"));
+                times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!(
+                "BENCH {count}: median {:.3} ms bytes {bytes} all {times:?}",
+                times[4]
+            );
+        }
+        db.execute_batch("DELETE FROM credentials; DELETE FROM quota_samples;")
+            .expect("clear");
+        for (i, label) in ["é", "E", "e", "Z", "ä", "A", "a", "Å", "中", "e\u{301}"]
+            .iter()
+            .enumerate()
+        {
+            db.execute(
+                "INSERT INTO credentials VALUES(?1,?2,'custom',1,NULL)",
+                rusqlite::params![i as i64, label],
+            )
+            .expect("label");
+            db.execute(
+                "INSERT INTO quota_samples VALUES(?1,'daily',1,10,NULL,1794613400000,NULL)",
+                [i as i64],
+            )
+            .expect("sample");
+        }
+        check("collation");
+        db.execute_batch("INSERT INTO credentials VALUES(2,'duplicate','custom',1,NULL),('1','text','custom',1,NULL); INSERT INTO quota_samples VALUES('1','daily',1,10,NULL,1794613400000,NULL),(999,'daily',1,10,NULL,1794613400000,NULL),(2,'daily',1,0,NULL,1794613400000,NULL),(2,'daily',1,NULL,NULL,1794613400000,NULL);").expect("mixed");
+        check("mixed-duplicate-orphan-limits");
+        for column in ["label", "provider"] {
+            for (name, value) in [
+                ("null", "NULL"),
+                ("blob", "x'ff'"),
+                ("invalid", "CAST(x'ff' AS TEXT)"),
+            ] {
+                db.execute_batch(&format!(
+                    "UPDATE credentials SET {column}={value} WHERE id=2"
+                ))
+                .expect("corrupt");
+                check(&format!("{column}-{name}"));
+            }
+            db.execute_batch(&format!(
+                "UPDATE credentials SET {column}='custom' WHERE id=2"
+            ))
+            .expect("restore");
+        }
+        db.execute_batch("DELETE FROM quota_samples; DROP TABLE quota_samples; CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at TEXT,window_ms); INSERT INTO quota_samples VALUES(2,'daily',1,10,NULL,'1794613400000x',NULL),(2,'daily',1,10,NULL,'1794613400000',NULL);").expect("text timestamp");
+        check("nonnumeric");
+    }
 }
 
 #[cfg(test)]
