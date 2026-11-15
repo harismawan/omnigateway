@@ -1,48 +1,45 @@
 # B3 OpenAI / Codex
 
-## D7 checkpoint — HEAD `567c2334` — next: group 6 control/inventory
+## Item A committed — HEAD `d0e142c6`; stopped before item B tests
 
-**Audit incomplete:** group 6 pending; groups 1–5 committed.
-Prior defect `f40aca5f`: unmodified tool_schema/native_call/native_output
-SIGSEGV; recursive lite `json!` fixed with deep clone/insert and moves.
-NEW DEFECT `5dab6c8f`: credential_accountId unmodified drop SIGABRT;
-derived clone also SIGABRT after drop fix. Deep clone/iterative Drop fix both.
-32 OAuth depth cases pass at 39,990 levels / 2 MiB; fixture follow-up `567c2334`.
-
-| Carrier/source under crates/omni-providers/src/openai | Mutation/outcome |
+Item A: depth audit completed; 33 cases, 39,990 levels / 2 MiB pass.
+No new unmodified failure/product defect. Prior lite/credential defects remain fixed.
+Canonical ownership table expanded in conformance/openai-depth.md; no Pending row.
+| Added control/stage | Evidence |
 |---|---|
-| text/reasoning per-field merge wire.rs:334 | plain clone → SIGSEGV (D1) |
-| reasoning array replacement wire.rs:337 | plain clone → SIGSEGV (D1) |
-| vendor input wire.rs:394 / stream mod.rs:90 | plain insert + scope removal → SIGABRT (D1) |
-| client metadata wire.rs:323–325,402 | scope removal passes: borrowed/skipped, shallow replacement (D1) |
-| Tool schema wire.rs:241–243; lite.rs:59–69 | plain schema clone → SIGSEGV |
-| Native reasoning payload + old passthrough lite.rs:183–189 | plain item clone → SIGSEGV, each case |
-| Native user message content lite.rs:147 | plain content clone → SIGSEGV |
-| Native function arguments/output lite.rs:169,177 | plain field clone → SIGSEGV, each case |
-| Unknown native lite.rs:192 | plain item clone → SIGSEGV |
-| Cache fallback wire.rs:184 | plain first-item clone → SIGSEGV |
-| Ordinary tool input wire.rs:107 | remove mod.rs:70 scope → PASS; borrowed writer, retained String |
-| Result string wire.rs:111 | same → PASS; String only |
-| Result media wire.rs:110–115 | same → PASS; typed strings, shallow moved parts |
-| Ignored native result wire.rs:109 | same → PASS; borrowed presence check, iterative IR drop |
-| Response schema/text replacement/malformed text wire.rs:370; response_format.rs:128–237 | remove mod.rs:70 scope → SIGABRT, all 3 |
-| Assistant annotations lite.rs:147–154; function name/call_id and output call_id lite.rs:169,177 | plain clone → SIGSEGV, all 4 |
-| Foreign native wire.rs:117; system/tools wire.rs:158,234–253 | scope removal PASS: borrowed/skipped, IR iterative drop (`00036121`) |
-| Credential accountId/installationId/idSalt/extension codec.rs:23–50 | plain-drop mutation SIGABRT all 4; original derived clone SIGABRT; reads borrowed/type-filtered |
-| Non-lite schema wire.rs:234–253; shared-helper inventory | Pending (group 6; expansion in depth document) |
+| API-key non-lite schema, wire.rs:234–253 | baseline PASS; plain clone SIGSEGV 11 |
+| repaired input copy, wire.rs:202 | native_reasoning plain clone SIGSEGV 11 |
+| LiteArgs input/tools drop | ordinary drop PASS within outer codec scope |
+| response-format raw/read/text/copy/next/spec owners | mapped to existing schema/replacement scope-removal cases |
+| system/file helpers; flush/repair; lite result | borrowed/typed shallow fields or moved owners; structural reasons recorded |
+Completeness grep (Value/Map/deep and named local owners across five named files):
+149 lines, `/tmp/opencode/b3/s5a-inventory.log`; exact expression in depth doc.
+Credentials PartialEq removed: no non-test comparison/container/bound use found;
+workspace all-target check passes (`s5a-workspace-check.log`).
+All scratch mutations restored; worktree clean after item A commit.
 
-Post-commit tests: 52 ok summaries, 231 passes, 4 ignored, no FAILED lines.
-Clippy Finished (2.13s); fmt empty. Logs `/tmp/opencode/b3/s4e-g6-*` (group 6 NOT done).
-Clippy regression introduced c0875139, fixed 6bf18cba (3 unwraps → expect).
-Only TWO source-tripwire binaries identified: json_writes 1 pass;
-public_json_boundary 4 passes. Earlier “three” claim unsupported. Mutations restored.
-Known differences unchanged: X1 ignores, OAuth Zstd transport/empty-body frame,
-startup environment capture and refresh persistence deferred; literals 35/86/0.
-Next: group 6 non-lite schema and exhaustive helper inventory. Afterwards compressed HTTP request body per
-`conformance/openai-compression.md` (open empty-body question; refusal at
-http/mod.rs:248–249), then registration, startup `initialize()`, generated
-descriptor catalog, persist OAuth provider data, end-to-end driver,
-`dispatch_depth` cases and benchmark-matrix entry.
+Item B NOT implemented; no failing-first HTTP tests written or frozen wire comparison run.
+Read compression note and frozen http-client.ts:90–155,160–207 only.
+Empty source IS compressed: 179–181 constructs Buffer and calls zstdEncode
+unconditionally for zstd; 203–204 writes then closes. 154: `if (bodyBytes.byteLength > 0) outgoing.write(bodyBytes);`
+99–100: `if (req.body.length > 0 && !hasHeader(req, "content-length"))` appends length.
+Thus empty encoded frame is written without explicit Content-Length (code reading,
+not a new wire observation). Output buffered via Response.arrayBuffer at 201.
+Existing encoder-only measurements: empty frame bytes differ; decoded equality required.
+
+Post-commit gates, logs under `/tmp/opencode/b3/`:
+`s5a-tests.log`: 52 `test result: ok` summaries; 231 passed, 4 ignored; no FAILED.
+`s5a-clippy.log`: `Finished dev profile [unoptimized] target(s) in 1.44s`.
+`s5a-fmt.log`: empty output.
+`s5a-tripwires.log`: json_writes 1 passed; public_json_boundary 4 passed, zero failed.
+Restored OAuth request corpus passes (`s5a-a-restored.log`); existing ignores untouched.
+
+Next session: finish item B with failing-first wire/reference/refusal/empty tests,
+only http/mod.rs and wire.rs plus tests/docs; separate commit; update compression
+Implemented section and rerun gates. Then step 5 gateway integration:
+provider registration, startup initialize(), generated descriptor catalog,
+persist OAuth result provider data via ensure_secrets(prior), frozen gateway
+end-to-end driver, dispatch_depth cases, benchmark-matrix entry.
 
 ## D1 vendor-depth checkpoint — HEAD `8ec4c4a5`
 
