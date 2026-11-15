@@ -1,6 +1,6 @@
 // Observation tool, outside the pinned matrix. K3 is BEFORE copy, not mid-copy;
 // K8 is reopen entry, not migration. Deeper schema-19 migration probe:
-// /tmp/opencode/db-review/r3/kill-migration.ts (reviewer evidence, not run here).
+// /tmp/opencode/db-review/r3/conformance/cli/kill-migration.ts (reviewer evidence, not run here).
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";

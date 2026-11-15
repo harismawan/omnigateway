@@ -24,10 +24,32 @@ pub fn clear_bodies(
             .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    // Frozen sweep takes this snapshot before walking, then rechecks only misses.
+    // Non-TEXT cells cannot strictly equal a JavaScript path string.
+    let known = conn
+        .prepare("SELECT rel_path FROM request_bodies WHERE rel_path IS NOT NULL")
+        .map_err(|e| e.to_string())?
+        .query_map([], |r| {
+            Ok(match r.get_ref(0)? {
+                rusqlite::types::ValueRef::Text(bytes) => {
+                    Some(String::from_utf8_lossy(bytes).into_owned())
+                }
+                _ => None,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .flatten()
+        .collect::<std::collections::HashSet<_>>();
     let mut files = Vec::new();
     list_artifacts(dir, dir, &mut files);
     let mut orphans = 0;
     for rel in files {
+        if known.contains(&rel) {
+            continue;
+        }
         let claimed: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM request_bodies WHERE rel_path = ?",
