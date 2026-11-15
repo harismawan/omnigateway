@@ -16,7 +16,7 @@ fn frozen_lifecycle_comparison() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rows: Vec<Value> = serde_json::from_slice(&out.stdout).expect("rows");
-    assert_eq!(rows.len(), 80);
+    assert_eq!(rows.len(), 152);
     for (index, row) in rows.iter().enumerate() {
         let refresh = row["mode"] == "refresh";
         let request = if refresh {

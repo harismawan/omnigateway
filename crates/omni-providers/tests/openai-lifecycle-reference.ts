@@ -23,4 +23,22 @@ for (const id_token of ['h.eyJlbWFpbCI6Im1haWwifQ.s','h.eyJlbWFpbCI6Im1haWwifQ==
   const result=(await step.next({status:200,body})).value;
   rows.push({prior:valid,mode:'refresh',status:200,body,request,result});
 }
+for (const depth of [126, 129, 1000, 10000, 40000, 100000]) {
+  const deep = '['.repeat(depth)+'0'+']'.repeat(depth);
+  for (const mode of ['exchange', 'reconnect', 'refresh']) {
+    for (const payload of [
+      `{"email":"mail","https://api.openai.com/auth":{"chatgpt_account_id":"acct"},"extra":${deep}}`,
+      deep,
+      `{"email":"mail","https://api.openai.com/auth":${deep}}`,
+      `{"email":42,"https://api.openai.com/auth":{"chatgpt_account_id":"  "},"extra":${deep}}`,
+    ]) {
+      const prior = mode === 'exchange' ? {} : valid;
+      const body = JSON.stringify({access_token:'a',id_token:`h.${Buffer.from(payload).toString('base64url')}.s`});
+      const step = mode === 'refresh' ? flow.refresh({...helpers,refreshToken:'old',providerData:prior}) : flow.exchange({...helpers,code:' code #s',pending,providerData:prior});
+      const request=(await step.next()).value;
+      const result=(await step.next({status:200,body})).value;
+      rows.push({prior,mode,status:200,body,request,result});
+    }
+  }
+}
 console.log(JSON.stringify(rows));
