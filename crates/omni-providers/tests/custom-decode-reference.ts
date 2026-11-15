@@ -15,6 +15,7 @@ for(const value of [s,null]){
  for(const field of ['code','type','message'])rows.push({protocol:'responses',messages:[m('error',{error:{[field]:value}})]});
  for(const usage of [{input_tokens:value},{input_tokens_details:{cached_tokens:value}},{prompt_tokens_details:{cached_tokens:value}}])rows.push({protocol:'responses',messages:[m('response.completed',{response:{usage}})]});
 }
-for(const protocol of ['chat','responses'])for(const data of ['{"id":1e309,"choices":[]}','{"usage":{"prompt_tokens":1e309}}'])rows.push({protocol,overflow:true,messages:protocol==='chat'?[{event:'message',data}]:[{event:'response.created',data:'{"response":{"id":1e309}}'}]});
+for(const data of ['{"id":1e309,"choices":[]}','{"usage":{"prompt_tokens":1e309}}'])rows.push({protocol:'chat',overflow:true,messages:[{event:'message',data}]});
+for(const data of ['{"response":{"id":1e309}}','{"response":{"id":"keep"},"ignored":1e309}'])rows.push({protocol:'responses',overflow:true,messages:[{event:'response.created',data}]});
 for(const row of rows){const events=[];let throws=false;try{for await(const e of (row.protocol==='chat'?decodeCustomChat:decodeCustomResponses)((async function*(){yield* row.messages})()))events.push(e)}catch(e){if(!(e instanceof TypeError))throw e;throws=true}row.events=events;row.throws=throws;}
 console.log(JSON.stringify(rows));
