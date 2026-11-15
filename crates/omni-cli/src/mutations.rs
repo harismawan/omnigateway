@@ -316,9 +316,9 @@ pub fn run(
                     if matches!(
                         listing.cell(index, "revokedAt"),
                         omni_ir::jsjson::JsValue::Null
-                    ) && !(omni_control::cli_cell::scalar_number(
-                        listing.cell(index, "expiresAt")
-                    ) > now as f64)
+                    ) && omni_control::cli_cell::scalar_number(listing.cell(index, "expiresAt"))
+                        .partial_cmp(&(now as f64))
+                        != Some(std::cmp::Ordering::Greater)
                     {
                         format!(" {}", paint(31, "(expired)"))
                     } else {

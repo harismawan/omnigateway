@@ -147,8 +147,9 @@ pub fn human(
         let state = if !matches!(listing.cell(index, "revokedAt"), jsjson::JsValue::Null) {
             "revoked"
         } else if !matches!(listing.cell(index, "expiresAt"), jsjson::JsValue::Null)
-            && !(omni_control::cli_cell::scalar_number(listing.cell(index, "expiresAt"))
-                > now as f64)
+            && omni_control::cli_cell::scalar_number(listing.cell(index, "expiresAt"))
+                .partial_cmp(&(now as f64))
+                != Some(std::cmp::Ordering::Greater)
         {
             "expired"
         } else {
