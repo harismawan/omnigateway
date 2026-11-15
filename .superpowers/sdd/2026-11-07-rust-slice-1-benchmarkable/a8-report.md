@@ -1,4 +1,23 @@
-# Fix round 2 — partial checkpoint: remaining named producers converted; audit completion and closure pending
+# Fix round 2 — item 1 disposition complete; sink audit and closure pending
+
+**NEXT STEP (current):** Item 1 audit found no additional producer requiring conversion. Finish item 2 consumer tracing and commit its sink table, then item 3 final gates/drivers/manifest. The earlier NEXT STEP paragraphs below are history.
+
+Producer disposition (paths relative to `crates/`; line numbers observed in this checkout):
+| Stored column | Disposition / error travel |
+|---|---|
+| api_keys.model_allowlist | Converted: omni-store/src/keys.rs:265,493,513 and pg/rows.rs:58,263; omni-control/src/api.rs:114, keys.rs:509, admin_password.rs:147. StoredJson Display/Debug sanitised; KeyRowError explicit wire parser text retained. Existing summary/operator canary coverage. |
+| credentials.provider_data | Converted: omni-store/src/credentials.rs:230, pg/rows.rs:292; omni-control/src/models.rs:60, api.rs:783. Structured error or its Display; snapshot isolation fixed message. Existing operator canary. |
+| virtual_models.targets | Converted: omni-store/src/models.rs:210-225, omni-control/src/models.rs:17. Structured Display in String reason; typed Target decode uses fixed reason. Existing operator canary. |
+| settings.value (settings object) | No parser-error propagation: omni-store/src/settings.rs:170 returns defaults; omni-control/src/settings_value.rs:45 returns defaults. Guardrail/smart-router settings share this reader. |
+| api_keys.limits | No parser-error propagation: omni-store/src/keys.rs:13-19 returns None, pg/rows.rs:42,224 shares reader; omni-control/src/api.rs:127-135 returns null and :170 logs only id + fixed `api key limits unreadable`; keys.rs:520 consumes Option. |
+| api_keys.guardrail_policy | No JSON parser: omni-store/src/keys.rs:362 text reader, pg/rows.rs:47,229 typed text. Policy inside settings uses tolerant settings reader above. |
+| request_logs.degradations | Fixed error: omni-store/src/logs.rs:197-202 discards parser detail for InvalidQuery; usage.rs:205 and pg/usage.rs:281 default on parse failure. |
+| request_logs.rtk_filters | No parser-error propagation: omni-store/src/logs.rs:204 uses .ok() and filters/defaults. |
+| encrypted body JSON | No parser-error propagation: omni-store/src/pg/bodies.rs:240 uses .ok()? after decrypting. from_slice calls in this file are crypto byte operations. |
+
+Audit searched parse_error/parse_js/serde_json::from_str/from_slice plus parser aliases (`operator_json::parse`, `parse_json`). Other matches are request/query input, plugin manifests, generated catalog, tests or non-JSON vocabulary/URL parsing. No new conversion and therefore no new converted-column canary in item 1; prior canaries remain in admin-routes.ts:2747-2755 and captured-log scan :3083-3086. This item is source inspection, not a new driver run.
+
+## Historical checkpoints (everything below)
 
 **NEXT STEP (current, supersedes ALL older NEXT STEP paragraphs):** product HEAD `6e05646a`. Finish the settings/limits/policy parser disposition and canary coverage; finish the complete log-sink consumer trace using `/tmp/opencode/a8/fix2/r3-tracing-audit.txt`; then final-commit closure and manifest. Do not mark complete yet. R1/R2 accepted. Named remaining R3 producers converted in `a95494b3`; PostgreSQL error-value test `298b071e`, relocated for Clippy in `6e05646a`. No new dependency or excluded-file edits. Other agents' notes, bun.lock, untracked specs untouched.
 
