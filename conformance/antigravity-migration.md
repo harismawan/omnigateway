@@ -97,10 +97,14 @@ The shared Rust JSON parser refuses upstream frames above 40,000 container
 levels with `DecodeError::Throw("upstream JSON exceeds depth 40000")`, before
 emitting any event from that frame. The adapter exposes retryable UPSTREAM
 `antigravity codec decode threw` (provider antigravity, gatewayAuthored true).
+Consequently a deterministic over-deep reply may be retried or failed over.
 Earlier frames' events remain emitted, including an open text block; refusal
 does not synthesize a blockEnd. This controller-approved difference also applies
 to ignored fields, usageMetadata and error payloads. Matching unbounded frozen
 JSON.parse would require changing the shared parser; ingress has the same bound.
+The independent re-review measured total frame depth 40,000 accepted and 40,001
+refused, for arrays and objects alike. Brackets inside JSON strings do not count:
+a 50,000-bracket text string was accepted and byte-equal to frozen.
 
 `bounded_depth_expected_divergence` asserts **10 rows**, explicitly separate from
 equality: `bounded-depth/{ignored,usageMetadata,error,args}/{first,after-text}`
@@ -127,12 +131,20 @@ contradiction was found in the decoder reading.
 
 ### Literal and branch audit
 
-Rust-only counter bound: indices `0..=4294967295` may be emitted. Checked
+Rust-only counter bound: indices `0..=4294967295` may be emitted. Checked index
 increments retain an exhaustion flag instead of wrapping; the next new block
-(or exhausted tool counter) closes any open block and emits terminal UPSTREAM,
+closes any open block and emits terminal UPSTREAM,
 retryable false, `Antigravity stream exceeded u32 block/tool index bound 4294967295`.
-Later frames are ignored. `decode::tests::counter_exhaustion_is_terminal` seeds
-both counters at MAX-1 and checks text alternation and tool calls through MAX.
+Later frames and `finish()` add nothing. The redundant `tools_exhausted` flag
+and allocation helper's tool parameter were removed: each tool consumes a block
+index, so tool exhaustion cannot independently precede index exhaustion.
+`tool_calls` uses saturating addition after emitting the call. With both counters
+seeded at MAX-1 (all prior blocks tools), the last two IDs are `fc_4294967294`
+and `fc_4294967295`, at those same indices, matching frozen's zero-based count.
+`decode::tests::counter_exhaustion_is_terminal` checks four reachable boundary
+scenarios: all tools, alternating text/thinking, mixed tool/text, and same-kind
+text continuation after index exhaustion (one more delta, no allocation).
+Each then refuses the next new block with the exact terminal error above.
 
 Locations below are in `crates/omni-providers/src/antigravity/decode.rs`;
 pinning rows are named by `tests/antigravity_decode-reference.ts`.
@@ -189,7 +201,7 @@ depth on a 2 MiB thread. Evidence: `/tmp/opencode/b4/turn5/depth.json` and
 `trait.log`. No stack-limit divergence was observed on this runtime.
 
 Retained-red X1: **the whole frame is rejected at parse time**, including for
-ignored fields. The 30 named reviewer rows cover both lone UTF-16 units and
+ignored fields. The original 30 named reviewer rows cover both lone UTF-16 units and
 `1e309` in text, thinking text, tool name/id, args string/value, responseId,
 modelVersion, error message/status, each of promptTokenCount,
 candidatesTokenCount, thoughtsTokenCount, cachedContentTokenCount, and ignored
@@ -200,7 +212,25 @@ nonfinite usage as zero, and preserves UTF-16 units. An additional dedicated
 ignored-field test repeats that particularly surprising representable-output case.
 Expected events travel as ASCII-safe JSON text strings inside a JSON envelope;
 Rust event JSON is escaped identically, without parsing expected event strings.
-Thus the 31 row executions fail at event comparison, not oracle transport.
+Three additional rows bring the total to **33 distinct X1 rows**:
+
+| Row | Frozen actual events (no throw) | Rust actual events (no throw) |
+|---|---|---|
+| `X1/surrogate/finishReason` | blank start; non-retryable UPSTREAM `unrecognized Antigravity finish reason "<lone D800>"` | retryable UPSTREAM truncation only |
+| `X1/surrogate/blockReason` | blank start; end(contentFilter), all four usage counters zero | retryable UPSTREAM truncation only |
+| `X1/overflow/candidatesLength` | blank start; non-retryable UPSTREAM `Antigravity returned Infinity candidates, which cannot be represented` | retryable UPSTREAM truncation only |
+
+The blockReason row's frozen output is fully representable: the surrogate itself
+is never emitted. Each new row has a dedicated ignored retained-red test, with
+real frozen expectations through the ASCII-safe transport. The six ignored tests
+execute 37 rows (33 distinct plus four repeats), all reaching event comparison
+and failing for X1 whole-frame rejection, not transport or fixture typos.
+
+No surrogate-bearing cloak-map row exists: `ToolCloak::build` consumes Rust IR
+tool names as `String`/`&str`, and `from_wire` is `HashMap<String, String>`.
+Neither wire keys nor original-name values can hold lone UTF-16 surrogates.
+The request-side X1 tool-name row pins rejection before cloak construction;
+there is no reachable decoder cloak-map consequence to exercise.
 
 The inherent request entry point remains as a trait-forwarding compatibility
 shim: existing `antigravity_depth.rs` calls it without importing ProviderCodec,
