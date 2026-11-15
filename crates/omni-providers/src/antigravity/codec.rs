@@ -30,7 +30,7 @@ impl crate::codec::ProviderCodec for AntigravityCodec {
         &self,
         input: &CodecInput<'_>,
     ) -> Result<CodecRequest<DecodeState>, BuildError> {
-        omni_ir::deep::scope(|| self.build_request_scoped(input))
+        self.build_request_scoped(input)
     }
 
     fn decoder(
