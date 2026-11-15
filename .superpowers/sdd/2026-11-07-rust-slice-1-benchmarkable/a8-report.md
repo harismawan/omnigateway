@@ -1,16 +1,43 @@
-# Fix round 2 — inference observation complete; sink audit and closure pending
-
-**NEXT STEP (current, supersedes below):** A passes: inference parser logging is inherited, not an R3 defect. Finish B writer/boot consumer tracing, then C fresh final-commit gates and four drivers/manifest, then D complete top block. No product change needed for A. Driver pins response canary and combined captured stdout/stderr canary on BOTH binaries for each path. `/tmp/opencode/a8/fix2/inference-observation.log`: **221 equal / 0 expected / 0 failures**; raw logs/exchanges in `inference-observation/`. Used existing external rust-r1 build; fresh closure still required. No failing-first run: observation passed on both binaries initially.
-
-| Observed inference path | Frozen log canary | Rust log canary | Response canary (both) |
+# Fix round 2 — complete for review
+Evidence base: `/tmp/opencode/a8/fix2/` (all log paths below relative); verified code/driver commit `c42cbbff`, following observation commit `20be5c97`; subsequent report-only commit changes no executable source. A–C complete; inference logging is inherited, not an unresolved R3 defect.
+| Finding | Fix commit(s) | Failed first → evidence |
+|---|---|---|
+| R1 quota identity joins | `30411500` | BLOB disclosure, 6 failures `r1-red.log`; green `r1-quota.log`, `r1-history.log` |
+| R2 history total ordering | `1d692b74` | 3 failures (order/500), `r2-red.log`; green `r2-green.log`, adversarial test `r2-test.log` |
+| R3 Rust-only stored parser logging | `ab409566`, `a95494b3`; PG value tests `298b071e`, `6e05646a` | Summary canary 1 failure `r3-red.log`; green `r3-green.log`, `r3-rest-admin.log`; later model/provider canaries had no failing-first run |
+Producer disposition (paths below under `crates/`; S=omni-store/src, C=omni-control/src, G=omni-gateway/src):
+| Column | Disposition / source |
+|---|---|
+| api_keys.model_allowlist | Converted StoredJson: S/keys.rs:265,493,513; S/pg/rows.rs:58,263; C/api.rs:114, keys.rs:509, admin_password.rs:147. Explicit inference wire text kept; client/operator logs sanitised. |
+| credentials.provider_data | Converted: S/credentials.rs:230, pg/rows.rs:292; C/models.rs:60, api.rs:783. StoredJson Display or fixed isolation message. |
+| virtual_models.targets | Converted: S/models.rs:210-225; C/models.rs:17. Sanitised Display; typed Target decode fixed reason. |
+| settings.value / contained policies | No parser-error propagation: S/settings.rs:170, C/settings_value.rs:45 return defaults. |
+| api_keys.limits / guardrail_policy | Limits discard diagnostics: S/keys.rs:13-19, pg/rows.rs:42,224; C/api.rs:127; fixed warning :170. Policy is text: S/keys.rs:362, pg/rows.rs:47,229. |
+| request_logs.degradations / rtk_filters / encrypted body JSON | Fixed InvalidQuery S/logs.rs:202; defaults S/usage.rs:205, pg/usage.rs:281; .ok() S/logs.rs:204, pg/bodies.rs:240. |
+Complete stored-parser-capable sink table, including investigated writer/boot candidates:
+| Sink | Printed form / reachability |
+|---|---|
+| G/api.rs:160; admin_routes.rs:177; S/keys.rs:378 | StoreError Display (or Failure.message derived from it): fixed text + table/column/id, no parser detail. |
+| S/credentials.rs:296,506; C/api.rs:170; G/dispatch.rs:323 | Fixed isolation/limits/publication text (id where present); no parser diagnostic. |
+| G/server.rs:1278,1311; dispatch.rs:179 via finish.rs:179 | Inference GatewayError.message retains parser text; BOTH gateways log it (table below). |
+| G/dispatch.rs:907 (also :179 on refresh failure) | Stored credential reread can fail; refresh.rs:53 replaces StoreError with fixed `credential persistence failed`. |
+| S/writer/health.rs:403,486,500,504,522,536 | JoinError Display; Refused/UncertainCommit/Panicked strings; StoreError Display at :500,536. Health scalar/vocabulary readers have no JSON parser. |
+| S/writer/pg_batch.rs:234; writer/task.rs:517,916,928; G/lib.rs:624 | Event-validation StoreError / checkpoint SQL error / batch StoreError / writer-close StoreError Display; no stored JSON parser on these paths. |
+| G/main.rs:54,79,87 | Config / start String / signal IO Display. Start maps store errors through Display (lib.rs:323-339); snapshot isolates malformed JSON rows. Others cannot read cells. |
+| Other inventory candidates | G/admin_routes.rs:166 JoinError; S/pg/mod.rs:189 and G/lib.rs:571 protocol errors; G/dispatch.rs:504 eligibility vocabulary, not ModelRowError. No parser detail. Full occurrence inventory: `r3-tracing-audit.txt`. |
+Observation (distinct canary per path; response comparison and BOTH stdout/stderr scanned by driver):
+| Inference path | Frozen log | Rust log | Response body, both |
 |---|---|---|---|
 | POST /v1/chat/completions | yes | yes | yes |
 | POST /v1/messages/count_tokens | yes | yes | yes |
 | GET /v1/models | yes | yes | yes |
+Inherited behaviour: a key whose stored allowlist is invalid JSON makes every request with that key answer 500 quoting the parser's diagnostic of the stored value, and the same text is logged in both gateways (observed on these three inference paths). Pinned by `20be5c97`; initial observation passed, no failing-first run: `inference-observation.log` 221 equal / 0 failures; repeated with fresh binary in `closure-admin-routes/`.
+Known differences: sort pair order on non-string sort cells; history order with non-numeric observedAt (requires hand-altered affinity); sanitised log lines on paths where frozen logs nothing; empty-413 `content-length` header. Broader operator malformed-id audit remains separate; PG covered by error-value unit tests, no live-PG driver.
+Gates: `closure-tests.log` **1163 passed / 0 failed / 11 ignored / 161 groups**; `closure-clippy.log` workspace all-targets -D warnings passed; `closure-fmt.log` passed; `closure-build.log` fresh build passed. All Cargo commands used CARGO_INCREMENTAL=0, CARGO_PROFILE_DEV_DEBUG=0, CARGO_PROFILE_TEST_DEBUG=0; test timeout 20 minutes.
+Drivers: `closure-admin-routes.log` **20377 equal / 24 expected / 0 failures**, 38 keys; `closure-admin-auth.log` **212 / 4 / 0**, 116 tokens; `closure-surface.log` **620 / 61 / 0**; `closure-run.log` **47 passing rows, all equal**. All runs completed and results read; normal driver scratch teardown, run.ts scratch removed after recording.
+Manifest: `manifest.json` records tested commit and SHA256 of frozen `/tmp/opencode/a8/ts` and fresh `rust-r1` (only copied Rust binary in fix2). Source edits this follow-up: driver only; excluded files, unrelated bun.lock/specs/stash untouched.
 
-Inherited behaviour: a key whose stored allowlist is not valid JSON makes requests with that key answer 500 quoting the parser diagnostic of the stored value, and that text is logged in both gateways (observed on the three paths above). Earlier classification as an unresolved defect was incorrect under the parity rule. R3 concerns Rust-only logging on client/operator paths.
-
-## History (everything below)
+## History — everything below is superseded checkpoint evidence
 
 ### B follow-up sink trace (current observation)
 | Sink under crates/ | Printed value; stored JSON reachability |
