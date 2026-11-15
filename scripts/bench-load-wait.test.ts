@@ -1,6 +1,41 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 
+test("load deadline includes a full second across a wall-clock boundary", async () => {
+  const dir = mkdtempSync("/tmp/opencode/load-boundary-");
+  try {
+    const p = Bun.spawn(
+      [
+        "bash",
+        "-c",
+        `
+      source scripts/bench-load-wait.sh
+      sleep "$(awk -v now="$EPOCHREALTIME" 'BEGIN { f=now-int(now); print (f<0.95 ? 0.95-f : 1.95-f) }')"
+      echo '9 0 0' > "$BENCH_TEST_LOAD_FILE"
+      (sleep 0.15; echo '0.5 0 0' > "$BENCH_TEST_LOAD_FILE") &
+      wait_for_load
+    `,
+      ],
+      {
+        env: {
+          ...process.env,
+          BENCH_TEST_LOAD_FILE: `${dir}/load`,
+          LOAD_WAIT: "1",
+          LOAD_POLL: "0.02",
+          MAX_LOAD: "1",
+          ALLOW_BUSY: "0",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const stderr = await new Response(p.stderr).text();
+    expect({ exit: await p.exited, stderr }).toMatchObject({ exit: 0 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("load guard waits for falling load, times out, or bypasses", async () => {
   const dir = mkdtempSync("/tmp/opencode/load-wait-");
   const file = `${dir}/load`;
