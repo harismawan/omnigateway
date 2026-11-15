@@ -252,3 +252,17 @@ fn owner_reexports_are_pinned() {
     negative.sort();
     assert_ne!(negative, expected, "reviewer's owner-reexport fixture");
 }
+
+#[test]
+fn flow_result_owner_is_explicit() {
+    let source = include_str!("../../omni-providers/src/oauth.rs");
+    assert!(source.contains("impl Clone for FlowResult"));
+    assert!(source.contains("impl Drop for FlowResult"));
+    assert!(source.contains("omni_ir::deep::clone_map(&self.provider_data)"));
+    assert!(source.contains("omni_ir::deep::drop_map_in_place(&mut self.provider_data)"));
+    assert!(
+        include_str!("public_json_boundary.tsv")
+            .contains("OWNER omni-providers/src/oauth.rs FlowResult.provider_data")
+    );
+    // This targeted lexical pin does not discover other owners or field additions.
+}

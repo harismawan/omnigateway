@@ -1,0 +1,337 @@
+//! Frozen OpenAI Responses SSE semantics. Arbitrary payloads remain scoped;
+//! emitted native maps use the IR's iterative ownership implementation.
+use crate::{
+    codec::{DecodeError, Flow, StreamDecoder},
+    sse::SseMessage,
+};
+use omni_ir::{
+    deep,
+    error::ErrorCode,
+    js::{self, nullish_or, prop},
+    stream::{
+        ContentBlockStart, Delta, NativeFold, StopReason, StreamEvent, usage_from_prompt_total,
+    },
+};
+use serde_json::{Map, Value, json};
+use std::collections::VecDeque;
+const KNOWN: &[&str] = &[
+    "keepalive",
+    "response.created",
+    "response.queued",
+    "response.in_progress",
+    "response.output_item.added",
+    "response.output_item.done",
+    "response.content_part.added",
+    "response.content_part.done",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.output_text.annotation.added",
+    "response.refusal.delta",
+    "response.refusal.done",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_part.done",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_text.delta",
+    "response.reasoning_text.done",
+    "response.function_call_arguments.delta",
+    "response.function_call_arguments.done",
+    "response.metadata",
+    "response.completed",
+    "response.incomplete",
+    "response.failed",
+    "error",
+];
+pub struct OpenAiDecoder {
+    native: bool,
+    indices: Vec<String>,
+    // Only primitives can match a later JSON payload under JS SameValueZero.
+    owns: Vec<String>,
+    tool: bool,
+    terminal: bool,
+}
+impl OpenAiDecoder {
+    pub fn new(native_reasoning: bool) -> Self {
+        Self {
+            native: native_reasoning,
+            indices: Vec::new(),
+            owns: Vec::new(),
+            tool: false,
+            terminal: false,
+        }
+    }
+    fn index(
+        &mut self,
+        output: Option<&Value>,
+        content: Option<&Value>,
+    ) -> Result<u32, DecodeError> {
+        let key = format!("{}:{}", string(output)?, string(content)?);
+        if let Some(i) = self.indices.iter().position(|k| k == &key) {
+            return Ok(i as u32);
+        }
+        self.indices.push(key);
+        Ok((self.indices.len() - 1) as u32)
+    }
+}
+fn string(v: Option<&Value>) -> Result<String, DecodeError> {
+    js::try_to_string(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
+}
+fn index_value(v: Option<&Value>) -> Option<&Value> {
+    nullish_or(v, None)
+}
+fn key(v: Option<&Value>) -> Option<String> {
+    match index_value(v) {
+        None => Some("n:0".into()),
+        Some(Value::Array(_) | Value::Object(_)) => None,
+        Some(Value::Number(_)) => Some(format!("n:{}", js::to_string(v))),
+        Some(v) => Some(format!(
+            "{}:{}",
+            if v.is_string() { "s" } else { "b" },
+            js::to_string(Some(v))
+        )),
+    }
+}
+fn text(v: Option<&Value>) -> Result<String, DecodeError> {
+    nullish_or(v, None)
+        .map(|v| string(Some(v)))
+        .unwrap_or_else(|| Ok(String::new()))
+}
+fn error(out: &mut VecDeque<StreamEvent>, message: String) {
+    out.push_back(StreamEvent::Error {
+        code: ErrorCode::Upstream,
+        message,
+        retryable: false,
+    });
+}
+impl StreamDecoder for OpenAiDecoder {
+    fn message(
+        &mut self,
+        msg: &SseMessage,
+        out: &mut VecDeque<StreamEvent>,
+    ) -> Result<Flow, DecodeError> {
+        if msg.data == "[DONE]" {
+            return Ok(Flow::Continue);
+        }
+        if !KNOWN.contains(&msg.event.as_str()) {
+            error(
+                out,
+                format!("unrecognized OpenAI stream event \"{}\"", msg.event),
+            );
+            return Ok(Flow::Stop);
+        }
+        let depth = deep::depth_of(&msg.data);
+        if depth > deep::MAX_DEPTH {
+            return Err(DecodeError::Throw("upstream JSON exceeds depth 40000"));
+        }
+        deep::scope_for_bound(depth, |_| {
+            let Ok(parsed) = deep::parse(&msg.data) else {
+                return Ok(Flow::Continue);
+            };
+            let owned = deep::Owned(parsed);
+            if !owned.0.is_object() && !owned.0.is_array() {
+                return Ok(Flow::Continue);
+            }
+            let d = Some(&owned.0);
+            let zero = Value::from(0);
+            let output = Some(index_value(prop(d, "output_index")).unwrap_or(&zero));
+            let content = Some(index_value(prop(d, "content_index")).unwrap_or(&zero));
+            let item = prop(d, "item");
+            match msg.event.as_str() {
+                "response.created" => {
+                    let r = prop(d, "response");
+                    out.push_back(StreamEvent::Start {
+                        id: text(prop(r, "id"))?,
+                        model: text(prop(r, "model"))?,
+                    });
+                }
+                "response.output_item.added" => {
+                    let kind = prop(item, "type").and_then(Value::as_str);
+                    if matches!(kind, Some("reasoning" | "function_call")) {
+                        if let Some(k) = key(output)
+                            && !self.owns.contains(&k)
+                        {
+                            self.owns.push(k);
+                        }
+                        let index = self.index(output, Some(&zero))?;
+                        let block = if kind == Some("function_call") {
+                            self.tool = true;
+                            ContentBlockStart::ToolUse {
+                                id: string(prop(item, "call_id"))?,
+                                name: string(prop(item, "name"))?,
+                            }
+                        } else if self.native {
+                            ContentBlockStart::ProviderNative {
+                                provider: "openai".into(),
+                                block_type: "reasoning".into(),
+                                data: Map::new(),
+                            }
+                        } else {
+                            ContentBlockStart::Thinking { signed: None }
+                        };
+                        out.push_back(StreamEvent::BlockStart { index, block });
+                    }
+                }
+                "response.content_part.added" => {
+                    if prop(prop(d, "part"), "type").and_then(Value::as_str) == Some("output_text")
+                    {
+                        out.push_back(StreamEvent::BlockStart {
+                            index: self.index(output, content)?,
+                            block: ContentBlockStart::Text,
+                        });
+                    }
+                }
+                "response.output_text.delta" => out.push_back(StreamEvent::BlockDelta {
+                    index: self.index(output, content)?,
+                    delta: Delta::Text {
+                        text: text(prop(d, "delta"))?,
+                    },
+                }),
+                "response.function_call_arguments.delta" => {
+                    out.push_back(StreamEvent::BlockDelta {
+                        index: self.index(output, Some(&zero))?,
+                        delta: Delta::ToolJson {
+                            partial: text(prop(d, "delta"))?,
+                        },
+                    })
+                }
+                "response.reasoning_summary_text.delta" => {
+                    let index = self.index(output, Some(&zero))?;
+                    let t = text(prop(d, "delta"))?;
+                    let delta = if self.native {
+                        let mut data = Map::new();
+                        deep::insert(&mut data, "text".into(), json!(t));
+                        Delta::ProviderNative {
+                            provider: "openai".into(),
+                            delta_type: "reasoning_summary_text.delta".into(),
+                            data,
+                            fold: None,
+                        }
+                    } else {
+                        Delta::Thinking { text: t }
+                    };
+                    out.push_back(StreamEvent::BlockDelta { index, delta });
+                }
+                "response.content_part.done" => out.push_back(StreamEvent::BlockEnd {
+                    index: self.index(output, content)?,
+                }),
+                "response.output_item.done" => {
+                    if let Some(at) =
+                        key(output).and_then(|k| self.owns.iter().position(|v| v == &k))
+                    {
+                        self.owns.remove(at);
+                        let index = self.index(output, Some(&zero))?;
+                        if self.native
+                            && prop(item, "type").and_then(Value::as_str) == Some("reasoning")
+                        {
+                            let data = item
+                                .and_then(Value::as_object)
+                                .map(deep::clone_map)
+                                .unwrap_or_default();
+                            out.push_back(StreamEvent::BlockDelta {
+                                index,
+                                delta: Delta::ProviderNative {
+                                    provider: "openai".into(),
+                                    delta_type: "response.output_item.done".into(),
+                                    data,
+                                    fold: Some(NativeFold::Merge),
+                                },
+                            });
+                        }
+                        out.push_back(StreamEvent::BlockEnd { index });
+                    }
+                }
+                "response.completed" | "response.incomplete" => {
+                    self.terminal = true;
+                    let r = prop(d, "response");
+                    let reason = prop(prop(r, "incomplete_details"), "reason");
+                    let status = prop(r, "status");
+                    let stop = match reason.and_then(Value::as_str) {
+                        Some("max_output_tokens") => StopReason::MaxTokens,
+                        Some("content_filter") => StopReason::ContentFilter,
+                        _ => {
+                            if reason.is_some()
+                                || msg.event == "response.incomplete"
+                                || status.is_some_and(|s| s.as_str() != Some("completed"))
+                            {
+                                let message = if reason.is_some() {
+                                    format!(
+                                        "unrecognized OpenAI incomplete reason \"{}\"",
+                                        string(reason)?
+                                    )
+                                } else if status.is_some_and(|s| s.as_str() != Some("incomplete")) {
+                                    format!(
+                                        "OpenAI reported terminal response status \"{}\"",
+                                        string(status)?
+                                    )
+                                } else {
+                                    "OpenAI reported the response incomplete without a reason"
+                                        .into()
+                                };
+                                error(out, message);
+                                return Ok(Flow::Continue);
+                            }
+                            if self.tool {
+                                StopReason::ToolUse
+                            } else {
+                                StopReason::EndTurn
+                            }
+                        }
+                    };
+                    let u = prop(r, "usage");
+                    let n = |v| js::to_number(nullish_or(v, None).or(Some(&zero)));
+                    // Frozen usageFromPromptTotal subtracts input and cache counts;
+                    // output_tokens is forwarded raw (its representation is parked X1).
+                    let checked = |v| {
+                        js::try_to_number(nullish_or(v, None).or(Some(&zero)))
+                            .map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
+                    };
+                    let usage = usage_from_prompt_total(
+                        checked(prop(u, "input_tokens"))?,
+                        n(prop(u, "output_tokens")),
+                        checked(nullish_or(
+                            prop(prop(u, "input_tokens_details"), "cached_tokens"),
+                            prop(prop(u, "prompt_tokens_details"), "cached_tokens"),
+                        ))?,
+                        0.0,
+                    );
+                    out.push_back(StreamEvent::End {
+                        stop_reason: stop,
+                        usage,
+                        vendor: None,
+                    });
+                }
+                "response.failed" | "error" => {
+                    self.terminal = true;
+                    let e = nullish_or(prop(prop(d, "response"), "error"), prop(d, "error"));
+                    let raw = string(nullish_or(prop(e, "code"), prop(e, "type")))?;
+                    let code = match raw.as_str() {
+                        "rate_limit_exceeded" => ErrorCode::RateLimit,
+                        "insufficient_quota" => ErrorCode::QuotaExhausted,
+                        "invalid_api_key" => ErrorCode::Auth,
+                        "context_length_exceeded" => ErrorCode::BadRequest,
+                        "content_policy_violation" => ErrorCode::ContentFilter,
+                        _ => ErrorCode::Upstream,
+                    };
+                    out.push_back(StreamEvent::Error {
+                        code,
+                        message: nullish_or(prop(e, "message"), None)
+                            .map(|v| string(Some(v)))
+                            .unwrap_or_else(|| Ok("upstream error".into()))?,
+                        retryable: code.retryable(),
+                    });
+                }
+                _ => {}
+            }
+            Ok(Flow::Continue)
+        })
+    }
+    fn finish(&mut self, out: &mut VecDeque<StreamEvent>) {
+        if !self.terminal {
+            out.push_back(StreamEvent::Error {
+                code: ErrorCode::Upstream,
+                message: "upstream stream ended before response completion".into(),
+                retryable: true,
+            });
+        }
+    }
+}

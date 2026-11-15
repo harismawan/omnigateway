@@ -186,6 +186,17 @@ pub struct TokenUpdate {
     pub updated_at: i64,
 }
 
+/// Completed exchange values. Reconnect replaces metadata, unlike refresh's merge.
+pub struct OAuthCredential<'a> {
+    pub id: &'a str,
+    pub provider: &'a str,
+    pub label: &'a str,
+    pub provider_data: &'a str,
+    pub account_email: Option<&'a str>,
+    pub tokens: &'a TokenUpdate,
+    pub reconnect: bool,
+}
+
 impl TokenUpdate {
     pub(crate) fn sealed(&self, key: &FieldKey) -> [Option<String>; 4] {
         [

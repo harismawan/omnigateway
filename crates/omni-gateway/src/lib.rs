@@ -309,6 +309,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     // storage contract, so it is not shortened: it runs on its own blocking
     // thread while the store opens, migrates and sweeps, which need no key.
     omni_providers::anthropic::profile::initialize();
+    omni_providers::openai::initialize();
     let kdf = {
         let secret = config.encryption_key.clone();
         tokio::task::spawn_blocking(move || omni_crypto::field::derive_key(&secret))

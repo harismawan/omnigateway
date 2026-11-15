@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use omni_ir::error::ErrorCode;
-use omni_ir::js::{self, nullish_or, prop};
+use omni_ir::js::{nullish_or, prop};
 use omni_ir::stream::{ContentBlockStart, Delta, StopReason, StreamEvent};
 use serde_json::Value;
 
@@ -70,8 +70,8 @@ impl ResponsesDecoder {
     fn ir_index(&mut self, output: &Value, content: &Value) -> Result<u32, DecodeError> {
         let key = format!(
             "{}:{}",
-            js::to_string(Some(output)),
-            js::to_string(Some(content))
+            super::string(Some(output))?,
+            super::string(Some(content))?
         );
         if let Some(&i) = self.indices.get(&key) {
             return Ok(i);
@@ -85,10 +85,10 @@ impl ResponsesDecoder {
 }
 
 /// `String(x ?? "")`.
-fn string_or_empty(v: Option<&Value>) -> String {
+fn string_or_empty(v: Option<&Value>) -> Result<String, DecodeError> {
     match v {
-        None | Some(Value::Null) => String::new(),
-        some => js::to_string(some),
+        None | Some(Value::Null) => Ok(String::new()),
+        some => super::string(some),
     }
 }
 
@@ -129,8 +129,8 @@ impl StreamDecoder for ResponsesDecoder {
                 "response.created" => {
                     let response = prop(d, "response");
                     out.push_back(StreamEvent::Start {
-                        id: string_or_empty(prop(response, "id")),
-                        model: string_or_empty(prop(response, "model")),
+                        id: string_or_empty(prop(response, "id"))?,
+                        model: string_or_empty(prop(response, "model"))?,
                     });
                 }
                 "response.output_item.added" => {
@@ -159,8 +159,8 @@ impl StreamDecoder for ResponsesDecoder {
                             out.push_back(StreamEvent::BlockStart {
                                 index,
                                 block: ContentBlockStart::ToolUse {
-                                    id: js::to_string(prop(item, "call_id")),
-                                    name: js::to_string(prop(item, "name")),
+                                    id: super::string(prop(item, "call_id"))?,
+                                    name: super::string(prop(item, "name"))?,
                                 },
                             });
                         }
@@ -182,7 +182,7 @@ impl StreamDecoder for ResponsesDecoder {
                     out.push_back(StreamEvent::BlockDelta {
                         index,
                         delta: Delta::Text {
-                            text: string_or_empty(prop(d, "delta")),
+                            text: string_or_empty(prop(d, "delta"))?,
                         },
                     });
                 }
@@ -191,13 +191,13 @@ impl StreamDecoder for ResponsesDecoder {
                     out.push_back(StreamEvent::BlockDelta {
                         index,
                         delta: Delta::Thinking {
-                            text: string_or_empty(prop(d, "delta")),
+                            text: string_or_empty(prop(d, "delta"))?,
                         },
                     });
                 }
                 "response.function_call_arguments.delta" => {
                     let index = self.ir_index(&output, &zero)?;
-                    let partial = string_or_empty(prop(d, "delta"));
+                    let partial = string_or_empty(prop(d, "delta"))?;
                     self.argument_depth
                         .entry(index)
                         .or_default()
@@ -241,12 +241,12 @@ impl StreamDecoder for ResponsesDecoder {
                                 let message = if reason.is_some() {
                                     format!(
                                         "unrecognized custom endpoint incomplete reason \"{}\"",
-                                        js::to_string(reason)
+                                        super::string(reason)?
                                     )
                                 } else if status.is_some_and(|s| s.as_str() != Some("incomplete")) {
                                     format!(
                                         "custom endpoint reported terminal response status \"{}\"",
-                                        js::to_string(status)
+                                        super::string(status)?
                                     )
                                 } else {
                                     "custom endpoint reported the response incomplete without a reason"
@@ -272,21 +272,21 @@ impl StreamDecoder for ResponsesDecoder {
                                 prop(prop(usage, "prompt_tokens_details"), "cached_tokens"),
                             ),
                             None,
-                        ),
+                        )?,
                         vendor: None,
                     });
                 }
                 "response.failed" | "error" => {
                     self.terminal = true;
                     let err = nullish_or(prop(prop(d, "response"), "error"), prop(d, "error"));
-                    let raw = js::to_string(nullish_or(prop(err, "code"), prop(err, "type")));
+                    let raw = super::string(nullish_or(prop(err, "code"), prop(err, "type")))?;
                     let code = RESPONSES_ERROR_CODE
                         .iter()
                         .find(|(k, _)| *k == raw)
                         .map_or(ErrorCode::Upstream, |(_, c)| *c);
                     let message = match nullish_or(prop(err, "message"), None) {
                         None => "upstream error".to_string(),
-                        some => js::to_string(some),
+                        some => super::string(some)?,
                     };
                     out.push_back(StreamEvent::Error {
                         code,

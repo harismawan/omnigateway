@@ -38,8 +38,8 @@ pub fn is_fingerprint_message(message: &str) -> bool {
 fn text(v: &Value) -> String {
     v.as_str().unwrap_or("").into()
 }
-fn name(v: Option<&Value>) -> String {
-    omni_ir::js::to_string(v)
+fn name(v: Option<&Value>) -> Result<String, DecodeError> {
+    omni_ir::js::try_to_string(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
 }
 fn protocol(out: &mut VecDeque<StreamEvent>, message: String) -> Flow {
     out.push_back(StreamEvent::Error {
@@ -154,11 +154,11 @@ impl AnthropicDecoder {
                     id: m
                         .get("id")
                         .filter(|v| !v.is_null())
-                        .map_or_else(String::new, |v| name(Some(v))),
+                        .map_or_else(|| Ok(String::new()), |v| name(Some(v)))?,
                     model: m
                         .get("model")
                         .filter(|v| !v.is_null())
-                        .map_or_else(String::new, |v| name(Some(v))),
+                        .map_or_else(|| Ok(String::new()), |v| name(Some(v)))?,
                 });
             }
             "content_block_start" => {
@@ -167,9 +167,10 @@ impl AnthropicDecoder {
                     "text" => ContentBlockStart::Text,
                     "thinking" => ContentBlockStart::Thinking { signed: Some(true) },
                     "tool_use" => {
-                        let n = name(b.get("name"));
+                        let id = name(b.get("id"))?;
+                        let n = name(b.get("name"))?;
                         ContentBlockStart::ToolUse {
-                            id: name(b.get("id")),
+                            id,
                             name: self.uncloak.get(&n).cloned().unwrap_or(n),
                         }
                     }
@@ -191,7 +192,7 @@ impl AnthropicDecoder {
                             out,
                             format!(
                                 "unrecognized Anthropic content block type \"{}\"",
-                                name(b.get("type"))
+                                name(b.get("type"))?
                             ),
                         ));
                     }
@@ -257,7 +258,7 @@ impl AnthropicDecoder {
                             out,
                             format!(
                                 "unrecognized Anthropic content block delta \"{}\"",
-                                name(delta.get("type"))
+                                name(delta.get("type"))?
                             ),
                         ));
                     }
@@ -311,15 +312,15 @@ impl AnthropicDecoder {
             }
             "error" => {
                 self.terminal = true;
+                let t = name(d["error"].get("type"))?;
                 let message = d["error"]
                     .get("message")
                     .filter(|v| !v.is_null())
-                    .map_or_else(|| "upstream error".into(), |v| name(Some(v)));
-                let t = d["error"]["type"].as_str().unwrap_or("");
+                    .map_or_else(|| Ok("upstream error".into()), |v| name(Some(v)))?;
                 let code = if t == "invalid_request_error" && is_fingerprint_message(&message) {
                     ErrorCode::FingerprintRefused
                 } else {
-                    match t {
+                    match t.as_str() {
                         "overloaded_error" => ErrorCode::Overloaded,
                         "rate_limit_error" => ErrorCode::RateLimit,
                         "authentication_error" | "permission_error" => ErrorCode::Auth,

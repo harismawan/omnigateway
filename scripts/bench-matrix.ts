@@ -3,6 +3,22 @@ import { probeText } from "./bench-probe";
 
 export const allProviders = [
   {
+    id: "openai-key",
+    provider: "openai",
+    protocol: "apiKey",
+    nearest: "responses",
+    origin: "https://api.openai.com",
+    script: "bench-anthropic-upstream.ts",
+  },
+  {
+    id: "openai-oauth",
+    provider: "openai",
+    protocol: "oauth",
+    nearest: "responses",
+    origin: "https://api.openai.com",
+    script: "bench-anthropic-upstream.ts",
+  },
+  {
     id: "custom-chat",
     provider: "custom",
     protocol: "chat-completions",

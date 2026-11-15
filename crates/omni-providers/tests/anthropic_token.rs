@@ -21,8 +21,8 @@ fn token_fields_match_frozen_ts_without_utf16_loss() {
         .expect("tokens");
         assert_eq!(serde_json::json!(result.access_token), row["access"]);
         for (field, expected) in [
-            (result.refresh_token, &row["refresh"]),
-            (result.account_email, &row["email"]),
+            (&result.refresh_token, &row["refresh"]),
+            (&result.account_email, &row["email"]),
         ] {
             assert_eq!(
                 omni_ir::jsjson::stringify(

@@ -20,16 +20,31 @@ use crate::http::{BodyEncoding, Headers};
 use crate::sse::SseMessage;
 
 /// `AdapterCredentials`: decrypted, from the in-memory snapshot.
-#[derive(Clone, PartialEq, Default)]
+#[derive(Default)]
 pub struct Credentials {
     pub access_token: Option<String>,
     pub api_key: Option<String>,
     /// Durable provider-specific state (custom: `origin`, `basePath`, `protocol`).
     pub provider_data: Map<String, Value>,
 }
+impl Clone for Credentials {
+    fn clone(&self) -> Self {
+        Self {
+            access_token: self.access_token.clone(),
+            api_key: self.api_key.clone(),
+            provider_data: omni_ir::deep::clone_map(&self.provider_data),
+        }
+    }
+}
 impl std::fmt::Debug for Credentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Credentials(<redacted>)")
+    }
+}
+
+impl Drop for Credentials {
+    fn drop(&mut self) {
+        omni_ir::deep::drop_map_in_place(&mut self.provider_data);
     }
 }
 

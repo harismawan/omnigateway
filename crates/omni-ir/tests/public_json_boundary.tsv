@@ -1,4 +1,8 @@
 # Public-declaration superset; LIMIT entries are unresolved, not certified safe.
+# OWNER omni-providers/src/oauth.rs FlowResult.provider_data: arbitrary public Map; manual deep Clone/Drop; moves use mem::take; flow_result_depth exercises 40000 levels on 2MiB. Function/reexport lexical scan cannot discover new struct fields or prove ownership.
+omni-providers/src/openai/decode.rs :: fn new(native_reasoning: bool) -> Self	boolean-only constructor; parsed payload scoped/Owned; emitted native map uses iterative StreamEvent ownership
+omni-providers/src/openai/mod.rs :: fn initialize()	startup environment capture; strings only, no JSON ownership
+omni-providers/src/openai/mod.rs :: fn build_api_key_request(input: CodecInput<'_>) -> Result<CodecRequest<bool>, GatewayError>	borrowed IR; deep scope owns arbitrary JSON temporaries, only strings/headers/boolean escape
 omni-dialects/src/egress/anthropic.rs :: fn error_body(code: ErrorCode, message: &str) -> Value	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
 omni-dialects/src/egress/anthropic.rs :: fn error_type(code: ErrorCode) -> &'static str	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
 omni-dialects/src/egress/anthropic.rs :: fn new(request_id: &str) -> AnthropicStream	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
@@ -221,3 +225,8 @@ omni-providers/src/tool_result_files.rs :: fn split_files<'a>(files: &'a [FileBl
 omni-providers/src/tool_result_files.rs :: fn with_file_text(content: &str, text: &[String]) -> String	typed file strings produce shallow JSON only; no arbitrary nested input
 omni-ir/src/jsjson.rs :: fn scan_steps() -> u64	thread-local step counter for complexity tests; no JSON taken, returned or released
 omni-ir/src/jsjson.rs :: fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>>	one linear pass over borrowed text, nesting skipped by a depth counter; builds no JSON value, returns UTF-16 units
+omni-ir/src/js.rs :: fn try_to_number(value: Option<&Value>) -> Result<f64, Throws>	Borrowed JSON inspected with stack growth; scalar result owns no JSON.
+omni-ir/src/js.rs :: fn try_to_string(value: Option<&Value>) -> Result<String, Throws>	Borrowed JSON inspected with stack growth; shared writer returns owned string.
+omni-providers/src/openai/oauth_lifecycle.rs :: fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest, GatewayError>	string-only exchange request, no retained client JSON
+omni-providers/src/openai/oauth_lifecycle.rs :: fn refresh_request(token: &str) -> AuthRequest	string-only refresh request
+omni-providers/src/openai/oauth_lifecycle.rs :: fn token_result( status: u16, text: &str, fallback: Option<&str>, now: f64, prior: &Value, ) -> Result<FlowResult, GatewayError>	borrows prior; retains validated identity strings and scalar claims only; parsed claims owned with iterative drop

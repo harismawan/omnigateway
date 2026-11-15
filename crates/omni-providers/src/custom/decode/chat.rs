@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use omni_ir::error::ErrorCode;
-use omni_ir::js::{self, nullish_or, prop, truthy};
+use omni_ir::js::{nullish_or, prop, truthy};
 use omni_ir::stream::{ContentBlockStart, Delta, StopReason, StreamEvent, Usage};
 use serde_json::Value;
 
@@ -190,12 +190,12 @@ impl ChatDecoder {
         if !self.started && (id.is_some() || model.is_some()) {
             self.started = true;
             let text = |v: Option<&Value>| match v {
-                None | Some(Value::Null) => String::new(),
-                some => js::to_string(some),
+                None | Some(Value::Null) => Ok(String::new()),
+                some => super::string(some),
             };
             out.push_back(StreamEvent::Start {
-                id: text(id),
-                model: text(model),
+                id: text(id)?,
+                model: text(model)?,
             });
         }
 
@@ -213,7 +213,7 @@ impl ChatDecoder {
                     prop(details, "cache_creation_tokens"),
                     prop(details, "cache_write_tokens"),
                 ),
-            );
+            )?;
         }
 
         let Some(choice) = &d.choice else {
@@ -253,15 +253,20 @@ impl ChatDecoder {
                 Some(&index) => index,
                 None => {
                     self.identity_budget.add(key.bytes())?;
+                    // Frozen yields the previous block's end before coercing
+                    // the next tool's identity (which may throw).
+                    if let Some((_, index)) = self.open.take() {
+                        out.push_back(StreamEvent::BlockEnd { index });
+                    }
                     let id = match prop(call, "id") {
                         None | Some(Value::Null) => {
-                            format!("call_{}", js::to_string(Some(&wire_index)))
+                            format!("call_{}", super::string(Some(&wire_index))?)
                         }
-                        some => js::to_string(some),
+                        some => super::string(some)?,
                     };
                     let name = match prop(function, "name") {
                         None | Some(Value::Null) => String::new(),
-                        some => js::to_string(some),
+                        some => super::string(some)?,
                     };
                     let index =
                         self.open_block(Open::Tool, ContentBlockStart::ToolUse { id, name }, out);

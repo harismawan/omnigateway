@@ -113,6 +113,8 @@ pub fn token_result(
             GatewayError::new(ErrorCode::Auth, "token endpoint returned no access_token")
         })?;
     Ok(FlowResult {
+        id_token: None,
+        provider_data: serde_json::Map::new(),
         access_token: access.clone(),
         refresh_token: present(get(&body, "refresh_token"))
             .cloned()

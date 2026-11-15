@@ -417,6 +417,13 @@ mod tests {
     }
 
     #[test]
+    fn shadow_and_overflow_path_selection() {
+        assert!(super::parse_chat_chunk(r#"{"id":{"toString":null}}"#).is_some());
+        assert!(super::parse_chat_chunk(r#"{"id":"keep","ignored":1e309}"#).is_some());
+        assert!(super::parse_chat_chunk(r#"{"id":1e309}"#).is_none());
+    }
+
+    #[test]
     fn the_benchmark_chunk_takes_the_fast_path() {
         let chunk = r#"{"id":"a","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"lorem ipsum "}}]}"#;
         assert!(super::parse_chat_chunk(chunk).is_some());

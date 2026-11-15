@@ -39,7 +39,7 @@ fn request_and_response_debug_never_contains_secrets() {
     redacted(&Credentials {
         access_token: Some("B1_REFRESH_SECRET".into()),
         api_key: Some("B1_REFRESH_SECRET".into()),
-        ..Default::default()
+        provider_data: Default::default(),
     });
     let mut headers = Headers::new();
     headers.append_received("set-cookie", "B1_REFRESH_SECRET");

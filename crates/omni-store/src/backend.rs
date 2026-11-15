@@ -195,21 +195,63 @@ impl Store {
     }
 
     /// Refresh metadata never changes token_version. Called only by the CAS winner.
+    pub async fn save_oauth(
+        &self,
+        key: &FieldKey,
+        input: &crate::credentials::OAuthCredential<'_>,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let sealed = input.tokens.sealed(key);
+                let id = input.id.to_owned();
+                let provider = input.provider.to_owned();
+                let label = input.label.to_owned();
+                let data = input.provider_data.to_owned();
+                let email = input.account_email.map(str::to_owned);
+                let expiry = input.tokens.expires_at;
+                let now = input.tokens.updated_at;
+                let reconnect = input.reconnect;
+                on_sqlite!(store, |s| {
+                    if reconnect {
+                        s.connection().execute("UPDATE credentials SET access_token=?1,refresh_token=?2,api_key=?3,id_token=?4,expires_at=?5,updated_at=?6,token_version=token_version+1 WHERE id=?7", rusqlite::params![sealed[0],sealed[1],sealed[2],sealed[3],expiry,now,id])?;
+                        s.connection().execute("UPDATE credentials SET enabled=1,disabled_reason=NULL,disabled_at=NULL,account_email=?1,provider_data=?2 WHERE id=?3", rusqlite::params![email,data,id])?;
+                    } else {
+                        s.connection().execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,provider_data,account_email,access_token,refresh_token,api_key,id_token,expires_at,created_at,updated_at) VALUES (?1,?2,?3,'oauth',1,1,1,?4,?5,?6,?7,?8,?9,?10,?11,?11)", rusqlite::params![id,provider,label,data,email,sealed[0],sealed[1],sealed[2],sealed[3],expiry,now])?;
+                    }
+                    Ok(())
+                })
+            }
+            Self::Postgres(pg) => pg.save_oauth(key, input).await,
+        }
+    }
+
+    /// Refresh metadata never changes token_version. Called only by the CAS winner.
     pub async fn refresh_metadata(
         &self,
         id: &str,
         email: Option<String>,
         now: i64,
     ) -> Result<(), StoreError> {
+        self.refresh_metadata_with_data(id, email, None, now).await
+    }
+
+    /// Winner-only metadata write; data is the host's prior/result merge.
+    pub async fn refresh_metadata_with_data(
+        &self,
+        id: &str,
+        email: Option<String>,
+        data: Option<String>,
+        now: i64,
+    ) -> Result<(), StoreError> {
         match self {
             Self::Sqlite { store, .. } => {
                 let id = id.to_owned();
                 on_sqlite!(store, |s| {
-                    s.connection().execute("UPDATE credentials SET account_email=COALESCE(?,account_email),updated_at=? WHERE id=?", rusqlite::params![email,now,id])?;
+                    s.connection().execute("UPDATE credentials SET account_email=COALESCE(?,account_email),provider_data=COALESCE(?,provider_data),updated_at=? WHERE id=?", rusqlite::params![email,data,now,id])?;
                     Ok(())
                 })
             }
-            Self::Postgres(pg) => pg.refresh_metadata(id, email, now).await,
+            Self::Postgres(pg) => pg.refresh_metadata_with_data(id, email, data, now).await,
         }
     }
 

@@ -90,8 +90,17 @@ fn deep_valid_events_are_not_silently_discarded() {
 
 #[test]
 fn frozen_ts_decoder_generated_corpus() {
+    compare(false);
+}
+#[test]
+#[ignore = "parked: roadmap X1 (upstream numbers beyond the double range)"]
+fn overflow_matches_ts() {
+    compare(true);
+}
+fn compare(overflow: bool) {
     let run = std::process::Command::new("bun")
         .arg("tests/anthropic-decode-reference.ts")
+        .args(if overflow { vec!["--overflow"] } else { vec![] })
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Bun");
@@ -105,14 +114,24 @@ fn frozen_ts_decoder_generated_corpus() {
         let mut decoder = AnthropicDecoder::default();
         let mut out = VecDeque::new();
         let mut stopped = false;
+        let mut threw = false;
         for msg in row["messages"].as_array().expect("messages") {
             let msg = SseMessage {
                 event: msg["event"].as_str().expect("event").into(),
                 data: msg["data"].as_str().expect("data").into(),
             };
-            if decoder.message(&msg, &mut out).expect("decode") == Flow::Stop {
-                stopped = true;
-                break;
+            match decoder.message(&msg, &mut out) {
+                Ok(Flow::Continue) => {}
+                Ok(Flow::Stop) => {
+                    stopped = true;
+                    break;
+                }
+                Err(omni_providers::codec::DecodeError::Throw(_)) => {
+                    threw = true;
+                    stopped = true;
+                    break;
+                }
+                Err(e) => panic!("{e:?}"),
             }
         }
         if !stopped {
@@ -122,6 +141,7 @@ fn frozen_ts_decoder_generated_corpus() {
             .iter()
             .map(|e| serde_json::from_str(&e.to_json()).expect("event JSON"))
             .collect();
+        assert_eq!(threw, row["throws"].as_bool().expect("throws"), "case {i}");
         assert_eq!(
             serde_json::Value::Array(actual),
             row["events"],

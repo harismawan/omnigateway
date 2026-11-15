@@ -217,13 +217,16 @@ impl Refresher {
                 format!("credential {} has no refresh token", c.id),
             )
         })?;
-        if c.provider != "anthropic" {
-            return Err(GatewayError::new(
-                ErrorCode::BadRequest,
-                "provider does not support OAuth refresh",
-            ));
-        }
-        let request = omni_providers::anthropic::oauth::refresh_request(token);
+        let request = match c.provider.as_str() {
+            "anthropic" => omni_providers::anthropic::oauth::refresh_request(token),
+            "openai" => omni_providers::openai::oauth::refresh_request(token),
+            _ => {
+                return Err(GatewayError::new(
+                    ErrorCode::BadRequest,
+                    "provider does not support OAuth refresh",
+                ));
+            }
+        };
         let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let response = self
                 .http
@@ -243,13 +246,23 @@ impl Refresher {
         .map_err(|_| GatewayError::new(ErrorCode::Timeout, "token request timed out"))?
         .map_err(|_| GatewayError::new(ErrorCode::Network, "token request failed"))?;
         #[allow(clippy::cast_precision_loss)]
-        let result = omni_providers::anthropic::oauth::token_result(
-            response.0,
-            &response.1,
-            Some(token),
-            (self.now)() as f64,
-        );
-        let result = match result {
+        let result = if c.provider == "openai" {
+            omni_providers::openai::oauth::token_result(
+                response.0,
+                &response.1,
+                Some(token),
+                (self.now)() as f64,
+                &c.provider_data,
+            )
+        } else {
+            omni_providers::anthropic::oauth::token_result(
+                response.0,
+                &response.1,
+                Some(token),
+                (self.now)() as f64,
+            )
+        };
+        let mut result = match result {
             Ok(result) => result,
             Err(error) => {
                 if error.code == ErrorCode::Auth {
@@ -269,7 +282,10 @@ impl Refresher {
             access_token: Some(access),
             refresh_token: refresh,
             api_key: None,
-            id_token: None,
+            id_token: result
+                .id_token
+                .as_ref()
+                .map(|s| String::from_utf16_lossy(s)),
             expires_at: persisted_expiry(result.expires_at),
             updated_at: (self.now)(),
         };
@@ -284,8 +300,22 @@ impl Refresher {
                 .as_ref()
                 .map(|v| email_text(v, self.store.engine()))
                 .transpose()?;
+            let mut data = c
+                .provider_data
+                .as_object()
+                .map(omni_ir::deep::clone_map)
+                .unwrap_or_default();
+            for (key, value) in std::mem::take(&mut result.provider_data) {
+                omni_ir::deep::insert(&mut data, key, value);
+            }
+            let data = omni_ir::deep::Owned(serde_json::Value::Object(data));
             self.store
-                .refresh_metadata(&c.id, email, (self.now)())
+                .refresh_metadata_with_data(
+                    &c.id,
+                    email,
+                    Some(omni_ir::jsjson::to_string(&data)),
+                    (self.now)(),
+                )
                 .await
                 .map_err(storage)?;
         }
