@@ -116,10 +116,6 @@ pub fn resolve_model_limits(
 }
 
 #[cfg(test)]
-#[path = "../tests/common/mod.rs"]
-mod fixtures;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
@@ -128,7 +124,32 @@ mod tests {
     fn one_request_pass_then_two_auths_or_one_pin_per_target() {
         let credentials: Vec<_> = (0..5000)
             .map(|i| {
-                let mut c = super::fixtures::cred_of(&format!("c{i}"), "openai");
+                use omni_store::credentials::{CredentialSecrets, Secret};
+                let mut c = Credential {
+                    lone_endpoint: None,
+                    id: format!("c{i}"),
+                    provider: "openai".into(),
+                    label: String::new(),
+                    auth_type: AuthType::ApiKey,
+                    enabled: true,
+                    tier: 1.0,
+                    weight: 1.0,
+                    expires_at: None,
+                    account_email: None,
+                    provider_data: serde_json::json!({}),
+                    disabled_reason: None,
+                    disabled_at: None,
+                    has_refresh_token: false,
+                    token_version: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    secrets: CredentialSecrets {
+                        access_token: Secret::Absent,
+                        refresh_token: Secret::Absent,
+                        api_key: Secret::Absent,
+                        id_token: Secret::Absent,
+                    },
+                };
                 c.auth_type = if i % 2 == 0 {
                     AuthType::ApiKey
                 } else {
