@@ -48,14 +48,15 @@ async fn openai_registered_codec_dispatches_responses() {
         matches!(events.last(), Some(StreamEvent::End { .. })),
         "{events:?}"
     );
-    let calls = h.script.seen.lock().expect("seen");
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].provider, "openai");
-    assert_eq!(calls[0].url, "https://api.openai.com/v1/responses");
-    let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
-    assert_eq!(sent["model"], "gpt-6-astra");
-    assert_eq!(sent["stream"], true);
-    drop(calls);
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "openai");
+        assert_eq!(calls[0].url, "https://api.openai.com/v1/responses");
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "gpt-6-astra");
+        assert_eq!(sent["stream"], true);
+    }
     flush(h).await;
 }
 
