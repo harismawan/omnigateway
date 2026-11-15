@@ -58,3 +58,49 @@ Observed contradiction to task: frozen wire.ts clamps **every** model to the
 global MAX_OUTPUT_TOKENS 65,536; models.ts advertises 65,535 on Pro. Future wire
 implementation must preserve the global constant, not apply per-model ceilings.
 No request implementation or test of that ceiling has landed yet.
+
+## Turn 3: request assembly
+
+The preceding pending-request statements are superseded here. `antigravity_wire`
+compares 338 complete envelope byte strings and ordered degradation lists;
+`antigravity_codec` compares 108 URL/method/ordered-header/body/error results.
+`AntigravityCodec::build_request` is inherent: the trait requires a real decoder.
+
+| Frozen literal / rule | Rust location | Pinning rows |
+| --- | --- | --- |
+| project, requestId, model, userAgent, requestType, request; `antigravity`, `agent` | `wire::to_wire` | every wire row |
+| user/model; merge same roles; empty opening, single-space closing | `wire::to_wire` | blocks/roles/result rows |
+| `skip_thought_signature_validator`; functionCall/functionResponse/inlineData | `wire::to_wire` | input, result, image and file rows |
+| cache-control/system-turn/thinking/provider-native/unmatched/error-flag/files-inlined degradation suffixes | `wire::to_wire` | cache, blocks, result, file rows; first-occurrence ordering compared |
+| exact agent preamble; billing prefix; CRLF paragraph split and JS trim | `wire::fingerprints`, existing anthropic/crypto constants | system rows |
+| max 65,536 for ALL models; temperature 0..2; first five stops | `wire::to_wire` | max/temperature/stops, including Pro ceiling |
+| budget -1..65,535; budget+1 ceiling repair and late insertion position | `wire::to_wire` | budget cross-product; NaN/Infinity/-0 rows |
+| betweenTools/off/adaptive display and effort notes | `wire::to_wire` | reasoning/adaptive rows |
+| portable tools; first duplicate wins; cloak note before schema pruning | `wire::to_wire` | tools rows |
+| AUTO/ANY/NONE; allowedFunctionNames | `wire::to_wire` | choice rows |
+| response-format-translated / response-schema-too-deep | shared reader + `schema::prune` | format rows; 40,000-hop schema on 2 MiB stack |
+| Object.assign overwrite position, index enumeration, __proto__ setter | `js::object_assign` + jsjson | vendor object/string/array/scalar/null rows |
+| daily-cloudcode-pa streaming URL, POST, Authorization Bearer | `codec::build_request` | all successful codec rows |
+| AUTH missing-token and missing-project messages | `codec::build_request` | invalid-token/project cross-product |
+| `omni-antigravity-req`, SHA256 UUID slices, version 4, variant mask 3/or 8 | `codec::build_request` | derived versus explicit/empty/space ids |
+
+Coercion audit: wire fingerprint `.trim()` receives joined text strings;
+generation arithmetic (including budget + 1) receives f64 fields, including
+nonfinite values exercised by explicit transport overrides. Schema `Number()`
+and `.trim()` have string guards (turn 2). Codec project `.trim()` has an explicit
+typeof-string guard. Seed, namespace, UUID and Authorization templates receive
+typed strings; parseInt receives one SHA256 hex character. Thus none of these
+sites receives an arbitrary nonprimitive through Rust IR. JSON.stringify is a
+separate failure boundary: cycles/getters/BigInt/functions are not JSON IR values.
+An object-valued format name with toString:null is retained in the corpus without
+coercion. Tool result content is String and cannot nest.
+
+**Unresolved depth boundary:** frozen JSON.stringify throws
+`RangeError: Maximum call stack size exceeded.` for 40,000 nested `items` in tool
+input and vendor.extra. Rust's input path overflowed a 2 MiB stack; retained-red
+ignored test `retained_red_deep_tool_input_serialization` records this gap. Vendor
+Rust depth parity remains unverified. No shared helper change was made. The
+response-schema case is green because the reader drops it before serialization.
+X1 lone-surrogate text (`"\ud800"`) remains ignored and unnormalized. Non-BMP
+vendor strings also need X1 coverage: Object.assign splits UTF-16 code units.
+Decode, full depth parity and independent review remain pending; B4 is incomplete.
