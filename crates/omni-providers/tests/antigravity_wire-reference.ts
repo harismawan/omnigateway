@@ -51,4 +51,8 @@ for (const schema of [{},{type:'object',properties:{x:{type:'string'}}},{const:'
 }
 for (const response_format of [null,{},false,{type:'json_object'},{type:'json_schema',json_schema:[]},{type:'json_schema',json_schema:{schema:{},name:{toString:null}}}]) add(`malformed:${JSON.stringify(response_format)}`,{vendor:{openai:{response_format}}});
 for (const antigravity of [{contents:[],tools:null,generationConfig:{topP:0.5},extra:1},{'10':'ten','2':'two',newKey:1},'abc',['x',{'n':1}],1,true,null,JSON.parse('{"__proto__":{"x":1},"constructor":2}')]) add(`vendor:${JSON.stringify(antigravity)}`,{temperature:1,tools:[tool],vendor:{antigravity}});
+add('description:nonempty', {tools:[{...tool,description:'d'}]});
+add('description:mixed', {tools:[{...tool,description:'d'}, {...tool,name:'absent'}, {...tool,name:'empty',description:''}]});
+add('duplicate-call-id:last-wins', {messages:[{role:'assistant',content:[{...call,id:'i',name:'a'},{...call,id:'i',name:'b'}]},{role:'user',content:[{...result,toolUseId:'i'}]}]});
+add('file:application/x-yaml', {messages:[{role:'user',content:[{...result,files:[{type:'file',mediaType:'application/x-yaml',data:'aGVsbG8='}]}]}]});
 console.log(JSON.stringify(rows));
