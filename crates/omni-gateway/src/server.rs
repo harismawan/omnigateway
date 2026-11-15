@@ -358,6 +358,7 @@ mod deadline_ownership {
 
 /// Everything a request handler reads. One per process.
 pub struct App {
+    pub connect: Arc<crate::connect::ConnectFlows>,
     pub deadline_workers: DeadlineWorkers,
     pub deps: Arc<Deps>,
     pub limiter: Arc<RateLimiter>,

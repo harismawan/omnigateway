@@ -1,4 +1,5 @@
 pub use super::oauth_lifecycle::{exchange_request, refresh_request, token_result};
+pub use super::oauth_start::start;
 use omni_crypto::codex;
 use omni_ir::jsjson;
 use serde_json::{Value, json};

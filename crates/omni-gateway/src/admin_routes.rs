@@ -183,6 +183,9 @@ fn failure(e: Failure) -> ApiError {
 /// The routes this module serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admin {
+    ConnectStart,
+    ConnectFinish,
+    ConnectPoll,
     Usage,
     Logs,
     ExportLogs,
@@ -224,6 +227,9 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
     let get = matches!(*method, M::GET | M::HEAD);
     let param = |rest: &str| (!rest.is_empty() && !rest.contains('/')).then(|| decode_param(rest));
     match path {
+        "/api/connect/start" if *method == M::POST => return Some(Admin::ConnectStart),
+        "/api/connect/finish" if *method == M::POST => return Some(Admin::ConnectFinish),
+        "/api/connect/poll" if *method == M::POST => return Some(Admin::ConnectPoll),
         "/api/usage" if get => return Some(Admin::Usage),
         "/api/logs" if get => return Some(Admin::Logs),
         "/api/logs/export" if get => return Some(Admin::ExportLogs),
@@ -290,6 +296,9 @@ pub async fn serve(
     let control = app.control.clone();
     let now = crate::clock::now_ms();
     match route {
+        Admin::ConnectStart => Box::pin(crate::connect::serve(app, req, "start")).await,
+        Admin::ConnectFinish => Box::pin(crate::connect::serve(app, req, "finish")).await,
+        Admin::ConnectPoll => Box::pin(crate::connect::serve(app, req, "poll")).await,
         Admin::ExportLogs => {
             require_reader(req.headers(), &app.admin).await?;
             let (query, jsonl) = omni_control::logs::export_query(req.uri().query().unwrap_or(""))
