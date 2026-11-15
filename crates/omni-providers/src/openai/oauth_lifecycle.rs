@@ -86,18 +86,20 @@ pub fn token_result(
         GatewayError::new(ErrorCode::Auth, "token endpoint returned no access_token")
     })?;
     let id_token = string(get(&body, "id_token")).cloned();
-    let claims = omni_ir::deep::Owned(
-        id_token
-            .as_ref()
-            .and_then(|s| claims(&String::from_utf16_lossy(s)))
-            .unwrap_or(Value::Null),
-    );
-    let account = nonblank(
-        claims
-            .get("https://api.openai.com/auth")
-            .and_then(|v| v.get("chatgpt_account_id")),
+    let claims = id_token
+        .as_ref()
+        .and_then(|s| claims(&String::from_utf16_lossy(s)))
+        .unwrap_or(JsValue::Null);
+    // Keep the existing X1 UTF-16-to-scalar boundary for claim metadata.
+    let account = string(
+        get(&claims, "https://api.openai.com/auth")
+            .and_then(|auth| get(auth, "chatgpt_account_id")),
     )
-    .or_else(|| fallback.and_then(|_| nonblank(prior.get("accountId"))));
+    .map(|s| String::from_utf16_lossy(s));
+    let account = account
+        .as_deref()
+        .filter(|s| !omni_ir::js::trim(s).is_empty())
+        .or_else(|| fallback.and_then(|_| nonblank(prior.get("accountId"))));
     let identity = super::identity::ensure_secrets(prior);
     let provider_data = serde_json::Map::from_iter([
         ("accountId".into(), json!(account)),
@@ -115,14 +117,12 @@ pub fn token_result(
             Some(JsValue::Number(n)) => Some(now + n * 1000.0),
             _ => None,
         },
-        account_email: claims
-            .get("email")
-            .and_then(Value::as_str)
-            .map(|s| JsValue::String(s.encode_utf16().collect())),
+        account_email: string(get(&claims, "email"))
+            .map(|s| JsValue::String(String::from_utf16_lossy(s).encode_utf16().collect())),
         provider_data,
     })
 }
-fn claims(token: &str) -> Option<Value> {
+fn claims(token: &str) -> Option<JsValue> {
     let parts: Vec<_> = token.split('.').collect();
     if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
         return None;
@@ -130,5 +130,5 @@ fn claims(token: &str) -> Option<Value> {
     // Buffer.from(payload, "base64url") accepts both alphabets, ignores junk,
     // stops at padding and discards an incomplete final sextet.
     let bytes = crate::tool_result_files::node_base64_decode(parts[1]);
-    omni_ir::js::parse_json(&String::from_utf8_lossy(&bytes))
+    parse_js(&String::from_utf8_lossy(&bytes)).ok()
 }
