@@ -1,0 +1,1297 @@
+diff --git a/conformance/cli/argv-bytes.py b/conformance/cli/argv-bytes.py
+index 2b3a7ad4..415b3101 100644
+--- a/conformance/cli/argv-bytes.py
++++ b/conformance/cli/argv-bytes.py
+@@ -5,6 +5,9 @@ import shutil
+ import subprocess
+ import tempfile
+ 
++# Match the TypeScript suites' fixture environment, including runtime caches.
++os.environ['BUN_RUNTIME_TRANSPILER_CACHE_PATH'] = '0'
++
+ binary = pathlib.Path(os.environ.get('OMNI_CLI_BIN', 'target/debug/omni')).resolve()
+ commands = [[shutil.which('bun'), '--no-env-file', str(pathlib.Path.cwd() / 'apps/cli/src/index.ts')], [str(binary)]]
+ samples = {
+diff --git a/conformance/cli/db-adapter-cases.ts b/conformance/cli/db-adapter-cases.ts
+index 85348882..403eade0 100644
+--- a/conformance/cli/db-adapter-cases.ts
++++ b/conformance/cli/db-adapter-cases.ts
+@@ -1,5 +1,5 @@
+ import { strict as assert } from "node:assert";
+-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
++import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, statSync } from "node:fs";
+ import { join } from "node:path";
+ import { goldenSpawn } from "./exit-gate.ts";
+ import { fileState, frozenPostState } from "./db-file-state.ts";
+@@ -27,13 +27,14 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
+      const p=goldenSpawn([...cmd,"--root",root,"--db","db","db",...args],{env,stdout:"pipe",stderr:"pipe"});
+      return {out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited};
+     };
++    chmodSync(dir,0o700);
+     const before=fileState(root);
+     chmodSync(dir,mode);
+     let listing, result;
+     try {
+      listing=await run(["snapshots","--json"]);
+      result=await run(operation==="backup"?["backup","--json"]:["restore",input]);
+-    } finally {chmodSync(dir,0o700);}
++    } finally {assert.equal(statSync(dir).mode&0o7777,mode);chmodSync(dir,0o700);}
+     assert.equal(listing.code,0,kind);
+     if(kind==="directory") {
+      assert.equal(result.code,1);
+@@ -58,12 +59,12 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
+      const post=frozenPostState(root);
+      const fresh=readdirSync(dir).filter(name=>name!==id);
+      const tables=fresh.map(name=>{const db=new Database(join(dir,name),{readonly:true});try{return databaseState(db);}finally{db.close();}});
+-     post.snapshots=(post.snapshots as any[]).map(([name,bytes])=>[name===id?name:"<new snapshot>",bytes]);
++     for(const entry of post)if(fresh.some(name=>entry.path===`snapshots/${name}`))entry.path="snapshots/<new snapshot>";
+      results.push({listing,result,post,tables});
+    }
+     if(operation==="backup"&&kind!=="inaccessible") {
+-     const a=(results[0].post.snapshots as any[]).find(([name])=>name==="<new snapshot>")[1] as Buffer;
+-     const b=(results[1].post.snapshots as any[]).find(([name])=>name==="<new snapshot>")[1] as Buffer;
++     const a=results[0].post.find(e=>e.path==="snapshots/<new snapshot>")!.bytes!;
++     const b=results[1].post.find(e=>e.path==="snapshots/<new snapshot>")!.bytes!;
+      const offsets=Array.from({length:Math.max(a.length,b.length)},(_,i)=>i).filter(i=>a[i]!==b[i]);
+      console.log(`${kind}: snapshots/<new snapshot> differing offsets ${JSON.stringify(offsets)}; TS=${JSON.stringify(offsets.map(i=>a[i]))}; Rust=${JSON.stringify(offsets.map(i=>b[i]))}`);
+      assert.deepEqual(results[1].tables,results[0].tables,"new snapshot contents table by table");
+diff --git a/conformance/cli/db-file-state-self-test.py b/conformance/cli/db-file-state-self-test.py
+new file mode 100755
+index 00000000..ba248c46
+--- /dev/null
++++ b/conformance/cli/db-file-state-self-test.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python3
++"""Negative whole-root probes; also acts as the Rust mutation wrapper."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++if "--root" in sys.argv:
++    result = subprocess.run([os.environ["DB_STATE_REAL_BIN"], *sys.argv[1:]])
++    root = Path(sys.argv[sys.argv.index("--root") + 1])
++    assert str(root).startswith("/tmp/opencode/e1-e5/")
++    mutation = os.environ["DB_STATE_MUTATION"]
++    if mutation == "file":
++        (root / "unexpected-file").write_bytes(b"unexpected")
++    elif mutation == "mode":
++        db = root / "db"
++        db.chmod(0o644 if db.stat().st_mode & 0o7777 == 0o600 else 0o600)
++    else:
++        (root / "unexpected-directory").mkdir(exist_ok=True)
++    sys.exit(result.returncode)
++
++binary = str(Path(os.environ.get("OMNI_CLI_BIN", "target/debug/omni")).resolve())
++histogram = {}
++for mutation in ("file", "mode", "directory"):
++    env = dict(os.environ, OMNI_CLI_BIN=str(Path(__file__).resolve()),
++               DB_STATE_REAL_BIN=binary, DB_STATE_MUTATION=mutation)
++    result = subprocess.run(["bun", "conformance/cli/db-restore-swap.ts", "--compare"],
++                            env=env, capture_output=True)
++    log = Path(f"/tmp/opencode/e1-e5/db16-mutation-{mutation}.log")
++    log.write_bytes(result.stdout + result.stderr)
++    assert result.returncode != 0, f"{mutation}: mutation escaped detection"
++    assert b"AssertionError: post-state comparison:" in result.stderr, log
++    expected = {"file": b"unexpected-file", "mode": b'"mode":384',
++                "directory": b"unexpected-directory"}[mutation]
++    assert expected in result.stdout, log
++    histogram[f"exit {result.returncode}"] = histogram.get(f"exit {result.returncode}", 0) + 1
++    print(f"PASS {mutation}: post-state comparison failed; {log}")
++pinned = json.loads(Path("conformance/cli/exit-histograms.json").read_text())
++assert histogram == pinned["db-file-state-self-test"], histogram
++print("EXIT HISTOGRAM db-file-state-self-test", json.dumps(histogram))
+diff --git a/conformance/cli/db-file-state.ts b/conformance/cli/db-file-state.ts
+index 44cbfa92..a80544f5 100644
+--- a/conformance/cli/db-file-state.ts
++++ b/conformance/cli/db-file-state.ts
+@@ -1,33 +1,39 @@
+ import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
+ import { join } from "node:path";
+ 
+-// lstat avoids following candidate/body symlinks, including self-links.
+-function tree(path: string): unknown {
+- try {
+-  const stat=lstatSync(path);
+-  if(stat.isSymbolicLink())return {link:readlinkSync(path)};
+-  if(stat.isDirectory())return readdirSync(path).sort().map(name=>[name,tree(join(path,name))]);
+-  return readFileSync(path);
+- } catch(error:any) {if(error.code==="ENOENT")return null;throw error;}
+-}
+-export function fileState(root: string, bodies=true) {
+- return {live:["","-wal","-shm"].map(s=>tree(join(root,"db"+s))),snapshots:tree(join(root,"snapshots")),...(bodies?{bodies:tree(join(root,"request_bodies"))}:{})};
++// Keep Bun's runtime compilation cache out of both CLI fixture environments.
++// Otherwise HOME=root makes TS execution itself populate .bun/install/cache.
++process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = "0";
++
++type Entry = { path: string; type: "file" | "directory" | "symlink" | "other"; mode?: number; bytes?: Buffer; target?: string };
++// Capture everything before opening inspection handles; never follow links.
++export function fileState(root: string, _bodies=true): Entry[] {
++ const entries: Entry[]=[];
++ function visit(path: string) {
++  const absolute=join(root,path),stat=lstatSync(absolute);
++  if(stat.isSymbolicLink()) entries.push({path,type:"symlink",target:readlinkSync(absolute)});
++  else if(stat.isDirectory()) {
++   entries.push({path,type:"directory",mode:stat.mode&0o7777});
++   for(const name of readdirSync(absolute).sort())visit(path?`${path}/${name}`:name);
++  } else if(stat.isFile())entries.push({path,type:"file",mode:stat.mode&0o7777,bytes:readFileSync(absolute)});
++  else entries.push({path,type:"other"});
++ }
++ visit("");return entries;
+ }
+-// Only SQLite's writer-version field in the live database header is masked.
+ export function frozenPostState(root: string, bodies=true) {
+  const state=fileState(root,bodies);
+- const db=state.live[0];
+- if(Buffer.isBuffer(db)&&db.length>=100)db.fill(0,96,100);
++ const db=state.find(e=>e.path==="db")?.bytes;
++ if(db&&db.length>=100)db.fill(0,96,100);
+  return state;
+ }
+-
+-// A newly generated undo has a clock-derived name and SQLite writer version.
+-export function restorePostState(root: string, undo: string) {
+- const state=frozenPostState(root);
+- state.snapshots=(state.snapshots as [string,unknown][]).map(([name,value])=>{
+-  if(name!==undo)return [name,value];
+-  if(Buffer.isBuffer(value)&&value.length>=100)value.fill(0,96,100);
+-  return ["<undo>",value];
+- }).sort(([a],[b])=>String(a).localeCompare(String(b)));
+- return state;
++// Clock-derived undo names and writer-version fields are the existing masks.
++export function restorePostState(root: string, undo: string | string[]) {
++ const state=frozenPostState(root),undos=typeof undo==="string"?[undo]:undo;
++ for(const entry of state) {
++  const index=undos.findIndex(name=>entry.path===`snapshots/${name}`);
++  if(index<0)continue;
++  entry.path=`snapshots/<undo${index||""}>`;
++  if(entry.bytes&&entry.bytes.length>=100)entry.bytes.fill(0,96,100);
++ }
++ return state.sort((a,b)=>a.path.localeCompare(b.path));
+ }
+diff --git a/conformance/cli/db-kill-driver.py b/conformance/cli/db-kill-driver.py
+new file mode 100644
+index 00000000..be8706cf
+--- /dev/null
++++ b/conformance/cli/db-kill-driver.py
+@@ -0,0 +1,104 @@
++"""Trace once, then inject a bounded delay at an observed syscall occurrence.
++
++Kills only the direct CLI child of our strace process, identified through /proc.
++Full traces and root captures are retained outside the disposable fixture.
++"""
++import os
++import re
++import select
++import signal
++import subprocess
++import sys
++import time
++
++point, log, baseline = sys.argv[1:4]
++cmd = sys.argv[4:]
++target = None
++if point not in ("trace", "K1"):
++    lines = open(baseline).readlines()
++    calls = []
++    counts = {}
++    for line in lines:
++        m = re.match(r"(\d+)\s+(\w+)\(", line)
++        if not m:
++            continue
++        pid, name = m.groups()
++        counts[pid, name] = counts.get((pid, name), 0) + 1
++        calls.append((name, counts[pid, name], line))
++    rename = next((i for i, c in enumerate(calls) if c[0].startswith("rename") and ".incoming" in c[2]), None)
++    copy = next((i for i, c in enumerate(calls) if c[0] in ("copy_file_range", "sendfile", "ioctl") and ".incoming" in c[2]), None)
++    if point == "K2":
++        target = next((c for c in calls if c[0] in ("pwrite64", "write") and "preRestore.sqlite>" in c[2]), None)
++    elif point == "K3" and copy is not None:
++        target = calls[copy]
++    elif point in ("K4", "K5") and copy is not None and rename is not None:
++        # Last two are the explicit swap removals; earlier ones are SQLite close.
++        unlinks = [c for c in calls[copy:rename] if c[0] in ("unlink", "unlinkat")][-2:]
++        index = 0 if point == "K4" else 1
++        target = unlinks[index] if len(unlinks) > index else None
++    elif point in ("K6", "K7") and rename is not None:
++        target = calls[rename]
++    elif point == "K8" and rename is not None:
++        target = next((c for c in calls[rename+1:] if c[0] == "openat" and '"' + cmd[cmd.index("--root")+1] + '/db"' in c[2]), None)
++        # Baseline uses a different scratch directory.
++        if target is None:
++            target = next((c for c in calls[rename+1:] if c[0] == "openat" and '/db"' in c[2]), None)
++    if target is None:
++        print("not reached: no matching syscall in baseline")
++        sys.exit(0)
++    print("TARGET", target, flush=True)
++
++master, slave = os.openpty()
++args = ["/usr/bin/strace", "-f", "-yy", "-e", "trace=file,desc", "-o", log+".trace"]
++if target:
++    phase = "delay_exit" if point == "K7" else "delay_enter"
++    args += ["-e", f"inject={target[0]}:{phase}=10s:when={target[1]}"]
++p = subprocess.Popen(args+cmd, stdin=slave, stdout=slave, stderr=slave)
++os.close(slave)
++child = None
++data = b""
++answered = False
++killed = False
++deadline = time.monotonic()+25
++try:
++    while p.poll() is None and time.monotonic() < deadline:
++        if child is None:
++            children = open(f"/proc/{p.pid}/task/{p.pid}/children").read().split()
++            if children:
++                child = int(children[0])
++        if select.select([master], [], [], .02)[0]:
++            try:
++                data += os.read(master, 65536)
++            except OSError:
++                break
++        if b"[y/N]" in data and not answered:
++            if point == "K1":
++                try:
++                    os.kill(child, signal.SIGKILL)
++                    killed = True
++                except ProcessLookupError:
++                    print("not reached: target ordinal drifted (process already exited)")
++                break
++            os.write(master, b"y\n")
++            answered = True
++        if target and answered:
++            # strace prints the syscall entry before the injected delay ends.
++            text = open(log+".trace").read()
++            matches = re.findall(r"^"+str(child)+r"\s+"+target[0]+r"\(", text, re.M)
++            if len(matches) >= target[1]:
++                time.sleep(.15)
++                try:
++                    os.kill(child, signal.SIGKILL)
++                    killed = True
++                except ProcessLookupError:
++                    print("not reached: target ordinal drifted (process already exited)")
++                break
++    if p.poll() is None and not killed:
++        if child:
++            os.kill(child, signal.SIGKILL)
++        print("not reached: timeout")
++    p.wait(timeout=15)
++finally:
++    os.close(master)
++open(log+".output", "wb").write(data)
++print("completed trace" if point == "trace" else "killed" if killed else "not reached: exited before target")
+diff --git a/conformance/cli/db-kill.ts b/conformance/cli/db-kill.ts
+new file mode 100644
+index 00000000..1fe13216
+--- /dev/null
++++ b/conformance/cli/db-kill.ts
+@@ -0,0 +1,55 @@
++// Opt-in strace experiment; deliberately outside the pinned matrix.
++import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
++import { join, resolve } from "node:path";
++import { createStore, deriveKey } from "../../packages/store/src/index.ts";
++import { Database } from "bun:sqlite";
++import { fileState } from "./db-file-state.ts";
++const base=mkdtempSync("/tmp/opencode/e1-e5/db17-kill-root-");
++const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
++const commands=[["bun","--no-env-file",resolve("apps/cli/src/index.ts")],[resolve(process.env.OMNI_CLI_BIN??"target/debug/omni")]];
++let different=false;
++try {
++ const seed=join(base,"seed");mkdirSync(join(seed,"snapshots"),{recursive:true});
++ const store=await createStore({path:join(seed,"db"),encryptionKey:await deriveKey("database-golden-secret")});
++ store.close();copyFileSync(join(seed,"db"),join(seed,"snapshots",id));
++ const candidate=new Database(join(seed,"snapshots",id));candidate.run("PRAGMA journal_mode=DELETE");candidate.run("INSERT INTO settings (key,value) VALUES ('candidate','installed')");candidate.close();
++ const walSource=join(base,"wal-source");copyFileSync(join(seed,"db"),walSource);
++ const writer=new Database(walSource);writer.run("PRAGMA journal_mode=WAL");writer.run("PRAGMA wal_autocheckpoint=0");writer.run("INSERT INTO settings (key,value) VALUES ('live-wal','old')");
++ for(const suffix of ["","-wal","-shm"])copyFileSync(walSource+suffix,join(seed,"db")+suffix);writer.close();
++ const env={...process.env,OMNI_ENCRYPTION_KEY:"database-golden-secret",NO_COLOR:"1"};
++ function capture(root:string){return fileState(root).map(({bytes,...entry})=>({...entry,path:entry.path.replace(/db_[\dTZ-]+_preRestore.sqlite/g,"<undo>"),size:bytes?.length,hex:bytes?.toString("hex")}));}
++ function listing(state:ReturnType<typeof capture>){return state.map(({hex,...entry})=>entry);}
++ for(const point of ["trace","K1","K2","K3","K4","K5","K6","K7","K8"]) {
++  const results=[];
++  const afters=[];
++  const followResults=[];
++  for(const [i,cmd] of commands.entries()) {
++   const root=join(base,`${point}-${i}`);cpSync(seed,root,{recursive:true});
++   const log=`/tmp/opencode/e1-e5/db17-kill-${point}-${i}`;
++   const p=Bun.spawn(["python3",resolve("conformance/cli/db-kill-driver.py"),point,log,`/tmp/opencode/e1-e5/db17-kill-trace-${i}.trace`,...cmd,"--root",root,"--db","db","db","restore",id],{env:{...env,HOME:root,XDG_STATE_HOME:join(root,"state")},stdout:"pipe",stderr:"pipe"});
++   const out=await new Response(p.stdout).text(),err=await new Response(p.stderr).text();const code=await p.exited;
++   console.log(point,i===0?"TS":"Rust",out.trim(),err.trim());
++   if(code!==0||out.includes("not reached")){results.push(null);continue;}
++   const state=capture(root);await Bun.write(log+".state.json",JSON.stringify(state));
++   console.log("LIST",JSON.stringify(listing(state)));
++   if(point==="trace"){results.push(state);continue;}
++   const undo=readdirSync(join(root,"snapshots")).find(n=>n.endsWith("_preRestore.sqlite"));
++   const follow=[];
++   for(const args of [...(undo?[["db","restore",undo,"--yes","--json"]]:[]),["db","stats","--json"]]) {
++    const f=Bun.spawn([...cmd,"--root",root,"--db","db",...args],{env:{...env,HOME:root,XDG_STATE_HOME:join(root,"state")},stdout:"pipe",stderr:"pipe"});
++    const stdout=await new Response(f.stdout).text(),stderr=await new Response(f.stderr).text();const exit=await f.exited;follow.push(exit);console.log("FOLLOW",point,i,args,exit,stdout,stderr);
++   }
++   const after=capture(root);await Bun.write(log+".after.json",JSON.stringify(after));console.log("AFTER",JSON.stringify(listing(after)));
++   console.log("FOLLOW SUMMARY",point,i,JSON.stringify(follow));afters.push(after);followResults.push(follow);
++   results.push(state);
++  }
++  if(point!=="trace"&&results.every(Boolean)) {
++   const sets=results.map(s=>JSON.stringify(s!.map(e=>[e.path,e.type])));
++   const afterSets=afters.map(s=>JSON.stringify(s.map(e=>[e.path,e.type])));
++   const equal=sets[0]===sets[1]&&afterSets[0]===afterSets[1];
++   const sizes=results.map(s=>JSON.stringify(listing(s!)));
++   console.log(`TABLE ${point} file-set-equal=${equal} sizes-and-modes-equal=${sizes[0]===sizes[1]} follow-exits-equal=${JSON.stringify(followResults[0])===JSON.stringify(followResults[1])}`);if(!equal){different=true;break;}
++  }
++ }
++} finally {rmSync(base,{recursive:true,force:true});}
++process.exitCode=different?1:0;
+diff --git a/conformance/cli/db-restore-before.ts b/conformance/cli/db-restore-before.ts
+new file mode 100644
+index 00000000..23a3d5ef
+--- /dev/null
++++ b/conformance/cli/db-restore-before.ts
+@@ -0,0 +1,45 @@
++import { strict as assert } from "node:assert";
++import { Database } from "bun:sqlite";
++import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
++import { join, resolve } from "node:path";
++import { createStore, deriveKey } from "../../packages/store/src/index.ts";
++import { frozenPostState, restorePostState } from "./db-file-state.ts";
++import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
++const base=mkdtempSync("/tmp/opencode/e1-e5/db14-before-");
++const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
++const commands=[["bun","--no-env-file",resolve("apps/cli/src/index.ts")]];
++if(process.argv.includes("--compare"))commands.push([resolve(process.env.OMNI_CLI_BIN??"target/debug/omni")]);
++try {
++ const seed=join(base,"seed");const store=await createStore({path:seed,encryptionKey:await deriveKey("database-golden-secret")});store.close();
++ for(const kind of ["snapshots-readonly","candidate-removed","candidate-replaced","live-dir-readonly"]) {
++  const results=[];
++  for(const [index,command] of commands.entries()) {
++   const root=join(base,`${kind}-${index}`),snapshots=join(root,"snapshots"),live=join(root,"db"),candidate=join(snapshots,id);
++   mkdirSync(snapshots,{recursive:true});copyFileSync(seed,live);copyFileSync(seed,candidate);
++   const replacement=join(root,"replacement");copyFileSync(seed,replacement);
++   const db=new Database(replacement);db.run("INSERT INTO settings (key,value) VALUES ('replacement','installed')");db.close();
++   const mutation=kind==="candidate-removed"?"remove":kind==="candidate-replaced"?"replace":"readonly";
++   const target=kind.startsWith("candidate-")?candidate:kind==="snapshots-readonly"?snapshots:root;
++   const args=["python3",resolve("conformance/cli/pty.py"),"y",...command,"--root",root,"--db","db","db","restore",id,"--json"];
++   const p=goldenSpawn(args,{env:{...process.env,HOME:root,XDG_STATE_HOME:join(root,"state"),OMNI_ENCRYPTION_KEY:"database-golden-secret",PTY_NO_COLOR:"1",PTY_STDOUT_PIPE:"1",PTY_RESTORE_MUTATION:mutation,PTY_RESTORE_TARGET:target,PTY_RESTORE_SOURCE:replacement},stdout:"pipe",stderr:"pipe"});
++   const [text,stderr]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text()]);await p.exited;
++   assert.equal(stderr,"");const nested=JSON.parse(text);let out=Buffer.from(nested.stdout,"hex").toString(),err=Buffer.from(nested.bytes,"hex").toString();
++   const code=nested.code;
++   assert.equal(code,kind==="candidate-replaced"?0:1,err);
++   const undos=readdirSync(snapshots).filter(n=>n.endsWith("_preRestore.sqlite"));
++   if(kind==="candidate-removed"){assert(err.includes("no such snapshot"));assert.equal(undos.length,0);}
++   if(kind==="snapshots-readonly")assert.equal(undos.length,0);
++   const state=undos.length?restorePostState(root,undos[0]):frozenPostState(root);
++   chmodSync(root,0o755);chmodSync(snapshots,0o755);
++   if(kind==="candidate-replaced") {
++    const data=JSON.parse(out);assert.equal(data.counts.settings,1,"second inspection sees replacement");
++    const installed=new Database(live,{readonly:true});assert.equal(installed.query("SELECT value FROM settings WHERE key='replacement'").get().value,"installed");installed.close();
++    data.preRestoreSnapshot.id=data.preRestoreSnapshot.filename="<undo>";data.preRestoreSnapshot.createdAt="<time>";out=JSON.stringify(data);
++   }
++   err=err.replaceAll(root,"<root>").replace(/db_\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z_preRestore\.sqlite/g,"<undo>");results.push({out,err,code,state});
++   console.log(`${kind} ${index===0?"TS":"Rust"}: exit=${code}, undos=${undos.length}, stderr=${JSON.stringify(err)}`);
++  }
++  if(results.length===2)assert.deepEqual(results[1],results[0],kind);
++ }
++ await verifyGoldenExits("db-restore-before");console.log("PASS 4 pre-rename comparisons");
++} finally {for(const name of readdirSync(base)){try{chmodSync(join(base,name),0o755);chmodSync(join(base,name,"snapshots"),0o755);}catch{}}rmSync(base,{recursive:true,force:true});}
+diff --git a/conformance/cli/db-restore-generations.ts b/conformance/cli/db-restore-generations.ts
+index f91af074..c19c7152 100644
+--- a/conformance/cli/db-restore-generations.ts
++++ b/conformance/cli/db-restore-generations.ts
+@@ -5,6 +5,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node
+ import { join, resolve } from "node:path";
+ import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+ import { restorePostState } from "./db-file-state.ts";
++import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
+ const root=mkdtempSync("/tmp/opencode/e1-e5/db13-generations-");
+ const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
+ const commands=[["bun","--no-env-file",resolve("apps/cli/src/index.ts")]];
+@@ -39,32 +40,67 @@ try {
+     writer.run("INSERT INTO settings (key,value) VALUES ('live-wal-only','undo must retain')");
+     assert(readFileSync(live+"-wal").length>0);
+    }
+-   const p=Bun.spawn([...command,"--root",home,"--db","db","db","restore",id,"--yes","--json"],{env:{...process.env,HOME:home,XDG_STATE_HOME:join(home,"state"),OMNI_ENCRYPTION_KEY:"database-golden-secret",NO_COLOR:"1"},stdout:"pipe",stderr:"pipe"});
++   const start=Date.now();
++   const p=goldenSpawn([...command,"--root",home,"--db","db","db","restore",id,"--yes","--json"],{env:{...process.env,HOME:home,XDG_STATE_HOME:join(home,"state"),OMNI_ENCRYPTION_KEY:"database-golden-secret",NO_COLOR:"1"},stdout:"pipe",stderr:"pipe"});
+    const [out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);
++   const end=Date.now();
+    assert.equal(code,0,err);
+    const data=JSON.parse(out),undo=data.preRestoreSnapshot.id;
+    assert.deepEqual(readFileSync(candidate),candidateBefore);
++   const postState=restorePostState(home,undo);
+    const db=new Database(live,{readonly:true});
+    assert(db.query("PRAGMA table_info(api_keys)").all().some((c:any)=>c.name==="smart_routing"));
+-   if(kind==="schema-19")console.log("migration 20",JSON.stringify(db.query("SELECT * FROM migrations WHERE id=20").get()));
++   const ledger=db.query("SELECT * FROM migrations ORDER BY id").all() as {id:number,applied_at:number}[];
++   const ledgerPage=(db.query("SELECT rootpage FROM sqlite_master WHERE name='migrations'").get() as {rootpage:number}).rootpage;
+    if(kind==="schema-21")assert.deepEqual(db.query("SELECT value FROM future_schema_fixture").all(),[{value:"future row"}]);
+    db.close();
+    if(writer) {
+     const saved=new Database(join(home,"snapshots",undo),{readonly:true});
+     assert.equal(saved.query("SELECT value FROM settings WHERE key='live-wal-only'").get().value,"undo must retain");saved.close();
+    }
+-   const postState=restorePostState(home,undo);
++    if(kind==="schema-19") {
++     const row=ledger.find(r=>r.id===20)!;
++     assert(row.applied_at>=start && row.applied_at<=end,"migration timestamp inside command window");
++     // Locate rowid 20's timestamp by decoding the SQLite table-leaf record,
++     // rather than searching for coincidentally equal bytes or masking a page.
++     const bytes=postState.find(e=>e.path==="db")!.bytes!;
++     const pageSize=bytes.readUInt16BE(16)||65536, page=(ledgerPage-1)*pageSize;
++     const header=page+(ledgerPage===1?100:0);
++     assert.equal(bytes[header],13,"ledger is a table leaf");
++     function varint(at:number):[number,number] {
++      let value=0;
++      for(let n=0;n<8;n++){const b=bytes[at++];value=value*128+(b&127);if(b<128)return [value,at];}
++      return [value*256+bytes[at],at+1];
++     }
++     let timestampOffset:number|undefined;
++     for(let i=0;i<bytes.readUInt16BE(header+3);i++) {
++      const cell=page+bytes.readUInt16BE(header+8+i*2);
++      const [length,next]=varint(cell),[rowid,record]=varint(next);
++      if(rowid!==20)continue;
++      const [headerLength,serials]=varint(record);
++      const [idType,afterId]=varint(serials),[timeType,afterTime]=varint(afterId);
++      assert.equal(idType,0);assert.equal(timeType,5,"six-byte timestamp");
++      assert.equal(afterTime,record+headerLength);assert.equal(length,headerLength+6);
++      timestampOffset=record+headerLength;
++     }
++     assert.notEqual(timestampOffset,undefined);
++     assert.equal(bytes.readIntBE(timestampOffset!,6),row.applied_at);
++     console.log(`schema-19 ${index===0?"TS":"Rust"}: timestamp bytes ${timestampOffset}–${timestampOffset!+5}, window ${start}..${end}, value ${row.applied_at}`);
++     bytes.writeIntBE(0,timestampOffset!,6);
++     row.applied_at=0;
++    }
+    data.preRestoreSnapshot.id=data.preRestoreSnapshot.filename="<undo>";data.preRestoreSnapshot.createdAt="<time>";
+-   results.push({data,err:err.replaceAll(home,"<root>"),code,postState});
++   results.push({data,err:err.replaceAll(home,"<root>"),code,postState,ledger});
+    console.log(`${kind} ${index===0?"TS":"Rust"}: exit=${code}; candidate retained; ${kind==="live-wal"?"undo retains WAL-only row":kind==="schema-19"?"smart_routing column migrated":"future table and row retained"}`);
+    writer?.close();
+   }
+   if(results.length===2) {
+-   const a=results[0].postState.live[0] as Buffer,b=results[1].postState.live[0] as Buffer;
++   const a=results[0].postState.find(e=>e.path==="db")!.bytes!,b=results[1].postState.find(e=>e.path==="db")!.bytes!;
+    const offsets=Array.from({length:Math.max(a.length,b.length)},(_,i)=>i).filter(i=>a[i]!==b[i]);
+    if(offsets.length)console.log(JSON.stringify({kind,entry:"live/db",offsets}));
+    assert.deepEqual(results[1],results[0],kind);
+   }
+  }
+- console.log("PASS 3 generation/live-WAL observations");
++  console.log("PASS 3 generation/live-WAL observations");
++  await verifyGoldenExits("db-restore-generations");
+ } finally {rmSync(root,{recursive:true,force:true});}
+diff --git a/conformance/cli/db-restore-hashes.ts b/conformance/cli/db-restore-hashes.ts
+new file mode 100644
+index 00000000..bf136d22
+--- /dev/null
++++ b/conformance/cli/db-restore-hashes.ts
+@@ -0,0 +1,38 @@
++import { strict as assert } from "node:assert";
++import { Database } from "bun:sqlite";
++import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
++import { join, resolve } from "node:path";
++import { createStore, deriveKey } from "../../packages/store/src/index.ts";
++import { restorePostState } from "./db-file-state.ts";
++import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
++const base=mkdtempSync("/tmp/opencode/e1-e5/db15-hashes-");
++const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
++const commands=[["bun","--no-env-file",resolve("apps/cli/src/index.ts")]];
++if(process.argv.includes("--compare"))commands.push([resolve(process.env.OMNI_CLI_BIN??"target/debug/omni")]);
++const cases: [string,string|null,string|null,boolean][]=[
++ ["blob-text","'abc'","X'616263'",true],["blob-blob","X'616263'","X'616263'",true],
++ ["text-text","'abc'","'abc'",false],["integer-text","42","'42'",true],
++ ["missing-present",null,"'abc'",true],["integer-real","42","42.0",false],
++ ["real-real","1.5","1.5",false],["null-missing","NULL",null,false],
++];
++try {
++ const seed=join(base,"seed");const store=await createStore({path:seed,encryptionKey:await deriveKey("database-golden-secret")});store.close();
++ // Preserve SQLite storage classes, including NULL, rather than TEXT affinity coercion.
++ const db=new Database(seed);db.run("DROP TABLE settings");db.run("CREATE TABLE settings (key TEXT PRIMARY KEY, value)");db.close();
++ for(const [kind,before,after,changed] of cases)for(const json of [true,false]) {
++  const results=[];
++  for(const [index,command] of commands.entries()) {
++   const root=join(base,`${kind}-${json}-${index}`),snapshots=join(root,"snapshots");mkdirSync(snapshots,{recursive:true});
++   for(const [path,value] of [[join(root,"db"),before],[join(snapshots,id),after]] as const){copyFileSync(seed,path);const db=new Database(path);if(value!==null)db.run(`INSERT INTO settings VALUES ('adminPasswordHash',${value}),('viewerPasswordHash',${value})`);db.close();}
++   const p=goldenSpawn([...command,"--root",root,"--db","db","db","restore",id,"--yes",...(json?["--json"]:[])],{env:{...process.env,HOME:root,XDG_STATE_HOME:join(root,"state"),OMNI_ENCRYPTION_KEY:"database-golden-secret",NO_COLOR:"1"},stdout:"pipe",stderr:"pipe"});
++   let [out,err]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text()]);const code=await p.exited;
++   console.log(`${kind} ${json?"json":"human"} ${index===0?"TS":"Rust"}: exit=${code}, stdout=${JSON.stringify(out)}, stderr=${JSON.stringify(err)}`);
++   assert.equal(code,0);const undos=readdirSync(snapshots).filter(n=>n.endsWith("_preRestore.sqlite"));assert.equal(undos.length,1);
++   const state=restorePostState(root,undos[0]);
++   if(json){const data=JSON.parse(out);assert.equal(data.adminPasswordChanged,changed);assert.equal(data.viewerPasswordChanged,changed);data.preRestoreSnapshot.id=data.preRestoreSnapshot.filename="<undo>";data.preRestoreSnapshot.createdAt="<time>";out=JSON.stringify(data);}
++   out=out.replaceAll(root,"<root>").replaceAll(undos[0],"<undo>");err=err.replaceAll(root,"<root>").replaceAll(undos[0],"<undo>");results.push({out,err,code,state});
++  }
++  if(results.length===2)assert.deepEqual(results[1],results[0],kind);
++ }
++ await verifyGoldenExits("db-restore-hashes");console.log("PASS 16 hash comparisons");
++} finally {rmSync(base,{recursive:true,force:true});}
+diff --git a/conformance/cli/db-restore-path.ts b/conformance/cli/db-restore-path.ts
+new file mode 100644
+index 00000000..45ae900f
+--- /dev/null
++++ b/conformance/cli/db-restore-path.ts
+@@ -0,0 +1,34 @@
++import { strict as assert } from "node:assert";
++import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
++import { join, resolve } from "node:path";
++import { createStore, deriveKey } from "../../packages/store/src/index.ts";
++import { frozenPostState, restorePostState } from "./db-file-state.ts";
++import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
++const base=mkdtempSync("/tmp/opencode/e1-e5/db15-path-");
++const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
++const commands=[["bun","--no-env-file",resolve("apps/cli/src/index.ts")]];
++if(process.argv.includes("--compare"))commands.push([resolve(process.env.OMNI_CLI_BIN??"target/debug/omni")]);
++try {
++ const seed=join(base,"seed");const store=await createStore({path:seed,encryptionKey:await deriveKey("database-golden-secret")});store.close();
++ for(const kind of ["outside","inside","dangling","directory"]) {
++  const results=[];
++  for(const [index,command] of commands.entries()) {
++   const root=join(base,`${kind}-${index}`),snapshots=join(root,"snapshots"),candidate=join(snapshots,id);
++   mkdirSync(snapshots,{recursive:true});copyFileSync(seed,join(root,"db"));copyFileSync(seed,candidate);
++   copyFileSync(seed,join(root,"replacement"));copyFileSync(seed,join(snapshots,"other.sqlite"));
++   const source=kind==="inside"?"other.sqlite":kind==="dangling"?"absent.sqlite":"../replacement";
++   const p=goldenSpawn(["python3",resolve("conformance/cli/pty.py"),"y",...command,"--root",root,"--db","db","db","restore",id,"--json"],{env:{...process.env,HOME:root,XDG_STATE_HOME:join(root,"state"),OMNI_ENCRYPTION_KEY:"database-golden-secret",PTY_NO_COLOR:"1",PTY_STDOUT_PIPE:"1",PTY_RESTORE_MUTATION:kind==="directory"?"directory":"symlink",PTY_RESTORE_TARGET:candidate,PTY_RESTORE_SOURCE:source},stdout:"pipe",stderr:"pipe"});
++   const [text,stderr]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text()]);await p.exited;assert.equal(stderr,"");
++   const nested=JSON.parse(text);let out=Buffer.from(nested.stdout,"hex").toString(),err=Buffer.from(nested.bytes,"hex").toString();const code=nested.code;
++   const undos=readdirSync(snapshots).filter(n=>n.endsWith("_preRestore.sqlite"));
++   const state=undos.length?restorePostState(root,undos[0]):frozenPostState(root);
++   console.log(`${kind} ${index===0?"TS":"Rust"}: exit=${code}, undos=${undos.length}, stderr=${JSON.stringify(err.replaceAll(root,"<root>"))}`);
++   assert.equal(code,kind==="inside"?0:1);assert.equal(undos.length,kind==="inside"?1:0);
++   if(kind==="outside")assert(err.includes("BAD_REQUEST: invalid snapshot id"));
++   if(kind==="inside"){const data=JSON.parse(out);data.preRestoreSnapshot.id=data.preRestoreSnapshot.filename="<undo>";data.preRestoreSnapshot.createdAt="<time>";out=JSON.stringify(data);}
++   err=err.replaceAll(root,"<root>").replace(/db_\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z_preRestore\.sqlite/g,"<undo>");results.push({out,err,code,state});
++  }
++  if(results.length===2)assert.deepEqual(results[1],results[0],kind);
++ }
++ await verifyGoldenExits("db-restore-path");console.log("PASS 4 post-confirmation path comparisons");
++} finally {rmSync(base,{recursive:true,force:true});}
+diff --git a/conformance/cli/db-restore-swap.ts b/conformance/cli/db-restore-swap.ts
+index f6703af9..2c9ad208 100644
+--- a/conformance/cli/db-restore-swap.ts
++++ b/conformance/cli/db-restore-swap.ts
+@@ -91,13 +91,14 @@ try {
+       const undoIds = readdirSync(join(root, "snapshots")).filter(name => name.endsWith("_preRestore.sqlite"));
+       assert.equal(undoIds.length, 1);
+       const undo = undoIds[0];
++      const postState = restorePostState(root, undo);
++      let roundtripState;
+       assert.match(undo, /^db_\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z_preRestore\.sqlite$/);
+       assert.deepEqual(rows(join(root, "snapshots", undo)), oldRows, "undo contains every old table");
+       assert.deepEqual(rows(live), installedRows, "candidate main file installed table by table (WAL excluded)");
+       assert.deepEqual(readFileSync(candidate), candidateBytes, "candidate retained byte-identically");
+       assert(existsSync(join(root, "snapshots", stale)), "forced undo skips all retention");
+        assert(!existsSync(live + ".incoming"));
+-       const postState = restorePostState(root, undo);
+       if (test.ledger) {
+         assert.equal(result.out, "");
+         assert.match(result.err, /the database swap failed and the database may be incomplete/);
+@@ -133,15 +134,34 @@ try {
+         // Restore the undo through the same public command, not by copying it.
+         const roundtrip = await run(undo, false, true);
+         assert.equal(roundtrip.code, 0, roundtrip.err);
++        const secondUndo = JSON.parse(roundtrip.out).preRestoreSnapshot.id;
++        const state = restorePostState(root, [undo, secondUndo]);
++        const data = JSON.parse(roundtrip.out);
++        data.preRestoreSnapshot.id = data.preRestoreSnapshot.filename = "<undo1>";
++        data.preRestoreSnapshot.createdAt = "<time>";
++        roundtrip.out = JSON.stringify(data);
++        roundtrip.err = roundtrip.err.replaceAll(root, "<root>").replaceAll(undo, "<undo>");
++        roundtripState = { roundtrip, state };
+         assert.deepEqual(rows(live), oldRows, "round trip restores every original table");
+         assert.equal(readdirSync(join(root, "snapshots")).filter(name => name.endsWith("_preRestore.sqlite")).length, 2);
+       }
+       result.err = result.err.replaceAll(root, "<root>");
+-       results.push({ result, sidecars, postState });
++       results.push({ result, sidecars, postState, roundtripState });
+       console.log(`${test.name} ${index === 0 ? "TS" : "Rust"}: exit=${result.code}, sidecars=${JSON.stringify(sidecars)}, undo retained, incoming absent`);
+     }
+     wal?.close();
+-    if (results.length === 2) assert.deepEqual(results[1], results[0], test.name);
++    if (results.length === 2) {
++      for(const key of ["postState", "roundtripState"] as const) {
++        const states=results.map(r=>key==="postState"?r.postState:r.roundtripState?.state);
++        for(const path of new Set(states.flatMap(s=>s?.map(e=>e.path)??[]))) {
++          const entries=states.map(s=>s?.find(e=>e.path===path));
++          try {assert.deepEqual(entries[1],entries[0]);} catch {
++            console.log("STATE DIFFERENCE",key,path,JSON.stringify(entries.map(e=>e&&({...e,bytes:e.bytes?{length:e.bytes.length,offsets: Array.from(e.bytes.keys()).filter(i=>entries[0]?.bytes?.[i]!==entries[1]?.bytes?.[i]).slice(0,40)}:undefined}))));
++          }
++        }
++      }
++      assert.deepEqual(results[1], results[0], `post-state comparison: ${test.name}`);
++    }
+   }
+   console.log(`PASS ${cases.length} frozen swap characterizations${commands.length === 2 ? " with Rust parity" : " (TS only)"}; 5 round trips`);
+   await verifyGoldenExits("db-restore-swap");
+diff --git a/conformance/cli/db-restore.ts b/conformance/cli/db-restore.ts
+index 53b23adc..ef1d4a05 100644
+--- a/conformance/cli/db-restore.ts
++++ b/conformance/cli/db-restore.ts
+@@ -47,13 +47,16 @@ try {
+    copyFileSync(join(root,"seed"),join(root,"db"));
+    copyFileSync(join(root,"seed"),join(root,"snapshots",id));
+    const pidfile=join(root,"state/omnigateway/gateway.pid");
+-   writeFileSync(pidfile,String(process.pid));chmodSync(pidfile,0);
++   writeFileSync(pidfile,String(process.pid));chmodSync(pidfile,0o600);
+    const before=state();
++   chmodSync(pidfile,0);
+    try {
+     const p=goldenSpawn([...cmd,"--root",root,"--db","db",...command],{env,stdout:"pipe",stderr:"pipe"});
+     const result={out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited};
+     assert.equal(result.code,1);assert.equal(result.out,"");
+     assert(result.err.includes(`EACCES: permission denied, open '${pidfile}'`));
++    assert.equal(lstatSync(pidfile).mode&0o7777,0);
++    chmodSync(pidfile,0o600);
+     assert.deepEqual(state(),before);results.push(result);
+    } finally {chmodSync(pidfile,0o600);assert.equal(readFileSync(pidfile,"utf8"),String(process.pid));rmSync(pidfile);}
+   }
+diff --git a/conformance/cli/db-snapshot-missing.ts b/conformance/cli/db-snapshot-missing.ts
+new file mode 100644
+index 00000000..641db434
+--- /dev/null
++++ b/conformance/cli/db-snapshot-missing.ts
+@@ -0,0 +1,35 @@
++// Missing live path: frozen first, then compare output and the whole root.
++import { strict as assert } from "node:assert";
++import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
++import { join, resolve } from "node:path";
++import { createStore, deriveKey } from "../../packages/store/src/index.ts";
++import { restorePostState } from "./db-file-state.ts";
++import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
++const base=mkdtempSync("/tmp/opencode/e1-e5/db17-missing-");
++const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
++try {
++ const seed=join(base,"seed"); const store=await createStore({path:seed,encryptionKey:await deriveKey("database-golden-secret")});store.close();
++ const commands=[["bun","--no-env-file",resolve("apps/cli/src/index.ts")]];
++ if(process.argv.includes("--compare"))commands.push([resolve(process.env.OMNI_CLI_BIN??"target/debug/omni")]);
++ for(const kind of ["backup","undo"]) {
++  const results=[];
++  for(const [index,cmd] of commands.entries()) {
++   const root=join(base,`${kind}-${index}`);mkdirSync(join(root,"snapshots"),{recursive:true});
++   copyFileSync(seed,join(root,"snapshots",id));
++   if(kind==="undo")copyFileSync(seed,join(root,"db"));
++   const args=kind==="backup"?[...cmd,"--root",root,"--db","db","db","backup","--json"]:["python3",resolve("conformance/cli/pty.py"),"y",...cmd,"--root",root,"--db","db","db","restore",id,"--json"];
++   const p=goldenSpawn(args,{env:{...process.env,HOME:root,XDG_STATE_HOME:join(root,"state"),NO_COLOR:"1",OMNI_ENCRYPTION_KEY:"database-golden-secret",PTY_NO_COLOR:"1",PTY_STDOUT_PIPE:"1",PTY_RESTORE_MUTATION:"remove",PTY_RESTORE_TARGET:join(root,"db")},stdout:"pipe",stderr:"pipe"});
++   let out=await new Response(p.stdout).text(),err=await new Response(p.stderr).text(),code=await p.exited;
++   if(kind==="undo"){assert.equal(err,"");const nested=JSON.parse(out);out=Buffer.from(nested.stdout,"hex").toString();err=Buffer.from(nested.bytes,"hex").toString();code=nested.code;}
++   const undos=readdirSync(join(root,"snapshots")).filter(n=>n!==id);
++   const normalize=(s:string)=>s.replaceAll(root,"<root>").replace(/db_[\dTZ-]+_(manual|preRestore)\.sqlite/g,"<snapshot>").replace(/"createdAt":\s*\d+/g,'"createdAt":0');
++   const state=restorePostState(root,undos);
++   // Backup boots a new database: migration timestamps differ by wall clock.
++   // Keep its captured entries but compare file sets, modes and sizes only.
++   const result={out:normalize(out),err:normalize(err),code,state:kind==="backup"?state.map(({bytes,...entry})=>({...entry,size:bytes?.length})):state};
++   console.log(kind,index===0?"TS":"Rust",JSON.stringify({out:result.out,err:result.err,code}));results.push(result);
++  }
++  if(results.length===2)assert.deepEqual(results[1],results[0],kind);
++ }
++ await verifyGoldenExits("db-snapshot-missing");console.log("PASS missing-live comparisons");
++} finally {rmSync(base,{recursive:true,force:true});}
+diff --git a/conformance/cli/exit-histograms.json b/conformance/cli/exit-histograms.json
+index 235baa01..62d67ba1 100644
+--- a/conformance/cli/exit-histograms.json
++++ b/conformance/cli/exit-histograms.json
+@@ -1,7 +1,13 @@
+ {
++  "db-snapshot-missing": {"exit 0":2},
++  "db-file-state-self-test": {"exit 1":3},
++  "db-restore-hashes": {"exit 0":16},
++  "db-restore-path": {"exit 1":3,"exit 0":1},
+   "pid-edge-states": {"exit 0":4,"exit 1":8,"environment EACCES":3},
+   "db-restore": {"exit 2":1,"exit 1":30,"environment EACCES":3,"exit 0":11},
+   "db-restore-swap": {"exit 0":10,"exit 1":2},
++  "db-restore-generations": {"exit 0":3},
++  "db-restore-before": {"exit 1":3,"environment unable to open database":1,"exit 0":1,"environment EACCES":1},
+   "db-clear-bodies": {"exit 1":4,"environment OMNI_ENCRYPTION_KEY":1,"exit 0":10},
+   "db-vacuum": {"exit 1":2,"environment OMNI_ENCRYPTION_KEY":2,"exit 0":2},
+   "db-backup": {"exit 1":9,"environment EACCES":1,"environment unable to open database":1,"environment OMNI_ENCRYPTION_KEY":3,"exit 0":21},
+diff --git a/conformance/cli/pid-edge-states.ts b/conformance/cli/pid-edge-states.ts
+index 6ea8908d..95aff340 100644
+--- a/conformance/cli/pid-edge-states.ts
++++ b/conformance/cli/pid-edge-states.ts
+@@ -1,5 +1,5 @@
+ import { strict as assert } from "node:assert";
+-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
++import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, lstatSync } from "node:fs";
+ import { join, resolve } from "node:path";
+ import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+ import { frozenPostState } from "./db-file-state.ts";
+@@ -18,7 +18,13 @@ try {
+    if(kind==='parent')chmodSync(parent,0);if(kind==='file')chmodSync(pid,0);
+    try {
+     const p=goldenSpawn([...cmd,'--root',root,'--db','db',...command],{env,stdout:'pipe',stderr:'pipe'});
+-    const result={out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited,state:frozenPostState(root)};
++     const out=await new Response(p.stdout).text(),err=await new Response(p.stderr).text(),code=await p.exited;
++     const restricted=kind==='parent'?parent:kind==='file'?pid:undefined;
++     const mode=restricted?lstatSync(restricted).mode&0o7777:undefined;
++     if(restricted){assert.equal(mode,0);chmodSync(restricted,kind==='parent'?0o700:0o600);}
++     const state=frozenPostState(root);
++     if(restricted)state.find(e=>e.path===(kind==='parent'?'state/omnigateway':'state/omnigateway/gateway.pid'))!.mode=mode;
++     const result={out,err,code,state};
+     assert.equal(result.code,kind==='directory'||kind==='file'||command[0]==='db'?1:0);
+     if(kind==='directory')assert.equal(result.err,'EISDIR: illegal operation on a directory, read\n');
+     if(kind==='file')assert.match(result.err,/EACCES: permission denied, open/);
+diff --git a/conformance/cli/pty.py b/conformance/cli/pty.py
+index 78a66418..70c92773 100644
+--- a/conformance/cli/pty.py
++++ b/conformance/cli/pty.py
+@@ -46,6 +46,26 @@ while True:
+         answer_index += 1
+         prompt_end = len(out)
+     if b"[y/N]" in out and not answered:
++        # Restore conformance: mutate only the fixture named by the caller,
++        # after preview and before accepting the confirmation.
++        mutation = env.get("PTY_RESTORE_MUTATION")
++        if mutation:
++            target = env["PTY_RESTORE_TARGET"]
++            if mutation == "remove":
++                os.unlink(target)
++            elif mutation == "replace":
++                import shutil
++                shutil.copyfile(env["PTY_RESTORE_SOURCE"], target)
++            elif mutation == "readonly":
++                os.chmod(target, 0o555)
++            elif mutation == "symlink":
++                os.unlink(target)
++                os.symlink(env["PTY_RESTORE_SOURCE"], target)
++            elif mutation == "directory":
++                os.unlink(target)
++                os.mkdir(target)
++            else:
++                raise ValueError(mutation)
+         os.write(master, sys.argv[1].encode() + b"\n")
+         answered = True
+ os.close(master)
+diff --git a/crates/omni-cli/src/lib.rs b/crates/omni-cli/src/lib.rs
+index 568d2ef7..a1cf2b2d 100644
+--- a/crates/omni-cli/src/lib.rs
++++ b/crates/omni-cli/src/lib.rs
+@@ -133,8 +133,43 @@ pub fn run(argv: Vec<String>) -> ExitCode {
+             ExitCode::SUCCESS
+         }
+         Err(e) => {
+-            eprintln!("{e}");
+-            ExitCode::FAILURE
++            let (stderr, code) = render_command_error(&e);
++            eprint!("{stderr}");
++            ExitCode::from(code)
+         }
+     }
+ }
++
++fn render_command_error(error: &str) -> (String, u8) {
++    (format!("{error}\n"), 1)
++}
++
++#[cfg(test)]
++mod restore_error_tests {
++    #[test]
++    fn restore_failures_render_without_undo_or_cause() {
++        use omni_control::database::{RestoreError, SwapFailedError};
++        for cause in ["rename failed", "unlink failed", "reopen failed"] {
++            for reopened in [true, false] {
++                let error = RestoreError::Swap(SwapFailedError {
++                    pre_restore_snapshot_id: "undo-id".into(),
++                    cause: cause.into(),
++                    reopened,
++                });
++                assert_eq!(
++                    super::render_command_error(&error.to_string()),
++                    (
++                        "the database swap failed and the database may be incomplete\n".into(),
++                        1
++                    )
++                );
++            }
++        }
++        assert_eq!(
++            super::render_command_error(
++                &RestoreError::Ordinary("snapshot failed".into()).to_string()
++            ),
++            ("snapshot failed\n".into(), 1)
++        );
++    }
++}
+diff --git a/crates/omni-control/src/database.rs b/crates/omni-control/src/database.rs
+index e44ec4f9..7fc32058 100644
+--- a/crates/omni-control/src/database.rs
++++ b/crates/omni-control/src/database.rs
+@@ -119,8 +119,8 @@ use crate::fs_error::fs_error;
+ use serde_json::{Value, json};
+ use std::path::Path;
+ 
+-/// Resolve and judge a candidate without swapping any files.
+-pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
++/// Shared preview/swap validation, before stat or acquiring the restore latch.
++fn snapshot_path(live: &Path, id: &str) -> Result<std::path::PathBuf, String> {
+     let invalid = || "BAD_REQUEST: invalid snapshot id".to_string();
+     let (stamp, reason) = id
+         .strip_prefix("db_")
+@@ -160,6 +160,12 @@ pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
+             return Err(invalid());
+         }
+     }
++    Ok(path)
++}
++
++/// Resolve and judge a candidate without swapping any files.
++pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
++    let path = snapshot_path(live, id)?;
+     if crate::database_fs::stat(&path).is_none() {
+         return Err("BAD_REQUEST: no such snapshot".into());
+     }
+@@ -276,8 +282,9 @@ fn write_snapshot(
+     if crate::database_fs::stat(&target).is_some() {
+         return Err("CONFLICT: a snapshot for this instant already exists".into());
+     }
++    let free = free_bytes(&dir);
+     let needed = (crate::database_fs::stat(path).map_or(0, |s| s.len()) as f64 * 1.1).ceil();
+-    if free_bytes(&dir).is_some_and(|free| (free as f64) < needed) {
++    if free.is_some_and(|free| (free as f64) < needed) {
+         return Err("CONFLICT: not enough free disk space to write a snapshot".into());
+     }
+     if let Err(error) = conn.execute_batch(&format!(
+@@ -300,11 +307,30 @@ fn size(path: &Path) -> u64 {
+ }
+ 
+ /// Operations on the one live handle. Implementations must release it at close.
++pub type HashCell = Option<rusqlite::types::Value>;
++
++// Bun returns numbers for INTEGER/REAL and a fresh Uint8Array for each BLOB.
++// readRaw coalesces both an absent row and SQL NULL to JavaScript null.
++fn hashes_equal(left: &HashCell, right: &HashCell) -> bool {
++    use rusqlite::types::Value as Cell;
++    match (
++        left.as_ref().unwrap_or(&Cell::Null),
++        right.as_ref().unwrap_or(&Cell::Null),
++    ) {
++        (Cell::Null, Cell::Null) => true,
++        (Cell::Text(a), Cell::Text(b)) => a == b,
++        (Cell::Integer(a), Cell::Integer(b)) => (*a as f64) == (*b as f64),
++        (Cell::Real(a), Cell::Real(b)) => a == b,
++        (Cell::Integer(a), Cell::Real(b)) | (Cell::Real(b), Cell::Integer(a)) => (*a as f64) == *b,
++        _ => false,
++    }
++}
++
+ pub trait RestoreStore {
+     fn inspect(&mut self, path: &Path) -> Result<Value, String>;
+     fn snapshot_to(&mut self, path: &Path) -> Result<(), String>;
+-    fn admin_hash(&mut self) -> Result<Option<String>, String>;
+-    fn viewer_hash(&mut self) -> Result<Option<String>, String>;
++    fn admin_hash(&mut self) -> Result<HashCell, String>;
++    fn viewer_hash(&mut self) -> Result<HashCell, String>;
+     fn close(&mut self) -> Result<(), String>;
+     fn reopen(&mut self) -> Result<(), String>;
+     fn rebuild_rollup(&mut self) -> Result<(), String>;
+@@ -354,7 +380,7 @@ impl std::fmt::Display for RestoreError {
+ }
+ impl std::error::Error for RestoreError {}
+ 
+-/// Restore a previously validated snapshot id, inspecting it again under the latch.
++/// Revalidate the snapshot path, then inspect it again under the latch.
+ /// There is deliberately no rollback after staging: failed swaps retain the undo.
+ pub fn restore_snapshot(
+     store: &mut dyn RestoreStore,
+@@ -363,11 +389,11 @@ pub fn restore_snapshot(
+     id: &str,
+     now: &dyn Fn() -> i64,
+ ) -> Result<Value, RestoreError> {
+-    let dir = live
++    let candidate = snapshot_path(live, id)?;
++    let dir = candidate
+         .parent()
+-        .ok_or_else(|| "database has no parent".to_string())?
+-        .join("snapshots");
+-    let candidate = dir.join(id);
++        .expect("validated snapshot parent")
++        .to_path_buf();
+     if files.stat(&candidate).is_none() {
+         return Err("BAD_REQUEST: no such snapshot".to_string().into());
+     }
+@@ -386,11 +412,9 @@ pub fn restore_snapshot(
+             .to_string()
+             .into());
+     }
++    let free = files.free_bytes(&dir);
+     let needed = (files.stat(live).unwrap_or(0) as f64 * 1.1).ceil();
+-    if files
+-        .free_bytes(&dir)
+-        .is_some_and(|free| (free as f64) < needed)
+-    {
++    if free.is_some_and(|free| (free as f64) < needed) {
+         return Err("CONFLICT: not enough free disk space to write a snapshot"
+             .to_string()
+             .into());
+@@ -438,7 +462,7 @@ pub fn restore_snapshot(
+         tracing::warn!(%error, "usage rollup not rebuilt after the swap; run omni doctor");
+     }
+     Ok(
+-        json!({"ok":true,"counts":counts,"preRestoreSnapshot":snapshot,"adminPasswordChanged":admin_after != admin_before,"viewerPasswordChanged":viewer_after != viewer_before}),
++        json!({"ok":true,"counts":counts,"preRestoreSnapshot":snapshot,"adminPasswordChanged":!hashes_equal(&admin_after, &admin_before),"viewerPasswordChanged":!hashes_equal(&viewer_after, &viewer_before)}),
+     )
+ }
+ 
+@@ -462,7 +486,7 @@ impl SqliteRestoreStore {
+             .map(|s| s.connection())
+             .ok_or_else(|| "database is closed".into())
+     }
+-    fn hash(&self, key: &str) -> Result<Option<String>, String> {
++    fn hash(&self, key: &str) -> Result<HashCell, String> {
+         use rusqlite::OptionalExtension;
+         self.connection()?
+             .query_row("SELECT value FROM settings WHERE key = ?", [key], |r| {
+@@ -484,10 +508,10 @@ impl RestoreStore for SqliteRestoreStore {
+             ))
+             .map_err(|e| e.to_string())
+     }
+-    fn admin_hash(&mut self) -> Result<Option<String>, String> {
++    fn admin_hash(&mut self) -> Result<HashCell, String> {
+         self.hash("adminPasswordHash")
+     }
+-    fn viewer_hash(&mut self) -> Result<Option<String>, String> {
++    fn viewer_hash(&mut self) -> Result<HashCell, String> {
+         self.hash("viewerPasswordHash")
+     }
+     fn close(&mut self) -> Result<(), String> {
+@@ -555,11 +579,11 @@ mod restore_sequence_tests {
+             self.call("snapshot");
+             Ok(())
+         }
+-        fn admin_hash(&mut self) -> Result<Option<String>, String> {
++        fn admin_hash(&mut self) -> Result<HashCell, String> {
+             self.call("admin");
+             Ok(None)
+         }
+-        fn viewer_hash(&mut self) -> Result<Option<String>, String> {
++        fn viewer_hash(&mut self) -> Result<HashCell, String> {
+             self.call("viewer");
+             Ok(None)
+         }
+@@ -623,6 +647,23 @@ mod restore_sequence_tests {
+         }
+     }
+     #[test]
++    fn restore_rejects_unchecked_ids_before_store_or_file_operations() {
++        for id in ["../outside.sqlite", "..", "nested/candidate"] {
++            let mut store = Fake::default();
++            let mut files = store.clone();
++            let error = restore_snapshot(
++                &mut store,
++                &mut files,
++                Path::new("/tmp/opencode/e1-e5/unchecked/db"),
++                id,
++                &|| 0,
++            )
++            .expect_err("unchecked id must be rejected");
++            assert_eq!(error.to_string(), "BAD_REQUEST: invalid snapshot id");
++            assert!(files.0.borrow().is_empty());
++        }
++    }
++    #[test]
+     fn swap_exact_sequence_keeps_forced_undo_without_retention() {
+         let mut store = Fake::default();
+         let mut files = store.clone();
+@@ -633,7 +674,7 @@ mod restore_sequence_tests {
+                 &mut store,
+                 &mut files,
+                 Path::new("/fixture/db"),
+-                "candidate",
++                "db_2026-11-01T00-00-00-000Z_manual.sqlite",
+                 &|| 0,
+             ) {
+                 Err(RestoreError::Ordinary(e)) if e.starts_with("CONFLICT:") => {
+@@ -649,8 +690,8 @@ mod restore_sequence_tests {
+                 "inspect",
+                 "mkdir",
+                 "stat undo",
+-                "stat live",
+                 "free",
++                "stat live",
+                 "snapshot",
+                 "stat undo",
+                 "admin",
+@@ -671,6 +712,247 @@ mod restore_sequence_tests {
+         assert_eq!(result["adminPasswordChanged"], false);
+         assert_eq!(result["viewerPasswordChanged"], false);
+     }
++
++    #[derive(Default)]
++    struct FailureState {
++        calls: Vec<String>,
++        undo: bool,
++        incoming: bool,
++        installed: bool,
++    }
++    #[derive(Clone)]
++    struct Failing {
++        state: Rc<RefCell<FailureState>>,
++        failure: &'static str,
++    }
++    impl Failing {
++        fn call(&self, name: &str) -> Result<(), String> {
++            self.state.borrow_mut().calls.push(name.into());
++            if name == self.failure {
++                Err(format!("{name} failed"))
++            } else {
++                Ok(())
++            }
++        }
++    }
++    impl RestoreStore for Failing {
++        fn inspect(&mut self, _: &Path) -> Result<Value, String> {
++            self.call("inspect")?;
++            Ok(json!({}))
++        }
++        fn snapshot_to(&mut self, _: &Path) -> Result<(), String> {
++            self.state.borrow_mut().undo = true; // Include a partial VACUUM output.
++            self.call("snapshot")
++        }
++        fn admin_hash(&mut self) -> Result<HashCell, String> {
++            self.call("admin")?;
++            Ok(None)
++        }
++        fn viewer_hash(&mut self) -> Result<HashCell, String> {
++            self.call("viewer")?;
++            Ok(None)
++        }
++        fn close(&mut self) -> Result<(), String> {
++            self.call("close")
++        }
++        fn reopen(&mut self) -> Result<(), String> {
++            self.call("reopen")
++        }
++        fn rebuild_rollup(&mut self) -> Result<(), String> {
++            self.call("rollup")
++        }
++    }
++    impl RestoreFiles for Failing {
++        fn stat(&mut self, path: &Path) -> Option<u64> {
++            let undo = path.to_string_lossy().ends_with("_preRestore.sqlite");
++            self.call(if undo {
++                "stat undo"
++            } else if path.ends_with("db") {
++                "stat live"
++            } else {
++                "stat candidate"
++            })
++            .expect("stat succeeds");
++            if undo && !self.state.borrow().undo {
++                None
++            } else {
++                Some(100)
++            }
++        }
++        fn mkdir(&mut self, _: &Path) -> Result<(), String> {
++            self.call("mkdir")
++        }
++        fn free_bytes(&mut self, _: &Path) -> Option<u64> {
++            self.call("free").expect("free succeeds");
++            Some(1000)
++        }
++        fn unlink(&mut self, path: &Path) -> Result<(), String> {
++            let undo = path.to_string_lossy().ends_with("_preRestore.sqlite");
++            self.call(if undo {
++                "unlink undo"
++            } else if path.to_string_lossy().ends_with("-wal") {
++                "unlink wal"
++            } else {
++                "unlink shm"
++            })?;
++            if undo {
++                self.state.borrow_mut().undo = false;
++            }
++            Ok(())
++        }
++        fn copy_file(&mut self, _: &Path, _: &Path) -> Result<(), String> {
++            self.call("copy")?;
++            self.state.borrow_mut().incoming = true;
++            Ok(())
++        }
++        fn rename(&mut self, _: &Path, _: &Path) -> Result<(), String> {
++            self.call("rename")?;
++            let mut state = self.state.borrow_mut();
++            state.incoming = false;
++            state.installed = true;
++            Ok(())
++        }
++    }
++    #[test]
++    fn failures_preserve_frozen_half_swap_states_and_sequences() {
++        // packages/control/src/database.ts:603–621: "unconditional: whatever
++        // file is at `live` now"; close, unlink WAL/SHM, rename, reopen; catch
++        // retries reopen and throws SwapFailedError. No cleanup or rollback.
++        // :421–427: "A half-written file ... It goes before the failure is
++        // reported"; unlink failed undo then rethrow the ordinary write error.
++        let prefix = [
++            "stat candidate",
++            "inspect",
++            "mkdir",
++            "stat undo",
++            "free",
++            "stat live",
++            "snapshot",
++        ];
++        let tails: &[(&str, &[&str], bool, bool, bool)] = &[
++            ("snapshot", &["unlink undo"], false, false, false),
++            (
++                "unlink wal",
++                &[
++                    "stat undo",
++                    "admin",
++                    "viewer",
++                    "copy",
++                    "close",
++                    "unlink wal",
++                    "reopen",
++                ],
++                true,
++                true,
++                false,
++            ),
++            (
++                "unlink shm",
++                &[
++                    "stat undo",
++                    "admin",
++                    "viewer",
++                    "copy",
++                    "close",
++                    "unlink wal",
++                    "unlink shm",
++                    "reopen",
++                ],
++                true,
++                true,
++                false,
++            ),
++            (
++                "rename",
++                &[
++                    "stat undo",
++                    "admin",
++                    "viewer",
++                    "copy",
++                    "close",
++                    "unlink wal",
++                    "unlink shm",
++                    "rename",
++                    "reopen",
++                ],
++                true,
++                true,
++                false,
++            ),
++            (
++                "reopen",
++                &[
++                    "stat undo",
++                    "admin",
++                    "viewer",
++                    "copy",
++                    "close",
++                    "unlink wal",
++                    "unlink shm",
++                    "rename",
++                    "reopen",
++                    "reopen",
++                ],
++                true,
++                false,
++                true,
++            ),
++        ];
++        for &(failure, tail, undo, incoming, installed) in tails {
++            let mut seam = Failing {
++                state: Rc::default(),
++                failure,
++            };
++            let error = loop {
++                *seam.state.borrow_mut() = FailureState::default();
++                match restore_snapshot(
++                    &mut seam.clone(),
++                    &mut seam,
++                    Path::new("/fixture/db"),
++                    "db_2026-11-01T00-00-00-000Z_manual.sqlite",
++                    &|| 0,
++                ) {
++                    Err(RestoreError::Ordinary(e)) if e.starts_with("CONFLICT:") => {
++                        std::thread::yield_now()
++                    }
++                    result => break result.expect_err("injected failure"),
++                }
++            };
++            let state = seam.state.borrow();
++            assert_eq!(
++                state.calls,
++                prefix
++                    .iter()
++                    .chain(tail.iter())
++                    .map(|s| s.to_string())
++                    .collect::<Vec<_>>(),
++                "{failure}"
++            );
++            assert_eq!(
++                (state.undo, state.incoming, state.installed),
++                (undo, incoming, installed),
++                "{failure}"
++            );
++            if failure == "snapshot" {
++                assert!(matches!(error, RestoreError::Ordinary(_)));
++                assert_eq!(error.to_string(), "snapshot failed");
++            } else {
++                assert_eq!(
++                    error.to_string(),
++                    "the database swap failed and the database may be incomplete"
++                );
++                let RestoreError::Swap(error) = error else {
++                    panic!("typed swap failure")
++                };
++                assert_eq!(error.cause, format!("{failure} failed"));
++                assert_eq!(error.reopened, failure != "reopen");
++                assert_eq!(
++                    error.pre_restore_snapshot_id,
++                    "db_1970-01-01T00-00-00-000Z_preRestore.sqlite"
++                );
++            }
++        }
++    }
+ }
+ 
+ /// Process-local maintenance latch, shared by all database handles.
+@@ -884,24 +1166,28 @@ mod tests {
+         let _serial = TEST_LOCK.lock().unwrap();
+         let root = tempfile::tempdir_in("/tmp/opencode/e1-e5").unwrap();
+         let path = root.path().join("db");
+-        let conn = rusqlite::Connection::open(&path).unwrap();
+-        conn.execute_batch("CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (42)")
++        let store = omni_store::SqliteStore::open(&path, 0).unwrap();
++        store.connection().execute_batch("CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (42); INSERT INTO settings (key,value) VALUES ('settings','{\"snapshotKeepLatest\":0,\"snapshotMaxAgeDays\":0}')")
+             .unwrap();
+         let dir = root.path().join("snapshots");
+         std::fs::create_dir(&dir).unwrap();
+         let old = dir.join("db_2000-01-01T00-00-00-000Z_manual.sqlite");
+         std::fs::write(&old, b"retention sentinel").unwrap();
+-        let result = with_exclusive("a restore", || {
+-            write_snapshot(
+-                &conn,
+-                &path,
+-                &|| 1_700_000_000_000,
+-                &|| panic!("forced undo must not read retention settings"),
+-                &|_| None,
+-                true,
+-            )
+-        })
++        let candidate = "db_2026-11-01T00-00-00-000Z_manual.sqlite";
++        store
++            .connection()
++            .execute_batch(&format!("VACUUM INTO '{}'", dir.join(candidate).display()))
++            .unwrap();
++        let mut store = SqliteRestoreStore::new(store, path.clone());
++        let restored = restore_snapshot(
++            &mut store,
++            &mut LocalRestoreFiles,
++            &path,
++            candidate,
++            &|| 1_700_000_000_000,
++        )
+         .unwrap();
++        let result = &restored["preRestoreSnapshot"];
+         assert_eq!(result["reason"], "preRestore");
+         assert_eq!(
+             result["id"],

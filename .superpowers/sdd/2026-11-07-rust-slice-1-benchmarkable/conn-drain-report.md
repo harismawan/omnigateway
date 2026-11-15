@@ -1,9 +1,11 @@
-# Completion drain — final HEAD 548aed49
+# Completion drain — partial fix5, HEAD 26b5c39b
+**Pending for next session:** item 2 scanner/normalisation/helper-closure/mutation suite; item 3 stronger slow-drip timing assertion and reset-on-byte red mutation. Existing structural guard has the confirmed review gaps; do not treat its passing result as resolving item 2.
 the frozen gateway closes the upstream connection after a chunked streaming response whose terminator arrives in a later write; with this change Rust returns it to the pool when the terminator arrives within the bounds — a Rust-only difference
 
 ## Latest round
 8aeb5cd1 fixes deadline enforcement, adds six drain cases and the ordinary-test structural guard. 548aed49 removes the C preload and its misleading standalone allocation test, in a separate commit. No preload instructions/references remain in production/test sources.
-Deadline now checked at start and before check-in; a stalled executor can delay closing but can no longer cause a late check-in. timeout_at remains responsible for pending reads, but its inner-first polling cannot bypass the absolute-deadline checks.
+26b5c39b adds deadline admission under the idle lock, immediately before insertion. Both early drain checks remain to avoid useless reading/lock waiting. Ordinary check-in passes no deadline and gains no clock read. After the check under the lock passes, insertion itself is immediate; a connection admitted just before the deadline then lives under the pool's ordinary idle rules. Executor stalls can delay closing. Current pool source imports Tokio Instant for idle timestamps too; deadline comparison explicitly uses tokio::time::Instant::now, not a wall clock.
+fix5-red.log: deadline_during_checkin_lock failed with idle count 1, expected 0; fixed test passes. Signalled lock acquisition plus one-second hold against 100 ms deadline reproduces contention without near-limit sleeping; not a paused-clock deterministic test, scheduling remains a limitation.
 Regression red: `/tmp/opencode/diag/drain/fix4-red.log`, `expired_before_first_poll`: `test result: FAILED. 0 passed; 1 failed`; paused clock advanced past adoption deadline, ready terminator was wrongly salvaged and socket-close wait expired. Fixed test passes without wall-clock sleeps.
 Structural red: `fix4-tripwire-red.log`, `next_chunk: forbidden Box::pin: match Box::pin(self.read_next()).await {`; `test result: FAILED. 0 passed; 1 failed`. Scratch boxing restored afterward; standing guard passes in ordinary suite.
 measured once with a temporary malloc-counting preload, since removed: 0 allocations for 1,000 chunks at e77e2787, 1,000 at e441bdc2
@@ -30,16 +32,17 @@ a connection is returned only at a message boundary with nothing buffered, and u
 Preterminal cancellation/errors, keys, expiry, TLS configuration and still_idle unchanged. No dependency or unsafe Rust added.
 
 ## Committed coverage
-Correction: seven drain unit tests before this round, now **13**. Original seven: drain_never_terminates; drain_invalid_and_excess_wire; drain_eof; drain_survives_body_handoff; drain_capacity_and_pool_shutdown; pool_shutdown_tasks_joined; finish_without_runtime_closes.
+Correction: seven drain unit tests before fix4, 13 after fix4, now **14** including deadline_during_checkin_lock. Original seven: drain_never_terminates; drain_invalid_and_excess_wire; drain_eof; drain_survives_body_handoff; drain_capacity_and_pool_shutdown; pool_shutdown_tasks_joined; finish_without_runtime_closes.
 New six: expired_before_first_poll (paused clock); slow_drip_uses_absolute_deadline (paused clock, 40 ms steps); capacity_recovers_after_completion (two waves of 32); runtime_teardown_ends_drains (future-drop counter); excess_initial_buffer_not_adopted; nonreusable_not_adopted.
 12 connection integration tests: six original Content-Length/cancellation cases; delayed_chunked_terminator_reuses (signal after complete client response, 1/20); responses_reuse (1/20); concurrent_reuse (five waves of 32); drain_forged_response_isolation; never_terminator_next_request_isolated; drain_eof_completed_client_unaffected (changed credentials, exact own0/own1).
 Structural request_body_reads_do_not_allocate scans next_chunk, read_next, fill, fill_or_abort, line, clamp, parse_chunk_size, release. Dispatch size gate unchanged. Poisoned-mutex/task-panic injection is not covered; not requested in this round's committed-case list.
 
 ## Final-commit gates — /tmp/opencode/diag/drain/
-`fix4-tests.log`: cargo test --offline -p omni-providers -p omni-gateway exit 0; **61 ok summaries, 332 passed, 5 ignored, no FAILED** (includes subprocess summaries).
-`fix4-loop.log`: **30/30**, final marker `RUN 30 PASS`; each run all 12 connection tests and all 13 drain unit tests.
-`fix4-clippy.log`: exit 0; `Finished dev profile [unoptimized] target(s) in 0.19s` (Cargo backticks omitted).
-`fix4-fmt.log`: `fmt exit=0`. `fix4-size.log`: `dispatch concrete state machine bytes=5496`; `test result: ok. 1 passed; 0 failed; 0 ignored`.
+`fix5-tests.log`: cargo test --offline -p omni-providers -p omni-gateway exit 0; **61 ok summaries, 333 passed, 5 ignored; zero lines containing FAILED or panicked** (includes subprocess summaries).
+`fix5-loop.log`: **30/30**, final marker `RUN 30 PASS`; each run all 12 connection tests, 14 drain unit tests and existing tripwire.
+`fix5-clippy.log`: exit 0; `Finished dev profile [unoptimized] target(s) in 0.15s`; zero lines starting error.
+`fix5-fmt.log`: `fmt exit=0`. `fix5-size.log`: `dispatch concrete state machine bytes=5496`; `test result: ok. 1 passed; 0 failed; 0 ignored`.
+`fix5-unchanged.log`: extracted brace-balanced function bodies from git show 548aed49 and working HEAD and asserted byte equality for next_chunk/read_next/fill/fill_or_abort/line/clamp/parse_chunk_size; all seven identical. Read review note and own-probes.patch; ran own regression and gates; did not run reviewer mutation script or new mutation table.
 Requested offline/shared target, incremental off, debug=0, jobs=3 used. No push/merge; both round commits append-only.
 
 ## Concerns
