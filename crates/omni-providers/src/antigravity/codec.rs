@@ -81,11 +81,19 @@ impl AntigravityCodec {
             })?;
         // Only portable tool roots are unguarded in frozen pruneSchema.
         // Response-format roots and nested schema positions use isSchema.
-        if input.request.tools.iter().flatten().any(|t| {
-            matches!(t,
-            omni_ir::request::ToolDef::Portable(t) if t.input_schema.is_null())
-        }) {
-            return Err(BuildError::Throw);
+        let cloak = ToolCloak::build(input.request);
+        let mut seen = std::collections::HashSet::new();
+        for tool in input.request.tools.iter().flatten() {
+            if let omni_ir::request::ToolDef::Portable(t) = tool {
+                let name = cloak.name(&t.name);
+                if seen.contains(name) {
+                    continue;
+                }
+                seen.extend([name]);
+                if t.input_schema.is_null() {
+                    return Err(BuildError::Throw);
+                }
+            }
         }
         let request_id = input
             .request_id
@@ -107,7 +115,6 @@ impl AntigravityCodec {
                     &h[20..32]
                 )
             });
-        let cloak = ToolCloak::build(input.request);
         let (body, degradations) =
             super::wire::to_wire(input.request, input.model, project, &request_id, &cloak);
         let serialized = omni_ir::jsjson::to_string(&body);

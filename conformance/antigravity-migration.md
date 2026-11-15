@@ -43,12 +43,12 @@ One current request inventory; independent re-review remains pending.
 | daily-cloudcode-pa streaming URL, POST, Authorization Bearer | `codec::build_request` | all successful codec rows |
 | AUTH missing-token and missing-project messages | `codec::build_request` | invalid-token/project cross-product |
 | `omni-antigravity-req`, SHA256 UUID slices, version 4, variant mask 3/or 8 | `codec::build_request` | derived versus explicit/empty/space ids |
-| `antigravity:system-{image,thinking,toolUse,toolResult,providerNative}-dropped` | `system::to_text` | wire `system-drop:image/thinking/toolUse/toolResult/providerNative` |
+| `antigravity:system-{image,thinking,toolUse,toolResult,providerNative}-dropped` | `system::system_text` | wire `system-drop:image/thinking/toolUse/toolResult/providerNative` |
 | response reader depth 64; items/additionalItems/additionalProperties/contains/contentSchema/if/then/else/not/propertyNames/unevaluatedItems/unevaluatedProperties; lists anyOf/allOf/oneOf/prefixItems/items; maps properties/patternProperties/$defs/definitions/dependentSchemas/dependencies | `response_format` | shared response-format corpus; wire `format:*`, depth response schema |
 | text/*, +json, +xml; application/json, x-ndjson, xml, yaml, x-yaml, toml, javascript, typescript, sql, x-sh; message/rfc822 | `tool_result_files::is_textual` | wire `file:*`, `file:application/x-yaml` |
 | `\n\n` joins nonempty content/files; lenient base64, UTF-8 replacement | `tool_result_files::{with_file_text,file_text}` | wire `file:*` empty/hello/invalid UTF-8/invalid base64 |
 | `You are a Claude agent, built on Anthropic's Claude Agent SDK.`; `x-anthropic-billing-header:`; `/(?:\r?\n){2,}/` | `wire::fingerprints` | wire `system:*` exact, quoted, CRLF, multiple paragraphs |
-| Object.entries root null throws; populated arrays/strings prune index keys; empty arrays/strings, numbers/bools yield {} without note; nested schemas guarded by isSchema | `schema::{try_prune,walk,sub}`, codec null-root check | schema 593 rows, codec 117 rows, `antigravity_build_throw` |
+| Object.entries root null throws; populated arrays/strings prune index keys; empty arrays/strings, numbers/bools yield {} without note; nested schemas guarded by isSchema | `schema::{try_prune,walk,sub}`, codec null-root check | schema 593 rows, codec 118 rows, `antigravity_build_throw` |
 | UPSTREAM / `antigravity codec buildRequest threw`, gatewayAuthored; classified AUTH rebound | `BuildError`, `ProviderCodec::try_build_request`, `adapter::send` | `antigravity_build_throw`; codec null row uses raw frozen TypeError plus adapter classification test |
 | nonempty descriptions preserved; duplicate call IDs last name wins | `wire::to_wire` | `description:nonempty`, `description:mixed`, `duplicate-call-id:last-wins`; mutations 29/30 killed |
 | `antigravity:agent-preamble-dropped` | `wire::to_wire` / fingerprints | wire `system:*` |

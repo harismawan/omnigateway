@@ -12,4 +12,9 @@ for (const schema of [null, [1], 'x', [], '', 1, true, [[1]], '🙂']) {
   try { const r=antigravityCodec.buildRequest(input); rows.push({project:'p',token:'token',requestId:'r',request,expected:{request:r.request,degradations:r.degradations,cloakedTools:r.cloakedTools}}); }
   catch(e) { if (!(e instanceof TypeError)) throw e; rows.push({project:'p',token:'token',requestId:'r',request,rawThrow:String(e),error:{code:'UPSTREAM',message:'antigravity codec buildRequest threw'}}); }
 }
+{
+ const request:any={model:'m',stream:true,messages:[],tools:[{kind:'portable',name:'read file',inputSchema:{}},{kind:'portable',name:'read file',inputSchema:null}]};
+ const r=antigravityCodec.buildRequest({request,model:'gemini-3.6-flash-high',credentials:{accessToken:'token',apiKey:null,providerData:{projectId:'p'}},requestId:'r',fail:(code:any,message:any)=>({code,message})} as any);
+ rows.push({project:'p',token:'token',requestId:'r',request,expected:{request:r.request,degradations:r.degradations,cloakedTools:r.cloakedTools}});
+}
 console.log(JSON.stringify(rows));
