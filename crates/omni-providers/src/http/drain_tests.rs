@@ -39,6 +39,67 @@ fn pool() -> Arc<Pool> {
     Arc::new(Pool::new(None, PoolLimits::default()))
 }
 
+async fn drain_at_destination_limit(expired: bool) {
+    let p = Arc::new(Pool::new(
+        None,
+        PoolLimits {
+            max_idle_per_destination: 1,
+            ..PoolLimits::default()
+        },
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let key = Key::of(&Target {
+        scheme: Scheme::Http,
+        host: "127.0.0.1".into(),
+        port: addr.port(),
+        host_header: "localhost".into(),
+        path: "/".into(),
+    });
+    let old = TcpStream::connect(addr).await.expect("old connection");
+    let (mut old_peer, _) = listener.accept().await.expect("old peer");
+    p.checkin(key.clone(), Conn::Plain(old));
+    assert_eq!(p.idle_count(), 1);
+    let new = TcpStream::connect(addr).await.expect("new connection");
+    let (mut new_peer, _) = listener.accept().await.expect("new peer");
+    let now = tokio::time::Instant::now();
+    let deadline = if expired {
+        now - Duration::from_millis(1)
+    } else {
+        now + Duration::from_secs(100)
+    };
+    Pool::checkin_drained(&p, key, Conn::Plain(new), deadline);
+    assert_eq!(
+        p.idle_count(),
+        1,
+        "drain admission must preserve one idle socket"
+    );
+    let retained = if expired {
+        closed(&mut new_peer).await;
+        &mut old_peer
+    } else {
+        closed(&mut old_peer).await;
+        &mut new_peer
+    };
+    assert_eq!(
+        retained
+            .try_read(&mut [0])
+            .expect_err("retained peer must not see EOF")
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_drain_preserves_healthy_idle() {
+    drain_at_destination_limit(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn admitted_drain_replaces_oldest_idle() {
+    drain_at_destination_limit(false).await;
+}
+
 #[tokio::test]
 async fn deadline_during_checkin_lock() {
     let p = pool();

@@ -328,17 +328,14 @@ impl Pool {
         if self.limits.max_idle == 0 || self.limits.max_idle_per_destination == 0 {
             return;
         }
+        // Decide admission under the lock, after sweeping but before creating
+        // an entry or evicting healthy sockets. None adds no clock read.
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return;
+        }
         let list = idle.entry(key).or_default();
         while list.len() >= self.limits.max_idle_per_destination {
             list.pop_front();
-        }
-        // Check after all lock waiting and housekeeping, immediately before
-        // insertion. None adds no clock read to ordinary response completion.
-        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-            if list.is_empty() {
-                idle.retain(|_, list| !list.is_empty());
-            }
-            return;
         }
         list.push_back((conn, Instant::now()));
         let mut total: usize = idle.values().map(VecDeque::len).sum();
