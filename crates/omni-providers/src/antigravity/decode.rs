@@ -369,7 +369,10 @@ mod tests {
                 if scenario == "continuing-text" && step == 1 {
                     assert!(decoder.index_exhausted);
                     let before = out.len();
-                    assert_eq!(decoder.message(&msg, &mut out).unwrap(), Flow::Continue);
+                    assert_eq!(
+                        decoder.message(&msg, &mut out).expect("continuing text"),
+                        Flow::Continue
+                    );
                     assert_eq!(out.len(), before + 1);
                     assert!(matches!(out.back(), Some(StreamEvent::BlockDelta {
                         index: u32::MAX, delta: Delta::Thinking { text }
