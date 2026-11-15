@@ -306,11 +306,30 @@ fn size(path: &Path) -> u64 {
 }
 
 /// Operations on the one live handle. Implementations must release it at close.
+pub type HashCell = Option<rusqlite::types::Value>;
+
+// Bun returns numbers for INTEGER/REAL and a fresh Uint8Array for each BLOB.
+// readRaw coalesces both an absent row and SQL NULL to JavaScript null.
+fn hashes_equal(left: &HashCell, right: &HashCell) -> bool {
+    use rusqlite::types::Value as Cell;
+    match (
+        left.as_ref().unwrap_or(&Cell::Null),
+        right.as_ref().unwrap_or(&Cell::Null),
+    ) {
+        (Cell::Null, Cell::Null) => true,
+        (Cell::Text(a), Cell::Text(b)) => a == b,
+        (Cell::Integer(a), Cell::Integer(b)) => (*a as f64) == (*b as f64),
+        (Cell::Real(a), Cell::Real(b)) => a == b,
+        (Cell::Integer(a), Cell::Real(b)) | (Cell::Real(b), Cell::Integer(a)) => (*a as f64) == *b,
+        _ => false,
+    }
+}
+
 pub trait RestoreStore {
     fn inspect(&mut self, path: &Path) -> Result<Value, String>;
     fn snapshot_to(&mut self, path: &Path) -> Result<(), String>;
-    fn admin_hash(&mut self) -> Result<Option<String>, String>;
-    fn viewer_hash(&mut self) -> Result<Option<String>, String>;
+    fn admin_hash(&mut self) -> Result<HashCell, String>;
+    fn viewer_hash(&mut self) -> Result<HashCell, String>;
     fn close(&mut self) -> Result<(), String>;
     fn reopen(&mut self) -> Result<(), String>;
     fn rebuild_rollup(&mut self) -> Result<(), String>;
@@ -444,7 +463,7 @@ pub fn restore_snapshot(
         tracing::warn!(%error, "usage rollup not rebuilt after the swap; run omni doctor");
     }
     Ok(
-        json!({"ok":true,"counts":counts,"preRestoreSnapshot":snapshot,"adminPasswordChanged":admin_after != admin_before,"viewerPasswordChanged":viewer_after != viewer_before}),
+        json!({"ok":true,"counts":counts,"preRestoreSnapshot":snapshot,"adminPasswordChanged":!hashes_equal(&admin_after, &admin_before),"viewerPasswordChanged":!hashes_equal(&viewer_after, &viewer_before)}),
     )
 }
 
@@ -468,7 +487,7 @@ impl SqliteRestoreStore {
             .map(|s| s.connection())
             .ok_or_else(|| "database is closed".into())
     }
-    fn hash(&self, key: &str) -> Result<Option<String>, String> {
+    fn hash(&self, key: &str) -> Result<HashCell, String> {
         use rusqlite::OptionalExtension;
         self.connection()?
             .query_row("SELECT value FROM settings WHERE key = ?", [key], |r| {
@@ -490,10 +509,10 @@ impl RestoreStore for SqliteRestoreStore {
             ))
             .map_err(|e| e.to_string())
     }
-    fn admin_hash(&mut self) -> Result<Option<String>, String> {
+    fn admin_hash(&mut self) -> Result<HashCell, String> {
         self.hash("adminPasswordHash")
     }
-    fn viewer_hash(&mut self) -> Result<Option<String>, String> {
+    fn viewer_hash(&mut self) -> Result<HashCell, String> {
         self.hash("viewerPasswordHash")
     }
     fn close(&mut self) -> Result<(), String> {
@@ -561,11 +580,11 @@ mod restore_sequence_tests {
             self.call("snapshot");
             Ok(())
         }
-        fn admin_hash(&mut self) -> Result<Option<String>, String> {
+        fn admin_hash(&mut self) -> Result<HashCell, String> {
             self.call("admin");
             Ok(None)
         }
-        fn viewer_hash(&mut self) -> Result<Option<String>, String> {
+        fn viewer_hash(&mut self) -> Result<HashCell, String> {
             self.call("viewer");
             Ok(None)
         }
@@ -726,11 +745,11 @@ mod restore_sequence_tests {
             self.state.borrow_mut().undo = true; // Include a partial VACUUM output.
             self.call("snapshot")
         }
-        fn admin_hash(&mut self) -> Result<Option<String>, String> {
+        fn admin_hash(&mut self) -> Result<HashCell, String> {
             self.call("admin")?;
             Ok(None)
         }
-        fn viewer_hash(&mut self) -> Result<Option<String>, String> {
+        fn viewer_hash(&mut self) -> Result<HashCell, String> {
             self.call("viewer")?;
             Ok(None)
         }
