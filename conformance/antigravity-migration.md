@@ -18,9 +18,14 @@ One current request inventory; independent re-review remains pending.
 | comma splitting, JS trim, reject invalid entries, default if empty | `profile.rs::headers`, existing `omni_ir::js::trim` | whitespace/BOM/NBSP, duplicates, unknown names |
 | import-time environment capture | `profile.rs::initialize` + OnceLock | TS mutation after import; Rust capture ignores a second source |
 | MAX_SCHEMA_DEPTH 24; refuse non-record subschemas | `schema::sub` | 23/24/25/40 hops and 40,000 hops on 2 MiB thread |
-| PRUNED = `antigravity:tool-schema-pruned`, deduplicated | `schema::prune` | all 593 rows compare degradation list |
+| PRUNED = `antigravity:tool-schema-pruned`, deduplicated | `schema::try_prune` | all 593 rows compare degradation list |
 | SCHEMA_TYPES string/number/integer/boolean/array/object/null/type_unspecified | `TYPES`, `walk` | scalar and union type rows, case handling |
-| SCHEMA_FIELDS: six walked, four text, three texts, six int, two double, three free fields | `walk` match arms | every field crossed with 21 values |
+| SCHEMA_FIELDS walked: `type`, `items`, `properties`, `anyOf`, `allOf`, `additionalProperties` | `walk` match arms | every field crossed with 21 values |
+| SCHEMA_FIELDS text: `format`, `title`, `description`, `pattern` | `walk` match arms | field/value matrix |
+| SCHEMA_FIELDS texts: `enum`, `required`, `propertyOrdering` | `walk` match arms | field/value matrix |
+| SCHEMA_FIELDS int: `minItems`, `maxItems`, `minLength`, `maxLength`, `minProperties`, `maxProperties` | `walk` match arms | field/value matrix |
+| SCHEMA_FIELDS double: `minimum`, `maximum` | `walk` match arms | field/value matrix |
+| SCHEMA_FIELDS free: `default`, `example`, `nullable` | `walk` match arms | field/value matrix; X1 overflow default |
 | const string → enum unless own enum; unknown fields dropped | `walk` | initial four rows, unknown/$ref rows |
 | integer spelling `^-?\d+$`; finite whole numbers | numeric match arm | decimal, fractional, exponent, hex, whitespace |
 | double strings trim nonempty then Number finite | `js::trim`, `js::try_to_number` | string numeric neighbours |
@@ -38,17 +43,18 @@ One current request inventory; independent re-review remains pending.
 | betweenTools/off/adaptive display and effort notes | `wire::to_wire` | reasoning/adaptive rows |
 | portable tools; first duplicate wins; cloak note before schema pruning | `wire::to_wire` | tools rows |
 | AUTO/ANY/NONE; allowedFunctionNames | `wire::to_wire` | choice rows |
-| response-format-translated / response-schema-too-deep | shared reader + `schema::prune` | format rows; 40,000-hop schema on 2 MiB stack |
+| response-format-translated / response-schema-too-deep | shared reader + `schema::try_prune` | format rows; 40,000-hop schema on 2 MiB stack |
 | Object.assign overwrite position, index enumeration, __proto__ setter | `js::object_assign` + jsjson | vendor object/string/array/scalar/null rows |
 | daily-cloudcode-pa streaming URL, POST, Authorization Bearer | `codec::build_request` | all successful codec rows |
-| AUTH missing-token and missing-project messages | `codec::build_request` | invalid-token/project cross-product |
+| AUTH `antigravity credential has no access token`; `antigravity credential has no Cloud Code project; reconnect the account` | `codec::build_request` | invalid-token/project cross-product |
+| Internal order: Rust builds tool cloak before deriving request id; frozen derives id first. Both are infallible on representable input; no observable effect | `codec::build_request_scoped` | source audit; existing explicit/derived id and cloak rows |
 | `omni-antigravity-req`, SHA256 UUID slices, version 4, variant mask 3/or 8 | `codec::build_request` | derived versus explicit/empty/space ids |
 | `antigravity:system-{image,thinking,toolUse,toolResult,providerNative}-dropped` | `system::system_text` | wire `system-drop:image/thinking/toolUse/toolResult/providerNative` |
 | response reader depth 64; items/additionalItems/additionalProperties/contains/contentSchema/if/then/else/not/propertyNames/unevaluatedItems/unevaluatedProperties; lists anyOf/allOf/oneOf/prefixItems/items; maps properties/patternProperties/$defs/definitions/dependentSchemas/dependencies | `response_format` | shared response-format corpus; wire `format:*`, depth response schema |
 | text/*, +json, +xml; application/json, x-ndjson, xml, yaml, x-yaml, toml, javascript, typescript, sql, x-sh; message/rfc822 | `tool_result_files::is_textual` | wire `file:*`, `file:application/x-yaml` |
 | `\n\n` joins nonempty content/files; lenient base64, UTF-8 replacement | `tool_result_files::{with_file_text,file_text}` | wire `file:*` empty/hello/invalid UTF-8/invalid base64 |
 | `You are a Claude agent, built on Anthropic's Claude Agent SDK.`; `x-anthropic-billing-header:`; `/(?:\r?\n){2,}/` | `wire::fingerprints` | wire `system:*` exact, quoted, CRLF, multiple paragraphs |
-| Object.entries root null throws; populated arrays/strings prune index keys; empty arrays/strings, numbers/bools yield {} without note; nested schemas guarded by isSchema | `schema::{try_prune,walk,sub}`, codec null-root check | schema 593 rows, codec 118 rows, `antigravity_build_throw` |
+| Object.entries root null throws; populated arrays/strings prune index keys; empty arrays/strings, numbers/bools yield {} without note; nested schemas guarded by isSchema | `schema::{try_prune,walk,sub}`; the two `try_prune` call sites in `wire.rs` propagate throws (response roots are guarded) | schema 593 rows, codec 118 rows, `antigravity_build_throw` |
 | UPSTREAM / `antigravity codec buildRequest threw`, gatewayAuthored; classified AUTH rebound | `BuildError`, `ProviderCodec::try_build_request`, `adapter::send` | `antigravity_build_throw`; codec null row uses raw frozen TypeError plus adapter classification test |
 | nonempty descriptions preserved; duplicate call IDs last name wins | `wire::to_wire` | `description:nonempty`, `description:mixed`, `duplicate-call-id:last-wins`; mutations 29/30 killed |
 | `antigravity:agent-preamble-dropped` | `wire::to_wire` / fingerprints | wire `system:*` |
@@ -75,9 +81,11 @@ One current request inventory; independent re-review remains pending.
 | `antigravity:duplicate-tool-dropped` | `wire::to_wire` / fingerprints | wire `tools:*read file*read file*` |
 | `antigravity:tool-name-renamed` | `wire::to_wire` / fingerprints | wire `tools:*read file*` |
 
-Depth: all seven depth tests pass without an unconditional scope on 2 MiB threads, including nine extra opaque positions at 39,990 levels. 1,000 shallow builds add zero stack grows. Frozen first throws at 39,994 toolUse.input levels and 39,999 vendor.antigravity.extra levels; Rust serializes in that band (documented engine-limit difference). The prior overflow was a test-fixture artefact.
+Depth: all eight depth tests pass without an unconditional scope on 2 MiB threads: `input_depth_matches_frozen`, `null_schema_throw_drops_partial_deep_body`, `vendor_depth_matches_frozen`, `response_schema_depth_matches_frozen`, `tool_schema_depth_matches_frozen`, `input_engine_threshold_band`, `shallow_builds_do_not_grow_stack`, and `opaque_positions_on_small_stack`. These include nine extra opaque positions at 39,990 levels. 1,000 shallow builds add zero stack grows. Frozen first throws at 39,994 toolUse.input levels and 39,999 vendor.antigravity.extra levels; Rust serializes in that band (documented engine-limit difference).
 
-X1 retained-red: text plus eight paired frozen tests cover non-BMP vendor UTF-16 splitting, lone-surrogate tool name/id, opaque value/key, system, project hashing/body and request-id body. Seven fail at serde surrogate parsing, vendor fails byte comparison. A JSON number beyond double range (1e309) cannot be carried by serde_json::Value/Number without arbitrary_precision (not enabled); no fake input test added. No normalization or shared IR fix.
+An overflow was observed once in an uncommitted form of a depth test harness. It has not been reproduced on any committed code by the implementers, the controller's probe (39,990–40,010 levels, with and without scope), or two independent reviews (11 client-JSON positions × normal and error paths at 39,990 levels on 2 MiB threads). One later fixture that built its input through recursive serde deserialisation did overflow, which is a property of that fixture. The original cause was never identified.
+
+X1 retained-red: eleven paired frozen tests cover non-BMP vendor UTF-16 splitting, lone-surrogate tool name/id, opaque value/key, system, project hashing/body and request-id body, plus three raw out-of-double-range number rows. Seven fail at serde surrogate parsing, vendor fails byte comparison. `x1_overflow_input` carries raw `input:1e309` (frozen emits `args:null`); `x1_overflow_nested_input` carries raw `input:{"x":1e309}` (frozen emits `args:{"x":null}`); `x1_overflow_schema_default` carries raw `inputSchema:{"type":"object","default":1e309}` (frozen emits `parameters:{"type":"object","default":null}`). Each numeric row fails at raw-request serde parsing with `number out of range`, before constructing the request. Raw input is hand-built in JS and transported as escaped JSON text; frozen parses Infinity and serializes null only after building. No normalization or shared IR fix.
 
 Coercions: numeric schema conversion is string-guarded; project trim is string-guarded; arithmetic uses typed f64. JSON-only IR excludes cycles/getters/BigInt. Null tool-schema roots are ordinary throws, unlike guarded response-schema roots.
 
