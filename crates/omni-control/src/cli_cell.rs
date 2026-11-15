@@ -64,6 +64,18 @@ pub fn scalar_string(value: &omni_ir::jsjson::JsValue) -> String {
         _ => unreachable!("scalar SQLite cell"),
     }
 }
+/// Relational ToNumber for the four SQLite cell classes, including Uint8Array.
+pub fn scalar_number(value: &omni_ir::jsjson::JsValue) -> f64 {
+    use omni_ir::jsjson::JsValue;
+    match value {
+        JsValue::Number(n) => *n,
+        JsValue::Null => 0.0,
+        JsValue::String(_) | JsValue::Object(_) => {
+            omni_ir::js::string_to_number(&scalar_string(value))
+        }
+        _ => f64::NAN,
+    }
+}
 pub fn json(cell: rusqlite::types::ValueRef<'_>) -> Result<omni_ir::jsjson::JsValue, String> {
     crate::operator_json::parse(&string(cell))
 }

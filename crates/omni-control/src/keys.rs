@@ -617,7 +617,7 @@ fn project_keys(store: &SqliteStore, now: i64, rows: Vec<CliKey>) -> Result<KeyL
         let usage: Vec<Value> = readings.iter().map(crate::api::lossy).collect();
         limits_js.push(exact);
         usage_js.push(omni_ir::jsjson::JsValue::Array(readings));
-        let mut projected = json!({"modelAllowlist":allowlist,"limits":limits,"limitUsage":usage,"bodyLoggingOptOut":key.body_logging_opt_out,"smartRouting":key.smart_routing});
+        let mut projected = json!({"id":null,"label":null,"prefix":null,"modelAllowlist":allowlist,"limits":limits,"limitUsage":usage,"bodyLoggingOptOut":key.body_logging_opt_out,"createdAt":null,"revokedAt":null,"expiresAt":null,"guardrailPolicy":null,"smartRouting":key.smart_routing});
         if let JsValue::Object(fields) = &fields {
             for (name, value) in fields {
                 projected[String::from_utf16_lossy(name)] = crate::api::lossy(value);

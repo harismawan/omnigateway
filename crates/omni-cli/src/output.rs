@@ -147,7 +147,8 @@ pub fn human(
         let state = if !matches!(listing.cell(index, "revokedAt"), jsjson::JsValue::Null) {
             "revoked"
         } else if !matches!(listing.cell(index, "expiresAt"), jsjson::JsValue::Null)
-            && !matches!(listing.cell(index, "expiresAt"), jsjson::JsValue::Number(e) if *e > now as f64)
+            && !(omni_control::cli_cell::scalar_number(listing.cell(index, "expiresAt"))
+                > now as f64)
         {
             "expired"
         } else {
