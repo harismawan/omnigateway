@@ -44,6 +44,20 @@ const bytes=enc.encode(frame(p([{text:'é😀'}])));
 for(let i=0;i<=bytes.length;i++)cases.push({name:`split/${i}`,chunks:[Array.from(bytes.slice(0,i)),Array.from(bytes.slice(i))],cloak:[]});
 raw('crlf',[frame(p([{text:'hi'}])).replaceAll('\n','\r\n')]);raw('multiline',[': comment\nevent: ignored\ndata: {"response":\ndata: {"candidates":[{"finishReason":"STOP"}]}}\n\n']);raw('no-data',['event: ignored\n\n']);raw('unterminated',[frame(p([])).trimEnd()]);
 if(process.argv.includes('--depth')){cases.length=0;for(const n of [100,1000,5000,10000,39990])raw(`depth/${n}`,[`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"x","args":${'['.repeat(n)}0${']'.repeat(n)}}}]},"finishReason":"STOP"}]}}\n\n`]);}
+if(process.argv.includes('--bounded-depth')) {
+ cases.length=0;
+ const nested=(n:number)=>'['.repeat(n)+'0'+']'.repeat(n);
+ const frames=[
+  ['ignored',`{"response":{"candidates":[{"finishReason":"STOP"}],"ignored":${nested(39999)}}}`],
+  ['usageMetadata',`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":${nested(39999)}}}`],
+  ['error',`{"error":${nested(40000)}}`],
+  ['args',`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"x","args":${nested(39993)}}}]},"finishReason":"STOP"}]}}`],
+  ['args-stringify',`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"x","args":${nested(40001)}}}]},"finishReason":"STOP"}]}}`],
+ ];
+ for(const [position,json] of frames) for(const prior of [false,true]) {
+  raw(`bounded-depth/${position}/${prior?'after-text':'first'}`,[...(prior?[frame(text)]:[]),`data: ${json}\n\n`]);
+ }
+}
 if(process.argv.includes('--x1')){cases.length=0;
  raw('X1/text-surrogate',['data: {"response":{"candidates":[{"content":{"parts":[{"text":"\\ud800"}]},"finishReason":"STOP"}]}}\n\n']);
  raw('X1/args-surrogate',['data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"x","args":"\\ud800"}}]},"finishReason":"STOP"}]}}\n\n']);

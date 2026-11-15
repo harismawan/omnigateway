@@ -17,6 +17,137 @@ fn depth_on_two_mib_stack() {
         .join()
         .expect("depth worker");
 }
+
+#[test]
+fn bounded_depth_expected_divergence() {
+    let run = std::process::Command::new("bun")
+        .args([
+            "--no-env-file",
+            "tests/antigravity_decode-reference.ts",
+            "--bounded-depth",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("bun");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&run.stdout).expect("rows");
+    let rows = rows.as_array().expect("rows");
+    assert_eq!(rows.len(), 10);
+    for row in rows {
+        let name = row["name"].as_str().expect("name");
+        let mut parser = SseParser::new();
+        let mut messages = Vec::new();
+        for chunk in row["chunks"].as_array().expect("chunks") {
+            let bytes: Vec<_> = chunk
+                .as_array()
+                .expect("bytes")
+                .iter()
+                .map(|b| b.as_u64().expect("byte") as u8)
+                .collect();
+            parser.push(&bytes, &mut messages).expect("SSE");
+        }
+        assert_eq!(
+            omni_ir::deep::depth_of(&messages.last().expect("frame").data),
+            if name.contains("args-stringify") {
+                40_009
+            } else {
+                40_001
+            },
+            "{name}"
+        );
+        let mut decoder = AntigravityDecoder::default();
+        let mut out = VecDeque::new();
+        let mut refusal = None;
+        for message in messages {
+            match decoder.message(&message, &mut out) {
+                Ok(Flow::Continue) => (),
+                Err(DecodeError::Throw(message)) => {
+                    refusal = Some(message);
+                    break;
+                }
+                result => panic!("{name}: unexpected {result:?}"),
+            }
+        }
+        assert_eq!(
+            refusal,
+            Some("upstream JSON exceeds depth 40000"),
+            "{name}"
+        );
+        let actual = serde_json::Value::Array(
+            out.iter()
+                .map(|e| serde_json::from_str(&e.to_json()).expect("event"))
+                .collect(),
+        );
+        let prefix = if name.ends_with("after-text") {
+            serde_json::json!([
+                {"type":"start","id":"","model":""},
+                {"type":"blockStart","index":0,"block":{"type":"text"}},
+                {"type":"blockDelta","index":0,"delta":{"type":"text","text":"before"}}
+            ])
+        } else {
+            serde_json::json!([])
+        };
+        assert_eq!(
+            actual, prefix,
+            "{name}: Rust must preserve exactly earlier events"
+        );
+        let frozen = row["events"].as_array().expect("events");
+        let prefix = prefix.as_array().expect("prefix");
+        assert_eq!(&frozen[..prefix.len()], prefix, "{name}: frozen prefix");
+        let mut expected = prefix.clone();
+        let after = name.ends_with("after-text");
+        if after {
+            expected.push(serde_json::json!({"type":"blockEnd","index":0}));
+        } else if !name.contains("/error/") {
+            expected.push(serde_json::json!({"type":"start","id":"","model":""}));
+        }
+        if name.contains("/error/") {
+            expected.push(serde_json::json!({"type":"error","code":"UPSTREAM","message":"upstream error","retryable":true}));
+        } else {
+            if name.contains("/args") {
+                let index = u32::from(after);
+                expected.push(serde_json::json!({"type":"blockStart","index":index,"block":{"type":"toolUse","id":"fc_0","name":"x"}}));
+                if !name.contains("args-stringify") {
+                    let partial = format!("{}0{}", "[".repeat(39_993), "]".repeat(39_993));
+                    expected.push(serde_json::json!({"type":"blockDelta","index":index,"delta":{"type":"toolJson","partial":partial}}));
+                    expected.push(serde_json::json!({"type":"blockEnd","index":index}));
+                }
+            }
+            if !name.contains("args-stringify") {
+                expected.push(serde_json::json!({"type":"end","stopReason":if name.contains("/args/") {"toolUse"} else {"endTurn"},"usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0}}));
+            }
+        }
+        assert_eq!(frozen, &expected, "{name}: exact frozen result");
+        assert!(
+            frozen.len() > prefix.len(),
+            "{name}: must be a real divergence"
+        );
+        assert_eq!(
+            row["thrown"].is_null(),
+            !name.contains("args-stringify"),
+            "{name}: frozen stringify timing"
+        );
+        if name.contains("args-stringify") {
+            assert_eq!(frozen.last().expect("tool start")["type"], "blockStart");
+            assert_eq!(
+                frozen.last().expect("tool start")["block"]["type"],
+                "toolUse"
+            );
+            assert_eq!(row["thrown"]["name"], "RangeError");
+        }
+        eprintln!(
+            "EXPECTED-DIVERGENCE {name}: frozen events={} thrown={}; Rust={actual} Throw({})",
+            frozen.len(),
+            row["thrown"],
+            refusal.expect("refusal")
+        );
+    }
+    eprintln!("bounded-parser expected-divergence: 10 rows asserted");
+}
 #[test]
 fn request_cloak_round_trip() {
     use omni_providers::codec::{CodecInput, Credentials, ProviderCodec};

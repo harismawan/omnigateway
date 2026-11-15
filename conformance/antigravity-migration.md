@@ -83,6 +83,33 @@ Coercions: numeric schema conversion is string-guarded; project trim is string-g
 
 ## Decoder port (turn5, frozen 1780bb39)
 
+### B1 bounded-parser documented difference (turn7)
+
+The shared Rust JSON parser refuses upstream frames above 40,000 container
+levels with `DecodeError::Throw("upstream JSON exceeds depth 40000")`, before
+emitting any event from that frame. The adapter exposes retryable UPSTREAM
+`antigravity codec decode threw` (provider antigravity, gatewayAuthored true).
+Earlier frames' events remain emitted, including an open text block; refusal
+does not synthesize a blockEnd. This controller-approved difference also applies
+to ignored fields, usageMetadata and error payloads. Matching unbounded frozen
+JSON.parse would require changing the shared parser; ingress has the same bound.
+
+`bounded_depth_expected_divergence` asserts **10 rows**, explicitly separate from
+equality: `bounded-depth/{ignored,usageMetadata,error,args}/{first,after-text}`
+have total JSON depth 40,001. Frozen ignored/usage rows start/end with zero usage;
+error rows emit retryable UPSTREAM `upstream error`; args rows emit the full tool
+call then end(toolUse). All after-text rows preserve start, text blockStart(0),
+and delta("before"), then frozen closes that block. Rust preserves exactly those
+three earlier events (or none for first), then throws the depth-refusal literal.
+
+Depth here counts the whole frame: args at total depth 40,001 contains only
+39,993 nested arrays and frozen stringify succeeds. Two additional
+`bounded-depth/args-stringify/{first,after-text}` rows put 40,001 arrays in args
+(total frame depth 40,009): frozen emits start + tool blockStart (after closing
+any earlier text block), then RangeError; Rust refuses before those new events.
+Both exact frozen results and exact Rust prefixes are asserted. Existing five
+in-bound depth rows through 39,990 arrays remain ordinary equality tests.
+
 1,020 SSE-byte corpus rows compare complete events and whether the generator throws;
 five additional depth rows compare tool JSON bytes, on a 2 MiB Rust thread.
 The oracle imports the frozen decoder and `parseSse`. Throw diagnostics are retained
