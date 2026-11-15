@@ -15,8 +15,16 @@ for(const value of [123,false,{},[],[1,null,'x']]) {
  cases.push([m('message_start',{message:{id:value,model:value}}),m('content_block_start',{content_block:{type:'tool_use',id:value,name:value}}),m('error',{error:{message:value}})]);
 }
 const rows = [];
+for(const value of [{toString:null},null]){
+ for(const field of ['id','model'])cases.push([m('message_start',{message:{[field]:value}})]);
+ for(const field of ['id','name'])cases.push([m('content_block_start',{content_block:{type:'tool_use',[field]:value}})]);
+ cases.push([m('content_block_start',{content_block:{type:value}})],[m('content_block_delta',{delta:{type:value}})]);
+ for(const field of ['type','message'])cases.push([m('error',{error:{[field]:value}})]);
+}
+const overflow=process.argv.includes('--overflow');
+if(overflow){cases.length=0;cases.push([{event:'message_start',data:'{"message":{"id":1e309}}'}],[{event:'message_start',data:'{"message":{"id":"keep"},"ignored":1e309}'}]);}
 for (const messages of cases) {
- const events = []; for await (const e of decodeAnthropic((async function*(){yield* messages;})())) events.push(e);
- rows.push({messages,events});
+ const events = []; let throws=false;try{for await (const e of decodeAnthropic((async function*(){yield* messages;})())) events.push(e);}catch(e){if(!(e instanceof TypeError))throw e;throws=true;}
+ rows.push({messages,events,throws});
 }
 console.log(JSON.stringify(rows));
