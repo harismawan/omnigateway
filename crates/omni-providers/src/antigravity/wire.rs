@@ -78,7 +78,7 @@ pub fn to_wire(
     let mut names = HashMap::new();
     for block in req.messages.iter().flat_map(|m| &m.content) {
         if let ContentBlock::ToolUse(t) = block {
-            names.insert(t.id.as_str(), t.name.as_str());
+            names.extend([(t.id.as_str(), t.name.as_str())]);
         }
     }
     let mut contents: Vec<(&str, Vec<Value>)> = Vec::new();
@@ -167,7 +167,9 @@ pub fn to_wire(
                 .is_some_and(|p| p.get("functionResponse").is_some())
     }) {
         note("antigravity:opening-turn-added".into());
-        contents.insert(0, ("user", vec![json!({"text":""})]));
+        contents = std::iter::once(("user", vec![json!({"text":""})]))
+            .chain(contents)
+            .collect();
     }
     if contents.last().is_some_and(|(r, _)| *r == "model") {
         note("antigravity:closing-turn-added".into());
@@ -290,9 +292,10 @@ pub fn to_wire(
         for tool in tools {
             if let ToolDef::Portable(t) = tool {
                 let name = cloak.name(&t.name);
-                if !seen.insert(name) {
+                if seen.contains(name) {
                     note("antigravity:duplicate-tool-dropped".into());
                 } else {
+                    seen.extend([name]);
                     named.push((name, t));
                 }
             }

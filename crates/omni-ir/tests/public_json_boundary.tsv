@@ -172,6 +172,8 @@ omni-providers/src/antigravity/cloak.rs :: fn original<'a>(&'a self, name: &'a s
 omni-providers/src/antigravity/profile.rs :: fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)>	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/antigravity/profile.rs :: fn initialize()	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/antigravity/schema.rs :: fn prune(node: &Value) -> (Value, Vec<String>)	borrows input; recursion bounded to 24 schema hops, deep::clone for opaque JSON, deep::insert/drop on replacement; returned Value requires caller deep disposal
+omni-providers/src/antigravity/wire.rs :: fn to_wire( req: &ChatRequest, model: &str, project: &str, request_id: &str, cloak: &ToolCloak, ) -> (Value, Vec<String>)	borrows IR; deep clone/insert for arbitrary JSON; returned envelope requires caller deep disposal; 40000-level serialization unresolved
+omni-providers/src/antigravity/codec.rs :: fn build_request( &self, input: &CodecInput<'_>, ) -> Result<CodecRequest<DecodeState>, GatewayError>	borrows IR; jsjson serialization and deep disposal of assembled envelope; 40000-level serialization unresolved
 omni-providers/src/anthropic/cloak.rs :: fn name<'a>(&'a self, name: &'a str) -> &'a str	borrows IR names only; produces string maps, never clones/releases nested JSON
 omni-providers/src/anthropic/decode.rs :: fn is_fingerprint_message(message: &str) -> bool	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/anthropic/oauth.rs :: fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest, GatewayError>	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
