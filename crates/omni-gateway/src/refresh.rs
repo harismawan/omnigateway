@@ -220,6 +220,7 @@ impl Refresher {
         let request = match c.provider.as_str() {
             "anthropic" => omni_providers::anthropic::oauth::refresh_request(token),
             "openai" => omni_providers::openai::oauth::refresh_request(token),
+            "antigravity" => omni_providers::antigravity::oauth::refresh_request(token),
             _ => {
                 return Err(GatewayError::new(
                     ErrorCode::BadRequest,
@@ -248,6 +249,14 @@ impl Refresher {
         #[allow(clippy::cast_precision_loss)]
         let result = if c.provider == "openai" {
             omni_providers::openai::oauth::token_result(
+                response.0,
+                &response.1,
+                Some(token),
+                (self.now)() as f64,
+                &c.provider_data,
+            )
+        } else if c.provider == "antigravity" {
+            omni_providers::antigravity::oauth::token_result(
                 response.0,
                 &response.1,
                 Some(token),
