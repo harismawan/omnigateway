@@ -47,13 +47,16 @@ try {
    copyFileSync(join(root,"seed"),join(root,"db"));
    copyFileSync(join(root,"seed"),join(root,"snapshots",id));
    const pidfile=join(root,"state/omnigateway/gateway.pid");
-   writeFileSync(pidfile,String(process.pid));chmodSync(pidfile,0);
+   writeFileSync(pidfile,String(process.pid));chmodSync(pidfile,0o600);
    const before=state();
+   chmodSync(pidfile,0);
    try {
     const p=goldenSpawn([...cmd,"--root",root,"--db","db",...command],{env,stdout:"pipe",stderr:"pipe"});
     const result={out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited};
     assert.equal(result.code,1);assert.equal(result.out,"");
     assert(result.err.includes(`EACCES: permission denied, open '${pidfile}'`));
+    assert.equal(lstatSync(pidfile).mode&0o7777,0);
+    chmodSync(pidfile,0o600);
     assert.deepEqual(state(),before);results.push(result);
    } finally {chmodSync(pidfile,0o600);assert.equal(readFileSync(pidfile,"utf8"),String(process.pid));rmSync(pidfile);}
   }

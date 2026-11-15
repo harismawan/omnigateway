@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { frozenPostState } from "./db-file-state.ts";
@@ -18,7 +18,13 @@ try {
    if(kind==='parent')chmodSync(parent,0);if(kind==='file')chmodSync(pid,0);
    try {
     const p=goldenSpawn([...cmd,'--root',root,'--db','db',...command],{env,stdout:'pipe',stderr:'pipe'});
-    const result={out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited,state:frozenPostState(root)};
+     const out=await new Response(p.stdout).text(),err=await new Response(p.stderr).text(),code=await p.exited;
+     const restricted=kind==='parent'?parent:kind==='file'?pid:undefined;
+     const mode=restricted?lstatSync(restricted).mode&0o7777:undefined;
+     if(restricted){assert.equal(mode,0);chmodSync(restricted,kind==='parent'?0o700:0o600);}
+     const state=frozenPostState(root);
+     if(restricted)state.find(e=>e.path===(kind==='parent'?'state/omnigateway':'state/omnigateway/gateway.pid'))!.mode=mode;
+     const result={out,err,code,state};
     assert.equal(result.code,kind==='directory'||kind==='file'||command[0]==='db'?1:0);
     if(kind==='directory')assert.equal(result.err,'EISDIR: illegal operation on a directory, read\n');
     if(kind==='file')assert.match(result.err,/EACCES: permission denied, open/);

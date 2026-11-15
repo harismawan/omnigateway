@@ -1,33 +1,39 @@
 import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 
-// lstat avoids following candidate/body symlinks, including self-links.
-function tree(path: string): unknown {
- try {
-  const stat=lstatSync(path);
-  if(stat.isSymbolicLink())return {link:readlinkSync(path)};
-  if(stat.isDirectory())return readdirSync(path).sort().map(name=>[name,tree(join(path,name))]);
-  return readFileSync(path);
- } catch(error:any) {if(error.code==="ENOENT")return null;throw error;}
+// Keep Bun's runtime compilation cache out of both CLI fixture environments.
+// Otherwise HOME=root makes TS execution itself populate .bun/install/cache.
+process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = "0";
+
+type Entry = { path: string; type: "file" | "directory" | "symlink" | "other"; mode?: number; bytes?: Buffer; target?: string };
+// Capture everything before opening inspection handles; never follow links.
+export function fileState(root: string, _bodies=true): Entry[] {
+ const entries: Entry[]=[];
+ function visit(path: string) {
+  const absolute=join(root,path),stat=lstatSync(absolute);
+  if(stat.isSymbolicLink()) entries.push({path,type:"symlink",target:readlinkSync(absolute)});
+  else if(stat.isDirectory()) {
+   entries.push({path,type:"directory",mode:stat.mode&0o7777});
+   for(const name of readdirSync(absolute).sort())visit(path?`${path}/${name}`:name);
+  } else if(stat.isFile())entries.push({path,type:"file",mode:stat.mode&0o7777,bytes:readFileSync(absolute)});
+  else entries.push({path,type:"other"});
+ }
+ visit("");return entries;
 }
-export function fileState(root: string, bodies=true) {
- return {live:["","-wal","-shm"].map(s=>tree(join(root,"db"+s))),snapshots:tree(join(root,"snapshots")),...(bodies?{bodies:tree(join(root,"request_bodies"))}:{})};
-}
-// Only SQLite's writer-version field in the live database header is masked.
 export function frozenPostState(root: string, bodies=true) {
  const state=fileState(root,bodies);
- const db=state.live[0];
- if(Buffer.isBuffer(db)&&db.length>=100)db.fill(0,96,100);
+ const db=state.find(e=>e.path==="db")?.bytes;
+ if(db&&db.length>=100)db.fill(0,96,100);
  return state;
 }
-
-// A newly generated undo has a clock-derived name and SQLite writer version.
-export function restorePostState(root: string, undo: string) {
- const state=frozenPostState(root);
- state.snapshots=(state.snapshots as [string,unknown][]).map(([name,value])=>{
-  if(name!==undo)return [name,value];
-  if(Buffer.isBuffer(value)&&value.length>=100)value.fill(0,96,100);
-  return ["<undo>",value];
- }).sort(([a],[b])=>String(a).localeCompare(String(b)));
- return state;
+// Clock-derived undo names and writer-version fields are the existing masks.
+export function restorePostState(root: string, undo: string | string[]) {
+ const state=frozenPostState(root),undos=typeof undo==="string"?[undo]:undo;
+ for(const entry of state) {
+  const index=undos.findIndex(name=>entry.path===`snapshots/${name}`);
+  if(index<0)continue;
+  entry.path=`snapshots/<undo${index||""}>`;
+  if(entry.bytes&&entry.bytes.length>=100)entry.bytes.fill(0,96,100);
+ }
+ return state.sort((a,b)=>a.path.localeCompare(b.path));
 }

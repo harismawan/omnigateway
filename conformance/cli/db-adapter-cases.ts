@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { goldenSpawn } from "./exit-gate.ts";
 import { fileState, frozenPostState } from "./db-file-state.ts";
@@ -27,13 +27,14 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
      const p=goldenSpawn([...cmd,"--root",root,"--db","db","db",...args],{env,stdout:"pipe",stderr:"pipe"});
      return {out:await new Response(p.stdout).text(),err:await new Response(p.stderr).text(),code:await p.exited};
     };
+    chmodSync(dir,0o700);
     const before=fileState(root);
     chmodSync(dir,mode);
     let listing, result;
     try {
      listing=await run(["snapshots","--json"]);
      result=await run(operation==="backup"?["backup","--json"]:["restore",input]);
-    } finally {chmodSync(dir,0o700);}
+    } finally {assert.equal(statSync(dir).mode&0o7777,mode);chmodSync(dir,0o700);}
     assert.equal(listing.code,0,kind);
     if(kind==="directory") {
      assert.equal(result.code,1);
@@ -58,12 +59,12 @@ export async function adapterCases(commands: string[][], seed: string, env: Reco
      const post=frozenPostState(root);
      const fresh=readdirSync(dir).filter(name=>name!==id);
      const tables=fresh.map(name=>{const db=new Database(join(dir,name),{readonly:true});try{return databaseState(db);}finally{db.close();}});
-     post.snapshots=(post.snapshots as any[]).map(([name,bytes])=>[name===id?name:"<new snapshot>",bytes]);
+     for(const entry of post)if(fresh.some(name=>entry.path===`snapshots/${name}`))entry.path="snapshots/<new snapshot>";
      results.push({listing,result,post,tables});
    }
     if(operation==="backup"&&kind!=="inaccessible") {
-     const a=(results[0].post.snapshots as any[]).find(([name])=>name==="<new snapshot>")[1] as Buffer;
-     const b=(results[1].post.snapshots as any[]).find(([name])=>name==="<new snapshot>")[1] as Buffer;
+     const a=results[0].post.find(e=>e.path==="snapshots/<new snapshot>")!.bytes!;
+     const b=results[1].post.find(e=>e.path==="snapshots/<new snapshot>")!.bytes!;
      const offsets=Array.from({length:Math.max(a.length,b.length)},(_,i)=>i).filter(i=>a[i]!==b[i]);
      console.log(`${kind}: snapshots/<new snapshot> differing offsets ${JSON.stringify(offsets)}; TS=${JSON.stringify(offsets.map(i=>a[i]))}; Rust=${JSON.stringify(offsets.map(i=>b[i]))}`);
      assert.deepEqual(results[1].tables,results[0].tables,"new snapshot contents table by table");

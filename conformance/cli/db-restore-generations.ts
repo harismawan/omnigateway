@@ -47,6 +47,7 @@ try {
    assert.equal(code,0,err);
    const data=JSON.parse(out),undo=data.preRestoreSnapshot.id;
    assert.deepEqual(readFileSync(candidate),candidateBefore);
+   const postState=restorePostState(home,undo);
    const db=new Database(live,{readonly:true});
    assert(db.query("PRAGMA table_info(api_keys)").all().some((c:any)=>c.name==="smart_routing"));
    const ledger=db.query("SELECT * FROM migrations ORDER BY id").all() as {id:number,applied_at:number}[];
@@ -57,13 +58,12 @@ try {
     const saved=new Database(join(home,"snapshots",undo),{readonly:true});
     assert.equal(saved.query("SELECT value FROM settings WHERE key='live-wal-only'").get().value,"undo must retain");saved.close();
    }
-    const postState=restorePostState(home,undo);
     if(kind==="schema-19") {
      const row=ledger.find(r=>r.id===20)!;
      assert(row.applied_at>=start && row.applied_at<=end,"migration timestamp inside command window");
      // Locate rowid 20's timestamp by decoding the SQLite table-leaf record,
      // rather than searching for coincidentally equal bytes or masking a page.
-     const bytes=postState.live[0] as Buffer;
+     const bytes=postState.find(e=>e.path==="db")!.bytes!;
      const pageSize=bytes.readUInt16BE(16)||65536, page=(ledgerPage-1)*pageSize;
      const header=page+(ledgerPage===1?100:0);
      assert.equal(bytes[header],13,"ledger is a table leaf");
@@ -95,7 +95,7 @@ try {
    writer?.close();
   }
   if(results.length===2) {
-   const a=results[0].postState.live[0] as Buffer,b=results[1].postState.live[0] as Buffer;
+   const a=results[0].postState.find(e=>e.path==="db")!.bytes!,b=results[1].postState.find(e=>e.path==="db")!.bytes!;
    const offsets=Array.from({length:Math.max(a.length,b.length)},(_,i)=>i).filter(i=>a[i]!==b[i]);
    if(offsets.length)console.log(JSON.stringify({kind,entry:"live/db",offsets}));
    assert.deepEqual(results[1],results[0],kind);

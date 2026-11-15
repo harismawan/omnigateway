@@ -91,13 +91,14 @@ try {
       const undoIds = readdirSync(join(root, "snapshots")).filter(name => name.endsWith("_preRestore.sqlite"));
       assert.equal(undoIds.length, 1);
       const undo = undoIds[0];
+      const postState = restorePostState(root, undo);
+      let roundtripState;
       assert.match(undo, /^db_\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z_preRestore\.sqlite$/);
       assert.deepEqual(rows(join(root, "snapshots", undo)), oldRows, "undo contains every old table");
       assert.deepEqual(rows(live), installedRows, "candidate main file installed table by table (WAL excluded)");
       assert.deepEqual(readFileSync(candidate), candidateBytes, "candidate retained byte-identically");
       assert(existsSync(join(root, "snapshots", stale)), "forced undo skips all retention");
        assert(!existsSync(live + ".incoming"));
-       const postState = restorePostState(root, undo);
       if (test.ledger) {
         assert.equal(result.out, "");
         assert.match(result.err, /the database swap failed and the database may be incomplete/);
@@ -133,15 +134,34 @@ try {
         // Restore the undo through the same public command, not by copying it.
         const roundtrip = await run(undo, false, true);
         assert.equal(roundtrip.code, 0, roundtrip.err);
+        const secondUndo = JSON.parse(roundtrip.out).preRestoreSnapshot.id;
+        const state = restorePostState(root, [undo, secondUndo]);
+        const data = JSON.parse(roundtrip.out);
+        data.preRestoreSnapshot.id = data.preRestoreSnapshot.filename = "<undo1>";
+        data.preRestoreSnapshot.createdAt = "<time>";
+        roundtrip.out = JSON.stringify(data);
+        roundtrip.err = roundtrip.err.replaceAll(root, "<root>").replaceAll(undo, "<undo>");
+        roundtripState = { roundtrip, state };
         assert.deepEqual(rows(live), oldRows, "round trip restores every original table");
         assert.equal(readdirSync(join(root, "snapshots")).filter(name => name.endsWith("_preRestore.sqlite")).length, 2);
       }
       result.err = result.err.replaceAll(root, "<root>");
-       results.push({ result, sidecars, postState });
+       results.push({ result, sidecars, postState, roundtripState });
       console.log(`${test.name} ${index === 0 ? "TS" : "Rust"}: exit=${result.code}, sidecars=${JSON.stringify(sidecars)}, undo retained, incoming absent`);
     }
     wal?.close();
-    if (results.length === 2) assert.deepEqual(results[1], results[0], test.name);
+    if (results.length === 2) {
+      for(const key of ["postState", "roundtripState"] as const) {
+        const states=results.map(r=>key==="postState"?r.postState:r.roundtripState?.state);
+        for(const path of new Set(states.flatMap(s=>s?.map(e=>e.path)??[]))) {
+          const entries=states.map(s=>s?.find(e=>e.path===path));
+          try {assert.deepEqual(entries[1],entries[0]);} catch {
+            console.log("STATE DIFFERENCE",key,path,JSON.stringify(entries.map(e=>e&&({...e,bytes:e.bytes?{length:e.bytes.length,offsets: Array.from(e.bytes.keys()).filter(i=>entries[0]?.bytes?.[i]!==entries[1]?.bytes?.[i]).slice(0,40)}:undefined}))));
+          }
+        }
+      }
+      assert.deepEqual(results[1], results[0], `post-state comparison: ${test.name}`);
+    }
   }
   console.log(`PASS ${cases.length} frozen swap characterizations${commands.length === 2 ? " with Rust parity" : " (TS only)"}; 5 round trips`);
   await verifyGoldenExits("db-restore-swap");

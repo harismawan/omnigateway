@@ -25,12 +25,12 @@ try {
    const [text,stderr]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text()]);await p.exited;
    assert.equal(stderr,"");const nested=JSON.parse(text);let out=Buffer.from(nested.stdout,"hex").toString(),err=Buffer.from(nested.bytes,"hex").toString();
    const code=nested.code;
-   chmodSync(root,0o755);chmodSync(snapshots,0o755);
    assert.equal(code,kind==="candidate-replaced"?0:1,err);
    const undos=readdirSync(snapshots).filter(n=>n.endsWith("_preRestore.sqlite"));
    if(kind==="candidate-removed"){assert(err.includes("no such snapshot"));assert.equal(undos.length,0);}
    if(kind==="snapshots-readonly")assert.equal(undos.length,0);
    const state=undos.length?restorePostState(root,undos[0]):frozenPostState(root);
+   chmodSync(root,0o755);chmodSync(snapshots,0o755);
    if(kind==="candidate-replaced") {
     const data=JSON.parse(out);assert.equal(data.counts.settings,1,"second inspection sees replacement");
     const installed=new Database(live,{readonly:true});assert.equal(installed.query("SELECT value FROM settings WHERE key='replacement'").get().value,"installed");installed.close();
