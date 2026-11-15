@@ -1,4 +1,4 @@
-# A8 speed investigation, rounds 1–4
+# A8 speed investigation, rounds 1–5
 - R1 baseline 1k/10k/50002:2.981/31.692/187.451 ms; split read36.661/preliminary66.221/projection7.793/validation2.963/final4.723/serialization61.737.
 - R1 f43a486e →135.138;c2d73919 →92.689;7805401f →78.516;bf7482f5 →71.233 ms; E2E Rust75.8/TS60.4; report48b0de37.
 - R2 baseline61.738 →5112834b compact49.219 →5108fa28 ranked43.436;1k/10k .621/8.176;reportf0c5d283.
@@ -37,3 +37,21 @@
 - r4-client-quota.log:admin-routes: 6081 equal, 6 expected divergences, 0 failures, 0 raw keys minted;debug binary copied outside checkout.
 - Scratch instrumentation removed; driver directories/frozen scratch database cleaned; logs/snapshots/scripts/binary copies retained. No unrelated staging,push,merge,SQL/schema change.
 - Rust is faster up to 10,000 samples and slower/level at the cap, because measured cap read/preliminary sort dominate Rust execution (inference: opportunity above SQLite floor). Final standalone61.815 vs60.192;E2E78.9/78.1 vs69.8/69.8. Runs varied: no production speedup or robust small-size advantage established.
+## Round 5
+- Each entry below: three-run median of medians [min,max], ms, sizes1k/10k/50002; uptime recorded in each r5 log under /tmp/opencode/a8/speed/. Benchmark/snapshots unchanged. Requested invocations were absent from all three named r4 logs; used the existing ignored test in compare mode and bun r3-frozen.ts directly.
+- Baseline r5-before:1.006[.986,1.049]/10.826[10.779,10.984]/58.886[58.376,60.930].
+- Interning trial (bounded16/direct typed equality, hashed overflow, malformed UTF-8 preserved) → .998[.955,1.020]/11.127[11.075,11.316]/60.866[59.512,60.922]; REVERTED, no demonstrated benefit; r5-intern.log/diff. Mixed-type thousands-of-cells regression test retained.
+- Flat-key sort alone → .967[.899,1.042]/11.193[11.130,11.436]/58.168[57.524,62.757]; inconclusive, superseded by counting grouping; r5-flat.log.
+- 006eab9d stable counting-group scatter + cached numeric per-group sort (flat-key fallback above64 ranks): baseline →1.077[.958,1.727]/10.660[10.480,11.733]/54.840[53.611,55.342]; r5-group.log. Cap improvement exceeds range widths; small-size improvement not established. Exact comparator handles mixed cells/NaN without affinity assumptions; stable ties and trim retained.
+- 807b3a2f bounded LIMIT reservation: repeated before1.060[1.002,1.079]/10.854[10.632,10.920]/59.598[57.785,60.204] →after.883[.857,.892]/8.692[8.603,8.843]/47.554[46.419,48.254]; r5-reserve-{before,after}-repeat.log. Initial after .881[.873,1.356]/8.832[8.752,8.933]/47.104[46.742,101.910] had noisy outlier; repeated BOTH sides, retained all logs.
+- Load averages baseline .54/.61/1.99, group3.85–5.02/2.12–2.56/2.27–2.41, reservation-repeat before5.75–6.08/3.55–4.04/2.79–3.00 and after4.89–5.47/4.06–4.12/3.04–3.11. 1eb9e029 test lint cleanup; no production change.
+- New cap split: bare19.378/borrowed30.304/full-reader37.627 (r5-final, three medians); instrumented read35.640/preliminary.699/projection-validation-final2.261/serialization5.867 (r5-split, nine medians). Instrumentation removed; independent medians do not sum; serialization code unchanged.
+| Samples | Final Rust total [three-run range] | Frozen function | Frozen stringify | Frozen total | Rust faster |
+|---:|---:|---:|---:|---:|---:|
+|1000|.910[.854,.919]|.858|.195|1.033|.123 ms (11.9%)|
+|10000|8.768[8.626,8.771]|7.459|2.293|10.146|1.378 ms (13.6%)|
+|50002|46.205[45.190,46.241]|39.711|13.086|53.111|6.906 ms (13.0%)|
+- Final comparison same sitting:r5-final.log/r5-frozen-final.log; all three byte snapshots identical after every trial; r5-legacy.log passes untouched legacy snapshots. Standalone target met in these observations; host variability remains. Item4 gateway allocator/cold-thread investigation not reached; no E2E timing claim.
+- Final gates:r5-tests.log 68 `test result: ok` summaries,389 passed,11 ignored; r5-clippy.log `Finished dev profile [unoptimized] target(s) in 4.22s`; r5-fmt.log `exit=0`; grep FAILED/panicked/^error empty for final gate logs.
+- r5-client-history.log:`admin-routes: 9892 equal, 11 expected divergences, 0 failures, 0 raw keys minted`; r5-client-quota.log:`admin-routes: 6081 equal, 6 expected divergences, 0 failures, 0 raw keys minted`. Both output directories removed after saving summaries; final debug copy r5-rust.
+- Release copy:/tmp/opencode/a8/speed/r5-release; r5-release.log Finished release in1m21s;5.0GB free before build. No unrelated staging, stash/worktree changes, SQL/schema edits, push, merge. Report deliberately uncommitted.

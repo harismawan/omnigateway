@@ -1,8 +1,44 @@
-# Completion drain — partial fix5, HEAD 26b5c39b
-**Pending for next session:** item 2 scanner/normalisation/helper-closure/mutation suite; item 3 stronger slow-drip timing assertion and reset-on-byte red mutation. Existing structural guard has the confirmed review gaps; do not treat its passing result as resolving item 2.
+# Completion drain — fix6, HEAD 570d10ff
+**Items 2 and 3 completed:** scanner blanking/normalisation/helper-closure and mutation suite; absolute-deadline slow-drip observation with reset-on-read red evidence. Product source is byte-identical to 26b5c39b; only two test files changed.
 the frozen gateway closes the upstream connection after a chunked streaming response whose terminator arrives in a later write; with this change Rust returns it to the pool when the terminator arrives within the bounds — a Rust-only difference
 
 ## Latest round
+fix6 commits: 6dd21f3a (item A), a8929731 (item B), 570d10ff (append-only clippy correction: two test unwraps replaced with descriptive expects). No push/merge. Report edited separately, not committed.
+Scanner returns function/normalised text/reason violations. It blanks nested comments, ordinary/raw/byte strings and chars while preserving byte offsets/newlines and recognising lifetimes; brace-matches exact function names including generic definitions; removes whitespace and path generic arguments. Same-file helper closure finds no additional required helpers in current source. Real source: zero violations. Allow-list: empty; no allocation spellings waived. `.clone()` is denied (none in scanned functions); reused-buffer reserve/extend_from_slice remain deliberately allowed amortised growth.
+
+| Mutation in next_chunk | Caught |
+|---|---|
+| `Box::pin(self.read_next())` | yes |
+| `std::boxed::Box::pin(..)` | yes |
+| `.boxed()` | yes |
+| `String::from("x")` | yes |
+| `Box::<_>::pin(..)` | yes |
+| `Box ::` newline `pin (..)` | yes |
+| `Arc::new(1)` | yes |
+| `vec![1, 2, 3]` | yes |
+| `.to_string()` | yes |
+| `Bytes::copy_from_slice(..)` | yes |
+| new same-file `sneaky()` containing `Box::new` | yes: unscanned local helper |
+| `// }` then `Box::pin` | yes |
+| `"}"` then `Box::pin` | yes |
+| `/* } /* nested */ } */` then `Box::pin` | yes |
+| `'}'` then `Box::pin` | yes |
+
+All mutations execute in ordinary cargo tests against real source mutated in memory. Separate blanking test covers false signatures in strings, lifetimes, escaped chars, Unicode chars, raw/byte strings and nested comments. `fix6-tripwire.log`: 3 passed; 15 caught markers. Temporary real-source boxing: `fix6-tripwire-red.log`, `reason: "Box::pin"`, `test result: FAILED. 0 passed; 1 failed`; body.rs restored exactly.
+Limits: external callees/crates, macro expansions, trait dispatch, aliases/re-exports, dependency allocations and unlisted spellings; ordinary signatures assumed, arbitrary const-generic expressions and Unicode identifiers not parsed. Name-only local-call matching is conservative and can conflate methods on unrelated types. Review remains necessary; this is not runtime allocation measurement.
+Slow-drip now sends at 0/40/80 ms, advances only to 100 ms, lets the drain/reactor process closure while keeping the paused clock there, checks observed close time <= start + 100 ms and idle count zero. Bounded 1,000 scheduler yields avoid paused-clock auto-advance; reactor scheduling remains a test limitation. Red mutation removed the outer absolute timeout and gave each fill read a fresh 100 ms timeout (one byte per read in this case). `fix6-drip-red.log`: `peer not closed at absolute drain deadline`; `test result: FAILED. 0 passed; 1 failed`. pool.rs/body.rs restored byte-for-byte.
+`hold_idle_for_test` verified `#[cfg(test)]`; retained one-second hold for generous margin on this loaded host rather than introducing a 300 ms scheduling assumption. `fix6-lock.log`: 1 passed, finished in 1.00s.
+
+### fix6 final-commit gates (supersede historical fix5 gates below)
+All logs under `/tmp/opencode/diag/drain/`, prescribed offline/shared target/debug-off/incremental-off/jobs=3 environment. Each final gate log searched for `FAILED`, `panicked`, and `^error`: zero matches.
+- `fix6-tests.log`: exit 0, 61 ok summaries, **335 passed, 5 ignored**, including subprocess summaries; final `test result: ok. 1 passed; 0 failed; 0 ignored`.
+- `fix6-loop.log`: **RUN 30 PASS**, 90 ok summaries, **870 passed**, zero ignored. Each iteration: `cargo test --offline -p omni-gateway --test connection_reuse`, `cargo test --offline -p omni-providers --lib http::drain_tests`, `cargo test --offline -p omni-providers --test body_read_tripwire` (12 + 14 + 3 tests).
+- `fix6-clippy.log`: exit 0, `Finished dev profile [unoptimized] target(s) in 0.25s` (log includes backticks around dev).
+- `fix6-fmt.log`: `fmt exit=0` for `cargo fmt --all -- --check`.
+- `fix6-size.log`: `cargo test --offline -p omni-gateway --test dispatch_size -- --nocapture`; `dispatch concrete state machine bytes=5496` <= 5500; 1 passed.
+- `fix6-unchanged.log`: compared bytes of every tracked crates/*/src/* file against `git show 26b5c39b:path`, except drain_tests.rs. All identical, including all seven named request functions and pool.rs. `git diff 26b5c39b..HEAD --stat`: only drain_tests.rs (24 lines touched) and tests/body_read_tripwire.rs (402 lines touched), 379 insertions/47 deletions. Thus no non-test src line changed.
+Ran all above, both red mutations, restored-source tests, and final gates. Read reviewer report/mutations.py/mutations.log and historical fix5 evidence; did not rerun the historical allocation measurement or reviewer script. Initial full test invocation hit the tool's 120-second timeout and was rerun to completion; initial loop selected the wrong package before any tests ran, corrected; initial clippy found two unwraps, corrected append-only. Final full gates and 30 loops rerun on 570d10ff.
+
 8aeb5cd1 fixes deadline enforcement, adds six drain cases and the ordinary-test structural guard. 548aed49 removes the C preload and its misleading standalone allocation test, in a separate commit. No preload instructions/references remain in production/test sources.
 26b5c39b adds deadline admission under the idle lock, immediately before insertion. Both early drain checks remain to avoid useless reading/lock waiting. Ordinary check-in passes no deadline and gains no clock read. After the check under the lock passes, insertion itself is immediate; a connection admitted just before the deadline then lives under the pool's ordinary idle rules. Executor stalls can delay closing. Current pool source imports Tokio Instant for idle timestamps too; deadline comparison explicitly uses tokio::time::Instant::now, not a wall clock.
 fix5-red.log: deadline_during_checkin_lock failed with idle count 1, expected 0; fixed test passes. Signalled lock acquisition plus one-second hold against 100 ms deadline reproduces contention without near-limit sleeping; not a paused-clock deterministic test, scheduling remains a limitation.

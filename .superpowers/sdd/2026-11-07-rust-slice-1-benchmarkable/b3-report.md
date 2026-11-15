@@ -1,3 +1,22 @@
+## Decoder review fixes — items 1–4 completed (2026-11-15)
+- Commits: `6d1e47e1` throwing coercions; `a5ef9b74` parked overflow; `465e7aad` reviewer generator. Worktree clean; no push/merge.
+- Item 1: fallible shared siblings preserve infallible callers; OpenAI returns Throw at audited coercions, preserving prefix events. Frozen usage subtracts input/cache but forwards output raw: output-count representation remains X1.
+- Audit table with frozen/Rust line pairs and yield ordering: `conformance/openai-coercion.md`. Adapter relabelling inspected, existing adapter error tests run.
+- Bun 1.4.4 probes: own toString=null/number/string/array/object, both keys, arrays/nested arrays all TypeError for String/Number. valueOf alone and own __proto__ data property do not throw. Source/output `/tmp/opencode/b3/decode-fix-probes.{ts,log}`.
+- Single join bisection: depth 4256 succeeds, 4257 RangeError; documented engine-stack difference, no emulation.
+- Rows: 36 added for item 1 (six reviewer shadows + 30 site rows), whole/1/7; six overflow streams ignored with explicit X1 reason and frozen expectations.
+- Reviewer generator: 296 agreeing streams × whole/1/7/13 = 1184 runs; two ~10 MiB cap streams omitted. Total reviewer streams retained 308/310: 302 ordinary, six ignored. Decode suite 0.60s; no chunk reduction.
+- RED logs: `decode-fix-red.log` and `decode-fix-overflow-red.log` under `/tmp/opencode/b3/`; both show expected FAILED results.
+- Item 4 executed six paired probes, no decoder edits: inputs, harness source, full side-by-side events/errors in `/tmp/opencode/b3/decode-fix-other/outputs.json` and sibling files.
+- Anthropic shadow id: frozen [] + TypeError; Rust Start("[object Object]") + End. Overflow extension: frozen Start("keep") + End; Rust End only.
+- Custom Responses: same two outcomes as Anthropic. Custom Chat shadow id: frozen [] + TypeError; Rust Start("[object Object]"), text start/delta("keep"), premature-[DONE] error.
+- Custom Chat overflow extension: BOTH Start("keep"), text start/delta("keep"), premature-[DONE] error. Fast path preserves this ignored extension case; do not generalize to all overflowing fields.
+- Final tests: `decode-fix-final-test.log`: 53 `test result: ok` summaries, 237 passed, 5 ignored, zero failed; grep FAILED/panicked/^error empty. Includes subprocess summaries.
+- Final clippy: `decode-fix-final-clippy.log`: `Finished dev profile [unoptimized] target(s) in 0.27s`; error grep empty. Final fmt: `decode-fix-final-fmt.log`: `fmt exit=0`.
+- Item 1 precommit gates separately passed: 53 summaries / 236 passed / 4 ignored; clippy Finished 2.99s; fmt exit=0 (`decode-fix-item1-*`). Initial public-API inventory failure corrected; one 120s gate attempt timed out, then rerun with 20-minute timeout.
+- Read review, full Rust/frozen decoder, coercion/parser/adapter/usage sources and review scripts; executed Bun probes, red/green reference tests, other-decoder observations, full gates. Never opened rows.json. No live upstream or HTTP probe.
+- Concerns retained: X1 counts/surrogates/overflow; engine stack threshold; observed other-decoder throwing coercions. No unsafe/dependencies/TypeScript product/bun.lock edits.
+
 # B3 OpenAI / Codex
 
 ## Request-side review fixes — complete for re-review
