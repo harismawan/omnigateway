@@ -72,7 +72,7 @@ cases.push({ name: "listing-alias", path: "/v1/models", kind: "listing" });
 type Wire = { url: string; method: string; headers: string[]; body: string };
 let recorded: Wire[] = [], boot: Wire[] = [];
 let current: Case = cases[0]!;
-let calls = 0, phase = 0, active = false;
+let phase = 0, active = false;
 const frame = (response: any) => `data: ${JSON.stringify({ response })}\n\n`;
 const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
   tls: { cert: Bun.file(f.cert!), key: Bun.file(f.key!) }, socket: {
@@ -94,11 +94,11 @@ const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
       (active && !quota ? recorded : boot).push(wire);
       const token = host === "oauth2.googleapis.com";
       let status = quota ? 200 : token ? (current.kind === "invalid-grant" ? 400 : 200) :
-        current.code && (!current.failover || calls++ === 0) ? current.code : 200;
+        current.code && (!current.failover || !head.some(h => h === "Authorization: Bearer secondary-access")) ? current.code : 200;
       let reply = quota ? '{}' : token ? (status === 400 ? '{"error":"invalid_grant"}' : '{"access_token":"new-access","refresh_token":"new-refresh"}') :
         status !== 200 ? JSON.stringify({ error: { code: status, message: "fixture refusal", status: ({400:"INVALID_ARGUMENT",401:"UNAUTHENTICATED",403:"PERMISSION_DENIED",404:"NOT_FOUND",429:"RESOURCE_EXHAUSTED",500:"INTERNAL",503:"UNAVAILABLE"} as any)[status] } }) : "";
       if (!token && !quota && status === 200) {
-        const parts: any[] = current.kind === "tools" && phase === 0 ? [{ functionCall: { id: "call_fixture", name: "read_file", args: { path: "x" } } }] :
+        const parts: any[] = current.kind === "tools" && phase === 0 ? [{ functionCall: { id: "call_fixture", name: current.path === "/v1/responses" ? "_1read_file" : "read_file", args: { path: "x" } } }] :
           [{ thought: true, text: "consider" }, { text: "hello" }];
         reply = frame({ responseId: "upstream-fixture", modelVersion: "gemini-2.5-pro", candidates: [{ content: { role: "model", parts } }] });
         if (current.kind !== "truncated") reply += frame({ candidates: [{ finishReason: current.kind === "unknown-finish" ? "FUTURE_REASON" : "STOP" }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3, thoughtsTokenCount: 2, cachedContentTokenCount: 1 } });
@@ -111,7 +111,9 @@ const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
 
 function request(c: Case, roundtrip = false): any {
   const model = c.kind === "bare" ? "gemini-2.5-pro" : "test-model";
-  const name = "read file";
+  // Responses rejects spaces before dispatch, but permits a leading digit;
+  // Cloud Code rejects that digit, exercising cloak through this surface too.
+  const name = c.path === "/v1/responses" ? "1read_file" : "read file";
   const common = { model, stream: !!c.stream, max_tokens: 128 };
   if (c.path === "/v1/messages") return { ...common, system: "fixture system", thinking: { type: "enabled", budget_tokens: 1024 },
     tools: [{ name, input_schema: { type: "object", properties: { path: { type: "string" } } } }],
@@ -129,7 +131,7 @@ const logMask = (row: any) => Object.fromEntries(Object.entries(row).filter(([k]
 async function run(binary: string, label: string) {
   const rows: any[] = [];
   for (const [i, c] of cases.entries()) {
-    current = c; phase = 0; calls = 0; active = false; recorded = []; boot = [];
+    current = c; phase = 0; active = false; recorded = []; boot = [];
     const root = join(work, `${label}-${i}`); mkdirSync(root);
     const file = join(root, "omni.db"); copyFileSync(seedDb, file);
     const writer = new Database(file);
@@ -200,7 +202,23 @@ function valid(row: any, c: Case): boolean {
   if (c.kind === "invalid-grant") return tokens.length === 1 && inference.length === 0 && row.credentials[0].enabled === 0 && row.credentials[0].disabled_reason === "tokenRejected";
   if (c.kind === "refresh" && (tokens.length !== 1 || row.upstream[0] !== tokens[0] || row.credentials[0].access_token !== "new-access" || row.credentials[0].refresh_token !== "new-refresh" || row.credentials[0].token_version !== 1)) return false;
   if (!inference.length) return false;
-  if (c.kind === "tools" && (!row.clients[0].body.includes("read file") || !inference.every((w: Wire) => w.body.includes('"name":"read_file"') && !w.body.includes('"name":"read file"')))) return false;
+  if (c.kind === "tools") {
+    const name = c.path === "/v1/responses" ? "1read_file" : "read file";
+    const cloaked = c.path === "/v1/responses" ? "_1read_file" : "read_file";
+    if (!row.clients[0].body.includes(name) || inference.length !== 2 || !inference.every((w: Wire) => w.body.includes(`"name":"${cloaked}"`) && !w.body.includes(`"name":"${name}"`)) || !inference[1].body.includes('"functionResponse"')) return false;
+  }
+  if (c.code) {
+    const succeeds = c.failover && c.code !== 400;
+    const expected = succeeds ? 200 : c.code === 400 ? 400 : 503;
+    const expectedCalls = c.code === 401 || c.code === 403 ? (succeeds ? 3 : 2) : succeeds ? 2 : 1;
+    if (row.clients[0].status !== expected || inference.length !== expectedCalls) return false;
+    if (succeeds && !inference.at(-1).headers.includes("Authorization: Bearer secondary-access")) return false;
+  }
+  if (c.profile) {
+    const ua = c.profile === "all" ? "fixture-antigravity/9.8.7" : "antigravity/ide/9.8.7 darwin/arm64";
+    if (!inference[0].headers.includes(`User-Agent: ${ua}`)) return false;
+    if (c.profile === "all" && inference[0].headers[1] !== `User-Agent: ${ua}`) return false;
+  }
   if (!c.code && !["truncated", "unknown-finish"].includes(c.kind!) && row.clients.some((x: any) => x.status !== 200)) return false;
   return true;
 }
