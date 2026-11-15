@@ -1,5 +1,35 @@
 # OpenAI request depth evidence (A1)
 
+## D3 ordinary tool carriers (s4e)
+
+| Carrier | Source | Evidence |
+|---|---|---|
+| Ordinary tool input | openai/wire.rs:107 | Remove mod.rs:70 scope: PASS; structurally safe, borrowed input written by stack-growing jsjson writer, retained as String in lite history |
+| Tool result string | openai/wire.rs:111 | Remove mod.rs:70 scope: PASS; structurally safe, content is String, not arbitrary JSON |
+| Tool result media | openai/wire.rs:110–115 | Remove mod.rs:70 scope: PASS; structurally safe, typed image/file fields are strings; moved parts are shallow |
+| Ignored tool result native | openai/wire.rs:109 | Remove mod.rs:70 scope: PASS; structurally safe, presence check only, never copied; IR owner drops iteratively |
+
+Four new subprocess cases pass unmodified at 39,990 levels / 2 MiB, bringing
+the focused harness to 18 cases. String/media cases carry nested JSON text
+and a deep ignored native owner; these are not claims of recursive portable
+result fields. Scope removal independently passed all four cases. No product
+defect found; no protection-removal crash claimed. Mutations restored.
+Logs: `/tmp/opencode/b3/s4e-group1-baseline.log` and
+`s4e-noscope-{ordinary_input,ordinary_result_native,ordinary_result_string,ordinary_result_media}.log`.
+
+Next group is **(2) response-format schema/text replacement**. Remaining:
+
+| Group/carrier | Source | Status |
+|---|---|---|
+| 2 response-format schema/text replacement | openai/wire.rs:370; response_format.rs (helper expansion in group 6) | Pending |
+| 3 assistant annotations | openai/lite.rs:147–154 | Pending |
+| 3 function name/call_id aliases | openai/lite.rs:169,177 | Pending |
+| 4 foreign native | openai/wire.rs:117 | Pending |
+| 4 system/provider tools | openai/wire.rs:158,234–253 | Pending |
+| 5 credential provider data | openai/identity.rs:30–40; openai/oauth.rs:53–58; openai/mod.rs:132–138 | Pending |
+| 6 explicit non-lite schema control | openai/wire.rs:234–253 | Pending |
+| 6 shared helper ownership inventory | response_format.rs, system.rs, tool_result_files.rs (line expansion pending); openai/wire.rs:79–89,135–155,202; openai/lite.rs:22–29,200–206 | Pending |
+
 ## D OAuth/lite ownership inventory (source at 31db790c)
 
 ### D2 tools/native checkpoint — product defect found and fixed
@@ -38,8 +68,7 @@ failures: `s4d-native-first-{native_call,native_output}.log`. Mutations:
 `s4d-native-clone-{tool_schema,native_reasoning,native_metadata,native_message,native_call,native_output,native_unknown,cache_fallback}.log`.
 Restored focused depth plus 289 request comparisons: `s4d-native-fixed.log`.
 
-**D remains incomplete.** Remaining: ordinary tool input/result string/media
-paths and ignored result-native data; response-format schema/text replacement;
+**D remains incomplete.** Remaining: response-format schema/text replacement;
 credential-data fields; foreign-native/system/provider-tool ignored payloads;
 native assistant annotations replacement; native function name/call_id aliases;
 shared helper source inventory. Do not label step 4 complete yet. Existing
@@ -101,10 +130,8 @@ and is structurally safe for the stated reason, not mutation-proven protection.
 Logs: `s4d-depth-vendor-baseline.log`, `s4d-depth-clone-{text_merge,reasoning_merge,scalar}.log`,
 `s4d-depth-insert-noscope-{input_replace,stream_replace,metadata}.log`.
 
-Remaining D: tool schemas/strict and lite tool prefix ownership, borrowed tool
-inputs/results/native result payload, native reasoning and passthrough replacement,
-native message/function/unknown shapes, response-format schema/text replacement,
-cache fallback and credential arbitrary fields; expand shared helper inventory.
+Remaining D: see the current D3 pending table above. D1/D2 evidence below
+is retained as historical evidence, not a second current pending list.
 
 ## Decoder depth (step 3 item 3)
 

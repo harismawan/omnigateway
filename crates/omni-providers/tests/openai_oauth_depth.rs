@@ -10,7 +10,11 @@ use omni_providers::{
 use serde_json::{Value, json};
 
 fn exercise(case: &str) {
-    let raw = if case == "tool_schema" {
+    let raw = if case == "ordinary_input" {
+        json!({"model":"m","stream":false,"messages":[{"role":"assistant","content":[{"type":"toolUse","id":"call","name":"f","input":null}]}]})
+    } else if case.starts_with("ordinary_result") {
+        json!({"model":"m","stream":false,"messages":[{"role":"user","content":[{"type":"toolResult","toolUseId":"call","content":"result","native":[{"provider":"anthropic","blockType":"future","data":{}}]}]}]})
+    } else if case == "tool_schema" {
         json!({"model":"m","stream":false,"messages":[],"tools":[{"kind":"portable","name":"f","inputSchema":null}]})
     } else if case.starts_with("native_") || case == "cache_fallback" {
         json!({"model":"m","stream":false,"messages":[{"role":"assistant","content":[{"type":"providerNative","provider":"openai","blockType":"reasoning","data":{}}]}]})
@@ -22,7 +26,41 @@ fn exercise(case: &str) {
     for _ in 0..39_990 {
         value = Value::Array(vec![value]);
     }
-    if case == "tool_schema" {
+    if case.starts_with("ordinary_result") {
+        if let ContentBlock::ToolResult(result) = &mut req.messages[0].content[0] {
+            if case == "ordinary_result_native" {
+                deep::insert(
+                    &mut result.native.as_mut().expect("native")[0].data,
+                    "payload".into(),
+                    value,
+                );
+            } else {
+                // Portable result text/media have no arbitrary JSON field. Carry
+                // the same nested JSON as text, plus a deep ignored native owner.
+                result.content = format!("{}null{}", "[".repeat(39_990), "]".repeat(39_990));
+                deep::insert(
+                    &mut result.native.as_mut().expect("native")[0].data,
+                    "payload".into(),
+                    value,
+                );
+                if case == "ordinary_result_media" {
+                    result.images = Some(
+                        serde_json::from_value(
+                            json!([{"mediaType":"image/png","data":"aGVsbG8="}]),
+                        )
+                        .expect("images"),
+                    );
+                    result.files = Some(serde_json::from_value(json!([{"mediaType":"application/pdf","data":"aGVsbG8=","filename":"a.pdf"}])).expect("files"));
+                }
+            }
+        }
+        req.conversation_id = Some("depth-conversation".into());
+    } else if case == "ordinary_input" {
+        if let ContentBlock::ToolUse(tool) = &mut req.messages[0].content[0] {
+            deep::replace(&mut tool.input, value);
+        }
+        req.conversation_id = Some("depth-conversation".into());
+    } else if case == "tool_schema" {
         if let ToolDef::Portable(tool) = &mut req.tools.as_mut().expect("tools")[0] {
             deep::replace(&mut tool.input_schema, value);
         }
@@ -107,7 +145,11 @@ fn exercise(case: &str) {
         .expect("OAuth build");
     if matches!(
         case,
-        "metadata" | "input_replace" | "stream_replace" | "native_metadata"
+        "metadata"
+            | "input_replace"
+            | "stream_replace"
+            | "native_metadata"
+            | "ordinary_result_native"
     ) {
         assert!(built.request.body.len() < 4000);
     } else {
@@ -136,6 +178,10 @@ fn vendor_carriers_on_small_stack() {
         "input_replace",
         "stream_replace",
         "tool_schema",
+        "ordinary_input",
+        "ordinary_result_native",
+        "ordinary_result_string",
+        "ordinary_result_media",
         "native_reasoning",
         "native_metadata",
         "native_message",
