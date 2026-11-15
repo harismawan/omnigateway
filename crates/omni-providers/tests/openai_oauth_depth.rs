@@ -104,6 +104,32 @@ fn exercise(case: &str) {
             .as_object_mut()
             .expect("object");
         match case {
+            "format_schema" => {
+                let mut schema = json!({"type":"object"});
+                deep::insert(
+                    schema.as_object_mut().expect("schema"),
+                    "default".into(),
+                    value,
+                );
+                let mut spec = json!({"name":"depth"});
+                deep::insert(spec.as_object_mut().expect("spec"), "schema".into(), schema);
+                let mut format = json!({"type":"json_schema"});
+                deep::insert(
+                    format.as_object_mut().expect("format"),
+                    "json_schema".into(),
+                    spec,
+                );
+                deep::insert(bag, "response_format".into(), format);
+            }
+            "format_replace" => {
+                let mut text = json!({});
+                deep::insert(text.as_object_mut().expect("text"), "format".into(), value);
+                deep::insert(bag, "text".into(), text);
+                deep::insert(bag, "response_format".into(), json!({"type":"json_object"}));
+            }
+            "format_text_drop" => {
+                deep::insert(bag, "text".into(), value);
+            }
             "text_merge" | "reasoning_merge" => {
                 let mut fields = serde_json::Map::new();
                 deep::insert(&mut fields, "extension".into(), value);
@@ -150,6 +176,8 @@ fn exercise(case: &str) {
             | "stream_replace"
             | "native_metadata"
             | "ordinary_result_native"
+            | "format_replace"
+            | "format_text_drop"
     ) {
         assert!(built.request.body.len() < 4000);
     } else {
@@ -182,6 +210,9 @@ fn vendor_carriers_on_small_stack() {
         "ordinary_result_native",
         "ordinary_result_string",
         "ordinary_result_media",
+        "format_schema",
+        "format_replace",
+        "format_text_drop",
         "native_reasoning",
         "native_metadata",
         "native_message",

@@ -2,6 +2,23 @@
 
 ## D3 ordinary tool carriers (s4e)
 
+### D4 response format (group 2)
+
+| Carrier | Source | Evidence |
+|---|---|---|
+| Response-format schema default | openai/wire.rs:370; response_format.rs:128–131,188,219–228 | Remove mod.rs:70 scope → stack overflow, SIGABRT 6 |
+| Text format replacement | response_format.rs:199–215,227 | Remove mod.rs:70 scope → stack overflow, SIGABRT 6 |
+| Malformed text removal | response_format.rs:190–193 | Remove mod.rs:70 scope → stack overflow, SIGABRT 6 |
+
+All three unmodified cases passed at 39,990 levels / 2 MiB; no product
+defect found. Scope protects recursive destruction of helper temporaries and
+removed values. Mutations restored. Logs: `s4e-format-baseline.log` and
+`s4e-format-noscope-{format_schema,format_replace,format_text_drop}.log`.
+
+Clippy correction: c0875139 introduced three denied unwraps in
+tests/openai_decode.rs; 6bf18cba replaces them with neighbouring-test-style
+expect messages. `s4e-clippy-fixed.log` ends with Finished dev profile (0.59s).
+
 | Carrier | Source | Evidence |
 |---|---|---|
 | Ordinary tool input | openai/wire.rs:107 | Remove mod.rs:70 scope: PASS; structurally safe, borrowed input written by stack-growing jsjson writer, retained as String in lite history |
@@ -17,11 +34,10 @@ defect found; no protection-removal crash claimed. Mutations restored.
 Logs: `/tmp/opencode/b3/s4e-group1-baseline.log` and
 `s4e-noscope-{ordinary_input,ordinary_result_native,ordinary_result_string,ordinary_result_media}.log`.
 
-Next group is **(2) response-format schema/text replacement**. Remaining:
+Next group is **(3) native assistant annotations/function aliases**. Remaining:
 
 | Group/carrier | Source | Status |
 |---|---|---|
-| 2 response-format schema/text replacement | openai/wire.rs:370; response_format.rs (helper expansion in group 6) | Pending |
 | 3 assistant annotations | openai/lite.rs:147–154 | Pending |
 | 3 function name/call_id aliases | openai/lite.rs:169,177 | Pending |
 | 4 foreign native | openai/wire.rs:117 | Pending |
