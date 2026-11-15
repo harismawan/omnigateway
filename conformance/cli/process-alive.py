@@ -1,5 +1,6 @@
 """Review part2/probe.py no-kill regression plus PID/systemctl boundaries."""
 import os, pathlib, subprocess, json, shutil, tempfile, hashlib
+import driver_env
 
 root = pathlib.Path(tempfile.mkdtemp(prefix='/tmp/opencode/e1-e5/process-'))
 repo = pathlib.Path.cwd()

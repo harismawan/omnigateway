@@ -1,3 +1,4 @@
+import "./driver-env.ts";
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

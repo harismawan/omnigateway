@@ -1,3 +1,4 @@
+import "./driver-env.ts";
 import { strict as assert } from "node:assert";
 import { mkdtempSync } from "node:fs";
 import { join, resolve } from "node:path";

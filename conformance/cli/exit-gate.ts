@@ -1,3 +1,4 @@
+import "./driver-env.ts";
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { assertCoversFrozenLoader, configDiagnostic } from "./config-diagnostics.ts";

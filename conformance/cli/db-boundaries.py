@@ -1,5 +1,6 @@
 """Missing DB creation and exclusive-lock refusal, independent fixtures."""
 import pathlib, tempfile, subprocess, os, json, sqlite3, shutil, hashlib
+import driver_env
 root=pathlib.Path(tempfile.mkdtemp(prefix='/tmp/opencode/e1-e5/db-boundaries-'))
 binary=pathlib.Path(os.environ['OMNI_CLI_BIN']).resolve()
 commands=[[shutil.which('bun'),'--no-env-file',str(pathlib.Path.cwd()/'apps/cli/src/index.ts')],[str(binary)]]
