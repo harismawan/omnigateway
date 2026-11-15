@@ -158,7 +158,9 @@ pub(crate) fn to_lite(
                     }
                     put(&mut v, "id", json!(fresh("msg")));
                     put(&mut v, "role", json!(role));
-                    put(&mut v, "content", content);
+                    if item.get("content").is_some() {
+                        put(&mut v, "content", content);
+                    }
                     put(&mut v, META, meta);
                     v
                 }
@@ -166,7 +168,9 @@ pub(crate) fn to_lite(
                     let mut v =
                         json!({"type":"function_call","status":"completed","id":fresh("fc")});
                     for key in ["name", "arguments", "call_id"] {
-                        put(&mut v, key, deep::clone(&item[key]));
+                        if let Some(value) = item.get(key) {
+                            put(&mut v, key, deep::clone(value));
+                        }
                     }
                     put(&mut v, META, json!({"turn_id":tid}));
                     v
@@ -174,7 +178,9 @@ pub(crate) fn to_lite(
                 Some("function_call_output") => {
                     let mut v = json!({"type":"function_call_output","id":fresh("fco")});
                     for key in ["call_id", "output"] {
-                        put(&mut v, key, deep::clone(&item[key]));
+                        if let Some(value) = item.get(key) {
+                            put(&mut v, key, deep::clone(value));
+                        }
                     }
                     put(&mut v, META, json!({"turn_id":tid,"create_time":time}));
                     v

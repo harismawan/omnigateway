@@ -116,4 +116,11 @@ for(const requestId of ['req_1','req_2']) for(const requestStartedAt of [undefin
 }
 for(const oauth of [true,false]) for(const value of ['bad\r\nx-injected: yes','日本語'])
  add('unsafe-affinity',{...base,vendor:{openai:{prompt_cache_key:value,session_id:value}}},'gpt-5-codex',`${oauth}/${value}`,{apiKey:oauth?null:'sk-oa',accessToken:oauth?'oauth-token':null,providerData:{}} as any);
+for(const model of ['gpt-6-astra','gpt-5.5'])
+ for(const blockType of ['function_call','function_call_output','message'])
+  for(const [label,value] of [['absent',undefined],['null',null],['wrong-type',{nested:[1,true]}]] as const) {
+   const keys=blockType==='function_call'?['name','arguments','call_id']:blockType==='function_call_output'?['call_id','output']:['content'];
+   const data=Object.fromEntries(keys.filter(()=>value!==undefined).map(key=>[key,value]));
+   add('native-presence',{...base,messages:[{role:'assistant',content:[{type:'providerNative',provider:'openai',blockType,data}]}]},model,`${blockType}/${label}`);
+  }
 console.log(JSON.stringify(rows));

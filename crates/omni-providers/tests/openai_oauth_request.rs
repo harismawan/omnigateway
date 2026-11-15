@@ -16,7 +16,7 @@ fn oauth_codec_matches_frozen_ts() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 289);
+    assert_eq!(rows.as_array().unwrap().len(), 307);
     for (i, row) in rows.as_array().unwrap().iter().enumerate() {
         let request = if let Some(dialect) = row["dialect"].as_str() {
             let surface = match dialect {
