@@ -109,8 +109,19 @@ fn overflow_matches_ts() {
 }
 
 fn compare_reference(malformed_usage: bool, codec: bool, overflow: bool) {
+    compare_source(malformed_usage, codec, overflow, false);
+}
+
+#[test]
+fn reviewer_decoder_chunkings() {
+    compare_source(false, false, false, true);
+}
+
+fn compare_source(malformed_usage: bool, codec: bool, overflow: bool, review: bool) {
     let run = std::process::Command::new("bun")
-        .arg(if codec {
+        .arg(if review {
+            "tests/openai-review-decode-reference.ts"
+        } else if codec {
             "tests/openai-oauth-decode-reference.ts"
         } else {
             "tests/openai-decode-reference.ts"
@@ -135,8 +146,19 @@ fn compare_reference(malformed_usage: bool, codec: bool, overflow: bool) {
         if usage_only != malformed_usage {
             continue;
         }
-        let bytes = row["wire"].as_str().expect("wire").as_bytes();
-        for chunk in [bytes.len().max(1), 1, 7] {
+        let bytes: Vec<u8> = if let Some(raw) = row["raw"].as_array() {
+            raw.iter()
+                .map(|v| u8::try_from(v.as_u64().expect("byte")).expect("u8"))
+                .collect()
+        } else {
+            row["wire"].as_str().expect("wire").as_bytes().to_vec()
+        };
+        let chunks = if review {
+            vec![bytes.len().max(1), 1, 7, 13]
+        } else {
+            vec![bytes.len().max(1), 1, 7]
+        };
+        for chunk in chunks {
             let mut parser = SseParser::new();
             let mut messages = Vec::new();
             for b in bytes.chunks(chunk) {

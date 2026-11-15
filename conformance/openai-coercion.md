@@ -55,6 +55,16 @@ Adapter source inspection confirms Throw becomes retryable UPSTREAM
 Added 36 streams (six exact reviewer shadows plus 30 site/ordering rows), each
 whole/one-byte/seven-byte, including prefix preservation and both reasoning modes.
 
+### Independent reviewer corpus
+
+`openai-review-decode-reference.ts` preserves the reviewer's generator, with
+296 agreeing streams at whole/1/7/13-byte chunking (1184 runs). The two ~10 MiB
+cap streams are omitted. The other twelve are in the primary generator: six
+fixed shadows run normally, six overflows are ignored. Thus 308/310 reviewer
+streams are committed, 302 run normally. New site rows: 30. Primary corpus:
+180 default rows plus eight parked count rows; six parked overflow rows are
+selected separately. The decode integration suite took 0.60s; no chunk reduction.
+
 ## Request-side representation boundary: null numeric options
 
 The frozen OpenAI builder treats explicit `maxTokens: null` and
