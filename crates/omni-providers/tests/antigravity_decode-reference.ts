@@ -6,6 +6,13 @@ const frame=(x:any)=>`data: ${JSON.stringify(x)}\n\n`;
 const add=(name:string,...xs:any[])=>raw(name,xs.map(frame));
 const r=(x:any)=>({response:x}), c=(x:any)=>r({candidates:[x]}), p=(x:any)=>c({content:{parts:x},finishReason:'STOP'});
 const text=c({content:{parts:[{text:'before'}]}});
+// Exact payloads from frozen antigravityDecode.test.ts.
+add('billing/cache-hit', {response:{candidates:[{finishReason:'STOP'}],usageMetadata:{promptTokenCount:61_244,candidatesTokenCount:12,cachedContentTokenCount:57_309}}});
+add('billing/blocked-12', {response:{promptFeedback:{blockReason:'SAFETY'},usageMetadata:{promptTokenCount:12}}});
+add('billing/hel-lo', {response:{responseId:'r1',modelVersion:'gemini-3.6-flash-high',candidates:[]}}, c({content:{parts:[{text:'hel'}]}}), c({content:{parts:[{text:'lo'}]}}), {response:{candidates:[{finishReason:'STOP'}],usageMetadata:{promptTokenCount:100,candidatesTokenCount:20,thoughtsTokenCount:15,cachedContentTokenCount:30}}});
+add('billing/thought-text', c({content:{parts:[{text:'hmm',thought:true}]}}), c({content:{parts:[{text:'answer'}]}}), c({finishReason:'STOP'}));
+add('billing/tool-later-finish', c({content:{parts:[{functionCall:{name:'Read',args:{path:'/a'}}}]}}), c({finishReason:'STOP'}));
+add('billing/no-cloak-Read', c({content:{parts:[{functionCall:{name:'Read',args:{}}}]}}));
 raw('empty',[]);raw('done',['data: [DONE]\n\n']);raw('invalid',['data: {\n\n']);
 const values=[undefined,null,false,true,0,2,-1,1.5,1e21,-0,'','x','ab',[],[null],{}, {length:0},{length:2},{toString:null}];
 for(const [i,v] of values.entries()) {

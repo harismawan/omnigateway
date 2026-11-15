@@ -1,4 +1,4 @@
-//! Request-side codec. A ProviderCodec implementation awaits the real decoder.
+//! Cloud Code request codec and incremental Antigravity stream decoder integration.
 use super::cloak::ToolCloak;
 use crate::codec::{BuildError, CodecHttpRequest, CodecInput, CodecRequest};
 use omni_ir::error::{ErrorCode, GatewayError};

@@ -110,7 +110,7 @@ any earlier text block), then RangeError; Rust refuses before those new events.
 Both exact frozen results and exact Rust prefixes are asserted. Existing five
 in-bound depth rows through 39,990 arrays remain ordinary equality tests.
 
-1,020 SSE-byte corpus rows compare complete events and whether the generator throws;
+1,026 SSE-byte corpus rows compare complete events and whether the generator throws;
 five additional depth rows compare tool JSON bytes, on a 2 MiB Rust thread.
 The oracle imports the frozen decoder and `parseSse`. Throw diagnostics are retained
 in the oracle; `DecodeError::Throw` delegates client-facing classification to the
@@ -165,6 +165,8 @@ pinning rows are named by `tests/antigravity_decode-reference.ts`.
 | 196 responseId | `inner` id / 160 | `responseId/18` |
 | 197 modelVersion | `inner` model / 161 | `modelVersion/18` |
 | 286 finishReason | `inner` raw / 258 | `finishReason/18` |
+| 203 candidate length numeric `> 1` coercion | `inner`, `try_to_number` | `candidate-length/18` throws; `candidate-length/5` enters diagnostic; `candidate-length/11` NaN |
+| 213 later candidate length String coercion | `inner`, `string(Some(len))` after close | `candidate-length/5`, `/8` pin diagnostic spelling; `/18` throws earlier during numeric coercion |
 
 All call `string` → `omni_ir::js::try_to_string`; already-yielded events remain
 queued on a throw. Null error/response/part/functionCall and noniterable parts
@@ -197,3 +199,15 @@ shim: existing `antigravity_depth.rs` calls it without importing ProviderCodec,
 and that file is outside this task's edit scope. Request construction is unchanged.
 Gateway registration, profile initialize capture, OAuth and gateway e2e remain
 next work, after independent decode-side review.
+
+### Decoder transport and fixture audit (turn8)
+
+| Behaviour | Location | Pinning rows/tests |
+|---|---|---|
+| UTF-8 replacement; split sequences carried; incomplete final sequence dropped; one leading BOM stripped | shared `sse.rs` | shared SSE parity suite; decoder `split/*` |
+| LF/CRLF blank-line records; bare CR is data; comments ignored; multiline data joined with LF; no-data records skipped; final unterminated record parsed | shared `sse.rs` | decoder `crlf`, `multiline`, `no-data`, `unterminated`; shared SSE suite |
+| 10,485,760 UTF-16-unit record cap, checked before parse and on residual buffer; UPSTREAM gatewayAuthored `upstream SSE record exceeded 10485760 characters` | shared `sse.rs` | shared SSE size-limit tests; inherited frozen resource policy |
+| 61,244 prompt / 57,309 cache → 3,935 input, 12 output, zero cache writes; prompt recovery 61,244 | `usage` | `billing/cache-hit`, explicit Rust prompt recovery assertion |
+| blocked prompt input 12; id/model then hel + lo + final 100/20/15/30 usage; cross-frame thought→text; tool then later STOP; no-cloak Read control | `inner` | `billing/blocked-12`, `billing/hel-lo`, `billing/thought-text`, `billing/tool-later-finish`, `billing/no-cloak-Read` |
+
+Erratum: commit `8aef0f19` subject “2 green 929 red” is incorrect; that run was **0 green / 931 red**. History remains append-only.

@@ -252,6 +252,19 @@ fn compare(mode: &str) {
         if !stopped {
             decoder.finish(&mut out);
         }
+        if row["name"] == "billing/cache-hit" {
+            let usage = out
+                .iter()
+                .find_map(|e| match e {
+                    omni_ir::stream::StreamEvent::End { usage, .. } => Some(usage),
+                    _ => None,
+                })
+                .expect("cache-hit end");
+            assert_eq!(
+                usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens,
+                61_244.0
+            );
+        }
         let actual = serde_json::Value::Array(
             out.iter()
                 .map(|e| {

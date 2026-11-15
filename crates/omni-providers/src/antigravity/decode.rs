@@ -321,6 +321,29 @@ impl AntigravityDecoder {
     }
 }
 
+impl StreamDecoder for AntigravityDecoder {
+    fn message(
+        &mut self,
+        msg: &SseMessage,
+        out: &mut VecDeque<StreamEvent>,
+    ) -> Result<Flow, DecodeError> {
+        omni_ir::deep::scope_for_bound(omni_ir::deep::depth_of(&msg.data), |bound| {
+            self.inner(msg, out, bound)
+        })
+    }
+    fn finish(&mut self, out: &mut VecDeque<StreamEvent>) {
+        if !self.terminal {
+            self.close(out);
+            self.error(
+                out,
+                ErrorCode::Upstream,
+                "upstream stream ended before the response finished".into(),
+                true,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,7 +364,10 @@ mod tests {
                     serde_json::json!({"text":"x","thought":step == 1})
                 };
                 let msg = SseMessage { event: "message".into(), data: serde_json::json!({"response":{"candidates":[{"content":{"parts":[part]}}]}}).to_string() };
-                assert_eq!(decoder.message(&msg, &mut out).unwrap(), expected);
+                assert_eq!(
+                    decoder.message(&msg, &mut out).expect("counter frame"),
+                    expected
+                );
             }
             let indices: Vec<_> = out
                 .iter()
@@ -367,33 +393,11 @@ mod tests {
                         },
                         &mut out
                     )
-                    .unwrap(),
+                    .expect("terminal frame"),
                 Flow::Stop
             );
             decoder.finish(&mut out);
             assert_eq!(out.len(), before);
-        }
-    }
-}
-impl StreamDecoder for AntigravityDecoder {
-    fn message(
-        &mut self,
-        msg: &SseMessage,
-        out: &mut VecDeque<StreamEvent>,
-    ) -> Result<Flow, DecodeError> {
-        omni_ir::deep::scope_for_bound(omni_ir::deep::depth_of(&msg.data), |bound| {
-            self.inner(msg, out, bound)
-        })
-    }
-    fn finish(&mut self, out: &mut VecDeque<StreamEvent>) {
-        if !self.terminal {
-            self.close(out);
-            self.error(
-                out,
-                ErrorCode::Upstream,
-                "upstream stream ended before the response finished".into(),
-                true,
-            );
         }
     }
 }
