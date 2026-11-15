@@ -361,7 +361,10 @@ mod tests {
             }]}})
             .to_string(),
         };
-        assert_eq!(decoder.message(&msg, &mut out).unwrap(), Flow::Stop);
+        assert_eq!(
+            decoder.message(&msg, &mut out).expect("final tool frame"),
+            Flow::Stop
+        );
         assert_eq!(out.len(), 5); // start, then the complete tool block and end
         assert!(matches!(&out[1], StreamEvent::BlockStart {
             index: u32::MAX, block: ContentBlockStart::ToolUse { id, name }
