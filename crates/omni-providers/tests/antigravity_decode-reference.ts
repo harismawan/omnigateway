@@ -66,6 +66,10 @@ if(process.argv.includes('--bounded-depth')) {
  }
 }
 if(process.argv.includes('--x1')){cases.length=0;
+ raw('X1/surrogate/finishReason',['data: {"response":{"candidates":[{"finishReason":"\\ud800"}]}}\n\n']);
+ // Frozen emits fully representable output: the offending blockReason is not emitted.
+ raw('X1/surrogate/blockReason',['data: {"response":{"promptFeedback":{"blockReason":"\\ud800"}}}\n\n']);
+ raw('X1/overflow/candidatesLength',['data: {"response":{"candidates":{"length":1e309}}}\n\n']);
  for(const kind of ['surrogate','overflow']) for(const position of ['text','thought','name','id','args','argskey','responseId','modelVersion','message','status','promptTokenCount','candidatesTokenCount','thoughtsTokenCount','cachedContentTokenCount','ignored']) {
   const value=kind==='surrogate'?'"\\ud800"':'1e309';
   let json:string;

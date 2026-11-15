@@ -187,6 +187,22 @@ fn x1_ignored_field_retained_red() {
 fn x1_overflow_retained_red() {
     compare("X1/overflow");
 }
+#[test]
+#[ignore = "X1: surrogate finishReason rejects the frame before the non-retryable error"]
+fn x1_surrogate_finish_reason_retained_red() {
+    compare("X1/surrogate/finishReason");
+}
+#[test]
+#[ignore = "X1: surrogate blockReason rejects the frame before contentFilter end"]
+fn x1_surrogate_block_reason_retained_red() {
+    // Frozen's output is fully representable; blockReason itself is never emitted.
+    compare("X1/surrogate/blockReason");
+}
+#[test]
+#[ignore = "X1: overflowing candidates.length rejects the frame before the non-retryable error"]
+fn x1_overflow_candidates_length_retained_red() {
+    compare("X1/overflow/candidatesLength");
+}
 fn compare(mode: &str) {
     let run = std::process::Command::new("bun")
         .args([
