@@ -188,7 +188,7 @@ pub fn run(
     let free = scalar("PRAGMA freelist_count")?;
     let version = scalar("SELECT COALESCE(MAX(id),0) FROM migrations")?;
     let mut statement=conn.prepare("SELECT m.tbl_name AS name,SUM(s.pgsize) AS bytes,SUM(CASE WHEN s.pagetype = 'leaf' AND s.name = m.tbl_name THEN s.ncell ELSE 0 END) AS rows FROM dbstat s JOIN sqlite_master m ON m.name = s.name WHERE m.tbl_name NOT LIKE 'sqlite_%' GROUP BY m.tbl_name ORDER BY bytes DESC,name").map_err(|e|e.to_string())?;
-    let tables=statement.query_map([],|r|Ok(json!({"name":r.get::<_,String>(0)?,"bytes":r.get::<_,i64>(1)?,"rows":r.get::<_,i64>(2)?,"deadRows":null}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let tables=statement.query_map([],|r|Ok(json!({"name":String::from_utf8_lossy(r.get_ref(0)?.as_bytes()?),"bytes":r.get::<_,i64>(1)?,"rows":r.get::<_,i64>(2)?,"deadRows":null}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let settings = omni_control::settings_value::read(&store)?;
     let setting = |key| {
         omni_control::settings_value::get(&settings, key)

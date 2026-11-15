@@ -185,7 +185,9 @@ fn judge_candidate(path: &Path) -> Result<Value, String> {
         let check = conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))?;
         let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
         let tables = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
+            .query_map([], |r| {
+                Ok(String::from_utf8_lossy(r.get_ref(0)?.as_bytes()?).into_owned())
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut counts = json!({});
         for table in [
@@ -490,7 +492,16 @@ impl SqliteRestoreStore {
         use rusqlite::OptionalExtension;
         self.connection()?
             .query_row("SELECT value FROM settings WHERE key = ?", [key], |r| {
-                r.get(0)
+                use rusqlite::types::{Value, ValueRef};
+                Ok(match r.get_ref(0)? {
+                    ValueRef::Text(bytes) => {
+                        Value::Text(String::from_utf8_lossy(bytes).into_owned())
+                    }
+                    ValueRef::Null => Value::Null,
+                    ValueRef::Integer(n) => Value::Integer(n),
+                    ValueRef::Real(n) => Value::Real(n),
+                    ValueRef::Blob(bytes) => Value::Blob(bytes.to_vec()),
+                })
             })
             .optional()
             .map_err(|e| e.to_string())

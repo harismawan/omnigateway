@@ -10,6 +10,10 @@ const id="db_2026-11-01T00-00-00-000Z_manual.sqlite";
 const commands=[["bun","--no-env-file",resolve("apps/cli/src/index.ts")]];
 if(process.argv.includes("--compare"))commands.push([resolve(process.env.OMNI_CLI_BIN??"target/debug/omni")]);
 const cases: [string,string|null,string|null,boolean][]=[
+ ["invalid-candidate","'abc'","CAST(X'ff' AS TEXT)",true],
+ ["invalid-live","CAST(X'ff' AS TEXT)","'abc'",true],
+ ["invalid-equal","CAST(X'ff' AS TEXT)","CAST(X'fe' AS TEXT)",false],
+ ["replacement-equal","CAST(X'ff' AS TEXT)","CAST(X'efbfbd' AS TEXT)",false],
  ["blob-text","'abc'","X'616263'",true],["blob-blob","X'616263'","X'616263'",true],
  ["text-text","'abc'","'abc'",false],["integer-text","42","'42'",true],
  ["missing-present",null,"'abc'",true],["integer-real","42","42.0",false],
@@ -34,5 +38,5 @@ try {
   }
   if(results.length===2)assert.deepEqual(results[1],results[0],kind);
  }
- await verifyGoldenExits("db-restore-hashes");console.log("PASS 16 hash comparisons");
+ await verifyGoldenExits("db-restore-hashes");console.log(`PASS ${cases.length*2} hash comparisons (both keys)`);
 } finally {rmSync(base,{recursive:true,force:true});}

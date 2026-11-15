@@ -1,7 +1,8 @@
 {
   "db-snapshot-missing": {"exit 0":2},
   "db-file-state-self-test": {"exit 1":3},
-  "db-restore-hashes": {"exit 0":16},
+  "db-restore-hashes": {"exit 0":24},
+  "db-text": {"exit 0":3},
   "db-restore-path": {"exit 1":3,"exit 0":1},
   "pid-edge-states": {"exit 0":4,"exit 1":8,"environment EACCES":3},
   "db-restore": {"exit 2":1,"exit 1":30,"environment EACCES":3,"exit 0":11},
