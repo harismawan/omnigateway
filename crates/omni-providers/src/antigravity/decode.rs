@@ -19,7 +19,6 @@ pub struct AntigravityDecoder {
     next_index: u32,
     tool_calls: u32,
     index_exhausted: bool,
-    tools_exhausted: bool,
     open: Option<(bool, u32)>,
 }
 fn nonnull(v: Option<&Value>) -> Option<&Value> {
@@ -59,8 +58,8 @@ fn length(v: &Value) -> Value {
     }
 }
 impl AntigravityDecoder {
-    fn allocate_index(&mut self, tool: bool, out: &mut VecDeque<StreamEvent>) -> Option<u32> {
-        if self.index_exhausted || (tool && self.tools_exhausted) {
+    fn allocate_index(&mut self, out: &mut VecDeque<StreamEvent>) -> Option<u32> {
+        if self.index_exhausted {
             self.close(out);
             self.error(
                 out,
@@ -216,7 +215,7 @@ impl AntigravityDecoder {
                     }
                     if let Some(name) = call.get("name").and_then(Value::as_str) {
                         self.close(out);
-                        let Some(index) = self.allocate_index(true, out) else {
+                        let Some(index) = self.allocate_index(out) else {
                             return Ok(Flow::Stop);
                         };
                         let id = call
@@ -239,10 +238,8 @@ impl AntigravityDecoder {
                             delta: Delta::ToolJson { partial },
                         });
                         out.push_back(StreamEvent::BlockEnd { index });
-                        match self.tool_calls.checked_add(1) {
-                            Some(next) => self.tool_calls = next,
-                            None => self.tools_exhausted = true,
-                        }
+                        // Every tool consumes an index; index exhaustion gates the next call.
+                        self.tool_calls = self.tool_calls.saturating_add(1);
                         continue;
                     }
                 }
@@ -255,7 +252,7 @@ impl AntigravityDecoder {
                         index
                     } else {
                         self.close(out);
-                        let Some(index) = self.allocate_index(false, out) else {
+                        let Some(index) = self.allocate_index(out) else {
                             return Ok(Flow::Stop);
                         };
                         self.open = Some((thinking, index));
@@ -350,15 +347,16 @@ mod tests {
 
     #[test]
     fn counter_exhaustion_is_terminal() {
-        for tool in [false, true] {
+        // Reachable histories: all tools, alternating text kinds, and mixed blocks.
+        for scenario in ["tools", "text", "mixed", "continuing-text"] {
             let mut decoder = AntigravityDecoder {
                 next_index: u32::MAX - 1,
-                tool_calls: u32::MAX - 1,
+                tool_calls: if scenario == "tools" { u32::MAX - 1 } else { 0 },
                 ..Default::default()
             };
             let mut out = VecDeque::new();
             for (step, expected) in [(0, Flow::Continue), (1, Flow::Continue), (2, Flow::Stop)] {
-                let part = if tool {
+                let part = if scenario == "tools" || (scenario == "mixed" && step == 0) {
                     serde_json::json!({"functionCall":{"name":"x"}})
                 } else {
                     serde_json::json!({"text":"x","thought":step == 1})
@@ -368,7 +366,34 @@ mod tests {
                     decoder.message(&msg, &mut out).expect("counter frame"),
                     expected
                 );
+                if scenario == "continuing-text" && step == 1 {
+                    assert!(decoder.index_exhausted);
+                    let before = out.len();
+                    assert_eq!(decoder.message(&msg, &mut out).unwrap(), Flow::Continue);
+                    assert_eq!(out.len(), before + 1);
+                    assert!(matches!(out.back(), Some(StreamEvent::BlockDelta {
+                        index: u32::MAX, delta: Delta::Thinking { text }
+                    }) if text == "x"));
+                }
             }
+            let ids: Vec<_> = out
+                .iter()
+                .filter_map(|e| match e {
+                    StreamEvent::BlockStart {
+                        block: ContentBlockStart::ToolUse { id, .. },
+                        ..
+                    } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                ids,
+                match scenario {
+                    "tools" => vec!["fc_4294967294", "fc_4294967295"],
+                    "mixed" => vec!["fc_0"],
+                    _ => vec![],
+                }
+            );
             let indices: Vec<_> = out
                 .iter()
                 .filter_map(|e| match e {
