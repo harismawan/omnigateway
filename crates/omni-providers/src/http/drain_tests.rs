@@ -40,6 +40,30 @@ fn pool() -> Arc<Pool> {
 }
 
 #[tokio::test]
+async fn deadline_during_checkin_lock() {
+    let p = pool();
+    let (mut body, mut peer) = pair(&p).await;
+    body.drain_test_remainder(b"0\r\n\r\n", true);
+    let key = Key::of(&Target {
+        scheme: Scheme::Http,
+        host: "127.0.0.1".into(),
+        port: 1,
+        host_header: "localhost".into(),
+        path: "/".into(),
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let q = p.clone();
+    let holder = std::thread::spawn(move || q.hold_idle_for_test(tx));
+    rx.recv().expect("idle locked");
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    body.drain(Arc::downgrade(&p), key, deadline).await;
+    holder.join().expect("lock holder");
+    assert!(tokio::time::Instant::now() >= deadline);
+    assert_eq!(p.idle_count(), 0, "expired admission must close");
+    closed(&mut peer).await;
+}
+
+#[tokio::test]
 async fn drain_never_terminates() {
     let p = pool();
     let (b, mut s) = pair(&p).await;

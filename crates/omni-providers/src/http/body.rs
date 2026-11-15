@@ -221,8 +221,14 @@ impl ResponseBody {
                     if tokio::time::Instant::now() >= deadline {
                         return;
                     }
-                    self.pool = Some((pool, key));
-                    self.release();
+                    // Same release eligibility, with deadline admission under
+                    // the pool's idle lock rather than ordinary check-in.
+                    if let Some(conn) = self.conn.take()
+                        && self.reusable
+                        && self.buf.is_empty()
+                    {
+                        Pool::checkin_drained(&pool, key, conn.finished(), deadline);
+                    }
                 }
                 return;
             }

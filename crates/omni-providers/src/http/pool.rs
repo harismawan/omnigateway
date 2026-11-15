@@ -193,6 +193,13 @@ impl Drop for Pool {
 
 impl Pool {
     #[cfg(test)]
+    pub(super) fn hold_idle_for_test(&self, ready: std::sync::mpsc::Sender<()>) {
+        let _lock = self.idle.lock().expect("idle");
+        ready.send(()).expect("locked signal");
+        // Generous separation from the 100 ms deadline; no near-limit race.
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    #[cfg(test)]
     pub(super) fn drain_test_count(&self) -> usize {
         self.drains.lock().expect("drains").len()
     }
@@ -304,6 +311,16 @@ impl Pool {
 
     /// Returns a connection whose last response was read cleanly to its end.
     pub fn checkin(&self, key: Key, conn: Conn) {
+        self.checkin_before(key, conn, None);
+    }
+
+    /// Drains have an admission deadline; ordinary body completion does not.
+    pub(super) fn checkin_drained(pool: &Arc<Self>, key: Key, conn: Conn, deadline: Instant) {
+        pool.checkin_before(key, conn, Some(deadline));
+        Self::ensure_reaper(pool);
+    }
+
+    fn checkin_before(&self, key: Key, conn: Conn, deadline: Option<Instant>) {
         let Ok(mut idle) = self.idle.lock() else {
             return;
         };
@@ -314,6 +331,14 @@ impl Pool {
         let list = idle.entry(key).or_default();
         while list.len() >= self.limits.max_idle_per_destination {
             list.pop_front();
+        }
+        // Check after all lock waiting and housekeeping, immediately before
+        // insertion. None adds no clock read to ordinary response completion.
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            if list.is_empty() {
+                idle.retain(|_, list| !list.is_empty());
+            }
+            return;
         }
         list.push_back((conn, Instant::now()));
         let mut total: usize = idle.values().map(VecDeque::len).sum();
