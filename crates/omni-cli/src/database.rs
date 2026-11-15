@@ -46,7 +46,7 @@ pub fn run(
                 positional[0]
             ))?;
         }
-        const RESTORE_SWAP_ENABLED: bool = false;
+        const RESTORE_SWAP_ENABLED: bool = true;
         if !RESTORE_SWAP_ENABLED {
             return Err("db restore is not yet available in the Rust CLI".into());
         }

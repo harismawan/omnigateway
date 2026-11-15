@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { databaseState } from "./database-state.ts";
 import { restorePostState } from "./db-file-state.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const base = mkdtempSync("/tmp/opencode/e1-e5/db8-swap-");
 const commands = [["bun", "--no-env-file", resolve("apps/cli/src/index.ts")]];
@@ -32,6 +33,8 @@ try {
   store.close();
   for (const test of cases) {
     const results = [];
+    let wal: Database | undefined;
+    const walSource = join(base, "wal-source");
     for (const [index, command] of commands.entries()) {
       const root = join(base, `${test.name}-${index}`);
       mkdirSync(join(root, "snapshots"), { recursive: true });
@@ -55,12 +58,15 @@ try {
       if (test.ledger) incoming.run("UPDATE migrations SET id=id+?", [test.ledger]);
       incoming.close();
       const installedRows = rows(candidate);
-      let wal: Database | undefined;
       if (test.wal) {
-        wal = new Database(candidate);
+        if(!wal) {
+        copyFileSync(candidate,walSource);
+        wal = new Database(walSource);
         wal.run("PRAGMA journal_mode=WAL");
         wal.run("PRAGMA wal_autocheckpoint=0");
         wal.run("INSERT INTO settings (key,value) VALUES ('wal-only','lost on restore')");
+        }
+        for(const suffix of ["","-wal","-shm"])copyFileSync(walSource+suffix,candidate+suffix);
         assert(readFileSync(candidate + "-wal").length > 0);
       }
       copyFileSync(seed, join(root, "snapshots", stale));
@@ -68,7 +74,7 @@ try {
       const env = { ...process.env, HOME: root, XDG_STATE_HOME: join(root, "state"), OMNI_ENCRYPTION_KEY: "database-golden-secret", NO_COLOR: "1", PTY_NO_COLOR: "1", PTY_STDOUT_PIPE: "1" };
       async function run(snapshot: string, tty: boolean, json: boolean) {
         const args = [...command, "--root", root, "--db", "db", "db", "restore", snapshot, ...(json ? ["--json"] : []), ...(tty ? [] : ["--yes"])];
-        const process = Bun.spawn(tty ? ["python3", resolve("conformance/cli/pty.py"), "y", ...args] : args, { env, stdout: "pipe", stderr: "pipe" });
+        const process = goldenSpawn(tty ? ["python3", resolve("conformance/cli/pty.py"), "y", ...args] : args, { env, stdout: "pipe", stderr: "pipe" });
         let [out, err, code] = await Promise.all([new Response(process.stdout).text(), new Response(process.stderr).text(), process.exited]);
         if (tty) {
           assert.equal(err, "");
@@ -133,9 +139,10 @@ try {
       result.err = result.err.replaceAll(root, "<root>");
        results.push({ result, sidecars, postState });
       console.log(`${test.name} ${index === 0 ? "TS" : "Rust"}: exit=${result.code}, sidecars=${JSON.stringify(sidecars)}, undo retained, incoming absent`);
-      wal?.close();
     }
+    wal?.close();
     if (results.length === 2) assert.deepEqual(results[1], results[0], test.name);
   }
   console.log(`PASS ${cases.length} frozen swap characterizations${commands.length === 2 ? " with Rust parity" : " (TS only)"}; 5 round trips`);
+  await verifyGoldenExits("db-restore-swap");
 } finally { rmSync(base, { recursive: true, force: true }); }
