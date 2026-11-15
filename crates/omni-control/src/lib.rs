@@ -5,6 +5,7 @@ pub mod api;
 pub mod body_schema;
 pub mod catalog;
 pub mod client_quota;
+pub mod cli_error;
 pub mod config;
 pub mod credentials;
 pub mod database;
