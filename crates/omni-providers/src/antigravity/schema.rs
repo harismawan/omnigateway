@@ -14,16 +14,24 @@ const TYPES: &[&str] = &[
 
 /// Prunes schema positions to depth 24; free-value fields remain opaque.
 pub fn prune(node: &Value) -> (Value, Vec<String>) {
+    try_prune(node).expect("Object.entries requires a non-null schema root")
+}
+
+/// Object.entries throws for null roots; nested schema positions are guarded.
+pub fn try_prune(node: &Value) -> Result<(Value, Vec<String>), crate::codec::BuildError> {
+    if node.is_null() {
+        return Err(crate::codec::BuildError::Throw);
+    }
     let mut dropped = false;
     let out = walk(node, 0, &mut dropped);
-    (
+    Ok((
         out,
         if dropped {
             vec!["antigravity:tool-schema-pruned".into()]
         } else {
             vec![]
         },
-    )
+    ))
 }
 fn put(out: &mut Map<String, Value>, key: &str, value: Value) {
     deep::insert(out, key.into(), value);
@@ -37,6 +45,12 @@ fn sub(v: &Value, depth: usize, dropped: &mut bool) -> Option<Value> {
     }
 }
 fn walk(node: &Value, depth: usize, dropped: &mut bool) -> Value {
+    // Array indices and string UTF-16 indices are all unknown keywords.
+    if node.as_array().is_some_and(|a| !a.is_empty())
+        || node.as_str().is_some_and(|s| !s.is_empty())
+    {
+        *dropped = true;
+    }
     let mut out = Map::new();
     for (key, v) in node.as_object().into_iter().flatten() {
         match key.as_str() {

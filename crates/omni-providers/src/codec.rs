@@ -136,6 +136,19 @@ pub enum DecodeError {
     Throw(&'static str),
 }
 
+/// Mirrors frozen `guard`: a classified refusal versus an ordinary throw.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BuildError {
+    Gateway(GatewayError),
+    Throw,
+}
+
+impl From<GatewayError> for BuildError {
+    fn from(error: GatewayError) -> Self {
+        Self::Gateway(error)
+    }
+}
+
 /// An incremental stream decoder: SSE messages in, canonical events out.
 pub trait StreamDecoder: Send {
     /// One message. Events are appended to `out` even when this then fails.
@@ -159,6 +172,13 @@ pub trait ProviderCodec: Send + Sync {
         &self,
         input: &CodecInput<'_>,
     ) -> Result<CodecRequest<Self::State>, GatewayError>;
+
+    fn try_build_request(
+        &self,
+        input: &CodecInput<'_>,
+    ) -> Result<CodecRequest<Self::State>, BuildError> {
+        self.build_request(input).map_err(BuildError::Gateway)
+    }
 
     /// The decoder for a 2xx response.
     fn decoder(&self, state: Self::State, headers: &Headers) -> Box<dyn StreamDecoder>;

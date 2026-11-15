@@ -1,6 +1,6 @@
 //! Request-side codec. A ProviderCodec implementation awaits the real decoder.
 use super::cloak::ToolCloak;
-use crate::codec::{CodecHttpRequest, CodecInput, CodecRequest};
+use crate::codec::{BuildError, CodecHttpRequest, CodecInput, CodecRequest};
 use omni_ir::error::{ErrorCode, GatewayError};
 use sha2::{Digest, Sha256};
 
@@ -16,6 +16,20 @@ impl crate::codec::ProviderCodec for AntigravityCodec {
         &self,
         input: &CodecInput<'_>,
     ) -> Result<CodecRequest<DecodeState>, GatewayError> {
+        self.try_build_request(input).map_err(|e| match e {
+            BuildError::Gateway(e) => e,
+            BuildError::Throw => {
+                GatewayError::new(ErrorCode::Upstream, "antigravity codec buildRequest threw")
+                    .with_provider("antigravity")
+                    .gateway_authored()
+            }
+        })
+    }
+
+    fn try_build_request(
+        &self,
+        input: &CodecInput<'_>,
+    ) -> Result<CodecRequest<DecodeState>, BuildError> {
         omni_ir::deep::scope(|| self.build_request_scoped(input))
     }
 
@@ -40,7 +54,7 @@ impl AntigravityCodec {
     fn build_request_scoped(
         &self,
         input: &CodecInput<'_>,
-    ) -> Result<CodecRequest<DecodeState>, GatewayError> {
+    ) -> Result<CodecRequest<DecodeState>, BuildError> {
         let token = input
             .credentials
             .access_token
@@ -65,6 +79,14 @@ impl AntigravityCodec {
                     "antigravity credential has no Cloud Code project; reconnect the account",
                 )
             })?;
+        // Only portable tool roots are unguarded in frozen pruneSchema.
+        // Response-format roots and nested schema positions use isSchema.
+        if input.request.tools.iter().flatten().any(|t| {
+            matches!(t,
+            omni_ir::request::ToolDef::Portable(t) if t.input_schema.is_null())
+        }) {
+            return Err(BuildError::Throw);
+        }
         let request_id = input
             .request_id
             .filter(|s| !s.is_empty())

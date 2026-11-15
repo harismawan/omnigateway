@@ -165,7 +165,10 @@ pub async fn send<C: ProviderCodec>(
         max_output_tokens: req.max_output_tokens,
         request_started_at: req.request_started_at,
     };
-    let built = codec.build_request(&input).map_err(|e| rebound(id, e))?;
+    let built = codec.try_build_request(&input).map_err(|e| match e {
+        crate::codec::BuildError::Gateway(e) => rebound(id, e),
+        crate::codec::BuildError::Throw => codec_failure(id, "buildRequest", "threw"),
+    })?;
     let request = built.request;
     let usable = is_sendable_url(&request.url)
         && HTTP_METHODS.contains(&request.method.as_str())
