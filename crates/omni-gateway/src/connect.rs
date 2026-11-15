@@ -620,8 +620,12 @@ mod tests {
             .expect("put");
         let owner = flows.clone();
         let holder = Arc::new(
-            omni_gateway_core::snapshot::SnapshotHolder::build(&store, key.clone(), 0.0)
-                .expect("snapshot"),
+            omni_gateway_core::snapshot::SnapshotHolder::build(
+                &omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("sqlite"),
+                key.clone(),
+                0.0,
+            )
+            .expect("snapshot"),
         );
         let waiter = tokio::spawn(async move {
             if poll {
@@ -674,7 +678,7 @@ mod tests {
         let http = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
         let holder = Arc::new(
             omni_gateway_core::snapshot::SnapshotHolder::build(
-                &store,
+                &omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("sqlite"),
                 omni_crypto::field::derive_key("test-key"),
                 0.0,
             )
