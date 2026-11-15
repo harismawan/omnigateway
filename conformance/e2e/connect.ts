@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /** A15 red-first differential, isolated by connect-ns.sh. No live networking.
  * Current coverage: start/validation/auth, non-device poll, failed exchange.
- * Success persistence, reconnect and inference coverage remain TODO (see report).
+ * Success persistence uses the frozen store decrypt path for both databases.
  */
 import { Database } from "bun:sqlite";
 import { copyFileSync, mkdirSync } from "node:fs";
@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { deriveKey, decrypt } from "../../packages/store/src/encryption.ts";
 
 const { values: f } = parseArgs({ options: Object.fromEntries(
   ["ts", "rust", "work", "cert", "key"].map(k => [k, { type: "string" as const }]),
@@ -26,6 +27,8 @@ const baseEnv = {
   NODE_EXTRA_CA_CERTS: f.cert!, SSL_CERT_FILE: f.cert!,
 };
 const seedDb = join(seed, "omnigateway.db");
+const fieldKey = await deriveKey(baseEnv.OMNI_ENCRYPTION_KEY);
+const uuid4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const cli = Bun.spawn(["bun", "--no-env-file", "apps/cli/src/index.ts", "--root", seed, "--json", "keys", "create", "--label", "seed"], {
   cwd: resolve(import.meta.dir, "../.."), env: { ...baseEnv, OMNI_DB_PATH: seedDb },
   stdout: Bun.file(join(work, "seed.log")), stderr: Bun.file(join(work, "seed.err")),
@@ -83,6 +86,57 @@ async function run(label: string, binary: string): Promise<Row[]> {
     rows.push({ name, response, wire: wires.map(w => ({ ...w, headers: [...w.headers] })) });
     return response.body;
   }
+  async function successRows(provider: string) {
+      // Frozen decodeClaims requires a nonempty third segment, even though it
+      // does not verify signatures. This fixture is deliberately not signed.
+      const idToken = `${Buffer.from('{"alg":"none"}').toString("base64url")}.${Buffer.from(JSON.stringify({ email: "fixture@example.test", "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account", organizations: [{ id: "fixture-org", is_default: true }] } })).toString("base64url")}.unsigned`;
+      tokenStatus = 200;
+      tokenBody = JSON.stringify({ access_token: `${provider}-new-access`, refresh_token: `${provider}-new-refresh`, expires_in: 3600,
+        ...(provider === "openai" ? { id_token: idToken } : { account: { email_address: "fixture@example.test" } }) });
+      const success = await row(`${provider}/success/start`, "start", JSON.stringify({ provider, label: "success label" }));
+      const successUrl = validateStart(success);
+      const before = Date.now();
+      const finished = await row(`${provider}/success/finish`, "finish", JSON.stringify({ flowId: success.flowId, code: `fixture-code#${successUrl.searchParams.get("state")}` }));
+      const after = Date.now();
+      for (const wire of rows.at(-1)!.wire) {
+        const json = wire.headers.some(h => /content-type: application\/json/i.test(h));
+        const fields = json ? JSON.parse(wire.body) : Object.fromEntries(new URLSearchParams(wire.body));
+        if (!/^[\w-]{43}$/.test(fields.code_verifier) || createHash("sha256").update(fields.code_verifier).digest("base64url") !== successUrl.searchParams.get("code_challenge")) throw Error("success PKCE invalid");
+        if (Number(wire.headers.find(h => /^content-length:/i.test(h))?.split(":")[1]) !== Buffer.byteLength(wire.body)) throw Error("success length invalid");
+        fields.code_verifier = "<verifier>";
+        if (fields.state !== undefined) {
+          if (fields.state !== successUrl.searchParams.get("state")) throw Error("success state invalid");
+          fields.state = "<state>";
+        }
+        wire.headers = wire.headers.map(h => /^content-length:/i.test(h) ? "content-length: <validated>" : h);
+        wire.body = json ? JSON.stringify(fields) : new URLSearchParams(fields).toString();
+      }
+      if (finished?.id) {
+        if (!uuid4.test(finished.id)) throw Error("credential id is not UUIDv4");
+        const reader = new Database(file, { readonly: true });
+        const stored = reader.query("SELECT * FROM credentials WHERE id = ?").get(finished.id) as any;
+        reader.close();
+        if (!stored || stored.id !== finished.id) throw Error("successful credential missing");
+        for (const field of ["access_token", "refresh_token", "id_token", "api_key"]) {
+          if (stored[field] !== null) stored[field] = await decrypt(fieldKey, stored[field]);
+        }
+        await Bun.write(join(root, `${provider}-success.raw.json`), JSON.stringify({ before, after, stored }, null, 2));
+        // 2s clock/serialization tolerance, validated before any time masking.
+        for (const [field, delta] of [["expires_at", 3600000], ["created_at", 0], ["updated_at", 0]] as const) {
+          if (!Number.isSafeInteger(stored[field]) || stored[field] < before + delta - 2000 || stored[field] > after + delta + 2000) throw Error(`invalid ${field}`);
+          stored[field] = `<request-time+${delta};tolerance=2000ms>`;
+        }
+        if (provider === "openai") {
+          const data = JSON.parse(stored.provider_data);
+          if (!uuid4.test(data.installationId) || !/^[0-9a-f]{64}$/.test(data.idSalt)) throw Error("invalid Codex randomness");
+          // Replace only validated random bytes; preserve JSON spacing/key order.
+          stored.provider_data = stored.provider_data.replace(data.installationId, "<installation>").replace(data.idSalt, "<salt>");
+        }
+        stored.id = "<uuid4>";
+        finished.id = "<uuid4>";
+        rows.push({ name: `${provider}/success/persistence`, response: stored, wire: [] });
+      } else rows.push({ name: `${provider}/success/persistence`, response: { missing: true }, wire: [] });
+    }
   try {
     const deadline = Date.now() + 20000;
     for (;;) {
@@ -157,6 +211,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
         await row(`${provider}/token/${status}/${body}/used`, "finish", JSON.stringify({ flowId: start.flowId, code: "code" }));
       }
     }
+    for (const provider of ["anthropic", "openai"]) await successRows(provider);
     return rows;
   } finally { proc.kill(); await proc.exited; }
 }
