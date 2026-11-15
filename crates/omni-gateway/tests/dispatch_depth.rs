@@ -43,6 +43,7 @@ async fn server_stream(
         base_url_https: false,
         control: admin_routes::ControlStore::new(store()),
         credential_key: common::key(),
+        connect: Arc::new(omni_gateway::connect::ConnectFlows::default()),
         body_logging_allowed: false,
         day_offset_minutes: 0,
         reported_catalog_problems: Mutex::default(),

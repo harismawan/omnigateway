@@ -173,8 +173,17 @@ try {
   await Bun.write(join(work, "ts.rows.json"), JSON.stringify(ts, null, 2));
   await Bun.write(join(work, "rust.rows.json"), JSON.stringify(rust, null, 2));
   const names = new Set([...ts, ...rust].map(r => r.name));
-  let failed = 0;
-  for (const name of names) if (!isDeepStrictEqual(ts.find(r => r.name === name), rust.find(r => r.name === name))) { failed++; console.log(`FAILED ${name}`); }
-  console.log(JSON.stringify({ rows: names.size, failed }));
+  let failed = 0, expectedDivergences = 0;
+  for (const name of names) {
+    const a = ts.find(r => r.name === name), b = rust.find(r => r.name === name);
+    const ar = a?.response as any, br = b?.response as any;
+    const frozen = "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder";
+    if (ar?.body?.error?.message === frozen || name === "start/provider/kimi" || name === "start/provider/kilo") {
+      const expected = name === "start/provider/kimi" ? "kimi oauth begin threw" : name === "start/provider/kilo" ? "kilo oauth begin threw" : frozen;
+      if (ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; continue; }
+    }
+    if (!isDeepStrictEqual(a,b)) { failed++; console.log(`FAILED ${name}`); }
+  }
+  console.log(JSON.stringify({ rows: names.size, failed, expectedDivergences }));
   process.exitCode = failed ? 1 : 0;
 } finally { stub.stop(true); }

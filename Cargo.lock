@@ -1567,6 +1567,7 @@ dependencies = [
  "nix 0.31.3",
  "omni-cli",
  "omni-control",
+ "omni-coord",
  "omni-crypto",
  "omni-dialects",
  "omni-gateway-core",
