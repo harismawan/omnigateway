@@ -91,7 +91,7 @@ fn compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct SortKey {
     text: Vec<u16>,
     string: bool,
@@ -186,6 +186,10 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
     let truncated = samples.len() > MAX_SAMPLES;
     samples.truncate(MAX_SAMPLES);
     let mut rows = Vec::new();
+    let mut distinct = std::collections::HashMap::new();
+    let mut keys = Vec::new();
+    let mut counts = Vec::new();
+    let mut previous = None;
     for (i, s) in samples.iter().enumerate() {
         let Some(c) = accounts.iter().rposition(|c| same_id(&c[0], &s[0])) else {
             continue;
@@ -193,13 +197,46 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         if s[3] == Value::Null || number(&s[3]) <= 0.0 {
             continue;
         }
-        let keys = sort_keys([&accounts[c][2], &accounts[c][1], &s[1]]);
-        rows.push((i, c, keys));
+        if let Some((last_c, window, k)) = previous {
+            if last_c == c && window == &s[1] {
+                counts[k] += 1;
+                rows.push((i, c, k));
+                continue;
+            }
+        }
+        let key = sort_keys([&accounts[c][2], &accounts[c][1], &s[1]]);
+        let next = keys.len();
+        let k = *distinct.entry(key.clone()).or_insert_with(|| {
+            keys.push(key);
+            counts.push(0usize);
+            next
+        });
+        counts[k] += 1;
+        previous = Some((c, &s[1], k));
+        rows.push((i, c, k));
     }
-    validate_sort(rows.iter().map(|r| &r.2).collect())?;
+    // Two representatives preserve the ordered-distinct-row validation rule
+    // even when every row has the same (possibly non-string) key.
+    validate_sort(
+        keys.iter()
+            .zip(&counts)
+            .flat_map(|(k, n)| std::iter::repeat_n(k, (*n).min(2)))
+            .collect(),
+    )?;
+    let mut order = (0..keys.len()).collect::<Vec<_>>();
+    order.sort_by(|a, b| compare_keys(&keys[*a], &keys[*b]));
+    let mut ranks = vec![0usize; keys.len()];
+    let mut rank = 0;
+    for (i, k) in order.iter().enumerate() {
+        if i > 0 && !compare_keys(&keys[order[i - 1]], &keys[*k]).is_eq() {
+            rank += 1;
+        }
+        ranks[*k] = rank;
+    }
     // Three collation keys followed by numeric/NaN classes form a total preorder.
     rows.sort_by(|a, b| {
-        compare_keys(&a.2, &b.2)
+        ranks[a.2]
+            .cmp(&ranks[b.2])
             .then_with(|| compare_numbers(number(&samples[a.0][5]), number(&samples[b.0][5])))
     });
     let mut out = String::from("{\"samples\":[");
