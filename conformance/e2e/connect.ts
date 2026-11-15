@@ -298,17 +298,17 @@ async function run(label: string, binary: string): Promise<Row[]> {
         await row(`${name}/consumed`, route, JSON.stringify({ flowId: start.flowId, code: "code" }));
       }
     }
-    for (const provider of ["anthropic", "openai"]) {
-      const name = `${provider}/disconnect`;
+    for (const provider of ["anthropic", "openai"]) for (const route of ["finish", "poll"]) {
+      const name = `${provider}/disconnect${route === "poll" ? "-poll" : ""}`;
       tokenStatus = 200;
       tokenBody = JSON.stringify({ access_token: `${provider}-disconnect-access`, refresh_token: "disconnect-refresh", expires_in: 3600 });
       const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: name }));
       const url = validateStart(start);
-      tokenDelay = 1000;
+      tokenDelay = 500;
       wires = [];
       const controller = new AbortController();
-      const response = fetch("http://127.0.0.1:18515/api/connect/finish", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ flowId: start.flowId, code: `fixture-code#${url.searchParams.get("state")}` }), signal: controller.signal }).then(() => "responded", () => "aborted");
-      await Bun.sleep(200);
+      const response = fetch(`http://127.0.0.1:18515/api/connect/${route}`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ flowId: start.flowId, code: `fixture-code#${url.searchParams.get("state")}` }), signal: controller.signal }).then(() => "responded", () => "aborted");
+      await Bun.sleep(100);
       controller.abort();
       if (await response !== "aborted") throw Error("disconnect request did not abort");
       await Bun.sleep(2000);
@@ -317,7 +317,11 @@ async function run(label: string, binary: string): Promise<Row[]> {
       const stored = reader.query("SELECT access_token FROM credentials WHERE label = ?").all(name) as any[];
       reader.close();
       rows.push({ name, response: { requests: wires.length, credentials: stored.length, access: await Promise.all(stored.map(r => decrypt(fieldKey, r.access_token))) }, wire: [] });
-      await row(`${name}/consumed`, "finish", JSON.stringify({ flowId: start.flowId, code: "code" }));
+      const { cookie: _, ...consumed } = await request("/api/connect/finish", JSON.stringify({ flowId: start.flowId, code: "code" }));
+      const after = new Database(file, { readonly: true });
+      const count = (after.query("SELECT count(*) AS n FROM credentials WHERE label = ?").get(name) as any).n;
+      after.close();
+      rows.push({ name: `${name}/consumed`, response: { ...consumed, requests: wires.length, credentials: count }, wire: [] });
     }
     for (const provider of ["anthropic", "openai"]) for (const success of [false, true]) {
       const name = `${provider}/concurrent/${success ? "success" : "refusal"}`;
