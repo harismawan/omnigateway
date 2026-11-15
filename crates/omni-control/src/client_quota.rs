@@ -179,11 +179,38 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         until,
         MAX_SAMPLES + 1,
     )?;
-    let mut samples = compact
-        .series
-        .iter()
-        .zip(&compact.values)
-        .map(|(s, v)| {
+    let mut cell_order = (0..compact.cells.len()).collect::<Vec<_>>();
+    cell_order.sort_by(|a, b| history_compare_cells(&compact.cells[*a], &compact.cells[*b]));
+    let mut ranks = vec![0; compact.cells.len()];
+    let mut rank = 0;
+    for (i, id) in cell_order.iter().enumerate() {
+        if i > 0
+            && !history_compare_cells(&compact.cells[cell_order[i - 1]], &compact.cells[*id])
+                .is_eq()
+        {
+            rank += 1;
+        }
+        ranks[*id] = rank;
+    }
+    let mut sample_order = (0..compact.series.len()).collect::<Vec<_>>();
+    sample_order.sort_by(|a, b| {
+        let (a_series, b_series) = (compact.series[*a], compact.series[*b]);
+        ranks[a_series[0]]
+            .cmp(&ranks[b_series[0]])
+            .then_with(|| ranks[a_series[1]].cmp(&ranks[b_series[1]]))
+            .then_with(|| {
+                compare_numbers(
+                    number(&compact.values[*a][3]),
+                    number(&compact.values[*b][3]),
+                )
+            })
+    });
+    let truncated = sample_order.len() > MAX_SAMPLES;
+    sample_order.truncate(MAX_SAMPLES);
+    let samples = sample_order
+        .into_iter()
+        .map(|i| {
+            let (s, v) = (&compact.series[i], &compact.values[i]);
             [
                 &compact.cells[s[0]],
                 &compact.cells[s[1]],
@@ -197,21 +224,13 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         .collect::<Vec<_>>();
     crate::credentials::validate_client_metadata(store)?;
     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
-    // Lexicographic composition of total preorders is total, even for corrupt cells.
-    samples.sort_by(|a, b| {
-        history_compare_cells(&a[0], &b[0])
-            .then_with(|| history_compare_cells(&a[1], &b[1]))
-            .then_with(|| compare_numbers(number(&a[5]), number(&b[5])))
-    });
-    let truncated = samples.len() > MAX_SAMPLES;
-    samples.truncate(MAX_SAMPLES);
     let mut rows = Vec::new();
     let mut distinct = std::collections::HashMap::new();
     let mut keys = Vec::new();
     let mut counts = Vec::new();
     let mut previous = None;
     for (i, s) in samples.iter().enumerate() {
-        let Some(c) = accounts.iter().rposition(|c| same_id(&c[0], &s[0])) else {
+        let Some(c) = accounts.iter().rposition(|c| same_id(&c[0], s[0])) else {
             continue;
         };
         if *s[3] == Value::Null || number(s[3]) <= 0.0 {
@@ -225,7 +244,7 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
             rows.push((i, c, k));
             continue;
         }
-        let key = sort_keys([&accounts[c][2], &accounts[c][1], &s[1]]);
+        let key = sort_keys([&accounts[c][2], &accounts[c][1], s[1]]);
         let next = keys.len();
         let k = *distinct.entry(key.clone()).or_insert_with(|| {
             keys.push(key);
@@ -258,7 +277,7 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
     rows.sort_by(|a, b| {
         ranks[a.2]
             .cmp(&ranks[b.2])
-            .then_with(|| compare_numbers(number(&samples[a.0][5]), number(&samples[b.0][5])))
+            .then_with(|| compare_numbers(number(samples[a.0][5]), number(samples[b.0][5])))
     });
     let mut out = String::from("{\"samples\":[");
     for (n, (i, c, _)) in rows.iter().enumerate() {
@@ -267,13 +286,13 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         }
         let s = &samples[*i];
         let c = &accounts[*c];
-        let ratio = nan_max(number(&s[2]) / number(&s[3]), 0.0);
+        let ratio = nan_max(number(s[2]) / number(s[3]), 0.0);
         for (prefix, value) in [
             ("{\"credentialId\":", &c[0]),
             (",\"label\":", &c[1]),
             (",\"provider\":", &c[2]),
-            (",\"windowType\":", &s[1]),
-            (",\"observedAt\":", &s[5]),
+            (",\"windowType\":", s[1]),
+            (",\"observedAt\":", s[5]),
         ] {
             out.push_str(prefix);
             write_history_cell(value, &mut out);
@@ -288,9 +307,9 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
             &mut out,
         );
         out.push_str(",\"resetsAt\":");
-        write_history_cell(&s[4], &mut out);
+        write_history_cell(s[4], &mut out);
         out.push_str(",\"windowMs\":");
-        write_history_cell(&s[6], &mut out);
+        write_history_cell(s[6], &mut out);
         out.push('}');
     }
     out.push_str(if truncated {
@@ -507,7 +526,7 @@ mod speed_tests {
             }
             times.sort_by(f64::total_cmp);
             eprintln!(
-                "BENCH {count}: median {:.3} ms bytes {bytes} all {times:?}",
+                "BENCH {count}: median {:.3} ms bytes {driver_bytes} legacy_bytes {bytes} all {times:?}",
                 times[4]
             );
             db.execute_batch("UPDATE credentials SET label='custom' WHERE id='history-1'")
