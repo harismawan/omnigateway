@@ -1,21 +1,14 @@
 # B3 OpenAI / Codex
 
-## D2 checkpoint — HEAD `f40aca5f` — depth defect fixed
+## D3 checkpoint — HEAD `9ca19793` — next: group 2 response format
 
-**Product defect observed without mutation:** tool-schema, native function-call
-arguments and native function output cases SIGSEGV at 39,990 levels on 2 MiB
-threads. Lite `json!` expression serialization recursively traversed arbitrary
-JSON despite its scope. Fixed tool-prefix construction, function fields and
-final result wrapping using deep cloning/insert, Owned temporary and value
-moves. Prefix-only fix still failed; fixing final wrapping made schema pass.
-Key order preserved; 289 whole-request comparisons still pass. No public IR,
-dependency, HTTP or tripwire exception changes. Commit `f40aca5f`.
+**Audit incomplete:** groups 2–6 pending; group 1 committed. No new defect.
+Prior defect `f40aca5f`: unmodified tool_schema/native_call/native_output
+SIGSEGV; recursive lite `json!` fixed with deep clone/insert and moves.
+18 OAuth depth subprocess cases pass at 39,990 levels / 2 MiB. Four new
+scope-removal cases pass: structurally safe, not mutation-proven protections.
 
-14 depth cases now pass (six prior vendor +eight new); eight new scratch clone
-mutations all SIGSEGV, restored. Complete current inventory is in
-`conformance/openai-depth.md`; D is **not complete**, no step-4 completion claim.
-
-| Carrier/source under crates/omni-providers/src | Mutation/outcome |
+| Carrier/source under crates/omni-providers/src/openai | Mutation/outcome |
 |---|---|
 | text/reasoning per-field merge wire.rs:334 | plain clone → SIGSEGV (D1) |
 | reasoning array replacement wire.rs:337 | plain clone → SIGSEGV (D1) |
@@ -27,33 +20,26 @@ mutations all SIGSEGV, restored. Complete current inventory is in
 | Native function arguments/output lite.rs:169,177 | plain field clone → SIGSEGV, each case |
 | Unknown native lite.rs:192 | plain item clone → SIGSEGV |
 | Cache fallback wire.rs:184 | plain first-item clone → SIGSEGV |
-| Ordinary tool input/result/media; ignored native result | Pending |
-| Response-format schema/text replacement | Pending |
-| Credential arbitrary data | Pending |
-| Foreign-native/system/provider-tool ignored payloads | Pending |
-| Native assistant annotations; function name/call_id aliases | Pending |
-| Explicit non-lite schema control/shared helper inventory | Pending |
+| Ordinary tool input wire.rs:107 | remove mod.rs:70 scope → PASS; borrowed writer, retained String |
+| Result string wire.rs:111 | same → PASS; String only |
+| Result media wire.rs:110–115 | same → PASS; typed strings, shallow moved parts |
+| Ignored native result wire.rs:109 | same → PASS; borrowed presence check, iterative IR drop |
+| Response schema/text wire.rs:370 | Pending (group 2) |
+| Assistant annotations lite.rs:147–154; function aliases lite.rs:169,177 | Pending (group 3) |
+| Foreign native wire.rs:117; system/tools wire.rs:158,234–253 | Pending (group 4) |
+| Credential data identity.rs:30–40, oauth.rs:53–58, mod.rs:132–138 | Pending (group 5) |
+| Non-lite schema wire.rs:234–253; shared-helper inventory | Pending (group 6; expansion in depth document) |
 
-Logs `/tmp/opencode/b3/s4d-native-baseline.log`, `s4d-schema-prefix-only.log`,
-`s4d-native-first-{native_call,native_output}.log`, and
-`s4d-native-clone-{tool_schema,native_reasoning,native_metadata,native_message,native_call,native_output,native_unknown,cache_fallback}.log`.
-Post-commit gates: **52 successful summaries, 231 passes including subprocess
-repetitions, 4 ignored, zero failures**; strict all-target clippy, fmt/diff and
-all three source tripwires pass. Logs `s4d-native-final-{tests,clippy}.log`.
-Cargo incremental/dev debug/test debug all zero. Worktree clean.
-
-**Next fresh session: finish pending D rows above**, using source inventory,
-unmodified failing-first depth cases and restored scratch mutations. Then
-compressed HTTP request body, rules/open empty-body question in
-`conformance/openai-compression.md`; then gateway integration (registration,
-startup initialize(), generated-descriptor catalog, persist OAuth result provider
-data, end-to-end driver, dispatch_depth, benchmark-matrix entry).
-
-Known differences unchanged: X1 surrogate/non-numeric usage ignores, unsupported
-OAuth Zstd transport, unresolved empty-body frame, startup environment capture
-and refresh persistence/integration deferred. OAuth decode comparison and
-literal inventory remain 35 ported /86 differential /0 undecided. This turn
-stops after a committed carrier set to preserve context for the remaining audit.
+Post-commit tests: 52 successful summaries, 231 passes, 4 ignored, zero failures;
+fmt passes. Strict clippy FAILS: three existing unwraps in openai_decode.rs.
+Source mutations restored; no source changes. Logs `/tmp/opencode/b3/s4e-*`.
+Known differences unchanged: X1 ignores, OAuth Zstd transport/empty-body frame,
+startup environment capture and refresh persistence deferred; literals 35/86/0.
+Next: group 2, then 3–6. Afterwards compressed HTTP request body per
+`conformance/openai-compression.md` (open empty-body question; refusal at
+http/mod.rs:248–249), then registration, startup `initialize()`, generated
+descriptor catalog, persist OAuth provider data, end-to-end driver,
+`dispatch_depth` cases and benchmark-matrix entry.
 
 ## D1 vendor-depth checkpoint — HEAD `8ec4c4a5`
 
