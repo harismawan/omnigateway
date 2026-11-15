@@ -107,7 +107,7 @@ impl ConnectFlows {
         let provider = text(get(&flow, "provider")).ok_or_else(internal)?;
         let pending = pending_value(&flow)?;
         let code = normalize(&provider, &pending, code)?;
-        complete(app.deps.refresher.clone(), flow, &code).await
+        finish_exchange(app.deps.refresher.clone(), flow, code).await
     }
     async fn pending(&self, id: &str, take: bool) -> Result<JsValue> {
         let key = format!("oauth:pending:{id}");
@@ -291,7 +291,20 @@ fn normalize(provider: &str, pending: &PendingFlow, code: &str) -> Result<String
 fn exchange_failure(provider: &str) -> GatewayError {
     // Frozen step runner raises transport failures into the exchange generator.
     // Neither built-in catches them, so rethrow classifies them as UPSTREAM.
-    GatewayError::new(ErrorCode::Upstream, format!("{provider} oauth exchange threw"))
+    GatewayError::new(
+        ErrorCode::Upstream,
+        format!("{provider} oauth exchange threw"),
+    )
+}
+async fn finish_exchange(
+    host: Arc<crate::refresh::Refresher>,
+    flow: JsValue,
+    code: String,
+) -> Result<String> {
+    // Dropping an admin connection must not cancel an already consumed flow.
+    tokio::spawn(async move { complete(host, flow, &code).await })
+        .await
+        .map_err(|_| internal())?
 }
 async fn complete(
     host: Arc<crate::refresh::Refresher>,
@@ -498,6 +511,82 @@ mod tests {
                 })
             })
         }
+    }
+    #[tokio::test]
+    async fn connect_finish_survives_waiter_cancellation() {
+        struct Delayed {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        impl omni_providers::http::HttpClient for Delayed {
+            fn send(
+                &self,
+                _: omni_providers::http::HttpRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = std::result::Result<
+                                omni_providers::http::HttpResponse,
+                                omni_providers::http::HttpError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    Ok(omni_providers::http::HttpResponse {
+                        status: 200,
+                        headers: omni_providers::http::Headers::new(),
+                        body: omni_providers::http::ResponseBody::from_bytes(
+                            r#"{"access_token":"survived","refresh_token":"r","expires_in":3600}"#,
+                        ),
+                    })
+                })
+            }
+        }
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let http = Arc::new(Delayed {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            http.clone(),
+            crate::clock::now_ms,
+        ));
+        let flow = parse_js(r#"{"provider":"anthropic","label":"survivor","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":""}}"#).expect("flow");
+        let waiter = tokio::spawn(finish_exchange(host, flow, "code#s".into()));
+        http.entered.notified().await;
+        waiter.abort();
+        assert!(waiter.await.expect_err("cancelled").is_cancelled());
+        http.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let rows = store.list_credentials(&key).await.expect("credentials");
+                if let Some(row) = rows.first() {
+                    assert_eq!(row.label, "survivor");
+                    assert_eq!(row.secrets.access_token.as_deref(), Some("survived"));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached finish persisted");
     }
     #[tokio::test]
     async fn connect_concurrent_poll_shares_exchange_and_consumes_failure() {
