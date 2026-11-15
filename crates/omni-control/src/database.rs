@@ -1389,7 +1389,7 @@ pub fn migrate_target_label(value: &str) -> String {
     match url::Url::parse(value) {
         Ok(mut url) => {
             if url.password().is_some_and(|p| !p.is_empty()) {
-                let _ = url.set_password(Some("***"));
+                let _password_result = url.set_password(Some("***"));
             }
             url.to_string()
         }
