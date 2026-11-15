@@ -12,7 +12,7 @@ fn wire_matches_frozen_ts() {
     );
     let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("rows");
     let rows = rows.as_array().expect("array");
-    assert_eq!(rows.len(), 342);
+    assert_eq!(rows.len(), 352);
     let mut failures = Vec::new();
     for row in rows {
         let mut request: omni_ir::request::ChatRequest =

@@ -11,9 +11,20 @@ fn schema_matches_frozen_wire() {
         String::from_utf8_lossy(&output.stderr)
     );
     let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("rows");
-    assert_eq!(rows.as_array().expect("array").len(), 582);
+    assert_eq!(rows.as_array().expect("array").len(), 593);
     for (i, row) in rows.as_array().expect("array").iter().enumerate() {
-        let (schema, notes) = omni_providers::antigravity::schema::prune(&row["schema"]);
+        let result = omni_providers::antigravity::schema::try_prune(&row["schema"]);
+        if row.get("error").is_some() {
+            assert_eq!(result, Err(omni_providers::codec::BuildError::Throw));
+            assert!(
+                row["error"]
+                    .as_str()
+                    .expect("TypeError")
+                    .starts_with("TypeError: Object.entries")
+            );
+            continue;
+        }
+        let (schema, notes) = result.expect("schema");
         let body = serde_json::json!({"name":"tool","parameters":schema});
         assert_eq!(
             omni_ir::jsjson::to_string(&body),
