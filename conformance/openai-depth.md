@@ -2,6 +2,51 @@
 
 ## D OAuth/lite ownership inventory (source at 31db790c)
 
+### D2 tools/native checkpoint — product defect found and fixed
+
+**Unmodified tool-schema, native function-call arguments and native function
+output cases failed with SIGSEGV.** The lite assembler's `json!` expression
+serialization recursively walked arbitrary JSON even inside its 16 MiB scope.
+Tool-prefix construction and final result wrapping both needed correction:
+prefix-only correction still failed (`s4d-schema-prefix-only.log`); replacing
+final wrapping with a move then passed. Function fields needed explicit deep
+cloning rather than `json!` serialization. All replacements preserve key order.
+New implementation uses deep clone/insert, Owned temporary, and moves input.
+No scope sizing, public IR, dependency, HTTP, or tripwire exception changes.
+
+Eight new cases join the six D1 cases: all 14 build/drop at 39,990 levels on
+2 MiB subprocess threads. Native cases select conversationId to bypass cache
+fallback; the separate cache case omits it. Retained/discarded sizes asserted.
+Source locations below reflect the corrected lite.rs (wire.rs unchanged).
+
+| Carrier/source | Scratch mutation after fix | Observed outcome |
+|---|---|---|
+| Tool schema strict:false, wire.rs:241–243; lite prefix lite.rs:59–69 | wire schema deep clone → plain clone | SIGSEGV 11 |
+| Native reasoning payload, lite.rs:183 | item deep clone → plain clone | SIGSEGV 11 |
+| Native reasoning old passthrough removal, lite.rs:183–189 | item deep clone → plain clone | SIGSEGV 11 |
+| Native message content, lite.rs:147 | content deep clone → plain clone | SIGSEGV 11 |
+| Native function-call arguments, lite.rs:169 | field deep clone → plain clone | SIGSEGV 11 |
+| Native function output, lite.rs:177 | field deep clone → plain clone | SIGSEGV 11 |
+| Unknown native item, lite.rs:192 | item deep clone → plain clone | SIGSEGV 11 |
+| Cache first-item fallback, wire.rs:184 | deep clone → cloned() | SIGSEGV 11 |
+
+All mutations restored. Lite clone-site mutations ran together; each named
+case selects its relevant match branch. Cache/schema mutations ran together,
+with depth only at the named site. Baseline failure log:
+`/tmp/opencode/b3/s4d-native-baseline.log` (tool schema); native call/output
+failures: `s4d-native-first-{native_call,native_output}.log`. Mutations:
+`s4d-native-clone-{tool_schema,native_reasoning,native_metadata,native_message,native_call,native_output,native_unknown,cache_fallback}.log`.
+Restored focused depth plus 289 request comparisons: `s4d-native-fixed.log`.
+
+**D remains incomplete.** Remaining: ordinary tool input/result string/media
+paths and ignored result-native data; response-format schema/text replacement;
+credential-data fields; foreign-native/system/provider-tool ignored payloads;
+native assistant annotations replacement; native function name/call_id aliases;
+shared helper source inventory. Do not label step 4 complete yet. Existing
+native-message case uses user role and deep content; it does not demonstrate
+assistant annotation replacement. Tool schema case uses the lite model; explicit
+non-lite control remains to be added.
+
 Paths below are relative to `crates/omni-providers/src/`. This inventory includes
 arbitrary values reachable through provider-native items, not only normal
 message shapes. D is in progress; a listed path is not a depth-safety claim.

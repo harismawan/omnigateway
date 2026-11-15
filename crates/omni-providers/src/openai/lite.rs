@@ -56,9 +56,17 @@ pub(crate) fn to_lite(
         if let Some(tools) = &args.tools
             && !tools.is_empty()
         {
-            let tools =
-                json!([{"type":"namespace","name":"functions","description":"","tools":tools}]);
-            out.push(json!({"type":"additional_tools","id":format!("at_{}",codex::uuid_v5(&namespace,&jsjson::to_string(&tools))),"role":"developer","tools":tools}));
+            let mut namespace_tools =
+                json!({"type":"namespace","name":"functions","description":""});
+            put(
+                &mut namespace_tools,
+                "tools",
+                Value::Array(tools.iter().map(deep::clone).collect()),
+            );
+            let tools = deep::Owned(Value::Array(vec![namespace_tools]));
+            let mut prefix = json!({"type":"additional_tools","id":format!("at_{}",codex::uuid_v5(&namespace,&jsjson::to_string(&tools.0))),"role":"developer"});
+            put(&mut prefix, "tools", deep::clone(&tools.0));
+            out.push(prefix);
         }
         if let Some(text) = &args.instructions
             && !text.is_empty()
@@ -155,10 +163,21 @@ pub(crate) fn to_lite(
                     v
                 }
                 Some("function_call") => {
-                    json!({"type":"function_call","status":"completed","id":fresh("fc"),"name":item["name"],"arguments":item["arguments"],"call_id":item["call_id"],META:{"turn_id":tid}})
+                    let mut v =
+                        json!({"type":"function_call","status":"completed","id":fresh("fc")});
+                    for key in ["name", "arguments", "call_id"] {
+                        put(&mut v, key, deep::clone(&item[key]));
+                    }
+                    put(&mut v, META, json!({"turn_id":tid}));
+                    v
                 }
                 Some("function_call_output") => {
-                    json!({"type":"function_call_output","id":fresh("fco"),"call_id":item["call_id"],"output":item["output"],META:{"turn_id":tid,"create_time":time}})
+                    let mut v = json!({"type":"function_call_output","id":fresh("fco")});
+                    for key in ["call_id", "output"] {
+                        put(&mut v, key, deep::clone(&item[key]));
+                    }
+                    put(&mut v, META, json!({"turn_id":tid,"create_time":time}));
+                    v
                 }
                 Some("reasoning") => {
                     let mut v = deep::clone(item);
@@ -181,6 +200,8 @@ pub(crate) fn to_lite(
             );
         }
         out.extend(history);
-        deep::Owned(json!({"input":out,"turnId":turn_id(turn),"startedAt":started}))
+        let mut result = json!({"input":null,"turnId":turn_id(turn),"startedAt":started});
+        put(&mut result, "input", Value::Array(out));
+        deep::Owned(result)
     })
 }
