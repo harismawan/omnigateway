@@ -1,12 +1,13 @@
 # B3 OpenAI / Codex
 
-## D5 checkpoint — HEAD `41dd6388` — next: group 4 ignored payloads
+## D7 checkpoint — HEAD `567c2334` — next: group 6 control/inventory
 
-**Audit incomplete:** groups 4–6 pending; groups 1–3 committed. No new defect.
+**Audit incomplete:** group 6 pending; groups 1–5 committed.
 Prior defect `f40aca5f`: unmodified tool_schema/native_call/native_output
 SIGSEGV; recursive lite `json!` fixed with deep clone/insert and moves.
-25 OAuth depth subprocess cases pass at 39,990 levels / 2 MiB. Group 2
-`95e9a77d`: 3 scope removals SIGABRT; group 3 `41dd6388`: 4 clones SIGSEGV.
+NEW DEFECT `5dab6c8f`: credential_accountId unmodified drop SIGABRT;
+derived clone also SIGABRT after drop fix. Deep clone/iterative Drop fix both.
+32 OAuth depth cases pass at 39,990 levels / 2 MiB; fixture follow-up `567c2334`.
 
 | Carrier/source under crates/omni-providers/src/openai | Mutation/outcome |
 |---|---|
@@ -26,18 +27,18 @@ SIGSEGV; recursive lite `json!` fixed with deep clone/insert and moves.
 | Ignored native result wire.rs:109 | same → PASS; borrowed presence check, iterative IR drop |
 | Response schema/text replacement/malformed text wire.rs:370; response_format.rs:128–237 | remove mod.rs:70 scope → SIGABRT, all 3 |
 | Assistant annotations lite.rs:147–154; function name/call_id and output call_id lite.rs:169,177 | plain clone → SIGSEGV, all 4 |
-| Foreign native wire.rs:117; system/tools wire.rs:158,234–253 | Pending (group 4) |
-| Credential data identity.rs:30–40, oauth.rs:53–58, mod.rs:132–138 | Pending (group 5) |
+| Foreign native wire.rs:117; system/tools wire.rs:158,234–253 | scope removal PASS: borrowed/skipped, IR iterative drop (`00036121`) |
+| Credential accountId/installationId/idSalt/extension codec.rs:23–50 | plain-drop mutation SIGABRT all 4; original derived clone SIGABRT; reads borrowed/type-filtered |
 | Non-lite schema wire.rs:234–253; shared-helper inventory | Pending (group 6; expansion in depth document) |
 
 Post-commit tests: 52 ok summaries, 231 passes, 4 ignored, no FAILED lines.
-Clippy Finished (1.89s); fmt empty. Logs `/tmp/opencode/b3/s4e-g3-final-*`.
+Clippy Finished (2.13s); fmt empty. Logs `/tmp/opencode/b3/s4e-g6-*` (group 6 NOT done).
 Clippy regression introduced c0875139, fixed 6bf18cba (3 unwraps → expect).
 Only TWO source-tripwire binaries identified: json_writes 1 pass;
 public_json_boundary 4 passes. Earlier “three” claim unsupported. Mutations restored.
 Known differences unchanged: X1 ignores, OAuth Zstd transport/empty-body frame,
 startup environment capture and refresh persistence deferred; literals 35/86/0.
-Next: group 4, then 5–6. Afterwards compressed HTTP request body per
+Next: group 6 non-lite schema and exhaustive helper inventory. Afterwards compressed HTTP request body per
 `conformance/openai-compression.md` (open empty-body question; refusal at
 http/mod.rs:248–249), then registration, startup `initialize()`, generated
 descriptor catalog, persist OAuth provider data, end-to-end driver,
