@@ -127,6 +127,36 @@ async fn compressed_request_wire() -> Result<(), Error> {
 }
 
 #[tokio::test]
+async fn encoding_whitespace_matches_frozen_adapter() -> Result<(), Error> {
+    let output = std::process::Command::new("bun")
+        .arg("tests/http-framing-reference.ts")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    for row in rows.as_array().ok_or("rows")? {
+        let mut req = request("x".into());
+        req.headers[1].1 = row["value"].as_str().ok_or("value")?.into();
+        // An invalid URL stops accepted framing before network/header encoding.
+        let error = Client::new().send(req).await.expect_err("invalid URL");
+        let accepted = !matches!(
+            error,
+            omni_providers::http::HttpError::InvalidEncodedRequest(_)
+        );
+        assert_eq!(
+            accepted,
+            row["accepted"].as_bool().ok_or("accepted")?,
+            "{row}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn refuses_invalid_framing_before_network() -> Result<(), Error> {
     use omni_providers::http::HttpError;
     let base = request("{}".into());

@@ -262,7 +262,7 @@ impl Client {
                 .iter()
                 .any(|(n, _)| n.eq_ignore_ascii_case("content-length"))
                 || encodings.len() != 1
-                || !encodings[0].1.trim().eq_ignore_ascii_case("zstd")
+                || !omni_ir::js::trim(&encodings[0].1).eq_ignore_ascii_case("zstd")
             {
                 return Err(HttpError::InvalidEncodedRequest(req.provider.clone()));
             }
