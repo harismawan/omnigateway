@@ -179,7 +179,17 @@ pub(super) fn usage_of(
     output: Option<&Value>,
     read: Option<&Value>,
     write: Option<&Value>,
-) -> Usage {
+) -> Result<Usage, DecodeError> {
     let n = |v: Option<&Value>| js::to_number(Some(&or_zero(v)));
-    usage_from_prompt_total(n(prompt), n(output), n(read), n(write))
+    let checked =
+        |v| js::try_to_number(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"));
+    let zero = Value::from(0);
+    let p = checked(js::nullish_or(prompt, Some(&zero)))?;
+    let r = checked(js::nullish_or(read, Some(&zero)))?;
+    let w = checked(js::nullish_or(write, Some(&zero)))?;
+    Ok(usage_from_prompt_total(p, n(output), r, w))
+}
+
+fn string(v: Option<&Value>) -> Result<String, DecodeError> {
+    js::try_to_string(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
 }
