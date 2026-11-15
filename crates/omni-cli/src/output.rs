@@ -111,7 +111,12 @@ pub fn human(
         .map(str::to_owned)
         .to_vec(),
     ];
-    for ((k, allowlist), exact) in keys.iter().zip(&listing.allowlists).zip(&listing.limits_js) {
+    for (index, ((k, allowlist), exact)) in keys
+        .iter()
+        .zip(&listing.allowlists)
+        .zip(&listing.limits_js)
+        .enumerate()
+    {
         let models = omni_control::operator_json::models(allowlist)?;
         let limits = if k["limits"].is_null() {
             paint(color, false, "unreadable")
@@ -139,19 +144,19 @@ pub fn human(
                 parts.join(" ")
             }
         };
-        let state = if !k["revokedAt"].is_null() {
+        let state = if !matches!(listing.cell(index, "revokedAt"), jsjson::JsValue::Null) {
             "revoked"
-        } else if !k["expiresAt"].is_null()
-            && !k["expiresAt"].as_f64().is_some_and(|e| e > now as f64)
+        } else if !matches!(listing.cell(index, "expiresAt"), jsjson::JsValue::Null)
+            && !matches!(listing.cell(index, "expiresAt"), jsjson::JsValue::Number(e) if *e > now as f64)
         {
             "expired"
         } else {
             "active"
         };
         rows.push(vec![
-            omni_control::cli_cell::table_text(&jsjson::JsValue::from(&k["id"]))?,
-            omni_control::cli_cell::table_text(&jsjson::JsValue::from(&k["label"]))?,
-            omni_control::cli_cell::table_text(&jsjson::JsValue::from(&k["prefix"]))?,
+            omni_control::cli_cell::table_text(listing.cell(index, "id"))?,
+            omni_control::cli_cell::table_text(listing.cell(index, "label"))?,
+            omni_control::cli_cell::table_text(listing.cell(index, "prefix"))?,
             models,
             limits,
             if k["bodyLoggingOptOut"] == true {
@@ -160,7 +165,10 @@ pub fn human(
                 "—"
             }
             .into(),
-            if k["guardrailPolicy"].is_null() {
+            if matches!(
+                listing.cell(index, "guardrailPolicy"),
+                jsjson::JsValue::Null
+            ) {
                 "no"
             } else {
                 "yes"
