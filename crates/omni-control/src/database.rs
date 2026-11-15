@@ -119,8 +119,8 @@ use crate::fs_error::fs_error;
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// Resolve and judge a candidate without swapping any files.
-pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
+/// Shared preview/swap validation, before stat or acquiring the restore latch.
+fn snapshot_path(live: &Path, id: &str) -> Result<std::path::PathBuf, String> {
     let invalid = || "BAD_REQUEST: invalid snapshot id".to_string();
     let (stamp, reason) = id
         .strip_prefix("db_")
@@ -160,6 +160,12 @@ pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
             return Err(invalid());
         }
     }
+    Ok(path)
+}
+
+/// Resolve and judge a candidate without swapping any files.
+pub fn validate_restore(live: &Path, id: &str) -> Result<Value, String> {
+    let path = snapshot_path(live, id)?;
     if crate::database_fs::stat(&path).is_none() {
         return Err("BAD_REQUEST: no such snapshot".into());
     }
@@ -354,7 +360,7 @@ impl std::fmt::Display for RestoreError {
 }
 impl std::error::Error for RestoreError {}
 
-/// Restore a previously validated snapshot id, inspecting it again under the latch.
+/// Revalidate the snapshot path, then inspect it again under the latch.
 /// There is deliberately no rollback after staging: failed swaps retain the undo.
 pub fn restore_snapshot(
     store: &mut dyn RestoreStore,
@@ -363,11 +369,11 @@ pub fn restore_snapshot(
     id: &str,
     now: &dyn Fn() -> i64,
 ) -> Result<Value, RestoreError> {
-    let dir = live
+    let candidate = snapshot_path(live, id)?;
+    let dir = candidate
         .parent()
-        .ok_or_else(|| "database has no parent".to_string())?
-        .join("snapshots");
-    let candidate = dir.join(id);
+        .expect("validated snapshot parent")
+        .to_path_buf();
     if files.stat(&candidate).is_none() {
         return Err("BAD_REQUEST: no such snapshot".to_string().into());
     }
@@ -623,6 +629,23 @@ mod restore_sequence_tests {
         }
     }
     #[test]
+    fn restore_rejects_unchecked_ids_before_store_or_file_operations() {
+        for id in ["../outside.sqlite", "..", "nested/candidate"] {
+            let mut store = Fake::default();
+            let mut files = store.clone();
+            let error = restore_snapshot(
+                &mut store,
+                &mut files,
+                Path::new("/tmp/opencode/e1-e5/unchecked/db"),
+                id,
+                &|| 0,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "BAD_REQUEST: invalid snapshot id");
+            assert!(files.0.borrow().is_empty());
+        }
+    }
+    #[test]
     fn swap_exact_sequence_keeps_forced_undo_without_retention() {
         let mut store = Fake::default();
         let mut files = store.clone();
@@ -633,7 +656,7 @@ mod restore_sequence_tests {
                 &mut store,
                 &mut files,
                 Path::new("/fixture/db"),
-                "candidate",
+                "db_2026-11-01T00-00-00-000Z_manual.sqlite",
                 &|| 0,
             ) {
                 Err(RestoreError::Ordinary(e)) if e.starts_with("CONFLICT:") => {
@@ -868,7 +891,7 @@ mod restore_sequence_tests {
                     &mut seam.clone(),
                     &mut seam,
                     Path::new("/fixture/db"),
-                    "candidate",
+                    "db_2026-11-01T00-00-00-000Z_manual.sqlite",
                     &|| 0,
                 ) {
                     Err(RestoreError::Ordinary(e)) if e.starts_with("CONFLICT:") => {

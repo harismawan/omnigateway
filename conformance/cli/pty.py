@@ -58,6 +58,12 @@ while True:
                 shutil.copyfile(env["PTY_RESTORE_SOURCE"], target)
             elif mutation == "readonly":
                 os.chmod(target, 0o555)
+            elif mutation == "symlink":
+                os.unlink(target)
+                os.symlink(env["PTY_RESTORE_SOURCE"], target)
+            elif mutation == "directory":
+                os.unlink(target)
+                os.mkdir(target)
             else:
                 raise ValueError(mutation)
         os.write(master, sys.argv[1].encode() + b"\n")
