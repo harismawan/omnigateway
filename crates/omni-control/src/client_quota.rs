@@ -197,12 +197,13 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         if s[3] == Value::Null || number(&s[3]) <= 0.0 {
             continue;
         }
-        if let Some((last_c, window, k)) = previous {
-            if last_c == c && window == &s[1] {
-                counts[k] += 1;
-                rows.push((i, c, k));
-                continue;
-            }
+        if let Some((last_c, window, k)) = previous
+            && last_c == c
+            && window == &s[1]
+        {
+            counts[k] += 1;
+            rows.push((i, c, k));
+            continue;
         }
         let key = sort_keys([&accounts[c][2], &accounts[c][1], &s[1]]);
         let next = keys.len();
@@ -279,7 +280,6 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
     });
     Ok(out)
 }
-// Borrow normal TEXT cells; retain the corrupt-cell coercion rules above.
 fn write_history_cell(value: &Value, out: &mut String) {
     match value {
         Value::Null => out.push_str("null"),
@@ -291,6 +291,7 @@ fn write_history_cell(value: &Value, out: &mut String) {
     }
 }
 
+// Borrow normal TEXT cells; retain the corrupt-cell coercion rules above.
 fn history_compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Text(a), Value::Text(b)) if a == b => std::cmp::Ordering::Equal,

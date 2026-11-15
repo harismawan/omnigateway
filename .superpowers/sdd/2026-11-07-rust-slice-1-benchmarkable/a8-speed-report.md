@@ -1,0 +1,29 @@
+# A8 history speed — partial progress
+- Rust end-to-end median 75.8 ms vs frozen TS 60.4 ms; requirement NOT met.
+- In-process 50,002: baseline 187.451 ms → best committed measurement 71.233 ms; later final rerun 94.565 ms. No proven floor; more work needed.
+- Baseline 1,000 / 10,000 / 50,002 medians: 2.981 / 31.692 / 187.451 ms (nine runs each, release).
+- Baseline phase medians, ms: store 36.661; metadata 0.056; preliminary sort+trim 66.221; projection 7.793; validate 2.963; final sort 4.723; serialization 61.737.
+- Benchmark is ignored `client_quota::speed_tests::history_speed`; release, `--ignored --nocapture`. `A8_CAPTURE=1` records baseline bytes in scratch; omit to compare.
+- Fixture uses driver overflow SQL with two custom/custom credentials: 8,675,399 bytes. Actual driver fixture is 8,550,404 bytes; these are not identical fixtures.
+- f43a486e borrow history TEXT comparisons: 187.451 → 135.138 ms (small sizes 2.564 / 24.158).
+- c2d73919 direct JSON cell writes using jsjson formatters: 135.138 → 92.689 ms (1.400 / 15.572).
+- 7805401f equal/ASCII comparison shortcuts: 92.689 → 78.516 ms (1.292 / 13.696).
+- bf7482f5 distinct collation ranks + consecutive-series cache: 78.516 → 71.233 ms (0.962 / 11.617).
+- Ranking without consecutive cache measured 92.561 ms; not committed separately. Pointer-only preliminary sort experiment measured 94.705 ms and was reverted.
+- Final rerun medians 1.020 / 14.090 / 94.565 ms. Later instrumented example: store 42.273, metadata 0.063, preliminary 26.052, projection 2.796, validation 0.002, final-sort 3.629, serialization 9.186 ms. Instrumentation removed.
+- Final release build copied to `/tmp/opencode/a8/speed/rust-release`; pre-build free disk 5.1 GB.
+- End-to-end TS nine ms: 81.3, 68.6, 61.5, 64.2, 55.4, 60.4, 60.0, 58.0, 60.4 (median 60.4).
+- End-to-end Rust nine ms: 80.5, 74.1, 75.8, 77.9, 78.8, 75.4, 76.8, 70.6, 73.3 (median 75.8).
+- All eighteen status 200, 8,550,404 bytes. Supplied previous baseline: TS 71.6 / Rust 186.2 ms.
+- Timing uptime: 10:18:20, up 16 days 8:48, 2 users, load 5.75 / 5.49 / 4.93. Process snapshot included opencode, hermes, herdr, containerd, dockerd, redis-server; full snapshot in uptime.log.
+- Byte snapshots compared after each optimization: three sizes; accent/case/canonical-equivalent labels; mixed numeric/text ids; duplicate ids; orphan; zero/NULL limits; NULL/BLOB/invalid-UTF8 labels/providers; TEXT nonnumeric timestamp. Errors captured with code/message.
+- Stable ranks coalesce ICU-equal distinct strings; validation keeps up to two representatives per exact key, preserving duplicate non-string failures. Existing sort_tests unchanged.
+- Final debug driver: `admin-routes: 9892 equal, 11 expected divergences, 0 failures, 0 raw keys minted` (client-history.log).
+- Final debug driver: `admin-routes: 6081 equal, 6 expected divergences, 0 failures, 0 raw keys minted` (client-quota.log).
+- Tests: 68 `test result: ok` summaries, 387 passed, 10 ignored, no FAILED line (tests.log). A timed-out repeat was rerun successfully.
+- Clippy: `Finished` dev profile; workspace all targets, -D warnings (clippy.log). Initial collapsible-if diagnostic corrected.
+- Format: `exit=0` (fmt.log).
+- All logs/snapshots: `/tmp/opencode/a8/speed/`. Driver output scratch directories removed after recording.
+- Only client_quota.rs changed in production. No store, locale_compare, TS, dependency, unsafe, schema, or credential matching changes; profiling prioritized sorting/serialization. Linear last-match lookup retained.
+- `/api/client/quota` still builds JSON objects and validates/sorts every key; its performance was not measured or changed.
+- Remaining concern: target <50 ms and TS parity unmet; store read and preliminary sort warrant further profiling. Snapshot benchmark depends on local pre-change captures, not checked-in golden files.
