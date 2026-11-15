@@ -8,7 +8,45 @@ pub fn list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
 
 /// Operator-terminal projection; parser details must not enter gateway logs.
 pub fn cli_list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
-    list_with(store, crate::cli_error::store)
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT * FROM virtual_models ORDER BY id")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let cell = |name| row.get_ref(name).map_err(|e| e.to_string());
+        out.push(JsValue::Object(vec![
+            (
+                "id".encode_utf16().collect(),
+                JsValue::String(
+                    crate::cli_cell::string(cell("id")?)
+                        .encode_utf16()
+                        .collect(),
+                ),
+            ),
+            (
+                "targets".encode_utf16().collect(),
+                crate::cli_cell::json(cell("targets")?)?,
+            ),
+            (
+                "strategy".encode_utf16().collect(),
+                JsValue::String(
+                    crate::cli_cell::string(cell("strategy")?)
+                        .encode_utf16()
+                        .collect(),
+                ),
+            ),
+            (
+                "isAlias".encode_utf16().collect(),
+                JsValue::Bool(matches!(
+                    cell("is_alias")?,
+                    rusqlite::types::ValueRef::Integer(1)
+                )),
+            ),
+        ]));
+    }
+    Ok(out)
 }
 
 fn list_with(
@@ -144,7 +182,11 @@ fn put_with(
             ));
         }
     }
-    let existing = list_with(store, render)?;
+    let existing = if terminal {
+        cli_list(store)?
+    } else {
+        list_with(store, render)?
+    };
     let stored = existing.iter().find(|m| get(m, "id") == Some(&text(id)));
     let old = stored.and_then(|m| get(m, "targets"));
     let pairs=match old {

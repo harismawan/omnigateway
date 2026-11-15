@@ -1,7 +1,10 @@
 //! Operator-only SQLite cell coercion, before JSON.parse's ToString.
 pub fn json(cell: rusqlite::types::ValueRef<'_>) -> Result<omni_ir::jsjson::JsValue, String> {
+    crate::operator_json::parse(&string(cell))
+}
+pub fn string(cell: rusqlite::types::ValueRef<'_>) -> String {
     use rusqlite::types::Value;
-    let raw = match crate::database::bun_cell(cell) {
+    match crate::database::bun_cell(cell) {
         Value::Null => "null".into(),
         Value::Text(s) => s,
         Value::Blob(bytes) => bytes
@@ -11,8 +14,7 @@ pub fn json(cell: rusqlite::types::ValueRef<'_>) -> Result<omni_ir::jsjson::JsVa
             .join(","),
         Value::Integer(n) => number(n as f64),
         Value::Real(n) => number(n),
-    };
-    crate::operator_json::parse(&raw)
+    }
 }
 fn number(n: f64) -> String {
     if n.is_nan() {

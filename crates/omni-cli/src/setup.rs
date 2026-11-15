@@ -271,8 +271,17 @@ fn describe(model: &V, credentials: &[V]) -> Result<V, String> {
     let mut label = get(model, "id").expect("id").clone();
     let mut context: Option<f64> = None;
     let mut output: Option<f64> = None;
-    let V::Array(targets) = get(model, "targets").ok_or("missing targets")? else {
-        return Err("model.targets is not iterable".into());
+    // JSON strings are iterable. Their character targets have no model fields,
+    // so neither limits nor a catalog label is selected by the frozen consumer.
+    let targets = match get(model, "targets").ok_or("missing targets")? {
+        V::Array(targets) => targets.as_slice(),
+        V::String(_) => &[],
+        V::Null => {
+            return Err("null is not an object (evaluating 'target of model.targets')".into());
+        }
+        V::Number(_) => return Err("number is not iterable".into()),
+        V::Bool(_) => return Err("boolean is not iterable".into()),
+        _ => return Err("{} is not iterable".into()),
     };
     for t in targets {
         let provider = get(t, "provider").map(string).unwrap_or_default();

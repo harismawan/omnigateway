@@ -360,9 +360,9 @@ pub fn set_guardrail(store: &SqliteStore, id: &str, policy: Option<&str>) -> Res
 }
 
 fn require_key(store: &SqliteStore, id: &str) -> Result<(), String> {
-    if omni_store::keys::get_operator(store.connection(), id)
+    if omni_store::keys::cli_operator_rows(store.connection(), Some(id), crate::cli_cell::string)
         .map_err(|e| e.to_string())?
-        .is_none()
+        .is_empty()
     {
         return Err("BAD_REQUEST: no such api key".into());
     }
@@ -419,8 +419,12 @@ impl KeyListing {
         let mut captured = project_keys(
             store,
             now,
-            omni_store::keys::operator_rows(store.connection(), Some(id))
-                .map_err(|e| e.to_string())?,
+            omni_store::keys::cli_operator_rows(
+                store.connection(),
+                Some(id),
+                crate::cli_cell::string,
+            )
+            .map_err(|e| e.to_string())?,
         )?;
         let index = captured.data["keys"]
             .as_array()
@@ -483,7 +487,8 @@ pub fn list_keys(store: &SqliteStore, now: i64) -> Result<KeyListing, String> {
     project_keys(
         store,
         now,
-        omni_store::keys::list_operator(store.connection()).map_err(|e| e.to_string())?,
+        omni_store::keys::cli_operator_rows(store.connection(), None, crate::cli_cell::string)
+            .map_err(|e| e.to_string())?,
     )
 }
 fn project_keys(

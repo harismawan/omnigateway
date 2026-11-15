@@ -404,6 +404,23 @@ pub fn list_operator(conn: &Connection) -> Result<Vec<OperatorKey>, StoreError> 
 }
 
 pub fn operator_rows(conn: &Connection, id: Option<&str>) -> Result<Vec<OperatorKey>, StoreError> {
+    operator_rows_with(conn, id, None)
+}
+
+/// Terminal-only cells; HTTP and routing retain the strict reader.
+pub fn cli_operator_rows(
+    conn: &Connection,
+    id: Option<&str>,
+    cell: fn(rusqlite::types::ValueRef<'_>) -> String,
+) -> Result<Vec<OperatorKey>, StoreError> {
+    operator_rows_with(conn, id, Some(cell))
+}
+
+fn operator_rows_with(
+    conn: &Connection,
+    id: Option<&str>,
+    cell: Option<fn(rusqlite::types::ValueRef<'_>) -> String>,
+) -> Result<Vec<OperatorKey>, StoreError> {
     let mut stmt = conn.prepare_cached(if id.is_some() {
         "SELECT * FROM api_keys WHERE id = ?1"
     } else {
@@ -431,8 +448,19 @@ pub fn operator_rows(conn: &Connection, id: Option<&str>) -> Result<Vec<Operator
         };
         out.push(OperatorKey {
             key: read_key(r, true)?,
-            allowlist_json: row::opt_text(r, T, "model_allowlist")?,
-            limits_json: row::text(r, T, "limits")?,
+            allowlist_json: if let Some(cell) = cell {
+                match r.get_ref("model_allowlist")? {
+                    rusqlite::types::ValueRef::Null => None,
+                    raw => Some(cell(raw)),
+                }
+            } else {
+                row::opt_text(r, T, "model_allowlist")?
+            },
+            limits_json: if let Some(cell) = cell {
+                cell(r.get_ref("limits")?)
+            } else {
+                row::text(r, T, "limits")?
+            },
             created_at: date("created_at")?,
             revoked_at: date("revoked_at")?,
             expires_at: date("expires_at")?,
