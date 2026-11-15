@@ -137,8 +137,8 @@ pub fn list_compact_quota_samples(
     let mut raw = Vec::<(u8, Vec<u8>)>::new();
     let mut out = CompactSamples {
         cells: Vec::new(),
-        series: Vec::new(),
-        values: Vec::new(),
+        series: Vec::with_capacity(limit.min(50_001)),
+        values: Vec::with_capacity(limit.min(50_001)),
     };
     let mut stmt = conn.prepare_cached("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?")?;
     let mut rows = stmt.query(rusqlite::params![since, until, limit as i64])?;
