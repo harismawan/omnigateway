@@ -2,6 +2,7 @@
   "pid-edge-states": {"exit 0":4,"exit 1":8,"environment EACCES":3},
   "db-restore": {"exit 2":1,"exit 1":30,"environment EACCES":3,"exit 0":11},
   "db-restore-swap": {"exit 0":10,"exit 1":2},
+  "db-restore-generations": {"exit 0":3},
   "db-clear-bodies": {"exit 1":4,"environment OMNI_ENCRYPTION_KEY":1,"exit 0":10},
   "db-vacuum": {"exit 1":2,"environment OMNI_ENCRYPTION_KEY":2,"exit 0":2},
   "db-backup": {"exit 1":9,"environment EACCES":1,"environment unable to open database":1,"environment OMNI_ENCRYPTION_KEY":3,"exit 0":21},
