@@ -68,4 +68,42 @@ mod tests {
             "{\"object\":\"list\",\"data\":[],\"has_more\":false,\"first_id\":null,\"last_id\":null}"
         );
     }
+
+    #[test]
+    fn frozen_listing_corpus() {
+        let output = std::process::Command::new("bun")
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .args(["--no-env-file", "conformance/models-listing.ts"])
+            .output()
+            .expect("Bun oracle");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mut failures = 0;
+        for row in rows.as_array().unwrap() {
+            let models: Vec<VirtualModel> = row["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| VirtualModel {
+                    id: m["id"].as_str().unwrap().into(),
+                    targets: serde_json::from_value(m["targets"].clone()).unwrap(),
+                    strategy: omni_store::Strategy::Priority,
+                    is_alias: false,
+                })
+                .collect();
+            let refs: Vec<_> = models.iter().collect();
+            if list_body(&refs) != row["expected"].as_str().unwrap() {
+                failures += 1;
+            }
+        }
+        eprintln!(
+            "listing corpus: {} rows, {failures} failing",
+            rows.as_array().unwrap().len()
+        );
+        assert_eq!(failures, 0);
+    }
 }

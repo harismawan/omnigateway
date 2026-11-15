@@ -29,7 +29,7 @@ const { values: flags } = parseArgs({
   options: {
     ts: { type: "string" },
     rust: { type: "string" },
-    cli: { type: "string", default: "bun apps/cli/src/index.ts" },
+    cli: { type: "string", default: "bun --no-env-file apps/cli/src/index.ts" },
     keep: { type: "boolean", default: false },
     only: { type: "string" },
     /** Self-check: send every request to this (closed) port instead of the gateway. */
@@ -256,6 +256,7 @@ const upstreamListener = Bun.listen<{ buf: Buffer; busy: Promise<void> }>({
 
 const env = {
   ...process.env,
+  HOME: join(work, "home"),
   OMNI_ENCRYPTION_KEY: KEY,
   OMNI_HOST: "127.0.0.1",
   OMNI_PORT: String(GATEWAY_PORT),
@@ -333,6 +334,15 @@ async function seed(): Promise<Record<string, string>> {
     writeFileSync(file, JSON.stringify({ id, strategy: "priority", isAlias: false, targets }));
     await cli(["models", "put", id, "-f", file]);
   }
+  // Raw store fixtures deliberately omit saved figures: the old custom-only
+  // listing rows could not observe catalog labels or credential-sensitive limits.
+  const db = new Database(join(seedRoot, "omni.db"));
+  const a = { ...target("", "claude-opus-5-5", 1), provider: "anthropic" };
+  const o = { ...target("", "gpt-6.1-sol", 1), provider: "openai" };
+  for (const [id, targets] of [["catalog-anthropic", [a]], ["catalog-openai", [o]], ["catalog-pool", [a, o]]] as const)
+    db.run("INSERT INTO virtual_models(id, targets, strategy, is_alias) VALUES (?, ?, 'priority', 0)", [id, JSON.stringify(targets)]);
+  db.run("UPDATE credentials SET provider='openai', auth_type='oauth', enabled=0 WHERE id=?", [ids.off!]);
+  db.close();
   const keys: Record<string, string> = {};
   keys.plain = (await cli(["keys", "create", "--label", "plain"])).key;
   keys.allow = (await cli(["keys", "create", "--label", "allow", "--allow", "ok"])).key;
@@ -355,6 +365,7 @@ import type { Exchange } from "./masks.ts";
 
 type Row = {
   name: string;
+  listingOAuth?: boolean;
   /** Scenario facts both binaries must show, beyond being equal. */
   expect?: (x: Exchange[], upstream: Uint8Array[]) => string | null;
   /** Changes stored settings for this row (the gateway's database), restored after. */
@@ -445,6 +456,24 @@ const ROWS: Row[] = [
   },
   { name: "models", run: one("GET", "/v1/models", (k) => ({ "x-api-key": k.plain })) },
   { name: "models allowlisted", run: one("GET", "/v1/models", (k) => ({ "x-api-key": k.allow })) },
+  ...[false, true].map((oauth): Row => ({
+    name: `models catalogs ${oauth ? "oauth" : "no oauth"}`,
+    listingOAuth: oauth,
+    expect: (xs) => {
+      const data = JSON.parse(fatal.decode(xs[0]!.body)).data;
+      for (const [id, label, context] of [
+        ["catalog-anthropic", "Claude Opus 5.5", 1000000],
+        ["catalog-openai", "GPT-6.1 Sol", oauth ? 272000 : 922000],
+        ["catalog-pool", "catalog-pool", oauth ? 272000 : 922000],
+      ]) {
+        const m = data.find((m: { id: string }) => m.id === id);
+        if (m?.display_name !== label || m?.max_input_tokens !== context || m?.max_tokens !== 128000)
+          return `wrong catalog facts for ${id}`;
+      }
+      return null;
+    },
+    run: one("GET", "/v1/models", (k) => ({ "x-api-key": k.plain })),
+  })),
   { name: "auth none", run: one("POST", "/v1/messages", () => ({}), msg("ok", false)) },
   {
     name: "auth bad",
@@ -756,6 +785,12 @@ async function runAgainst(
       if (only !== undefined && !only.includes(row.name)) continue;
       recorded = [];
       resetGate();
+      if (row.listingOAuth !== undefined) {
+        const d = new Database(db);
+        d.run("UPDATE credentials SET enabled=? WHERE provider='openai' AND auth_type='oauth'", [Number(row.listingOAuth)]);
+        d.close();
+        await sleep(1200);
+      }
       let restore: string | null = null;
       if (row.settings !== undefined) {
         const d = new Database(db);
