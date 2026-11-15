@@ -13,6 +13,39 @@ pub struct CatalogModel {
     pub max_output_tokens: Option<f64>,
 }
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn openai_catalog_matches_generated_descriptor() {
+        let generated: serde_json::Value = serde_json::from_str(include_str!(
+            "../../omni-control/data/provider-catalog.json"
+        ))
+        .expect("generated catalog");
+        let registry = super::Providers::builtin();
+        let actual = registry.get("openai").expect("registered");
+        let expected = generated["openai"]["catalog"]["models"]
+            .as_array()
+            .expect("models");
+        assert!(!expected.is_empty());
+        assert_eq!(actual.catalog.len(), expected.len());
+        for (actual, expected) in actual.catalog.iter().zip(expected) {
+            assert_eq!(actual.id, expected["id"]);
+            assert_eq!(
+                actual.pricing,
+                serde_json::from_value(expected["pricing"].clone()).expect("pricing")
+            );
+            assert_eq!(
+                actual.context_window,
+                expected["limits"]["contextWindow"].as_f64()
+            );
+            assert_eq!(
+                actual.max_output_tokens,
+                expected["limits"]["maxOutputTokens"].as_f64()
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Descriptor {
     pub capabilities: Capabilities,
@@ -47,29 +80,34 @@ fn descriptor(capabilities: Capabilities, prefixes: &[&str]) -> Descriptor {
 impl Providers {
     /// The built-in registry (`packages/providers/src/descriptors.ts`).
     ///
-    /// Anthropic uses the generated frozen catalog; other providers retain
+    /// Anthropic and OpenAI use the generated frozen catalog; other providers retain
     /// empty catalogs until their codecs are ported.
     pub fn builtin() -> Self {
         let all = caps(true, true, true);
         let mut p = Self::default();
-        let mut anthropic = descriptor(all, &["claude-"]);
         let generated: serde_json::Value = serde_json::from_str(include_str!(
             "../../omni-control/data/provider-catalog.json"
         ))
         .expect("generated provider catalog");
-        anthropic.catalog = generated["anthropic"]["catalog"]["models"]
-            .as_array()
-            .expect("models")
-            .iter()
-            .map(|m| CatalogModel {
-                id: m["id"].as_str().expect("model id").into(),
-                pricing: serde_json::from_value(m["pricing"].clone()).expect("catalog pricing"),
-                context_window: m["limits"]["contextWindow"].as_f64(),
-                max_output_tokens: m["limits"]["maxOutputTokens"].as_f64(),
-            })
-            .collect();
+        let catalog = |id: &str| {
+            generated[id]["catalog"]["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .map(|m| CatalogModel {
+                    id: m["id"].as_str().expect("model id").into(),
+                    pricing: serde_json::from_value(m["pricing"].clone()).expect("catalog pricing"),
+                    context_window: m["limits"]["contextWindow"].as_f64(),
+                    max_output_tokens: m["limits"]["maxOutputTokens"].as_f64(),
+                })
+                .collect()
+        };
+        let mut anthropic = descriptor(all, &["claude-"]);
+        anthropic.catalog = catalog("anthropic");
         p.register("anthropic", anthropic);
-        p.register("openai", descriptor(all, &["gpt-", "o1", "o3", "o4"]));
+        let mut openai = descriptor(all, &["gpt-", "o1", "o3", "o4"]);
+        openai.catalog = catalog("openai");
+        p.register("openai", openai);
         p.register(
             "kimi",
             descriptor(caps(true, false, false), &["kimi-", "moonshot"]),

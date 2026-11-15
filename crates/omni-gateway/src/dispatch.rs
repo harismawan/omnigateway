@@ -337,7 +337,11 @@ fn credentials_of(c: &Credential, secrets: Option<&omni_store::CredentialSecrets
     Credentials {
         access_token,
         api_key,
-        provider_data: c.provider_data.as_object().cloned().unwrap_or_default(),
+        provider_data: c
+            .provider_data
+            .as_object()
+            .map(omni_ir::deep::clone_map)
+            .unwrap_or_default(),
     }
 }
 
@@ -695,7 +699,7 @@ fn run(mut s: RunState) -> EventsStream {
             let preemptive_refresh_required = c.credential.auth_type == AuthType::OAuth
                 && c.credential.expires_at.is_some_and(|at| at.saturating_sub(REFRESH_LEAD_MS) <= attempt_now);
 
-            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" {
+            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" && c.target.provider != "openai" {
                 let ttft = lock(&log).ttft_ms;
                 slot.release(ttft);
                 yield Err(GatewayError::new(
@@ -734,6 +738,11 @@ fn run(mut s: RunState) -> EventsStream {
                             within(s.deadline, Box::pin(omni_providers::adapter::send(
                                 &omni_providers::anthropic::codec::AnthropicCodec,
                                 "anthropic", ar, deps.http.as_ref(),
+                            ))).await
+                        } else if c.target.provider == "openai" {
+                            within(s.deadline, Box::pin(omni_providers::adapter::send(
+                                &omni_providers::openai::OpenAiCodec,
+                                "openai", ar, deps.http.as_ref(),
                             ))).await
                         } else {
                         within(s.deadline, omni_providers::adapter::send(

@@ -32,6 +32,34 @@ async fn flush(h: Harness) {
 }
 
 #[tokio::test]
+async fn openai_registered_codec_dispatches_responses() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='openai',provider_data='{}'",
+        [],
+    )
+    .expect("provider");
+    let body = "event: response.created\ndata: {\"response\":{\"id\":\"r1\",\"model\":\"gpt-6-astra\"}}\n\nevent: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n";
+    let h = harness(&f, vec![Reply::Http(200, vec![], vec![body.into()])]);
+    let mut d = dispatch(h.deps.clone(), req("gpt-6-astra"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let calls = h.script.seen.lock().expect("seen");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].provider, "openai");
+    assert_eq!(calls[0].url, "https://api.openai.com/v1/responses");
+    let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+    assert_eq!(sent["model"], "gpt-6-astra");
+    assert_eq!(sent["stream"], true);
+    drop(calls);
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn rejected_refresh_falls_back_and_removes_credential_from_snapshot() {
     let f = fixture(&["c0", "c1"]);
     set_setting(&f.path, "routingStrategy", "\"priority\"");
