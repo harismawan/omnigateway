@@ -6,7 +6,8 @@ mod identity_tests;
 mod lite;
 #[cfg(test)]
 mod lite_tests;
-mod oauth;
+pub mod oauth;
+mod oauth_lifecycle;
 mod profile;
 mod wire;
 /// Credential-selected OpenAI Responses codec.

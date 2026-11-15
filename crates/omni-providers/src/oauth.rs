@@ -58,6 +58,8 @@ impl std::fmt::Debug for AuthRequest {
 // Deliberately no Debug: these values contain live credentials.
 #[derive(Clone)]
 pub struct FlowResult {
+    pub id_token: Option<Vec<u16>>,
+    pub provider_data: serde_json::Map<String, Value>,
     pub access_token: Vec<u16>,
     pub refresh_token: Option<omni_ir::jsjson::JsValue>,
     pub expires_at: Option<f64>,
