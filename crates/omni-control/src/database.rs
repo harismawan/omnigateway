@@ -659,7 +659,7 @@ mod restore_sequence_tests {
                 id,
                 &|| 0,
             )
-            .unwrap_err();
+            .expect_err("unchecked id must be rejected");
             assert_eq!(error.to_string(), "BAD_REQUEST: invalid snapshot id");
             assert!(files.0.borrow().is_empty());
         }
