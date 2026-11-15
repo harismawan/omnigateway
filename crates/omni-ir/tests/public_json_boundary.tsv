@@ -224,3 +224,5 @@ omni-providers/src/tool_result_files.rs :: fn split_files<'a>(files: &'a [FileBl
 omni-providers/src/tool_result_files.rs :: fn with_file_text(content: &str, text: &[String]) -> String	typed file strings produce shallow JSON only; no arbitrary nested input
 omni-ir/src/jsjson.rs :: fn scan_steps() -> u64	thread-local step counter for complexity tests; no JSON taken, returned or released
 omni-ir/src/jsjson.rs :: fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>>	one linear pass over borrowed text, nesting skipped by a depth counter; builds no JSON value, returns UTF-16 units
+omni-ir/src/js.rs :: fn try_to_number(value: Option<&Value>) -> Result<f64, Throws>	Borrowed JSON inspected with stack growth; scalar result owns no JSON.
+omni-ir/src/js.rs :: fn try_to_string(value: Option<&Value>) -> Result<String, Throws>	Borrowed JSON inspected with stack growth; shared writer returns owned string.

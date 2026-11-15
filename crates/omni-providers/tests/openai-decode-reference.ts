@@ -41,13 +41,26 @@ for(const value of malformedValues){
 }
 function textStart(){return m('response.content_part.added',{part:{type:'output_text'}});}
 for(const item of [undefined,null,{}, {id:'id'}, {type:'function_call'}, {type:'reasoning'}, {type:'unknown'}])add('coercion-item',m('response.output_item.added',{item})+m('response.output_item.done',{item})+end);
+for(const v of [{toString:null},{toString:1},{toString:[],valueOf:0}]) {
+ add('shadow-coercion',textStart()+m('response.output_text.delta',{delta:v})+m('response.completed',{}));
+ add('shadow-error',m('error',{error:{message:v}}));
+}
+const shadow={toString:null};
+for(const field of ['id','model'])add('throw-'+field,text+m('response.created',{response:{[field]:shadow}})+end);
+for(const field of ['call_id','name'])add('throw-'+field,text+m('response.output_item.added',{item:{type:'function_call',[field]:shadow}})+end);
+for(const native of [false,true])for(const event of ['response.output_text.delta','response.function_call_arguments.delta','response.reasoning_summary_text.delta'])add('throw-delta',text+m(event,{delta:[[shadow]]})+end,native);
+add('throw-reason',text+m('response.incomplete',{response:{incomplete_details:{reason:shadow}}}));
+add('throw-status',text+m('response.completed',{response:{status:shadow}}));
+for(const field of ['code','type','message'])add('throw-error-'+field,text+m('error',{error:{[field]:shadow}}));
+for(const field of ['input_tokens','cached_tokens','fallback_cached_tokens'])add('throw-usage-'+field,text+m('response.completed',{response:{usage:field==='input_tokens'?{input_tokens:shadow}:field==='cached_tokens'?{input_tokens_details:{cached_tokens:shadow}}:{prompt_tokens_details:{cached_tokens:shadow}}}}));
+for(const field of ['output_index','content_index'])for(const event of ['response.content_part.added','response.content_part.done','response.output_text.delta','response.output_item.added','response.function_call_arguments.delta','response.reasoning_summary_text.delta'])add('throw-index',text+m(event,{[field]:shadow,part:{type:'output_text'},item:{type:'reasoning'},delta:'x'})+end);
 for(const c of cases){
  const bytes=new TextEncoder().encode(c.wire);
  let expected:string|undefined;
  let originalEvents:any[]=[];
  for(const chunk of [bytes.length||1,1,7]){
   const body=new ReadableStream({start(controller){for(let i=0;i<bytes.length;i+=chunk)controller.enqueue(bytes.slice(i,i+chunk));controller.close();}});
-  const events=[];for await(const e of decodeResponses(parseSse(body),{nativeReasoning:c.native}))events.push(e);
+  const events=[];try {for await(const e of decodeResponses(parseSse(body),{nativeReasoning:c.native}))events.push(e);} catch(e) {if (!(e instanceof TypeError)) throw e;c.throws=true;}
   const encoded=JSON.stringify(events);if(expected!==undefined&&expected!==encoded)throw new Error('TS chunk dependence');expected=encoded;
   originalEvents=events;
  }

@@ -161,11 +161,24 @@ fn compare_decoder_mode(malformed_usage: bool, codec: bool) {
             };
             let mut out = VecDeque::new();
             let mut stopped = false;
+            let mut threw = false;
             for m in messages {
-                if matches!(decoder.message(&m, &mut out).expect("decode"), Flow::Stop) {
-                    stopped = true;
-                    break;
+                match decoder.message(&m, &mut out) {
+                    Ok(Flow::Continue) => {}
+                    Ok(Flow::Stop) => {
+                        stopped = true;
+                        break;
+                    }
+                    Err(omni_providers::codec::DecodeError::Throw(_)) => {
+                        threw = true;
+                        stopped = true;
+                        break;
+                    }
+                    Err(e) => panic!("unexpected error: {e:?}"),
                 }
+            }
+            if threw != row["throws"].as_bool().unwrap_or(false) {
+                mismatches.push(format!("{i}/{chunk}/throw"));
             }
             if !stopped {
                 decoder.finish(&mut out);

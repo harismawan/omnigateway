@@ -32,6 +32,35 @@ pub fn to_string(value: Option<&Value>) -> String {
     out
 }
 
+/// A JSON value's JavaScript ToPrimitive conversion threw TypeError.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Throws;
+
+/// Fallible `String(value)`, including own non-callable `toString` properties.
+pub fn try_to_string(value: Option<&Value>) -> Result<String, Throws> {
+    check_primitive(value)?;
+    Ok(to_string(value))
+}
+
+fn check_primitive(value: Option<&Value>) -> Result<(), Throws> {
+    match value {
+        Some(Value::Object(map)) if map.contains_key("toString") => Err(Throws),
+        Some(Value::Array(items)) => crate::deep::grow(|| {
+            for item in items {
+                check_primitive(Some(item))?;
+            }
+            Ok(())
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Fallible `Number(value)`. Existing infallible callers retain their behavior.
+pub fn try_to_number(value: Option<&Value>) -> Result<f64, Throws> {
+    check_primitive(value)?;
+    Ok(to_number(value))
+}
+
 fn push_string(value: Option<&Value>, out: &mut String) {
     match value {
         None => out.push_str("undefined"),

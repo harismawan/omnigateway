@@ -1,5 +1,44 @@
 # Malformed upstream fields: item 2 checkpoint
 
+## Decoder throwing coercions (review fix)
+
+`try_to_string` / `try_to_number` reject JSON objects with an own `toString`
+key, including such objects reached through array join; other objects retain
+the shared writer's `[object Object]`. Infallible callers are unchanged.
+Bun 1.4.4: twelve JSON.parse probes confirmed null/number/string/array/object
+shadows throw TypeError for both hints; valueOf alone and an own __proto__
+data property do not. Probe source/output: `/tmp/opencode/b3/decode-fix-probes.*`.
+One bisection observed array join's first RangeError at depth 4257 (4256
+succeeded). This engine/stack-dependent threshold is a documented difference:
+Rust uses stack growth up to its existing JSON depth bound, not JSC's stack limit.
+
+Audit (frozen `openai/decode.ts` → Rust `openai/decode.rs`):
+
+| Frozen line/site | Rust line/site | Can throw? | Already yielded in this event |
+|---|---|---|---|
+|131 index template (output/content)|68 index|yes|none; done's second index follows native delta, but its primitive key already succeeded|
+|162 unknown-event template|118 format|no, SSE event is a string|none|
+|175–176 id/model|143–144 text|yes|none|
+|201 call_id/name|159–160 string|yes, after index|none|
+|222 text delta|184–186 index/text|yes, index first|none|
+|237/239 native/thinking delta|198–199 index/text|yes, index first|none|
+|247 tool delta|191–193 index/text|yes, index first|none|
+|314 reason|259 string|yes|none|
+|316 status|264 string|yes|none|
+|326 usage → ir/stream.ts:70 subtraction/Math.max|289/291 checked|input/cache yes; output is forwarded raw|none|
+|344 code/type|306 string|yes|none|
+|349 message|318 string|yes|none|
+
+Map string keys and Set identity operations add no coercions; strict comparisons,
+nullish selection and numeric next++ cannot throw on upstream JSON. The only
+imported coercion is usage subtraction (input before cached, including fallback).
+Raw nonnumeric output counts remain X1; they must not become decoder throws.
+Every earlier event remains queued on Throw; no finish or later event is emitted.
+Adapter source inspection confirms Throw becomes retryable UPSTREAM
+`openai codec decode threw` (adapter.rs:320–322).
+Added 36 streams (six exact reviewer shadows plus 30 site/ordering rows), each
+whole/one-byte/seven-byte, including prefix preservation and both reasoning modes.
+
 ## Request-side representation boundary: null numeric options
 
 The frozen OpenAI builder treats explicit `maxTokens: null` and

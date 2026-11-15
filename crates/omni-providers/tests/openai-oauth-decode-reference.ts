@@ -17,7 +17,8 @@ for(const row of rows) {
   for(const chunk of [new TextEncoder().encode(row.wire).length||1,1,7]) {
    const bytes=new TextEncoder().encode(row.wire);
    const body=new ReadableStream({start(c){for(let i=0;i<bytes.length;i+=chunk)c.enqueue(bytes.slice(i,i+chunk));c.close();}});
-   const events=[]; for await(const event of openaiCodec.decode({body,decodeState:built.decodeState,headers:new Headers()})) events.push(event);
+   const events=[]; let threw=false; try {for await(const event of openaiCodec.decode({body,decodeState:built.decodeState,headers:new Headers()})) events.push(event);} catch(e) {if (!(e instanceof TypeError)) throw e;threw=true;}
+   if(threw!==Boolean(row.throws)) throw new Error(`${row.category}: codec throw`);
    if(JSON.stringify(events)!==JSON.stringify(row.events)) throw new Error(`${row.category}: codec events ${oauth}/${chunk}`);
    const collected=collect(events);
    const json=[anthropicResponse(collected,'req'),openaiResponse(collected,'req',123),responsesResponse(collected,{requestId:'req',created:123,customToolNames:new Set()})].map(JSON.stringify);
