@@ -184,13 +184,31 @@ async fn expired_before_first_poll() {
 async fn slow_drip_uses_absolute_deadline() {
     let p = pool();
     let (body, mut peer) = pair(&p).await;
+    let started = tokio::time::Instant::now();
     body.finish_if_ready();
-    for byte in b"0\r\n" {
+    for (byte, step) in b"0\r\n".iter().zip([40, 40, 20]) {
         peer.write_all(&[*byte]).await.expect("drip");
         tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(40)).await;
+        tokio::time::advance(Duration::from_millis(step)).await;
     }
-    closed(&mut peer).await;
+    // Keep the paused clock at the absolute deadline while the reactor and
+    // drain task process EOF. A resetting timeout still has 80 ms left here.
+    let observer = tokio::spawn(async move {
+        closed(&mut peer).await;
+        tokio::time::Instant::now()
+    });
+    for _ in 0..1000 {
+        if observer.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        observer.is_finished(),
+        "peer not closed at absolute drain deadline"
+    );
+    let observed = observer.await.expect("close observer");
+    assert!(observed <= started + Duration::from_millis(100));
     assert_eq!(p.idle_count(), 0);
 }
 
