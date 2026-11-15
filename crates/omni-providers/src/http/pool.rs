@@ -50,6 +50,13 @@ impl Default for PoolLimits {
 pub(crate) enum Conn {
     Plain(TcpStream),
     Tls(Box<TlsStream<TcpStream>>),
+    Finishing(Box<CompletionConn>),
+}
+
+#[derive(Debug)]
+pub(crate) struct CompletionConn {
+    conn: Conn,
+    remaining: usize,
 }
 
 impl AsyncRead for Conn {
@@ -61,6 +68,19 @@ impl AsyncRead for Conn {
         match self.get_mut() {
             Conn::Plain(s) => Pin::new(s).poll_read(cx, buf),
             Conn::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+            Conn::Finishing(s) => {
+                if s.remaining == 0 {
+                    return Poll::Ready(Err(io::Error::other("completion drain limit")));
+                }
+                let mut scratch = [0; 16 * 1024];
+                let len = scratch.len().min(s.remaining).min(buf.remaining());
+                let mut limited = ReadBuf::new(&mut scratch[..len]);
+                let result = Pin::new(&mut s.conn).poll_read(cx, &mut limited);
+                let n = limited.filled().len();
+                s.remaining -= n;
+                buf.put_slice(limited.filled());
+                result
+            }
         }
     }
 }
@@ -74,6 +94,7 @@ impl AsyncWrite for Conn {
         match self.get_mut() {
             Conn::Plain(s) => Pin::new(s).poll_write(cx, buf),
             Conn::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+            Conn::Finishing(s) => Pin::new(&mut s.conn).poll_write(cx, buf),
         }
     }
 
@@ -81,6 +102,7 @@ impl AsyncWrite for Conn {
         match self.get_mut() {
             Conn::Plain(s) => Pin::new(s).poll_flush(cx),
             Conn::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+            Conn::Finishing(s) => Pin::new(&mut s.conn).poll_flush(cx),
         }
     }
 
@@ -88,11 +110,25 @@ impl AsyncWrite for Conn {
         match self.get_mut() {
             Conn::Plain(s) => Pin::new(s).poll_shutdown(cx),
             Conn::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+            Conn::Finishing(s) => Pin::new(&mut s.conn).poll_shutdown(cx),
         }
     }
 }
 
 impl Conn {
+    pub(super) fn finishing(self, remaining: usize) -> Self {
+        Self::Finishing(Box::new(CompletionConn {
+            conn: self,
+            remaining,
+        }))
+    }
+
+    pub(super) fn finished(self) -> Self {
+        match self {
+            Self::Finishing(s) => s.conn,
+            conn => conn,
+        }
+    }
     /// Whether an idle connection can carry another request: the peer has not
     /// closed it and has sent nothing unsolicited. Never blocks.
     fn still_idle(&mut self) -> bool {
@@ -132,6 +168,8 @@ pub(crate) struct Pool {
     tls: OnceLock<TlsConnector>,
     roots: Option<rustls::RootCertStore>,
     drains: Mutex<tokio::task::JoinSet<()>>,
+    #[cfg(test)]
+    pub(super) active_drains: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for Pool {
@@ -166,6 +204,8 @@ impl Pool {
             tls: OnceLock::new(),
             roots,
             drains: Mutex::new(tokio::task::JoinSet::new()),
+            #[cfg(test)]
+            active_drains: Arc::default(),
         }
     }
 
@@ -188,8 +228,12 @@ impl Pool {
         }
         let weak = Arc::downgrade(pool);
         let deadline = Instant::now() + DRAIN_TIMEOUT;
+        #[cfg(test)]
+        let guard = DrainGuard::new(pool.active_drains.clone());
         drains.spawn_on(
             async move {
+                #[cfg(test)]
+                let _guard = guard;
                 let _completion = tokio::time::timeout_at(deadline, body.drain(weak, key)).await;
             },
             &runtime,
@@ -331,6 +375,22 @@ impl Pool {
                 Ok(Conn::Tls(Box::new(tls)))
             }
         }
+    }
+}
+
+#[cfg(test)]
+struct DrainGuard(Arc<std::sync::atomic::AtomicUsize>);
+#[cfg(test)]
+impl DrainGuard {
+    fn new(count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(count)
+    }
+}
+#[cfg(test)]
+impl Drop for DrainGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

@@ -115,3 +115,31 @@ async fn drain_capacity_and_pool_shutdown() {
         closed(s).await;
     }
 }
+
+#[tokio::test]
+async fn pool_shutdown_tasks_joined() {
+    let client = Client::new();
+    let count = client.pool.active_drains.clone();
+    let (body, mut peer) = pair(&client.pool).await;
+    body.finish_if_ready();
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while count.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("task future destroyed");
+    closed(&mut peer).await;
+}
+
+#[test]
+fn finish_without_runtime_closes() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let p = pool();
+    let (body, mut peer) = runtime.block_on(pair(&p));
+    body.finish_if_ready();
+    assert_eq!(p.drain_test_count(), 0);
+    runtime.block_on(closed(&mut peer));
+}

@@ -413,6 +413,17 @@ mod responses_probe {
 
     #[tokio::test]
     async fn drain_forged_response_isolation() {
+        isolation("forged").await;
+    }
+    #[tokio::test]
+    async fn never_terminator_next_request_isolated() {
+        isolation("never").await;
+    }
+    #[tokio::test]
+    async fn drain_eof_completed_client_unaffected() {
+        isolation("eof").await;
+    }
+    async fn isolation(mode: &'static str) {
         tokio::time::timeout(Duration::from_secs(5), async {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let addr = listener.local_addr().expect("addr");
@@ -425,7 +436,10 @@ mod responses_probe {
                 let own = body("own0");
                 first.write_all(format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{own}\r\n",own.len()).as_bytes()).await.expect("first body");
                 release.await.expect("client completed");
-                first.write_all(b"0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nPOISON").await.expect("forged response");
+                if mode == "forged" {
+                    first.write_all(b"0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nPOISON").await.expect("forged response");
+                }
+                if mode == "eof" { first.shutdown().await.expect("upstream EOF"); }
                 let mut byte = [0];
                 assert_eq!(first.read(&mut byte).await.unwrap_or(0),0);
                 closed.send(()).expect("closed signal");
