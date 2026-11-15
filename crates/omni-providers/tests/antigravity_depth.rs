@@ -160,9 +160,9 @@ fn shallow_builds_do_not_grow_stack() {
             }
             assert_eq!(deep::grows(), before);
         })
-        .unwrap()
+        .expect("fixture")
         .join()
-        .unwrap();
+        .expect("fixture");
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn opaque_positions_on_small_stack() {
                 let mut request: ChatRequest = serde_json::from_value(
                     json!({"model":"m","stream":true,"messages":[],"tools":[]}),
                 )
-                .unwrap();
+                .expect("fixture");
                 let mut nested = Value::Null;
                 for _ in 0..39_990 {
                     nested = Value::Array(vec![nested]);
@@ -198,86 +198,87 @@ fn opaque_positions_on_small_stack() {
                     data,
                     cache_control: None,
                 };
-                let block =
-                    match position {
-                        "native" | "system_native" => {
-                            Some(ContentBlock::ProviderNative(native(map)))
-                        }
-                        "result_native" => Some(ContentBlock::ToolResult(ToolResultBlock {
-                            tool_use_id: "i".into(),
-                            content: "".into(),
-                            images: None,
-                            files: None,
-                            native: Some(vec![native(map)]),
-                            is_error: None,
-                            cache_control: None,
-                        })),
-                        "citations" => Some(ContentBlock::Text(TextBlock {
-                            text: "".into(),
-                            cache_control: None,
-                            citations: Some(vec![Value::Object(map)]),
-                        })),
-                        "options" | "schema_free" => {
-                            let mut schema = serde_json::Map::new();
-                            if position == "schema_free" {
-                                deep::insert(
-                                    &mut schema,
-                                    "default".into(),
-                                    Value::Object(deep::clone_map(&map)),
-                                );
-                            }
-                            request.tools.as_mut().unwrap().push(ToolDef::Portable(
-                                CustomToolDef {
-                                    name: "n".into(),
-                                    description: None,
-                                    input_schema: Value::Object(schema),
-                                    cache_control: None,
-                                    options: Some(map),
-                                },
-                            ));
-                            None
-                        }
-                        "provider_tool" => {
-                            request.tools.as_mut().unwrap().push(ToolDef::Provider(
-                                ProviderToolDef {
-                                    provider: "p".into(),
-                                    tool_type: "x".into(),
-                                    name: "n".into(),
-                                    wire: map,
-                                    cache_control: None,
-                                    family: None,
-                                },
-                            ));
-                            None
-                        }
-                        "headers" => {
-                            request.provider_headers = Some(map);
-                            None
-                        }
-                        "response_free" => {
-                            let mut value = Value::Object(map);
-                            for key in ["default", "schema", "json_schema"] {
-                                let mut m = serde_json::Map::new();
-                                deep::insert(&mut m, key.into(), value);
-                                value = Value::Object(m);
-                            }
+                let block = match position {
+                    "native" | "system_native" => Some(ContentBlock::ProviderNative(native(map))),
+                    "result_native" => Some(ContentBlock::ToolResult(ToolResultBlock {
+                        tool_use_id: "i".into(),
+                        content: "".into(),
+                        images: None,
+                        files: None,
+                        native: Some(vec![native(map)]),
+                        is_error: None,
+                        cache_control: None,
+                    })),
+                    "citations" => Some(ContentBlock::Text(TextBlock {
+                        text: "".into(),
+                        cache_control: None,
+                        citations: Some(vec![Value::Object(map)]),
+                    })),
+                    "options" | "schema_free" => {
+                        let mut schema = serde_json::Map::new();
+                        if position == "schema_free" {
                             deep::insert(
-                                value.as_object_mut().unwrap(),
-                                "type".into(),
-                                json!("json_schema"),
+                                &mut schema,
+                                "default".into(),
+                                Value::Object(deep::clone_map(&map)),
                             );
-                            for key in ["response_format", "openai"] {
-                                let mut m = serde_json::Map::new();
-                                deep::insert(&mut m, key.into(), value);
-                                value = Value::Object(m);
-                            }
-                            if let Value::Object(m) = value {
-                                request.vendor = Some(m);
-                            }
-                            None
                         }
-                        _ => unreachable!(),
-                    };
+                        request
+                            .tools
+                            .as_mut()
+                            .expect("fixture")
+                            .push(ToolDef::Portable(CustomToolDef {
+                                name: "n".into(),
+                                description: None,
+                                input_schema: Value::Object(schema),
+                                cache_control: None,
+                                options: Some(map),
+                            }));
+                        None
+                    }
+                    "provider_tool" => {
+                        request
+                            .tools
+                            .as_mut()
+                            .expect("fixture")
+                            .push(ToolDef::Provider(ProviderToolDef {
+                                provider: "p".into(),
+                                tool_type: "x".into(),
+                                name: "n".into(),
+                                wire: map,
+                                cache_control: None,
+                                family: None,
+                            }));
+                        None
+                    }
+                    "headers" => {
+                        request.provider_headers = Some(map);
+                        None
+                    }
+                    "response_free" => {
+                        let mut value = Value::Object(map);
+                        for key in ["default", "schema", "json_schema"] {
+                            let mut m = serde_json::Map::new();
+                            deep::insert(&mut m, key.into(), value);
+                            value = Value::Object(m);
+                        }
+                        deep::insert(
+                            value.as_object_mut().expect("fixture"),
+                            "type".into(),
+                            json!("json_schema"),
+                        );
+                        for key in ["response_format", "openai"] {
+                            let mut m = serde_json::Map::new();
+                            deep::insert(&mut m, key.into(), value);
+                            value = Value::Object(m);
+                        }
+                        if let Value::Object(m) = value {
+                            request.vendor = Some(m);
+                        }
+                        None
+                    }
+                    _ => unreachable!(),
+                };
                 if let Some(block) = block {
                     if position == "system_native" {
                         request.system = Some(vec![block]);
@@ -291,7 +292,10 @@ fn opaque_positions_on_small_stack() {
                 let credentials = Credentials {
                     access_token: Some("t".into()),
                     api_key: None,
-                    provider_data: json!({"projectId":"p"}).as_object().unwrap().clone(),
+                    provider_data: json!({"projectId":"p"})
+                        .as_object()
+                        .expect("fixture")
+                        .clone(),
                 };
                 let result = AntigravityCodec
                     .build_request(&CodecInput {
@@ -303,13 +307,13 @@ fn opaque_positions_on_small_stack() {
                         max_output_tokens: None,
                         request_started_at: None,
                     })
-                    .unwrap();
+                    .expect("fixture");
                 drop(result);
                 drop(request);
                 drop(credentials);
             })
-            .unwrap()
+            .expect("fixture")
             .join()
-            .unwrap();
+            .expect("fixture");
     }
 }

@@ -18,7 +18,7 @@ impl HttpClient for NoHttp {
 
 #[tokio::test]
 async fn build_throw_and_classified_refusal() {
-    let request = serde_json::from_value(serde_json::json!({"model":"m","stream":true,"messages":[],"tools":[{"kind":"portable","name":"t","inputSchema":null}]})).unwrap();
+    let request = serde_json::from_value(serde_json::json!({"model":"m","stream":true,"messages":[],"tools":[{"kind":"portable","name":"t","inputSchema":null}]})).expect("fixture");
     for token in [Some("t".to_owned()), None] {
         let has_token = token.is_some();
         let credentials = Credentials {
@@ -26,7 +26,7 @@ async fn build_throw_and_classified_refusal() {
             api_key: None,
             provider_data: serde_json::json!({"projectId":"p"})
                 .as_object()
-                .unwrap()
+                .expect("fixture")
                 .clone(),
         };
         let error = match send(

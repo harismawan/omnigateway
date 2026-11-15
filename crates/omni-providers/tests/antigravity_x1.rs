@@ -3,29 +3,29 @@ fn compare(label: &str) {
         .args(["--no-env-file", "tests/antigravity_x1-reference.ts"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
-        .unwrap();
+        .expect("fixture");
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&out.stdout).expect("fixture");
     let row = rows
         .as_array()
-        .unwrap()
+        .expect("fixture")
         .iter()
         .find(|r| r["label"] == label)
-        .unwrap();
+        .expect("fixture");
     // The oracle envelope escapes the raw input so Rust never normalizes it.
-    let input: serde_json::Value = serde_json::from_str(row["input"].as_str().unwrap())
+    let input: serde_json::Value = serde_json::from_str(row["input"].as_str().expect("fixture"))
         .expect("X1: lone UTF-16 surrogate must remain representable");
-    let request = serde_json::from_value(input["request"].clone()).unwrap();
+    let request = serde_json::from_value(input["request"].clone()).expect("fixture");
     let credentials = omni_providers::codec::Credentials {
         access_token: Some("t".into()),
         api_key: None,
         provider_data: serde_json::json!({"projectId":input["project"]})
             .as_object()
-            .unwrap()
+            .expect("fixture")
             .clone(),
     };
     let result = omni_providers::antigravity::codec::AntigravityCodec
@@ -38,10 +38,10 @@ fn compare(label: &str) {
             max_output_tokens: None,
             request_started_at: None,
         })
-        .unwrap();
+        .expect("fixture");
     assert_eq!(
         result.request.body,
-        row["expected"].as_str().unwrap(),
+        row["expected"].as_str().expect("fixture"),
         "X1: UTF-16 unit splitting"
     );
 }

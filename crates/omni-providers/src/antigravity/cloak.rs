@@ -107,7 +107,9 @@ impl ToolCloak {
                 base
             };
             *cloak.from_wire.entry(alias.clone()).or_default() = name.into();
-            cloak.name_index.insert(name.into(), cloak.to_wire.len());
+            cloak
+                .name_index
+                .extend([(name.into(), cloak.to_wire.len())]);
             cloak.to_wire.push((name.into(), alias));
         }
         cloak
