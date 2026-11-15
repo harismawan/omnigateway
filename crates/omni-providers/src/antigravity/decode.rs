@@ -50,7 +50,10 @@ fn length(v: &Value) -> Value {
     match v {
         Value::Array(a) => Value::from(a.len()),
         Value::String(s) => Value::from(s.encode_utf16().count()),
-        _ => v.get("length").cloned().unwrap_or(Value::Null),
+        _ => v
+            .get("length")
+            .map(omni_ir::deep::clone)
+            .unwrap_or(Value::Null),
     }
 }
 impl AntigravityDecoder {
@@ -130,7 +133,8 @@ impl AntigravityDecoder {
         }
         let empty = Value::Array(Vec::new());
         let candidates = nonnull(response.get("candidates")).unwrap_or(&empty);
-        let len = length(candidates);
+        let len_owner = omni_ir::deep::Owned(length(candidates));
+        let len = &len_owner.0;
         if response
             .get("promptFeedback")
             .and_then(|p| p.get("blockReason"))
@@ -158,13 +162,13 @@ impl AntigravityDecoder {
             let model = string(response.get("modelVersion"), "")?;
             out.push_back(StreamEvent::Start { id, model });
         }
-        if omni_ir::js::try_to_number(Some(&len))
+        if omni_ir::js::try_to_number(Some(len))
             .map_err(|_| DecodeError::Throw("JavaScript coercion threw"))?
             > 1.0
         {
             self.terminal = true;
             self.close(out);
-            let n = string(Some(&len), "")?;
+            let n = string(Some(len), "")?;
             return Ok(self.error(
                 out,
                 ErrorCode::Upstream,

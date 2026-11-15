@@ -129,3 +129,77 @@ using an ordinary recursive serde deserializer inside a 16 MiB scope SIGSEGV'd;
 the replacement builds the nested Value iteratively. That fixture failure is not
 evidence of a codec defect. The scope is defensive hardening, not a demonstrated
 crash fix. No product red commit is justified by these measurements.
+
+## Decoder port (turn5, frozen 1780bb39)
+
+1,020 SSE-byte corpus rows compare complete events and whether the generator throws;
+five additional depth rows compare tool JSON bytes, on a 2 MiB Rust thread.
+The oracle imports the frozen decoder and `parseSse`. Throw diagnostics are retained
+in the oracle; `DecodeError::Throw` delegates client-facing classification to the
+existing adapter (`antigravity codec decode threw`). No brief/code behavioral
+contradiction was found in the decoder reading.
+
+### Literal and branch audit
+
+Locations below are in `crates/omni-providers/src/antigravity/decode.rs`;
+pinning rows are named by `tests/antigravity_decode-reference.ts`.
+
+| Frozen lines / literals | Rust location | Pinning row |
+|---|---|---|
+| 40 STOP → endTurn | `inner`, reason match | `stop/STOP` |
+| 41 MAX_TOKENS → maxTokens | reason match | `stop/MAX_TOKENS` |
+| 42–46 SAFETY, PROHIBITED_CONTENT, SPII, BLOCKLIST, RECITATION → contentFilter | reason match | corresponding `stop/*` |
+| 51 RESOURCE_EXHAUSTED → RATE_LIMIT | status match | `error-code/RESOURCE_EXHAUSTED` |
+| 52–53 UNAUTHENTICATED, PERMISSION_DENIED → AUTH | status match | corresponding `error-code/*` and `wrapped-code/*` |
+| 54–55 INVALID_ARGUMENT, FAILED_PRECONDITION → BAD_REQUEST | status match | corresponding `error-code/*` |
+| 56–57 UNAVAILABLE, INTERNAL → UPSTREAM | status match default | corresponding `error-code/*` |
+| 58 DEADLINE_EXCEEDED → TIMEOUT | status match | `error-code/DEADLINE_EXCEEDED` |
+| 99–105 JSON object/array acceptance | bounded parse, frame shape guard | `frame/*`, `invalid` |
+| 108–126 finite numeric counts, zero fallback, prompt/cache subtraction | `usage` | `count-*/*`, `nonfinal-usage` |
+| 136–145 false flags, zero indices, open block closure | decoder state, `close` | `alternation`, `empty` |
+| 149 `[DONE]` | `inner` early return | `done` |
+| 159–172 nullish error precedence, empty status, `upstream error`, RETRYABLE | failure branch | `error/*`, `wrapped-error/*`, `failure-*/*` |
+| 175–189 absent response, blockReason, empty id/model, contentFilter | response/blocked branches | `response/*`, `blocked/*` |
+| 192–199 start id/model | start branch | `responseId/*`, `modelVersion/*` |
+| 201–217 zero/default candidates, multiple-candidate literal, retryable false | length check | `candidates/17`, `candidates/12` |
+| 220–224 candidate/content/parts nullish chain; iteration; null call throws | candidate/parts loop | `candidate/*`, `content/*`, `parts/*`, `part/*`, `functionCall/*` |
+| 225–255 toolUse, nonempty upstream id, `fc_`, toolJson, `{}`, blockEnd | tool branch | `alternation`, `id/*`, `args/*`, `raw-args/*`, `cloak` |
+| 258–277 string-only text, strict thought true, text/thinking blocks and deltas | text branch | `text/*`, `thought/*`, `alternation` |
+| 280–286 nullish finish, close before coercion | finish branch | `finishReason/*` |
+| 288–295 MALFORMED_FUNCTION_CALL, BAD_REQUEST, `the model emitted a malformed function call`, false | reason match | `stop/MALFORMED_FUNCTION_CALL` |
+| 298–307 unknown/prototype reason, UPSTREAM, `unrecognized Antigravity finish reason`, false | reason match default | `stop/unknown`, `stop/toString`, `stop/__proto__`, `stop/constructor`, `stop/hasOwnProperty` |
+| 309–318 toolUse outranks mapped finish; final-frame usage | end branch | `tool-stop/*`, `nonfinal-usage` |
+| 321–328 UPSTREAM, `upstream stream ended before the response finished`, true | `finish` | `empty`, `done`, `response/*` |
+
+### Throwing coercion sites
+
+| Frozen line | Rust site (line at audit) | Throwing row |
+|---|---|---|
+| 163 failure.status | `inner` status / 116 | `failure-status/18` |
+| 169 failure.message | `inner` message / 124 | `failure-message/18` |
+| 196 responseId | `inner` id / 160 | `responseId/18` |
+| 197 modelVersion | `inner` model / 161 | `modelVersion/18` |
+| 286 finishReason | `inner` raw / 258 | `finishReason/18` |
+
+All call `string` → `omni_ir::js::try_to_string`; already-yielded events remain
+queued on a throw. Null error/response/part/functionCall and noniterable parts
+also return `DecodeError::Throw`. Candidate length additionally uses JS numeric
+coercion for `> 1` and string coercion for the diagnostic.
+
+### Depth and retained differences
+
+Frozen Bun succeeded at args nesting 100, 1,000, 5,000, 10,000 and 39,990;
+Rust produced the same five-event sequence and identical tool JSON at every
+depth on a 2 MiB thread. Evidence: `/tmp/opencode/b4/turn5/depth.json` and
+`trait.log`. No stack-limit divergence was observed on this runtime.
+
+Retained-red X1 inputs: text `"\\ud800"`; functionCall args `"\\ud800"`;
+responseId numeric literal `1e309`. Separate ignored tests retain each case.
+Non-numeric usage is counted as zero here, so the ordinary corpus covers it
+without the shared nonnumeric-carrier gap.
+
+The inherent request entry point remains as a trait-forwarding compatibility
+shim: existing `antigravity_depth.rs` calls it without importing ProviderCodec,
+and that file is outside this task's edit scope. Request construction is unchanged.
+Gateway registration, profile initialize capture, OAuth and gateway e2e remain
+next work, after independent decode-side review.

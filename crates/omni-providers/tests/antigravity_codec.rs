@@ -38,7 +38,10 @@ fn codec_matches_frozen_ts() {
             max_output_tokens: None,
             request_started_at: None,
         };
-        match omni_providers::antigravity::codec::AntigravityCodec.build_request(&input) {
+        match ProviderCodec::build_request(
+            &omni_providers::antigravity::codec::AntigravityCodec,
+            &input,
+        ) {
             Ok(r) => {
                 assert!(row.get("error").is_none(), "row {i}");
                 assert_eq!(

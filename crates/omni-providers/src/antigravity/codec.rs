@@ -19,12 +19,24 @@ impl crate::codec::ProviderCodec for AntigravityCodec {
         omni_ir::deep::scope(|| self.build_request_scoped(input))
     }
 
-    fn decoder(&self, state: DecodeState, _headers: &crate::http::Headers) -> Box<dyn crate::codec::StreamDecoder> {
+    fn decoder(
+        &self,
+        state: DecodeState,
+        _headers: &crate::http::Headers,
+    ) -> Box<dyn crate::codec::StreamDecoder> {
         Box::new(super::decode::AntigravityDecoder::new(state.cloak))
     }
 }
 
 impl AntigravityCodec {
+    /// Compatibility entry point for existing request-side callers.
+    pub fn build_request(
+        &self,
+        input: &CodecInput<'_>,
+    ) -> Result<CodecRequest<DecodeState>, GatewayError> {
+        <Self as crate::codec::ProviderCodec>::build_request(self, input)
+    }
+
     fn build_request_scoped(
         &self,
         input: &CodecInput<'_>,
