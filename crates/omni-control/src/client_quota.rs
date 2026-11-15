@@ -256,6 +256,8 @@ fn write_history_cell(value: &Value, out: &mut String) {
 
 fn history_compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
+        (Value::Text(a), Value::Text(b)) if a == b => std::cmp::Ordering::Equal,
+        (Value::Text(a), Value::Text(b)) if a.is_ascii() && b.is_ascii() => a.cmp(b),
         (Value::Text(a), Value::Text(b)) => a.encode_utf16().cmp(b.encode_utf16()),
         _ => compare_cells(a, b),
     }
