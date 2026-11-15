@@ -95,8 +95,7 @@ async fn compatibility_throw_equals_adapter_all_fields_for_two_rows() {
                 request_started_at: None,
             },
         )
-        .err()
-        .expect("null schema must throw");
+        .expect_err("null schema must throw");
         let wrapped = match send(
             &AntigravityCodec,
             "antigravity",
