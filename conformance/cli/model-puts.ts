@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/model-puts-");
 console.log(root);
@@ -44,6 +45,7 @@ function snapshot(db: Database) {
   ).map(({ name }) => [name, db.query(`SELECT * FROM "${name}"`).all()]);
 }
 let count = 0;
+let successfulCommands = 0;
 async function compare(
   raw: string | Uint8Array,
   args = ["put", "m", "-f", "model.json", "--json"],
@@ -55,15 +57,23 @@ async function compare(
     await Bun.write(join(dir, "model.json"), raw);
     const db = new Database(join(dir, "db"));
     const before = snapshot(db);
-    const p = Bun.spawn([...(commands[i] ?? []), "--root", dir, "--db", "db", "models", ...args], {
-      cwd: dir,
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const p = goldenSpawn(
+      [...(commands[i] ?? []), "--root", dir, "--db", "db", "models", ...args],
+      {
+        cwd: dir,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
     const out = Buffer.from(await new Response(p.stdout).arrayBuffer());
     const err = Buffer.from(await new Response(p.stderr).arrayBuffer());
     const code = await p.exited;
+    if (code === 0 && !args.includes("--help")) successfulCommands++;
+    assert(
+      !err.includes("OMNI_PORT must"),
+      "unrelated configuration failure is not a model oracle",
+    );
     const rows = snapshot(db);
     db.close();
     if (code !== 0) assert.deepEqual(rows, before, "failed put atomicity");
@@ -365,4 +375,11 @@ if (!group || group === "M2") {
   ])
     await compare(JSON.stringify(model), args);
 }
+assert(successfulCommands > 0, "must exercise successful model puts");
 console.log(`PASS ${count} put comparisons`);
+
+await verifyGoldenExits("model-puts");
+
+// Run the same-exit substitution regression with the normal suite. The child
+// created by config-gate must not recursively launch another negative test.
+await import("./config-gate.ts");

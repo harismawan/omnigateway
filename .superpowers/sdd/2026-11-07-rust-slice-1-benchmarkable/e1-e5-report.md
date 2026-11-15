@@ -1,3 +1,87 @@
+## db21 current: local migrate implemented; copy deferred D4
+
+### db22 M1 fix round (current)
+
+Commits `bd4cde5b` (red-first regression), `8e7f2927` (shared reader fix),
+`f7e073bd` (test assertion diagnostic lint). Frozen raw JS Set membership now
+uses raw ValueRef: Integer→f64 and Real compare exactly against known IDs1..20;
+TEXT/invalid TEXT/NULL/BLOB never match. Fractional values are not rounded;
+numeric1.0 matches1; signed zero, infinities and large unknown numbers match none.
+Only membership is projected; original/duplicate/unknown ledger rows stay intact,
+and existing per-migration transactions/partial progress are unchanged.
+
+Committed `db-migrate-ledger.ts`:44 paired cases,26 RED mismatches against db21,
+then44 GREEN; pinned exits0=21/1=23. Includes malformed-only and full-schema
+refusal, all storage classes, duplicate/unknown IDs, reviewer populated schema
+1/5/9/19/20 logs (tokens7,cost1.25), commit19/fail20 partial progress. Exact
+streams/full-root before inspection; old cells retained byte/type-exact; only
+decoded/window-checked new timestamp cells and existing writer bytes normalized.
+New shared-store unit regression passes. Bun cell observation log explicitly
+checks +/-0, infinities, NaN→NULL and out-of-safe-integer Number conversion.
+
+Offline store/CLI/control tests:186 passed,0 failed,5 preexisting ignored;
+includes all5 existing migration conformance tests (every partial state plus
+rollback/newer-ledger). Gateway server/boot tests40 passed. Store/CLI/control
+all-target clippy-Dwarnings and fmt pass after test-only expect diagnostic fix.
+Gateway all-target clippy-Dwarnings also passes. Full package suite runs without
+an external Postgres service; its conditional PG tests do not certify live PG.
+Invalid-port new suite exits1 and rejects44 unexpected port diagnostics.
+Single final matrix **47/47 drivers exit0** (prior46 plus ledger); no duplicate
+matrix. Final scan **57 logs, zero FAILED/panicked/^error matches**; expected
+red evidence separate (27 regression-log matches,8 initial lint-log matches).
+Original migrate negative also exits1 with34 port diagnostics. Final binary
+SHA256 `580f3f701363d8b44f41067a7260914a0a2ee50117638351c86cea2246a86d88`,
+product source `8e7f2927`; final HEAD `f7e073bd` changes only test diagnostics.
+End disk1.2GB, sole dirty file this unstaged report. No push/merge.
+Evidence `/tmp/opencode/e1-e5/db22-*`; exact provenance `db22-source-manifest.json`.
+Report remains unstaged; prior db21 history below preserved. Re-review required,
+then controller-owned semantic main conflicts/post-merge gates; no merge done.
+
+Append-only commits `a94bcee0`, `68d15a3d`, `5fa640c8`, `69e7c951`,
+`c4287040`. Frozen mapping `apps/cli/src/commands/db.ts:46–115`: registry/parser
+dispatch no--to to existence-before-open, shared real migrations, then
+`get_settings`, exact JSON/human output. No stopped-gateway guard added.
+Lazy config error ordering retained; SQLite migration error wrappers removed
+only for this command. `--to` prefix/service/confirmation refusals implemented;
+accepted copy explicitly unsupported before either store opens. No TS copy
+parity claimed. Existing approved DB handlers retained.
+
+Regression `db-migrate.ts`: 41 paired cases, every schema prefix 0..20 opened by
+the real CLI, credential/settings retention, new/current/old created flag,
+settings-read failure, malformed schema/ledger/database, config/key errors,
+human/JSON/argv, running gateway, symlinks and PTY decline. Both streams, exits
+and full-root pre-inspection captures compared. Normalizations limited to
+existing writer-version bytes and decoded/window-checked ledger clock cells.
+Pinned exits 0=28 / 1=11 / 2=2; config categories key=1 / port=1 / open=1.
+Two Rust-only accepted-copy boundary cases require exact exit1/no root writes.
+Red evidence `db21-red.log`: 41 mismatches against previous db20 binary.
+
+Evidence `/tmp/opencode/e1-e5/db21-*`, detailed account `db21-account.md`.
+Offline test gates 4 CLI +30 control; clippy all-targets -Dwarnings and fmt pass.
+Eleven invalid-port suites exit1; new suite rejects 34 port diagnostics despite
+paired equality. Negative scan: zero FAILED/panicked/^error matches. C3 retained
+fixture proof passes under the same narrow accepted boundary. Final copied
+binary source `69e7c951`, SHA256
+`636221faa270c4103cc944b334f3b427da109ed3e567fbf628621fae9396fa51`.
+`c4287040` only updates help's implemented-handler classification.
+Single final pinned matrix completed: **46/46 drivers exit0**;
+`db21-final-verified-summary.txt`. Final scan **51 logs, zero
+FAILED/panicked/^error matches**, `db21-final-scan.json`. No duplicate matrix.
+End HEAD `c42870405fa30a7844d035a2f4a5bf05ca2ed2b8`; sole dirty file is this
+controller-owned report, intentionally unstaged. Binary hash unchanged.
+
+Roadmap remainder: E2 credentials/connect; E3 logs/export/usage/bodies/console/
+quota; E4 process/service/doctor; A12 models dry-run; A7 agent-setup after CLI
+branch merge; `--to` orchestration/lifecycle/copy/reporting deferred D4.
+Whole-branch independent review still required; no whole-CLI completion claim.
+This current block supersedes historical migrate-unavailable statements below.
+Coverage boundary: prefix fixtures retain credential/settings rows but do not
+seed populated request-log backfills. Prior restore C3/K3/K6/K8 limitations
+remain unchanged. Final matrix provenance is split explicitly between binary
+source `69e7c951` and test-only help correction `c4287040`, which landed during
+the one matrix run before its help driver; see `db21-final-source-manifest.json`.
+
+
 ## Database write commands
 
 ### db restore swap
@@ -1377,3 +1461,37 @@ step 2. No running jobs remain.
   write outside the owned worktree (other than evidence/build dependencies).
 - Independent review remains required. This is a two-step partial result, not
   completion of E1–E5 or the CLI migration.
+
+## Historical checkpoint lines kept from the feat/rust-cli-e1-e5 copy of this report
+
+Merged by the controller: these lines existed only in the branch copy (db2–db6 checkpoints, superseded by the blocks above).
+
+**db6 checkpoint: restore groups 1–3 complete (`cb412bfc`, `006a6986`); 17 comparisons, histogram exit 2=1 / exit 1=14 / exit 0=2. Groups 4–5 remain. Canonical detailed report updated at `/home/homebrew/code/omnigateway/.superpowers/sdd/2026-11-07-rust-slice-1-benchmarkable/e1-e5-report.md`.**
+- Group-2 absent-ID red; group-3 schema acceptance red (dry-run parser), then JSON ordering fixed. Other candidate refusals already passed group-2 inspection. TS accepts older/newer schema IDs.
+- Truncated WAL-mode candidate creates -wal/-shm in TS; Rust matches byte-identical post-state. All other restore cases unchanged. OMNI_PORT=invalid now fails histogram with eight environment failures.
+- Code commit 006a69863292384af9924fd65c37b02da8d75e2d: offline tests 27 passed, clippy/fmt passed; foreground matrix 32/32, /tmp/opencode/e1-e5/db6-verified-summary.txt. Binary db6-omni-final SHA256 2bff39eded4492d4483a2107fb85f9496d50562232cc6c02b8ee6ba5e364a431.
+- Next: human preview plus frozen formatter unit goldens (union/missing/null), stderr ordering and confirmation cases; Rust-only yes refusal test. Valid non-JSON-dry-run paths currently unavailable. Only then begin swap with revalidation, undo/staging failure injection; remaining failure-state rows are swap work. No swap implemented.
+| Command | Current status |
+| backup / vacuum / clear-bodies | implemented; 24 / 4 / 10 cases |
+| restore | group 1 complete: 3 cases; groups 2–5 pending |
+- Shared service-status gate; missing ID exit 2 and running gateway messages with/without PID match TS. Registry/help updated. Each differential case verifies live/sidecar/snapshot bytes and directory listing unchanged.
+- Red-first missing-ID case failed on exit, then wording; PID case caught numeric representation bug. Supervisor case not independently run red. Green: 3 comparisons, pinned exit 2=1 / exit 1=2. No TS refusal-state changes observed; nonempty WAL not injected.
+- Candidate-validation failure row remains untested; undo/staging/swap/reopen/metadata rows belong to swap increment. All stopped-gateway inputs currently unavailable, including dry-run; no preview/prompt or Rust-only yes test yet.
+- OMNI_PORT=invalid still passes these early-gate cases; negative disturbance pending group 2 database-open case.
+- Code binary `9365d16eac4c60cf4bd3ee93740b4bd914b6bf8a`: `/tmp/opencode/e1-e5/db5-omni-final`, SHA256 `9d3b7b8ba053677ecd772782cc3e5b4b0ba3a16eafec911cf405c6f19d307c04`.
+- Offline tests 27 passed; clippy -D warnings/fmt passed. Foreground latest matrix plus restore 32/32 exit=0, `/tmp/opencode/e1-e5/db5-verified-summary.txt`. Logs db5-*; fixtures removed.
+- Next: group-2 refusal cases red first (absent/separator/traversal/outside symlink/directory/empty); pass positional ID into database.rs, inspect snapshotPath/store inspection, implement control validation under exclusive guard. Then candidate integrity/schema, preview and confirmation; yes must remain unavailable with Rust-only invariance test. Swap follows only afterward, starting validation recheck/undo/staging failure injections.
+### Previous checkpoint (historical)
+
+**Partial checkpoint (db2/A7). A1–A4 and A7 complete; A5 partial; B and A6 open. Next: finish A5 deterministic CLI collision and live-WAL refusal coverage, then B, A6. db restore: not started.**
+| db backup | ea7cb71b; 71473672; aa9e2588; 254c3076; 679e399b; 54e11aaa; 59366f8a; 43b96666 | db-backup.ts / 22 | A1–A4, A7 complete; A5 partial |
+| db clear-bodies | none | none | unavailable |
+| Candidate validation | swap not entered; live store already opened by CLI | command unavailable, untouched | not written |
+- A5 partial in 59366f8a: injected free-bytes callback; control tests cover threshold minus one/exact/plus one and unknown, with nonempty WAL byte-invariance on refusal. Corrupt table-page golden exercises both CLIs' VACUUM failure, identical live/-wal/-shm bytes, empty snapshot directory; unit probe proves raw SQLite creates partial output before error. Collision and transaction refusal unit assertions now check live bytes too. Collision through both CLIs, live-WAL differential refusals, prune-unlink/busy errors remain open. No full-disk CLI injection; space refusal unit-only. These additions passed existing behavior; no red product defect claimed.
+- No process-local exclusive maintenance latch in the new control module yet; single-shot CLI use is covered, concurrent admin reuse needs it.
+- CLI clock has no injection option; only timestamp-derived fields/names are masked in backup. Vacuum masks measured duration. Control receives one clock callback. No new environment variable.
+- Terminal confirmation and clear-bodies orphan handling remain to implement.
+- Clear-bodies continuation detail: frozen `bodies.prune(now)` selects `at < now`, not an unconditional DELETE; future/same-instant rows survive despite the question saying every body. Preserve that boundary and orphan re-check (`bodies.ts:150–155,191–209`).
+Current gate counts: backup 22 (includes four listing/backup tie comparisons), vacuum 4; four database control unit tests. Changed backup and password-bytes suites fail under OMNI_PORT=invalid (`db2-a7-disturbance.log`, `db2-a7-password-disturbance.log`); shared guards/histogram retained. No clear-bodies suite yet.
+Binary source commit `43b96666bb7476801266869e3f9a34e9dd5b945b`; `/tmp/opencode/e1-e5/db2-a7-omni-final`, SHA256 `257b24b9981801d6348c07efbb44621dad955a1766f3ca4000ff544bddc27149`. Fresh abort binary `db2-a7-omni-final-abort`, SHA256 `b582ae6b231f67f8b8b9d5a66bc9651cdb294fff7dd3f2a8c62b1732e4cfef09`.
+On final code commit: offline tests 26 passed; clippy all-targets -D warnings and fmt passed (`db2-a7-test.log`, `db2-a7-clippy.log`, `db2-a7-fmt.log`), incremental/debug=0. Foreground matrix 30/30 exit=0, summary read: `/tmp/opencode/e1-e5/db2-a7-verified-summary.txt`; script `db2-a7-matrix.sh`. No failed matrix logs. Suite fixtures self-clean; no new suite added. Report-only checkpoint follows verification.

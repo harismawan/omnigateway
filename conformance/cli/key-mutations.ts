@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { join, resolve } from "node:path";
 import { createStore, deriveKey, hashApiKey, keyUsable } from "../../packages/store/src/index.ts";
 import { requestLog } from "../../packages/testkit/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/key-mutations-");
 const repo = resolve(import.meta.dir, "../..");
@@ -261,7 +262,7 @@ try {
       const command = commands[i];
       const dir = roots[i];
       assert(command && dir);
-      const proc = Bun.spawn([...command, "keys", ...args, "--root", dir, "--db", "db"], {
+      const proc = goldenSpawn([...command, "keys", ...args, "--root", dir, "--db", "db"], {
         cwd: roots[i],
         env,
         stdin: "pipe",
@@ -326,7 +327,7 @@ try {
       db.run("UPDATE api_keys SET model_allowlist=?, revoked_at=NULL WHERE id='k'", [value]);
       db.close();
       for (const json of [false, true]) {
-        const proc = Bun.spawn(
+        const proc = goldenSpawn(
           [
             ...command,
             "keys",
@@ -369,7 +370,7 @@ try {
         "UPDATE api_keys SET limits='broken',model_allowlist=NULL,revoked_at=NULL WHERE id='k'",
       );
       db.close();
-      const p = Bun.spawn([...command, "keys", ...args, "--root", dir, "--db", "db"], {
+      const p = goldenSpawn([...command, "keys", ...args, "--root", dir, "--db", "db"], {
         cwd: dir,
         env,
         stdout: "pipe",
@@ -419,7 +420,7 @@ try {
       const dir = roots[i],
         command = commands[i];
       assert(dir && command);
-      const p = Bun.spawn(
+      const p = goldenSpawn(
         [...command, "keys", "limits", "k", ...extra, "--root", dir, "--db", "db"],
         { cwd: dir, env, stdout: "pipe", stderr: "pipe" },
       );
@@ -451,7 +452,7 @@ try {
       const db = new Database(join(dir, "db"));
       db.run("UPDATE api_keys SET limits='broken',revoked_at=NULL WHERE id='k'");
       db.close();
-      const p = Bun.spawn(
+      const p = goldenSpawn(
         [
           "python3",
           join(repo, "conformance/cli/pty.py"),
@@ -518,7 +519,7 @@ try {
       db.run("DELETE FROM api_keys");
       db.close();
       const before = Date.now();
-      const proc = Bun.spawn(
+      const proc = goldenSpawn(
         [...command, "keys", "create", ...flags, "--root", dir, "--db", "db"],
         { cwd: dir, env, stdout: "pipe", stderr: "pipe" },
       );
@@ -562,7 +563,7 @@ try {
           hash: "<sha256>",
           created_at: "<time>",
         });
-        const listing = Bun.spawn(
+        const listing = goldenSpawn(
           [...command, "keys", "list", "--json", "--root", dir, "--db", "db"],
           { cwd: dir, env, stdout: "pipe", stderr: "pipe" },
         );
@@ -589,3 +590,5 @@ try {
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
+
+await verifyGoldenExits("key-mutations");

@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, DEFAULT_SETTINGS, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/settings-golden-");
 const repo = resolve(import.meta.dir, "../..");
@@ -29,12 +30,13 @@ for (const dir of roots) {
     db.run("INSERT INTO settings(key,value) VALUES (?,?)", [key, "secret-sentinel"]);
   db.close();
 }
+let successfulCommands = 0;
 async function run(i: number, args: string[], dir = roots[i]) {
   const command = commands[i];
   assert(dir && command);
   const db = new Database(join(dir, "db"));
   const before = db.query("SELECT * FROM settings ORDER BY key").all();
-  const p = Bun.spawn([...command, "--root", dir, "--db", "db", "settings", ...args], {
+  const p = goldenSpawn([...command, "--root", dir, "--db", "db", "settings", ...args], {
     cwd: dir,
     env,
     stdout: "pipe",
@@ -43,6 +45,11 @@ async function run(i: number, args: string[], dir = roots[i]) {
   const out = Buffer.from(await new Response(p.stdout).arrayBuffer());
   const err = Buffer.from(await new Response(p.stderr).arrayBuffer());
   const code = await p.exited;
+  if (code === 0 && !args.includes("--help")) successfulCommands++;
+  assert(
+    !err.includes("OMNI_PORT must"),
+    "unrelated configuration failure is not a settings oracle",
+  );
   const rows = db.query("SELECT * FROM settings ORDER BY key").all();
   db.close();
   if (code !== 0) assert.deepEqual(rows, before, "invalid mutation atomicity");
@@ -206,6 +213,9 @@ assert.deepEqual(
   await run(0, ["get", "--json"], roots[1]),
   await run(1, ["get", "--json"], roots[0]),
 );
+assert(successfulCommands > 0, "must exercise successful settings commands");
 console.log(
   `PASS ${count} settings raw-byte/status/whole-row comparisons; crossread; artifacts ${root}`,
 );
+
+await verifyGoldenExits("settings");

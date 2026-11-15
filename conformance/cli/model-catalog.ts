@@ -16,6 +16,7 @@ import {
 import { join, resolve } from "node:path";
 import { PROVIDER_DESCRIPTORS } from "../../packages/providers/src/descriptors.ts";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/model-catalog-");
 console.log(root);
@@ -90,6 +91,7 @@ type Options = {
   readOnly?: boolean;
 };
 let count = 0;
+let successfulCommands = 0;
 let red = 0;
 async function compare(args: string[], options: Options = {}) {
   const { pty = false, rootEnv = false, db = true, extraEnv = {}, prefix = [] } = options;
@@ -110,7 +112,7 @@ async function compare(args: string[], options: Options = {}) {
     ];
     const runEnv = { ...env, ...(rootEnv ? { OMNI_ROOT: dir } : {}), ...extraEnv };
     for (const [k, v] of Object.entries(runEnv)) if (v === undefined) delete runEnv[k];
-    const p = Bun.spawn(
+    const p = goldenSpawn(
       pty ? ["python3", join(repo, "conformance/cli/pty.py"), "", ...command] : command,
       { cwd: dir, env: runEnv, stdout: "pipe", stderr: "pipe" },
     );
@@ -120,6 +122,7 @@ async function compare(args: string[], options: Options = {}) {
     const out = own(await new Response(p.stdout).arrayBuffer());
     const err = own(await new Response(p.stderr).arrayBuffer());
     const code = await p.exited;
+    if (code === 0 && !args.includes("--help")) successfulCommands++;
     const rows = [snapshot(join(dir, "db")), snapshot(join(dir, "omnigateway.db"))];
     const status = pty ? JSON.parse(out.toString()).code : code;
     assert.deepEqual(readdirSync(dir).sort(), files, "no files created");
@@ -603,7 +606,7 @@ for (const [name, files, contributes] of [
     )(at, dir);
     if (symlinked) symlinkSync(at, join(home, "acme"));
   }
-  const ts = Bun.spawn(
+  const ts = goldenSpawn(
     [...tsCommand, "--root", tsRoot, "--db", "db", "models", "catalog", "--json"],
     { cwd: tsRoot, env, stdout: "pipe", stderr: "pipe" },
   );
@@ -613,7 +616,7 @@ for (const [name, files, contributes] of [
   assert.equal(tsOut.includes('"provider": "acme"'), contributes, name);
   for (const args of [["catalog"], ["catalog", "--json"], put("kimi:k3"), put("nope:x")]) {
     const before = snapshot(join(rustRoot, "db"));
-    const p = Bun.spawn([...rustCommand, "--root", rustRoot, "--db", "db", "models", ...args], {
+    const p = goldenSpawn([...rustCommand, "--root", rustRoot, "--db", "db", "models", ...args], {
       cwd: rustRoot,
       env,
       stdout: "pipe",
@@ -642,4 +645,7 @@ if (red > 0) {
   console.log(`RED ${red} of ${count} catalog comparisons`);
   process.exit(1);
 }
+assert(successfulCommands > 0, "must exercise successful catalog commands");
 console.log(`PASS ${count} catalog comparisons`);
+
+await verifyGoldenExits("model-catalog");

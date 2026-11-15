@@ -1,12 +1,18 @@
 #![forbid(unsafe_code)]
 mod args;
 mod context;
+mod database;
 mod date;
 mod limits;
 mod models;
 mod mutations;
 mod output;
+mod password;
+mod process;
+mod registry;
 mod settings;
+mod setup;
+mod status;
 use std::{io::IsTerminal, process::ExitCode};
 
 pub fn run(argv: Vec<String>) -> ExitCode {
@@ -17,9 +23,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     let help = argv.iter().any(|s| matches!(s.as_str(), "--help" | "-h"));
     let Some((command, rest)) = args::resolve(&argv) else {
         if help || argv.iter().all(|s| s.starts_with('-')) {
-            println!(
-                "omni — Rust CLI migration increment\n\nImplemented: keys list, create, limits, models, guardrail, smart-routing, revoke, expiry; settings get, set; models list, show, rm, catalog, put (-f FILE | --from-catalog; built-in providers only, plugin providers refused)\n\nGlobal flags: --root <path> --db <path> --json --no-color --yes"
-            );
+            println!("{}", registry::help());
             return ExitCode::SUCCESS;
         }
         eprintln!(
@@ -34,35 +38,34 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         return ExitCode::from(2);
     };
     if help {
-        println!(
-            "omni {}\n\n{}",
-            mutations::usage(&command),
-            match command.as_str() {
-                "models-list" => "List virtual models and their targets",
-                "models-show" => "Show one virtual model's targets and pricing",
-                "models-rm" => "Delete a virtual model",
-                "models-put" => "Create or replace a virtual model",
-                "models-catalog" => "List the built-in model catalog and its list pricing",
-                "settings-get" => "Show routing and retention settings",
-                "settings-set" =>
-                    "Change one setting, e.g. weights.cost 0.4, rtkEnabled true, or guardrailModel null",
-                "models" => "Show or replace one key's allowed models",
-                "expiry" => "Show or replace one key's expiry",
-                "create" => "Mint a gateway API key, printed once",
-                "limits" => "Show or edit one key's limits, with what has been used against them",
-                "guardrail" => "Show or replace one key's usage policy",
-                "smart-routing" => "Turn confidential-data routing on or off for one key",
-                "revoke" => "Revoke a gateway API key, keeping its usage history",
-                _ => "List gateway API keys",
-            }
-        );
+        println!("{}", registry::command_help(&command));
         return ExitCode::SUCCESS;
     }
+    if command.starts_with("plugin ") {
+        eprintln!("plugins are not supported in this release");
+        return ExitCode::FAILURE;
+    }
+    let Some(command) = registry::implemented(&command) else {
+        eprintln!("{command} is not yet available in the Rust CLI");
+        return ExitCode::FAILURE;
+    };
     if command != "list" {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))
             .and_then(|(flags, positional, allow)| {
-                if command.starts_with("models-") {
+                if command.starts_with("db-") {
+                    if command == "db-restore" && positional.first().is_none_or(|id| id.is_empty())
+                    {
+                        return Err((2, "snapshot id is required".into()));
+                    }
+                    database::run(&command, &flags, &positional).map_err(|e| (1, e))
+                } else if command == "status" {
+                    status::run(&flags).map_err(|e| (1, e))
+                } else if command == "admin-set-password" {
+                    password::run(&flags).map_err(|e| (1, e))
+                } else if command.starts_with("setup-") {
+                    setup::run(&command, &flags).map_err(|e| (1, e))
+                } else if command.starts_with("models-") {
                     models::run(&command, &flags, &positional, &allow)
                 } else if command.starts_with("settings-") {
                     settings::run(&command, &flags, &positional)
@@ -73,12 +76,32 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         return match result {
             Ok(out) => {
                 println!("{out}");
+                if command.starts_with("setup-")
+                    && let Ok((flags, _, _)) = args::parse_command(&rest, &command)
+                    && !flags.contains_key("json")
+                    && !flags.contains_key("key")
+                {
+                    eprintln!(
+                        "no --key given: the files carry a placeholder, so paste your key over it"
+                    );
+                }
                 ExitCode::SUCCESS
             }
             Err((code, error)) => {
-                eprintln!("{error}");
+                // Reporting a failed terminal write must not itself abort.
+                let _reported = std::io::Write::write_fmt(
+                    &mut std::io::stderr().lock(),
+                    format_args!("{error}\n"),
+                );
                 if code == 2 {
-                    eprintln!("usage: omni {}", mutations::usage(&command));
+                    let usage = registry::COMMANDS
+                        .iter()
+                        .find(|(n, _, _)| n.replace(' ', "-") == command)
+                        .map(|(_, u, _)| *u);
+                    eprintln!(
+                        "usage: omni {}",
+                        usage.unwrap_or_else(|| mutations::usage(&command))
+                    );
                 }
                 ExitCode::from(code)
             }
@@ -110,8 +133,43 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("{e}");
-            ExitCode::FAILURE
+            let (stderr, code) = render_command_error(&e);
+            eprint!("{stderr}");
+            ExitCode::from(code)
         }
+    }
+}
+
+fn render_command_error(error: &str) -> (String, u8) {
+    (format!("{error}\n"), 1)
+}
+
+#[cfg(test)]
+mod restore_error_tests {
+    #[test]
+    fn restore_failures_render_without_undo_or_cause() {
+        use omni_control::database::{RestoreError, SwapFailedError};
+        for cause in ["rename failed", "unlink failed", "reopen failed"] {
+            for reopened in [true, false] {
+                let error = RestoreError::Swap(SwapFailedError {
+                    pre_restore_snapshot_id: "undo-id".into(),
+                    cause: cause.into(),
+                    reopened,
+                });
+                assert_eq!(
+                    super::render_command_error(&error.to_string()),
+                    (
+                        "the database swap failed and the database may be incomplete\n".into(),
+                        1
+                    )
+                );
+            }
+        }
+        assert_eq!(
+            super::render_command_error(
+                &RestoreError::Ordinary("snapshot failed".into()).to_string()
+            ),
+            ("snapshot failed\n".into(), 1)
+        );
     }
 }

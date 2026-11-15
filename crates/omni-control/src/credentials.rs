@@ -314,6 +314,36 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         ("lastUsed", JsValue::Object(last_used)),
     ])))
 }
+/// Raw quota projection for CLI status, without health/burn/last-used reads.
+/// Like listQuota in frozen TS, unrelated request logs cannot affect this read.
+pub fn status_quota(s: &SqliteStore) -> Result<JsValue> {
+    let mut statement = s
+        .connection()
+        .prepare("SELECT * FROM quota_windows")
+        .map_err(Failure::internal)?;
+    let mut cursor = statement.query([]).map_err(Failure::internal)?;
+    let mut quota = Vec::new();
+    while let Some(row) = cursor.next().map_err(Failure::internal)? {
+        let mut fields = Vec::new();
+        for (name, column) in [
+            ("credentialId", "credential_id"),
+            ("windowType", "window_type"),
+            ("startsAt", "starts_at"),
+            ("used", "used"),
+            ("limit", "limit_value"),
+            ("resetsAt", "resets_at"),
+            ("observedAt", "observed_at"),
+            ("windowMs", "window_ms"),
+        ] {
+            fields.push((
+                name,
+                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+            ));
+        }
+        quota.push(obj(fields));
+    }
+    Ok(JsValue::Array(quota))
+}
 pub fn remove(s: &SqliteStore, id: Option<&str>) -> Result<()> {
     omni_store::credentials::remove(s.connection(), id)?;
     Ok(())

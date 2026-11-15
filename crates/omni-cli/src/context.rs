@@ -23,8 +23,9 @@ fn absolute(base: &Path, value: &str) -> PathBuf {
 /// Resolving prints the ambient-database warning, as TS does before a command
 /// runs; opening the store is a separate, later step.
 pub struct Context {
+    pub env: HashMap<String, String>,
     pub root: PathBuf,
-    path: PathBuf,
+    pub path: PathBuf,
     config: Result<Config, omni_control::config::ConfigError>,
 }
 
@@ -103,11 +104,28 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
             path.display()
         );
     }
-    Ok(Context { root, path, config })
+    Ok(Context {
+        root,
+        path,
+        config,
+        env,
+    })
 }
 
 impl Context {
+    pub fn base_url(&self) -> Result<String, String> {
+        self.config
+            .as_ref()
+            .map(|c| c.base_url.clone())
+            .map_err(|e| e.to_string())
+    }
     pub fn open(self) -> Result<omni_store::SqliteStore, String> {
+        self.open_with(false)
+    }
+    pub fn open_migrate(self) -> Result<omni_store::SqliteStore, String> {
+        self.open_with(true)
+    }
+    fn open_with(self, migrate: bool) -> Result<omni_store::SqliteStore, String> {
         let Config {
             day_offset_minutes, ..
         } = self.config.map_err(|e| e.to_string())?;
@@ -119,7 +137,16 @@ impl Context {
             {
                 "unable to open database file".into()
             }
+            _ if migrate => migrate_error(e),
             _ => e.to_string(),
         })
+    }
+}
+
+pub(crate) fn migrate_error(error: omni_store::StoreError) -> String {
+    match error {
+        omni_store::StoreError::Migration { source, .. } => migrate_error(*source),
+        omni_store::StoreError::Sqlite(rusqlite::Error::SqlInputError { msg, .. }) => msg,
+        error => error.to_string(),
     }
 }

@@ -7,6 +7,10 @@ pub mod catalog;
 pub mod client_quota;
 pub mod config;
 pub mod credentials;
+pub mod database;
+pub mod database_fs;
+pub mod date;
+pub mod fs_error;
 #[cfg(test)]
 mod http_oracle_tests;
 pub mod keys;

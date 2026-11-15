@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { requestLog } from "../../packages/testkit/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const binary = resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni");
@@ -20,7 +21,7 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.st
 Object.assign(env, { OMNI_ENCRYPTION_KEY: secret, NO_COLOR: "1", HOME: root });
 const ts = ["bun", "--no-env-file", join(repo, "apps/cli/src/index.ts")];
 async function invoke(cmd: string[], args: string[], cwd = root, extra = {}) {
-  const p = Bun.spawn([...cmd, ...args], {
+  const p = goldenSpawn([...cmd, ...args], {
     cwd,
     env: { ...env, ...extra },
     stdout: "pipe",
@@ -34,10 +35,12 @@ async function invoke(cmd: string[], args: string[], cwd = root, extra = {}) {
   return { out, err, code };
 }
 let count = 0;
+let successfulCommands = 0;
 let failures = 0;
 async function check(args: string[], cwd = root, extra = {}) {
   const expected = await invoke(ts, args, cwd, extra);
   const actual = await invoke(rust, args, cwd, extra);
+  if (actual.code === 0 && expected.code === 0 && !args.includes("--help")) successfulCommands++;
   try {
     assert.deepEqual(actual, expected, JSON.stringify(args));
   } catch (e) {
@@ -286,7 +289,10 @@ try {
     );
   }
   assert.equal(failures, 0, `${failures}/${count} differential failures`);
+  assert(successfulCommands > 0, "must exercise successful key listings");
   console.log(`PASS ${count} real TS/Rust golden comparisons`);
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
+
+await verifyGoldenExits("keys-list");

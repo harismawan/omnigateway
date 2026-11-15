@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 
 const root = mkdtempSync("/tmp/opencode/model-removals-");
 console.log(root);
@@ -53,6 +54,7 @@ function snapshot(db: Database) {
   ]);
 }
 let count = 0;
+let successfulCommands = 0;
 async function compare(args: string[], pty: string | false = false, rootEnv = false) {
   const results = [];
   for (let i = 0; i < 2; i++) {
@@ -69,13 +71,20 @@ async function compare(args: string[], pty: string | false = false, rootEnv = fa
       "models",
       ...args,
     ];
-    const p = Bun.spawn(
+    const p = goldenSpawn(
       pty !== false ? ["python3", join(repo, "conformance/cli/pty.py"), pty, ...command] : command,
       { cwd: dir, env: { ...env, OMNI_ROOT: dir }, stdout: "pipe", stderr: "pipe" },
     );
     const out = Buffer.from(await new Response(p.stdout).arrayBuffer());
     const err = Buffer.from(await new Response(p.stderr).arrayBuffer());
     const code = await p.exited;
+    if ((pty !== false ? JSON.parse(out.toString()).code : code) === 0 && !args.includes("--help"))
+      successfulCommands++;
+    assert(
+      !err.includes("OMNI_PORT must") &&
+        !out.includes(Buffer.from("OMNI_PORT must").toString("hex")),
+      "unrelated configuration failure is not a model oracle",
+    );
     const rows = snapshot(db);
     const expected = structuredClone(before);
     const removed = pty === false ? code === 0 : JSON.parse(out.toString()).code === 0;
@@ -139,4 +148,7 @@ seed("[]");
 await compare(["rm", "a😀", "-y", "ignored"]);
 seed("[]");
 await compare(["rm", "a😀", "-y"], false, true);
+assert(successfulCommands > 0, "must exercise successful model removals");
 console.log(`PASS ${count} removal comparisons`);
+
+await verifyGoldenExits("model-removals");

@@ -149,8 +149,25 @@ pub fn migrate(conn: &mut Connection, day_offset_minutes: i64) -> Result<(), Sto
     )?;
     let done: HashSet<i64> = {
         let mut stmt = conn.prepare("SELECT id FROM migrations")?;
-        stmt.query_map([], |r| r.get(0))?
-            .collect::<Result<_, _>>()?
+        let mut rows = stmt.query([])?;
+        let mut done = HashSet::new();
+        while let Some(row) = rows.next()? {
+            // Bun's raw cells enter a JS Set: only Number cells can equal a
+            // numeric migration ID. Comparing against our small exact IDs
+            // avoids coercing TEXT, rounding fractional REALs, or rejecting
+            // unknown cells. Unknown ledger rows are never changed.
+            let number = match row.get_ref(0)? {
+                rusqlite::types::ValueRef::Integer(n) => n as f64,
+                rusqlite::types::ValueRef::Real(n) => n,
+                _ => continue,
+            };
+            for migration in &MIGRATIONS {
+                if number == migration.id as f64 {
+                    done.insert(migration.id);
+                }
+            }
+        }
+        done
     };
     for m in &MIGRATIONS {
         if done.contains(&m.id) {
