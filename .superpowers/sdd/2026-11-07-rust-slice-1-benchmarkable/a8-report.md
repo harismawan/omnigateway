@@ -1,6 +1,21 @@
-# Fix round 2 — item 1 disposition complete; sink audit and closure pending
+# Fix round 2 — item 1 committed; item 2 found inference-auth log leak; closure pending
 
-**NEXT STEP (current):** Item 1 audit found no additional producer requiring conversion. Finish item 2 consumer tracing and commit its sink table, then item 3 final gates/drivers/manifest. The earlier NEXT STEP paragraphs below are history.
+**NEXT STEP (current):** Item 1 disposition committed as `eef79df4`. Item 2 found an unresolved stored-allowlist parser leak through inference authentication: omni-store KeyRowError.message → omni-gateway-core/src/snapshot.rs:117 GatewayError.message → omni-gateway/src/server.rs:1278 (token count), :1311 (model listing), and finish.rs:179 → dispatch.rs:179 (request rejection). Preserve wire text, sanitise ONLY logged error. Add a stored-allowlist canary authenticated with its raw API key for all three inference paths; prove failing first. `dispatch.rs`, `omni-gateway-core`, and `omni-ir` are excluded from edits: do not change them without scope authorisation; investigate an allowed gateway-side logging boundary rather than losing wire detail. No implementation attempted for this newly discovered path. Finish remaining sink trace, then final closure. Do NOT mark complete. Older NEXT STEP paragraphs below are history.
+
+Item 2 sink table so far (NOT complete; source-traced, no new runtime verification):
+| Sink (under crates/) | Current formatting / status |
+|---|---|
+| omni-gateway/src/server.rs:1278,1311; dispatch.rs:179 via finish.rs:179 | **DEFECT:** GatewayError.message may contain explicit wire parser detail from KeyRowError. No redaction at these sinks. |
+| omni-gateway/src/api.rs:160 | `%e`, StoreError Display sanitises StoredJson. |
+| omni-gateway/src/admin_routes.rs:177 | `%e.message`, Failure contains sanitised StoreError Display or fixed error for audited stored JSON producers. |
+| omni-store/src/keys.rs:378 | `%e`, StoreError Display. |
+| omni-store/src/credentials.rs:296,506 | Fixed metadata/health unreadable messages; no error formatting. |
+| omni-control/src/api.rs:170 | Id + fixed `api key limits unreadable`; parser discarded. |
+| omni-store/src/writer/health.rs:403,500,536; writer/pg_batch.rs:234; writer/task.rs:517,916,928 | Inventory shows `%e` StoreError Display; full reachability audit pending. |
+| omni-gateway/src/main.rs:54,79,87; lib.rs:624 | Inventory shows Display; full origin trace pending. |
+| omni-gateway/src/dispatch.rs:504 | Resolved: reason is router filters' eligibility reason, not ModelRowError; omni-router/src/filters.rs:208-325 uses fixed vocabulary/capability/quota reasons. resolve.rs:53-95 consumes configured models or synthesises them, not model parse errors. |
+
+No new tests/drivers run in this checkpoint; no manifest updated. Item 1 required no new product conversion. Item 2 is blocked on an actual remaining leak, not merely paperwork; item 3 unstarted. Existing earlier gate counts below are historical only.
 
 Producer disposition (paths relative to `crates/`; line numbers observed in this checkout):
 | Stored column | Disposition / error travel |
