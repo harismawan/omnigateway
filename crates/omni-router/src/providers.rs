@@ -7,6 +7,8 @@ use omni_store::models::{Capabilities, TargetPricing};
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogModel {
     pub id: String,
+    pub label: String,
+    pub oauth_limits: Option<(Option<f64>, Option<f64>)>,
     pub pricing: TargetPricing,
     /// `limits` (the API-key figures; `entryLimits` defaults to `apiKey`).
     pub context_window: Option<f64>,
@@ -96,6 +98,10 @@ impl Providers {
                 .iter()
                 .map(|m| CatalogModel {
                     id: m["id"].as_str().expect("model id").into(),
+                    label: m["label"].as_str().expect("model label").into(),
+                    oauth_limits: m
+                        .get("oauthLimits")
+                        .map(|l| (l["contextWindow"].as_f64(), l["maxOutputTokens"].as_f64())),
                     pricing: serde_json::from_value(m["pricing"].clone()).expect("catalog pricing"),
                     context_window: m["limits"]["contextWindow"].as_f64(),
                     max_output_tokens: m["limits"]["maxOutputTokens"].as_f64(),
