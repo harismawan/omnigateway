@@ -11,6 +11,7 @@ pub mod admin_routes;
 pub mod api;
 pub mod client_routes;
 pub mod clock;
+pub mod connect;
 pub mod dispatch;
 pub mod finish;
 pub mod jsc_json;
@@ -536,6 +537,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         base_url_https: api::base_url_is_https(&config.base_url),
         control: admin_routes::ControlStore::new(control_store),
         credential_key: key.clone(),
+        connect: Arc::new(connect::ConnectFlows::default()),
         body_logging_allowed: config.body_logging_allowed,
         day_offset_minutes: offset,
         reported_catalog_problems: std::sync::Mutex::default(),

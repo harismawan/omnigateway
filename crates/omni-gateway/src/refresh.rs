@@ -343,11 +343,11 @@ fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> toki
 // X2: the shared integer carrier truncates fractions and saturates infinities.
 // SQLite binds NaN as NULL; preserving that avoids repeated preemptive refresh.
 #[allow(clippy::cast_possible_truncation)]
-fn persisted_expiry(expiry: Option<f64>) -> Option<i64> {
+pub(crate) fn persisted_expiry(expiry: Option<f64>) -> Option<i64> {
     expiry.filter(|n| !n.is_nan()).map(|n| n as i64)
 }
 
-fn email_text(
+pub(crate) fn email_text(
     value: &omni_ir::jsjson::JsValue,
     engine: omni_store::Engine,
 ) -> std::result::Result<String, GatewayError> {
@@ -366,7 +366,7 @@ fn email_text(
         _ => Ok(js_text(value)),
     }
 }
-fn js_text(value: &omni_ir::jsjson::JsValue) -> String {
+pub(crate) fn js_text(value: &omni_ir::jsjson::JsValue) -> String {
     use omni_ir::jsjson::JsValue;
     let mut out = String::new();
     let mut parents: Vec<std::slice::Iter<'_, JsValue>> = Vec::new();

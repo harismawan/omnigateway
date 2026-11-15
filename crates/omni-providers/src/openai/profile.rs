@@ -37,10 +37,14 @@ pub(crate) fn sandbox() -> &'static str {
         "seccomp"
     }
 }
+pub(super) fn originator() -> String {
+    env("OMNI_OPENAI_ORIGINATOR", "codex-tui")
+}
+
 pub(crate) fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     initialize();
     let version = env("OMNI_OPENAI_CLI_VERSION", "0.165.0");
-    let origin = env("OMNI_OPENAI_ORIGINATOR", "codex-tui");
+    let origin = originator();
     let platform = env("OMNI_OPENAI_UA_PLATFORM", "Windows 10.0.26200");
     let arch = env("OMNI_OPENAI_UA_ARCH", "x86_64");
     let terminal = env("OMNI_OPENAI_UA_TERMINAL", "WindowsTerminal");

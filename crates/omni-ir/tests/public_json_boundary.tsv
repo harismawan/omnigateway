@@ -230,3 +230,4 @@ omni-ir/src/js.rs :: fn try_to_string(value: Option<&Value>) -> Result<String, T
 omni-providers/src/openai/oauth_lifecycle.rs :: fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest, GatewayError>	string-only exchange request, no retained client JSON
 omni-providers/src/openai/oauth_lifecycle.rs :: fn refresh_request(token: &str) -> AuthRequest	string-only refresh request
 omni-providers/src/openai/oauth_lifecycle.rs :: fn token_result( status: u16, text: &str, fallback: Option<&str>, now: f64, prior: &Value, ) -> Result<FlowResult, GatewayError>	borrows prior; retains validated identity strings and scalar claims only; parsed claims owned with iterative drop
+omni-providers/src/openai/oauth_start.rs :: fn start(redirect: &str, verifier: &str, challenge: &str, state: &str) -> AuthorizeStart	string-only authorization URL construction; no client JSON crosses this function
