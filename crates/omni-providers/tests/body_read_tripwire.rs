@@ -1,11 +1,13 @@
 //! Deny per-chunk allocating spellings (including clone: none occurs today).
 //! Blank comments/literals, brace-match fn bodies, normalise whitespace and
-//! path generics. reserve/extend_from_slice on the reused read buffer are
+//! path generics and nested turbofish calls (free, self and Self methods).
+//! reserve/extend_from_slice on the reused read buffer are
 //! deliberately allowed amortised growth. This is not an allocation proof:
 //! other files/crates, macro expansions, trait dispatch, aliases/re-exports
 //! (Box as B), dependencies and unlisted spellings still require review.
-//! Assumes ordinary signatures, not arbitrary const-generic expressions or
-//! Unicode identifiers. Same-file calls are conservatively matched by name.
+//! Assumes ordinary signatures: braces in const-generic expressions before
+//! the body and Unicode identifiers are not parsed. Name-only local-call
+//! matching can conservatively flag an unrelated method with the same name.
 
 const SOURCE: &str = include_str!("../src/http/body.rs");
 const SCANNED: &[&str] = &[
@@ -157,7 +159,10 @@ fn normalise(text: &str) -> String {
                 }
                 end += 1;
             }
-            if depth == 0 && b[end..].starts_with(b"::") {
+            if depth == 0
+                && (b[end..].starts_with(b"::")
+                    || (out.ends_with("::") && b.get(end) == Some(&b'(')))
+            {
                 if out.ends_with("::") {
                     out.truncate(out.len() - 2);
                 }
@@ -306,6 +311,26 @@ fn mutations_are_caught() {
         ),
         ("helper", "sneaky()", "unscanned local helper"),
         (
+            "generic helper",
+            "allocation_helper::<u8>()",
+            "unscanned local helper",
+        ),
+        (
+            "Self generic helper",
+            "Self::allocation_helper::<T>()",
+            "unscanned local helper",
+        ),
+        (
+            "self generic helper",
+            "self.allocation_helper::<T>()",
+            "unscanned local helper",
+        ),
+        (
+            "nested generic helper",
+            "allocation_helper::<Vec<u8>>()",
+            "unscanned local helper",
+        ),
+        (
             "line comment",
             "0; // }\nlet _ = Box::pin(self.read_next())",
             "Box::pin",
@@ -334,6 +359,9 @@ fn mutations_are_caught() {
         let mut mutated = SOURCE.to_string();
         mutated.insert_str(open + 1, &format!("\nlet _ = {inserted};\n"));
         mutated.push_str("\nfn sneaky() { let _ = Box::new(1); }\n");
+        mutated.push_str(
+            "\nfn allocation_helper<T: Default>() -> Box<T> { Box::new(T::default()) }\n",
+        );
         let hits = scan(&mutated);
         assert!(
             hits.iter()
