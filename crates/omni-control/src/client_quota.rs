@@ -192,19 +192,7 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         }
         ranks[*id] = rank;
     }
-    let mut sample_order = (0..compact.series.len()).collect::<Vec<_>>();
-    sample_order.sort_by(|a, b| {
-        let (a_series, b_series) = (compact.series[*a], compact.series[*b]);
-        ranks[a_series[0]]
-            .cmp(&ranks[b_series[0]])
-            .then_with(|| ranks[a_series[1]].cmp(&ranks[b_series[1]]))
-            .then_with(|| {
-                compare_numbers(
-                    number(&compact.values[*a][3]),
-                    number(&compact.values[*b][3]),
-                )
-            })
-    });
+    let mut sample_order = history_sample_order(&compact, &ranks);
     let truncated = sample_order.len() > MAX_SAMPLES;
     sample_order.truncate(MAX_SAMPLES);
     let samples = sample_order
@@ -330,6 +318,55 @@ fn write_history_cell(value: &Value, out: &mut String) {
     }
 }
 
+fn history_sample_order(
+    compact: &omni_store::quota::CompactSamples,
+    ranks: &[usize],
+) -> Vec<usize> {
+    let width = ranks.iter().copied().max().unwrap_or(0) + 1;
+    if width <= 64 {
+        // Stable counting scatter groups equal ranked series in linear time.
+        // Each group retains the original numeric comparator and tie order.
+        let mut offsets = vec![0; width * width + 1];
+        let group = |s: &[usize; 2]| ranks[s[0]] * width + ranks[s[1]];
+        for s in &compact.series {
+            offsets[group(s) + 1] += 1;
+        }
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut next = offsets.clone();
+        let mut order = vec![0; compact.series.len()];
+        let observed = compact
+            .values
+            .iter()
+            .map(|v| number(&v[3]))
+            .collect::<Vec<_>>();
+        for (i, s) in compact.series.iter().enumerate() {
+            let g = group(s);
+            order[next[g]] = i;
+            next[g] += 1;
+        }
+        for bounds in offsets.windows(2) {
+            order[bounds[0]..bounds[1]].sort_by(|&a, &b| compare_numbers(observed[a], observed[b]));
+        }
+        return order;
+    }
+    // Coercion is pure; caching it preserves the comparator even for odd cells
+    // and NaNs. Stable sorting retains SQLite order for all equal keys.
+    let mut keys = compact
+        .series
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (ranks[s[0]], ranks[s[1]], number(&compact.values[i][3]), i))
+        .collect::<Vec<_>>();
+    keys.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| compare_numbers(a.2, b.2))
+    });
+    keys.into_iter().map(|k| k.3).collect()
+}
+
 // Borrow normal TEXT cells; retain the corrupt-cell coercion rules above.
 fn history_compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
@@ -337,6 +374,105 @@ fn history_compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Text(a), Value::Text(b)) if a.is_ascii() && b.is_ascii() => a.cmp(b),
         (Value::Text(a), Value::Text(b)) => a.encode_utf16().cmp(b.encode_utf16()),
         _ => compare_cells(a, b),
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+
+    #[test]
+    fn flat_order_matches_original() {
+        let observed = [
+            Value::Integer(1),
+            Value::Real(1.0),
+            Value::Real(f64::NAN),
+            Value::Null,
+            Value::Text("2".into()),
+            Value::Blob(vec![3]),
+            Value::Real(-0.0),
+            Value::Real(0.0),
+            Value::Real(f64::INFINITY),
+        ];
+        for reverse in [false, true] {
+            for interleave in [false, true] {
+                let mut compact = omni_store::quota::CompactSamples {
+                    cells: vec![],
+                    series: vec![],
+                    values: vec![],
+                };
+                for j in 0..300 {
+                    let i = if reverse { 299 - j } else { j };
+                    compact
+                        .series
+                        .push([if interleave { i % 3 } else { i / 100 }, i % 2]);
+                    compact.values.push([
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        observed[i % observed.len()].clone(),
+                        Value::Null,
+                    ]);
+                }
+                let ranks = [0, 0, 1];
+                let mut expected = (0..compact.series.len()).collect::<Vec<_>>();
+                expected.sort_by(|&a, &b| {
+                    let (a_s, b_s) = (compact.series[a], compact.series[b]);
+                    ranks[a_s[0]]
+                        .cmp(&ranks[b_s[0]])
+                        .then_with(|| ranks[a_s[1]].cmp(&ranks[b_s[1]]))
+                        .then_with(|| {
+                            compare_numbers(
+                                number(&compact.values[a][3]),
+                                number(&compact.values[b][3]),
+                            )
+                        })
+                });
+                assert_eq!(history_sample_order(&compact, &ranks), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_series_interning() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms);").unwrap();
+        let mut cells = vec![
+            Value::Null,
+            Value::Integer(1),
+            Value::Real(1.0),
+            Value::Text("1".into()),
+            Value::Blob(b"1".to_vec()),
+            Value::Real(-0.0),
+            Value::Real(0.0),
+        ];
+        for i in 2..3000 {
+            cells.extend([
+                Value::Integer(i),
+                Value::Real(i as f64),
+                Value::Text(i.to_string()),
+                Value::Blob(i.to_le_bytes().to_vec()),
+            ]);
+        }
+        for cell in &cells {
+            for _ in 0..2 {
+                db.execute(
+                    "INSERT INTO quota_samples VALUES(?1,?1,0,1,NULL,1,NULL)",
+                    [cell],
+                )
+                .unwrap();
+            }
+        }
+        let result = omni_store::quota::list_compact_quota_samples(&db, 0.0, 2.0, 50001).unwrap();
+        assert_eq!(result.cells.len(), cells.len());
+        for (i, pair) in result.series.chunks_exact(2).enumerate() {
+            assert_eq!(pair, &[[i, i], [i, i]]);
+        }
+        // Invalid text byte sequences must remain distinct despite lossy ownership.
+        db.execute_batch("DELETE FROM quota_samples; INSERT INTO quota_samples VALUES(CAST(x'ff' AS TEXT),NULL,0,1,NULL,1,NULL),(CAST(x'fe' AS TEXT),NULL,0,1,NULL,1,NULL),(CAST(x'ff' AS TEXT),NULL,0,1,NULL,1,NULL);").unwrap();
+        let result = omni_store::quota::list_compact_quota_samples(&db, 0.0, 2.0, 10).unwrap();
+        assert_ne!(result.series[0][0], result.series[1][0]);
+        assert_eq!(result.series[0][0], result.series[2][0]);
     }
 }
 
