@@ -5,6 +5,9 @@ import shutil
 import subprocess
 import tempfile
 
+# Match the TypeScript suites' fixture environment, including runtime caches.
+os.environ['BUN_RUNTIME_TRANSPILER_CACHE_PATH'] = '0'
+
 binary = pathlib.Path(os.environ.get('OMNI_CLI_BIN', 'target/debug/omni')).resolve()
 commands = [[shutil.which('bun'), '--no-env-file', str(pathlib.Path.cwd() / 'apps/cli/src/index.ts')], [str(binary)]]
 samples = {
