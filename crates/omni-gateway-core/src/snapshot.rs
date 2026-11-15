@@ -383,9 +383,18 @@ impl SnapshotHolder {
         let cur = self.current.load_full();
         let mut next = GatewaySnapshot::clone(&cur);
         if let Some(row) = &row {
-            if let Some(current) = next.routing.credentials.iter_mut().find(|c| c.id == id) {
-                *current = row.clone();
+            let current = next.routing.credentials.iter().position(|c| c.id == id);
+            let move_row = insert_missing
+                && current.is_some_and(|i| {
+                    let held = &next.routing.credentials[i];
+                    held.tier != row.tier || held.label.as_bytes() != row.label.as_bytes()
+                });
+            if let Some(i) = current.filter(|_| !move_row) {
+                next.routing.credentials[i] = row.clone();
             } else if insert_missing {
+                if let Some(i) = current {
+                    next.routing.credentials.remove(i);
+                }
                 // Match the store's ORDER BY tier, label; ties follow existing rows.
                 let position = next
                     .routing
@@ -1037,10 +1046,14 @@ mod publication_tests {
                 .publish_credential_at_read("new", read, || {}, true)
                 .unwrap();
             assert_eq!(holder.load().routing.credentials.len(), 4);
-            assert_eq!(
-                holder.load().routing.credentials[position].label,
-                "replacement"
-            );
+            let mut expected = holder.load().routing.credentials.clone();
+            expected.sort_by(|a, b| {
+                a.tier
+                    .partial_cmp(&b.tier)
+                    .unwrap()
+                    .then_with(|| a.label.as_bytes().cmp(b.label.as_bytes()))
+            });
+            assert_eq!(holder.load().routing.credentials, expected);
             let before = holder.load();
             db.connection()
                 .execute(
@@ -1073,6 +1086,92 @@ mod publication_tests {
             assert!(Arc::ptr_eq(&before, &holder.load()));
             assert_eq!(holder.generation(), 0);
         }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn connect_replacement_order_matches_store_rebuild() {
+        for (case, tier, label) in [
+            ("later", 1.0, "z"),
+            ("earlier", 1.0, "a"),
+            ("tier boundary", 3.5, "m"),
+            ("unchanged equal key", 1.0, "m"),
+            ("changed to equal neighbour", 1.0, "b"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = SqliteStore::open(dir.path().join("replacement.db"), 0).unwrap();
+            let key = omni_crypto::field::derive_key("k");
+            for (id, tier, label) in [
+                ("before", 1.0, "b"),
+                ("equal-before", 1.0, "m"),
+                ("subject", 1.0, "m"),
+                ("equal-after", 1.0, "m"),
+                ("higher", 2.0, "a"),
+            ] {
+                db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES (?,'anthropic',?,'oauth',1,?,1,'{}',0,0)", (id, label, tier)).unwrap();
+            }
+            let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
+            let ids = |snapshot: Arc<GatewaySnapshot>| {
+                snapshot
+                    .routing
+                    .credentials
+                    .iter()
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>()
+            };
+            let before = ids(holder.load());
+            db.connection()
+                .execute(
+                    "UPDATE credentials SET tier=?,label=?,weight=7 WHERE id='subject'",
+                    (tier, label),
+                )
+                .unwrap();
+            holder
+                .publish_credential_at_read(
+                    "subject",
+                    || omni_store::credentials::get(db.connection(), &key, "subject"),
+                    || {},
+                    true,
+                )
+                .unwrap();
+            let published = ids(holder.load());
+            if case == "unchanged equal key" {
+                assert_eq!(published, before);
+            }
+            holder.rebuild(&db).unwrap();
+            assert_eq!(published, ids(holder.load()), "{case}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn patch_credential_changed_label_keeps_old_position_unchanged_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SqliteStore::open(dir.path().join("refresh-order.db"), 0).unwrap();
+        let key = omni_crypto::field::derive_key("k");
+        for id in ["a", "b"] {
+            db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES (?,'anthropic',?,'oauth',1,1,1,'{}',0,0)", (id, id)).unwrap();
+        }
+        let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
+        db.connection()
+            .execute("UPDATE credentials SET label='z' WHERE id='a'", [])
+            .unwrap();
+        holder
+            .patch_credential("a", || {
+                omni_store::credentials::get(db.connection(), &key, "a")
+            })
+            .unwrap();
+        let current = holder.load();
+        assert_eq!(
+            current
+                .routing
+                .credentials
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(current.routing.credentials[0].label, "z");
     }
 
     #[tokio::test]
