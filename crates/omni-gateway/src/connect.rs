@@ -422,14 +422,14 @@ async fn complete(
         )
         .await
         .map_err(|_| internal())?;
+    if holder
+        .publish_credential(host.store.clone(), id.clone())
+        .await
+        .is_err()
+    {
+        tracing::warn!(credentialId = %id, "credential snapshot publication failed; retaining previous snapshot");
+    }
     if reconnect.is_some() {
-        if holder
-            .refresh_credential(host.store.clone(), id.clone())
-            .await
-            .is_err()
-        {
-            tracing::warn!(credentialId = %id, "credential snapshot publication failed; retaining previous snapshot");
-        }
         tracing::info!(provider, credentialId = id, "oauth reconnect completed");
     } else {
         tracing::info!(provider, credentialId = id, "oauth connect completed");
