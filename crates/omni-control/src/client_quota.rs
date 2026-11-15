@@ -460,6 +460,117 @@ mod speed_tests {
     #[test]
     #[ignore = "release benchmark and byte snapshots; A8_CAPTURE=1 records baseline"]
     fn history_speed() {
+        let root = std::path::Path::new("/tmp/opencode/a8/speed");
+        let dir = root.join(format!("r4-bench-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let path = dir.join("store.db");
+        let migrated = omni_store::SqliteStore::open(&path, 0).expect("real migrations");
+        let db = rusqlite::Connection::open(&path).expect("driver connection");
+        db.execute_batch(
+            "PRAGMA foreign_keys=OFF; DELETE FROM quota_samples; DELETE FROM credentials;",
+        )
+        .expect("clear");
+        for (i, label) in ["custom", "E", "e", "Z", "ä", "A", "a", "Å", "中"]
+            .iter()
+            .enumerate()
+        {
+            db.execute("INSERT INTO credentials(id,label,provider,auth_type,tier,weight,enabled,created_at,updated_at) VALUES(?1,?2,'custom','api_key',1,1,1,1,1)", rusqlite::params![format!("history-{i}"), label]).expect("credential");
+        }
+        let store = omni_store::SqliteStore::open_reader(&path, 0).expect("gateway reader");
+        let reader = store.connection();
+        if let Ok(cache) = std::env::var("A8_CACHE_KIB") {
+            reader
+                .pragma_update(None, "cache_size", -cache.parse::<i64>().expect("KiB"))
+                .expect("cache");
+        }
+        let sql = "SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?";
+        let mut plan = reader
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("plan");
+        let details = plan
+            .query_map(
+                rusqlite::params![1793232000000.0, 1794614400000.0, 50001],
+                |r| r.get::<_, String>(3),
+            )
+            .expect("plan rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("details");
+        eprintln!(
+            "PLAN {details:?} cache_size {}",
+            reader
+                .pragma_query_value(None, "cache_size", |r| r.get::<_, i64>(0))
+                .expect("reader cache size")
+        );
+        drop(plan);
+        for count in [1000, 10000, 50002] {
+            db.execute_batch(&format!("DELETE FROM quota_samples; WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<{count}) INSERT INTO quota_samples(credential_id,window_type,used,limit_value,observed_at) SELECT CASE WHEN x%2=0 THEN 'history-0' ELSE 'history-1' END,'daily',x,60000,1794613400000+x FROM n;")).expect("overflow fixture");
+            let output = history(&store, "", 1794614400000.0).expect("history");
+            if count == 50002 {
+                assert_eq!(output.len(), 8_550_404);
+            }
+            let snapshot = root.join(format!("r4-production-{count}.json"));
+            if std::env::var_os("A8_CAPTURE").is_some() {
+                std::fs::write(snapshot, &output).expect("capture once");
+            } else {
+                assert_eq!(
+                    std::fs::read(snapshot).expect("baseline"),
+                    output.as_bytes()
+                );
+            }
+            for mode in 0..4 {
+                let mut times = Vec::new();
+                for _ in 0..9 {
+                    let start = std::time::Instant::now();
+                    match mode {
+                        0 | 1 => {
+                            let mut stmt = reader.prepare_cached(sql).expect("statement");
+                            let mut rows = stmt
+                                .query(rusqlite::params![1793232000000.0, 1794614400000.0, 50001])
+                                .expect("query");
+                            while let Some(row) = rows.next().expect("step") {
+                                if mode == 1 {
+                                    for i in 0..7 {
+                                        std::hint::black_box(row.get_ref(i).expect("cell"));
+                                    }
+                                }
+                            }
+                        }
+                        2 => {
+                            std::hint::black_box(
+                                omni_store::quota::list_compact_quota_samples(
+                                    reader,
+                                    1793232000000.0,
+                                    1794614400000.0,
+                                    50001,
+                                )
+                                .expect("compact"),
+                            );
+                        }
+                        _ => {
+                            std::hint::black_box(
+                                history(&store, "", 1794614400000.0).expect("history"),
+                            );
+                        }
+                    }
+                    times.push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+                times.sort_by(f64::total_cmp);
+                eprintln!(
+                    "BENCH count={count} mode={mode} median={:.3} bytes={} all={times:?}",
+                    times[4],
+                    output.len()
+                );
+            }
+        }
+        drop(store);
+        drop(db);
+        drop(migrated);
+        std::fs::remove_dir_all(dir).expect("cleanup database");
+    }
+
+    #[test]
+    #[ignore = "legacy altered-schema byte snapshots; not a production benchmark"]
+    fn history_legacy_snapshots() {
         let dir = std::path::Path::new("/tmp/opencode/a8/speed");
         std::fs::create_dir_all(dir).expect("scratch directory");
         let store = omni_store::SqliteStore::open(":memory:", 0).expect("store");
