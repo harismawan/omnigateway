@@ -415,23 +415,29 @@ async function run(label: string, binary: string): Promise<Row[]> {
       console.log(`FIRST ${label} ${name} ${valid ? "PASS" : "FAIL"}`);
       rows.push({ name: `${name}/result`, response: { status, valid }, wire: [] });
     }
-    for (const provider of ["anthropic", "openai"]) for (const route of ["finish", "poll"]) for (let trial = 0; trial < (process.env.A15_VISIBILITY_TRIALS === "10" ? 10 : 1); trial++) {
-      const name = `${provider}/changed-label/${route}/${trial}`;
-      const model = `order-${provider}-${route}-${trial}`;
+    for (const kind of ["changed-label", "equal-priority", "equal-roundRobin", "invalid-utf8"]) for (const provider of ["anthropic", "openai"]) for (const route of ["finish", "poll"]) for (let trial = 0; trial < (process.env.A15_VISIBILITY_TRIALS === "10" ? 10 : 1); trial++) {
+      const name = `${provider}/${kind}/${route}/${trial}`;
+      const model = `order-${kind}-${provider}-${route}-${trial}`;
       const key = await request("/api/keys", JSON.stringify({ label: model }));
-      const saved = await request(`/api/models/${model}`, JSON.stringify({ id: model, strategy: "priority", isAlias: false, targets: [{ provider, model: provider === "openai" ? "gpt-5" : "claude-sonnet-4-5", tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: true, reasoning: true } }] }), cookie, "PUT");
+      const saved = await request(`/api/models/${model}`, JSON.stringify({ id: model, strategy: kind === "equal-roundRobin" ? "roundRobin" : "priority", isAlias: false, targets: [{ provider, model, tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: true, reasoning: true } }] }), cookie, "PUT");
       if (key.status !== 200 || typeof key.body.key !== "string" || saved.status !== 200) throw Error("order fixture failed");
       const writer = new Database(file);
       writer.run("UPDATE credentials SET enabled=0 WHERE provider=?", [provider]);
       writer.run("UPDATE credentials SET enabled=1,tier=1,weight=1,label='a' WHERE id=?", [`${provider}-full`]);
       writer.run("UPDATE credentials SET enabled=1,tier=1,weight=1,label='b' WHERE id=?", [`${provider}-missing`]);
       writer.close();
-      const other = await storedRow(`${provider}-missing`);
       await Bun.sleep(650);
       tokenStatus = 200;
       tokenBody = JSON.stringify({ access_token: `${provider}-order-access-${route}-${trial}`, refresh_token: "order-refresh", expires_in: 3600 });
-      const edited = await request(`/api/credentials/${provider}-full`, JSON.stringify({ label: "z" }), cookie, "PATCH");
-      if (edited.status !== 200) throw Error("label patch failed");
+      if (kind === "invalid-utf8") {
+        const db = new Database(file);
+        db.run("UPDATE credentials SET label=CAST(x'80' AS TEXT) WHERE id=?", [`${provider}-full`]);
+        db.run("UPDATE credentials SET label='é' WHERE id=?", [`${provider}-missing`]);
+        db.close();
+      } else {
+        const edited = await request(`/api/credentials/${provider}-full`, JSON.stringify({ label: kind === "changed-label" ? "z" : "b" }), cookie, "PATCH");
+        if (edited.status !== 200) throw Error("label patch failed");
+      }
       const start = await request("/api/connect/start", JSON.stringify({ provider, credentialId: `${provider}-full` }));
       const url = validateStart(start.body);
       const done = await request(`/api/connect/${route}`, JSON.stringify({ flowId: start.body.flowId, code: `code#${url.searchParams.get("state")}` }));
@@ -441,9 +447,19 @@ async function run(label: string, binary: string): Promise<Row[]> {
       const answer: any = await r.json();
       inference = false;
       const bearer = wires.map(w => w.headers.find(h => /^authorization:/i.test(h))?.replace(/^authorization:\s*/i, ""));
-      await Bun.write(join(root, `${model}-routable.json`), JSON.stringify({ status: r.status, answer, wires, expectedBearer: `Bearer ${other.access_token}` }, null, 2));
-      if (r.status !== 200 || answer.choices?.[0]?.message?.content !== "fixture answer" || bearer.length !== 1) throw Error("order inference failed");
-      rows.push({ name, response: { status: r.status, answer: answer.choices[0].message.content, bearer }, wire: [] });
+      // Unique upstream model: no health/load/recent history. Frozen roundRobin
+      // has equal spent/load/idle, so its stable sort retains SQLite arrival order.
+      const db = new Database(file, { readonly: true });
+      const expectedId = (db.query("SELECT id FROM credentials WHERE enabled=1 AND provider=? ORDER BY tier, label LIMIT 1").get(provider) as any).id;
+      db.close();
+      const expectedBearer = `Bearer ${(await storedRow(expectedId)).access_token}`;
+      const valid = r.status === 200 && answer.choices?.[0]?.message?.content === "fixture answer" && bearer.length === 1 && bearer[0] === expectedBearer;
+      console.log(`FIRST ${label} ${name} ${valid && r.status === 200 ? "PASS" : "FAIL"}`);
+      await Bun.write(join(root, `${model}-routable.json`), JSON.stringify({ status: r.status, answer, wires, bearer, expectedId, expectedBearer, valid }, null, 2));
+      rows.push({ name, response: { status: r.status, answer: answer.choices?.[0]?.message?.content, bearer, valid }, wire: [] });
+      const cleanup = new Database(file);
+      cleanup.run("UPDATE credentials SET label='a' WHERE id=?", [`${provider}-full`]);
+      cleanup.close();
     }
     return rows;
   } finally { proc.kill(); await proc.exited; }
@@ -479,6 +495,9 @@ try {
   for (const name of names) {
     const a = ts.find(r => r.name === name), b = rust.find(r => r.name === name);
     const ar = a?.response as any, br = b?.response as any;
+    if (["changed-label", "equal-priority", "equal-roundRobin", "invalid-utf8"].some(kind => name.includes(`/${kind}/`)) && (!ar?.valid || !br?.valid)) {
+      failed++; console.log(`FAILED ${name} expected bearer`); continue;
+    }
     if ((name.includes("/reconnect-first/") || name.includes("/fresh-first/")) && name.endsWith("/result")) {
       if (ar?.status !== 200 || !ar.valid || br?.status !== 200 || !br.valid) { failed++; console.log(`FAILED ${name}`); }
       continue;
