@@ -214,6 +214,10 @@ pub fn read_snapshot(
     now: f64,
 ) -> Result<GatewaySnapshot, StoreError> {
     let data = store.snapshot_reads(key)?;
+    Ok(snapshot_from(data, now))
+}
+
+fn snapshot_from(data: omni_store::SnapshotData, now: f64) -> GatewaySnapshot {
     let models = data
         .models
         .into_iter()
@@ -238,7 +242,7 @@ pub fn read_snapshot(
             }
         })
         .collect();
-    Ok(GatewaySnapshot {
+    GatewaySnapshot {
         keys_by_hash,
         routing: Snapshot::new(
             data.credentials,
@@ -248,7 +252,7 @@ pub fn read_snapshot(
             data.settings,
             now,
         ),
-    })
+    }
 }
 
 fn now_ms() -> f64 {
@@ -310,6 +314,33 @@ impl SnapshotHolder {
         self.rebuild_read(|| read_snapshot(store, &self.key, now_ms()))
     }
 
+    /// Publish an authoritative full snapshot before acknowledging connect.
+    pub async fn rebuild_from(
+        self: &Arc<Self>,
+        store: Arc<omni_store::Store>,
+    ) -> Result<(), StoreError> {
+        let holder = self.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let job = self.publication_job();
+        tokio::task::spawn_blocking(move || {
+            let _job = job;
+            holder.rebuild_read(|| match store.as_ref() {
+                omni_store::Store::Sqlite { store, .. } => {
+                    let db = store
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    read_snapshot(&db, &holder.key, now_ms())
+                }
+                omni_store::Store::Postgres(_) => {
+                    let data = runtime.block_on(store.snapshot_reads(&holder.key))?;
+                    Ok(snapshot_from(data, now_ms()))
+                }
+            })
+        })
+        .await
+        .map_err(|e| StoreError::Writer(format!("snapshot task: {e}")))?
+    }
+
     fn rebuild_read(
         &self,
         read: impl FnOnce() -> Result<GatewaySnapshot, StoreError>,
@@ -359,17 +390,7 @@ impl SnapshotHolder {
         &self,
         id: &str,
         read: impl FnOnce() -> Result<Option<omni_store::Credential>, StoreError>,
-        before_store: impl FnMut(),
-    ) -> Result<(), StoreError> {
-        self.publish_credential_at_read(id, read, before_store, false)
-    }
-
-    fn publish_credential_at_read(
-        &self,
-        id: &str,
-        read: impl FnOnce() -> Result<Option<omni_store::Credential>, StoreError>,
         mut before_store: impl FnMut(),
-        insert_missing: bool,
     ) -> Result<(), StoreError> {
         let _writer = self
             .writers
@@ -383,29 +404,8 @@ impl SnapshotHolder {
         let cur = self.current.load_full();
         let mut next = GatewaySnapshot::clone(&cur);
         if let Some(row) = &row {
-            let current = next.routing.credentials.iter().position(|c| c.id == id);
-            let move_row = insert_missing
-                && current.is_some_and(|i| {
-                    let held = &next.routing.credentials[i];
-                    held.tier != row.tier || held.label.as_bytes() != row.label.as_bytes()
-                });
-            if let Some(i) = current.filter(|_| !move_row) {
-                next.routing.credentials[i] = row.clone();
-            } else if insert_missing {
-                if let Some(i) = current {
-                    next.routing.credentials.remove(i);
-                }
-                // Match the store's ORDER BY tier, label; ties follow existing rows.
-                let position = next
-                    .routing
-                    .credentials
-                    .iter()
-                    .position(|c| {
-                        c.tier > row.tier
-                            || (c.tier == row.tier && c.label.as_bytes() > row.label.as_bytes())
-                    })
-                    .unwrap_or(next.routing.credentials.len());
-                next.routing.credentials.insert(position, row.clone());
+            if let Some(current) = next.routing.credentials.iter_mut().find(|c| c.id == id) {
+                *current = row.clone();
             }
         } else {
             next.routing.credentials.retain(|c| c.id != id);
@@ -422,30 +422,12 @@ impl SnapshotHolder {
         store: Arc<omni_store::Store>,
         id: String,
     ) -> Result<(), StoreError> {
-        self.read_and_publish_credential(store, id, false).await
-    }
-
-    /// Publish a completed connect, including a credential not yet seen by polling.
-    pub async fn publish_credential(
-        self: &Arc<Self>,
-        store: Arc<omni_store::Store>,
-        id: String,
-    ) -> Result<(), StoreError> {
-        self.read_and_publish_credential(store, id, true).await
-    }
-
-    async fn read_and_publish_credential(
-        self: &Arc<Self>,
-        store: Arc<omni_store::Store>,
-        id: String,
-        insert_missing: bool,
-    ) -> Result<(), StoreError> {
         let holder = self.clone();
         let runtime = tokio::runtime::Handle::current();
         let job = self.publication_job();
         tokio::task::spawn_blocking(move || {
             let _job = job;
-            let read = || match store.as_ref() {
+            holder.patch_credential(&id, || match store.as_ref() {
                 omni_store::Store::Sqlite { store, .. } => {
                     let db = store
                         .lock()
@@ -458,12 +440,7 @@ impl SnapshotHolder {
                 omni_store::Store::Postgres(_) => {
                     runtime.block_on(store.credential(&holder.key, &id))
                 }
-            };
-            if insert_missing {
-                holder.publish_credential_at_read(&id, read, || {}, true)
-            } else {
-                holder.patch_credential(&id, read)
-            }
+            })
         })
         .await
         .map_err(|e| StoreError::Writer(format!("snapshot task: {e}")))?
@@ -874,19 +851,21 @@ mod publication_tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn authoritative_sections_serialize_read_and_publish_in_both_orders() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
         for patch_first in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("ordering.db");
             let db = SqliteStore::open(&path, 0).unwrap();
             db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('c','anthropic','old','oauth',0,1,1,'{}',0,0)", []).unwrap();
             let key = omni_crypto::field::derive_key("k");
-            let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
+            let holder = Arc::new(SnapshotHolder::build(&db, key.clone(), 0.0).unwrap());
             let (read_tx, read_rx) = std::sync::mpsc::sync_channel(0);
             let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
             std::thread::scope(|s| {
                 let holder = &holder;
                 let key = &key;
                 let path = &path;
+                let runtime = &runtime;
                 s.spawn(move || {
                     let db = SqliteStore::open(path, 0).unwrap();
                     if patch_first {
@@ -919,10 +898,17 @@ mod publication_tests {
                     )
                     .unwrap();
                 assert!(holder.writers.try_lock().is_err());
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
                 let second = s.spawn(move || {
                     let db = SqliteStore::open(path, 0).unwrap();
                     if patch_first {
-                        holder.rebuild(&db).unwrap();
+                        runtime
+                            .block_on(holder.rebuild_from(Arc::new(omni_store::Store::Sqlite {
+                                store: Arc::new(std::sync::Mutex::new(db)),
+                                path: path.clone(),
+                                day_offset_minutes: 0,
+                            })))
+                            .unwrap();
                     } else {
                         holder
                             .patch_credential("c", || {
@@ -930,7 +916,12 @@ mod publication_tests {
                             })
                             .unwrap();
                     }
+                    done_tx.send(()).unwrap();
                 });
+                assert!(matches!(
+                    done_rx.recv_timeout(std::time::Duration::from_millis(30)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ));
                 release_tx.send(()).unwrap();
                 second.join().unwrap();
             });
@@ -941,6 +932,60 @@ mod publication_tests {
             assert_eq!(row.weight, 19.0);
             assert_eq!(row.token_version, 2);
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn rebuild_from_preserves_sql_order_deletions_generation_and_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.db");
+        let db = SqliteStore::open(&path, 0).unwrap();
+        let holder =
+            Arc::new(SnapshotHolder::build(&db, omni_crypto::field::derive_key("k"), 0.0).unwrap());
+        let writer = SqliteStore::open(&path, 0).unwrap();
+        let backend = Arc::new(omni_store::Store::Sqlite {
+            store: Arc::new(std::sync::Mutex::new(db)),
+            path,
+            day_offset_minutes: 0,
+        });
+        for (id, label) in [("older", "a"), ("newer", "b")] {
+            writer.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES (?,'anthropic',?,'oauth',1,1,1,'{}',0,0)", (id, label)).unwrap();
+        }
+        for sql in [
+            "SELECT 1",
+            "UPDATE credentials SET label='b' WHERE id='older'",
+            "DELETE FROM credentials WHERE id='older'",
+        ] {
+            writer.connection().execute_batch(sql).unwrap();
+            let generation = holder.generation();
+            holder.rebuild_from(backend.clone()).await.unwrap();
+            let expected = writer
+                .connection()
+                .prepare("SELECT id FROM credentials ORDER BY tier, label")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let actual = holder
+                .load()
+                .routing
+                .credentials
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            assert_eq!(holder.generation(), generation + 1);
+        }
+        let before = holder.load();
+        let generation = holder.generation();
+        writer
+            .connection()
+            .execute_batch("DROP TABLE credentials")
+            .unwrap();
+        assert!(holder.rebuild_from(backend).await.is_err());
+        assert!(Arc::ptr_eq(&before, &holder.load()));
+        assert_eq!(holder.generation(), generation);
     }
 
     #[test]
@@ -1014,270 +1059,6 @@ mod publication_tests {
             // No subsequent database write or refresh may be needed to heal.
             assert_eq!(entry(result.as_ref()), expected);
             assert_eq!(entry(holder.load().keys_by_hash.get("h")), expected);
-        }
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn connect_upsert_orders_replaces_removes_and_preserves_read_errors() {
-        for (tier, label, position) in [(0, "z", 0), (1, "b", 1), (1, "c", 2), (3, "a", 3)] {
-            let dir = tempfile::tempdir().unwrap();
-            let db = SqliteStore::open(dir.path().join("upsert.db"), 0).unwrap();
-            let key = omni_crypto::field::derive_key("k");
-            for (id, tier, label) in [("a", 1, "a"), ("b", 1, "c"), ("c", 2, "a")] {
-                db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES (?,'anthropic',?,'oauth',1,?,1,'{}',0,0)", (id, label, tier)).unwrap();
-            }
-            let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
-            db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('new','anthropic',?,'oauth',1,?,1,'{}',0,0)", (label, tier)).unwrap();
-            let read = || omni_store::credentials::get(db.connection(), &key, "new");
-            holder.patch_credential("new", read).unwrap();
-            assert_eq!(holder.load().routing.credentials.len(), 3);
-            holder
-                .publish_credential_at_read("new", read, || {}, true)
-                .unwrap();
-            assert_eq!(holder.load().routing.credentials[position].id, "new");
-            db.connection()
-                .execute(
-                    "UPDATE credentials SET label='replacement',tier=99 WHERE id='new'",
-                    [],
-                )
-                .unwrap();
-            holder
-                .publish_credential_at_read("new", read, || {}, true)
-                .unwrap();
-            assert_eq!(holder.load().routing.credentials.len(), 4);
-            let mut expected = holder.load().routing.credentials.clone();
-            expected.sort_by(|a, b| {
-                a.tier
-                    .partial_cmp(&b.tier)
-                    .unwrap()
-                    .then_with(|| a.label.as_bytes().cmp(b.label.as_bytes()))
-            });
-            assert_eq!(holder.load().routing.credentials, expected);
-            let before = holder.load();
-            db.connection()
-                .execute(
-                    "UPDATE credentials SET provider_data='invalid json' WHERE id='new'",
-                    [],
-                )
-                .unwrap();
-            assert!(read().is_err());
-            assert!(
-                holder
-                    .publish_credential_at_read("new", read, || {}, true)
-                    .is_err()
-            );
-            assert!(Arc::ptr_eq(&before, &holder.load()));
-            db.connection()
-                .execute("DELETE FROM credentials WHERE id='new'", [])
-                .unwrap();
-            holder
-                .publish_credential_at_read("new", read, || {}, true)
-                .unwrap();
-            assert_eq!(holder.load().routing.credentials.len(), 3);
-            // A malformed row omitted by the routing read must not be inserted.
-            db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('new','anthropic','bad','oauth',1,1,1,'invalid json',0,0)", []).unwrap();
-            let before = holder.load();
-            assert!(
-                holder
-                    .publish_credential_at_read("new", read, || {}, true)
-                    .is_err()
-            );
-            assert!(Arc::ptr_eq(&before, &holder.load()));
-            assert_eq!(holder.generation(), 0);
-        }
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn connect_replacement_order_matches_store_rebuild() {
-        for (case, tier, label) in [
-            ("later", 1.0, "z"),
-            ("earlier", 1.0, "a"),
-            ("tier boundary", 3.5, "m"),
-            ("unchanged equal key", 1.0, "m"),
-            ("changed to equal neighbour", 1.0, "b"),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let db = SqliteStore::open(dir.path().join("replacement.db"), 0).unwrap();
-            let key = omni_crypto::field::derive_key("k");
-            for (id, tier, label) in [
-                ("before", 1.0, "b"),
-                ("equal-before", 1.0, "m"),
-                ("subject", 1.0, "m"),
-                ("equal-after", 1.0, "m"),
-                ("higher", 2.0, "a"),
-            ] {
-                db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES (?,'anthropic',?,'oauth',1,?,1,'{}',0,0)", (id, label, tier)).unwrap();
-            }
-            let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
-            let ids = |snapshot: Arc<GatewaySnapshot>| {
-                snapshot
-                    .routing
-                    .credentials
-                    .iter()
-                    .map(|c| c.id.clone())
-                    .collect::<Vec<_>>()
-            };
-            let before = ids(holder.load());
-            db.connection()
-                .execute(
-                    "UPDATE credentials SET tier=?,label=?,weight=7 WHERE id='subject'",
-                    (tier, label),
-                )
-                .unwrap();
-            holder
-                .publish_credential_at_read(
-                    "subject",
-                    || omni_store::credentials::get(db.connection(), &key, "subject"),
-                    || {},
-                    true,
-                )
-                .unwrap();
-            let published = ids(holder.load());
-            if case == "unchanged equal key" {
-                assert_eq!(published, before);
-            }
-            holder.rebuild(&db).unwrap();
-            assert_eq!(published, ids(holder.load()), "{case}");
-        }
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn patch_credential_changed_label_keeps_old_position_unchanged_behavior() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = SqliteStore::open(dir.path().join("refresh-order.db"), 0).unwrap();
-        let key = omni_crypto::field::derive_key("k");
-        for id in ["a", "b"] {
-            db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES (?,'anthropic',?,'oauth',1,1,1,'{}',0,0)", (id, id)).unwrap();
-        }
-        let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
-        db.connection()
-            .execute("UPDATE credentials SET label='z' WHERE id='a'", [])
-            .unwrap();
-        holder
-            .patch_credential("a", || {
-                omni_store::credentials::get(db.connection(), &key, "a")
-            })
-            .unwrap();
-        let current = holder.load();
-        assert_eq!(
-            current
-                .routing
-                .credentials
-                .iter()
-                .map(|c| c.id.as_str())
-                .collect::<Vec<_>>(),
-            ["a", "b"]
-        );
-        assert_eq!(current.routing.credentials[0].label, "z");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn refresh_absent_stays_absent_but_connect_publishes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("adapter.db");
-        let db = SqliteStore::open(&path, 0).unwrap();
-        let holder =
-            Arc::new(SnapshotHolder::build(&db, omni_crypto::field::derive_key("k"), 0.0).unwrap());
-        db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('new','anthropic','new','oauth',1,1,1,'{}',0,0)", []).unwrap();
-        let backend = Arc::new(omni_store::Store::Sqlite {
-            store: Arc::new(std::sync::Mutex::new(db)),
-            path,
-            day_offset_minutes: 0,
-        });
-        holder
-            .refresh_credential(backend.clone(), "new".into())
-            .await
-            .unwrap();
-        assert!(holder.load().routing.credentials.is_empty());
-        holder
-            .publish_credential(backend, "new".into())
-            .await
-            .unwrap();
-        assert_eq!(holder.load().routing.credentials.len(), 1);
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn connect_upsert_serializes_with_rebuild_without_resurrection_or_duplicates() {
-        for delete in [false, true] {
-            for upsert_first in [false, true] {
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("race.db");
-                let db = SqliteStore::open(&path, 0).unwrap();
-                let key = omni_crypto::field::derive_key("k");
-                let holder = SnapshotHolder::build(&db, key.clone(), 0.0).unwrap();
-                db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES ('new','anthropic','new','oauth',1,1,1,'{}',0,0)", []).unwrap();
-                let (captured_tx, captured_rx) = std::sync::mpsc::sync_channel(0);
-                let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
-                std::thread::scope(|s| {
-                    let holder = &holder;
-                    let key = &key;
-                    let path = &path;
-                    s.spawn(move || {
-                        let db = SqliteStore::open(path, 0).unwrap();
-                        if upsert_first {
-                            holder
-                                .publish_credential_at_read(
-                                    "new",
-                                    || {
-                                        let row = omni_store::credentials::get(
-                                            db.connection(),
-                                            key,
-                                            "new",
-                                        )?;
-                                        captured_tx.send(()).unwrap();
-                                        release_rx.recv().unwrap();
-                                        Ok(row)
-                                    },
-                                    || {},
-                                    true,
-                                )
-                                .unwrap();
-                        } else {
-                            holder
-                                .rebuild_read(|| {
-                                    let snapshot = read_snapshot(&db, key, 0.0)?;
-                                    captured_tx.send(()).unwrap();
-                                    release_rx.recv().unwrap();
-                                    Ok(snapshot)
-                                })
-                                .unwrap();
-                        }
-                    });
-                    captured_rx.recv().unwrap();
-                    if delete {
-                        db.connection()
-                            .execute("DELETE FROM credentials WHERE id='new'", [])
-                            .unwrap();
-                    }
-                    assert!(holder.writers.try_lock().is_err());
-                    let second = s.spawn(move || {
-                        let db = SqliteStore::open(path, 0).unwrap();
-                        if upsert_first {
-                            holder.rebuild(&db).unwrap();
-                        } else {
-                            holder
-                                .publish_credential_at_read(
-                                    "new",
-                                    || omni_store::credentials::get(db.connection(), key, "new"),
-                                    || {},
-                                    true,
-                                )
-                                .unwrap();
-                        }
-                    });
-                    release_tx.send(()).unwrap();
-                    second.join().unwrap();
-                });
-                assert_eq!(
-                    holder.load().routing.credentials.len(),
-                    usize::from(!delete)
-                );
-            }
         }
     }
 }
