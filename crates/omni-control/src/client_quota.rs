@@ -173,8 +173,28 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
     };
     let since = optional("since", oldest).max(oldest);
     let until = optional("until", now).min(now);
-    let mut samples =
-        omni_store::quota::list_quota_samples(store.connection(), since, until, MAX_SAMPLES + 1)?;
+    let compact = omni_store::quota::list_compact_quota_samples(
+        store.connection(),
+        since,
+        until,
+        MAX_SAMPLES + 1,
+    )?;
+    let mut samples = compact
+        .series
+        .iter()
+        .zip(&compact.values)
+        .map(|(s, v)| {
+            [
+                &compact.cells[s[0]],
+                &compact.cells[s[1]],
+                &v[0],
+                &v[1],
+                &v[2],
+                &v[3],
+                &v[4],
+            ]
+        })
+        .collect::<Vec<_>>();
     crate::credentials::validate_client_metadata(store)?;
     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
     // Lexicographic composition of total preorders is total, even for corrupt cells.
@@ -194,7 +214,7 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         let Some(c) = accounts.iter().rposition(|c| same_id(&c[0], &s[0])) else {
             continue;
         };
-        if s[3] == Value::Null || number(&s[3]) <= 0.0 {
+        if *s[3] == Value::Null || number(s[3]) <= 0.0 {
             continue;
         }
         if let Some((last_c, window, k)) = previous
@@ -446,6 +466,39 @@ mod speed_tests {
         for count in [1000, 10000, 50002] {
             db.execute_batch(&format!("DELETE FROM quota_samples; WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<{count}) INSERT INTO quota_samples SELECT CASE WHEN x%2=0 THEN 'history-0' ELSE 'history-1' END,'daily',x,60000,NULL,1794613400000+x,NULL FROM n;")).expect("samples");
             let bytes = check(&count.to_string());
+            db.execute_batch("UPDATE credentials SET label='E' WHERE id='history-1'; CREATE INDEX IF NOT EXISTS speed_observed ON quota_samples(observed_at);").expect("driver metadata/index");
+            let driver_bytes = check(&format!("r2-driver-{count}"));
+            let sql = "SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?";
+            let mut plan = db
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .expect("plan");
+            let details = plan
+                .query_map(
+                    rusqlite::params![1793232000000.0, 1794614400000.0, 50001],
+                    |r| r.get::<_, String>(3),
+                )
+                .expect("plan rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("details");
+            let mut stepping = Vec::new();
+            for _ in 0..9 {
+                let start = std::time::Instant::now();
+                let mut stmt = db.prepare(sql).expect("statement");
+                let mut rows = stmt
+                    .query(rusqlite::params![1793232000000.0, 1794614400000.0, 50001])
+                    .expect("query");
+                let mut n = 0;
+                while rows.next().expect("step").is_some() {
+                    n += 1;
+                }
+                std::hint::black_box(n);
+                stepping.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            stepping.sort_by(f64::total_cmp);
+            eprintln!(
+                "STEP {count} median {} plan {details:?} driver_bytes {driver_bytes}",
+                stepping[4]
+            );
             let mut times = Vec::new();
             for _ in 0..9 {
                 let start = std::time::Instant::now();
@@ -457,7 +510,14 @@ mod speed_tests {
                 "BENCH {count}: median {:.3} ms bytes {bytes} all {times:?}",
                 times[4]
             );
+            db.execute_batch("UPDATE credentials SET label='custom' WHERE id='history-1'")
+                .expect("restore");
         }
+        db.execute_batch("UPDATE quota_samples SET observed_at=1794613400000;")
+            .expect("ties");
+        check("r2-ties");
+        db.execute_batch("DELETE FROM quota_samples; INSERT INTO credentials VALUES(1,'numeric','custom',1,NULL); INSERT INTO quota_samples VALUES(1,'1',1,10,NULL,1794613400000,NULL),(1.0,'1',2,10,NULL,1794613400000,NULL),('1',1,3,10,NULL,1794613400000,NULL),(x'31',1.0,4,10,NULL,1794613400000,NULL),(0,x'31',5,10,NULL,1794613400000,NULL),(-0.0,NULL,6,10,NULL,1794613400000,NULL);").expect("mixed cells");
+        check("r2-mixed-cells");
         db.execute_batch("DELETE FROM credentials; DELETE FROM quota_samples;")
             .expect("clear");
         for (i, label) in ["é", "E", "e", "Z", "ä", "A", "a", "Å", "中", "e\u{301}"]
