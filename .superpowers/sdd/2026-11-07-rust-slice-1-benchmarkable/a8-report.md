@@ -1,3 +1,35 @@
+# Fix round 4 — complete for review
+Tested product/driver commit `d237ee93` (fix + driver `8a587977`, formatting `d237ee93`); subsequent report commit documentation only. Evidence base `/tmp/opencode/a8/fix4/`.
+T1 observation table: entries are status / `api key limits unreadable` lines with apiKeyId=client-A. “Other five” means login, logs, usage, quota, quota/history. Full response bodies and actual SQLite types are in `{red,green}/client-summary-0-{ts,rust}-limits-cells.json`, repeated for all three summary configurations in closure.
+| Cell | Route | Frozen | Rust before | Rust after |
+|---|---|---|---|---|
+| BLOB X'7b7d' | summary / other five | 200/2 ; 200/1 | 500/1 ; 200/1 | 200/2 ; 200/1 |
+| Empty BLOB | summary / other five | 200/2 ; 200/1 | 500/1 ; 200/1 | 200/2 ; 200/1 |
+| INTEGER 5 | summary / other five | 200/2 ; 200/1 | 500/1 ; 200/1 | 200/2 ; 200/1 |
+| REAL 1.5 | summary / other five | 200/2 ; 200/1 | 500/1 ; 200/1 | 200/2 ; 200/1 |
+| SQL NULL | summary / other five | 200/2 ; 200/1 | 500/1 ; 200/1 | 200/2 ; 200/1 |
+T1: summary now handles non-text limits as rejected configs, returning limits:null / limitUsage:[], with its second fixed log. Session validation and store key reader already reject non-text limits; left intact. Only client_summary changed; no shared operator reader changed. Normal schema used for BLOBs; no-affinity nullable table for numeric/NULL cells. Initial `before.log` accidentally stored numeric literals as TEXT (recorded typeof); corrected before `red.log`. Failed first: `admin-routes: 288 equal, 0 expected divergences, 12 failures, 0 raw keys minted`; GREEN: `admin-routes: 295 equal, 0 expected divergences, 0 failures, 0 raw keys minted` (`green.log`). Complete normalized exchanges compared, not only status/counts.
+T2: zero-limit odd/id=2 arrangement pinned next to mixed raw ids trim. Full normalized status, headers and generated complete bodies, including all rows: TS 25,000 versus Rust 24,999, both 200/truncated:true. Full bodies chosen because compact deterministic generation avoids an unwieldy literal or opaque digest. `history.log`: `admin-routes: 9892 equal, 11 expected divergences, 0 failures, 0 raw keys minted`. No product sorting change.
+Known differences:
+- Sort pair order on non-string sort cells.
+- history order, which row the 50,001-row trim cuts and therefore — when the cut rows differ in projectability — the number of samples returned, when credential_id / window_type / observed_at cells have mixed or non-declared types (reachable only with a hand-altered column affinity)
+- Sanitised Rust-only log lines on paths where frozen logs nothing; empty-413 `content-length` header.
+Rust-only stored-cell diagnostics retain the fixed-message/table/column/row-id exception; limits lines contain fixed message + apiKeyId. Inherited malformed allowlist inference parser diagnostics remain pinned. No live-Postgres driver in this increment.
+| Closure gate | Result line / evidence | Log |
+|---|---|---|
+| Tests | 161 `test result: ok` summaries, total 1163 passed / 11 ignored / 0 failed; no `FAILED` line; last: `test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s` | `closure-tests.log` |
+| Clippy | `Finished \`dev\` profile [unoptimized] target(s) in 3.03s` | `closure-clippy.log` |
+| fmt | Exit 0, empty log (no result line emitted) | `closure-fmt.log` |
+| Fresh build | `Finished \`dev\` profile [unoptimized] target(s) in 5.49s` | `closure-build.log` |
+| admin-routes | `admin-routes: 20602 equal, 27 expected divergences, 0 failures, 38 raw keys minted` | `closure-admin-routes.log` |
+| admin-auth | `admin-auth: 212 equal, 4 expected divergences, 0 failures, 116 distinct tokens` | `closure-admin-auth.log` |
+| surface | `surface: 620 equal, 61 expected divergences, 0 failures` | `closure-surface.log` |
+| run.ts | `all rows equal`; 64 rows containing `| pass |` | `closure-run.log` |
+All Cargo commands used CARGO_INCREMENTAL=0, CARGO_PROFILE_DEV_DEBUG=0, CARGO_PROFILE_TEST_DEBUG=0; tests had 20-minute timeout. Drivers ran after Cargo gates, sequentially. Full admin-routes passed first attempt; no wall-clock retry or threshold change.
+Other attempts retained: `before.log` 290/0/8; initial copy failed (artifact is omnigateway, not omni-gateway); `build.log` E0433 unqualified ValueRef, corrected in `build2.log`; `tests.log` same 161 summaries/1163 passed/11 ignored/no FAILED; `clippy.log` passed (`Finished ... in 3.71s`); `fmt.log` formatting diff, corrected then all closure gates repeated on d237ee93.
+Manifest: `/tmp/opencode/a8/fix4/manifest.json` records tested commit, both binary SHA256 values, counts/log names and attempts. Fresh Rust binary copied to `rust`; frozen `/tmp/opencode/a8/ts`. Drivers completed normal scratch teardown. Unrelated bun.lock, specs, stash and other worktrees untouched.
+
+## History — previous round
 # Fix round 3 — complete for review
 Tested product/driver commit: `b192499a` (implementation `e7e83f04`, then allowlist-before-limits evaluation correction). All evidence paths below are relative to `/tmp/opencode/a8/fix3/`; subsequent closure-report commit changes documentation only.
 | Item | Change / observed evidence |
