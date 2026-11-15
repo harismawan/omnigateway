@@ -10,6 +10,7 @@ use omni_store::{Credential, VirtualModel};
 pub fn list_body(models: &[&VirtualModel], credentials: &[Credential]) -> String {
     static PROVIDERS: std::sync::OnceLock<omni_router::Providers> = std::sync::OnceLock::new();
     let providers = PROVIDERS.get_or_init(omni_router::Providers::builtin);
+    let credentials = omni_router::ServingCredentials::new(credentials);
     let mut out = String::from("{\"object\":\"list\",\"data\":[");
     for (i, m) in models.iter().enumerate() {
         if i > 0 {
@@ -22,7 +23,7 @@ pub fn list_body(models: &[&VirtualModel], credentials: &[Credential]) -> String
         out.push_str(
             ",\"created\":0,\"created_at\":\"1970-01-01T00:00:00.000Z\",\"owned_by\":\"omnigateway\"",
         );
-        let (context, output) = omni_router::resolve_model_limits(m, credentials, providers);
+        let (context, output) = omni_router::resolve_model_limits(m, &credentials, providers);
         if let Some(n) = context {
             out.push_str(",\"max_input_tokens\":");
             write_number(n, &mut out);
