@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { deriveKey, decrypt } from "../../packages/store/src/encryption.ts";
+import { deriveKey, decrypt, encrypt } from "../../packages/store/src/encryption.ts";
 
 const { values: f } = parseArgs({ options: Object.fromEntries(
   ["ts", "rust", "work", "cert", "key"].map(k => [k, { type: "string" as const }]),
@@ -37,6 +37,14 @@ if (await cli.exited) throw Error("seed failed; see seed.err");
 const password = "a15-admin-password";
 const db = new Database(seedDb);
 db.run("INSERT OR REPLACE INTO settings (key,value) VALUES ('adminPasswordHash',?)", [await Bun.password.hash(password, { algorithm: "argon2id", memoryCost: 19456, timeCost: 2 })]);
+// Identical SQL on the stopped seed DB; both gateways receive the same copy.
+for (const provider of ["anthropic", "openai"]) for (const kind of ["full", "missing", "deleted", "key"]) {
+  db.run(`INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,expires_at,account_email,provider_data,access_token,refresh_token,id_token,created_at,updated_at,disabled_reason,disabled_at,token_version)
+    VALUES (?,?,?,?,0,3,2.5,4102444800000,'old@example.test',?,?,?,?,1000,2000,'fixture disabled',1500,7)`,
+    [`${provider}-${kind}`, provider, "old label", kind === "key" ? "apiKey" : "oauth",
+     JSON.stringify({ installationId: "11111111-1111-4111-8111-111111111111", idSalt: "a".repeat(64), accountId: "old-account", old: true }),
+     await encrypt(fieldKey, "old-access"), await encrypt(fieldKey, "old-refresh"), await encrypt(fieldKey, "old-id")]);
+}
 db.close();
 
 type Wire = { line: string; headers: string[]; body: string };
@@ -92,17 +100,31 @@ async function run(label: string, binary: string): Promise<Row[]> {
     rows.push({ name, response, wire: wires.map(w => ({ ...w, headers: [...w.headers] })) });
     return response.body;
   }
-  async function successRows(provider: string) {
+  async function storedRow(id: string) {
+    const reader = new Database(file, { readonly: true });
+    const stored = reader.query("SELECT * FROM credentials WHERE id = ?").get(id) as any;
+    reader.close();
+    if (!stored) throw Error(`missing ${id}`);
+    for (const field of ["access_token", "refresh_token", "id_token", "api_key"])
+      if (stored[field] !== null) stored[field] = await decrypt(fieldKey, stored[field]);
+    return stored;
+  }
+  async function successRows(provider: string, reconnect?: "full" | "missing") {
+      const name = reconnect ? `${provider}/reconnect-${reconnect}` : `${provider}/success`;
+      const credentialId = reconnect ? `${provider}-${reconnect}` : undefined;
+      const prior = credentialId ? await storedRow(credentialId) : undefined;
+      if (prior) rows.push({ name: `${name}/before`, response: prior, wire: [] });
       // Frozen decodeClaims requires a nonempty third segment, even though it
       // does not verify signatures. This fixture is deliberately not signed.
       const idToken = `${Buffer.from('{"alg":"none"}').toString("base64url")}.${Buffer.from(JSON.stringify({ email: "fixture@example.test", "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account", organizations: [{ id: "fixture-org", is_default: true }] } })).toString("base64url")}.unsigned`;
       tokenStatus = 200;
       tokenBody = JSON.stringify({ access_token: `${provider}-new-access`, refresh_token: `${provider}-new-refresh`, expires_in: 3600,
         ...(provider === "openai" ? { id_token: idToken } : { account: { email_address: "fixture@example.test" } }) });
-      const success = await row(`${provider}/success/start`, "start", JSON.stringify({ provider, label: "success label" }));
+      if (reconnect === "missing") tokenBody = JSON.stringify({ access_token: `${provider}-new-access`, expires_in: 3600 });
+      const success = await row(`${name}/start`, "start", JSON.stringify({ provider, label: "success label", credentialId: credentialId ? `  ${credentialId}  ` : undefined }));
       const successUrl = validateStart(success);
       const before = Date.now();
-      const finished = await row(`${provider}/success/finish`, "finish", JSON.stringify({ flowId: success.flowId, code: `fixture-code#${successUrl.searchParams.get("state")}` }));
+      const finished = await row(`${name}/finish`, "finish", JSON.stringify({ flowId: success.flowId, code: `fixture-code#${successUrl.searchParams.get("state")}` }));
       const after = Date.now();
       for (const wire of rows.at(-1)!.wire) {
         const json = wire.headers.some(h => /content-type: application\/json/i.test(h));
@@ -118,7 +140,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
         wire.body = json ? JSON.stringify(fields) : new URLSearchParams(fields).toString();
       }
       if (finished?.id) {
-        if (!uuid4.test(finished.id)) throw Error("credential id is not UUIDv4");
+        if (credentialId ? finished.id !== credentialId : !uuid4.test(finished.id)) throw Error("credential id invalid");
         const reader = new Database(file, { readonly: true });
         const stored = reader.query("SELECT * FROM credentials WHERE id = ?").get(finished.id) as any;
         reader.close();
@@ -126,9 +148,10 @@ async function run(label: string, binary: string): Promise<Row[]> {
         for (const field of ["access_token", "refresh_token", "id_token", "api_key"]) {
           if (stored[field] !== null) stored[field] = await decrypt(fieldKey, stored[field]);
         }
-        await Bun.write(join(root, `${provider}-success.raw.json`), JSON.stringify({ before, after, stored }, null, 2));
+        await Bun.write(join(root, `${provider}-${reconnect ?? "success"}.raw.json`), JSON.stringify({ before, after, prior, stored }, null, 2));
         // 2s clock/serialization tolerance, validated before any time masking.
         for (const [field, delta] of [["expires_at", 3600000], ["created_at", 0], ["updated_at", 0]] as const) {
+          if (prior && field === "created_at") { if (stored[field] !== prior[field]) throw Error("created_at changed"); continue; }
           if (!Number.isSafeInteger(stored[field]) || stored[field] < before + delta - 2000 || stored[field] > after + delta + 2000) throw Error(`invalid ${field}`);
           stored[field] = `<request-time+${delta};tolerance=2000ms>`;
         }
@@ -136,12 +159,12 @@ async function run(label: string, binary: string): Promise<Row[]> {
           const data = JSON.parse(stored.provider_data);
           if (!uuid4.test(data.installationId) || !/^[0-9a-f]{64}$/.test(data.idSalt)) throw Error("invalid Codex randomness");
           // Replace only validated random bytes; preserve JSON spacing/key order.
-          stored.provider_data = stored.provider_data.replace(data.installationId, "<installation>").replace(data.idSalt, "<salt>");
+          if (!prior) stored.provider_data = stored.provider_data.replace(data.installationId, "<installation>").replace(data.idSalt, "<salt>");
         }
-        stored.id = "<uuid4>";
-        finished.id = "<uuid4>";
-        rows.push({ name: `${provider}/success/persistence`, response: stored, wire: [] });
-      } else rows.push({ name: `${provider}/success/persistence`, response: { missing: true }, wire: [] });
+        if (!prior) { stored.id = "<uuid4>"; finished.id = "<uuid4>"; }
+        else stored.token_version_delta = stored.token_version - prior.token_version;
+        rows.push({ name: `${name}/persistence`, response: stored, wire: [] });
+      } else rows.push({ name: `${name}/persistence`, response: { missing: true }, wire: [] });
     }
   try {
     const deadline = Date.now() + 20000;
@@ -218,6 +241,18 @@ async function run(label: string, binary: string): Promise<Row[]> {
       }
     }
     for (const provider of ["anthropic", "openai"]) await successRows(provider);
+    for (const provider of ["anthropic", "openai"]) {
+      await successRows(provider, "full");
+      await successRows(provider, "missing");
+      for (const [kind, credentialId] of Object.entries({ other: `${provider === "openai" ? "anthropic" : "openai"}-full`, apiKey: `${provider}-key`, object: {} }))
+        await row(`${provider}/reconnect-refusal/${kind}`, "start", JSON.stringify({ provider, credentialId }));
+      const start = await row(`${provider}/deleted/start`, "start", JSON.stringify({ provider, credentialId: `${provider}-deleted` }));
+      const url = validateStart(start);
+      const writer = new Database(file);
+      writer.run("DELETE FROM credentials WHERE id = ?", [`${provider}-deleted`]); writer.close();
+      await row(`${provider}/deleted/finish`, "finish", JSON.stringify({ flowId: start.flowId, code: `fixture-code#${url.searchParams.get("state")}` }));
+      await row(`${provider}/deleted/consumed`, "finish", JSON.stringify({ flowId: start.flowId, code: "code" }));
+    }
     for (const provider of ["anthropic", "openai"]) {
       for (const mode of ["close", "partial"] as const) for (const route of ["finish", "poll"]) {
         const name = `${provider}/transport/${mode}/${route}`;
