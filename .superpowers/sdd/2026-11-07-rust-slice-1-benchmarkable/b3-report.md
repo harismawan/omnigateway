@@ -1,45 +1,42 @@
 # B3 OpenAI / Codex
 
-## Item A committed — HEAD `d0e142c6`; stopped before item B tests
+## Item B implemented — HEAD `f35643f0`; empty-body decision pending
 
-Item A: depth audit completed; 33 cases, 39,990 levels / 2 MiB pass.
-No new unmodified failure/product defect. Prior lite/credential defects remain fixed.
-Canonical ownership table expanded in conformance/openai-depth.md; no Pending row.
-| Added control/stage | Evidence |
-|---|---|
-| API-key non-lite schema, wire.rs:234–253 | baseline PASS; plain clone SIGSEGV 11 |
-| repaired input copy, wire.rs:202 | native_reasoning plain clone SIGSEGV 11 |
-| LiteArgs input/tools drop | ordinary drop PASS within outer codec scope |
-| response-format raw/read/text/copy/next/spec owners | mapped to existing schema/replacement scope-removal cases |
-| system/file helpers; flush/repair; lite result | borrowed/typed shallow fields or moved owners; structural reasons recorded |
-Completeness grep (Value/Map/deep and named local owners across five named files):
-149 lines, `/tmp/opencode/b3/s5a-inventory.log`; exact expression in depth doc.
-Credentials PartialEq removed: no non-test comparison/container/bound use found;
-workspace all-target check passes (`s5a-workspace-check.log`).
-All scratch mutations restored; worktree clean after item A commit.
+Worktree rust-providers clean; append-only commit, no push/merge.
+First new wire test failed with UnsupportedEncoding(Zstd): `s5b-red.log`.
+Client now sends nonempty zstd bodies, level 3 / one write_all / finish;
+source remains uncompressed; compressed allocation reused for wire bytes.
+Depth: compression consumes already-serialised bytes and holds no JSON value.
+Raw TCP captures compared to frozen nodeHttpClient via Bun reference script:
+source sizes 37, 131091, 3145746, real OAuth codec request (1653 bytes),
+and 2-byte mixed-case/whitespace encoding acceptance probe.
+All header lists/order equal; Content-Length correct; both bodies decompress
+exactly to source; compressed bytes identical in all five probes (`s5b-green.log`).
+Both framing refusals occur before URL parsing/network: supplied content-length;
+missing/wrong/duplicate content-encoding. Rust InvalidEncodedRequest preserves
+frozen text `{provider} codec buildRequest did not return a usable request`;
+frozen type is GatewayError UPSTREAM (adapter); Rust checks in transport.
+Observed empty frozen POST: content-encoding: zstd, Host: fixture,
+Connection: keep-alive, Transfer-Encoding: chunked (no Content-Length).
+After CRLFCRLF, hex `390d0a28b52ffd00580100000d0a300d0a0d0a`:
+9-byte frame `28b52ffd0058010000`, chunk terminator (`s5b-empty.log`).
+Existing explicit chunking needs a new branch for this implicit-empty case;
+per instruction Rust refuses with EmptyEncodedBody. Controller decision pending;
+OAuth emits a nonempty JSON object. Known differences documented in
+conformance/openai-compression.md, Implemented section; byte identity not required.
+Item A depth audit remains committed in d0e142c6 (details in depth doc).
 
-Item B NOT implemented; no failing-first HTTP tests written or frozen wire comparison run.
-Read compression note and frozen http-client.ts:90–155,160–207 only.
-Empty source IS compressed: 179–181 constructs Buffer and calls zstdEncode
-unconditionally for zstd; 203–204 writes then closes. 154: `if (bodyBytes.byteLength > 0) outgoing.write(bodyBytes);`
-99–100: `if (req.body.length > 0 && !hasHeader(req, "content-length"))` appends length.
-Thus empty encoded frame is written without explicit Content-Length (code reading,
-not a new wire observation). Output buffered via Response.arrayBuffer at 201.
-Existing encoder-only measurements: empty frame bytes differ; decoded equality required.
+Post-last-commit gates, all logs under `/tmp/opencode/b3/`:
+`s5b-tests.log`: 53 `test result: ok` summaries; 235 passed; 4 ignored; no FAILED.
+Final result: `test result: ok. 1 passed; 0 failed; 0 ignored; ... finished in 0.07s`.
+`s5b-clippy.log`: `Finished dev profile [unoptimized] target(s) in 0.18s`.
+`s5b-fmt.log`: `exit code: 0`. Existing ignored tests unchanged.
 
-Post-commit gates, logs under `/tmp/opencode/b3/`:
-`s5a-tests.log`: 52 `test result: ok` summaries; 231 passed, 4 ignored; no FAILED.
-`s5a-clippy.log`: `Finished dev profile [unoptimized] target(s) in 1.44s`.
-`s5a-fmt.log`: empty output.
-`s5a-tripwires.log`: json_writes 1 passed; public_json_boundary 4 passed, zero failed.
-Restored OAuth request corpus passes (`s5a-a-restored.log`); existing ignores untouched.
-
-Next session: finish item B with failing-first wire/reference/refusal/empty tests,
-only http/mod.rs and wire.rs plus tests/docs; separate commit; update compression
-Implemented section and rerun gates. Then step 5 gateway integration:
-provider registration, startup initialize(), generated descriptor catalog,
-persist OAuth result provider data via ensure_secrets(prior), frozen gateway
-end-to-end driver, dispatch_depth cases, benchmark-matrix entry.
+Next: controller decides whether to accept empty-body refusal or extend implicit
+chunking. Then step 5, gateway integration: provider registration, startup
+initialize(), catalog from generated descriptors, persist OAuth result provider
+data with ensure_secrets(prior), end-to-end driver against frozen gateway,
+dispatch_depth cases, and a benchmark-matrix entry.
 
 ## D1 vendor-depth checkpoint — HEAD `8ec4c4a5`
 
