@@ -12,17 +12,18 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 - [x] A5 (M) admin keys/models/catalog/settings/password routes — 5da6af7e..9248cd45, reviewed clean (3 fix rounds)
 - [x] A6 (M) credentials routes — d2757acb..9624fa13, approved after 2 fix rounds; routing-path bench vs 66020396: no measurable regression; PG gateway leg + live-PG proof + PG row isolation → D4 + encrypted credential writes + health
 - [x] A7 (M) usage, logs, logs/export, nodes — 6d2a7a8e..d0c11d29, approved after 2 fix rounds (a7-r2-review.md); bounded read-only readers (export pool 4, report lane 4); usage-large peak RSS 58–69 MB vs TS 153–156 MB; documented difference: HEAD export lacks transfer-encoding; requests/:id/body → with A3; agent-setup → after CLI branch merge; PG readers → D4
-- [ ] A8 (S) /api/client/* (7)
+- [x] A8 (S) /api/client/* (7) — functional review closed; speed review approved (a8-speed-review.md), five controller E2E rounds faster at cap; bounded eager-reservation tradeoff recorded.
 - [ ] A9 (L) /api/stream WebSocket + console live view
 - [ ] A10 (M) database routes, quiesce latch, lifecycle restart/shutdown
 - [ ] A11 (S) maintenance loop (pruning, heartbeat)
 - [ ] A12 (S) models dry-run (API + CLI)
 - [ ] A13 (M) OTLP export
 - [ ] A14 (S) outbound idle timeout: close a response whose client stops reading (Bun idleTimeout 255 s parity), all response kinds; found in A7 fix round 1
+- [ ] A15 (S) /api/connect/* routes (start, finish, poll) over the B1 provider functions
 
 ## B. Providers
-- [~] B1 (M) OAuth framework (in progress with B2, worktree feat/rust-provider-anthropic), refresh() with token_version CAS, 60 s sweep, /api/connect/*
-- [~] B2 (L) anthropic (b66c1016: refresh approved for merge; codec round 5 = lifecycle small-stack tests in progress; overhead-c1 re-measure + merge pending)   - [ ] B3 (L) openai/codex   - [ ] B4 (L) antigravity
+- [x] B1 (M) OAuth framework: refresh() with token_version CAS, 60 s sweep, snapshot publication (W→P mutexes) — merged 8f6f84f9, refresh approved after 3 review rounds; /api/connect/* HTTP routes → A15
+- [x] B2 (L) anthropic — merged 8f6f84f9, codec approved after 6 rounds (b2-codec-r6-review.md); bench 7 rounds vs 04c3c5af: overhead-c1 +1.5 %, chat-stream −0.8 % (inside base range)   - [ ] B3 (L) openai/codex   - [ ] B4 (L) antigravity
 - [ ] B5 (M) grok  - [ ] B6 (M) kimi  - [ ] B7 (M) kilo  - [ ] B8 (M) muse  - [ ] B9 (M) qoder
 - [ ] B10 (M) quota poller + oauthUsage + quota routes + resets/redeem
 
@@ -42,6 +43,7 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 
 ## F. Packaging and cutover
 - [x] F1 CI cargo + release assets — merged 66020396 (arm64/macOS + publish proven only by CI)   - [x] F2 Dockerfile — merged 66020396; k8s Recreate staged on feat/rust-first-rollout d461aba0 for the promotion PR
-- [ ] X1 lossless UTF-16 stream text end-to-end (shared IR StreamEvent text, collectors, all egress dialects; parked B2 codec I3/I5)
+- [ ] X1 lossless UTF-16 stream text end-to-end (shared IR StreamEvent text, collectors, all egress dialects; parked B2 codec I3/I5; B3 OpenAI decoder: four retained-RED cases in conformance/openai-lossless-blocker.md, test `lone_surrogates_match_ts` ignored until X1; ALSO non-numeric upstream usage counts — TS keeps string/object/array/boolean in Usage, Rust Usage is f64: B2 codec I5-exotic and B3 conformance/openai-coercion.md rows 107/108/131/132/137/138/143/144, test `malformed_usage_matches_ts` ignored until X1; ALSO upstream numbers beyond the double range (`1e309`): serde_json Value cannot hold ±Infinity so the whole event is skipped where TS carries Infinity — B3 decode review finding 1, six reviewer streams as an ignored test; custom and Anthropic decoders share deep::parse and are to be observed)
 - [ ] X2 TS-exact credential expiry carrier (fractional/non-finite expires_at as REAL/NULL through store, snapshot, router; reading a TS-written REAL must not drop the credential; PG oracle) — parked from B1
+- [ ] X3 malformed id cells on operator routes: Rust strict String readers fail the request where frozen strict equality just does not match (models.rs credential pin/provider/auth membership, key-id projection keys.rs:429, credentials health last-used lookup BLOB→text) — surfaced by the A8 R1 audit, nothing reproduced yet; reproduce against frozen first, then decide
 - [ ] F3 cutover runbook, npm final notice, cross-read gate SQLite+Postgres, full conformance gate

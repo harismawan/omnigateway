@@ -29,6 +29,35 @@ fn sql_value(v: ValueRef<'_>) -> JsValue {
         ValueRef::Text(s) | ValueRef::Blob(s) => text(&String::from_utf8_lossy(s)),
     }
 }
+fn provider_data(raw: ValueRef<'_>, id: ValueRef<'_>) -> Result<JsValue> {
+    if matches!(raw, ValueRef::Null) {
+        return Ok(JsValue::Null);
+    }
+    let invalid = || {
+        Failure::internal(format!(
+            "invalid credential provider_data: id={}",
+            stringify(&sql_value(id))
+        ))
+    };
+    let bytes = raw.as_bytes().map_err(|_| invalid())?;
+    crate::operator_json::parse(&String::from_utf8_lossy(bytes)).map_err(|_| invalid())
+}
+
+/// Match credentials.list's whole-list JSON failure without opening secret columns.
+pub(crate) fn validate_client_metadata(s: &SqliteStore) -> Result<()> {
+    let mut stmt = s
+        .connection()
+        .prepare("SELECT provider_data,id FROM credentials")
+        .map_err(Failure::internal)?;
+    let mut rows = stmt.query([]).map_err(Failure::internal)?;
+    while let Some(row) = rows.next().map_err(Failure::internal)? {
+        provider_data(
+            row.get_ref(0).map_err(Failure::internal)?,
+            row.get_ref(1).map_err(Failure::internal)?,
+        )?;
+    }
+    Ok(())
+}
 fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
     let mut stmt = s
         .connection()
@@ -63,11 +92,7 @@ fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
                         || matches!(raw,ValueRef::Real(n) if n==1.0),
                 ),
                 "hasRefreshToken" => JsValue::Bool(!matches!(raw, ValueRef::Null)),
-                "providerData" if matches!(raw, ValueRef::Null) => JsValue::Null,
-                "providerData" => crate::operator_json::parse(&String::from_utf8_lossy(
-                    raw.as_bytes().map_err(Failure::internal)?,
-                ))
-                .map_err(Failure::internal)?,
+                "providerData" => provider_data(raw, r.get_ref("id").map_err(Failure::internal)?)?,
                 _ => sql_value(raw),
             };
             fields.push((k, v));

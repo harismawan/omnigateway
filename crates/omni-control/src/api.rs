@@ -110,13 +110,21 @@ struct KeyRow {
 
 /// `JSON.parse` of a stored column, which throws (a `SyntaxError`, reported
 /// as INTERNAL) on anything `JSON.parse` refuses.
-fn parse_stored(raw: &str) -> Result<JsValue> {
-    crate::operator_json::parse(raw).map_err(Failure::internal)
+fn parse_allowlist(raw: &str, id: &str) -> Result<JsValue> {
+    crate::operator_json::parse(raw).map_err(|detail| {
+        omni_store::StoreError::StoredJson {
+            table: "api_keys",
+            column: "model_allowlist",
+            row_id: id.to_owned(),
+            detail: detail.into(),
+        }
+        .into()
+    })
 }
 
 /// `parseLimits`: the stored matrix through `parseLimitConfig` (strict,
 /// `__proto__` refused at any depth), or null when it does not parse.
-fn stored_limits(raw: &str) -> JsValue {
+pub(crate) fn stored_limits(raw: &str) -> JsValue {
     let Ok(value) = crate::operator_json::parse(raw) else {
         return JsValue::Null;
     };
@@ -154,7 +162,7 @@ fn key_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<KeyRow>> {
             Ok(KeyRow {
                 allowlist: match &row.allowlist_json {
                     None => JsValue::Null,
-                    Some(raw) => parse_stored(raw)?,
+                    Some(raw) => parse_allowlist(raw, &row.key.id)?,
                 },
                 limits: {
                     let limits = stored_limits(&row.limits_json);
@@ -369,10 +377,24 @@ pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> R
             .get::<_, Option<String>>("model_allowlist")
             .map_err(Failure::internal)?
         {
-            Some(v) => parse_stored(&v)?,
+            Some(v) => parse_allowlist(&v, id)?,
             None => JsValue::Null,
         },
-        limits: stored_limits(&row.get::<_, String>("limits").map_err(Failure::internal)?),
+        limits: {
+            // JSON.parse coerces SQLite non-text cells first. Numbers/null
+            // cannot satisfy the object schema; Uint8Array's comma-separated
+            // bytes cannot produce an object either (including an empty blob).
+            let limits = match row.get_ref("limits").map_err(Failure::internal)? {
+                rusqlite::types::ValueRef::Text(raw) => {
+                    stored_limits(&String::from_utf8_lossy(raw))
+                }
+                _ => JsValue::Null,
+            };
+            if matches!(limits, JsValue::Null) {
+                tracing::error!(apiKeyId = %id, "api key limits unreadable");
+            }
+            limits
+        },
         body_logging_opt_out: matches!(
             row.get_ref("body_logging_opt_out")
                 .map_err(Failure::internal)?,
@@ -747,7 +769,7 @@ fn public_rows(catalog: Option<&JsValue>) -> Vec<PublicRow> {
 
 /// `String.prototype.localeCompare` under Bun's default (root/`en`) ICU
 /// collation.
-fn locale_compare(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
+pub(crate) fn locale_compare(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
     static COLLATOR: std::sync::OnceLock<icu_collator::CollatorBorrowed<'static>> =
         std::sync::OnceLock::new();
     COLLATOR
@@ -771,7 +793,17 @@ pub type Account = (String, JsValue);
 pub fn accounts(store: &SqliteStore) -> Result<Vec<Account>> {
     omni_store::models::operator_credentials(store.connection())?
         .into_iter()
-        .map(|(_, provider, _, _, data)| Ok((provider, parse_stored(&data)?)))
+        .map(|(id, provider, _, _, data)| {
+            let parsed = crate::operator_json::parse(&data).map_err(|detail| {
+                omni_store::StoreError::StoredJson {
+                    table: "credentials",
+                    column: "provider_data",
+                    row_id: id,
+                    detail: detail.into(),
+                }
+            })?;
+            Ok((provider, parsed))
+        })
         .collect()
 }
 

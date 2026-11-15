@@ -4,6 +4,7 @@ pub mod admin_password;
 pub mod api;
 pub mod body_schema;
 pub mod catalog;
+pub mod client_quota;
 pub mod config;
 pub mod credentials;
 #[cfg(test)]

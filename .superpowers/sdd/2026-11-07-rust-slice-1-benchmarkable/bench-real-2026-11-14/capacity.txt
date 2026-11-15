@@ -1,0 +1,11 @@
+| wire | chunks/clients | direct statuses clean | gate |
+|---|---:|---|---|
+| chat | 1/64 | true | inconclusive/fail: >3× best observed gateway |
+| chat | 1/1 | true | pass: all requests successful only; no rate ratio |
+| chat | 2000/16 | true | pass: >3× best observed gateway |
+| responses | 1/64 | true | pass: >3× best observed gateway |
+| responses | 1/1 | true | pass: all requests successful only; no rate ratio |
+| responses | 2000/16 | true | inconclusive/fail: >3× best observed gateway |
+| messages | 1/64 | true | pass: >3× best observed gateway |
+| messages | 1/1 | true | pass: all requests successful only; no rate ratio |
+| messages | 2000/16 | true | pass: >3× best observed gateway |

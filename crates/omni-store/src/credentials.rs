@@ -226,10 +226,16 @@ fn open(r: &Row<'_>, key: &FieldKey, column: &'static str) -> Result<Secret, Sto
 
 fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> {
     let raw = row::text(r, T, "provider_data")?;
-    let lossless = omni_ir::jsjson::parse_js(&raw).map_err(StoreError::Corrupt)?;
+    let id = row::text(r, T, "id")?;
+    let lossless = omni_ir::jsjson::parse_js(&raw).map_err(|detail| StoreError::StoredJson {
+        table: T,
+        column: "provider_data",
+        row_id: id.clone(),
+        detail: detail.into(),
+    })?;
     Ok(Credential {
         lone_endpoint: lone_fields(&lossless, &["endpointId"]).remove("endpointId"),
-        id: row::text(r, T, "id")?,
+        id,
         provider: row::text(r, T, "provider")?,
         label: row::text(r, T, "label")?,
         auth_type: AuthType::parse(&row::text(r, T, "auth_type")?),
@@ -571,4 +577,16 @@ pub fn read_health(
         .query_row([credential_id, model], |r| Ok(health_from_row(r)))
         .optional()?
         .transpose()
+}
+/// Named accounts disclosed by the client quota surface. Secret columns are never read.
+pub fn client_quota_accounts(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<Vec<rusqlite::types::Value>>, crate::error::StoreError> {
+    let mut stmt = conn.prepare("SELECT id,label,provider FROM credentials ORDER BY tier,label")?;
+    let rows = stmt.query_map([], |r| {
+        (0..3)
+            .map(|i| r.get_ref(i).map(crate::js::own_cell))
+            .collect()
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }

@@ -1,0 +1,49 @@
+diff --git a/conformance/e2e/admin-routes.ts b/conformance/e2e/admin-routes.ts
+index 7dc22787..8251810a 100644
+--- a/conformance/e2e/admin-routes.ts
++++ b/conformance/e2e/admin-routes.ts
+@@ -2539,4 +2539,10 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
+             throw new Error(`mixed raw ids: unexpected count/truncated on ${label}`);
+         }
++        fixture.run("UPDATE quota_samples SET limit_value=0 WHERE credential_id=2");
++        const trimAnswer = await exchange({target:"/api/client/quota/history",headers:[["cookie",`omni_admin=${callers.find(([who])=>who==="client-A")![1]}`]]});
++        check("mixed raw ids trim projectability",trimAnswer,200);
++        const trimBody = JSON.parse(trimAnswer.body.toString());
++        if (trimBody.samples.length !== (label==="ts"?25000:24999) || trimBody.truncated !== true)
++          throw new Error(`mixed raw ids projectability: unexpected count/truncated on ${label}`);
+         fixture.run("DROP TABLE quota_samples");
+         fixture.run("DROP TABLE credentials");
+@@ -2766,4 +2772,26 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
+       if (step.kind === "client-summary") {
+         const { fixture, identities, check, attacks, callers } = await clientFixture();
++        const cellObservations: Record<string,unknown> = {};
++        for (const [cell,sql] of [["blob","X'7b7d'"],["empty-blob","X''"],["integer","5"],["real","1.5"],["null","NULL"]]) {
++          if (cell === "integer") {
++            const columns = fixture.query("PRAGMA table_info(api_keys)").all() as {name:string}[];
++            fixture.run(`CREATE TABLE nullable_api_keys (${columns.map(c=>`"${c.name}"`).join(",")})`);
++            fixture.run("INSERT INTO nullable_api_keys SELECT * FROM api_keys");
++            fixture.run("DROP TABLE api_keys");
++            fixture.run("ALTER TABLE nullable_api_keys RENAME TO api_keys");
++          }
++          fixture.run(`UPDATE api_keys SET limits=${sql} WHERE id='client-A'`);
++          for (const route of ["login","summary","logs","usage","quota","quota/history"]) {
++            const count = () => readFileSync(logFile,"utf8").split("\n").filter(l=>l.includes("api key limits unreadable") && l.includes("client-A")).length;
++            const before = count();
++            const answer = await exchange({target:`/api/client/${route}${route==="logs"?"?until=1000":route==="usage"?"?since=0&until=1000":""}`,method:route==="login"?"POST":"GET",headers:[["cookie",`omni_admin=${identities[0]!.cookie}`],J],...(route==="login"?{body:JSON.stringify({key:identities[0]!.key})}:{})});
++            check(`limits cell ${cell} ${route}`,answer,200);
++            await sleep(30);
++            const lines = count()-before;
++            cellObservations[`${cell} ${route}`] = {storage:fixture.query("SELECT typeof(limits) AS type FROM api_keys WHERE id='client-A'").get(),status:answer.status,body:answer.body.toString(),lines};
++            if (lines !== (route==="summary"?2:1)) secretProblems.push(`limits cell ${cell} ${route}: got ${lines} unreadable lines`);
++          }
++        }
++        writeFileSync(join(out,`${cfg.label}-${label}-limits-cells.json`),JSON.stringify(cellObservations,null,2));
+         fixture.run("UPDATE api_keys SET limits='limitsStoredProbe' WHERE id='client-A'");
+         const limitsObservations: Record<string,number> = {};
+@@ -3199,4 +3227,6 @@ for (const cfg of configs) {
+       };
+       for(const trim of [false,true]) pinned.set(`mixed raw ids ${trim?"trim":"pair"}`,{why:"history mixed raw types: order and trim (hand-altered column affinity)",ts:mixedWire("ts",trim),rust:mixedWire("rust",trim)});
++      const projectedWire = (side:"ts"|"rust") => head(200)+JSON.stringify({samples:Array.from({length:side==="ts"?25000:24999},(_,i)=>({credentialId:"1",label:"x",provider:"a",windowType:"daily",observedAt:1794612000000,usedRatio:(2*i+2)/100000,resetsAt:null,windowMs:null})),truncated:true});
++      pinned.set("mixed raw ids trim projectability",{why:"history mixed raw types: trimmed row projectability changes sample count",ts:projectedWire("ts"),rust:projectedWire("rust")});
+       const orders = [
+         [[0,1,4,2,3], [4,2,0,1,3]],

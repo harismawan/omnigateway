@@ -47,6 +47,9 @@ pub enum Route {
     ClientLogin,
     ClientSummary,
     ClientLogs,
+    ClientUsage,
+    ClientQuota,
+    ClientHistory,
     /// Keys, models, catalog, settings and passwords (A5).
     Admin(crate::admin_routes::Admin),
 }
@@ -63,6 +66,9 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
         (&Method::POST, "/api/client/login") => Some(Route::ClientLogin),
         (&Method::GET | &Method::HEAD, "/api/client/summary") => Some(Route::ClientSummary),
         (&Method::GET | &Method::HEAD, "/api/client/logs") => Some(Route::ClientLogs),
+        (&Method::GET | &Method::HEAD, "/api/client/usage") => Some(Route::ClientUsage),
+        (&Method::GET | &Method::HEAD, "/api/client/quota") => Some(Route::ClientQuota),
+        (&Method::GET | &Method::HEAD, "/api/client/quota/history") => Some(Route::ClientHistory),
         _ => crate::admin_routes::route(method, path).map(Route::Admin),
     }
 }
@@ -77,6 +83,9 @@ pub async fn serve(app: Arc<App>, route: Route, req: Request<Incoming>) -> Respo
         Route::ClientLogin => crate::client_routes::login(&app, req).await,
         Route::ClientSummary => crate::client_routes::summary(&app, req).await,
         Route::ClientLogs => crate::client_routes::logs(&app, req).await,
+        Route::ClientUsage => crate::client_routes::usage(&app, req).await,
+        Route::ClientQuota => crate::client_routes::quota(&app, req).await,
+        Route::ClientHistory => crate::client_routes::history(&app, req).await,
         Route::Admin(admin) => crate::admin_routes::serve(&app, admin, req).await,
     };
     result.unwrap_or_else(|e| e.into_response())

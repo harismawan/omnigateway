@@ -206,16 +206,25 @@ pub(crate) fn model_from_parts(
     strategy: &str,
     is_alias: bool,
 ) -> Result<VirtualModel, String> {
+    let invalid = |detail: String| {
+        StoreError::StoredJson {
+            table: T,
+            column: "targets",
+            row_id: id.to_owned(),
+            detail: detail.into(),
+        }
+        .to_string()
+    };
     // The typed view uses U+FFFD; exact identity fields are recovered below.
     let raw: serde_json::Value = omni_ir::js::parse_json(targets).ok_or_else(|| {
         let e = serde_json::from_str::<serde_json::Value>(targets)
             .err()
             .map_or_else(String::new, |e| e.to_string());
-        format!("unreadable row: {T}.targets: not JSON ({e})")
+        invalid(e)
     })?;
-    let identities = omni_ir::jsjson::parse_js(targets).map_err(|e| e.to_string())?;
+    let identities = omni_ir::jsjson::parse_js(targets).map_err(invalid)?;
     let mut targets: Vec<Target> = serde_json::from_value(raw)
-        .map_err(|e| format!("virtual_models.targets: not a Target[] ({e})"))?;
+        .map_err(|_| format!("virtual_models.targets of {id}: not a Target[]"))?;
     if let omni_ir::jsjson::JsValue::Array(items) = &identities {
         for (target, item) in targets.iter_mut().zip(items) {
             target.lone_identity =

@@ -82,6 +82,116 @@ impl QuotaWindow {
 
 const Q: &str = "quota_windows";
 
+/// Bounded newest-first sample read; the caller applies the frozen JS re-sort.
+pub fn list_quota_samples(
+    conn: &Connection,
+    since: f64,
+    until: f64,
+    limit: usize,
+) -> Result<Vec<Vec<rusqlite::types::Value>>, StoreError> {
+    let mut stmt = conn.prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?")?;
+    let rows = stmt.query_map(rusqlite::params![since, until, limit as i64], |r| {
+        (0..7)
+            .map(|i| r.get_ref(i).map(crate::js::own_cell))
+            .collect()
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Lossless cells for the client projection; coercion belongs to control.
+pub struct CompactSamples {
+    pub cells: Vec<rusqlite::types::Value>,
+    pub series: Vec<[usize; 2]>,
+    pub values: Vec<[rusqlite::types::Value; 5]>,
+}
+
+/// Same SQL order as list_quota_samples, with exact typed series-cell interning.
+pub fn list_compact_quota_samples(
+    conn: &Connection,
+    since: f64,
+    until: f64,
+    limit: usize,
+) -> Result<CompactSamples, StoreError> {
+    use rusqlite::types::ValueRef;
+    #[derive(Hash, PartialEq, Eq)]
+    enum Key<'a> {
+        Null,
+        Integer(i64),
+        Real(u64),
+        Text(&'a [u8]),
+        Blob(&'a [u8]),
+    }
+    fn key(v: ValueRef<'_>) -> Key<'_> {
+        match v {
+            ValueRef::Null => Key::Null,
+            ValueRef::Integer(n) => Key::Integer(n),
+            ValueRef::Real(n) => Key::Real(n.to_bits()),
+            ValueRef::Text(s) => Key::Text(s),
+            ValueRef::Blob(s) => Key::Blob(s),
+        }
+    }
+    // Hash buckets borrow SQLite bytes for lookup; equality checks preserve
+    // SQLite types and bit patterns, including signed zero and blob identity.
+    use std::hash::{Hash, Hasher};
+    let mut buckets: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    let mut raw = Vec::<(u8, Vec<u8>)>::new();
+    let mut out = CompactSamples {
+        cells: Vec::new(),
+        series: Vec::with_capacity(limit.min(50_001)),
+        values: Vec::with_capacity(limit.min(50_001)),
+    };
+    let mut stmt = conn.prepare_cached("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?")?;
+    let mut rows = stmt.query(rusqlite::params![since, until, limit as i64])?;
+    while let Some(r) = rows.next()? {
+        let mut series = [0; 2];
+        for (i, slot) in series.iter_mut().enumerate() {
+            let v = r.get_ref(i)?;
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            key(v).hash(&mut hash);
+            let bucket = buckets.entry(hash.finish()).or_default();
+            let (tag, bytes): (u8, std::borrow::Cow<'_, [u8]>) = match v {
+                ValueRef::Null => (0, (&[][..]).into()),
+                ValueRef::Integer(n) => (1, n.to_le_bytes().to_vec().into()),
+                ValueRef::Real(n) => (2, n.to_bits().to_le_bytes().to_vec().into()),
+                ValueRef::Text(s) => (3, s.into()),
+                ValueRef::Blob(s) => (4, s.into()),
+            };
+            *slot = if let Some(id) = bucket
+                .iter()
+                .find(|id| raw[**id].0 == tag && raw[**id].1 == *bytes)
+            {
+                *id
+            } else {
+                let id = out.cells.len();
+                out.cells.push(crate::js::own_cell(v));
+                raw.push((tag, bytes.into_owned()));
+                bucket.push(id);
+                id
+            };
+        }
+        out.series.push(series);
+        out.values.push([
+            crate::js::own_cell(r.get_ref(2)?),
+            crate::js::own_cell(r.get_ref(3)?),
+            crate::js::own_cell(r.get_ref(4)?),
+            crate::js::own_cell(r.get_ref(5)?),
+            crate::js::own_cell(r.get_ref(6)?),
+        ]);
+    }
+    Ok(out)
+}
+
+/// Lossless cells for the client projection; coercion belongs to control.
+pub fn client_windows(conn: &Connection) -> Result<Vec<Vec<rusqlite::types::Value>>, StoreError> {
+    let mut stmt = conn.prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_windows")?;
+    let rows = stmt.query_map([], |r| {
+        (0..7)
+            .map(|i| r.get_ref(i).map(crate::js::own_cell))
+            .collect()
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 fn opt_number(r: &rusqlite::Row<'_>, column: &str) -> Result<Option<f64>, StoreError> {
     match r.get_ref(column)? {
         rusqlite::types::ValueRef::Null => Ok(None),

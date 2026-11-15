@@ -14,7 +14,15 @@ pub fn list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
                 ),
                 (
                     "targets".encode_utf16().collect(),
-                    crate::operator_json::parse(&targets)?,
+                    crate::operator_json::parse(&targets).map_err(|detail| {
+                        omni_store::StoreError::StoredJson {
+                            table: "virtual_models",
+                            column: "targets",
+                            row_id: id.clone().unwrap_or_else(|| "null".into()),
+                            detail: detail.into(),
+                        }
+                        .to_string()
+                    })?,
                 ),
                 (
                     "strategy".encode_utf16().collect(),
@@ -48,7 +56,18 @@ pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String>
     let credentials = omni_store::models::operator_credentials(store.connection())
         .map_err(|e| e.to_string())?
         .into_iter()
-        .map(|(id, p, l, a, d)| Ok((id, p, l, a, crate::operator_json::parse(&d)?)))
+        .map(|(id, p, l, a, d)| {
+            let parsed = crate::operator_json::parse(&d).map_err(|detail| {
+                omni_store::StoreError::StoredJson {
+                    table: "credentials",
+                    column: "provider_data",
+                    row_id: id.clone(),
+                    detail: detail.into(),
+                }
+                .to_string()
+            })?;
+            Ok((id, p, l, a, parsed))
+        })
         .collect::<Result<Vec<_>, String>>()?;
     let Some(JsValue::Array(targets)) = get(&model, "targets") else {
         unreachable!()

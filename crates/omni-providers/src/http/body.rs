@@ -129,6 +129,26 @@ impl std::fmt::Debug for ResponseBody {
 }
 
 impl ResponseBody {
+    #[cfg(test)]
+    pub(super) fn drain_test_remainder(&mut self, bytes: &[u8], reusable: bool) {
+        self.buf.extend_from_slice(bytes);
+        self.reusable = reusable;
+    }
+    #[cfg(test)]
+    pub(super) fn drain_test_body(
+        socket: tokio::net::TcpStream,
+        pool: Arc<Pool>,
+        key: Key,
+    ) -> Self {
+        Self {
+            conn: Some(Conn::Plain(socket)),
+            given: Default::default(),
+            buf: BytesMut::new(),
+            framing: Framing::ChunkSize,
+            reusable: true,
+            pool: Some((pool, key)),
+        }
+    }
     /// A body that is already complete, for tests and fakes.
     pub fn from_bytes(bytes: impl Into<Bytes>) -> Self {
         let bytes: Bytes = bytes.into();
@@ -149,11 +169,15 @@ impl ResponseBody {
 
     /// Stops reading. If the rest of the body is already in hand — the
     /// terminating chunk of a stream the decoder ended at `[DONE]`, say — the
-    /// connection still goes back to the pool; otherwise it is closed. Never
-    /// waits for the network.
+    /// connection still goes back to the pool; otherwise the pool may finish
+    /// its framing in a bounded task. Never waits for the network.
     pub fn finish_if_ready(mut self) {
-        /// More than this unread, and the connection is not worth saving.
+        // Bound wire bytes (including framing) spent saving one connection.
         const DRAIN_LIMIT: usize = 64 * 1024;
+        let Some(remaining) = DRAIN_LIMIT.checked_sub(self.buf.len()) else {
+            return;
+        };
+        self.conn = self.conn.take().map(|conn| conn.finishing(remaining));
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         let mut drained = 0;
         loop {
@@ -168,9 +192,45 @@ impl ResponseBody {
                         return;
                     }
                 }
-                // Ended cleanly (and was released by `next_chunk`), failed, or
-                // would wait: in the last two cases dropping `self` closes it.
+                std::task::Poll::Pending => {
+                    if self.reusable
+                        && let Some((pool, key)) = self.pool.take()
+                    {
+                        Pool::adopt(&pool, key, self);
+                    }
+                    return;
+                }
                 _ => return,
+            }
+        }
+    }
+
+    pub(super) async fn drain(
+        mut self,
+        pool: std::sync::Weak<Pool>,
+        key: Key,
+        deadline: tokio::time::Instant,
+    ) {
+        // timeout_at polls its inner future first, even if already expired.
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        while let Ok(chunk) = self.read_next().await {
+            if chunk.is_none() {
+                if let Some(pool) = pool.upgrade() {
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    // Same release eligibility, with deadline admission under
+                    // the pool's idle lock rather than ordinary check-in.
+                    if let Some(conn) = self.conn.take()
+                        && self.reusable
+                        && self.buf.is_empty()
+                    {
+                        Pool::checkin_drained(&pool, key, conn.finished(), deadline);
+                    }
+                }
+                return;
             }
         }
     }
@@ -213,7 +273,7 @@ impl ResponseBody {
     /// Back to the pool only when the framing ended cleanly with nothing
     /// unread behind it; otherwise the connection is dropped, which closes it.
     fn release(&mut self) {
-        let conn = self.conn.take();
+        let conn = self.conn.take().map(Conn::finished);
         if let (Some(conn), Some((pool, key))) = (conn, self.pool.take())
             && self.reusable
             && self.buf.is_empty()

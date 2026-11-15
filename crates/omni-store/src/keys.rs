@@ -262,8 +262,11 @@ pub(crate) fn parse_allowlist(id: &str, raw: Option<String>) -> Result<Allowlist
             _ => (Some(Vec::new()), Vec::new()),
         });
     }
-    let parsed = omni_ir::jsjson::parse_js(&raw).map_err(|message| {
-        StoreError::Corrupt(format!("api_keys.model_allowlist of {id}: {message}"))
+    let parsed = omni_ir::jsjson::parse_js(&raw).map_err(|detail| StoreError::StoredJson {
+        table: T,
+        column: "model_allowlist",
+        row_id: id.to_owned(),
+        detail: detail.into(),
     })?;
     Ok(match &parsed {
         JsValue::Null => (None, Vec::new()),
@@ -489,7 +492,12 @@ pub fn get_operator(conn: &Connection, id: &str) -> Result<Option<ApiKey>, Store
         if let Some(raw) = raw
             && let Some(error) = omni_ir::jsc_json::parse_error(&raw)
         {
-            return Err(StoreError::Corrupt(error));
+            return Err(StoreError::StoredJson {
+                table: T,
+                column: "model_allowlist",
+                row_id: id.to_owned(),
+                detail: error.into(),
+            });
         }
         key
     })
@@ -501,7 +509,14 @@ pub fn get_operator(conn: &Connection, id: &str) -> Result<Option<ApiKey>, Store
 pub fn list(conn: &Connection) -> Result<Vec<ApiKey>, StoreError> {
     list_entries(conn)?
         .into_iter()
-        .map(|e| e.map_err(|e| StoreError::Corrupt(e.message)))
+        .map(|e| {
+            e.map_err(|e| StoreError::StoredJson {
+                table: T,
+                column: "model_allowlist",
+                row_id: e.id,
+                detail: e.message.into(),
+            })
+        })
         .collect()
 }
 

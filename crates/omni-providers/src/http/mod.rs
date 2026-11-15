@@ -186,6 +186,9 @@ pub(crate) struct Target {
     pub path: String,
 }
 
+#[cfg(test)]
+mod drain_tests;
+
 /// `onResponseHead`: called once per request when the response head or a
 /// transport failure arrives, with the provider and the elapsed whole ms.
 pub type OnResponseHead = Arc<dyn Fn(&str, u64) + Send + Sync>;
