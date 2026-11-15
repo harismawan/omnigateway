@@ -825,8 +825,8 @@ mod restore_sequence_tests {
             "inspect",
             "mkdir",
             "stat undo",
-            "stat live",
             "free",
+            "stat live",
             "snapshot",
         ];
         let tails: &[(&str, &[&str], bool, bool, bool)] = &[
