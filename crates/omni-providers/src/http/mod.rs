@@ -110,6 +110,12 @@ pub enum HttpError {
     InvalidHeader { name: String },
     #[error("body encoding {0:?} is not implemented by this transport")]
     UnsupportedEncoding(BodyEncoding),
+    #[error("{0} codec buildRequest did not return a usable request")]
+    InvalidEncodedRequest(String),
+    #[error("empty zstd request bodies require unsupported implicit chunked upload")]
+    EmptyEncodedBody,
+    #[error("request body compression failed: {0}")]
+    Compression(std::io::Error),
     /// `getaddrinfo` failed or returned nothing (node `ENOTFOUND`).
     #[error("getaddrinfo ENOTFOUND {host}: {source}")]
     Dns {
@@ -245,11 +251,38 @@ impl Client {
 
     /// Sends one request and returns once the response head has arrived.
     pub async fn send(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        if let Some(encoding) = req.body_encoding {
-            return Err(HttpError::UnsupportedEncoding(encoding));
+        if req.body_encoding.is_some() {
+            let encodings: Vec<_> = req
+                .headers
+                .iter()
+                .filter(|(n, _)| n.eq_ignore_ascii_case("content-encoding"))
+                .collect();
+            if req
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+                || encodings.len() != 1
+                || !encodings[0].1.trim().eq_ignore_ascii_case("zstd")
+            {
+                return Err(HttpError::InvalidEncodedRequest(req.provider.clone()));
+            }
+            if req.body.is_empty() {
+                return Err(HttpError::EmptyEncodedBody);
+            }
         }
         let target = wire::parse_target(&req.url)?;
-        let (bytes, facts) = wire::encode(&req.method, &target, &req.headers, req.body.as_bytes())?;
+        let (bytes, facts) = if req.body_encoding.is_some() {
+            use std::io::Write as _;
+            let mut encoder =
+                zstd::stream::write::Encoder::new(Vec::new(), 3).map_err(HttpError::Compression)?;
+            encoder
+                .write_all(req.body.as_bytes())
+                .map_err(HttpError::Compression)?;
+            let compressed = encoder.finish().map_err(HttpError::Compression)?;
+            wire::encode_owned(&req.method, &target, &req.headers, compressed)?
+        } else {
+            wire::encode(&req.method, &target, &req.headers, req.body.as_bytes())?
+        };
         let started = Instant::now();
         // `trace()`, once: on the response head, on a transport error, or —
         // as TS's `onAbort` destroy → `error` → `trace(undefined, true)` —

@@ -1,5 +1,52 @@
 # Step 4 compression prerequisite (2026-11-14)
 
+## Implemented (2026-11-15)
+
+The HTTP client compresses nonempty encoded bodies with a level-3 streaming
+encoder, one `write_all` then `finish`, with no size threshold (frozen
+`http-client.ts:160–207`). The source string stays uncompressed. The compressed
+allocation is reused for the final wire request, retaining only the source and
+its compressed form, plus the small header buffer and encoder working storage.
+Compression operates on already-serialised bytes; no JSON value is held by this path.
+The supplied headers retain the existing wire ordering/casing rules; appended
+Content-Length counts compressed bytes (`http-client.ts:97–100`). The transport
+does not invent content-encoding. OAuth supplies it (`openai/mod.rs` and frozen
+`openai/codec.ts:97–124`). Unencoded requests use the existing encoder entry point.
+
+Before URL parsing or network activity, encoded requests with any content-length
+or without exactly one content-encoding whose trimmed, case-insensitive value
+is zstd are refused (`codecAdapter.ts:64–74,341`). Frozen GatewayError UPSTREAM
+maps to Rust HttpError::InvalidEncodedRequest, retaining the complete message:
+`{provider} codec buildRequest did not return a usable request`
+(`codecAdapter.ts:23–33`). This is a transport-level check in Rust; frozen checks
+it in the adapter. Compression IO errors map to HttpError::Compression.
+
+Observed frozen empty-body wire request (raw TCP, Bun reference script):
+`POST / HTTP/1.1\r\ncontent-encoding: zstd\r\nHost: fixture\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n`
+followed by hex `390d0a28b52ffd00580100000d0a300d0a0d0a`:
+one 9-byte frame `28b52ffd0058010000`, then the terminating chunk.
+Evidence: `/tmp/opencode/b3/s5b-empty.log`. This confirms unconditional empty
+compression and write (`http-client.ts:154,179–181,203–204`) without explicit
+length (`99–100`). The existing writer handles explicit chunking, but deriving
+implicit chunking from a nonempty encoded/empty source requires a new branch.
+Per controller instruction, Rust refuses empty encoded bodies with
+HttpError::EmptyEncodedBody; decision on extending implicit chunking remains
+open. OAuth's serialised JSON object is nonempty.
+
+First wire test failed with UnsupportedEncoding(Zstd), saved in
+`/tmp/opencode/b3/s5b-red.log`. `http_zstd` captures raw TCP requests and invokes
+the frozen nodeHttpClient via `http-zstd-reference.ts`. Source byte lengths
+37, 131091, 3145746 and the real OAuth codec request all have equal complete
+header lists/order, correct Content-Length, and exactly equal decompressed
+source bytes. Compressed bytes were identical for all these comparisons,
+also for the 2-byte mixed-case/whitespace encoding-header acceptance probe.
+OAuth bytes include generated identity data; its measured frame length can vary.
+`s5b-green.log` records the observations. Tests also cover supplied length,
+missing/wrong/duplicate encoding, and frozen-empty/Rust-refusal behavior.
+Known differences: empty-body refusal; Rust error type rather than GatewayError;
+compressed identity is diagnostic, not required (earlier empty encoder probes
+below differ). No frozen TypeScript production file was modified.
+
 ## Encoder decision and measured prerequisite
 
 Controller approved exact `zstd = { version = "=0.14.4", default-features = false }`.

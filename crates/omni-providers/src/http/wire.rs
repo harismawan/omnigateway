@@ -134,6 +134,50 @@ pub(crate) fn encode(
     headers: &[(String, String)],
     body: &[u8],
 ) -> Result<(Vec<u8>, RequestFacts), HttpError> {
+    let (mut head, facts, chunked) = encode_head(method, target, headers, body.len())?;
+    if chunked {
+        if !body.is_empty() {
+            head.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+            head.extend_from_slice(body);
+            head.extend_from_slice(b"\r\n");
+        }
+        head.extend_from_slice(b"0\r\n\r\n");
+    } else {
+        head.extend_from_slice(body);
+    }
+    Ok((head, facts))
+}
+
+/// Reuse the compressed allocation rather than retaining two copies of it.
+pub(crate) fn encode_owned(
+    method: &str,
+    target: &Target,
+    headers: &[(String, String)],
+    mut body: Vec<u8>,
+) -> Result<(Vec<u8>, RequestFacts), HttpError> {
+    let (mut head, facts, chunked) = encode_head(method, target, headers, body.len())?;
+    if chunked && !body.is_empty() {
+        head.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+    }
+    let len = body.len();
+    body.resize(len + head.len(), 0);
+    body.copy_within(..len, head.len());
+    body[..head.len()].copy_from_slice(&head);
+    if chunked {
+        if len > 0 {
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+    }
+    Ok((body, facts))
+}
+
+fn encode_head(
+    method: &str,
+    target: &Target,
+    headers: &[(String, String)],
+    body_len: usize,
+) -> Result<(Vec<u8>, RequestFacts, bool), HttpError> {
     if !is_token(method) {
         return Err(HttpError::InvalidMethod(method.to_string()));
     }
@@ -147,8 +191,8 @@ pub(crate) fn encode(
             None => object.push((name.as_str(), value.clone())),
         }
     }
-    if !body.is_empty() && !has("content-length") {
-        object.push(("Content-Length", body.len().to_string()));
+    if body_len > 0 && !has("content-length") {
+        object.push(("Content-Length", body_len.to_string()));
     }
     // Enumeration order: array-index keys ascending, then insertion order.
     let mut keys: Vec<usize> = (0..object.len()).collect();
@@ -177,7 +221,7 @@ pub(crate) fn encode(
     }
 
     // Step 3: `_storeHeader`.
-    let mut head = Vec::with_capacity(256 + body.len());
+    let mut head = Vec::with_capacity(256);
     head.extend_from_slice(method.as_bytes());
     head.push(b' ');
     head.extend_from_slice(target.path.as_bytes());
@@ -235,22 +279,13 @@ pub(crate) fn encode(
         }
     }
     head.extend_from_slice(b"\r\n");
-    if chunked {
-        if !body.is_empty() {
-            head.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
-            head.extend_from_slice(body);
-            head.extend_from_slice(b"\r\n");
-        }
-        head.extend_from_slice(b"0\r\n\r\n");
-    } else {
-        head.extend_from_slice(body);
-    }
     Ok((
         head,
         RequestFacts {
             close,
             head: method == "HEAD",
         },
+        chunked,
     ))
 }
 
