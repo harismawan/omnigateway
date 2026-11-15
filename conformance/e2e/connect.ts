@@ -118,6 +118,18 @@ async function run(label: string, binary: string): Promise<Row[]> {
       if (start.flowId) {
         validateStart(start);
         await row(`${provider}/poll`, "poll", JSON.stringify({ flowId: start.flowId }));
+        for (const wire of rows.at(-1)!.wire) {
+          const url = validateStart(start);
+          const json = wire.headers.some(h => /content-type: application\/json/i.test(h));
+          const fields = json ? JSON.parse(wire.body) : Object.fromEntries(new URLSearchParams(wire.body));
+          if (fields.code !== "" || !/^[\w-]{43}$/.test(fields.code_verifier) || createHash("sha256").update(fields.code_verifier).digest("base64url") !== url.searchParams.get("code_challenge")) throw Error("poll PKCE invalid");
+          if (fields.state !== undefined && fields.state !== url.searchParams.get("state")) throw Error("poll state invalid");
+          if (Number(wire.headers.find(h => /^content-length:/i.test(h))?.split(":")[1]) !== Buffer.byteLength(wire.body)) throw Error("poll length invalid");
+          fields.code_verifier = "<verifier>";
+          if (fields.state !== undefined) fields.state = "<state>";
+          wire.headers = wire.headers.map(h => /^content-length:/i.test(h) ? "content-length: <validated>" : h);
+          wire.body = json ? JSON.stringify(fields) : new URLSearchParams(fields).toString();
+        }
         await row(`${provider}/poll/consumed`, "poll", JSON.stringify({ flowId: start.flowId }));
       }
       for (const [status, body] of [[400, '{"error":"fixture_refusal"}'], [401, '{}'], [429, '{}'], [500, '{}'], [200, '{'], [200, '{}']] as const) {
@@ -151,7 +163,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
 function validateStart(start: any): URL {
   if (!/^[\w-]{43}$/.test(start.flowId)) throw Error("invalid flow id");
   const url = new URL(start.authorizeUrl);
-  if (!/^[\w-]{43}$/.test(url.searchParams.get("code_challenge") ?? "") || url.searchParams.get("code_challenge_method") !== "S256" || !/^[\w-]{20,128}$/.test(url.searchParams.get("state") ?? "")) throw Error("invalid authorize randomness");
+  if (!/^[\w-]{43}$/.test(url.searchParams.get("code_challenge") ?? "") || url.searchParams.get("code_challenge_method") !== "S256" || !/^[\w-]{43}$/.test(url.searchParams.get("state") ?? "")) throw Error("invalid authorize randomness");
   return url;
 }
 function masked(rows: Row[]): Row[] {
