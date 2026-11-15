@@ -90,8 +90,21 @@ fn malformed_usage_matches_ts() {
 }
 
 fn compare_decoder(malformed_usage: bool) {
+    compare_decoder_mode(malformed_usage, false);
+}
+
+#[test]
+fn oauth_codec_decoder_chunkings() {
+    compare_decoder_mode(false, true);
+}
+
+fn compare_decoder_mode(malformed_usage: bool, codec: bool) {
     let run = std::process::Command::new("bun")
-        .arg("tests/openai-decode-reference.ts")
+        .arg(if codec {
+            "tests/openai-oauth-decode-reference.ts"
+        } else {
+            "tests/openai-decode-reference.ts"
+        })
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("bun");
@@ -121,7 +134,30 @@ fn compare_decoder(malformed_usage: bool) {
             if let Some(m) = parser.finish() {
                 messages.push(m);
             }
-            let mut decoder = OpenAiDecoder::new(row["native"].as_bool().expect("native"));
+            let mut decoder: Box<dyn StreamDecoder> = if codec {
+                use omni_providers::codec::{CodecInput, Credentials, ProviderCodec};
+                use omni_providers::openai::OpenAiCodec;
+                let request = serde_json::from_value(row["request"].clone()).unwrap();
+                let credentials = Credentials {
+                    access_token: Some("oauth-token".into()),
+                    ..Default::default()
+                };
+                let built = OpenAiCodec
+                    .build_request(&CodecInput {
+                        request: &request,
+                        model: "gpt-6-astra",
+                        credentials: &credentials,
+                        request_id: Some("req"),
+                        request_started_at: Some(123.0),
+                        auto_cache_enabled: None,
+                        max_output_tokens: None,
+                    })
+                    .unwrap();
+                assert_eq!(built.decode_state, row["native"].as_bool().unwrap());
+                OpenAiCodec.decoder(built.decode_state, &Default::default())
+            } else {
+                Box::new(OpenAiDecoder::new(row["native"].as_bool().expect("native")))
+            };
             let mut out = VecDeque::new();
             let mut stopped = false;
             for m in messages {
