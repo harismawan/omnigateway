@@ -1,5 +1,5 @@
 import {toAntigravityWire} from '../../../packages/providers/src/antigravity/wire.ts';
-const schemas:any[]=[{}, {const:'a'}, {const:1}, {const:'a',enum:['b']}];
+const schemas:any[]=[{}, {const:'a'}, {const:1}, {const:'a',enum:['b']}, [1], 'x', [], '', 1, true, [[1]], '🙂'];
 if (process.argv.includes('--depth')) {
   let schema:any={type:'string'};
   for(let i=0;i<40000;i++)schema={items:schema};

@@ -14,7 +14,7 @@ fn codec_matches_frozen_ts() {
     );
     let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("rows");
     let rows = rows.as_array().expect("array");
-    assert_eq!(rows.len(), 108);
+    assert_eq!(rows.len(), 117);
     for (i, row) in rows.iter().enumerate() {
         let request = serde_json::from_value(row["request"].clone()).expect("request");
         let mut credentials = omni_providers::codec::Credentials {

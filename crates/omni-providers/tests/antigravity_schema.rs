@@ -11,7 +11,7 @@ fn schema_matches_frozen_wire() {
         String::from_utf8_lossy(&output.stderr)
     );
     let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("rows");
-    assert_eq!(rows.as_array().expect("array").len(), 574);
+    assert_eq!(rows.as_array().expect("array").len(), 582);
     for (i, row) in rows.as_array().expect("array").iter().enumerate() {
         let (schema, notes) = omni_providers::antigravity::schema::prune(&row["schema"]);
         let body = serde_json::json!({"name":"tool","parameters":schema});
