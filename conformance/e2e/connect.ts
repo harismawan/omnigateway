@@ -285,6 +285,10 @@ async function run(label: string, binary: string): Promise<Row[]> {
         }
         const reader = new Database(file, { readonly: true });
         const stored = reader.query("SELECT account_email FROM credentials WHERE label = ?").all(name);
+        if (r.body.id !== undefined) {
+          const saved = reader.query("SELECT id, label FROM credentials WHERE id = ?").all(typeof r.body.id === "string" ? r.body.id : "") as any[];
+          if (typeof r.body.id !== "string" || !uuid4.test(r.body.id) || saved.length !== 1 || saved[0].label !== name) throw Error(`FAILED ${name}: invalid saved credential id`);
+        }
         reader.close();
         rows.push({ name, response: { status: r.status, body: r.body.id ? { ...r.body, id: "<uuid>" } : r.body, stored }, wire: [] });
         await row(`${name}/consumed`, route, JSON.stringify({ flowId: start.flowId, code: "code" }));
@@ -376,40 +380,40 @@ async function run(label: string, binary: string): Promise<Row[]> {
       rows.push({ name, response: { requests: wires.length, responses: normalized, credentials: credentials.length, access: await Promise.all(credentials.map(c => decrypt(fieldKey, c.access_token))) }, wire: [] });
       await row(`${name}/consumed`, "poll", JSON.stringify({ flowId: start.flowId }));
     }
-    for (const provider of ["anthropic", "openai"]) for (const reconnect of [false, true]) for (let trial = 0; trial < (reconnect && process.env.A15_VISIBILITY_TRIALS === "10" ? 10 : 1); trial++) {
-      const name = `${provider}/${reconnect ? "reconnect-first" : "visibility-lag"}/${trial}`;
+    for (const provider of ["anthropic", "openai"]) for (const reconnect of [false, true]) for (const route of ["finish", "poll"]) for (let trial = 0; trial < (process.env.A15_VISIBILITY_TRIALS === "10" ? 10 : 1); trial++) {
+      const name = `${provider}/${reconnect ? "reconnect-first" : "fresh-first"}/${route}/${trial}`;
       const model = `inference-${provider}-${reconnect}`;
       const key = await request("/api/keys", JSON.stringify({ label: model }));
       const target = (credentialId?: string) => JSON.stringify({ id: model, strategy: "priority", isAlias: false, targets: [{ provider, model: provider === "openai" ? "gpt-5" : "claude-sonnet-4-5", credentialId, tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: true, reasoning: true } }] });
-      if (reconnect) {
-        await request(`/api/models/${model}`, target(`${provider}-full`), cookie, "PUT");
-        await request(`/api/credentials/${provider}-full`, JSON.stringify({ enabled: false }), cookie, "PATCH");
-      }
+      await request(`/api/models/${model}`, target(), cookie, "PUT");
+      const disable = new Database(file);
+      disable.run("UPDATE credentials SET enabled = 0 WHERE provider = ?", [provider]);
+      disable.close();
       await Bun.sleep(650);
       tokenStatus = 200;
       tokenBody = JSON.stringify({ access_token: `${provider}-inference-access-${trial}`, refresh_token: "inference-refresh", expires_in: 3600 });
-      const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: "inference", credentialId: reconnect ? `${provider}-full` : undefined }));
+      const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: "inference" }));
       if (!start.flowId) continue;
       const url = validateStart(start);
-      const connected = await request("/api/connect/finish", JSON.stringify({ flowId: start.flowId, code: `code#${url.searchParams.get("state")}` }));
-      if (connected.status !== 200 || (reconnect ? connected.body.id !== `${provider}-full` : !uuid4.test(connected.body.id))) throw Error("inference connect failed");
-      const begin = Date.now();
-      if (!reconnect) await request(`/api/models/${model}`, target(connected.body.id), cookie, "PUT");
+      const connected = await request(`/api/connect/${route}`, JSON.stringify({ flowId: start.flowId, code: `code#${url.searchParams.get("state")}` }));
+      if (connected.status !== 200 || !uuid4.test(connected.body.id)) throw Error("inference connect failed");
+      const expectedToken = `${provider}-inference-access-${trial}${reconnect ? "-second" : ""}`;
+      if (reconnect) {
+        tokenBody = JSON.stringify({ access_token: expectedToken, refresh_token: "second-refresh", expires_in: 3600 });
+        const again = await request("/api/connect/start", JSON.stringify({ provider, credentialId: connected.body.id, label: "inference" }));
+        const againUrl = validateStart(again.body);
+        const done = await request(`/api/connect/${route}`, JSON.stringify({ flowId: again.body.flowId, code: `code#${againUrl.searchParams.get("state")}` }));
+        if (done.status !== 200 || done.body.id !== connected.body.id) throw Error("immediate reconnect failed");
+      }
       if (key.status !== 200 || typeof key.body.key !== "string") throw Error(`key create: ${JSON.stringify(key)}`);
       inference = true; wires = [];
-      let status = 0, answer: any, delay = 0;
-      const attempts: any[] = [];
-      do {
         const r = await fetch("http://127.0.0.1:18515/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${key.body.key}`, "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: "hello" }], max_tokens: 32, stream: false }) });
-        status = r.status; answer = await r.json(); delay = Date.now() - begin;
-        attempts.push({ status, answer, delay });
-        if (reconnect || status === 200 || delay >= 1000) break;
-        await Bun.sleep(50);
-      } while (Date.now() - begin < 1000);
+      const status = r.status, answer: any = await r.json();
       inference = false;
-      await Bun.write(join(root, `${provider}-${reconnect}-${trial}-routable.json`), JSON.stringify({ delay, status, answer, wires, attempts }, null, 2));
-      const valid = status === 200 && answer.choices?.[0]?.message?.content === "fixture answer" && wires.length === 1 && wires[0]!.headers.some(h => h.toLowerCase() === `authorization: bearer ${provider}-inference-access-${trial}`);
-      rows.push({ name: `${name}/result`, response: reconnect ? { status, valid } : { first: attempts[0], delay, status, valid }, wire: [] });
+      await Bun.write(join(root, `${provider}-${reconnect}-${route}-${trial}-routable.json`), JSON.stringify({ status, answer, wires }, null, 2));
+      const valid = status === 200 && answer.choices?.[0]?.message?.content === "fixture answer" && wires.length === 1 && wires[0]!.headers.some(h => h.toLowerCase() === `authorization: bearer ${expectedToken}`);
+      console.log(`FIRST ${label} ${name} ${valid ? "PASS" : "FAIL"}`);
+      rows.push({ name: `${name}/result`, response: { status, valid }, wire: [] });
     }
     return rows;
   } finally { proc.kill(); await proc.exited; }
@@ -441,17 +445,13 @@ try {
   await Bun.write(join(work, "rust.rows.json"), JSON.stringify(rust, null, 2));
   const names = new Set([...ts, ...rust].map(r => r.name));
   let failed = 0, expectedDivergences = 0;
-  const classes = { "visibility-lag": 0, "unported-provider": 0, "provider-list": 0 };
+  const classes = { "unported-provider": 0, "provider-list": 0 };
   for (const name of names) {
     const a = ts.find(r => r.name === name), b = rust.find(r => r.name === name);
     const ar = a?.response as any, br = b?.response as any;
-    if (name.includes("/reconnect-first/") && name.endsWith("/result")) {
+    if ((name.includes("/reconnect-first/") || name.includes("/fresh-first/")) && name.endsWith("/result")) {
       if (ar?.status !== 200 || !ar.valid || br?.status !== 200 || !br.valid) { failed++; console.log(`FAILED ${name}`); }
       continue;
-    }
-    if (name.includes("/visibility-lag/") && name.endsWith("/result")) {
-      if (ar?.first.status === 200 && ar.valid && br?.valid && br.delay <= 1000) { expectedDivergences++; classes["visibility-lag"]++; continue; }
-      failed++; console.log(`FAILED ${name}`); continue;
     }
     const frozen = "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder";
     if (["kimi", "kilo", "grok", "muse"].some(p => name === `start/provider/${p}`)) {
@@ -467,7 +467,7 @@ try {
     }
     if (!isDeepStrictEqual(a,b)) { failed++; console.log(`FAILED ${name}`); }
   }
-  for (const [name, count] of Object.entries({ "visibility-lag": 2, "unported-provider": 6, "provider-list": 12 })) {
+  for (const [name, count] of Object.entries({ "unported-provider": 6, "provider-list": 12 })) {
     if (classes[name as keyof typeof classes] !== count) { failed++; console.log(`FAILED divergence count ${name}: expected ${count}, got ${classes[name as keyof typeof classes]}`); }
   }
   console.log(JSON.stringify({ rows: names.size, failed, expectedDivergences, classes }));
