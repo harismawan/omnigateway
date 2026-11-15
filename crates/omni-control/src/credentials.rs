@@ -59,12 +59,13 @@ pub(crate) fn validate_client_metadata(s: &SqliteStore) -> Result<()> {
     Ok(())
 }
 fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
-    rows_with(s, id, provider_data)
+    rows_with(s, id, provider_data, false)
 }
 fn rows_with(
     s: &SqliteStore,
     id: Option<&str>,
     parse: fn(ValueRef<'_>, ValueRef<'_>) -> Result<JsValue>,
+    terminal: bool,
 ) -> Result<Vec<JsValue>> {
     let mut stmt = s
         .connection()
@@ -100,6 +101,7 @@ fn rows_with(
                 ),
                 "hasRefreshToken" => JsValue::Bool(!matches!(raw, ValueRef::Null)),
                 "providerData" => parse(raw, r.get_ref("id").map_err(Failure::internal)?)?,
+                _ if terminal => crate::cli_cell::Cell::read(raw).json(),
                 _ => sql_value(raw),
             };
             fields.push((k, v));
@@ -122,9 +124,12 @@ pub fn cli_list(s: &SqliteStore) -> std::result::Result<String, String> {
     )])))
 }
 pub fn cli_rows(s: &SqliteStore) -> std::result::Result<Vec<JsValue>, String> {
-    let rows = rows_with(s, None, |raw, _| {
-        crate::cli_cell::json(raw).map_err(Failure::internal)
-    })
+    let rows = rows_with(
+        s,
+        None,
+        |raw, _| crate::cli_cell::json(raw).map_err(Failure::internal),
+        true,
+    )
     .map_err(|e| e.message)?;
     Ok(rows)
 }

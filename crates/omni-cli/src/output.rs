@@ -141,7 +141,9 @@ pub fn human(
         };
         let state = if !k["revokedAt"].is_null() {
             "revoked"
-        } else if !k["expiresAt"].is_null() && !k["expiresAt"].as_f64().is_some_and(|e| e > now as f64) {
+        } else if !k["expiresAt"].is_null()
+            && !k["expiresAt"].as_f64().is_some_and(|e| e > now as f64)
+        {
             "expired"
         } else {
             "active"

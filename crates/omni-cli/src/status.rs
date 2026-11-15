@@ -192,7 +192,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
         for c in &credentials {
             let enabled = c["enabled"] == true;
             rows.push(vec![
-                c["label"].as_str().unwrap_or("").into(),
+                omni_control::cli_cell::table_text(&omni_ir::jsjson::JsValue::from(&c["label"]))?,
                 paint(
                     provider_color(c["provider"].as_str().unwrap_or("")),
                     c["provider"].as_str().unwrap_or(""),

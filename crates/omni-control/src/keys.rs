@@ -3,27 +3,69 @@ use omni_store::SqliteStore;
 use serde_json::{Value, json};
 
 /// Terminal projection only: the HTTP reader remains strict.
-fn cli_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<(omni_store::keys::OperatorKey, Value)>, String> {
-    let mut stmt = store.connection().prepare(if id.is_some() { "SELECT * FROM api_keys WHERE id = ?1" } else { "SELECT * FROM api_keys ORDER BY created_at DESC" }).map_err(|e| e.to_string())?;
-    let mut rows = if let Some(id) = id { stmt.query([id]) } else { stmt.query([]) }.map_err(|e| e.to_string())?;
+fn cli_rows(
+    store: &SqliteStore,
+    id: Option<&str>,
+) -> Result<Vec<(omni_store::keys::OperatorKey, Value)>, String> {
+    let mut stmt = store
+        .connection()
+        .prepare(if id.is_some() {
+            "SELECT * FROM api_keys WHERE id = ?1"
+        } else {
+            "SELECT * FROM api_keys ORDER BY created_at DESC"
+        })
+        .map_err(|e| e.to_string())?;
+    let mut rows = if let Some(id) = id {
+        stmt.query([id])
+    } else {
+        stmt.query([])
+    }
+    .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().map_err(|e| e.to_string())? {
         let cell = |name| r.get_ref(name).map_err(|e| e.to_string());
-        let raw = |name| -> Result<Value, String> { Ok(crate::api::lossy(&crate::cli_cell::Cell::read(cell(name)?).json())) };
-        let flag = |name| -> Result<bool, String> { Ok(matches!(cell(name)?, rusqlite::types::ValueRef::Integer(1) | rusqlite::types::ValueRef::Real(1.0))) };
+        let raw = |name| -> Result<Value, String> {
+            Ok(crate::api::lossy(
+                &crate::cli_cell::Cell::read(cell(name)?).json(),
+            ))
+        };
+        let flag = |name| -> Result<bool, String> {
+            Ok(matches!(
+                cell(name)?,
+                rusqlite::types::ValueRef::Integer(1) | rusqlite::types::ValueRef::Real(1.0)
+            ))
+        };
         let limits_json = crate::cli_cell::string(cell("limits")?);
         let key = omni_store::keys::ApiKey {
-            id: crate::cli_cell::string(cell("id")?), label: String::new(), prefix: String::new(), hash: String::new(),
-            model_allowlist: None, lone_allowlist: Vec::new(), limits: omni_store::keys::parse_stored_limits(&limits_json),
-            body_logging_opt_out: flag("body_logging_opt_out")?, smart_routing: flag("smart_routing")?,
-            created_at: 0, revoked_at: None, expires_at: None, guardrail_policy: None,
+            id: crate::cli_cell::string(cell("id")?),
+            label: String::new(),
+            prefix: String::new(),
+            hash: String::new(),
+            model_allowlist: None,
+            lone_allowlist: Vec::new(),
+            limits: omni_store::keys::parse_stored_limits(&limits_json),
+            body_logging_opt_out: flag("body_logging_opt_out")?,
+            smart_routing: flag("smart_routing")?,
+            created_at: 0,
+            revoked_at: None,
+            expires_at: None,
+            guardrail_policy: None,
         };
         let fields = json!({"id":raw("id")?, "label":raw("label")?, "prefix":raw("prefix")?, "guardrailPolicy":raw("guardrail_policy")?});
-        out.push((omni_store::keys::OperatorKey {
-            key, limits_json,
-            allowlist_json: match cell("model_allowlist")? { rusqlite::types::ValueRef::Null => None, v => Some(crate::cli_cell::string(v)) },
-            created_at: raw("created_at")?, revoked_at: raw("revoked_at")?, expires_at: raw("expires_at")?,
-        }, fields));
+        out.push((
+            omni_store::keys::OperatorKey {
+                key,
+                limits_json,
+                allowlist_json: match cell("model_allowlist")? {
+                    rusqlite::types::ValueRef::Null => None,
+                    v => Some(crate::cli_cell::string(v)),
+                },
+                created_at: raw("created_at")?,
+                revoked_at: raw("revoked_at")?,
+                expires_at: raw("expires_at")?,
+            },
+            fields,
+        ));
     }
     Ok(out)
 }
@@ -445,8 +487,7 @@ impl KeyListing {
         let mut captured = project_keys(
             store,
             now,
-            cli_rows(store, Some(id))
-            .map_err(|e| e.to_string())?,
+            cli_rows(store, Some(id)).map_err(|e| e.to_string())?,
         )?;
         let index = captured.data["keys"]
             .as_array()
@@ -509,8 +550,7 @@ pub fn list_keys(store: &SqliteStore, now: i64) -> Result<KeyListing, String> {
     project_keys(
         store,
         now,
-        cli_rows(store, None)
-            .map_err(|e| e.to_string())?,
+        cli_rows(store, None).map_err(|e| e.to_string())?,
     )
 }
 fn project_keys(
@@ -522,14 +562,17 @@ fn project_keys(
     let mut allowlists = Vec::new();
     let mut limits_js = Vec::new();
     let mut usage_js = Vec::new();
-    for (omni_store::keys::OperatorKey {
-        key,
-        allowlist_json: raw,
-        created_at,
-        expires_at,
-        revoked_at,
-        ..
-    }, fields) in rows
+    for (
+        omni_store::keys::OperatorKey {
+            key,
+            allowlist_json: raw,
+            created_at,
+            expires_at,
+            revoked_at,
+            ..
+        },
+        fields,
+    ) in rows
     {
         allowlists.push(match raw {
             None => omni_ir::jsjson::JsValue::Null,

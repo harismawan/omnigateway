@@ -24,9 +24,17 @@ impl Cell {
             Self::Null => JsValue::Null,
             Self::Number(n) => JsValue::Number(*n),
             Self::String(s) => JsValue::String(s.encode_utf16().collect()),
-            Self::Bytes(b) => JsValue::Object(b.iter().enumerate().map(|(i, b)| {
-                (i.to_string().encode_utf16().collect(), JsValue::Number(f64::from(*b)))
-            }).collect()),
+            Self::Bytes(b) => JsValue::Object(
+                b.iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        (
+                            i.to_string().encode_utf16().collect(),
+                            JsValue::Number(f64::from(*b)),
+                        )
+                    })
+                    .collect(),
+            ),
         }
     }
 }
@@ -45,7 +53,11 @@ pub fn table_text(value: &omni_ir::jsjson::JsValue) -> Result<String, String> {
 pub fn scalar_string(value: &omni_ir::jsjson::JsValue) -> String {
     use omni_ir::jsjson::JsValue;
     match value {
-        JsValue::Object(fields) => fields.iter().map(|(_, v)| scalar_string(v)).collect::<Vec<_>>().join(","),
+        JsValue::Object(fields) => fields
+            .iter()
+            .map(|(_, v)| scalar_string(v))
+            .collect::<Vec<_>>()
+            .join(","),
         JsValue::String(s) => String::from_utf16_lossy(s),
         JsValue::Number(n) => number(*n),
         JsValue::Null => "null".into(),

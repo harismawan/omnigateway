@@ -236,8 +236,12 @@ pub fn run(
         "revoke" => {
             let question = format!(
                 "revoke key \"{}\" ({}…)?",
-                omni_control::cli_cell::scalar_string(&omni_ir::jsjson::JsValue::from(&key["label"])),
-                omni_control::cli_cell::scalar_string(&omni_ir::jsjson::JsValue::from(&key["prefix"]))
+                omni_control::cli_cell::scalar_string(&omni_ir::jsjson::JsValue::from(
+                    &key["label"]
+                )),
+                omni_control::cli_cell::scalar_string(&omni_ir::jsjson::JsValue::from(
+                    &key["prefix"]
+                ))
             );
             if !has("yes") {
                 if !std::io::stdin().is_terminal() {
