@@ -432,7 +432,7 @@ fn human(model: &JsValue, color: bool) -> Result<String, String> {
     Ok(format!(
         "id        {}\nstrategy  {}\nalias     {}\n\n{}",
         text(prop(model, "id"))?,
-        text(prop(model, "strategy"))?,
+        omni_control::cli_cell::scalar_string(prop(model, "strategy")),
         if truthy(prop(model, "isAlias")) {
             "yes"
         } else {
@@ -704,8 +704,8 @@ pub fn run(
                 providers.push(p);
             }
             rows.push(vec![
-                text(prop(m, "id"))?,
-                text(prop(m, "strategy"))?,
+                omni_control::cli_cell::table_text(prop(m, "id"))?,
+                omni_control::cli_cell::table_text(prop(m, "strategy"))?,
                 if truthy(prop(m, "isAlias")) {
                     "yes"
                 } else {

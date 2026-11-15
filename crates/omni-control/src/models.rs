@@ -19,15 +19,7 @@ pub fn cli_list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
         out.push(JsValue::Object(vec![
             (
                 "id".encode_utf16().collect(),
-                if matches!(cell("id")?, rusqlite::types::ValueRef::Null) {
-                    JsValue::Null
-                } else {
-                    JsValue::String(
-                        crate::cli_cell::string(cell("id")?)
-                            .encode_utf16()
-                            .collect(),
-                    )
-                },
+                crate::cli_cell::Cell::read(cell("id")?).json(),
             ),
             (
                 "targets".encode_utf16().collect(),
@@ -35,17 +27,13 @@ pub fn cli_list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
             ),
             (
                 "strategy".encode_utf16().collect(),
-                JsValue::String(
-                    crate::cli_cell::string(cell("strategy")?)
-                        .encode_utf16()
-                        .collect(),
-                ),
+                crate::cli_cell::Cell::read(cell("strategy")?).json(),
             ),
             (
                 "isAlias".encode_utf16().collect(),
                 JsValue::Bool(matches!(
                     cell("is_alias")?,
-                    rusqlite::types::ValueRef::Integer(1)
+                    rusqlite::types::ValueRef::Integer(1) | rusqlite::types::ValueRef::Real(1.0)
                 )),
             ),
         ]));
