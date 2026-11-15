@@ -18,7 +18,7 @@ fn compare(label: &str) {
         .expect("fixture");
     // The oracle envelope escapes the raw input so Rust never normalizes it.
     let input: serde_json::Value = serde_json::from_str(row["input"].as_str().expect("fixture"))
-        .expect("X1: lone UTF-16 surrogate must remain representable");
+        .expect("X1: raw request must remain representable (UTF-16 / out-of-double-range number)");
     let request = serde_json::from_value(input["request"].clone()).expect("fixture");
     let credentials = omni_providers::codec::Credentials {
         access_token: Some("t".into()),
@@ -42,13 +42,13 @@ fn compare(label: &str) {
     assert_eq!(
         result.request.body,
         row["expected"].as_str().expect("fixture"),
-        "X1: UTF-16 unit splitting"
+        "X1: frozen request bytes"
     );
 }
 macro_rules! retained {
     ($name:ident, $label:literal) => {
         #[test]
-        #[ignore = "X1: UTF-16 representation gap; paired frozen expectation"]
+        #[ignore = "X1: shared JSON/IR representation gap; paired frozen expectation"]
         fn $name() {
             compare($label);
         }
@@ -70,3 +70,9 @@ retained!(x1_system, "system");
 retained!(x1_project_hash_and_body, "project");
 // Minimal requestId: "\ud800"; frozen escapes body.
 retained!(x1_request_id_body, "request_id");
+// Raw 1e309 becomes Infinity in frozen, then args:null on serialization.
+retained!(x1_overflow_input, "overflow_input");
+// The same raw token in a nested opaque input becomes args:{"x":null}.
+retained!(x1_overflow_nested_input, "overflow_nested_input");
+// Schema free fields retain Infinity until serialization emits default:null.
+retained!(x1_overflow_schema_default, "overflow_schema_default");

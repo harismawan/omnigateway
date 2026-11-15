@@ -10,4 +10,14 @@ const cases:any[]=[
  ['project',base,'\ud800',undefined],
  ['request_id',base,'p','\ud800'],
 ];
-console.log(JSON.stringify(cases.map(([label,request,project,requestId])=>({label,input:JSON.stringify({request,project,requestId}),expected:antigravityCodec.buildRequest({request,model:'m',credentials:{accessToken:'t',apiKey:null,providerData:{projectId:project}},requestId,fail:(code:any,message:any)=>({code,message})} as any).request.body}))));
+const rows = cases.map(([label,request,project,requestId])=>({label,input:JSON.stringify({request,project,requestId}),expected:antigravityCodec.buildRequest({request,model:'m',credentials:{accessToken:'t',apiKey:null,providerData:{projectId:project}},requestId,fail:(code:any,message:any)=>({code,message})} as any).request.body}));
+// Keep raw numeric tokens: stringify before transport would erase Infinity.
+for (const [label, raw] of [
+ ['overflow_input', '{"model":"m","stream":true,"messages":[{"role":"user","content":[{"type":"toolUse","id":"i","name":"t","input":1e309}]}]}'],
+ ['overflow_nested_input', '{"model":"m","stream":true,"messages":[{"role":"user","content":[{"type":"toolUse","id":"i","name":"t","input":{"x":1e309}}]}]}'],
+ ['overflow_schema_default', '{"model":"m","stream":true,"messages":[],"tools":[{"kind":"portable","name":"t","inputSchema":{"type":"object","default":1e309}}]}'],
+]) {
+ const request = JSON.parse(raw!);
+ rows.push({label, input:'{"request":'+raw+',"project":"p","requestId":"r"}', expected:antigravityCodec.buildRequest({request,model:'m',credentials:{accessToken:'t',apiKey:null,providerData:{projectId:'p'}},requestId:'r',fail:(code:any,message:any)=>({code,message})} as any).request.body});
+}
+console.log(JSON.stringify(rows));
