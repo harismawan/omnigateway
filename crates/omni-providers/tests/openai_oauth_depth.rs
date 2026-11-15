@@ -28,7 +28,7 @@ fn exercise(case: &str) {
     };
     let mut req: ChatRequest = serde_json::from_value(raw).expect("shallow fixture");
     let mut value = Value::Null;
-    for _ in 0..39_990 {
+    for _ in 0..if case == "prototype" { 40_000 } else { 39_990 } {
         value = Value::Array(vec![value]);
     }
     let mut credentials = Credentials {
@@ -155,6 +155,11 @@ fn exercise(case: &str) {
             .as_object_mut()
             .expect("object");
         match case {
+            "prototype" => {
+                let mut prototype = serde_json::Map::new();
+                deep::insert(&mut prototype, "payload".into(), value);
+                deep::insert(bag, "__proto__".into(), Value::Object(prototype));
+            }
             "format_schema" => {
                 let mut schema = json!({"type":"object"});
                 deep::insert(
@@ -223,6 +228,7 @@ fn exercise(case: &str) {
     if matches!(
         case,
         "metadata"
+            | "prototype"
             | "input_replace"
             | "stream_replace"
             | "native_metadata"
@@ -262,6 +268,7 @@ fn vendor_carriers_on_small_stack() {
         return;
     }
     for case in [
+        "prototype",
         "text_merge",
         "reasoning_merge",
         "scalar",
@@ -309,6 +316,9 @@ fn vendor_carriers_on_small_stack() {
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
-        eprintln!("{case}: passed (39990 levels, 2 MiB)");
+        eprintln!(
+            "{case}: passed ({} levels, 2 MiB)",
+            if case == "prototype" { 40_000 } else { 39_990 }
+        );
     }
 }

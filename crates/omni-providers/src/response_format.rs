@@ -183,18 +183,39 @@ pub(crate) fn move_to_responses_text(
     body: &mut Map<String, Value>,
     provider: &str,
 ) -> Option<String> {
+    move_to_responses_text_with_prototype(req, body, provider, &Value::Null)
+}
+
+/// Plain reads of the merged OpenAI body see its JSON prototype; spreads and
+/// serialization still use only the own map. JSON arrays have no named fields
+/// used here (neither indices nor `length` are read). Default Object.prototype
+/// and a null prototype likewise have none of the fields read by these callers.
+pub(crate) fn prototype_get<'a>(
+    body: &'a Map<String, Value>,
+    prototype: &'a Value,
+    key: &str,
+) -> Option<&'a Value> {
+    body.get(key).or_else(|| prototype.as_object()?.get(key))
+}
+
+pub(crate) fn move_to_responses_text_with_prototype(
+    req: &ChatRequest,
+    body: &mut Map<String, Value>,
+    provider: &str,
+    prototype: &Value,
+) -> Option<String> {
     // Internal helper: CustomCodec scopes deep request assembly. Keeping this
     // private avoids repeating its carrier scan on every ordinary request.
-    let raw = body.shift_remove("response_format");
+    let raw = prototype_get(body, prototype, "response_format").map(omni_ir::deep::clone);
+    body.shift_remove("response_format");
 
-    let malformed_text = body.get("text").is_some_and(|t| !t.is_object());
+    let malformed_text = prototype_get(body, prototype, "text").is_some_and(|t| !t.is_object());
     if malformed_text {
         body.shift_remove("text");
     }
 
     let read = read_response_format(req);
-    let client_text = body
-        .get("text")
+    let client_text = prototype_get(body, prototype, "text")
         .and_then(Value::as_object)
         .map(omni_ir::deep::clone_map);
     let client_format = client_text.as_ref().and_then(|t| t.get("format"));

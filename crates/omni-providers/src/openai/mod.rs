@@ -68,12 +68,11 @@ fn build_mode(input: CodecInput<'_>, oauth: bool) -> Result<CodecRequest<bool>, 
     .as_ref()
     .ok_or_else(|| GatewayError::new(ErrorCode::Auth, "openai credential has no token"))?;
     Ok(deep::scope(|| {
-        let (mut body, degradations, key, mut protocol) =
+        let (mut body, degradations, key, mut protocol, prototype) =
             wire::encode_mode(input.request, input.model, oauth.then_some(&input));
         if oauth && !input.model.is_empty() && input.model.bytes().all(|b| (33..=126).contains(&b))
         {
-            let tier = body
-                .get("service_tier")
+            let tier = crate::response_format::prototype_get(&body, &prototype.0, "service_tier")
                 .and_then(serde_json::Value::as_str)
                 .filter(|s| {
                     !s.is_empty() && s.bytes().all(|b| (33..=126).contains(&b)) && !s.contains(';')

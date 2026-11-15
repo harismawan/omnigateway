@@ -123,4 +123,41 @@ for(const model of ['gpt-6-astra','gpt-5.5'])
    const data=Object.fromEntries(keys.filter(()=>value!==undefined).map(key=>[key,value]));
    add('native-presence',{...base,messages:[{role:'assistant',content:[{type:'providerNative',provider:'openai',blockType,data}]}]},model,`${blockType}/${label}`);
   }
+// API-key null twin already omitted; keep the OAuth rows below as boundary documentation.
+const reviewer = await Bun.file(new URL('./openai-review-inputs.json', import.meta.url)).json();
+for(const row of reviewer) {
+ const {request,model,credentials,label}=row;
+ if(label==='null-bound/null') continue; // Out of contract: ingress schemas openai.ts:118–120, anthropic.ts:268–269, responses.ts:46–47 reject null numbers.
+ const id=Object.hasOwn(row,'requestId')?(row.requestId??undefined):'review';
+ const built=openaiCodec.buildRequest({request,model,credentials,requestId:id,requestStartedAt,fail:(c,m)=>new Error(c+':'+m)});
+ rows.push({category:'review-corpus',label,request,model,credentials,requestId:id??null,codec:built.request,notes:built.degradations,state:built.decodeState});
+}
+// Finding 1: assignment setters versus own nested spread properties.
+for(const oauth of [true,false]) for(const model of ['gpt-6-astra','gpt-5.5']) {
+ const credential={apiKey:oauth?null:'sk-review',accessToken:oauth?'oauth-token':null,providerData:{}};
+ const prototypes=[null,'ignored',42,true,[],[{service_tier:'priority'}],
+  {service_tier:'priority'}, {reasoning:{effort:'high'}},
+  {response_format:{type:'json_object'}}, {text:{format:{type:'json_object'}}},
+  JSON.parse('{"__proto__":{"service_tier":"priority"}}')];
+ for(const proto of prototypes)
+  add('prototype-pending',{...base,vendor:{openai:{['__proto__']:proto}}},model,`${oauth}/${JSON.stringify(proto)}`,credential as any);
+ for(const bag of [
+  {['__proto__']:{service_tier:'priority'},service_tier:'default'},
+  {['__proto__']:{response_format:{type:'json_object'}},response_format:null},
+  {['__proto__']:{text:{format:{type:'json_object'}}},text:null},
+  {['__proto__']:{reasoning:{effort:'high'}},reasoning:{effort:'low'}},
+  {text:{['__proto__']:{format:{type:'json_object'}}}},
+  {reasoning:{['__proto__']:{effort:'high'}}},
+  {metadata:{['__proto__']:{service_tier:'priority'}}},
+  {constructor:{service_tier:'priority'},prototype:{service_tier:'priority'}},
+  {['__proto__']:{text:'malformed',reasoning:{effort:'invalid'}},client_metadata:{client:true}},
+  {['__proto__']:{text:{format:{type:'json_schema',schema:{type:'object'}}}},text:null},
+  ...['text','reasoning','service_tier'].flatMap(key => {
+   const inherited={text:{extra:'inherited'},reasoning:{effort:'high'},service_tier:'priority'};
+   const own={text:{verbosity:'high'},reasoning:{effort:'low'},service_tier:'default'}[key];
+   return [Object.fromEntries([['__proto__',inherited],[key,own]]),
+    Object.fromEntries([[key,own],['__proto__',inherited]])];
+  }),
+ ]) add('prototype-pending',{...base,vendor:{openai:bag}},model,`${oauth}/${JSON.stringify(bag)}`,credential as any);
+}
 console.log(JSON.stringify(rows));

@@ -1,5 +1,28 @@
 # Malformed upstream fields: item 2 checkpoint
 
+## Request-side representation boundary: null numeric options
+
+The frozen OpenAI builder treats explicit `maxTokens: null` and
+`temperature: null` as present: OAuth records `openai:max-tokens-dropped` and
+`openai:temperature-dropped`; API-key mode carries null numeric fields. Rust's
+canonical `Option<f64>` collapses null and absence. This is outside the port's
+gateway-reachable contract, not a codec behaviour exception: ingress rejects
+null with HTTP 400 before either gateway calls a codec. The frozen schemas in
+`apps/gateway/src/ingress/openai.ts:118–120`, `anthropic.ts:268–269`, and
+`responses.ts:46–47` require optional numbers; assignments at
+`openai.ts:297–299`, `anthropic.ts:682–683`, and `responses.ts:519–520` occur only
+for values other than undefined. Plugin-produced canonical requests are out of
+scope.
+
+Reviewer label `null-bound/null` documents all three excluded inputs: the
+API-key twin was omitted from `openai-review-inputs.json` previously; the two
+OAuth rows (gpt-6-astra and gpt-5.5, formerly comparison rows 436–437) remain in
+that file and are skipped by label in the reference loader. Thus 158 of the
+original 161 reviewer inputs run, with three excluded for this single reason.
+Every included row still compares the complete request, notes and decode state.
+
+## Decoder checkpoint
+
 Controller disposition: the eight non-numeric count rows are now **parked under
 roadmap X1 (non-numeric upstream usage counts)**. No shared Usage change here.
 Rust reports a number (2, 0, 1) or no numeric value (NaN renders null) where TS

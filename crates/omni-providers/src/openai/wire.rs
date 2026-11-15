@@ -41,7 +41,7 @@ fn thread(seed: &str) -> String {
 }
 #[cfg(test)]
 pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec<String>, String) {
-    let (body, notes, key, _) = encode_mode(req, model, None);
+    let (body, notes, key, _, _) = encode_mode(req, model, None);
     (body, notes, key)
 }
 type Encoded = (
@@ -49,6 +49,7 @@ type Encoded = (
     Vec<String>,
     String,
     Vec<(String, String)>,
+    deep::Owned,
 );
 pub(crate) fn encode_mode(
     req: &ChatRequest,
@@ -195,6 +196,9 @@ pub(crate) fn encode_mode(
     let catalog = super::oauth::catalog(model);
     let mut lite_tools = None;
     let mut body = Map::new();
+    // Own properties and [[Prototype]] are separate. Retain arbitrary client
+    // JSON with iterative clone/drop, including prototypes never serialized.
+    let mut prototype = deep::Owned(Value::Null);
     deep::insert(&mut body, "model".into(), json!(model));
     deep::insert(
         &mut body,
@@ -320,19 +324,28 @@ pub(crate) fn encode_mode(
         );
         if let Some(vendor) = req.vendor_bag("openai") {
             for (k, v) in vendor {
+                if k == "__proto__" {
+                    if v.is_object() || v.is_array() || v.is_null() {
+                        prototype = deep::Owned(deep::clone(v));
+                    }
+                    continue;
+                }
                 if k == "client_metadata" {
                     note(&mut notes, "openai:client-metadata-replaced");
                     continue;
                 }
                 if (k == "text" || k == "reasoning")
                     && let (Some(ours), Some(theirs)) = (
-                        body.get_mut(k).and_then(Value::as_object_mut),
+                        crate::response_format::prototype_get(&body, &prototype.0, k)
+                            .and_then(Value::as_object),
                         v.as_object(),
                     )
                 {
+                    let mut ours = deep::clone_map(ours);
                     for (name, value) in theirs {
-                        deep::insert(ours, name.clone(), deep::clone(value));
+                        deep::insert(&mut ours, name.clone(), deep::clone(value));
                     }
+                    deep::insert(&mut body, k.clone(), Value::Object(ours));
                 } else {
                     deep::insert(&mut body, k.clone(), deep::clone(v));
                 }
@@ -365,16 +378,27 @@ pub(crate) fn encode_mode(
             }
             _ => {}
         }
+        if let Some(v) = req
+            .vendor_bag("openai")
+            .and_then(|bag| bag.get("__proto__"))
+            && (v.is_object() || v.is_array() || v.is_null())
+        {
+            prototype = deep::Owned(deep::clone(v));
+        }
         omni_ir::js::object_assign(&mut body, req.vendor_value("openai"));
     }
-    if let Some(n) = crate::response_format::move_to_responses_text(req, &mut body, "openai") {
+    if let Some(n) = crate::response_format::move_to_responses_text_with_prototype(
+        req,
+        &mut body,
+        "openai",
+        &prototype.0,
+    ) {
         note(&mut notes, n);
     }
     deep::insert(&mut body, "prompt_cache_key".into(), json!(key));
     let mut headers = Vec::new();
     if let Some(opts) = oauth {
-        let effort = body
-            .get("reasoning")
+        let effort = crate::response_format::prototype_get(&body, &prototype.0, "reasoning")
             .and_then(|v| v.get("effort"))
             .and_then(Value::as_str)
             .filter(|e| super::oauth::is_effort(e))
@@ -406,7 +430,7 @@ pub(crate) fn encode_mode(
             deep::drop(item);
         }
     }
-    (body, notes, key, headers)
+    (body, notes, key, headers, prototype)
 }
 #[cfg(test)]
 mod tests {

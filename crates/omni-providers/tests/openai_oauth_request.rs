@@ -16,7 +16,8 @@ fn oauth_codec_matches_frozen_ts() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 307);
+    assert_eq!(rows.as_array().unwrap().len(), 573);
+    let mut note_mismatches = Vec::new();
     for (i, row) in rows.as_array().unwrap().iter().enumerate() {
         let request = if let Some(dialect) = row["dialect"].as_str() {
             let surface = match dialect {
@@ -58,7 +59,9 @@ fn oauth_codec_matches_frozen_ts() {
                 request: &request,
                 model: row["model"].as_str().unwrap(),
                 credentials: &credentials,
-                request_id: Some(row["requestId"].as_str().unwrap_or("fixed-oauth-request")),
+                request_id: row
+                    .get("requestId")
+                    .map_or(Some("fixed-oauth-request"), serde_json::Value::as_str),
                 request_started_at: row
                     .get("requestStartedAt")
                     .map_or(Some(1794000000123.0), serde_json::Value::as_f64),
@@ -92,15 +95,17 @@ fn oauth_codec_matches_frozen_ts() {
             row["codec"]["bodyEncoding"].as_str(),
             "encoding {i}"
         );
-        assert_eq!(
-            serde_json::json!(got.degradations),
-            row["notes"],
-            "notes {i}"
-        );
+        if serde_json::json!(got.degradations) != row["notes"] {
+            note_mismatches.push(format!(
+                "notes {i}: Rust {:?}; frozen {}",
+                got.degradations, row["notes"]
+            ));
+        }
         assert_eq!(
             got.decode_state,
             row["state"]["nativeReasoning"].as_bool().unwrap(),
             "state {i}"
         );
     }
+    assert!(note_mismatches.is_empty(), "{}", note_mismatches.join("\n"));
 }
