@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { copyFileSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { parseArgs } from "node:util";
-import { deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
+import { deriveKey, encrypt, decrypt } from "../../packages/store/src/encryption.ts";
 import { normalize, normalizedEqual, show } from "./masks.ts";
 
 const { values: f } = parseArgs({
@@ -65,6 +65,10 @@ const key = (await cli(["keys", "create", "--label", "test"])).key;
 const fieldKey = await deriveKey(env.OMNI_ENCRYPTION_KEY);
 const oauthToken = await encrypt(fieldKey, "oauth-access");
 const refreshToken = await encrypt(fieldKey, "oauth-refresh");
+const winnerAccess = await encrypt(fieldKey, "winner-access");
+const winnerRefresh = await encrypt(fieldKey, "winner-refresh");
+let activeDb = "";
+const refreshedId = `fixture.${Buffer.from(JSON.stringify({ email: "refreshed@example.com", "https://api.openai.com/auth": { chatgpt_account_id: "refreshed-account" } })).toString("base64url")}.fixture`;
 const identity = {
   accountId: "account-fixture",
   installationId: "11111111-1111-4111-8111-111111111111",
@@ -137,6 +141,26 @@ const listener = Bun.listen<{ buffer: Buffer; id: number }>({
         body: body.toString(),
       });
       s.data.buffer = s.data.buffer.subarray(end + 4 + length);
+      if (line === "POST /oauth/token HTTP/1.1") {
+        if (focused === "refresh-cas-loser") {
+          const db = new Database(activeDb);
+          db.run(
+            "UPDATE credentials SET access_token=?,refresh_token=?,expires_at=4102444800000,token_version=token_version+1",
+            [winnerAccess, winnerRefresh],
+          );
+          db.close();
+        }
+        const response = JSON.stringify({
+          access_token: "refreshed-access",
+          refresh_token: "refreshed-refresh",
+          id_token: refreshedId,
+          expires_in: 3600,
+        });
+        s.end(
+          `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(response)}\r\nConnection: close\r\n\r\n${response}`,
+        );
+        return;
+      }
       const probe = line!.startsWith("GET ");
       if (!probe) inferenceSockets.add(s.data.id);
       const code = probe
@@ -197,6 +221,15 @@ cases.push(
 );
 cases.push({ oauth: false, path: "/v1/chat/completions", stream: true, code: 200, kind: "throw" });
 cases.push(
+  ...["refresh-preserved", "refresh-backfill", "refresh-cas-loser"].map((kind) => ({
+    oauth: true,
+    path: "/v1/chat/completions",
+    stream: false,
+    code: 200,
+    kind,
+  })),
+);
+cases.push(
   ...["/v1/chat/completions", "/v1/responses"].map((path) => ({
     oauth: false,
     path,
@@ -205,6 +238,8 @@ cases.push(
     kind: "cancel",
   })),
 );
+if (process.env.OPENAI_REFRESH_ONLY === "1")
+  cases.splice(0, cases.length, ...cases.filter((c) => c.kind.startsWith("refresh-")));
 function request(path: string, stream: boolean) {
   return path === "/v1/responses"
     ? { model: "test-model", stream, input: "hello" }
@@ -221,6 +256,7 @@ async function run(binary: string, label: string) {
     const root = join(work, `${label}-${i}`);
     mkdirSync(root);
     const dbPath = join(root, "omni.db");
+    activeDb = dbPath;
     copyFileSync(env.OMNI_DB_PATH, dbPath);
     if (c.kind === "failover") {
       const db = new Database(dbPath);
@@ -239,7 +275,14 @@ async function run(binary: string, label: string) {
       const db = new Database(dbPath);
       db.run(
         "UPDATE credentials SET auth_type='oauth',api_key=NULL,access_token=?,refresh_token=?,expires_at=?,provider_data=?",
-        [oauthToken, refreshToken, 4102444800000, JSON.stringify(identity)],
+        [
+          oauthToken,
+          refreshToken,
+          4102444800000,
+          JSON.stringify(
+            c.kind === "refresh-backfill" ? { accountId: identity.accountId } : identity,
+          ),
+        ],
       );
       db.close();
     }
@@ -262,6 +305,12 @@ async function run(binary: string, label: string) {
       }
       if (!ready) throw Error(`boot failed ${root}`);
       await Bun.sleep(100);
+      if (c.kind.startsWith("refresh-")) {
+        const db = new Database(dbPath);
+        db.run("UPDATE credentials SET expires_at=1");
+        db.close();
+        await Bun.sleep(1500);
+      }
       recorded = [];
       inferenceSockets = new Set();
       closedSockets = new Set();
@@ -324,7 +373,10 @@ async function run(binary: string, label: string) {
             `${label} late sockets ${inferenceSockets.size}, expected ${expectedSockets}`,
           );
       }
-      const upstream = recorded.filter((x) => x.line.startsWith("POST "));
+      const tokenRequests = recorded.filter((x) => x.line === "POST /oauth/token HTTP/1.1");
+      const upstream = recorded.filter(
+        (x) => x.line.startsWith("POST ") && x.line !== "POST /oauth/token HTTP/1.1",
+      );
       if (
         c.kind === "throw" &&
         (!Buffer.from(body).includes("openai codec decode threw") ||
@@ -347,10 +399,117 @@ async function run(binary: string, label: string) {
       if (upstream[0]!.line !== `POST ${expected} HTTP/1.1`) throw Error("wrong upstream route");
       if (c.oauth && !upstream[0]!.headers.includes("chatgpt-account-id: account-fixture"))
         throw Error("account identity missing");
+      // Shutdown flushes the asynchronous request-log/accounting writer.
+      child.kill("SIGTERM");
+      await child.exited;
       const db = new Database(dbPath);
       const credentials = db
         .query("SELECT id,disabled_reason,provider_data,token_version FROM credentials ORDER BY id")
         .all();
+      let lifecycle: unknown = null;
+      if (c.kind.startsWith("refresh-")) {
+        const loser = c.kind === "refresh-cas-loser";
+        if (
+          tokenRequests.length !== 1 ||
+          !upstream[0]!.headers.includes(
+            `authorization: Bearer ${loser ? "winner-access" : "refreshed-access"}`,
+          )
+        )
+          throw Error("refresh request/secrets not used");
+        const row = db
+          .query(
+            "SELECT access_token,refresh_token,id_token,expires_at,account_email,provider_data,token_version,enabled,disabled_reason FROM credentials",
+          )
+          .get() as any;
+        for (const col of ["access_token", "refresh_token", "id_token"])
+          if (row[col] !== null) row[col] = await decrypt(fieldKey, row[col]);
+        if (
+          row.access_token !== (loser ? "winner-access" : "refreshed-access") ||
+          row.refresh_token !== (loser ? "winner-refresh" : "refreshed-refresh") ||
+          row.id_token !== (loser ? null : refreshedId) ||
+          row.token_version !== 1
+        )
+          throw Error("refresh persistence mismatch");
+        if (loser) {
+          if (row.expires_at !== 4102444800000 || row.account_email !== null)
+            throw Error("losing metadata overwrote winner");
+        } else {
+          if (Math.abs(row.expires_at - Date.now() - 3600000) > 10000)
+            throw Error("refresh expiry outside window");
+          row.expires_at = "<validated refresh clock + 3600s>";
+        }
+        const data = JSON.parse(row.provider_data);
+        if (data.accountId !== (loser ? identity.accountId : "refreshed-account"))
+          throw Error("refresh account persistence mismatch");
+        if (c.kind !== "refresh-backfill") {
+          if (data.installationId !== identity.installationId || data.idSalt !== identity.idSalt)
+            throw Error("prior identity replaced");
+        } else {
+          if (
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+              data.installationId,
+            ) ||
+            !/^[0-9a-f]{64}$/.test(data.idSalt)
+          )
+            throw Error("backfill malformed");
+          data.installationId = "<validated uuid4>";
+          data.idSalt = "<validated 32 random bytes>";
+        }
+        row.provider_data = JSON.stringify(data);
+        (credentials[0] as any).provider_data = row.provider_data;
+        const accounting = Object.fromEntries(
+          ["request_logs", "usage_daily", "usage_rollup", "credential_health"].map((table) => {
+            const order = {
+              request_logs: "at, rowid",
+              usage_daily:
+                "day, provider, credential_id, requested_model, resolved_model, api_key_id",
+              usage_rollup: "api_key_id, hour",
+              credential_health: "credential_id, model",
+            }[table];
+            const rows = db.query(`SELECT * FROM ${table} ORDER BY ${order}`).all() as Record<
+              string,
+              any
+            >[];
+            for (const r of rows) {
+              for (const col of table === "request_logs"
+                ? ["id", "at", "duration_ms", "node_id"]
+                : table === "usage_daily"
+                  ? ["duration_ms_sum"]
+                  : []) {
+                const value = r[col];
+                if (col === "id" || col === "node_id") {
+                  if (
+                    typeof value !== "string" ||
+                    !/^(req_)?[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+                      value,
+                    )
+                  )
+                    throw Error(`invalid ${col}`);
+                } else if (
+                  !Number.isFinite(value) ||
+                  value < 0 ||
+                  (col === "at" && Math.abs(value - Date.now()) > 10000)
+                )
+                  throw Error(`invalid ${col}`);
+                delete r[col];
+              }
+              if (table === "request_logs") {
+                if (r.ttft_ms !== null && (!Number.isFinite(r.ttft_ms) || r.ttft_ms < 0))
+                  throw Error("invalid ttft");
+                r.ttft_ms = r.ttft_ms !== null;
+              }
+            }
+            return [table, rows];
+          }),
+        );
+        if (
+          accounting.request_logs.length !== 1 ||
+          accounting.usage_daily.length !== 1 ||
+          accounting.usage_rollup.length !== 1
+        )
+          throw Error("missing lifecycle accounting");
+        lifecycle = { tokenRequests, persisted: row, accounting };
+      }
       db.close();
       output.push({
         case: c,
@@ -360,6 +519,7 @@ async function run(binary: string, label: string) {
         upstream,
         catalog: catalogBody,
         credentials,
+        lifecycle,
         sockets: inferenceSockets.size,
       });
     } finally {
@@ -394,10 +554,11 @@ try {
       JSON.stringify(maskWire(rust[i]!.upstream, c.oauth));
     const state =
       JSON.stringify(ts[i]!.credentials) === JSON.stringify(rust[i]!.credentials) &&
+      JSON.stringify(ts[i]!.lifecycle) === JSON.stringify(rust[i]!.lifecycle) &&
       JSON.stringify(ts[i]!.catalog) === JSON.stringify(rust[i]!.catalog);
     if (!normalizedEqual(a, b) || !upstream || !state) {
       failed++;
-      console.error("DIFF", i, c, { upstream, ts: show(a), rust: show(b) });
+      console.error("DIFF", i, c, { upstream, state, ts: show(a), rust: show(b) });
     }
   }
   console.log({ work, rows: cases.length, failed });
