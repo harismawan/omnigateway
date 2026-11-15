@@ -206,8 +206,12 @@ pub(crate) fn move_to_responses_text_with_prototype(
 ) -> Option<String> {
     // Internal helper: CustomCodec scopes deep request assembly. Keeping this
     // private avoids repeating its carrier scan on every ordinary request.
-    let raw = prototype_get(body, prototype, "response_format").map(omni_ir::deep::clone);
-    body.shift_remove("response_format");
+    let raw = body.shift_remove("response_format").or_else(|| {
+        prototype
+            .as_object()?
+            .get("response_format")
+            .map(omni_ir::deep::clone)
+    });
 
     let malformed_text = prototype_get(body, prototype, "text").is_some_and(|t| !t.is_object());
     if malformed_text {

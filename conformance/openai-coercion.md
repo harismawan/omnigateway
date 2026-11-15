@@ -62,7 +62,7 @@ whole/one-byte/seven-byte, including prefix preservation and both reasoning mode
 cap streams are omitted. The other twelve are in the primary generator: six
 fixed shadows run normally, six overflows are ignored. Thus 308/310 reviewer
 streams are committed, 302 run normally. New site rows: 30. Primary corpus:
-180 default rows plus eight parked count rows; six parked overflow rows are
+186 default rows plus eight parked count rows (194 primary); six parked overflow rows are
 selected separately. The decode integration suite took 0.60s; no chunk reduction.
 
 ## Request-side representation boundary: null numeric options
