@@ -42,7 +42,8 @@ fn wire_matches_frozen_ts() {
             "projects/p-1",
             "req-1",
             &cloak,
-        );
+        )
+        .expect("wire");
         if omni_ir::jsjson::to_string(&body) != row["expected"].as_str().expect("expected")
             || serde_json::json!(notes) != row["notes"]
         {

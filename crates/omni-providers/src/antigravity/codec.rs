@@ -79,22 +79,7 @@ impl AntigravityCodec {
                     "antigravity credential has no Cloud Code project; reconnect the account",
                 )
             })?;
-        // Only portable tool roots are unguarded in frozen pruneSchema.
-        // Response-format roots and nested schema positions use isSchema.
         let cloak = ToolCloak::build(input.request);
-        let mut seen = std::collections::HashSet::new();
-        for tool in input.request.tools.iter().flatten() {
-            if let omni_ir::request::ToolDef::Portable(t) = tool {
-                let name = cloak.name(&t.name);
-                if seen.contains(name) {
-                    continue;
-                }
-                seen.extend([name]);
-                if t.input_schema.is_null() {
-                    return Err(BuildError::Throw);
-                }
-            }
-        }
         let request_id = input
             .request_id
             .filter(|s| !s.is_empty())
@@ -116,7 +101,7 @@ impl AntigravityCodec {
                 )
             });
         let (body, degradations) =
-            super::wire::to_wire(input.request, input.model, project, &request_id, &cloak);
+            super::wire::to_wire(input.request, input.model, project, &request_id, &cloak)?;
         let serialized = omni_ir::jsjson::to_string(&body);
         omni_ir::deep::drop(body);
         let cloaked_tools = (!cloak.to_wire.is_empty()).then_some(cloak.to_wire.len() as u32);

@@ -12,11 +12,6 @@ const TYPES: &[&str] = &[
     "type_unspecified",
 ];
 
-/// Prunes schema positions to depth 24; free-value fields remain opaque.
-pub fn prune(node: &Value) -> (Value, Vec<String>) {
-    try_prune(node).expect("Object.entries requires a non-null schema root")
-}
-
 /// Object.entries throws for null roots; nested schema positions are guarded.
 pub fn try_prune(node: &Value) -> Result<(Value, Vec<String>), crate::codec::BuildError> {
     if node.is_null() {

@@ -124,6 +124,45 @@ fn compare(kind: &'static str) {
 fn input_depth_matches_frozen() {
     compare("input");
 }
+
+#[test]
+fn null_schema_throw_drops_partial_deep_body() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            use omni_ir::request::*;
+            use omni_providers::codec::{BuildError, ProviderCodec};
+            let mut request: ChatRequest = serde_json::from_value(json!({
+                "model":"m", "stream":true,
+                "messages":[{"role":"assistant","content":[{"type":"toolUse","id":"i","name":"t","input":null}]}],
+                "tools":[{"kind":"portable","name":"first","inputSchema":{"default":null}},
+                         {"kind":"portable","name":"t","inputSchema":null}]
+            })).expect("fixture");
+            let mut nested = Value::Null;
+            for _ in 0..39_990 {
+                nested = Value::Array(vec![nested]);
+            }
+            if let ToolDef::Portable(t) = &mut request.tools.as_mut().expect("tools")[0] {
+                t.input_schema["default"] = deep::clone(&nested);
+            }
+            if let ContentBlock::ToolUse(t) = &mut request.messages[0].content[0] {
+                t.input = nested;
+            }
+            let credentials = Credentials {
+                access_token: Some("t".into()), api_key: None,
+                provider_data: json!({"projectId":"p"}).as_object().expect("object").clone(),
+            };
+            assert!(matches!(AntigravityCodec.try_build_request(&CodecInput {
+                request: &request, model: "m", credentials: &credentials,
+                request_id: Some("r"), auto_cache_enabled: None,
+                max_output_tokens: None, request_started_at: None,
+            }), Err(BuildError::Throw)));
+            let cloak = omni_providers::antigravity::cloak::ToolCloak::build(&request);
+            assert!(matches!(omni_providers::antigravity::wire::to_wire(
+                &request, "m", "p", "r", &cloak,
+            ), Err(BuildError::Throw)));
+        }).expect("spawn").join().expect("join");
+}
 #[test]
 fn vendor_depth_matches_frozen() {
     compare("vendor");

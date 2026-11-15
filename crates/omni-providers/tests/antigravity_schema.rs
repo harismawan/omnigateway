@@ -61,7 +61,8 @@ fn schema_depth_matches_frozen_on_small_stack() {
                 omni_ir::deep::insert(&mut map, "items".into(), node);
                 node = serde_json::Value::Object(map);
             }
-            let (schema, notes) = omni_providers::antigravity::schema::prune(&node);
+            let (schema, notes) =
+                omni_providers::antigravity::schema::try_prune(&node).expect("schema");
             assert_eq!(schema, expected["schema"]);
             assert_eq!(serde_json::json!(notes), expected["notes"]);
             omni_ir::deep::drop(node);

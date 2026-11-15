@@ -68,7 +68,7 @@ pub fn to_wire(
     project: &str,
     request_id: &str,
     cloak: &ToolCloak,
-) -> (Value, Vec<String>) {
+) -> Result<(Value, Vec<String>), crate::codec::BuildError> {
     let mut notes = Vec::new();
     let mut note = |s: String| {
         if !notes.contains(&s) {
@@ -251,9 +251,15 @@ pub fn to_wire(
     }
     match read_response_format(req) {
         ResponseFormatRead::Readable(f) => {
-            let schema = Value::Object(f.schema);
-            let (pruned, notes) = super::schema::prune(&schema);
-            deep::drop(schema);
+            let schema = deep::Owned(Value::Object(f.schema));
+            let (pruned, notes) = match super::schema::try_prune(&schema) {
+                Ok(result) => result,
+                Err(error) => {
+                    deep::drop_map(request);
+                    deep::drop_map(config);
+                    return Err(error);
+                }
+            };
             for n in notes {
                 note(n);
             }
@@ -310,7 +316,16 @@ pub fn to_wire(
             if let Some(d) = &t.description {
                 put(&mut m, "description", json!(d));
             }
-            let (schema, notes) = super::schema::prune(&t.input_schema);
+            let (schema, notes) = match super::schema::try_prune(&t.input_schema) {
+                Ok(result) => result,
+                Err(error) => {
+                    // Earlier messages, response schemas and declarations may
+                    // contain opaque client values at the full ingress depth.
+                    deep::drop_map(request);
+                    deep::drop(Value::Array(declarations));
+                    return Err(error);
+                }
+            };
             for n in notes {
                 note(n);
             }
@@ -350,5 +365,5 @@ pub fn to_wire(
         put(&mut body, k, json!(v));
     }
     put(&mut body, "request", Value::Object(request));
-    (Value::Object(body), notes)
+    Ok((Value::Object(body), notes))
 }
