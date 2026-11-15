@@ -1,10 +1,29 @@
-# Fix round 3 — pins and limits logging committed; closure running
-**NEXT STEP:** `b192499a` is final product/driver source (N1/minor b originally `e7e83f04`). Corrected binary `/tmp/opencode/a8/fix3/rust`; manifest hashes current. Wait for `closure-tests.log`, tally/read it, then rerun full admin-routes without our workspace-test overlap. `closure-admin-routes.log` ABORTED at Rust usage-large contention median 10.042230ms > 10ms bound (raw `closure-admin-routes/report-contention-rust.json`); scratch XBoKBg removed. Earlier `final-admin-routes.log` failed frozen credential-crossread's 1-second bound (20420 / 26 / 2). No threshold/product workaround. Corrected build/Clippy/fmt passed; corrected admin-auth 212/4/0, surface 620/61/0, run.ts 47 `| pass |` rows all equal; respective `closure-*.log`, manifest counts updated. Completion still requires passing full admin run and corrected tests, then final report/manifest. All paths relative to `/tmp/opencode/a8/fix3/`.
-N1: `n1-observe.log` 9891 equal / 8 expected / 2 unpinned differences; `n1-green.log` 9891 / 10 / 0. Pair order frozen ["1",2], Rust [2,"1"]. 50,002-sample probe: both 200, 50,000 samples, truncated=true, no panic; SQL LIMIT omitted sample 50,002 on both, subsequent trim omitted sample 50,001 (id=2) frozen vs 50,000 (id="1") Rust. Full normalised exchanges pinned, no product comparator change beyond comment.
-Minor (b): frozen counts per successful request summary=2, logs/usage/quota/history/login=1, logout=0; Rust now matches exactly on probe. `limits-red.log` has six missing-count assertions plus unbounded logs/usage fixture differences; fixture bounded to stable historic interval before green. `limits-green.log` 235 equal / 0 expected / 0 failures; both per-path count JSON files retained. No stored content logged.
-Log rule: Rust logs no parser or input detail about a stored cell that the frozen gateway does not log in the same situation; sanitised Rust-only lines carry a fixed message plus table, column and row id.
+# Fix round 3 — complete for review
+Tested product/driver commit: `b192499a` (implementation `e7e83f04`, then allowlist-before-limits evaluation correction). All evidence paths below are relative to `/tmp/opencode/a8/fix3/`; subsequent closure-report commit changes documentation only.
+| Item | Change / observed evidence |
+|---|---|
+| N1 | `e7e83f04`: full normalised pair and overflow exchanges pinned as expected divergences; comparator comment only, no sorting behaviour change. `n1-observe.log`: 9891 equal / 8 expected / 2 unpinned differences; `n1-green.log`: 9891 / 10 / 0. |
+| N1 trim | Pair frozen ["1",2], Rust [2,"1"]. With 50,002 samples both return 200, 50,000 rows, truncated=true, no Rust panic. SQL LIMIT omits sample 50,002 on both; subsequent trim cuts 50,001 (id=2) frozen versus 50,000 (id="1") Rust. `trim-observation.json`; full exchanges in `n1-observe/`, repeated by closure driver. |
+| Minor (b) | `e7e83f04`, `b192499a`: fixed message + apiKeyId at client login, session validation and summary reread. Frozen logs per successful request: summary=2; logs/usage/quota/history/login=1; logout=0. Rust matches exact counts, not just presence, in both `limits-green/` and `closure-admin-routes-repeat/` per-side limits-observation JSON. |
+| Failed first (b) | `limits-red.log`: six missing-count assertions; 231 equal / 0 expected / 4 aggregate failures (also dynamic logs/usage fixture differences). Those queries were bounded to a stable historic interval; `limits-green.log`: 235 / 0 / 0. |
+| Minor (a) | Rust logs no parser or input detail about a stored cell that the frozen gateway does not log in the same situation; sanitised Rust-only lines carry a fixed message plus table, column and row id. |
+Known differences:
+- Sort pair order on non-string sort cells.
+- history order, and which row the 50,001-row trim cuts, when credential_id / window_type / observed_at cells have mixed or non-declared types (reachable only with a hand-altered column affinity).
+- Sanitised Rust-only log lines on paths where frozen logs nothing; empty-413 `content-length` header.
+Inherited behaviour retained: malformed stored allowlist produces parser diagnostics in inference 500 bodies and logs in both gateways (proxy, token count, model listing); existing driver assertions retained. Broader operator malformed-id audit remains separate; no live-Postgres driver in this increment.
+| Closure gate | Result | Log |
+|---|---|---|
+| Workspace tests | 1163 passed / 0 failed / 11 ignored / 161 groups | `closure-tests.log` |
+| Clippy / fmt / fresh build | Passed; workspace all-targets -D warnings | `closure-clippy.log`, `closure-fmt.log`, `closure-build.log` |
+| admin-routes | 20421 equal / 26 expected / 0 failures; 38 raw keys | `closure-admin-routes-repeat.log` |
+| admin-auth | 212 equal / 4 expected / 0 failures; 116 tokens | `closure-admin-auth.log` |
+| surface | 620 equal / 61 expected / 0 failures | `closure-surface.log` |
+| run.ts | 47 rows containing `| pass |`; all rows equal | `closure-run.log` |
+All Cargo gates used CARGO_INCREMENTAL=0, CARGO_PROFILE_DEV_DEBUG=0, CARGO_PROFILE_TEST_DEBUG=0; test timeout 20 minutes. Runs completed and outputs read. Earlier admin attempts retained: `final-admin-routes.log` frozen credential-crossread 1-second deadline (20420 / 26 / 2); `closure-admin-routes.log` aborted at 10.042230ms contention median > 10ms. Repeat after our workspace tests completed passed unchanged threshold (usage/logs medians 2.259/2.102ms); no claim about external host load.
+Manifest `manifest.json`: tested commit, both SHA256 values, counts/logs. Fresh copied binary `rust` is the only Rust binary in fix3; frozen `/tmp/opencode/a8/ts` hash rechecked. Normal driver scratch teardown; aborted admin scratch and run.ts scratch removed after recording. Excluded files, bun.lock, untracked specs and stash untouched.
 
-## History — everything below
+## History — everything below is superseded checkpoint evidence
 # Fix round 2 — complete for review
 Evidence base: `/tmp/opencode/a8/fix2/` (all log paths below relative); verified code/driver commit `c42cbbff`, following observation commit `20be5c97`; subsequent report-only commit changes no executable source. A–C complete; inference logging is inherited, not an unresolved R3 defect.
 | Finding | Fix commit(s) | Failed first → evidence |
