@@ -99,12 +99,23 @@ fn oauth_codec_decoder_chunkings() {
 }
 
 fn compare_decoder_mode(malformed_usage: bool, codec: bool) {
+    compare_reference(malformed_usage, codec, false);
+}
+
+#[test]
+#[ignore = "parked: roadmap X1 (upstream numbers beyond the double range)"]
+fn overflow_matches_ts() {
+    compare_reference(false, false, true);
+}
+
+fn compare_reference(malformed_usage: bool, codec: bool, overflow: bool) {
     let run = std::process::Command::new("bun")
         .arg(if codec {
             "tests/openai-oauth-decode-reference.ts"
         } else {
             "tests/openai-decode-reference.ts"
         })
+        .args(if overflow { vec!["--overflow"] } else { vec![] })
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("bun");

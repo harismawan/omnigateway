@@ -54,7 +54,13 @@ add('throw-status',text+m('response.completed',{response:{status:shadow}}));
 for(const field of ['code','type','message'])add('throw-error-'+field,text+m('error',{error:{[field]:shadow}}));
 for(const field of ['input_tokens','cached_tokens','fallback_cached_tokens'])add('throw-usage-'+field,text+m('response.completed',{response:{usage:field==='input_tokens'?{input_tokens:shadow}:field==='cached_tokens'?{input_tokens_details:{cached_tokens:shadow}}:{prompt_tokens_details:{cached_tokens:shadow}}}}));
 for(const field of ['output_index','content_index'])for(const event of ['response.content_part.added','response.content_part.done','response.output_text.delta','response.output_item.added','response.function_call_arguments.delta','response.reasoning_summary_text.delta'])add('throw-index',text+m(event,{[field]:shadow,part:{type:'output_text'},item:{type:'reasoning'},delta:'x'})+end);
-for(const c of cases){
+for(const n of ['1e309','-1e309']) {
+ add('overflow',textStart()+`event: response.output_text.delta\ndata: {"delta":${n}}\n\n`+m('response.content_part.done',{})+m('response.completed',{}));
+ add('overflow',m('response.output_item.added',{item:{type:'reasoning'}})+`event: response.output_item.done\ndata: {"item":{"type":"reasoning","n":${n}}}\n\n`+m('response.completed',{}),true);
+}
+add('overflow','event: response.completed\ndata: {"response":{"usage":{"output_tokens":1e309}}}\n\n');
+add('overflow','event: response.output_text.delta\ndata: {"delta":"keep me","ignored":1e309}\n\n'+m('response.completed',{}));
+for(const c of cases.filter(c=>(c.category==='overflow')===process.argv.includes('--overflow'))){
  const bytes=new TextEncoder().encode(c.wire);
  let expected:string|undefined;
  let originalEvents:any[]=[];

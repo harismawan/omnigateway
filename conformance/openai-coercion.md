@@ -2,6 +2,22 @@
 
 ## Decoder throwing coercions (review fix)
 
+### Parked X1: upstream numbers beyond the double range
+
+The six reviewer overflow streams live in `overflow_matches_ts`, explicitly
+ignored under roadmap X1. Removing the ignore compares the frozen expectation
+and fails: `deep::parse` cannot carry ±Infinity in serde_json::Value and skips
+the entire event. This is the third X1 class, alongside nonnumeric usage counts
+and lone surrogates. The eventual lossless carrier (`jsjson::parse_js` already
+represents ±Infinity) is the fix; no lossy parser workaround is applied.
+
+Client-visible consequences: a numeric delta loses frozen `Infinity` or
+`-Infinity` text; a native done loses its merge and block end, leaving empty
+native data. An unread extension containing 1e309 drops even valid sibling text
+(`keep me`). An overflowing response.completed is skipped: instead of normal
+End, EOF produces retryable UPSTREAM `upstream stream ended before response
+completion`. These rows compare events and all three buffered answers.
+
 `try_to_string` / `try_to_number` reject JSON objects with an own `toString`
 key, including such objects reached through array join; other objects retain
 the shared writer's `[object Object]`. Infallible callers are unchanged.
