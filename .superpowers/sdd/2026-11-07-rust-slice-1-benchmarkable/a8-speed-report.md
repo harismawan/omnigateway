@@ -1,29 +1,31 @@
-# A8 history speed — partial progress
-- Rust end-to-end median 75.8 ms vs frozen TS 60.4 ms; requirement NOT met.
-- In-process 50,002: baseline 187.451 ms → best committed measurement 71.233 ms; later final rerun 94.565 ms. No proven floor; more work needed.
-- Baseline 1,000 / 10,000 / 50,002 medians: 2.981 / 31.692 / 187.451 ms (nine runs each, release).
-- Baseline phase medians, ms: store 36.661; metadata 0.056; preliminary sort+trim 66.221; projection 7.793; validate 2.963; final sort 4.723; serialization 61.737.
-- Benchmark is ignored `client_quota::speed_tests::history_speed`; release, `--ignored --nocapture`. `A8_CAPTURE=1` records baseline bytes in scratch; omit to compare.
-- Fixture uses driver overflow SQL with two custom/custom credentials: 8,675,399 bytes. Actual driver fixture is 8,550,404 bytes; these are not identical fixtures.
-- f43a486e borrow history TEXT comparisons: 187.451 → 135.138 ms (small sizes 2.564 / 24.158).
-- c2d73919 direct JSON cell writes using jsjson formatters: 135.138 → 92.689 ms (1.400 / 15.572).
-- 7805401f equal/ASCII comparison shortcuts: 92.689 → 78.516 ms (1.292 / 13.696).
-- bf7482f5 distinct collation ranks + consecutive-series cache: 78.516 → 71.233 ms (0.962 / 11.617).
-- Ranking without consecutive cache measured 92.561 ms; not committed separately. Pointer-only preliminary sort experiment measured 94.705 ms and was reverted.
-- Final rerun medians 1.020 / 14.090 / 94.565 ms. Later instrumented example: store 42.273, metadata 0.063, preliminary 26.052, projection 2.796, validation 0.002, final-sort 3.629, serialization 9.186 ms. Instrumentation removed.
-- Final release build copied to `/tmp/opencode/a8/speed/rust-release`; pre-build free disk 5.1 GB.
-- End-to-end TS nine ms: 81.3, 68.6, 61.5, 64.2, 55.4, 60.4, 60.0, 58.0, 60.4 (median 60.4).
-- End-to-end Rust nine ms: 80.5, 74.1, 75.8, 77.9, 78.8, 75.4, 76.8, 70.6, 73.3 (median 75.8).
-- All eighteen status 200, 8,550,404 bytes. Supplied previous baseline: TS 71.6 / Rust 186.2 ms.
-- Timing uptime: 10:18:20, up 16 days 8:48, 2 users, load 5.75 / 5.49 / 4.93. Process snapshot included opencode, hermes, herdr, containerd, dockerd, redis-server; full snapshot in uptime.log.
-- Byte snapshots compared after each optimization: three sizes; accent/case/canonical-equivalent labels; mixed numeric/text ids; duplicate ids; orphan; zero/NULL limits; NULL/BLOB/invalid-UTF8 labels/providers; TEXT nonnumeric timestamp. Errors captured with code/message.
-- Stable ranks coalesce ICU-equal distinct strings; validation keeps up to two representatives per exact key, preserving duplicate non-string failures. Existing sort_tests unchanged.
-- Final debug driver: `admin-routes: 9892 equal, 11 expected divergences, 0 failures, 0 raw keys minted` (client-history.log).
-- Final debug driver: `admin-routes: 6081 equal, 6 expected divergences, 0 failures, 0 raw keys minted` (client-quota.log).
-- Tests: 68 `test result: ok` summaries, 387 passed, 10 ignored, no FAILED line (tests.log). A timed-out repeat was rerun successfully.
-- Clippy: `Finished` dev profile; workspace all targets, -D warnings (clippy.log). Initial collapsible-if diagnostic corrected.
-- Format: `exit=0` (fmt.log).
-- All logs/snapshots: `/tmp/opencode/a8/speed/`. Driver output scratch directories removed after recording.
-- Only client_quota.rs changed in production. No store, locale_compare, TS, dependency, unsafe, schema, or credential matching changes; profiling prioritized sorting/serialization. Linear last-match lookup retained.
-- `/api/client/quota` still builds JSON objects and validates/sorts every key; its performance was not measured or changed.
-- Remaining concern: target <50 ms and TS parity unmet; store read and preliminary sort warrant further profiling. Snapshot benchmark depends on local pre-change captures, not checked-in golden files.
+# A8 history speed, rounds 1–2
+- Corrected in-process median: 61.738 → 49.219 → 43.436 ms; 8,550,404 bytes. End-to-end parity remains UNPROVEN/unmet; no proven floor preventing it.
+- Round 1 original benchmark 1k/10k/50002: 2.981 / 31.692 / 187.451 ms; it dropped the observed_at index and used two custom labels, producing 8,675,399 bytes.
+- Round 1 baseline split ms: read 36.661, metadata .056, preliminary 66.221, projection 7.793, validation 2.963, final sort 4.723, serialization 61.737.
+- f43a486e borrowed sort strings → 135.138 ms; c2d73919 direct JSON → 92.689; 7805401f equal/ASCII shortcuts → 78.516; bf7482f5 cached collation ranks → 71.233 (later noisy rerun 94.565). 48b0de37 recorded round 1.
+- Round 1 E2E Rust 75.8 vs TS 60.4 ms medians. Original logs remain in scratch.
+- Round 2 benchmark uses label custom/E, same overflow SQL and observed_at index as driver; exactly 8,550,404 bytes. Legacy snapshots still checked.
+- Corrected baseline 1k/10k/50002: .812 / 11.264 / 61.738 ms (r2-baseline.log).
+- Bare stepping, no Rust cell reads, nine-run medians: .164 / 1.736 / 9.496 ms. Same SELECT, parameters and LIMIT as reader.
+- EXPLAIN: SEARCH quota_samples USING INDEX speed_observed (observed_at>? AND observed_at<?); no temporary B-tree. SQL/order terms unchanged.
+- 5112834b compact reader, cached statement, interned exact typed series cells → .684 / 8.732 / 49.219 ms; snapshots passed.
+- 5108fa28 distinct preliminary cell ranks + stable index sort → .621 / 8.176 / 43.436 ms; snapshots passed.
+- Compact reader keeps original owned cells; hash collision buckets check raw typed bytes. Numeric real bits and integer types stay distinct until comparison ranking. BLOB ids still never match credentials.
+- Ranking coalesces compare-equal distinct cells; unchanged stable tie ordering. Old reader and other quota readers unchanged.
+- Final instrumented run median 43.661 ms; representative split: read 22.458, preliminary/metadata 8.987, projection+validation+final sort 1.450, serialization 9.276 ms (r2-split.log); instrumentation removed.
+- Measured stepping + serialization ~18.8 ms is NOT an impossibility floor above the target. E2E overhead/discrepancy needs investigation.
+- E2E first TS nine ms: 90.2,78.1,66.6,65.8,66.2,55.2,64.2,74.2,65.3; median 66.2.
+- E2E first Rust nine ms: 89.6,81.7,90.5,84.7,79.0,74.8,72.5,79.6,76.5; median 79.6.
+- E2E repeat TS nine ms: 99.5,84.4,79.5,75.1,71.4,92.7,100.4,92.5,96.6; median 92.5.
+- E2E repeat Rust nine ms: 85.5,103.6,79.7,79.2,121.3,81.5,108.6,98.7,125.2; median 98.7.
+- All E2E responses 200 / 8,550,404 bytes; release copy r2-rust-release. Free disk before release build 5.9 GB.
+- Uptime first: 16 days 9:10, 2 users, load 5.70/4.62/4.29; repeat: 16 days 9:12, 2 users, load 4.97/4.84/4.43. Other processes not sampled in round 2.
+- Equality: legacy sizes, collation variants, mixed/duplicate ids, orphan, 0/NULL limits, NULL/BLOB/invalid UTF8 metadata, nonnumeric timestamp; added equal-timestamp overflow and mixed INTEGER/REAL/TEXT/BLOB series cells before reader edits. All byte snapshots passed after each change.
+- Baseline capture mode rewrote snapshots before production edits; separately retained original 50002 snapshot compares identical. New mixed-cell fixture includes compare-equal integer/real cells; existing sort_tests unchanged.
+- client-history: admin-routes: 9892 equal, 11 expected divergences, 0 failures, 0 raw keys minted.
+- client-quota: admin-routes: 6081 equal, 6 expected divergences, 0 failures, 0 raw keys minted.
+- Tests: 68 test result: ok summaries, 387 passed, 10 ignored, no FAILED (r2-tests.log).
+- Clippy workspace/all-targets/-D warnings: Finished dev profile in 4.13s (r2-clippy.log).
+- Format: exit=0 (r2-fmt.log). Logs under /tmp/opencode/a8/speed/ with r2- prefix; driver scratch directories removed after recording.
+- Untouched: TS, SQL ordering/schema, locale_compare, credential readers/matching, account route, serialization this round, dependencies. Only new store sibling reader and history/benchmark changed.
+- Remaining: end-to-end requirement unmet despite <50 ms in-process; shared-host timing noisy. No claim of an unavoidable floor. Snapshot benchmark depends on local captured files.
