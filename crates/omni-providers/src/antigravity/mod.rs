@@ -2,3 +2,4 @@
 pub mod cloak;
 pub mod profile;
 pub mod schema;
+pub mod wire;
