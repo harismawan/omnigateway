@@ -8,13 +8,13 @@ pub fn clear_bodies(
         .prepare("SELECT request_id, rel_path FROM request_bodies WHERE at < ?")
         .map_err(|e| e.to_string())?
         .query_map([now], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            Ok((bun_cell(r.get_ref(0)?), bun_cell(r.get_ref(1)?)))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     for (_, rel) in &rows {
-        if let Some(rel) = rel {
+        if let rusqlite::types::Value::Text(rel) = rel {
             delete_artifact(dir, rel);
         }
     }
@@ -41,6 +41,16 @@ pub fn clear_bodies(
         }
     }
     Ok(serde_json::json!({"removed":rows.len(),"orphans":orphans}))
+}
+
+// Bun SQLite replaces malformed TEXT bytes, but keeps other cell types distinct.
+fn bun_cell(cell: rusqlite::types::ValueRef<'_>) -> rusqlite::types::Value {
+    match cell {
+        rusqlite::types::ValueRef::Text(bytes) => {
+            rusqlite::types::Value::Text(String::from_utf8_lossy(bytes).into_owned())
+        }
+        other => other.into(),
+    }
 }
 
 // Node's POSIX path.join concatenates before normalizing, including absolute rels.
