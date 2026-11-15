@@ -1,8 +1,8 @@
 from pathlib import Path
 import os,subprocess,sqlite3,json,hashlib,collections
-import tempfile
+import tempfile, time, typed_state
 import driver_env
-L=Path(tempfile.mkdtemp(prefix='/tmp/opencode/cli-fix3/neighbors-'));base=L/'fixture';base.mkdir();root=base/'root';root.mkdir()
+L=Path(tempfile.mkdtemp(prefix='/tmp/opencode/cli-fix5/neighbors-'));base=L/'fixture';base.mkdir();root=base/'root';root.mkdir()
 repo=Path.cwd();env={'PATH':os.environ['PATH'],'HOME':str(base),'XDG_STATE_HOME':str(base/'state'),'OMNI_ENCRYPTION_KEY':'review-secret-long-enough','NO_COLOR':'1','BUN_RUNTIME_TRANSPILER_CACHE_PATH':'0'}
 cmds=[['bun','--no-env-file',str(repo/'apps/cli/src/index.ts')],[os.environ['OMNI_CLI_BIN']]]
 subprocess.run(cmds[0]+['--root',str(root),'status','--json'],env=env,capture_output=True,check=True)
@@ -42,9 +42,12 @@ for cls,sql,commands in cases:
    pair=[]
    for cmd in cmds:
     (root/'omnigateway.db').write_bytes(seed);d=sqlite3.connect(root/'omnigateway.db');d.executescript(sql);d.commit();d.close();before=(root/'omnigateway.db').read_bytes()
+    started=time.time()*1000
     p=subprocess.run(cmd+['--root',str(root)]+args+jf,env=env,capture_output=True,timeout=20)
+    ended=time.time()*1000
     after=(root/'omnigateway.db').read_bytes();d=sqlite3.connect(root/'omnigateway.db');d.text_factory=lambda b:b.decode('utf-8','backslashreplace');dump='\n'.join(d.iterdump());d.close()
-    pair.append(dict(code=p.returncode,out=p.stdout.hex(),err=p.stderr.hex(),db_sha=hashlib.sha256(after).hexdigest(),unchanged=before==after,dump=dump))
+    pair.append(dict(code=p.returncode,out=p.stdout.hex(),err=p.stderr.hex(),db_sha=hashlib.sha256(after).hexdigest(),unchanged=before==after,dump=dump,types=typed_state.snapshot(root/'omnigateway.db'),started=started,ended=ended))
+   typed_state.no_panic(pair[1])
    equal=all(pair[0][k]==pair[1][k] for k in ['code','out','err']);results.append(dict(cls=cls,sql=sql,args=args+jf,ts=pair[0],rust=pair[1],equal=equal,db_equal=pair[0]['db_sha']==pair[1]['db_sha']))
 (L/'neighbors.json').write_text(json.dumps(results,indent=2));print(len(results),sum(x['equal'] for x in results));print(collections.Counter(x['cls'] for x in results if not x['equal']))
 
@@ -65,20 +68,7 @@ for r in results:
         assert r['rust']['code'] != 0
         excluded['unimplemented-credentials']+=1
         continue
-    dumps=[]
-    for side in ['ts','rust']:
-        dump=r[side]['dump']
-        if args[:2]==['keys','revoke'] and r[side]['code']==0:
-            def clock(m):
-                assert abs(int(m[0])-time.time()*1000)<3600000
-                return '<revoke-wall-clock>'
-            # Only the api_keys INSERT carries the revoked_at timestamp in
-            # these seeded cases. No output bytes or other tables are masked.
-            dump='\n'.join(re.sub(r'(?<!\d)1\d{12}(?!\d)',clock,line)
-                           if line.startswith('INSERT INTO "api_keys" VALUES') else line
-                           for line in dump.split('\n'))
-        dumps.append(dump)
-    if not r['equal'] or dumps[0]!=dumps[1]: failures.append(r)
+    if not r['equal'] or not typed_state.equal([r['ts'],r['rust']],args): failures.append(r)
 assert excluded=={'random-create':2,'unimplemented-credentials':4}, excluded
 hist=collections.Counter('exit '+str(r['ts']['code']) for r in results)
 print('evidence',L,'pairs',len(results),'failing',len(failures),'excluded',dict(excluded))

@@ -1,4 +1,6 @@
 {
+  "wide": { "exit 0": 3034, "exit 1": 1202 },
+  "extra": { "exit 0": 98, "exit 1": 82 },
   "neighbors": {"exit 0":2778,"exit 1":1026,"exit 2":2},
   "stored-cells": {"exit 0":734,"exit 1":256,"exit 2":55},
   "stored-json": {"exit 1":7},
