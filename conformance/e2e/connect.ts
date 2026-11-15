@@ -298,6 +298,26 @@ async function run(label: string, binary: string): Promise<Row[]> {
       rows.push({ name, response: { requests: wires.length, credentials: stored.length, access: await Promise.all(stored.map(r => decrypt(fieldKey, r.access_token))) }, wire: [] });
       await row(`${name}/consumed`, "finish", JSON.stringify({ flowId: start.flowId, code: "code" }));
     }
+    for (const provider of ["anthropic", "openai"]) for (const success of [false, true]) {
+      const name = `${provider}/concurrent/${success ? "success" : "refusal"}`;
+      tokenStatus = success ? 200 : 400;
+      tokenBody = success ? JSON.stringify({ access_token: `${provider}-concurrent-access`, refresh_token: "concurrent-refresh", expires_in: 3600 }) : '{"error":"fixture_refusal"}';
+      const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: name }));
+      validateStart(start);
+      tokenDelay = 500;
+      wires = [];
+      const responses = await Promise.all([0, 1].map(() => request("/api/connect/poll", JSON.stringify({ flowId: start.flowId }))));
+      tokenDelay = 0;
+      const reader = new Database(file, { readonly: true });
+      const credentials = reader.query("SELECT id,access_token FROM credentials WHERE label = ?").all(name) as any[];
+      reader.close();
+      const ids = responses.map(r => r.body?.id);
+      if (success && (responses.some(r => r.status !== 200 || r.body.status !== "complete") || ids[0] !== ids[1] || !uuid4.test(ids[0]) || credentials.length !== 1 || credentials[0].id !== ids[0])) throw Error(`${name}: invalid shared success`);
+      if (!success && responses.some(r => r.status !== 401 || r.body.error?.code !== "AUTH" || r.body.error?.message !== "token endpoint rejected the request: fixture_refusal")) throw Error(`${name}: invalid shared refusal`);
+      const normalized = responses.map(({ cookie: _, ...r }) => { if (success) r.body.id = "<uuid4>"; return r; }).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      rows.push({ name, response: { requests: wires.length, responses: normalized, credentials: credentials.length, access: await Promise.all(credentials.map(c => decrypt(fieldKey, c.access_token))) }, wire: [] });
+      await row(`${name}/consumed`, "poll", JSON.stringify({ flowId: start.flowId }));
+    }
     return rows;
   } finally { proc.kill(); await proc.exited; }
 }
