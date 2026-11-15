@@ -217,7 +217,9 @@ function valid(row: any, c: Case): boolean {
   if (c.profile) {
     const ua = c.profile === "all" ? "fixture-antigravity/9.8.7" : "antigravity/ide/9.8.7 darwin/arm64";
     if (!inference[0].headers.includes(`User-Agent: ${ua}`)) return false;
-    if (c.profile === "all" && inference[0].headers[1] !== `User-Agent: ${ua}`) return false;
+    // Host is transport-appended, not a profile header. Profile order begins
+    // at User-Agent on the actual frozen wire.
+    if (c.profile === "all" && inference[0].headers[0] !== `User-Agent: ${ua}`) return false;
   }
   if (!c.code && !["truncated", "unknown-finish"].includes(c.kind!) && row.clients.some((x: any) => x.status !== 200)) return false;
   return true;
