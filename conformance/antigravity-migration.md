@@ -28,3 +28,33 @@ added in this partial slice.
 Pending literal and coercion audits: all of `codec.ts`, `wire.ts`, `decode.ts`,
 model-dependent limits and the envelope body-order array in `profile.ts`.
 No 40,000-level depth experiment has been run for this provider yet.
+
+## Turn 2: schema pruning slice
+
+`schema.rs` now ports `pruneSchema` and `scalarValue` from wire.ts. The statement
+above about no depth experiment is superseded for tool schemas only.
+
+| Frozen rule | Rust | Test |
+| --- | --- | --- |
+| MAX_SCHEMA_DEPTH 24; refuse non-record subschemas | `schema::sub` | 23/24/25/40 hops and 40,000 hops on 2 MiB thread |
+| PRUNED = `antigravity:tool-schema-pruned`, deduplicated | `schema::prune` | all 574 rows compare degradation list |
+| SCHEMA_TYPES string/number/integer/boolean/array/object/null/type_unspecified | `TYPES`, `walk` | scalar and union type rows, case handling |
+| SCHEMA_FIELDS: six walked, four text, three texts, six int, two double, three free fields | `walk` match arms | every field crossed with 21 values |
+| const string → enum unless own enum; unknown fields dropped | `walk` | initial four rows, unknown/$ref rows |
+| integer spelling `^-?\d+$`; finite whole numbers | numeric match arm | decimal, fractional, exponent, hex, whitespace |
+| double strings trim nonempty then Number finite | `js::trim`, `js::try_to_number` | string numeric neighbours |
+| tuple items first; arrays of schema arms; empty property key dropped | `walk` | field/type shape matrix |
+| structural inference uses original declared type for both agree calls | post-walk repair | inferred versus contradictory types |
+| required/propertyOrdering filter to own known property names | post-walk repair | missing-name rows |
+| lowercase `array` without items loses type; uppercase preserved | final repair | ARRAY/array rows |
+
+Coercion audit of this slice: Number only receives strings, because scalarValue
+checks typeof before calling it. Thus an object owning toString is dropped without
+invoking coercion; no throwing coercion row applies here. `.trim()` likewise only
+receives strings. Free fields are deep-cloned without coercion. Full request-side
+coercion audit, JSON stringify edge cases and prototype-special keys remain pending.
+
+Observed contradiction to task: frozen wire.ts clamps **every** model to the
+global MAX_OUTPUT_TOKENS 65,536; models.ts advertises 65,535 on Pro. Future wire
+implementation must preserve the global constant, not apply per-model ceilings.
+No request implementation or test of that ceiling has landed yet.
