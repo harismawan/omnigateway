@@ -415,6 +415,36 @@ async function run(label: string, binary: string): Promise<Row[]> {
       console.log(`FIRST ${label} ${name} ${valid ? "PASS" : "FAIL"}`);
       rows.push({ name: `${name}/result`, response: { status, valid }, wire: [] });
     }
+    for (const provider of ["anthropic", "openai"]) for (const route of ["finish", "poll"]) for (let trial = 0; trial < (process.env.A15_VISIBILITY_TRIALS === "10" ? 10 : 1); trial++) {
+      const name = `${provider}/changed-label/${route}/${trial}`;
+      const model = `order-${provider}-${route}-${trial}`;
+      const key = await request("/api/keys", JSON.stringify({ label: model }));
+      const saved = await request(`/api/models/${model}`, JSON.stringify({ id: model, strategy: "priority", isAlias: false, targets: [{ provider, model: provider === "openai" ? "gpt-5" : "claude-sonnet-4-5", tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: true, reasoning: true } }] }), cookie, "PUT");
+      if (key.status !== 200 || typeof key.body.key !== "string" || saved.status !== 200) throw Error("order fixture failed");
+      const writer = new Database(file);
+      writer.run("UPDATE credentials SET enabled=0 WHERE provider=?", [provider]);
+      writer.run("UPDATE credentials SET enabled=1,tier=1,weight=1,label='a' WHERE id=?", [`${provider}-full`]);
+      writer.run("UPDATE credentials SET enabled=1,tier=1,weight=1,label='b' WHERE id=?", [`${provider}-missing`]);
+      writer.close();
+      const other = await storedRow(`${provider}-missing`);
+      await Bun.sleep(650);
+      tokenStatus = 200;
+      tokenBody = JSON.stringify({ access_token: `${provider}-order-access-${route}-${trial}`, refresh_token: "order-refresh", expires_in: 3600 });
+      const edited = await request(`/api/credentials/${provider}-full`, JSON.stringify({ label: "z" }), cookie, "PATCH");
+      if (edited.status !== 200) throw Error("label patch failed");
+      const start = await request("/api/connect/start", JSON.stringify({ provider, credentialId: `${provider}-full` }));
+      const url = validateStart(start.body);
+      const done = await request(`/api/connect/${route}`, JSON.stringify({ flowId: start.body.flowId, code: `code#${url.searchParams.get("state")}` }));
+      if (done.status !== 200 || done.body.id !== `${provider}-full`) throw Error("order reconnect failed");
+      inference = true; wires = [];
+      const r = await fetch("http://127.0.0.1:18515/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${key.body.key}`, "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: "hello" }], max_tokens: 32, stream: false }) });
+      const answer: any = await r.json();
+      inference = false;
+      const bearer = wires.map(w => w.headers.find(h => /^authorization:/i.test(h))?.replace(/^authorization:\s*/i, ""));
+      await Bun.write(join(root, `${model}-routable.json`), JSON.stringify({ status: r.status, answer, wires, expectedBearer: `Bearer ${other.access_token}` }, null, 2));
+      if (r.status !== 200 || answer.choices?.[0]?.message?.content !== "fixture answer" || bearer.length !== 1) throw Error("order inference failed");
+      rows.push({ name, response: { status: r.status, answer: answer.choices[0].message.content, bearer }, wire: [] });
+    }
     return rows;
   } finally { proc.kill(); await proc.exited; }
 }
