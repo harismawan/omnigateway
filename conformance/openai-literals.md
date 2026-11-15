@@ -3,17 +3,16 @@
 Numbers below are 1-based `test(...)` declaration order within each frozen file.
 Every declaration is assigned exactly once. Differential means exact wire JSON,
 codec JSON/ordered headers/degradations/native flag against real Bun, not a
-claim that each original expect() was copied. Mixed OAuth/API tests stay later
-until their OAuth assertions can run. Frozen titles sometimes describe obsolete
+claim that each original expect() was copied. Frozen titles sometimes describe obsolete
 behavior (the image test forwards images; system turns become developer).
 
 | File | Total | Ported | Differential | Later |
 |---|---:|---:|---:|---:|
-| openai.test.ts |49|0|47|2|
+| openai.test.ts |49|0|49|0|
 | openaiCacheKey.test.ts |19|1|18|0|
-| openaiCodec.test.ts |7|3|1|3|
+| openaiCodec.test.ts |7|3|4|0|
 | openaiCodexFingerprint.test.ts |46|31|15|0|
-| Total |121|35|81|5|
+| Total |121|35|86|0|
 
 ## Declaration-by-declaration disposition
 
@@ -34,7 +33,7 @@ the source authority: locate titles with `grep -n '^test('` in the named file.
 | openai.test.ts |23|decoder malformed category (DONE alone)|
 | openai.test.ts |24,26|decoder errors category (constructor and response.failed)|
 | openai.test.ts |27,28,29|baseline differential (developer turns, sampling)|
-| openai.test.ts |30,31|Later: OAuth|
+| openai.test.ts |30,31|Differential: oauth-branches controls/baseline (OAuth parameter removal and degradation presence/absence)|
 | openai.test.ts |32,33|decoder-literal-edges category (message and reasoning duplicate done)|
 | openai.test.ts |34|decoder usage category (prompt_tokens_details fallback)|
 | openai.test.ts |35|foreign-drops differential (1M beta)|
@@ -49,11 +48,12 @@ the source authority: locate titles with `grep -n '^test('` in the named file.
 | openaiCacheKey.test.ts |4,6,7,8,10,13,17,18|literal-edges differential (session/precedence/fallback/vendor/empty history)|
 | openaiCacheKey.test.ts |11,12,14,15,16|cache-history differential (private id, growing and edited prefix)|
 | openaiCacheKey.test.ts |19|Ported: before/after request equality on every integration corpus row; Rust takes immutable borrow|
-| openaiCodec.test.ts |1,2|Later: OAuth host/account selection|
+| openaiCodec.test.ts |1|Differential: three-dialects (Codex URL/body/headers/encoding); captured header literals additionally pinned by C1|
+| openaiCodec.test.ts |2|Differential: oauth-branches account-omitted (missing/nonstring account IDs)|
 | openaiCodec.test.ts |3,4|Ported: captured_literal_and_small_stack fixed BODY/KEY; differential checks headers, URL and absent encoding|
 | openaiCodec.test.ts |5|Ported: missing_token_is_auth; pure builder has no transport to send|
 | openaiCodec.test.ts |6|baseline differential nativeReasoning flag|
-| openaiCodec.test.ts |7|Later: OAuth half; API half in baseline/literal-edges|
+| openaiCodec.test.ts |7|Differential: unsafe-affinity (both hosts × CRLF/Unicode affinity values; whole body and ordered headers)|
 | openaiCodexFingerprint.test.ts |1,2,3,5,25|Ported: openai_fingerprint_literals::captured_headers_and_metadata (zstd marker only; wire frame belongs to transport compression)|
 | openaiCodexFingerprint.test.ts |4,6,7,8,11,36,38,44|Ported: captured_body_prefix_and_history (7 pins both provider-visible UUIDv5 prefix vectors; helper vector remains in frozen test)|
 | openaiCodexFingerprint.test.ts |28,29,30,33,34|Ported: catalog_and_non_lite_literals|
@@ -71,8 +71,10 @@ C1 checkpoint: six Rust literal test functions cover 31 frozen declarations;
 all passed on first execution (first three before expansion, then remaining
 three). Behavioral differential disposition names a category rather than claiming
 each original expect was copied. 285 whole-request rows now include 13 new
-fingerprint boundary rows (269 OAuth + 16 API-key controls). The remaining five
-later declarations above await C3, after C2 OAuth codec-level decode comparisons.
+fingerprint boundary rows (269 OAuth + 16 API-key controls). C3 adds four
+unsafe-affinity rows: now 289 (271 OAuth +18 API-key). All 121 declarations
+are dispositioned; no later/undecided rows remain. Transport compression,
+refresh and connect routes remain roadmap work, not claims of these codec tests.
 
 Chat-completions file attachments are deliberately supplied in rich-ingress;
 the frozen ingress drops non-image attachments rather than creating file IR.

@@ -114,4 +114,6 @@ for(const requestId of ['req_1','req_2']) for(const requestStartedAt of [undefin
  const built=openaiCodec.buildRequest({request,model,credentials,requestId,requestStartedAt,fail:(c,m)=>new Error(c+':'+m)});
  rows.push({category:'fingerprint-clock',request,model,credentials,requestId,requestStartedAt:requestStartedAt??null,codec:built.request,notes:built.degradations,state:built.decodeState});
 }
+for(const oauth of [true,false]) for(const value of ['bad\r\nx-injected: yes','日本語'])
+ add('unsafe-affinity',{...base,vendor:{openai:{prompt_cache_key:value,session_id:value}}},'gpt-5-codex',`${oauth}/${value}`,{apiKey:oauth?null:'sk-oa',accessToken:oauth?'oauth-token':null,providerData:{}} as any);
 console.log(JSON.stringify(rows));
