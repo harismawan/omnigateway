@@ -385,7 +385,9 @@ pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> R
             // cannot satisfy the object schema; Uint8Array's comma-separated
             // bytes cannot produce an object either (including an empty blob).
             let limits = match row.get_ref("limits").map_err(Failure::internal)? {
-                rusqlite::types::ValueRef::Text(raw) => stored_limits(&String::from_utf8_lossy(raw)),
+                rusqlite::types::ValueRef::Text(raw) => {
+                    stored_limits(&String::from_utf8_lossy(raw))
+                }
                 _ => JsValue::Null,
             };
             if matches!(limits, JsValue::Null) {
