@@ -381,7 +381,13 @@ pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> R
             None => JsValue::Null,
         },
         limits: {
-            let limits = stored_limits(&row.get::<_, String>("limits").map_err(Failure::internal)?);
+            // JSON.parse coerces SQLite non-text cells first. Numbers/null
+            // cannot satisfy the object schema; Uint8Array's comma-separated
+            // bytes cannot produce an object either (including an empty blob).
+            let limits = match row.get_ref("limits").map_err(Failure::internal)? {
+                rusqlite::types::ValueRef::Text(raw) => stored_limits(&String::from_utf8_lossy(raw)),
+                _ => JsValue::Null,
+            };
             if matches!(limits, JsValue::Null) {
                 tracing::error!(apiKeyId = %id, "api key limits unreadable");
             }
