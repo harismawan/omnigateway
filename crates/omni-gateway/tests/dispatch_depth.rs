@@ -72,6 +72,10 @@ async fn server_stream(
     // fixture's tool definition to its native shape, retaining the deep schema.
     let body = if responses {
         body.replace(
+            "\"stream\":true",
+            "\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]",
+        )
+        .replace(
             "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]",
             "\"input\":\"hi\"",
         )
@@ -266,7 +270,19 @@ case!(
     "native_stream_disconnect"
 );
 
+case!(openai_deep_request_success, false, "request");
+case!(openai_deep_response_buffered, false, "response");
+case!(openai_deep_retry, false, "retry");
+case!(openai_deep_error, false, "error");
+case!(openai_deep_cancel, false, "cancel");
+case!(
+    openai_native_server_responses,
+    false,
+    "native_stream_responses"
+);
+
 fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
+    let openai = name.starts_with("openai_");
     const CHILD: &str = "OMNI_DISPATCH_DEPTH_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = std::process::Command::new(std::env::current_exe().expect("exe"))
@@ -315,7 +331,7 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                             if wire.len() >= end + 4 + size { break; }
                         }
                     }
-                    let path = if anthropic { "/v1/messages" } else { "/v1/chat/completions" };
+                    let path = if openai { "/v1/responses" } else if anthropic { "/v1/messages" } else { "/v1/chat/completions" };
                     assert!(wire.starts_with(format!("POST {path} HTTP/1.1\r\n").as_bytes()), "codec destination");
                     assert!(wire.split(|b| *b != b'[').any(|w| w.len() == 39_980), "full deep payload reached HTTP");
                     if mode == "error" || (mode == "retry" && attempt == 0) {
@@ -323,18 +339,26 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                         write!(socket, "HTTP/1.1 {status} Error\r\nContent-Length: 26\r\nConnection: close\r\n\r\n{{\"error\":\"fixture failed\"}}").expect("error response");
                         continue;
                     }
-                    let body = if anthropic {
+                    let body = if openai {
+                        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"gpt-5\"}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+                    } else if anthropic {
                         "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":1}}}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {}\n\n"
                     } else {
                         "data: {\"id\":\"m\",\"model\":\"up\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
                     };
                     let body = if mode.starts_with("native") {
                         let nested = format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980));
+                        if openai {
+                            format!("event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r\",\"model\":\"gpt-5\"}}}}\n\nevent: response.output_item.added\ndata: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"reasoning\"}}}}\n\nevent: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"type\":\"reasoning\",\"encrypted_content\":\"fixture\",\"deep\":{nested}}}}}\n\nevent: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\"}}}}\n\n")
+                        } else {
                         format!("event: message_start\ndata: {{\"message\":{{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}}}\n\nevent: content_block_start\ndata: {{\"index\":0,\"content_block\":{{\"type\":\"web_search_tool_result\",\"content\":{nested}}}}}\n\nevent: content_block_stop\ndata: {{\"index\":0}}\n\nevent: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"end_turn\"}}}}\n\nevent: message_stop\ndata: {{}}\n\n")
+                        }
                     } else if mode == "response" || mode == "cancel" || mode.starts_with("stream") {
                         let nested = format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980));
                         let args = serde_json::to_string(&nested).expect("argument string");
-                        if anthropic {
+                        if openai {
+                            format!("event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"r\",\"model\":\"gpt-5\"}}}}\n\nevent: response.output_item.added\ndata: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"function_call\",\"call_id\":\"t\",\"name\":\"f\"}}}}\n\nevent: response.function_call_arguments.delta\ndata: {{\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":{args}}}\n\nevent: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"type\":\"function_call\"}}}}\n\nevent: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{{\"status\":\"completed\"}}}}\n\n")
+                        } else if anthropic {
                             format!("event: message_start\ndata: {{\"message\":{{\"id\":\"m\",\"model\":\"claude-opus-5-5\",\"usage\":{{\"input_tokens\":1}}}}}}\n\nevent: content_block_start\ndata: {{\"index\":0,\"content_block\":{{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"f\",\"input\":{{}}}}}}\n\nevent: content_block_delta\ndata: {{\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":{args}}}}}\n\nevent: content_block_stop\ndata: {{\"index\":0}}\n\nevent: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"tool_use\"}}}}\n\nevent: message_stop\ndata: {{}}\n\n")
                         } else {
                             format!("data: {{\"id\":\"m\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"t\",\"type\":\"function\",\"function\":{{\"name\":\"f\",\"arguments\":{args}}}}}]}},\"finish_reason\":null}}]}}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n")
@@ -364,6 +388,9 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                 if anthropic {
                     rusqlite::Connection::open(&fixture.path).expect("db").execute("UPDATE credentials SET provider='anthropic',provider_data='{}'", []).expect("provider");
                 }
+                if openai {
+                    rusqlite::Connection::open(&fixture.path).expect("db").execute("UPDATE credentials SET provider='openai',provider_data='{}'", []).expect("provider");
+                }
                 if mode.contains("stream") {
                     rusqlite::Connection::open(&fixture.path).expect("db").execute(
                         "INSERT INTO api_keys (id,label,prefix,hash,created_at) VALUES ('depth','depth',?,?,0)",
@@ -375,7 +402,7 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                     http: Arc::new(Local { client: Client::new(), origin }),
                     ..Arc::try_unwrap(h.deps).unwrap_or_else(|_| panic!("sole deps"))
                 });
-                let model = if anthropic { "claude-opus-5-5" } else { "m1" };
+                let model = if openai { "gpt-5" } else if anthropic { "claude-opus-5-5" } else { "m1" };
                 // An arbitrary schema annotation, preserved by both codecs.
                 let nested = format!("{}0{}", "[".repeat(39_980), "]".repeat(39_980));
                 let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"tools":[{{"type":"function","function":{{"name":"f","parameters":{{"type":"object","x-deep":{nested}}}}}}}],"stream":false}}"#);
@@ -418,7 +445,7 @@ fn run_case(name: &'static str, anthropic: bool, mode: &'static str) {
                 drop((d, deps));
                 h.writer.close().await.expect("close");
                 stub.join().expect("stub");
-                eprintln!("deep dispatch ingest/codec/HTTP/release passed: {}", if anthropic { "anthropic" } else { "custom" });
+                eprintln!("deep dispatch ingest/codec/HTTP/release passed: {}", if openai { "openai" } else if anthropic { "anthropic" } else { "custom" });
             }
         });
     }).expect("worker").join().expect("join");
