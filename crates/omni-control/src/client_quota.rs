@@ -80,8 +80,8 @@ fn compare_numbers(a: f64, b: f64) -> std::cmp::Ordering {
     }
 }
 
-// Disjoint numeric/string classes avoid JS relational coercion cycles.
-// Each class is totally ordered; strings use UTF-16 lexicographic order.
+// Numeric cells first, then strings in UTF-16 order; frozen mixed-type order
+// is not reproduced (reachable only with hand-altered column affinity).
 fn compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (primitive(a), primitive(b)) {
         (Some(a), Some(b)) => a.encode_utf16().cmp(b.encode_utf16()),

@@ -2521,6 +2521,27 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       if (step.kind === "client-history") {
         const { fixture, check, attacks, callers } = await clientFixture();
         await quotaSortEdges(fixture,check,callers,true);
+        fixture.run("PRAGMA foreign_keys=OFF");
+        fixture.run("ALTER TABLE credentials RENAME TO mixed_saved_credentials");
+        fixture.run("ALTER TABLE quota_samples RENAME TO mixed_saved_samples");
+        fixture.run("CREATE TABLE credentials(id,provider,label,auth_type,enabled,tier,weight,created_at,updated_at,provider_data)");
+        fixture.run("CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms)");
+        for (const id of [2,"1"]) fixture.run("INSERT INTO credentials VALUES(?,'a','x','api_key',1,1,1,1,1,'{}')",[id]);
+        for (const overflow of [false,true]) {
+          fixture.run("DELETE FROM quota_samples");
+          if (overflow) fixture.run("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<50002) INSERT INTO quota_samples SELECT CASE WHEN x%2=1 THEN 2 ELSE '1' END,'daily',x,100000,NULL,1794612000000,NULL FROM n");
+          else for (const id of [2,"1"]) fixture.run("INSERT INTO quota_samples VALUES(?,'daily',1,10,NULL,1794612000000,NULL)",[id]);
+          const cookie = callers.find(([who]) => who === "client-A")![1];
+          const answer = await exchange({target:"/api/client/quota/history",headers:[["cookie",`omni_admin=${cookie}`]]});
+          check(`mixed raw ids ${overflow ? "trim" : "pair"}`,answer,200);
+          const body = JSON.parse(answer.body.toString());
+          if (body.samples?.length !== (overflow ? 50000 : 2) || body.truncated !== overflow)
+            throw new Error(`mixed raw ids: unexpected count/truncated on ${label}`);
+        }
+        fixture.run("DROP TABLE quota_samples");
+        fixture.run("DROP TABLE credentials");
+        fixture.run("ALTER TABLE mixed_saved_credentials RENAME TO credentials");
+        fixture.run("ALTER TABLE mixed_saved_samples RENAME TO quota_samples");
         // Reviewer regressions require hand-altered TEXT timestamp affinity.
         fixture.run("ALTER TABLE quota_samples RENAME TO saved_quota_samples");
         fixture.run("CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at TEXT,window_ms)");
@@ -2744,6 +2765,23 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
       }
       if (step.kind === "client-summary") {
         const { fixture, identities, check, attacks, callers } = await clientFixture();
+        fixture.run("UPDATE api_keys SET limits='limitsStoredProbe' WHERE id='client-A'");
+        const limitsObservations: Record<string,number> = {};
+        for (const route of ["summary","logs","usage","quota","quota/history","login","logout"]) {
+          const before = readFileSync(logFile,"utf8").split("\n").filter(l=>l.includes("api key limits unreadable") && l.includes("client-A")).length;
+          const answer = await exchange({target:`/api/client/${route}${route==="logs"?"?until=1000":route==="usage"?"?since=0&until=1000":""}`,method:["login","logout"].includes(route)?"POST":"GET",headers:[["cookie",`omni_admin=${identities[0]!.cookie}`],J],...(route==="login"?{body:JSON.stringify({key:identities[0]!.key})}:{})});
+          check(`unreadable limits ${route}`,answer,200);
+          await sleep(30);
+          const after = readFileSync(logFile,"utf8").split("\n").filter(l=>l.includes("api key limits unreadable") && l.includes("client-A")).length;
+          limitsObservations[route] = after-before;
+          if (after-before !== (route==="summary"?2:route==="logout"?0:1))
+            secretProblems.push(`unreadable limits ${route}: expected per-read log count, got ${after-before}`);
+        }
+        writeFileSync(join(out,`${cfg.label}-${label}-limits-observation.json`),JSON.stringify(limitsObservations,null,2));
+        fixture.run("UPDATE api_keys SET limits='{}' WHERE id='client-A'");
+        const reopened = await exchange({method:"POST",target:"/api/client/login",headers:[J],body:JSON.stringify({key:identities[0]!.key})});
+        identities[0]!.cookie=cookieOf(reopened)!;
+        callers.find(([who])=>who==="client-A")![1]=identities[0]!.cookie;
         // Inference auth intentionally retains the frozen parser diagnostic on
         // both the wire and in rejection logs; separate keys pin each sink.
         for (const [name,target,method] of [["Proxy","/v1/chat/completions","POST"],["Count","/v1/messages/count_tokens","POST"],["Models","/v1/models","GET"]] as const) {
@@ -3153,6 +3191,13 @@ for (const cfg of configs) {
     // not merely status, for the accepted engine-pair-order difference.
     const head=(status:number)=>`${status}\ncontent-length: <body length>\ncontent-type: application/json;charset=utf-8\ndate: <date>\n\n`;
     if (cfg.label === "client-history") {
+      const mixedWire = (side:"ts"|"rust", trim:boolean) => {
+        const evens=Array.from({length:25000},(_,i)=>2*i+2);
+        const odds=Array.from({length:25001},(_,i)=>2*i+1);
+        const values=trim?(side==="ts"?[...evens,...odds.slice(0,-1)]:[...odds,...evens.slice(0,-1)]):side==="ts"?[2,1]:[1,2];
+        return head(200)+JSON.stringify({samples:values.map(x=>({credentialId:x%2===1?2:"1",label:"x",provider:"a",windowType:"daily",observedAt:1794612000000,usedRatio:trim?x/100000:0.1,resetsAt:null,windowMs:null})),truncated:trim});
+      };
+      for(const trim of [false,true]) pinned.set(`mixed raw ids ${trim?"trim":"pair"}`,{why:"history mixed raw types: order and trim (hand-altered column affinity)",ts:mixedWire("ts",trim),rust:mixedWire("rust",trim)});
       const orders = [
         [[0,1,4,2,3], [4,2,0,1,3]],
         [[13,11,9,6,0,1,5,10,12,14,19,8,17,15,16,18,2,20,21,3,7,4], [13,19,11,9,20,7,6,0,1,5,10,8,17,4,15,12,14,16,18,2,21,3]],

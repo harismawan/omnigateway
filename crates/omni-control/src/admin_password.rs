@@ -120,7 +120,7 @@ pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool
     let row = store
         .connection()
         .prepare_cached(
-            "SELECT revoked_at, expires_at, model_allowlist FROM api_keys WHERE id = ?",
+            "SELECT revoked_at, expires_at, model_allowlist, limits FROM api_keys WHERE id = ?",
         )?
         .query_row([id], |r| {
             let num = |v: ValueRef<'_>| -> Option<f64> {
@@ -137,12 +137,24 @@ pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool
                 ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
                 _ => None,
             };
-            Ok((num(r.get_ref(0)?), num(r.get_ref(1)?), allowlist))
+            let limits = match r.get_ref(3)? {
+                ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
+                _ => None,
+            };
+            Ok((num(r.get_ref(0)?), num(r.get_ref(1)?), allowlist, limits))
         })
         .optional()?;
-    let Some((revoked_at, expires_at, allowlist)) = row else {
+    let Some((revoked_at, expires_at, allowlist, limits)) = row else {
         return Ok(false);
     };
+    if limits.as_deref().is_none_or(|raw| {
+        matches!(
+            crate::api::stored_limits(raw),
+            omni_ir::jsjson::JsValue::Null
+        )
+    }) {
+        tracing::error!(apiKeyId = %id, "api key limits unreadable");
+    }
     if let Some(raw) = allowlist
         && let Some(error) = omni_ir::jsc_json::parse_error(&raw)
     {

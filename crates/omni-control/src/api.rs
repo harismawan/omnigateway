@@ -124,7 +124,7 @@ fn parse_allowlist(raw: &str, id: &str) -> Result<JsValue> {
 
 /// `parseLimits`: the stored matrix through `parseLimitConfig` (strict,
 /// `__proto__` refused at any depth), or null when it does not parse.
-fn stored_limits(raw: &str) -> JsValue {
+pub(crate) fn stored_limits(raw: &str) -> JsValue {
     let Ok(value) = crate::operator_json::parse(raw) else {
         return JsValue::Null;
     };
@@ -380,7 +380,13 @@ pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> R
             Some(v) => parse_allowlist(&v, id)?,
             None => JsValue::Null,
         },
-        limits: stored_limits(&row.get::<_, String>("limits").map_err(Failure::internal)?),
+        limits: {
+            let limits = stored_limits(&row.get::<_, String>("limits").map_err(Failure::internal)?);
+            if matches!(limits, JsValue::Null) {
+                tracing::error!(apiKeyId = %id, "api key limits unreadable");
+            }
+            limits
+        },
         body_logging_opt_out: matches!(
             row.get_ref("body_logging_opt_out")
                 .map_err(Failure::internal)?,

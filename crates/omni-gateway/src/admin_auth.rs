@@ -484,6 +484,11 @@ impl AdminAuth {
         let id = self
             .with_store(move |s| {
                 Ok(omni_store::keys::find_by_hash(s.connection(), &hash)?
+                    .inspect(|k| {
+                        if k.limits.is_none() {
+                            tracing::error!(apiKeyId = %k.id, "api key limits unreadable");
+                        }
+                    })
                     .filter(|k| k.usable(now))
                     .map(|k| k.id))
             })
