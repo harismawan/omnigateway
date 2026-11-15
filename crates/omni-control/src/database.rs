@@ -671,6 +671,247 @@ mod restore_sequence_tests {
         assert_eq!(result["adminPasswordChanged"], false);
         assert_eq!(result["viewerPasswordChanged"], false);
     }
+
+    #[derive(Default)]
+    struct FailureState {
+        calls: Vec<String>,
+        undo: bool,
+        incoming: bool,
+        installed: bool,
+    }
+    #[derive(Clone)]
+    struct Failing {
+        state: Rc<RefCell<FailureState>>,
+        failure: &'static str,
+    }
+    impl Failing {
+        fn call(&self, name: &str) -> Result<(), String> {
+            self.state.borrow_mut().calls.push(name.into());
+            if name == self.failure {
+                Err(format!("{name} failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    impl RestoreStore for Failing {
+        fn inspect(&mut self, _: &Path) -> Result<Value, String> {
+            self.call("inspect")?;
+            Ok(json!({}))
+        }
+        fn snapshot_to(&mut self, _: &Path) -> Result<(), String> {
+            self.state.borrow_mut().undo = true; // Include a partial VACUUM output.
+            self.call("snapshot")
+        }
+        fn admin_hash(&mut self) -> Result<Option<String>, String> {
+            self.call("admin")?;
+            Ok(None)
+        }
+        fn viewer_hash(&mut self) -> Result<Option<String>, String> {
+            self.call("viewer")?;
+            Ok(None)
+        }
+        fn close(&mut self) -> Result<(), String> {
+            self.call("close")
+        }
+        fn reopen(&mut self) -> Result<(), String> {
+            self.call("reopen")
+        }
+        fn rebuild_rollup(&mut self) -> Result<(), String> {
+            self.call("rollup")
+        }
+    }
+    impl RestoreFiles for Failing {
+        fn stat(&mut self, path: &Path) -> Option<u64> {
+            let undo = path.to_string_lossy().ends_with("_preRestore.sqlite");
+            self.call(if undo {
+                "stat undo"
+            } else if path.ends_with("db") {
+                "stat live"
+            } else {
+                "stat candidate"
+            })
+            .expect("stat succeeds");
+            if undo && !self.state.borrow().undo {
+                None
+            } else {
+                Some(100)
+            }
+        }
+        fn mkdir(&mut self, _: &Path) -> Result<(), String> {
+            self.call("mkdir")
+        }
+        fn free_bytes(&mut self, _: &Path) -> Option<u64> {
+            self.call("free").expect("free succeeds");
+            Some(1000)
+        }
+        fn unlink(&mut self, path: &Path) -> Result<(), String> {
+            let undo = path.to_string_lossy().ends_with("_preRestore.sqlite");
+            self.call(if undo {
+                "unlink undo"
+            } else if path.to_string_lossy().ends_with("-wal") {
+                "unlink wal"
+            } else {
+                "unlink shm"
+            })?;
+            if undo {
+                self.state.borrow_mut().undo = false;
+            }
+            Ok(())
+        }
+        fn copy_file(&mut self, _: &Path, _: &Path) -> Result<(), String> {
+            self.call("copy")?;
+            self.state.borrow_mut().incoming = true;
+            Ok(())
+        }
+        fn rename(&mut self, _: &Path, _: &Path) -> Result<(), String> {
+            self.call("rename")?;
+            let mut state = self.state.borrow_mut();
+            state.incoming = false;
+            state.installed = true;
+            Ok(())
+        }
+    }
+    #[test]
+    fn failures_preserve_frozen_half_swap_states_and_sequences() {
+        // packages/control/src/database.ts:603–621: "unconditional: whatever
+        // file is at `live` now"; close, unlink WAL/SHM, rename, reopen; catch
+        // retries reopen and throws SwapFailedError. No cleanup or rollback.
+        // :421–427: "A half-written file ... It goes before the failure is
+        // reported"; unlink failed undo then rethrow the ordinary write error.
+        let prefix = [
+            "stat candidate",
+            "inspect",
+            "mkdir",
+            "stat undo",
+            "stat live",
+            "free",
+            "snapshot",
+        ];
+        let tails: &[(&str, &[&str], bool, bool, bool)] = &[
+            ("snapshot", &["unlink undo"], false, false, false),
+            (
+                "unlink wal",
+                &[
+                    "stat undo",
+                    "admin",
+                    "viewer",
+                    "copy",
+                    "close",
+                    "unlink wal",
+                    "reopen",
+                ],
+                true,
+                true,
+                false,
+            ),
+            (
+                "unlink shm",
+                &[
+                    "stat undo",
+                    "admin",
+                    "viewer",
+                    "copy",
+                    "close",
+                    "unlink wal",
+                    "unlink shm",
+                    "reopen",
+                ],
+                true,
+                true,
+                false,
+            ),
+            (
+                "rename",
+                &[
+                    "stat undo",
+                    "admin",
+                    "viewer",
+                    "copy",
+                    "close",
+                    "unlink wal",
+                    "unlink shm",
+                    "rename",
+                    "reopen",
+                ],
+                true,
+                true,
+                false,
+            ),
+            (
+                "reopen",
+                &[
+                    "stat undo",
+                    "admin",
+                    "viewer",
+                    "copy",
+                    "close",
+                    "unlink wal",
+                    "unlink shm",
+                    "rename",
+                    "reopen",
+                    "reopen",
+                ],
+                true,
+                false,
+                true,
+            ),
+        ];
+        for &(failure, tail, undo, incoming, installed) in tails {
+            let mut seam = Failing {
+                state: Rc::default(),
+                failure,
+            };
+            let error = loop {
+                *seam.state.borrow_mut() = FailureState::default();
+                match restore_snapshot(
+                    &mut seam.clone(),
+                    &mut seam,
+                    Path::new("/fixture/db"),
+                    "candidate",
+                    &|| 0,
+                ) {
+                    Err(RestoreError::Ordinary(e)) if e.starts_with("CONFLICT:") => {
+                        std::thread::yield_now()
+                    }
+                    result => break result.expect_err("injected failure"),
+                }
+            };
+            let state = seam.state.borrow();
+            assert_eq!(
+                state.calls,
+                prefix
+                    .iter()
+                    .chain(tail.iter())
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+                "{failure}"
+            );
+            assert_eq!(
+                (state.undo, state.incoming, state.installed),
+                (undo, incoming, installed),
+                "{failure}"
+            );
+            if failure == "snapshot" {
+                assert!(matches!(error, RestoreError::Ordinary(_)));
+                assert_eq!(error.to_string(), "snapshot failed");
+            } else {
+                assert_eq!(
+                    error.to_string(),
+                    "the database swap failed and the database may be incomplete"
+                );
+                let RestoreError::Swap(error) = error else {
+                    panic!("typed swap failure")
+                };
+                assert_eq!(error.cause, format!("{failure} failed"));
+                assert_eq!(error.reopened, failure != "reopen");
+                assert_eq!(
+                    error.pre_restore_snapshot_id,
+                    "db_1970-01-01T00-00-00-000Z_preRestore.sqlite"
+                );
+            }
+        }
+    }
 }
 
 /// Process-local maintenance latch, shared by all database handles.

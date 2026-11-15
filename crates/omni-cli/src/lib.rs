@@ -133,8 +133,43 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("{e}");
-            ExitCode::FAILURE
+            let (stderr, code) = render_command_error(&e);
+            eprint!("{stderr}");
+            ExitCode::from(code)
         }
+    }
+}
+
+fn render_command_error(error: &str) -> (String, u8) {
+    (format!("{error}\n"), 1)
+}
+
+#[cfg(test)]
+mod restore_error_tests {
+    #[test]
+    fn restore_failures_render_without_undo_or_cause() {
+        use omni_control::database::{RestoreError, SwapFailedError};
+        for cause in ["rename failed", "unlink failed", "reopen failed"] {
+            for reopened in [true, false] {
+                let error = RestoreError::Swap(SwapFailedError {
+                    pre_restore_snapshot_id: "undo-id".into(),
+                    cause: cause.into(),
+                    reopened,
+                });
+                assert_eq!(
+                    super::render_command_error(&error.to_string()),
+                    (
+                        "the database swap failed and the database may be incomplete\n".into(),
+                        1
+                    )
+                );
+            }
+        }
+        assert_eq!(
+            super::render_command_error(
+                &RestoreError::Ordinary("snapshot failed".into()).to_string()
+            ),
+            ("snapshot failed\n".into(), 1)
+        );
     }
 }
