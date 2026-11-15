@@ -9,15 +9,22 @@ pub struct DecodeState {
     pub cloak: ToolCloak,
 }
 
-impl AntigravityCodec {
-    /// Same signature as ProviderCodec; no placeholder stream decoder is exposed.
-    pub fn build_request(
+impl crate::codec::ProviderCodec for AntigravityCodec {
+    type State = DecodeState;
+
+    fn build_request(
         &self,
         input: &CodecInput<'_>,
     ) -> Result<CodecRequest<DecodeState>, GatewayError> {
         omni_ir::deep::scope(|| self.build_request_scoped(input))
     }
 
+    fn decoder(&self, state: DecodeState, _headers: &crate::http::Headers) -> Box<dyn crate::codec::StreamDecoder> {
+        Box::new(super::decode::AntigravityDecoder::new(state.cloak))
+    }
+}
+
+impl AntigravityCodec {
     fn build_request_scoped(
         &self,
         input: &CodecInput<'_>,

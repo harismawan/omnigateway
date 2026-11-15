@@ -1,3 +1,5 @@
+use omni_providers::codec::ProviderCodec;
+
 #[test]
 fn codec_matches_frozen_ts() {
     let output = std::process::Command::new("bun")
