@@ -236,8 +236,8 @@ pub fn run(
         "revoke" => {
             let question = format!(
                 "revoke key \"{}\" ({}…)?",
-                key["label"].as_str().expect("stored label"),
-                key["prefix"].as_str().expect("stored prefix")
+                omni_control::cli_cell::scalar_string(&omni_ir::jsjson::JsValue::from(&key["label"])),
+                omni_control::cli_cell::scalar_string(&omni_ir::jsjson::JsValue::from(&key["prefix"]))
             );
             if !has("yes") {
                 if !std::io::stdin().is_terminal() {
@@ -284,9 +284,9 @@ pub fn run(
         "id",
         id,
         "label",
-        key["label"].as_str().expect("stored label"),
+        omni_control::cli_cell::scalar_string(&omni_ir::jsjson::JsValue::from(&key["label"])),
         "prefix",
-        key["prefix"].as_str().expect("stored prefix")
+        omni_control::cli_cell::scalar_string(&omni_ir::jsjson::JsValue::from(&key["prefix"]))
     );
     Ok(match command {
         "limits" => {
@@ -311,7 +311,7 @@ pub fn run(
                     "{head}\nexpires: {}{}",
                     crate::output::time(&key["expiresAt"]),
                     if key["revokedAt"].is_null()
-                        && key["expiresAt"].as_f64().is_some_and(|v| v <= now as f64)
+                        && !key["expiresAt"].as_f64().is_some_and(|v| v > now as f64)
                     {
                         format!(" {}", paint(31, "(expired)"))
                     } else {

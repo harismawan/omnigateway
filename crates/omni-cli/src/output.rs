@@ -141,15 +141,15 @@ pub fn human(
         };
         let state = if !k["revokedAt"].is_null() {
             "revoked"
-        } else if k["expiresAt"].as_f64().is_some_and(|e| e <= now as f64) {
+        } else if !k["expiresAt"].is_null() && !k["expiresAt"].as_f64().is_some_and(|e| e > now as f64) {
             "expired"
         } else {
             "active"
         };
         rows.push(vec![
-            text(&k["id"]),
-            text(&k["label"]),
-            text(&k["prefix"]),
+            omni_control::cli_cell::table_text(&jsjson::JsValue::from(&k["id"]))?,
+            omni_control::cli_cell::table_text(&jsjson::JsValue::from(&k["label"]))?,
+            omni_control::cli_cell::table_text(&jsjson::JsValue::from(&k["prefix"]))?,
             models,
             limits,
             if k["bodyLoggingOptOut"] == true {
