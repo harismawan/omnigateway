@@ -46,7 +46,45 @@ pub fn run(
                 positional[0]
             ))?;
         }
-        return Err("db restore is not yet available in the Rust CLI".into());
+        const RESTORE_SWAP_ENABLED: bool = false;
+        if !RESTORE_SWAP_ENABLED {
+            return Err("db restore is not yet available in the Rust CLI".into());
+        }
+        let mut store = omni_control::database::SqliteRestoreStore::new(store, path.clone());
+        let result = omni_control::database::restore_snapshot(
+            &mut store,
+            &mut omni_control::database::LocalRestoreFiles,
+            &path,
+            &positional[0],
+            &|| chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(if flags.contains_key("json") {
+            omni_ir::jsjson::to_string_pretty(&result)
+        } else {
+            let mut rows = vec![
+                ("restored".to_string(), positional[0].clone()),
+                (
+                    "undo".to_string(),
+                    result["preRestoreSnapshot"]["id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            ];
+            rows.extend(
+                result["counts"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(key, value)| (key.clone(), value.to_string())),
+            );
+            let width = rows.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+            rows.iter()
+                .map(|(key, value)| format!("{key:width$}  {value}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
     }
     if command == "db-clear-bodies" {
         let result = omni_control::database::clear_bodies(

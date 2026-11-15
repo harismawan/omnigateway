@@ -299,6 +299,380 @@ fn size(path: &Path) -> u64 {
     path.metadata().map(|s| s.len()).unwrap_or(0)
 }
 
+/// Operations on the one live handle. Implementations must release it at close.
+pub trait RestoreStore {
+    fn inspect(&mut self, path: &Path) -> Result<Value, String>;
+    fn snapshot_to(&mut self, path: &Path) -> Result<(), String>;
+    fn admin_hash(&mut self) -> Result<Option<String>, String>;
+    fn viewer_hash(&mut self) -> Result<Option<String>, String>;
+    fn close(&mut self) -> Result<(), String>;
+    fn reopen(&mut self) -> Result<(), String>;
+    fn rebuild_rollup(&mut self) -> Result<(), String>;
+}
+
+/// Missing or inaccessible stat results are indistinguishable, as in the CLI adapter.
+pub trait RestoreFiles {
+    fn stat(&mut self, path: &Path) -> Option<u64>;
+    fn mkdir(&mut self, path: &Path) -> Result<(), String>;
+    fn free_bytes(&mut self, path: &Path) -> Option<u64>;
+    fn unlink(&mut self, path: &Path) -> Result<(), String>;
+    fn copy_file(&mut self, from: &Path, to: &Path) -> Result<(), String>;
+    fn rename(&mut self, from: &Path, to: &Path) -> Result<(), String>;
+}
+
+#[derive(Debug)]
+pub struct SwapFailedError {
+    pub pre_restore_snapshot_id: String,
+    pub cause: String,
+    pub reopened: bool,
+}
+
+impl std::fmt::Display for SwapFailedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the database swap failed and the database may be incomplete")
+    }
+}
+impl std::error::Error for SwapFailedError {}
+
+#[derive(Debug)]
+pub enum RestoreError {
+    Ordinary(String),
+    Swap(SwapFailedError),
+}
+impl From<String> for RestoreError {
+    fn from(error: String) -> Self {
+        Self::Ordinary(error)
+    }
+}
+impl std::fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ordinary(error) => f.write_str(error),
+            Self::Swap(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for RestoreError {}
+
+/// Restore a previously validated snapshot id, inspecting it again under the latch.
+/// There is deliberately no rollback after staging: failed swaps retain the undo.
+pub fn restore_snapshot(
+    store: &mut dyn RestoreStore,
+    files: &mut dyn RestoreFiles,
+    live: &Path,
+    id: &str,
+    now: &dyn Fn() -> i64,
+) -> Result<Value, RestoreError> {
+    let dir = live
+        .parent()
+        .ok_or_else(|| "database has no parent".to_string())?
+        .join("snapshots");
+    let candidate = dir.join(id);
+    if files.stat(&candidate).is_none() {
+        return Err("BAD_REQUEST: no such snapshot".to_string().into());
+    }
+    let _guard = EXCLUSIVE.enter("a restore")?;
+    let counts = store.inspect(&candidate)?;
+    let at = now();
+    let stamp = chrono::DateTime::from_timestamp_millis(at)
+        .ok_or_else(|| "invalid snapshot time".to_string())?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        .replace([':', '.'], "-");
+    let name = format!("db_{stamp}_preRestore.sqlite");
+    let target = dir.join(&name);
+    files.mkdir(&dir)?;
+    if files.stat(&target).is_some() {
+        return Err("CONFLICT: a snapshot for this instant already exists"
+            .to_string()
+            .into());
+    }
+    let needed = (files.stat(live).unwrap_or(0) as f64 * 1.1).ceil();
+    if files
+        .free_bytes(&dir)
+        .is_some_and(|free| (free as f64) < needed)
+    {
+        return Err("CONFLICT: not enough free disk space to write a snapshot"
+            .to_string()
+            .into());
+    }
+    if let Err(error) = store.snapshot_to(&target) {
+        files.unlink(&target)?;
+        return Err(error.into());
+    }
+    // Forced undo has no retention callback, even when policy would prune everything.
+    let snapshot = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":files.stat(&target).unwrap_or(0),"reason":"preRestore"});
+    let admin_before = store.admin_hash()?;
+    let viewer_before = store.viewer_hash()?;
+    let staged = live.with_file_name(format!(
+        "{}.incoming",
+        live.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    if let Err(error) = files.copy_file(&candidate, &staged) {
+        files.unlink(&staged)?;
+        return Err(error.into());
+    }
+    let swap = (|| -> Result<(), String> {
+        store.close()?;
+        files.unlink(&live.with_file_name(format!(
+            "{}-wal",
+            live.file_name().unwrap_or_default().to_string_lossy()
+        )))?;
+        files.unlink(&live.with_file_name(format!(
+            "{}-shm",
+            live.file_name().unwrap_or_default().to_string_lossy()
+        )))?;
+        files.rename(&staged, live)?;
+        store.reopen()
+    })();
+    if let Err(cause) = swap {
+        let reopened = store.reopen().is_ok();
+        return Err(RestoreError::Swap(SwapFailedError {
+            pre_restore_snapshot_id: name,
+            cause,
+            reopened,
+        }));
+    }
+    let admin_after = store.admin_hash()?;
+    let viewer_after = store.viewer_hash()?;
+    if let Err(error) = store.rebuild_rollup() {
+        tracing::warn!(%error, "usage rollup not rebuilt after the swap; run omni doctor");
+    }
+    Ok(
+        json!({"ok":true,"counts":counts,"preRestoreSnapshot":snapshot,"adminPasswordChanged":admin_after != admin_before,"viewerPasswordChanged":viewer_after != viewer_before}),
+    )
+}
+
+pub struct SqliteRestoreStore {
+    store: Option<omni_store::SqliteStore>,
+    path: std::path::PathBuf,
+    day_offset: i64,
+}
+impl SqliteRestoreStore {
+    pub fn new(store: omni_store::SqliteStore, path: std::path::PathBuf) -> Self {
+        let day_offset = store.day_offset_minutes();
+        Self {
+            store: Some(store),
+            path,
+            day_offset,
+        }
+    }
+    fn connection(&self) -> Result<&rusqlite::Connection, String> {
+        self.store
+            .as_ref()
+            .map(|s| s.connection())
+            .ok_or_else(|| "database is closed".into())
+    }
+    fn hash(&self, key: &str) -> Result<Option<String>, String> {
+        use rusqlite::OptionalExtension;
+        self.connection()?
+            .query_row("SELECT value FROM settings WHERE key = ?", [key], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+}
+impl RestoreStore for SqliteRestoreStore {
+    fn inspect(&mut self, path: &Path) -> Result<Value, String> {
+        judge_candidate(path)
+    }
+    fn snapshot_to(&mut self, path: &Path) -> Result<(), String> {
+        self.connection()?
+            .execute_batch(&format!(
+                "VACUUM INTO '{}'",
+                path.to_string_lossy().replace('\'', "''")
+            ))
+            .map_err(|e| e.to_string())
+    }
+    fn admin_hash(&mut self) -> Result<Option<String>, String> {
+        self.hash("adminPasswordHash")
+    }
+    fn viewer_hash(&mut self) -> Result<Option<String>, String> {
+        self.hash("viewerPasswordHash")
+    }
+    fn close(&mut self) -> Result<(), String> {
+        self.store.take();
+        Ok(())
+    }
+    fn reopen(&mut self) -> Result<(), String> {
+        self.store.take();
+        self.store = Some(
+            omni_store::SqliteStore::open(&self.path, self.day_offset)
+                .map_err(|e| e.to_string())?,
+        );
+        Ok(())
+    }
+    fn rebuild_rollup(&mut self) -> Result<(), String> {
+        omni_store::rollup::rebuild_rollup(self.connection()?).map_err(|e| e.to_string())
+    }
+}
+
+pub struct LocalRestoreFiles;
+impl RestoreFiles for LocalRestoreFiles {
+    fn stat(&mut self, path: &Path) -> Option<u64> {
+        crate::database_fs::stat(path).map(|s| s.len())
+    }
+    fn mkdir(&mut self, path: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(path).map_err(|e| fs_error(&e, "mkdir", path))
+    }
+    fn free_bytes(&mut self, path: &Path) -> Option<u64> {
+        rustix::fs::statfs(path)
+            .ok()
+            .map(|s| s.f_bavail * s.f_bsize as u64)
+    }
+    fn unlink(&mut self, path: &Path) -> Result<(), String> {
+        unlink(path)
+    }
+    fn copy_file(&mut self, from: &Path, to: &Path) -> Result<(), String> {
+        std::fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|e| format!("{} -> '{}'", fs_error(&e, "copyfile", from), to.display()))
+    }
+    fn rename(&mut self, from: &Path, to: &Path) -> Result<(), String> {
+        std::fs::rename(from, to)
+            .map_err(|e| format!("{} -> '{}'", fs_error(&e, "rename", from), to.display()))
+    }
+}
+
+#[cfg(test)]
+mod restore_sequence_tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[derive(Clone, Default)]
+    struct Fake(Rc<RefCell<Vec<String>>>);
+    impl Fake {
+        fn call(&self, operation: &str) {
+            self.0.borrow_mut().push(operation.into());
+        }
+    }
+    impl RestoreStore for Fake {
+        fn inspect(&mut self, _: &Path) -> Result<Value, String> {
+            self.call("inspect");
+            Ok(json!({"settings": 4}))
+        }
+        fn snapshot_to(&mut self, _: &Path) -> Result<(), String> {
+            self.call("snapshot");
+            Ok(())
+        }
+        fn admin_hash(&mut self) -> Result<Option<String>, String> {
+            self.call("admin");
+            Ok(None)
+        }
+        fn viewer_hash(&mut self) -> Result<Option<String>, String> {
+            self.call("viewer");
+            Ok(None)
+        }
+        fn close(&mut self) -> Result<(), String> {
+            self.call("close");
+            Ok(())
+        }
+        fn reopen(&mut self) -> Result<(), String> {
+            self.call("reopen");
+            Ok(())
+        }
+        fn rebuild_rollup(&mut self) -> Result<(), String> {
+            self.call("rollup");
+            Ok(())
+        }
+    }
+    impl RestoreFiles for Fake {
+        fn stat(&mut self, path: &Path) -> Option<u64> {
+            let name = path
+                .file_name()
+                .expect("fixture filename")
+                .to_string_lossy();
+            let undo = name.ends_with("_preRestore.sqlite");
+            self.call(if undo {
+                "stat undo"
+            } else if name == "db" {
+                "stat live"
+            } else {
+                "stat candidate"
+            });
+            if undo && !self.0.borrow().iter().any(|s| s == "snapshot") {
+                None
+            } else {
+                Some(100)
+            }
+        }
+        fn mkdir(&mut self, _: &Path) -> Result<(), String> {
+            self.call("mkdir");
+            Ok(())
+        }
+        fn free_bytes(&mut self, _: &Path) -> Option<u64> {
+            self.call("free");
+            Some(1000)
+        }
+        fn unlink(&mut self, path: &Path) -> Result<(), String> {
+            self.call(&format!(
+                "unlink {}",
+                path.file_name()
+                    .expect("fixture filename")
+                    .to_string_lossy()
+            ));
+            Ok(())
+        }
+        fn copy_file(&mut self, _: &Path, _: &Path) -> Result<(), String> {
+            self.call("copy");
+            Ok(())
+        }
+        fn rename(&mut self, _: &Path, _: &Path) -> Result<(), String> {
+            self.call("rename");
+            Ok(())
+        }
+    }
+    #[test]
+    fn swap_exact_sequence_keeps_forced_undo_without_retention() {
+        let mut store = Fake::default();
+        let mut files = store.clone();
+        // Retry only latch contention with other maintenance unit tests.
+        let result = loop {
+            files.0.borrow_mut().clear();
+            match restore_snapshot(
+                &mut store,
+                &mut files,
+                Path::new("/fixture/db"),
+                "candidate",
+                &|| 0,
+            ) {
+                Err(RestoreError::Ordinary(e)) if e.starts_with("CONFLICT:") => {
+                    std::thread::yield_now()
+                }
+                result => break result.expect("successful swap"),
+            }
+        };
+        assert_eq!(
+            *files.0.borrow(),
+            [
+                "stat candidate",
+                "inspect",
+                "mkdir",
+                "stat undo",
+                "stat live",
+                "free",
+                "snapshot",
+                "stat undo",
+                "admin",
+                "viewer",
+                "copy",
+                "close",
+                "unlink db-wal",
+                "unlink db-shm",
+                "rename",
+                "reopen",
+                "admin",
+                "viewer",
+                "rollup"
+            ]
+        );
+        assert_eq!(result["preRestoreSnapshot"]["reason"], "preRestore");
+        assert_eq!(result["counts"], json!({"settings":4}));
+        assert_eq!(result["adminPasswordChanged"], false);
+        assert_eq!(result["viewerPasswordChanged"], false);
+    }
+}
+
 /// Process-local maintenance latch, shared by all database handles.
 #[derive(Default)]
 struct Exclusive(std::sync::Mutex<Option<&'static str>>);
