@@ -107,7 +107,7 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     let ctx = crate::context::resolve(flags)?;
     let base = ctx.base_url()?;
     let store = ctx.open()?;
-    let models = omni_control::models::list(&store)?;
+    let models = omni_control::models::cli_list(&store)?;
     let descriptions = models
         .iter()
         .map(|m| describe(m, &store))

@@ -59,6 +59,13 @@ pub(crate) fn validate_client_metadata(s: &SqliteStore) -> Result<()> {
     Ok(())
 }
 fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
+    rows_with(s, id, provider_data)
+}
+fn rows_with(
+    s: &SqliteStore,
+    id: Option<&str>,
+    parse: fn(ValueRef<'_>, ValueRef<'_>) -> Result<JsValue>,
+) -> Result<Vec<JsValue>> {
     let mut stmt = s
         .connection()
         .prepare("SELECT * FROM credentials WHERE (?1 IS NULL OR id=?1) ORDER BY tier,label")
@@ -92,7 +99,7 @@ fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
                         || matches!(raw,ValueRef::Real(n) if n==1.0),
                 ),
                 "hasRefreshToken" => JsValue::Bool(!matches!(raw, ValueRef::Null)),
-                "providerData" => provider_data(raw, r.get_ref("id").map_err(Failure::internal)?)?,
+                "providerData" => parse(raw, r.get_ref("id").map_err(Failure::internal)?)?,
                 _ => sql_value(raw),
             };
             fields.push((k, v));
@@ -106,6 +113,20 @@ pub fn list(s: &SqliteStore) -> Result<String> {
         "credentials",
         JsValue::Array(rows(s, None)?),
     )])))
+}
+/// Frozen CLI status propagates JSON.parse diagnostics; HTTP retains its safe failures.
+pub fn cli_list(s: &SqliteStore) -> std::result::Result<String, String> {
+    let rows = rows_with(s, None, |raw, _| {
+        if matches!(raw, ValueRef::Null) {
+            return Ok(JsValue::Null);
+        }
+        crate::operator_json::parse(&String::from_utf8_lossy(
+            raw.as_bytes().map_err(Failure::internal)?,
+        ))
+        .map_err(Failure::internal)
+    })
+    .map_err(|e| e.message)?;
+    Ok(stringify(&obj(vec![("credentials", JsValue::Array(rows))])))
 }
 pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
     let mut statement = s

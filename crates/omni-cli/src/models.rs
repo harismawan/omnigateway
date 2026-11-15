@@ -609,7 +609,7 @@ pub fn run(
         let store = ctx.open()?;
         if let Some(input) = &input {
             let id = &args[0];
-            omni_control::models::put(&store, id, input)?;
+            omni_control::models::cli_put(&store, id, input)?;
             return Ok(if flags.contains_key("json") {
                 jsjson::stringify_pretty(&JsValue::from(&serde_json::json!({"id":id,"ok":true})))
                     .expect("result")
@@ -620,7 +620,7 @@ pub fn run(
         if remove {
             let id = &args[0];
             // Frozen control reads/parses every model before asking confirmation.
-            omni_control::models::get(&store, id)?;
+            omni_control::models::cli_get(&store, id)?;
             if !flags.contains_key("yes") {
                 let question = format!("delete virtual model \"{id}\"?");
                 if !std::io::stdin().is_terminal() {
@@ -650,9 +650,9 @@ pub fn run(
             });
         }
         let models = if show {
-            vec![omni_control::models::get(&store, &args[0])?]
+            vec![omni_control::models::cli_get(&store, &args[0])?]
         } else {
-            omni_control::models::list(&store)?
+            omni_control::models::cli_list(&store)?
         };
         // TS checks pins before emit, including JSON mode.
         if show {

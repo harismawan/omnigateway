@@ -101,10 +101,9 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             configured = omni_control::admin_password::admin_hash(&store)
                 .map_err(|e| e.to_string())?
                 .is_some();
-            let accounts = omni_control::operator_json::parse(
-                &omni_control::credentials::list(&store).map_err(|e| e.message)?,
-            )
-            .map_err(|e| e.to_string())?;
+            let accounts =
+                omni_control::operator_json::parse(&omni_control::credentials::cli_list(&store)?)
+                    .map_err(|e| e.to_string())?;
             let quota_rows =
                 omni_control::credentials::status_quota(&store).map_err(|e| e.message)?;
             use omni_control::settings_value::get;

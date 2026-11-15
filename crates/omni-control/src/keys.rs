@@ -507,13 +507,12 @@ fn project_keys(
         allowlists.push(match raw {
             None => omni_ir::jsjson::JsValue::Null,
             Some(raw) => crate::operator_json::parse(&raw).map_err(|detail| {
-                omni_store::StoreError::StoredJson {
+                crate::cli_error::store(omni_store::StoreError::StoredJson {
                     table: "api_keys",
                     column: "model_allowlist",
                     row_id: key.id.clone(),
                     detail: detail.into(),
-                }
-                .to_string()
+                })
             })?,
         });
         let allowlist = Value::Null;

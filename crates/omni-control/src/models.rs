@@ -3,6 +3,18 @@ use omni_ir::jsjson::JsValue;
 use omni_store::SqliteStore;
 
 pub fn list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
+    list_with(store, |e| e.to_string())
+}
+
+/// Operator-terminal projection; parser details must not enter gateway logs.
+pub fn cli_list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
+    list_with(store, crate::cli_error::store)
+}
+
+fn list_with(
+    store: &SqliteStore,
+    render: fn(omni_store::StoreError) -> String,
+) -> Result<Vec<JsValue>, String> {
     omni_store::models::operator_rows(store.connection())
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -15,13 +27,12 @@ pub fn list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
                 (
                     "targets".encode_utf16().collect(),
                     crate::operator_json::parse(&targets).map_err(|detail| {
-                        omni_store::StoreError::StoredJson {
+                        render(omni_store::StoreError::StoredJson {
                             table: "virtual_models",
                             column: "targets",
                             row_id: id.clone().unwrap_or_else(|| "null".into()),
                             detail: detail.into(),
-                        }
-                        .to_string()
+                        })
                     })?,
                 ),
                 (
@@ -42,11 +53,33 @@ pub fn get(store: &SqliteStore, id: &str) -> Result<JsValue, String> {
         .ok_or_else(|| format!("MODEL_UNAVAILABLE: no virtual model \"{id}\""))
 }
 
+pub fn cli_get(store: &SqliteStore, id: &str) -> Result<JsValue, String> {
+    cli_list(store)?
+        .into_iter()
+        .find(|m| {
+            crate::settings_value::get(m, "id") == Some(&JsValue::from(&serde_json::json!(id)))
+        })
+        .ok_or_else(|| format!("MODEL_UNAVAILABLE: no virtual model \"{id}\""))
+}
+
 pub fn remove(store: &SqliteStore, id: &str) -> Result<(), String> {
     omni_store::models::remove(store.connection(), id).map_err(|e| e.to_string())
 }
 
 pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String> {
+    put_with(store, id, input, |e| e.to_string())
+}
+
+pub fn cli_put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String> {
+    put_with(store, id, input, crate::cli_error::store)
+}
+
+fn put_with(
+    store: &SqliteStore,
+    id: &str,
+    input: &JsValue,
+    render: fn(omni_store::StoreError) -> String,
+) -> Result<(), String> {
     use crate::settings_value::get;
     let model = crate::model_schema::parse(input)?;
     let text = |s: &str| JsValue::String(s.encode_utf16().collect());
@@ -58,13 +91,12 @@ pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String>
         .into_iter()
         .map(|(id, p, l, a, d)| {
             let parsed = crate::operator_json::parse(&d).map_err(|detail| {
-                omni_store::StoreError::StoredJson {
+                render(omni_store::StoreError::StoredJson {
                     table: "credentials",
                     column: "provider_data",
                     row_id: id.clone(),
                     detail: detail.into(),
-                }
-                .to_string()
+                })
             })?;
             Ok((id, p, l, a, parsed))
         })
@@ -92,7 +124,7 @@ pub fn put(store: &SqliteStore, id: &str, input: &JsValue) -> Result<(), String>
             ));
         }
     }
-    let existing = list(store)?;
+    let existing = list_with(store, render)?;
     let stored = existing.iter().find(|m| get(m, "id") == Some(&text(id)));
     let old = stored.and_then(|m| get(m, "targets"));
     let pairs=match old {

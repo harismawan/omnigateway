@@ -1,4 +1,5 @@
 {
+  "stored-json": {"exit 1":7},
   "db-migrate-ledger": {"exit 0":21,"exit 1":23},
   "db-migrate": {"exit 0":28,"exit 1":11,"environment OMNI_ENCRYPTION_KEY":1,"environment OMNI_PORT":1,"environment unable to open database":1,"exit 2":2},
   "db-clear-path-types": { "exit 1": 9, "exit 0": 9 },
