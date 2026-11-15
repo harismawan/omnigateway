@@ -147,14 +147,6 @@ pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool
     let Some((revoked_at, expires_at, allowlist, limits)) = row else {
         return Ok(false);
     };
-    if limits.as_deref().is_none_or(|raw| {
-        matches!(
-            crate::api::stored_limits(raw),
-            omni_ir::jsjson::JsValue::Null
-        )
-    }) {
-        tracing::error!(apiKeyId = %id, "api key limits unreadable");
-    }
     if let Some(raw) = allowlist
         && let Some(error) = omni_ir::jsc_json::parse_error(&raw)
     {
@@ -164,6 +156,14 @@ pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool
             row_id: id.to_owned(),
             detail: error.into(),
         });
+    }
+    if limits.as_deref().is_none_or(|raw| {
+        matches!(
+            crate::api::stored_limits(raw),
+            omni_ir::jsjson::JsValue::Null
+        )
+    }) {
+        tracing::error!(apiKeyId = %id, "api key limits unreadable");
     }
     #[allow(clippy::cast_precision_loss)]
     let now = now as f64;
