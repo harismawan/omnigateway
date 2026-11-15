@@ -80,7 +80,7 @@ fn descriptor(capabilities: Capabilities, prefixes: &[&str]) -> Descriptor {
 impl Providers {
     /// The built-in registry (`packages/providers/src/descriptors.ts`).
     ///
-    /// Anthropic and OpenAI use the generated frozen catalog; other providers retain
+    /// Anthropic, OpenAI and Antigravity use the generated frozen catalog; other providers retain
     /// empty catalogs until their codecs are ported.
     pub fn builtin() -> Self {
         let all = caps(true, true, true);
@@ -114,7 +114,9 @@ impl Providers {
         );
         p.register("kilo", descriptor(all, &[]));
         p.register("grok", descriptor(all, &["grok-"]));
-        p.register("antigravity", descriptor(all, &["gemini-"]));
+        let mut antigravity = descriptor(all, &["gemini-"]);
+        antigravity.catalog = catalog("antigravity");
+        p.register("antigravity", antigravity);
         p.register("muse", descriptor(all, &["muse-", "muse-spark"]));
         p.register("qoder", descriptor(all, &[]));
         p.register("custom", descriptor(all, &[]));
