@@ -1013,7 +1013,7 @@ mod publication_tests {
     fn connect_upsert_orders_replaces_removes_and_preserves_read_errors() {
         for (tier, label, position) in [(0, "z", 0), (1, "b", 1), (1, "c", 2), (3, "a", 3)] {
             let dir = tempfile::tempdir().unwrap();
-            let db = SqliteStore::open(&dir.path().join("upsert.db"), 0).unwrap();
+            let db = SqliteStore::open(dir.path().join("upsert.db"), 0).unwrap();
             let key = omni_crypto::field::derive_key("k");
             for (id, tier, label) in [("a", 1, "a"), ("b", 1, "c"), ("c", 2, "a")] {
                 db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,provider_data,created_at,updated_at) VALUES (?,'anthropic',?,'oauth',1,?,1,'{}',0,0)", (id, label, tier)).unwrap();
