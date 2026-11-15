@@ -1,4 +1,5 @@
 # Public-declaration superset; LIMIT entries are unresolved, not certified safe.
+# OWNER omni-providers/src/oauth.rs FlowResult.provider_data: arbitrary public Map; manual deep Clone/Drop; moves use mem::take; flow_result_depth exercises 40000 levels on 2MiB. Function/reexport lexical scan cannot discover new struct fields or prove ownership.
 omni-providers/src/openai/decode.rs :: fn new(native_reasoning: bool) -> Self	boolean-only constructor; parsed payload scoped/Owned; emitted native map uses iterative StreamEvent ownership
 omni-providers/src/openai/mod.rs :: fn initialize()	startup environment capture; strings only, no JSON ownership
 omni-providers/src/openai/mod.rs :: fn build_api_key_request(input: CodecInput<'_>) -> Result<CodecRequest<bool>, GatewayError>	borrowed IR; deep scope owns arbitrary JSON temporaries, only strings/headers/boolean escape
