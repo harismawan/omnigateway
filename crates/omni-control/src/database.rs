@@ -49,7 +49,10 @@ fn bun_cell(cell: rusqlite::types::ValueRef<'_>) -> rusqlite::types::Value {
         rusqlite::types::ValueRef::Text(bytes) => {
             rusqlite::types::Value::Text(String::from_utf8_lossy(bytes).into_owned())
         }
-        other => other.into(),
+        rusqlite::types::ValueRef::Null => rusqlite::types::Value::Null,
+        rusqlite::types::ValueRef::Integer(n) => rusqlite::types::Value::Integer(n),
+        rusqlite::types::ValueRef::Real(n) => rusqlite::types::Value::Real(n),
+        rusqlite::types::ValueRef::Blob(bytes) => rusqlite::types::Value::Blob(bytes.to_vec()),
     }
 }
 
