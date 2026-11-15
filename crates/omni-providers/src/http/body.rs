@@ -130,6 +130,11 @@ impl std::fmt::Debug for ResponseBody {
 
 impl ResponseBody {
     #[cfg(test)]
+    pub(super) fn drain_test_remainder(&mut self, bytes: &[u8], reusable: bool) {
+        self.buf.extend_from_slice(bytes);
+        self.reusable = reusable;
+    }
+    #[cfg(test)]
     pub(super) fn drain_test_body(
         socket: tokio::net::TcpStream,
         pool: Arc<Pool>,
@@ -200,10 +205,22 @@ impl ResponseBody {
         }
     }
 
-    pub(super) async fn drain(mut self, pool: std::sync::Weak<Pool>, key: Key) {
+    pub(super) async fn drain(
+        mut self,
+        pool: std::sync::Weak<Pool>,
+        key: Key,
+        deadline: tokio::time::Instant,
+    ) {
+        // timeout_at polls its inner future first, even if already expired.
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
         while let Ok(chunk) = self.read_next().await {
             if chunk.is_none() {
                 if let Some(pool) = pool.upgrade() {
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
                     self.pool = Some((pool, key));
                     self.release();
                 }

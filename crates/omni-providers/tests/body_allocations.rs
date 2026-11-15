@@ -1,3 +1,4 @@
+//! Without the preload this test measures nothing.
 //! Run with the malloc-count preload documented in the drain report. The
 //! external probe avoids weakening the workspace's Rust unsafe-code ban.
 use omni_providers::http::{Client, HttpRequest};

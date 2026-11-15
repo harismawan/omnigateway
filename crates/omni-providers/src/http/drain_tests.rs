@@ -143,3 +143,98 @@ fn finish_without_runtime_closes() {
     assert_eq!(p.drain_test_count(), 0);
     runtime.block_on(closed(&mut peer));
 }
+
+#[tokio::test(start_paused = true)]
+async fn expired_before_first_poll() {
+    let p = pool();
+    let (body, mut peer) = pair(&p).await;
+    body.finish_if_ready();
+    peer.try_write(b"0\r\n\r\n").expect("tail ready");
+    // advance changes the clock before yielding to the newly spawned drain.
+    tokio::time::advance(Duration::from_secs(1)).await;
+    closed(&mut peer).await;
+    assert_eq!(p.idle_count(), 0, "expired drain must not check in");
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_drip_uses_absolute_deadline() {
+    let p = pool();
+    let (body, mut peer) = pair(&p).await;
+    body.finish_if_ready();
+    for byte in b"0\r\n" {
+        peer.write_all(&[*byte]).await.expect("drip");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(40)).await;
+    }
+    closed(&mut peer).await;
+    assert_eq!(p.idle_count(), 0);
+}
+
+#[tokio::test]
+async fn capacity_recovers_after_completion() {
+    let p = pool();
+    let mut retained = Vec::new();
+    for wave in 1..=2 {
+        let mut bodies = Vec::new();
+        let mut peers = Vec::new();
+        for _ in 0..32 {
+            let (body, peer) = pair(&p).await;
+            bodies.push(body);
+            peers.push(peer);
+        }
+        for body in bodies {
+            body.finish_if_ready();
+        }
+        assert_eq!(p.drain_test_count(), 32);
+        for peer in &mut peers {
+            peer.write_all(b"0\r\n\r\n").await.expect("tail");
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while p.idle_count() != wave * 32 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all returned");
+        retained.extend(peers);
+    }
+}
+
+#[test]
+fn runtime_teardown_ends_drains() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let p = pool();
+    let count = p.active_drains.clone();
+    let peer = runtime.block_on(async {
+        let (body, peer) = pair(&p).await;
+        body.finish_if_ready();
+        peer
+    });
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(runtime);
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(peer);
+}
+
+#[tokio::test]
+async fn excess_initial_buffer_not_adopted() {
+    let p = pool();
+    let (mut body, mut peer) = pair(&p).await;
+    body.drain_test_remainder(&vec![b'x'; 65537], true);
+    body.finish_if_ready();
+    assert_eq!(p.drain_test_count(), 0);
+    closed(&mut peer).await;
+}
+
+#[tokio::test]
+async fn nonreusable_not_adopted() {
+    let p = pool();
+    let (mut body, mut peer) = pair(&p).await;
+    body.drain_test_remainder(b"", false);
+    body.finish_if_ready();
+    assert_eq!(p.drain_test_count(), 0);
+    closed(&mut peer).await;
+}

@@ -234,7 +234,8 @@ impl Pool {
             async move {
                 #[cfg(test)]
                 let _guard = guard;
-                let _completion = tokio::time::timeout_at(deadline, body.drain(weak, key)).await;
+                let _completion =
+                    tokio::time::timeout_at(deadline, body.drain(weak, key, deadline)).await;
             },
             &runtime,
         );
