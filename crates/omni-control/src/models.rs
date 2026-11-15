@@ -19,11 +19,15 @@ pub fn cli_list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
         out.push(JsValue::Object(vec![
             (
                 "id".encode_utf16().collect(),
-                JsValue::String(
-                    crate::cli_cell::string(cell("id")?)
-                        .encode_utf16()
-                        .collect(),
-                ),
+                if matches!(cell("id")?, rusqlite::types::ValueRef::Null) {
+                    JsValue::Null
+                } else {
+                    JsValue::String(
+                        crate::cli_cell::string(cell("id")?)
+                            .encode_utf16()
+                            .collect(),
+                    )
+                },
             ),
             (
                 "targets".encode_utf16().collect(),
