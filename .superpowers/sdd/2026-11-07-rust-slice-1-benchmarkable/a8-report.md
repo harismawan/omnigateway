@@ -1,3 +1,10 @@
+# Fix round 3 — pins and limits logging committed; closure running
+**NEXT STEP:** `e7e83f04` implements N1 pins/comment and minor (b); `b192499a` preserves allowlist-before-limits evaluation. Corrected binary copied to `/tmp/opencode/a8/fix3/rust`; manifest hashes updated. `closure-tests.log` and four `closure-*.log` drivers running; closure build/Clippy/fmt passed. Wait/read these results, tally counts, update manifest, replace this top block only on success. Earlier `final-admin-routes.log` failed frozen credential-crossread's 1-second visibility bound (20420 equal / 26 expected / 2 failures); final-admin-auth/surface/run passed before correction. All evidence for this round is in `/tmp/opencode/a8/fix3/`.
+N1: `n1-observe.log` 9891 equal / 8 expected / 2 unpinned differences; `n1-green.log` 9891 / 10 / 0. Pair order frozen ["1",2], Rust [2,"1"]. 50,002-sample probe: both 200, 50,000 samples, truncated=true, no panic; SQL LIMIT omitted sample 50,002 on both, subsequent trim omitted sample 50,001 (id=2) frozen vs 50,000 (id="1") Rust. Full normalised exchanges pinned, no product comparator change beyond comment.
+Minor (b): frozen counts per successful request summary=2, logs/usage/quota/history/login=1, logout=0; Rust now matches exactly on probe. `limits-red.log` has six missing-count assertions plus unbounded logs/usage fixture differences; fixture bounded to stable historic interval before green. `limits-green.log` 235 equal / 0 expected / 0 failures; both per-path count JSON files retained. No stored content logged.
+Log rule: Rust logs no parser or input detail about a stored cell that the frozen gateway does not log in the same situation; sanitised Rust-only lines carry a fixed message plus table, column and row id.
+
+## History — everything below
 # Fix round 2 — complete for review
 Evidence base: `/tmp/opencode/a8/fix2/` (all log paths below relative); verified code/driver commit `c42cbbff`, following observation commit `20be5c97`; subsequent report-only commit changes no executable source. A–C complete; inference logging is inherited, not an unresolved R3 defect.
 | Finding | Fix commit(s) | Failed first → evidence |
