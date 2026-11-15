@@ -22,7 +22,7 @@ mkdirSync(seed, { recursive: true });
 const baseEnv = {
   PATH: process.env.PATH!, HOME: work, TMPDIR: work,
   OMNI_ENCRYPTION_KEY: "a15-connect-key-01234567890123456789",
-  OMNI_HOST: "127.0.0.1", OMNI_PORT: "18515", OMNI_LOG_LEVEL: "warn",
+  OMNI_HOST: "127.0.0.1", OMNI_PORT: "18515", OMNI_LOG_LEVEL: "debug",
   OMNI_DAY_OFFSET_MINUTES: "0",
   NODE_EXTRA_CA_CERTS: f.cert!, SSL_CERT_FILE: f.cert!,
 };
@@ -259,6 +259,28 @@ async function run(label: string, binary: string): Promise<Row[]> {
           wire.body = json ? JSON.stringify(fields) : new URLSearchParams(fields).toString();
         }
         await row(`${provider}/token/${status}/${body}/used`, "finish", JSON.stringify({ flowId: start.flowId, code: "code" }));
+      }
+    }
+    for (const provider of ["anthropic", "openai"]) {
+      const cases: [string, unknown, string][] = [];
+      for (const shape of [{}, [], [1]]) for (const route of ["finish", "poll"]) cases.push(["email", shape, route]);
+      for (const field of ["expires_in", "refresh_token", "access_token", "id_token"]) for (const shape of [{}, [], 1, true, null]) cases.push([field, shape, "finish"]);
+      for (const [field, shape, route] of cases) {
+        const name = `${provider}/shape/${field}/${JSON.stringify(shape)}/${route}`;
+        const payload: any = { access_token: "shape-access", refresh_token: "shape-refresh", expires_in: 3600 };
+        if (field !== "email") payload[field] = shape;
+        else if (provider === "anthropic") payload.account = { email_address: shape };
+        else payload.id_token = `e30.${Buffer.from(JSON.stringify({ email: shape })).toString("base64url")}.unsigned`;
+        tokenStatus = 200; tokenBody = JSON.stringify(payload);
+        const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: name }));
+        if (!start.flowId) continue;
+        const url = validateStart(start);
+        const r = await request(`/api/connect/${route}`, JSON.stringify({ flowId: start.flowId, code: `code#${url.searchParams.get("state")}` }));
+        const reader = new Database(file, { readonly: true });
+        const stored = reader.query("SELECT account_email FROM credentials WHERE label = ?").all(name);
+        reader.close();
+        rows.push({ name, response: { status: r.status, body: r.body.id ? { ...r.body, id: "<uuid>" } : r.body, stored }, wire: [] });
+        await row(`${name}/consumed`, route, JSON.stringify({ flowId: start.flowId, code: "code" }));
       }
     }
     for (const provider of ["anthropic", "openai"]) await successRows(provider);
