@@ -8,20 +8,26 @@ pub fn clear_bodies(
         .prepare("SELECT request_id, rel_path FROM request_bodies WHERE at < ?")
         .map_err(|e| e.to_string())?
         .query_map([now], |r| {
-            let rel = match r.get_ref(1)? {
-                rusqlite::types::ValueRef::Text(bytes) => {
-                    Some(String::from_utf8_lossy(bytes).into_owned())
-                }
-                _ => r.get::<_, Option<String>>(1)?,
-            };
-            Ok((bun_cell(r.get_ref(0)?), rel))
+            Ok((bun_cell(r.get_ref(0)?), bun_cell(r.get_ref(1)?)))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     for (_, rel) in &rows {
-        if let Some(rel) = rel {
-            delete_artifact(dir, rel);
+        // Frozen path.join validates here, outside unlink's catch. Earlier
+        // artifact deletions survive refusal; SQL deletion has not begun.
+        match rel {
+            rusqlite::types::Value::Null => {}
+            rusqlite::types::Value::Text(rel) => delete_artifact(dir, rel),
+            value => {
+                let kind = match value {
+                    rusqlite::types::Value::Blob(_) => "object",
+                    _ => "number",
+                };
+                return Err(format!(
+                    "The \"paths[1]\" property must be of type string, got {kind}"
+                ));
+            }
         }
     }
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;

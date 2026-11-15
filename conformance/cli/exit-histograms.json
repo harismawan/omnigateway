@@ -1,4 +1,5 @@
 {
+  "db-clear-path-types": { "exit 1": 9, "exit 0": 9 },
   "db-clear-cells": { "exit 0": 22 },
   "db-snapshot-missing": {"exit 0":2},
   "db-file-state-self-test": {"exit 1":3},
