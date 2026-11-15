@@ -43,6 +43,7 @@ type Wire = { line: string; headers: string[]; body: string };
 let wires: Wire[] = [];
 let tokenStatus = 400;
 let tokenBody = '{"error":"fixture_refusal"}';
+let transport: "normal" | "close" | "partial" = "normal";
 const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
   tls: { cert: Bun.file(f.cert!), key: Bun.file(f.key!) },
   socket: {
@@ -55,6 +56,8 @@ const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
       const length = Number(headers.find(h => /^content-length:/i.test(h))?.split(":")[1] ?? 0);
       if (s.data.buffer.length < end + 4 + length) return;
       wires.push({ line: line!, headers, body: s.data.buffer.subarray(end + 4, end + 4 + length).toString() });
+      if (transport === "close") { s.end(); return; }
+      if (transport === "partial") { s.end('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{"access_token":'); return; }
       s.end(`HTTP/1.1 ${tokenStatus} Fixture\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(tokenBody)}\r\nConnection: close\r\n\r\n${tokenBody}`);
     },
   },
@@ -212,6 +215,30 @@ async function run(label: string, binary: string): Promise<Row[]> {
       }
     }
     for (const provider of ["anthropic", "openai"]) await successRows(provider);
+    for (const provider of ["anthropic", "openai"]) {
+      for (const mode of ["close", "partial"] as const) for (const route of ["finish", "poll"]) {
+        const name = `${provider}/transport/${mode}/${route}`;
+        const start = await row(`${name}/start`, "start", JSON.stringify({ provider }));
+        const url = validateStart(start);
+        transport = mode;
+        await row(name, route, JSON.stringify({ flowId: start.flowId, code: `fixture-code#${url.searchParams.get("state")}` }));
+        for (const wire of rows.at(-1)!.wire) {
+          const json = wire.headers.some(h => /content-type: application\/json/i.test(h));
+          const fields = json ? JSON.parse(wire.body) : Object.fromEntries(new URLSearchParams(wire.body));
+          if (!/^[\w-]{43}$/.test(fields.code_verifier) || createHash("sha256").update(fields.code_verifier).digest("base64url") !== url.searchParams.get("code_challenge")) throw Error("transport PKCE invalid");
+          if (Number(wire.headers.find(h => /^content-length:/i.test(h))?.split(":")[1]) !== Buffer.byteLength(wire.body)) throw Error("transport length invalid");
+          fields.code_verifier = "<verifier>";
+          if (fields.state !== undefined) {
+            if (fields.state !== url.searchParams.get("state")) throw Error("transport state invalid");
+            fields.state = "<state>";
+          }
+          wire.headers = wire.headers.map(h => /^content-length:/i.test(h) ? "content-length: <validated>" : h);
+          wire.body = json ? JSON.stringify(fields) : new URLSearchParams(fields).toString();
+        }
+        transport = "normal";
+        await row(`${name}/consumed`, route, JSON.stringify({ flowId: start.flowId, code: "code" }));
+      }
+    }
     return rows;
   } finally { proc.kill(); await proc.exited; }
 }
