@@ -31,7 +31,7 @@ fn captured_literal_and_small_stack() {
     }
     std::thread::Builder::new().stack_size(2*1024*1024).spawn(|| {
         let mut request:omni_ir::request::ChatRequest=serde_json::from_str(r#"{"model":"pool","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}"#).unwrap();
-        let credentials=Credentials{api_key:Some("sk-oa".into()),..Default::default()};
+        let credentials=Credentials{api_key:Some("sk-oa".into()),access_token:None,provider_data:Default::default()};
         let build=|request: &omni_ir::request::ChatRequest|build_api_key_request(CodecInput{request,model:"gpt-5-codex",credentials:&credentials,request_id:None,auto_cache_enabled:None,max_output_tokens:None,request_started_at:None}).unwrap();
         assert_eq!(build(&request).request.body,r#"{"model":"gpt-5-codex","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"store":false,"prompt_cache_key":"019b86b5-42c0-7505-b36d-80ccdd119119"}"#);
         let mut value=serde_json::Value::Null;
