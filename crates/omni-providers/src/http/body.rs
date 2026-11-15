@@ -121,6 +121,7 @@ pub struct ResponseBody {
     framing: Framing,
     reusable: bool,
     pool: Option<(Arc<Pool>, Key)>,
+    drain_remaining: usize,
 }
 impl std::fmt::Debug for ResponseBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -129,6 +130,22 @@ impl std::fmt::Debug for ResponseBody {
 }
 
 impl ResponseBody {
+    #[cfg(test)]
+    pub(super) fn drain_test_body(
+        socket: tokio::net::TcpStream,
+        pool: Arc<Pool>,
+        key: Key,
+    ) -> Self {
+        Self {
+            conn: Some(Conn::Plain(socket)),
+            given: Default::default(),
+            buf: BytesMut::new(),
+            framing: Framing::ChunkSize,
+            reusable: true,
+            pool: Some((pool, key)),
+            drain_remaining: usize::MAX,
+        }
+    }
     /// A body that is already complete, for tests and fakes.
     pub fn from_bytes(bytes: impl Into<Bytes>) -> Self {
         let bytes: Bytes = bytes.into();
@@ -144,16 +161,21 @@ impl ResponseBody {
             buf: BytesMut::new(),
             reusable: false,
             pool: None,
+            drain_remaining: usize::MAX,
         }
     }
 
     /// Stops reading. If the rest of the body is already in hand — the
     /// terminating chunk of a stream the decoder ended at `[DONE]`, say — the
-    /// connection still goes back to the pool; otherwise it is closed. Never
-    /// waits for the network.
+    /// connection still goes back to the pool; otherwise the pool may finish
+    /// its framing in a bounded task. Never waits for the network.
     pub fn finish_if_ready(mut self) {
-        /// More than this unread, and the connection is not worth saving.
+        // Bound wire bytes (including framing) spent saving one connection.
         const DRAIN_LIMIT: usize = 64 * 1024;
+        let Some(remaining) = DRAIN_LIMIT.checked_sub(self.buf.len()) else {
+            return;
+        };
+        self.drain_remaining = remaining;
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         let mut drained = 0;
         loop {
@@ -168,16 +190,34 @@ impl ResponseBody {
                         return;
                     }
                 }
-                // Ended cleanly (and was released by `next_chunk`), failed, or
-                // would wait: in the last two cases dropping `self` closes it.
+                std::task::Poll::Pending => {
+                    if self.reusable
+                        && let Some((pool, key)) = self.pool.take()
+                    {
+                        Pool::adopt(&pool, key, self);
+                    }
+                    return;
+                }
                 _ => return,
+            }
+        }
+    }
+
+    pub(super) async fn drain(mut self, pool: std::sync::Weak<Pool>, key: Key) {
+        while let Ok(chunk) = self.read_next().await {
+            if chunk.is_none() {
+                if let Some(pool) = pool.upgrade() {
+                    self.pool = Some((pool, key));
+                    self.release();
+                }
+                return;
             }
         }
     }
 
     /// The next piece of the body; `None` at its end.
     pub async fn next_chunk(&mut self) -> Option<Result<Bytes, HttpError>> {
-        match self.read_next().await {
+        match Box::pin(self.read_next()).await {
             Ok(Some(bytes)) => Some(Ok(bytes)),
             Ok(None) => {
                 self.release();
@@ -224,11 +264,28 @@ impl ResponseBody {
 
     /// Reads more bytes into `buf`; `Ok(0)` at EOF.
     async fn fill(&mut self) -> Result<usize, HttpError> {
+        if self.drain_remaining != usize::MAX {
+            return Box::pin(self.fill_bounded()).await;
+        }
         let Some(conn) = self.conn.as_mut() else {
             return Ok(0);
         };
         self.buf.reserve(READ_CHUNK);
         Ok(conn.read_buf(&mut self.buf).await?)
+    }
+
+    async fn fill_bounded(&mut self) -> Result<usize, HttpError> {
+        let Some(conn) = self.conn.as_mut() else {
+            return Ok(0);
+        };
+        let left = &mut self.drain_remaining;
+        if *left == 0 {
+            return Err(HttpError::InvalidResponse("completion drain limit".into()));
+        }
+        self.buf.reserve(READ_CHUNK);
+        let n = conn.take(*left as u64).read_buf(&mut self.buf).await?;
+        *left -= n;
+        Ok(n)
     }
 
     /// Like [`fill`](Self::fill), but EOF mid-framing is a truncated body.
@@ -552,6 +609,7 @@ fn finish_head(
         framing,
         reusable,
         pool: Some((pool.clone(), key)),
+        drain_remaining: usize::MAX,
     };
     if framing == Framing::Done {
         body.release();

@@ -131,6 +131,7 @@ pub(crate) struct Pool {
     /// Built on first TLS use; the platform root store is read once.
     tls: OnceLock<TlsConnector>,
     roots: Option<rustls::RootCertStore>,
+    drains: Mutex<tokio::task::JoinSet<()>>,
 }
 
 impl std::fmt::Debug for Pool {
@@ -153,6 +154,10 @@ impl Drop for Pool {
 }
 
 impl Pool {
+    #[cfg(test)]
+    pub(super) fn drain_test_count(&self) -> usize {
+        self.drains.lock().expect("drains").len()
+    }
     pub fn new(roots: Option<rustls::RootCertStore>, limits: PoolLimits) -> Pool {
         Pool {
             idle: Mutex::new(HashMap::new()),
@@ -160,7 +165,35 @@ impl Pool {
             reaper: Mutex::new(None),
             tls: OnceLock::new(),
             roots,
+            drains: Mutex::new(tokio::task::JoinSet::new()),
         }
+    }
+
+    /// Own incomplete responses independently of the request; JoinSet's drop
+    /// aborts all tasks, and each task holds only a weak pool reference.
+    pub(super) fn adopt(pool: &Arc<Self>, key: Key, body: super::body::ResponseBody) {
+        // Bound outstanding sockets/tasks without a waiting queue.
+        const MAX_DRAINS: usize = 32;
+        // Late framing is worth a short wait, never an indefinite socket lease.
+        const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let Ok(mut drains) = pool.drains.lock() else {
+            return;
+        };
+        while drains.try_join_next().is_some() {}
+        if drains.len() >= MAX_DRAINS {
+            return;
+        }
+        let weak = Arc::downgrade(pool);
+        let deadline = Instant::now() + DRAIN_TIMEOUT;
+        drains.spawn_on(
+            async move {
+                let _completion = tokio::time::timeout_at(deadline, body.drain(weak, key)).await;
+            },
+            &runtime,
+        );
     }
 
     pub fn idle_count(&self) -> usize {

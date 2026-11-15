@@ -147,10 +147,13 @@ async fn run(anthropic: bool, streaming: bool, mode: Mode) {
     let origin = format!("http://{}", listener.local_addr().expect("addr"));
     let count = Arc::new(AtomicUsize::new(0));
     let accepted = count.clone();
+    let finish = Arc::new(tokio::sync::Semaphore::new(0));
+    let finish_upstream = finish.clone();
     let upstream = tokio::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
         while let Ok((mut socket, _)) = listener.accept().await {
             let first = accepted.fetch_add(1, Ordering::SeqCst) == 0;
+            let finish = finish_upstream.clone();
             tasks.spawn(async move {
                 let prefix = if anthropic {
                     "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}\n\nevent: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"
@@ -186,7 +189,7 @@ async fn run(anthropic: bool, streaming: bool, mode: Mode) {
                         return;
                     }
                     if mode == Mode::Delayed {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        finish.acquire().await.expect("finish signal").forget();
                         if socket.write_all(b"0\r\n\r\n").await.is_err() { return; }
                     }
                 }
@@ -214,10 +217,11 @@ async fn run(anthropic: bool, streaming: bool, mode: Mode) {
             .expect("provider");
     }
     let mut h = common::harness(&f, vec![]);
-    Arc::get_mut(&mut h.deps).expect("unique").http = Arc::new(Local {
+    let local = Arc::new(Local {
         client: Client::new(),
         origin,
     });
+    Arc::get_mut(&mut h.deps).expect("unique").http = local.clone();
     let n = if matches!(mode, Mode::Cancel | Mode::Truncated) {
         2
     } else {
@@ -233,6 +237,16 @@ async fn run(anthropic: bool, streaming: bool, mode: Mode) {
             i > 0 || matches!(mode, Mode::Complete | Mode::Delayed),
         )
         .await;
+        if mode == Mode::Delayed {
+            finish.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while local.client.idle_connections() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("completed framing must return to pool");
+        }
     }
     let observed = count.load(Ordering::SeqCst);
     eprintln!("anthropic={anthropic} streaming={streaming}: {observed} sockets / {n} requests");
@@ -280,7 +294,154 @@ async fn client_disconnects_are_not_reused() {
     }
 }
 #[tokio::test]
-#[ignore = "finish_if_ready never waits for a delayed chunked terminator; bounded completion drain needed"]
 async fn delayed_chunked_terminator_reuses() {
     run(true, true, Mode::Delayed).await;
+}
+
+mod responses_probe {
+    use super::*;
+    use omni_ir::{
+        request::ChatRequest,
+        stream::{Delta, StreamEvent},
+    };
+    use omni_providers::{
+        adapter::{AdapterRequest, send},
+        codec::Credentials,
+        custom::CustomCodec,
+    };
+    use serde_json::json;
+    use tokio::net::TcpStream;
+
+    async fn read_request(s: &mut TcpStream) -> bool {
+        let mut b = Vec::new();
+        loop {
+            let mut x = [0; 8192];
+            let Ok(n) = s.read(&mut x).await else {
+                return false;
+            };
+            if n == 0 {
+                return false;
+            }
+            b.extend_from_slice(&x[..n]);
+            if let Some(e) = b.windows(4).position(|v| v == b"\r\n\r\n") {
+                let h = String::from_utf8_lossy(&b[..e]).to_lowercase();
+                let l: usize = h
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .expect("length")
+                    .trim()
+                    .parse()
+                    .expect("number");
+                if b.len() >= e + 4 + l {
+                    return true;
+                }
+            }
+        }
+    }
+    async fn one(client: &Client, creds: &Credentials) -> String {
+        let req: ChatRequest =
+            serde_json::from_value(json!({"model":"m","messages":[],"stream":true}))
+                .expect("request");
+        let mut r = send(
+            &CustomCodec,
+            "custom",
+            AdapterRequest::new(&req, "m", creds),
+            client,
+        )
+        .await
+        .expect("send");
+        let mut text = String::new();
+        while let Some(e) = r.events.next().await {
+            match &e.expect("event") {
+                StreamEvent::BlockDelta {
+                    delta: Delta::Text { text: t },
+                    ..
+                } => text.push_str(t),
+                StreamEvent::End { .. } => return text,
+                _ => {}
+            }
+        }
+        panic!("no End")
+    }
+    async fn run(waves: usize, width: usize) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let count = Arc::new(AtomicUsize::new(0));
+            let accepted = count.clone();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let barrier = Arc::new(tokio::sync::Barrier::new(width));
+            let upstream = tokio::spawn(async move {
+                let mut tasks = tokio::task::JoinSet::new();
+                while let Ok((mut s, _)) = listener.accept().await {
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                    let requests = requests.clone(); let barrier = barrier.clone();
+                    tasks.spawn(async move {
+                        while read_request(&mut s).await {
+                            let i = requests.fetch_add(1, Ordering::SeqCst);
+                            barrier.wait().await;
+                            let body = format!("event: response.output_text.delta\ndata: {{\"output_index\":0,\"delta\":\"own{i}\"}}\n\nevent: response.completed\ndata: {{\"response\":{{\"status\":\"completed\"}}}}\n\n");
+                            if s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).await.is_err() { return; }
+                        }
+                    });
+                }
+            });
+            let cr = Credentials { access_token: None, api_key: Some("key-one".into()), provider_data: json!({"origin":format!("http://{addr}"),"protocol":"responses"}).as_object().expect("credentials").clone() };
+            let c = Arc::new(Client::new());
+            for wave in 0..waves {
+                let mut tasks = tokio::task::JoinSet::new();
+                for _ in 0..width {
+                    let c = c.clone(); let cr = cr.clone();
+                    tasks.spawn(async move { one(&c,&cr).await });
+                }
+                let mut texts = std::collections::HashSet::new();
+                while let Some(r) = tasks.join_next().await { texts.insert(r.expect("task")); }
+                for i in wave*width..(wave+1)*width { assert!(texts.contains(&format!("own{i}"))); }
+                assert_eq!(count.load(Ordering::SeqCst),width);
+            }
+            upstream.abort();
+        }).await.expect("deadline");
+    }
+    #[tokio::test]
+    async fn responses_reuse() {
+        run(20, 1).await;
+    }
+    #[tokio::test]
+    async fn concurrent_reuse() {
+        run(5, 32).await;
+    }
+
+    #[tokio::test]
+    async fn drain_forged_response_isolation() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let (finish, release) = tokio::sync::oneshot::channel();
+            let (closed, observe_closed) = tokio::sync::oneshot::channel();
+            let upstream = tokio::spawn(async move {
+                let (mut first, _) = listener.accept().await.expect("first");
+                assert!(read_request(&mut first).await);
+                let body = |text: &str| format!("event: response.output_text.delta\ndata: {{\"output_index\":0,\"delta\":\"{text}\"}}\n\nevent: response.completed\ndata: {{\"response\":{{\"status\":\"completed\"}}}}\n\n");
+                let own = body("own0");
+                first.write_all(format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{own}\r\n",own.len()).as_bytes()).await.expect("first body");
+                release.await.expect("client completed");
+                first.write_all(b"0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nPOISON").await.expect("forged response");
+                let mut byte = [0];
+                assert_eq!(first.read(&mut byte).await.unwrap_or(0),0);
+                closed.send(()).expect("closed signal");
+                let (mut second, _) = listener.accept().await.expect("second");
+                assert!(read_request(&mut second).await);
+                let own = body("own1");
+                second.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{own}",own.len()).as_bytes()).await.expect("own response");
+            });
+            let mut cr = Credentials { access_token: None, api_key: Some("key-one".into()), provider_data: json!({"origin":format!("http://{addr}"),"protocol":"responses"}).as_object().expect("credentials").clone() };
+            let c = Client::new();
+            assert_eq!(one(&c,&cr).await,"own0");
+            finish.send(()).expect("finish");
+            observe_closed.await.expect("first closed");
+            cr.api_key = Some("key-two".into());
+            assert_eq!(one(&c,&cr).await,"own1");
+            upstream.await.expect("upstream");
+        }).await.expect("deadline");
+    }
 }
